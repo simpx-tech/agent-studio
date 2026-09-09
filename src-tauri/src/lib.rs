@@ -26,7 +26,12 @@ async fn read_context(
     connection_id: Option<String>,
 ) -> Result<context::ContextSnapshot, String> {
     folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
-    let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    let mut profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    profile.folder_distribution = location
+        .as_ref()
+        .map(|location| folders::environment_distribution(&app, &location.environment_id))
+        .transpose()?
+        .flatten();
     profiles::scope(profile, context::read(app, provider, model, location)).await
 }
 
@@ -102,6 +107,16 @@ fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, Str
 #[tauri::command]
 async fn discover_wsl(app: tauri::AppHandle) -> Result<wsl::Discovery, String> {
     wsl::discover(&profiles::installation(&app)?.id).await
+}
+#[tauri::command]
+async fn inspect_environment_clis(
+    app: tauri::AppHandle,
+    environment_id: String,
+) -> Result<Vec<providers::CliInstallation>, String> {
+    match folders::environment_distribution(&app, &environment_id)? {
+        Some(distribution) => wsl::installations(&distribution).await,
+        None => Ok(providers::native_installations()),
+    }
 }
 #[tauri::command]
 async fn list_folders(
@@ -258,7 +273,13 @@ async fn run_agent(
 ) -> Result<String, String> {
     request.validate()?;
     folders::validate_chat(&app, request.location.as_ref(), connection_id.as_deref())?;
-    let profile = profiles::resolve(&app, &request.agent.provider, connection_id.as_deref())?;
+    let mut profile = profiles::resolve(&app, &request.agent.provider, connection_id.as_deref())?;
+    profile.folder_distribution = request
+        .location
+        .as_ref()
+        .map(|location| folders::environment_distribution(&app, &location.environment_id))
+        .transpose()?
+        .flatten();
     let cancel = CancellationToken::new();
     {
         let mut active = runs.0.lock().map_err(|_| "Run registry lock failed")?;
@@ -392,6 +413,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_installation,
             discover_wsl,
+            inspect_environment_clis,
             list_folders,
             detect_connection,
             relay_connect,

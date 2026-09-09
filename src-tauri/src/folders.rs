@@ -1,4 +1,4 @@
-//! Folder selection pins the project and owning computer; CLI executable choice may prefer Windows.
+//! Folder and execution environments are pinned independently; only Windows may open its own WSL folders.
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -7,7 +7,9 @@ use tauri::Manager;
 #[serde(rename_all = "camelCase")]
 pub struct ChatLocation {
     computer_id: String,
-    environment_id: String,
+    pub environment_id: String,
+    #[serde(default)]
+    execution_environment_id: Option<String>,
     pub path: String,
 }
 pub fn validate_chat(
@@ -49,8 +51,26 @@ fn validate_connection(
             })
         })
         .ok_or("Folder environment no longer exists on this computer")?;
-    if connection["environmentId"] != location.environment_id {
-        return Err("The selected CLI does not belong to this folder’s environment".into());
+    let execution_id = location
+        .execution_environment_id
+        .as_deref()
+        .unwrap_or(&location.environment_id);
+    let execution = workspace["fleet"]["environments"]
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|e| e["id"] == execution_id && e["computerId"] == location.computer_id)
+        })
+        .ok_or("The selected execution computer is unavailable")?;
+    if connection["environmentId"] != execution_id {
+        return Err("The selected CLI does not belong to the selected execution computer".into());
+    }
+    if environment["id"] != execution["id"]
+        && !(execution["platform"] == "windows"
+            && environment["platform"] == "wsl"
+            && environment["discoveredOn"] == execution["id"])
+    {
+        return Err("The selected computer cannot access this folder environment".into());
     }
     if location.path.is_empty() {
         return Err("Choose a folder before chatting".into());
@@ -321,10 +341,39 @@ mod tests {
         let location = ChatLocation {
             computer_id: "desktop".into(),
             environment_id: "linux".into(),
+            execution_environment_id: None,
             path: "/home/project".into(),
         };
         assert!(validate_connection(&workspace, &location, Some("correct")).is_ok());
         assert!(validate_connection(&workspace, &location, Some("wrong")).is_err());
         assert!(validate_connection(&workspace, &location, None).is_err());
+    }
+    #[test]
+    fn desktop_can_open_its_wsl_folder_without_switching_the_connection() {
+        let workspace = serde_json::json!({"fleet":{
+            "environments":[
+                {"id":"windows","computerId":"desktop","platform":"windows"},
+                {"id":"ubuntu","computerId":"desktop","platform":"wsl","discoveredOn":"windows"},
+                {"id":"debian","computerId":"desktop","platform":"wsl","discoveredOn":"windows"},
+                {"id":"remote","computerId":"laptop","platform":"windows"}
+            ],
+            "connections":[{"id":"native","environmentId":"windows"},{"id":"linux","environmentId":"ubuntu"},{"id":"sibling","environmentId":"debian"},{"id":"other","environmentId":"remote"}]
+        }});
+        let mut location = ChatLocation {
+            computer_id: "desktop".into(),
+            environment_id: "ubuntu".into(),
+            execution_environment_id: Some("windows".into()),
+            path: "/home/project".into(),
+        };
+        assert!(validate_connection(&workspace, &location, Some("native")).is_ok());
+        assert!(validate_connection(&workspace, &location, Some("linux")).is_err());
+        assert!(validate_connection(&workspace, &location, Some("other")).is_err());
+        location.execution_environment_id = None;
+        assert!(validate_connection(&workspace, &location, Some("linux")).is_ok());
+        assert!(validate_connection(&workspace, &location, Some("native")).is_err());
+        location.execution_environment_id = Some("debian".into());
+        assert!(validate_connection(&workspace, &location, Some("sibling")).is_err());
+        location.execution_environment_id = Some("remote".into());
+        assert!(validate_connection(&workspace, &location, Some("other")).is_err());
     }
 }

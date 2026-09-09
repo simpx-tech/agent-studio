@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
+import { expectVisibleQuotaComparison } from './quota-helper';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +79,9 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('fixture-workspace') ?? 'null');
           if (command === 'save_workspace') {
+            if (w.holdAccountSave)
+              await new Promise<void>((resolve) => (w.releaseAccountSave = resolve));
+            if (w.failAccountSave) throw new Error('Synthetic account save failure');
             localStorage.setItem('fixture-workspace', JSON.stringify(args.workspace));
             return;
           }
@@ -96,8 +100,28 @@ async function host(page: Page, relay: string, token: string, name: string, plat
             version: 'Synthetic CLI',
             detail: 'Verified fixture',
           });
+          if (command === 'inspect_environment_clis') {
+            if (localStorage.getItem('fixture-inventory-error'))
+              throw new Error('Synthetic installation check failure');
+            const linux = args.environmentId !== identity.id;
+            return ['codex', 'claude', 'gemini'].map((id) => ({
+              id,
+              path: linux
+                ? JSON.parse(
+                    localStorage.getItem('fixture-linux-clis') ?? '["codex","claude"]',
+                  ).includes(id)
+                  ? '/usr/local/bin/' + id
+                  : null
+                : 'C:\\CLIs\\' + id + '.exe',
+            }));
+          }
           if (command === 'detect_providers') return ['codex', 'claude', 'gemini'].map(status);
-          if (command === 'detect_connection') return status(args.provider);
+          if (command === 'detect_connection') {
+            const result = status(args.provider);
+            if (localStorage.getItem('fixture-pending-auth') === args.connectionId)
+              result.auth = 'login';
+            return result;
+          }
           if (command === 'list_models')
             return Object.fromEntries(
               ['codex', 'claude', 'gemini'].map((id) => [
@@ -107,6 +131,15 @@ async function host(page: Page, relay: string, token: string, name: string, plat
             );
           if (command === 'read_usage') {
             localStorage.setItem('fixture-usage', JSON.stringify(args));
+            (w.usageCalls ??= []).push(args);
+            if (w.holdUsageConnections?.includes(args.connectionId))
+              await new Promise<void>((resolve) =>
+                (w.pendingUsage ??= []).push({ ...args, resolve }),
+              );
+            if (w.failUsageConnections?.includes(args.connectionId))
+              throw new Error('Usage check failed for this account.');
+            if (w.usageReadings?.[args.connectionId])
+              return { ...w.usageReadings[args.connectionId], provider: args.provider };
             return {
               provider: args.provider,
               checkedAt: Date.now() / 1000,
@@ -118,6 +151,10 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           if (command === 'generate_title') throw new Error('Synthetic title unavailable');
           if (command === 'cancel_title') return;
           if (command === 'sign_in') {
+            (w.signInCalls ??= []).push(args);
+            if (w.holdSignIn) await new Promise<void>((resolve) => (w.releaseSignIn = resolve));
+            if (w.failSignIn) throw new Error('Synthetic terminal failed to start');
+            if (w.requireNewLogin) localStorage.setItem('fixture-pending-auth', args.connectionId);
             localStorage.setItem('fixture-login', JSON.stringify(args));
             return;
           }
@@ -192,9 +229,135 @@ async function host(page: Page, relay: string, token: string, name: string, plat
   );
   await page.goto('/');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(
+    page
+      .locator('.fleet-account')
+      .getByRole('heading', { name: 'Claude CLI login', exact: true })
+      .first(),
+  ).toBeVisible();
   return identity;
 }
-test('each computer groups its accounts and locations with contextual settings', async ({
+test('Connections shows separate account quotas, refresh progress, and retained readings on failure', async ({
+  page,
+}) => {
+  await page.clock.install();
+  await host(page, '', '', 'Desktop', 'windows');
+  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Second Claude');
+  await page.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const ids = await page.evaluate(() => {
+    const w = window as any;
+    const fleet = JSON.parse(localStorage.getItem('fixture-workspace')!).fleet;
+    const ids: Record<string, string> = {};
+    w.usageReadings = {};
+    for (const connection of fleet.connections) {
+      const account = fleet.accounts.find((a: any) => a.id === connection.accountId);
+      ids[account.name] = connection.id;
+      const values =
+        account.name === 'Second Claude'
+          ? [80, 0]
+          : account.provider === 'claude'
+            ? [25, 60]
+            : account.provider === 'codex'
+              ? [0, null]
+              : [null, null];
+      const now = Date.now() / 1000;
+      w.usageReadings[connection.id] = {
+        checkedAt: now,
+        context: null,
+        detail: 'Fixture account limits',
+        windows: [300, 10080].map((minutes, i) => ({
+          id: i === 0 ? 'five-hour' : 'weekly',
+          label: i === 0 ? '5-hour' : 'Weekly',
+          usedPercent: values[i],
+          resetsAt: now + minutes * 30,
+          windowMinutes: minutes,
+          model: null,
+          bucket: account.provider,
+        })),
+      };
+    }
+    return ids;
+  });
+  const usage = (name: string) =>
+    page.getByRole('region', { name: `Usage for ${name}`, exact: true });
+  const meter = (name: string, window = '5-hour') =>
+    usage(name).getByRole('progressbar', { name: `${window} limit used`, exact: true });
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(meter('Claude CLI login')).toHaveAttribute('aria-valuenow', '25');
+  await expect(meter('Second Claude')).toHaveAttribute('aria-valuenow', '80');
+  await expect(meter('Codex CLI login')).toHaveAttribute('aria-valuenow', '0');
+  await expect(meter('Codex CLI login', 'Weekly')).not.toHaveAttribute('aria-valuenow');
+  await expect(usage('Second Claude')).toContainText('Budget');
+  await expect(usage('Second Claude')).toContainText('Resets in');
+  await expect(usage('Second Claude').getByRole('img', { name: 'Ahead of pace' })).toBeVisible();
+  await expect(usage('Claude CLI login').getByRole('img', { name: 'Below pace' })).toBeVisible();
+  await expect(usage('Gemini CLI login')).toContainText('Not reported');
+  await expect(usage('Gemini CLI login')).not.toContainText('0%');
+  await expect(usage('Claude CLI login')).not.toContainText('Context');
+  await expectVisibleQuotaComparison(meter('Second Claude'), true);
+  await expectVisibleQuotaComparison(meter('Claude CLI login'), false);
+  const computer = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  const boxes = await computer.locator('.provider-group').evaluateAll((cards) =>
+    cards.map((card) => {
+      const r = card.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, x: r.x, width: r.width };
+    }),
+  );
+  expect(boxes[1].top).toBeGreaterThan(boxes[0].bottom);
+  expect(boxes[1].x).toBe(boxes[0].x);
+  await page.setViewportSize({ width: 1380, height: 1600 });
+  await computer.screenshot({ path: 'artifacts/account-usage-desktop.png' });
+  await page.evaluate((ids) => {
+    const w = window as any;
+    w.holdUsageConnections = [ids['Second Claude']];
+    w.usageReadings[ids['Claude CLI login']].windows[0].usedPercent = 35;
+    w.usageReadings[ids['Codex CLI login']].windows[0].usedPercent = null;
+  }, ids);
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(usage('Second Claude')).toContainText('Updating…');
+  await expect(meter('Second Claude')).toHaveAttribute('aria-valuenow', '80');
+  await expect(meter('Claude CLI login')).toHaveAttribute('aria-valuenow', '35');
+  await expect(meter('Codex CLI login')).toHaveCount(0);
+  await expect(meter('Codex CLI login', 'Weekly')).toBeVisible();
+  await page.evaluate((id) => {
+    const w = window as any;
+    w.failUsageConnections = [id];
+    w.holdUsageConnections = [];
+    for (const pending of w.pendingUsage) pending.resolve();
+  }, ids['Second Claude']);
+  await expect(usage('Second Claude')).toContainText('Last reported');
+  await expect(usage('Second Claude')).toContainText('Usage check failed for this account.');
+  await expect(usage('Second Claude').locator('.recommended-fill')).toHaveCount(0);
+  await expect(usage('Second Claude')).not.toContainText('Budget');
+  await expect(meter('Second Claude')).toHaveAttribute('aria-valuenow', '80');
+  await expect(usage('Claude CLI login')).not.toContainText('Last reported');
+  await page.setViewportSize({ width: 840, height: 1800 });
+  await computer.screenshot({ path: 'artifacts/account-usage-narrow.png' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  await page.evaluate(
+    (id) => localStorage.setItem('fixture-pending-auth', id),
+    ids['Second Claude'],
+  );
+  const before = await page.evaluate(() => (window as any).usageCalls.length);
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(usage('Second Claude')).toContainText('Sign in to read usage.');
+  await page.clock.fastForward(61_000);
+  await expect
+    .poll(() => page.evaluate(() => (window as any).usageCalls.length))
+    .toBeGreaterThan(before + 3);
+  const calls = await page.evaluate((before) => (window as any).usageCalls.slice(before), before);
+  expect(calls.some((call: any) => call.connectionId === ids['Second Claude'])).toBe(false);
+  expect(calls.every((call: any) => Object.values(ids).includes(call.connectionId))).toBe(true);
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!).conversations),
+  ).toHaveLength(0);
+});
+
+test('computers discover existing logins and keep additional accounts in contextual dialogs', async ({
   page,
 }) => {
   const distroId = crypto.randomUUID();
@@ -210,81 +373,47 @@ test('each computer groups its accounts and locations with contextual settings',
     { distroId },
   );
   await host(page, '', '', 'Desktop', 'windows');
-  await expect(page.locator('.provider-group')).toHaveCount(3);
-  await expect(page.getByRole('heading', { name: 'Claude', exact: true })).toHaveCount(1);
-  await expect(page.getByRole('textbox', { name: 'Computer name', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('textbox', { name: 'Account name', exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('Relay URL')).toHaveCount(0);
-  await expect(page.locator('.provider-setup[open]')).toHaveCount(0);
-  const claude = page.getByRole('article', { name: 'Claude connections', exact: true });
-  await claude.getByRole('button', { name: 'Name this account' }).click();
-  await expect(page.getByRole('dialog')).toHaveAccessibleName('Connect an account');
-  await expect(page.getByRole('combobox', { name: 'Account provider' })).toHaveText('Claude');
-  await expect(page.getByRole('combobox', { name: 'Login profile' })).toHaveText(
-    'Use the existing CLI login',
-  );
-  await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Personal 1');
-  await page.getByRole('button', { name: 'Connect account', exact: true }).click();
-  const personal = claude.locator('.fleet-account').filter({ hasText: 'Personal 1' });
-  await expect(personal).toHaveCount(1);
-  await expect(claude.locator('.current-login')).toHaveCount(0);
-  await personal.getByRole('button', { name: 'Manage account' }).click();
-  await personal.getByRole('button', { name: 'Connect on another environment' }).click();
-  await expect(page.getByRole('combobox', { name: 'Account to connect' })).toHaveText('Personal 1');
-  await page.getByRole('combobox', { name: 'Connection environment' }).click();
-  await page.getByRole('option', { name: 'WSL · Ubuntu', exact: true }).click();
-  await page.getByRole('button', { name: 'Connect account', exact: true }).click();
-  await expect(personal.locator('.account-connection')).toHaveCount(2);
-  await personal.getByRole('button', { name: 'Manage account' }).click();
-  for (const [name, purpose] of [
-    ['Personal 2', 'Personal'],
-    ['Company', 'Work'],
-  ]) {
-    await page.getByRole('button', { name: 'Add account', exact: true }).click();
-    await page.getByRole('textbox', { name: 'Account name', exact: true }).fill(name);
-    await page.getByRole('combobox', { name: 'Account purpose', exact: true }).click();
-    await page.getByRole('option', { name: purpose, exact: true }).click();
-    await page.getByRole('button', { name: 'Connect account', exact: true }).click();
+  const local = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  const ubuntu = page.getByRole('article', { name: 'WSL · Ubuntu computer', exact: true });
+  const claude = local.getByRole('article', { name: 'Claude connections', exact: true });
+  await expect(local.locator('.fleet-account')).toHaveCount(3);
+  await expect(ubuntu.locator('.fleet-account')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Name this account' })).toHaveCount(0);
+  const primary = claude.locator('.fleet-account').first();
+  await primary.getByRole('button', { name: 'Manage account' }).click();
+  await page.getByRole('textbox', { name: 'Edit account name', exact: true }).fill('Personal 1');
+  await page.getByRole('button', { name: 'Save account', exact: true }).click();
+  for (const name of ['Personal 2', 'Company']) {
+    await local.getByRole('button', { name: 'Add account', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+    await expect(dialog.getByRole('combobox')).toHaveCount(1);
+    await expect(dialog.getByRole('combobox', { name: 'Account provider' })).toHaveText('Claude');
+    await expect(dialog).not.toContainText('already connected');
+    await expect(dialog.getByRole('combobox', { name: 'Account to connect' })).toHaveCount(0);
+    await expect(dialog.getByRole('combobox', { name: 'Login profile' })).toHaveCount(0);
+    await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill(name);
+    await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
   }
   await expect(claude.locator('.fleet-account')).toHaveCount(3);
-  await expect(claude.getByRole('heading', { name: 'Personal 1', exact: true })).toHaveCount(1);
-  await expect(claude).toContainText('3 accounts');
-  await page.screenshot({ path: 'artifacts/connections-organized-browser.png' });
-
-  const manage = page.getByRole('button', { name: 'Manage computer Desktop', exact: true });
-  await manage.click();
-  await page.getByRole('textbox', { name: 'Computer name', exact: true }).fill('Discarded name');
-  await page.getByRole('dialog').press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(manage).toBeFocused();
-  await expect(page.locator('.fleet-computer')).toContainText('Desktop');
-  await manage.click();
-  await page.getByRole('textbox', { name: 'Computer name', exact: true }).fill('Home desktop');
-  await page.getByRole('button', { name: 'Save computer', exact: true }).click();
-  await expect(
-    page
-      .getByRole('article', { name: 'Home desktop computer', exact: true })
-      .locator('.fleet-account')
-      .filter({ hasText: 'Personal 1' }),
-  ).toContainText('Windows');
-  await expect(personal).toContainText('WSL · Ubuntu');
+  await expect(ubuntu.locator('.fleet-account')).toHaveCount(2);
+  await primary.getByRole('button', { name: 'Manage account' }).click();
+  const management = page.getByRole('dialog', { name: 'Manage account' });
+  await expect(primary.locator('input')).toHaveCount(0);
+  await management.getByRole('textbox', { name: 'Edit account name' }).fill('Discarded');
+  await management.getByRole('button', { name: 'Disconnect account' }).click();
+  await management.getByRole('button', { name: 'Keep connection' }).click();
+  await management.press('Escape');
+  await expect(primary.getByRole('button', { name: 'Manage account' })).toBeFocused();
+  await expect(primary).toContainText('Personal 1');
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Home desktop', exact: true })).toBeVisible();
   await expect(claude.locator('.fleet-account')).toHaveCount(3);
   await page.setViewportSize({ width: 840, height: 640 });
-  await expect(page.getByRole('button', { name: 'Add account', exact: true })).toBeVisible();
+  await claude.screenshot({ path: 'artifacts/connections-accounts-narrow.png' });
+  await local.getByRole('button', { name: 'Add account', exact: true }).click();
+  await page.getByRole('dialog').screenshot({ path: 'artifacts/add-account-simple-browser.png' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: 'artifacts/connections-organized-narrow.png' });
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
-  const profile = page.getByRole('combobox', { name: 'Login profile' });
-  await profile.click();
-  await page.getByRole('option', { name: 'Use the existing CLI login' }).click();
-  await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Duplicate CLI');
-  await page.getByRole('button', { name: 'Connect account', exact: true }).click();
-  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('already has');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(claude.locator('.fleet-account')).toHaveCount(3);
   await expect(page.locator('select')).toHaveCount(0);
 });
 
@@ -307,6 +436,15 @@ test('computer cards keep local and remote accounts separate and explain both lo
         name: 'macOS',
         platform: 'macos',
       });
+      const originalClaude = workspace.fleet.accounts
+        .filter((a: any) => a.provider === 'claude')
+        .map((a: any) => a.id);
+      workspace.fleet.connections = workspace.fleet.connections.filter(
+        (c: any) => !originalClaude.includes(c.accountId),
+      );
+      workspace.fleet.accounts = workspace.fleet.accounts.filter(
+        (a: any) => !originalClaude.includes(a.id),
+      );
       workspace.fleet.accounts.push(
         { id: shared, name: 'Personal', purpose: 'personal', provider: 'claude' },
         { id: remote, name: 'Company', purpose: 'work', provider: 'claude' },
@@ -349,8 +487,16 @@ test('computer cards keep local and remote accounts separate and explain both lo
   await expect(remote.locator('.computer-state')).toHaveText('Offline');
   await expect(remote.getByRole('button', { name: 'Open sign-in', exact: true })).toHaveCount(0);
   await expect(remote.getByRole('button', { name: 'Add account', exact: true })).toHaveCount(0);
-  await expect(local.locator('.account-connection')).toContainText('Windows');
-  await expect(remote.locator('.account-connection').first()).toContainText('macOS');
+  await expect(local.locator('.account-connection').first()).not.toContainText('Windows');
+  await expect(local.locator('.fleet-account').first()).not.toContainText('Connected');
+  await expect(local.locator('.fleet-account-heading small')).toHaveCount(0);
+  await expect(remote.locator('.account-connection').first()).not.toContainText('macOS');
+  await expect(
+    local
+      .locator('.fleet-account')
+      .first()
+      .getByRole('button', { name: 'Open sign-in', exact: true }),
+  ).toBeVisible();
   await page.screenshot({
     path: 'artifacts/connections-computer-list-browser.png',
     fullPage: true,
@@ -375,32 +521,171 @@ test('computer cards keep local and remote accounts separate and explain both lo
     .filter({ hasText: 'Company' })
     .getByRole('button', { name: 'Manage account', exact: true })
     .click();
-  await page.getByRole('button', { name: 'Connect on this computer', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('Connect an account on Desktop');
-  await expect(page.getByRole('combobox', { name: 'Account to connect' })).toHaveText('Company');
-  const explanation = page.getByRole('note', { name: 'How this login works' });
-  await expect(explanation).toContainText('same installed CLI');
-  await expect(explanation).toContainText('without changing the account you use in your terminal');
-  const profile = page.getByRole('combobox', { name: 'Login profile' });
-  await profile.click();
-  await page.getByRole('option', { name: 'Use the existing CLI login' }).click();
-  await expect(explanation).toContainText(
-    'Signing out or switching that CLI’s account also changes this connection',
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Connect on Desktop', exact: true })
+    .click();
+  await expect(page.getByRole('dialog')).toContainText('Add an account on Desktop');
+  await expect(page.getByRole('textbox', { name: 'Account name', exact: true })).toHaveValue(
+    'Company',
   );
-  await expect(explanation).toContainText('never provider logins');
-  await page.getByRole('combobox', { name: 'Connection environment' }).click();
-  await expect(page.getByRole('option', { name: 'macOS', exact: true })).toHaveCount(0);
-  await page.getByRole('combobox', { name: 'Connection environment' }).press('Escape');
+  await expect(page.getByRole('combobox', { name: 'Account to connect' })).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Login profile' })).toHaveCount(0);
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByText('Accounts without a computer', { exact: false }).click();
   const unused = page.locator('.unassigned-accounts .fleet-account');
   await expect(unused).toContainText('Unused');
   await expect(unused).toContainText('Codex');
   await unused.getByRole('button', { name: 'Manage account', exact: true }).click();
-  await unused.getByRole('button', { name: 'Remove account label' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove account label' }).click();
   await expect(page.locator('.unassigned-accounts')).toHaveCount(0);
-  await expect(local.locator('.fleet-account')).toHaveCount(1);
+  await expect(local.locator('.fleet-account')).toHaveCount(3);
   await expect(remote.locator('.fleet-account')).toHaveCount(2);
+});
+
+for (const provider of ['claude', 'codex'] as const) {
+  test(`adding ${provider} saves a separate profile and opens its sign-in automatically`, async ({
+    page,
+  }) => {
+    const label = provider === 'claude' ? 'Claude' : 'Codex';
+    await host(page, '', '', 'Desktop', 'windows');
+    const before = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('fixture-workspace')!),
+    );
+    const computer = page.getByRole('article', { name: 'Desktop computer', exact: true });
+    await computer.getByRole('button', { name: 'Add account', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Account provider' }).click();
+    await page.getByRole('option', { name: label, exact: true }).click();
+    await page.getByRole('textbox', { name: 'Account name', exact: true }).fill(label + ' Second');
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Add account', exact: true })
+      .click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    const after = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!));
+    const added = after.fleet.accounts.find((a: any) => a.name === label + ' Second');
+    const connection = after.fleet.connections.find((c: any) => c.accountId === added.id);
+    expect(connection.profile).toBe('isolated');
+    expect(after.fleet.connections.filter((c: any) => c.id !== connection.id)).toEqual(
+      before.fleet.connections,
+    );
+    expect(after.fleet.accounts.filter((a: any) => a.id !== added.id)).toEqual(
+      before.fleet.accounts,
+    );
+    expect(await page.evaluate(() => (window as any).signInCalls)).toEqual([
+      { provider, connectionId: connection.id },
+    ]);
+    await page.reload();
+    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await expect(
+      computer
+        .getByRole('article', { name: label + ' connections', exact: true })
+        .locator('.fleet-account'),
+    ).toHaveCount(2);
+  });
+}
+
+test('account creation shows progress, retries the same connection, and tracks its own authentication', async ({
+  page,
+}) => {
+  await host(page, '', '', 'Desktop', 'windows');
+  const computer = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  await computer.getByRole('button', { name: 'Add account', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill('Second Claude');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.holdAccountSave = true;
+    w.holdSignIn = true;
+    w.failSignIn = true;
+    w.requireNewLogin = true;
+  });
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog.getByRole('status')).toHaveText('Creating account…');
+  await expect(dialog.locator('form')).toHaveAttribute('aria-busy', 'true');
+  await expect(dialog.getByRole('textbox', { name: 'Account name', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+  await page.evaluate(() => {
+    const w = window as any;
+    w.holdAccountSave = false;
+    w.releaseAccountSave();
+  });
+  await expect(dialog.getByRole('status')).toHaveText('Opening sign-in…');
+  await dialog.screenshot({ path: 'artifacts/add-account-progress-browser.png' });
+  await expect.poll(() => page.evaluate(() => (window as any).signInCalls?.length)).toBe(1);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.holdSignIn = false;
+    w.releaseSignIn();
+  });
+  await expect(dialog.getByRole('alert')).toContainText('terminal failed to start');
+  await expect(dialog.getByRole('button', { name: 'Retry sign-in' })).toBeEnabled();
+  const afterFailure = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('fixture-workspace')!),
+  );
+  await page.evaluate(() => {
+    (window as any).failSignIn = false;
+  });
+  await dialog.getByRole('button', { name: 'Retry sign-in' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!).fleet),
+  ).toEqual(afterFailure.fleet);
+  const calls = await page.evaluate(() => (window as any).signInCalls);
+  expect(calls).toHaveLength(2);
+  expect(calls[0]).toEqual(calls[1]);
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(
+    page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
+  ).toHaveCount(0);
+  const account = computer.locator('.fleet-account').filter({ hasText: 'Second Claude' });
+  await expect(account).toContainText('Sign in or refresh');
+  await page.evaluate(() => {
+    localStorage.removeItem('fixture-pending-auth');
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(
+    page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
+  ).toBeVisible();
+  await expect(account).not.toContainText('Sign in or refresh');
+});
+
+test('the additional-account modal offers supported providers without login choices', async ({
+  page,
+}) => {
+  await host(page, '', '', 'Desktop', 'windows');
+  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await expect(dialog.getByRole('combobox')).toHaveCount(1);
+  await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+  await expect(page.getByRole('option', { name: 'Claude', exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Gemini', exact: true })).toHaveCount(0);
+});
+
+test('missing WSL CLIs require installation before connecting accounts', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('fixture-linux-clis', '[]');
+    localStorage.setItem(
+      'fixture-wsl',
+      JSON.stringify({
+        distributions: [{ id: crypto.randomUUID(), name: 'Ubuntu', running: true }],
+        warning: null,
+      }),
+    );
+  });
+  await host(page, '', '', 'Desktop', 'windows');
+  const ubuntu = page.getByRole('article', { name: 'WSL · Ubuntu computer', exact: true });
+  await expect(ubuntu.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    'Not installed',
+  );
+  await expect(ubuntu.getByRole('button', { name: 'Add account', exact: true })).toBeDisabled();
+  await expect(
+    ubuntu.locator('.provider-group').getByRole('button', { name: 'Add account', exact: true }),
+  ).toHaveCount(0);
+  await expect(ubuntu).toContainText('Install this CLI in WSL · Ubuntu, then refresh Connections.');
+  const desktop = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  await expect(desktop.getByRole('button', { name: 'Add account', exact: true })).toBeEnabled();
 });
 
 test('Windows discovers WSL automatically and management forms use accessible design-system pickers', async ({
@@ -410,6 +695,7 @@ test('Windows discovers WSL automatically and management forms use accessible de
     debian = crypto.randomUUID();
   await page.addInitScript(
     ({ ubuntu, debian }) => {
+      localStorage.setItem('fixture-linux-clis', '["codex"]');
       if (!localStorage.getItem('fixture-wsl'))
         localStorage.setItem(
           'fixture-wsl',
@@ -425,47 +711,61 @@ test('Windows discovers WSL automatically and management forms use accessible de
     { ubuntu, debian },
   );
   await host(page, '', '', 'Desktop', 'windows');
-  const ubuntuRow = page.locator('.environment-row').filter({ hasText: 'WSL · Ubuntu' });
-  const debianRow = page.locator('.environment-row').filter({ hasText: 'WSL · Debian' });
-  await expect(ubuntuRow).toContainText('Automatically detected');
+  const ubuntuRow = page
+    .getByRole('article', { name: 'WSL · Ubuntu computer', exact: true })
+    .locator('.computer-state');
+  const debianRow = page
+    .getByRole('article', { name: 'WSL · Debian computer', exact: true })
+    .locator('.computer-state');
   await expect(ubuntuRow).toContainText('WSL running');
-  await expect(ubuntuRow).toContainText('Managed here');
+  await expect(page.locator('.environment-row, .provider-setup, .connection-copy')).toHaveCount(0);
+  await expect(page.getByText('CLI setup', { exact: true })).toHaveCount(0);
   await expect(debianRow).toContainText('WSL stopped');
-  await expect(page.locator('.fleet-computer')).toHaveCount(1);
+  await expect(page.locator('.fleet-computer')).toHaveCount(3);
   await expect(page.locator('select')).toHaveCount(0);
+  const ubuntuCard = page.getByRole('article', { name: 'WSL · Ubuntu computer', exact: true });
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    'Installed',
+  );
+  await expect(ubuntuCard.getByLabel('Claude installation in WSL · Ubuntu')).toContainText(
+    'Not installed',
+  );
+  await expect(
+    page
+      .getByRole('article', { name: 'Desktop computer', exact: true })
+      .getByLabel('Claude installation in Windows'),
+  ).toContainText('Installed');
+  await expect(ubuntuCard).not.toContainText('C:\\CLIs');
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
-  await expect(page.locator('.environment-row')).toHaveCount(3);
+  await expect(page.locator('.fleet-computer')).toHaveCount(3);
   await page.screenshot({ path: 'artifacts/wsl-discovery-browser.png' });
 
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
-  const purpose = page.getByRole('combobox', { name: 'Account purpose', exact: true });
-  await purpose.focus();
-  await purpose.press('End');
-  await purpose.press('Enter');
-  await expect(purpose).toHaveText('Work');
+  await page
+    .getByRole('article', { name: 'Desktop computer', exact: true })
+    .getByRole('button', { name: 'Add account', exact: true })
+    .click();
+  await expect(page.getByRole('combobox', { name: 'Account purpose', exact: true })).toHaveCount(0);
   const provider = page.getByRole('combobox', { name: 'Account provider' });
   await provider.click();
   await page.getByRole('option', { name: 'Codex', exact: true }).click();
   await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Codex work');
-  const profile = page.getByRole('combobox', { name: 'Login profile' });
-  await profile.click();
-  await expect(page.getByRole('listbox')).toBeVisible();
-  await page.screenshot({ path: 'artifacts/fleet-design-system-picker.png' });
-  await page.getByRole('option', { name: 'Use the existing CLI login' }).click();
-  await page.getByRole('button', { name: 'Connect account', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Codex work' })).toBeVisible();
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!));
-  expect(saved.fleet.accounts[0]).toMatchObject({ provider: 'codex', purpose: 'work' });
-  expect(saved.fleet.connections[0].profile).toBe('existing');
-  await page.getByRole('button', { name: 'Manage account' }).click();
-  await page.getByRole('combobox', { name: 'Edit account purpose' }).click();
-  await page.getByRole('option', { name: 'Personal', exact: true }).click();
+  const added = saved.fleet.accounts.find((a: any) => a.name === 'Codex work');
+  expect(added.provider).toBe('codex');
+  expect(saved.fleet.connections.find((c: any) => c.accountId === added.id).profile).toBe(
+    'isolated',
+  );
+  await page
+    .locator('.fleet-account')
+    .filter({ hasText: 'Codex work' })
+    .getByRole('button', { name: 'Manage account' })
+    .click();
   await page.getByRole('button', { name: 'Save account' }).click();
-  await expect(page.locator('.fleet-account-heading')).toContainText('Personal');
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Account to connect' }).click();
-  await page.getByRole('option', { name: 'Codex work', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Account provider' })).toHaveCount(0);
+  await ubuntuCard.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('WSL · Ubuntu');
+  await expect(page.getByRole('combobox', { name: 'Account provider' })).toHaveText('Codex');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Manage computer Desktop' }).click();
   await page.getByText('Advanced: group environments', { exact: true }).click();
@@ -480,7 +780,7 @@ test('Windows discovers WSL automatically and management forms use accessible de
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Synthetic WSL discovery failure');
   await expect(ubuntuRow).toContainText('WSL state unavailable');
-  await expect(page.locator('.environment-row')).toHaveCount(3);
+  await expect(page.locator('.fleet-computer')).toHaveCount(3);
   await page.evaluate(() => {
     localStorage.removeItem('fixture-wsl-error');
     const value = JSON.parse(localStorage.getItem('fixture-wsl')!);
@@ -491,9 +791,31 @@ test('Windows discovers WSL automatically and management forms use accessible de
   await expect(ubuntuRow).toContainText('WSL stopped');
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await expect(page.locator('.environment-row')).toHaveCount(3);
+  await expect(page.locator('.fleet-computer')).toHaveCount(3);
   await expect(ubuntuRow).toContainText('WSL stopped');
   await expect(page.locator('select')).toHaveCount(0);
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    'Installed',
+  );
+  await page.evaluate(() => localStorage.setItem('fixture-inventory-error', 'yes'));
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(ubuntuCard.getByRole('alert')).toContainText(
+    'Showing the last successful installation check',
+  );
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    'Last check',
+  );
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    '/usr/local/bin/codex',
+  );
+  await page.reload();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
+    'Installation unknown',
+  );
+  await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).not.toContainText(
+    'Not installed',
+  );
 });
 
 test('one Windows app signs in, runs, and stops a WSL account without pairing a relay', async ({
@@ -518,22 +840,25 @@ test('one Windows app signs in, runs, and stops a WSL account without pairing a 
   await expect(page.getByRole('button', { name: 'Computers & accounts', exact: true })).toHaveCount(
     0,
   );
-  await expect(page.getByRole('heading', { name: 'Claude', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: 'Claude', exact: true })).toHaveCount(2);
   await expect(page.getByRole('heading', { name: 'Your computers', exact: true })).toBeVisible();
   await expect(
     page.getByText('Open Agent Studio in Ubuntu and pair its relay to connect.'),
   ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Connection environment' }).click();
-  await page.getByRole('option', { name: 'WSL · Ubuntu', exact: true }).click();
+  await page
+    .getByRole('article', { name: 'WSL · Ubuntu computer', exact: true })
+    .getByRole('button', { name: 'Add account', exact: true })
+    .click();
+  await expect(page.getByRole('dialog')).toContainText('WSL · Ubuntu');
   await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Claude in Ubuntu');
-  await page.getByRole('button', { name: 'Connect account', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
   const account = page.locator('.fleet-account').filter({ hasText: 'Claude in Ubuntu' });
-  await expect(account).toContainText('Connected');
-  await account.getByRole('button', { name: 'Manage account' }).click();
+  await expect(account.getByRole('button', { name: 'Open sign-in', exact: true })).toBeEnabled();
   await account.getByRole('button', { name: 'Open sign-in', exact: true }).click();
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!));
-  const connection = saved.fleet.connections[0];
+  const connection = saved.fleet.connections.find((c: any) =>
+    saved.fleet.accounts.some((a: any) => a.id === c.accountId && a.name === 'Claude in Ubuntu'),
+  );
   expect(connection.environmentId).toBe(distroId);
   expect(connection.environmentId).not.toBe(identity.id);
   expect(
@@ -593,14 +918,47 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
     );
     await host(windows, url, token, 'Desktop', 'windows');
     await host(mac, url, token, 'MacBook', 'macos');
-    await windows.getByRole('button', { name: 'Add account', exact: true }).click();
-    await windows.getByRole('combobox', { name: 'Connection environment' }).click();
-    await windows.getByRole('option', { name: 'WSL · Ubuntu', exact: true }).click();
+    await windows
+      .getByRole('article', { name: 'WSL · Ubuntu computer', exact: true })
+      .getByRole('button', { name: 'Add account', exact: true })
+      .click();
+    await expect(windows.getByRole('dialog')).toContainText('WSL · Ubuntu');
     await windows
       .getByRole('textbox', { name: 'Account name', exact: true })
       .fill('Claude WSL shared');
-    await windows.getByRole('button', { name: 'Connect account', exact: true }).click();
-    await expect(windows.locator('.fleet-account')).toContainText('Connected');
+    await windows
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Add account', exact: true })
+      .click();
+    await expect(
+      windows
+        .locator('.fleet-account')
+        .filter({ hasText: 'Claude WSL shared' })
+        .getByRole('button', { name: 'Open sign-in', exact: true }),
+    ).toBeEnabled();
+    const usageConnectionId = await windows.evaluate(() => {
+      const w = window as any;
+      const fleet = JSON.parse(localStorage.getItem('fixture-workspace')!).fleet;
+      const account = fleet.accounts.find((a: any) => a.name === 'Claude WSL shared');
+      const connection = fleet.connections.find((c: any) => c.accountId === account.id);
+      (w.usageReadings ??= {})[connection.id] = {
+        checkedAt: Date.now() / 1000,
+        context: null,
+        detail: 'Reported on Ubuntu through Desktop',
+        windows: [
+          {
+            id: 'five-hour',
+            label: '5-hour',
+            usedPercent: 42,
+            resetsAt: Date.now() / 1000 + 9000,
+            windowMinutes: 300,
+            model: null,
+            bucket: 'claude',
+          },
+        ],
+      };
+      return connection.id;
+    });
     for (const page of [windows, mac]) {
       await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
       await page.getByLabel('Relay URL').fill(url);
@@ -611,7 +969,17 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
       });
     }
     const account = mac.locator('.fleet-account').filter({ hasText: 'Claude WSL shared' });
-    await expect(account).toContainText('Connected', { timeout: 15_000 });
+    await expect(account).toBeVisible({ timeout: 15_000 });
+    await expect(account.locator('.connection-hint')).toHaveCount(0, { timeout: 15_000 });
+    await expect(
+      account.getByRole('progressbar', { name: '5-hour limit used', exact: true }),
+    ).toHaveAttribute('aria-valuenow', '42', { timeout: 15_000 });
+    expect(
+      await mac.evaluate(
+        (id) => (window as any).usageCalls.some((c: any) => c.connectionId === id),
+        usageConnectionId,
+      ),
+    ).toBe(false);
     await account.getByRole('button', { name: 'Chat', exact: true }).click();
     await chooseTestFolder(mac);
     await mac
@@ -626,7 +994,12 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
       JSON.parse(localStorage.getItem('fixture-workspace')!),
     );
     const connection = saved.fleet.connections.find(
-      (c: { environmentId: string }) => c.environmentId === distroId,
+      (c: { environmentId: string; accountId: string }) =>
+        c.environmentId === distroId &&
+        saved.fleet.accounts.some(
+          (a: { id: string; name: string }) =>
+            a.id === c.accountId && a.name === 'Claude WSL shared',
+        ),
     );
     expect(await windows.evaluate(() => localStorage.getItem('fixture-run-connection'))).toBe(
       connection.id,
@@ -651,7 +1024,7 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
     await mac.getByRole('option', { name: 'MacBook', exact: true }).click();
     await mac.locator('#conversation-panel-active .folder-new-chat').click();
     await expect(mac.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText(
-      'Desktop',
+      'WSL · Ubuntu',
     );
     await expect(mac.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
       'title',
@@ -674,6 +1047,19 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
       connection.id,
     );
     expect(await mac.evaluate(() => localStorage.getItem('fixture-run'))).toBeNull();
+    await mac.getByRole('button', { name: 'Connections', exact: true }).click();
+    await expect(mac.locator('.account-usage[aria-busy="true"]')).toHaveCount(0, {
+      timeout: 15000,
+    });
+    await mac.getByText('Sync settings', { exact: true }).click();
+    await mac.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
+    await expect(
+      account.getByRole('region', { name: 'Usage for Claude WSL shared' }),
+    ).toContainText('Computer offline.');
+    await expect(
+      account.getByRole('progressbar', { name: '5-hour limit used', exact: true }),
+    ).toHaveAttribute('aria-valuenow', '42');
+    await expect(account.locator('.recommended-fill')).toHaveCount(0);
   } finally {
     await a.close();
     await b.close();
@@ -700,11 +1086,11 @@ test('two app environments pair, share accounts, route chats, retain progress an
     await host(mac, url, token, 'MacBook', 'macos');
     await mac.getByRole('button', { name: 'Add account', exact: true }).click();
     await mac.getByLabel('Account name', { exact: true }).fill('Claude personal 1');
-    await mac.getByRole('button', { name: 'Connect account', exact: true }).click();
+    await mac.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
     await expect(mac.getByRole('heading', { name: 'Claude personal 1' })).toBeVisible();
-    await mac.locator('.fleet-account').getByRole('button', { name: 'Manage account' }).click();
     await mac
       .locator('.fleet-account')
+      .filter({ hasText: 'Claude personal 1' })
       .getByRole('button', { name: 'Open sign-in', exact: true })
       .click();
     const connection = await mac.evaluate(
@@ -720,7 +1106,11 @@ test('two app environments pair, share accounts, route chats, retain progress an
     }
     await expect(desktop.getByRole('heading', { name: 'MacBook', exact: true })).toBeVisible();
     await expect(desktop.getByRole('heading', { name: 'Claude personal 1' })).toBeVisible();
-    await desktop.getByRole('button', { name: 'Chat', exact: true }).click();
+    await desktop
+      .locator('.fleet-account')
+      .filter({ hasText: 'Claude personal 1' })
+      .getByRole('button', { name: 'Chat', exact: true })
+      .click();
     await chooseTestFolder(desktop);
     await expect(desktop.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText(
       'MacBook',

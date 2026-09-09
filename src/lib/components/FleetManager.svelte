@@ -7,9 +7,9 @@
     RefreshCw,
     ShieldCheck,
     Download,
-    ChevronDown,
     Settings2,
     ArrowUpRight,
+    LoaderCircle,
   } from '@lucide/svelte';
   import {
     providers,
@@ -21,22 +21,31 @@
   import {
     accountSchema,
     executionHost,
+    computerViews,
+    computerViewId,
     reconcileDiscoveredWsl,
     type Installation,
     type Account,
     type Environment,
     type WslDiscovery,
+    type CliInventory,
   } from '$lib/fleet';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
+  import AccountUsage from './AccountUsage.svelte';
+  import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop, signIn } from '$lib/transport';
+  import { desktop } from '$lib/transport';
   let {
-    workspace,
+    workspace = $bindable(),
     installation,
     wslDiscovery,
     wslError,
-    statuses,
+    cliInventories,
+    statuses = $bindable(),
+    usageSnapshots,
+    usageLoading,
+    usageErrors,
     presence,
     syncStatus,
     syncError,
@@ -56,7 +65,11 @@
     installation: Installation | undefined;
     wslDiscovery: WslDiscovery | undefined;
     wslError: string;
+    cliInventories: Record<string, CliInventory>;
     statuses: Record<string, ProviderStatus>;
+    usageSnapshots: Record<string, UsageSnapshot>;
+    usageLoading: Record<string, boolean>;
+    usageErrors: Record<string, string>;
     presence: Presence[];
     syncStatus: string;
     syncError: string;
@@ -66,32 +79,33 @@
     connect: (url: string, key: string) => Promise<void>;
     disconnect: () => Promise<void>;
     resolveConflict: () => Promise<void>;
-    chat: (provider: ProviderId, connectionId?: string) => void;
+    chat: (provider: ProviderId, connectionId?: string, computerId?: string) => void;
     providerStatuses: ProviderStatus[];
-    login: (provider: ProviderId) => Promise<void>;
+    login: (provider: ProviderId, connectionId?: string) => Promise<void>;
     exportWorkspace: () => Promise<void>;
     running: boolean;
   } = $props();
   let provider = $state<ProviderId>('claude');
   let name = $state('');
-  let purpose = $state<'personal' | 'work'>('personal');
-  let existingAccount = $state('');
-  let profile = $state<'existing' | 'isolated'>('isolated');
+  let linkedAccountId = $state('');
+  let createdConnectionId = $state('');
+  let creationStage = $state('');
+  let signingInConnection = $state('');
   let error = $state('');
   let busy = $state(false);
   let url = $state('http://127.0.0.1:4317');
   let key = $state('');
   let computerName = $state('');
   let computerGroup = $state('');
-  let dialog = $state<'account' | 'computer' | 'relay' | null>(null);
-  let editing = $state('');
+  let dialog = $state<'account' | 'manage-account' | 'computer' | 'relay' | null>(null);
+  let managedAccountId = $state('');
+  let managedComputerId = $state<string | null>(null);
   let accountName = $state('');
-  let accountPurpose = $state<'personal' | 'work'>('personal');
   let removing = $state('');
   let environmentId = $state('');
   let accountComputerId = $state('');
   const computers = $derived(
-    [...workspace.fleet.computers].sort(
+    computerViews(workspace.fleet).sort(
       (a, b) =>
         Number(b.id === ownComputer?.id) - Number(a.id === ownComputer?.id) ||
         a.name.localeCompare(b.name),
@@ -116,7 +130,6 @@
   const targetEnvironment = $derived(
     workspace.fleet.environments.find((e) => e.id === (environmentId || installation?.id)),
   );
-  const targetWsl = $derived(!!targetEnvironment?.discoveredOn);
   function localEnvironment(id: string) {
     return executionHost(workspace.fleet, id) === installation?.id;
   }
@@ -126,13 +139,42 @@
   const ownComputer = $derived(
     workspace.fleet.computers.find((c) => c.id === ownEnvironment?.computerId),
   );
-  const purposes = [
-    { id: 'personal', name: 'Personal' },
-    { id: 'work', name: 'Work' },
-  ];
   const selectedProvider = $derived(
-    workspace.fleet.accounts.find((a) => a.id === existingAccount)?.provider ?? provider,
+    workspace.fleet.accounts.find((a) => a.id === linkedAccountId)?.provider ?? provider,
   );
+  function connectionOnTarget(accountId: string) {
+    return workspace.fleet.connections.find(
+      (connection) =>
+        connection.accountId === accountId && connection.environmentId === targetEnvironment?.id,
+    );
+  }
+  const managedAccount = $derived(workspace.fleet.accounts.find((a) => a.id === managedAccountId));
+  const managedConnections = $derived(
+    workspace.fleet.connections.filter(
+      (c) => c.accountId === managedAccountId && onComputer(c.environmentId, managedComputerId),
+    ),
+  );
+  const canConnectManagedAccountHere = $derived(
+    !!installation &&
+      !!managedAccount &&
+      !workspace.fleet.connections.some(
+        (c) => c.accountId === managedAccountId && c.environmentId === installation.id,
+      ),
+  );
+  function cliInstalled(environmentId: string, provider: ProviderId) {
+    const inventory = cliInventories[environmentId];
+    return (
+      !!inventory?.entries?.some((entry) => entry.id === provider && entry.path) && !inventory.error
+    );
+  }
+  function connectableProviders(computerId: string) {
+    const environments = computers.find((c) => c.id === computerId)?.environments ?? [];
+    return providerIds.filter(
+      (id) =>
+        id !== 'gemini' &&
+        environments.some((e) => localEnvironment(e.id) && cliInstalled(e.id, id)),
+    );
+  }
   function distroState(environment: Environment) {
     if (
       !environment.distribution ||
@@ -155,6 +197,7 @@
             : 'WSL stopped';
   }
   async function action(fn: () => Promise<void>) {
+    if (busy) return;
     busy = true;
     error = '';
     try {
@@ -163,6 +206,8 @@
       error = String(e);
     } finally {
       busy = false;
+      creationStage = '';
+      signingInConnection = '';
     }
   }
   async function add() {
@@ -170,42 +215,55 @@
       !installation ||
       !targetEnvironment ||
       !localEnvironment(targetEnvironment.id) ||
-      targetEnvironment.computerId !== accountComputerId
+      computerViewId(targetEnvironment) !== accountComputerId
     )
       throw new Error('Choose an environment on this computer.');
-    const account = existingAccount
-      ? workspace.fleet.accounts.find((a) => a.id === existingAccount)
-      : accountSchema.parse({ id: crypto.randomUUID(), name, provider, purpose });
+    if (createdConnectionId) {
+      creationStage = 'Opening sign-in…';
+      await login(selectedProvider, createdConnectionId);
+      closeDialog();
+      return;
+    }
+    const account = linkedAccountId
+      ? workspace.fleet.accounts.find((a) => a.id === linkedAccountId)
+      : accountSchema.parse({ id: crypto.randomUUID(), name, provider, purpose: 'personal' });
     if (!account) throw new Error('Choose an account.');
-    if (targetWsl && account.provider === 'gemini')
-      throw new Error('Choose Codex or Claude for a WSL connection.');
-    const mode = account.provider === 'gemini' ? 'existing' : profile;
-    if (
-      workspace.fleet.connections.some(
-        (c) =>
-          c.environmentId === targetEnvironment.id &&
-          (c.accountId === account.id ||
-            (mode === 'existing' &&
-              c.profile === 'existing' &&
-              workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider ===
-                account.provider)),
-      )
-    )
-      throw new Error(
-        'This environment already has that account or a connection to this provider’s existing CLI login. Use a separate profile for another account.',
-      );
-    if (!existingAccount) workspace.fleet.accounts.push(account);
-    workspace.fleet.connections.push({
+    if (!cliInstalled(targetEnvironment.id, account.provider))
+      throw new Error('Install this CLI on the selected computer, then refresh Connections.');
+    if (account.provider === 'gemini')
+      throw new Error('Additional accounts are supported for Claude and Codex.');
+    if (linkedAccountId && connectionOnTarget(linkedAccountId))
+      throw new Error('This account is already connected on this computer.');
+    const connection = {
       id: crypto.randomUUID(),
       environmentId: targetEnvironment.id,
       accountId: account.id,
-      profile: mode,
-    });
-    name = '';
-    existingAccount = '';
-    await save();
-    await refresh();
-    dialog = null;
+      profile: 'isolated' as const,
+    };
+    creationStage = 'Creating account…';
+    if (!linkedAccountId) workspace.fleet.accounts.push(account);
+    workspace.fleet.connections.push(connection);
+    try {
+      await save();
+    } catch (e) {
+      workspace.fleet.connections = workspace.fleet.connections.filter(
+        (c) => c.id !== connection.id,
+      );
+      if (!linkedAccountId)
+        workspace.fleet.accounts = workspace.fleet.accounts.filter((a) => a.id !== account.id);
+      throw e;
+    }
+    createdConnectionId = connection.id;
+    statuses[connection.id] = {
+      id: account.provider,
+      installed: true,
+      auth: 'login',
+      version: null,
+      detail: 'Sign in to connect this account.',
+    };
+    creationStage = 'Opening sign-in…';
+    await login(account.provider, connection.id);
+    closeDialog();
   }
   function presenceFor(id: string) {
     return presence.find((p) => p.environmentId === executionHost(workspace.fleet, id));
@@ -218,7 +276,7 @@
           ? 'Connected'
           : statuses[id]?.installed
             ? 'Sign in or refresh'
-            : 'Check CLI setup';
+            : 'Install the CLI';
     const host = presenceFor(environmentId);
     if (!paired || !host?.online) return 'Offline';
     return host.connections.find((c) => c.connectionId === id)?.auth === 'ready'
@@ -229,40 +287,41 @@
   function closeDialog() {
     dialog = null;
     error = '';
+    removing = '';
+    creationStage = '';
+  }
+  function manageAccount(account: Account, computerId: string | null) {
+    managedAccountId = account.id;
+    managedComputerId = computerId;
+    accountName = account.name;
+    error = '';
+    removing = '';
+    dialog = 'manage-account';
   }
   function openAccount(
     id: ProviderId = 'claude',
-    accountId = '',
-    useExisting = false,
     computerId = ownComputer?.id ?? '',
+    accountId = '',
   ) {
-    provider = id;
-    existingAccount = accountId;
-    profile = useExisting ? 'existing' : 'isolated';
+    const available = connectableProviders(computerId);
+    provider = available.includes(id) ? id : (available[0] ?? id);
+    linkedAccountId = accountId;
+    createdConnectionId = '';
+    creationStage = '';
     accountComputerId = computerId;
     environmentId =
       workspace.fleet.environments.find(
         (environment) =>
-          environment.computerId === computerId &&
+          computerViewId(environment) === computerId &&
           localEnvironment(environment.id) &&
           !environment.discoveredOn,
       )?.id ??
       workspace.fleet.environments.find(
-        (environment) => environment.computerId === computerId && localEnvironment(environment.id),
+        (environment) =>
+          computerViewId(environment) === computerId && localEnvironment(environment.id),
       )?.id ??
       '';
-    if (useExisting) {
-      const location = providerStatus(id)?.location;
-      const detected = workspace.fleet.environments.find(
-        (environment) =>
-          environment.computerId === computerId &&
-          localEnvironment(environment.id) &&
-          environment.name === location,
-      );
-      if (detected) environmentId = detected.id;
-    }
-    name = '';
-    purpose = 'personal';
+    name = workspace.fleet.accounts.find((a) => a.id === accountId)?.name ?? '';
     error = '';
     dialog = 'account';
   }
@@ -274,20 +333,6 @@
   }
   function providerStatus(id: ProviderId) {
     return providerStatuses.find((s) => s.id === id);
-  }
-  function providerStatusLabel(id: ProviderId) {
-    const status = providerStatus(id);
-    return !status
-      ? 'Checking…'
-      : !desktop()
-        ? 'Desktop only'
-        : !status.installed
-          ? 'Set up'
-          : status.auth === 'ready'
-            ? 'Connected'
-            : status.auth === 'login'
-              ? 'Sign in'
-              : 'Installed';
   }
   function locationName(id: string) {
     const environment = workspace.fleet.environments.find((e) => e.id === id);
@@ -303,7 +348,7 @@
             workspace.fleet.environments.some(
               (environment) =>
                 environment.id === connection.environmentId &&
-                environment.computerId === computerId,
+                computerViewId(environment) === computerId,
             ),
         ),
     );
@@ -312,167 +357,104 @@
     return (
       computerId === null ||
       workspace.fleet.environments.some(
-        (environment) => environment.id === environmentId && environment.computerId === computerId,
+        (environment) =>
+          environment.id === environmentId && computerViewId(environment) === computerId,
       )
     );
   }
   function computerStatus(computerId: string) {
+    const computer = computers.find((c) => c.id === computerId);
+    if (computer?.wsl && computer.environments.some((e) => localEnvironment(e.id)))
+      return distroState(computer.environments[0]);
     const hosts = workspace.fleet.environments
-      .filter((environment) => environment.computerId === computerId)
+      .filter((environment) => computerViewId(environment) === computerId)
       .map((environment) => presenceFor(environment.id));
     if (computerId === ownComputer?.id) return running ? 'Working' : 'This computer';
     if (!paired || !hosts.some((host) => host?.online)) return 'Offline';
     return hosts.some((host) => host?.online && host.running.length) ? 'Working' : 'Online';
   }
+  function inventoryLabel(environmentId: string, provider: ProviderId) {
+    const inventory = cliInventories[environmentId];
+    const entry = inventory?.entries?.find((entry) => entry.id === provider);
+    if (inventory?.checking) return entry ? 'Updating…' : 'Checking installation…';
+    if (inventory?.error) return entry ? 'Last check' : 'Installation unknown';
+    return entry ? (entry.path ? 'Installed' : 'Not installed') : 'Installation unknown';
+  }
 </script>
 
 {#snippet accountCard(account: Account, computerId: string | null)}
-  {@const editingId = (computerId ?? 'unassigned') + ':' + account.id}
-
   <div class="fleet-account">
     <div class="fleet-account-heading">
       <div>
         <h4>{account.name}</h4>
-        <small
-          >{#if computerId === null}{providers[account.provider].name} ·
-          {/if}{account.purpose === 'work' ? 'Work' : 'Personal'}</small
-        >
+        {#if computerId === null}<small>{providers[account.provider].name}</small>{/if}
       </div>
       <button
-        class="text-button"
-        aria-expanded={editing === editingId}
-        onclick={() => {
-          editing = editing === editingId ? '' : editingId;
-          accountName = account.name;
-          accountPurpose = account.purpose;
-          removing = '';
-        }}>Manage account</button
+        class="icon-button manage-account"
+        aria-label="Manage account"
+        title="Manage account"
+        aria-haspopup="dialog"
+        onclick={() => manageAccount(account, computerId)}><Settings2 size={16} /></button
       >
     </div>
     {#each workspace.fleet.connections.filter((c) => c.accountId === account.id && onComputer(c.environmentId, computerId)) as connection}
       {@const status = connectionStatus(connection.id, connection.environmentId)}
-      <div class="account-connection">
-        <div class="connection-copy">
-          <strong>{locationName(connection.environmentId)}</strong><small
-            ><span class:ready={status === 'Connected'}>{status}</span>{#if editing === editingId}
-              · {connection.profile === 'isolated'
-                ? 'Separate CLI profile'
-                : 'Existing CLI login'}{/if}</small
-          >
-        </div>
-        <div class="fleet-actions">
-          {#if localEnvironment(connection.environmentId) && (editing === editingId || statuses[connection.id]?.auth !== 'ready')}<button
-              class="text-button"
-              disabled={busy || !desktop() || running}
-              onclick={() =>
-                action(async () => {
-                  await signIn(account.provider, connection.id);
-                })}>Open sign-in</button
-            >{/if}
-          <button class="secondary" onclick={() => chat(account.provider, connection.id)}
-            >Chat<ArrowUpRight size={13} /></button
-          >
-        </div>
-      </div>
-      {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.detail && statuses[connection.id]?.auth !== 'ready'}<p
-          class="connection-hint"
-        >
-          {statuses[connection.id].detail}
-        </p>{/if}
-      {#if editing === editingId && localEnvironment(connection.environmentId)}
-        {#if removing === connection.id}<div class="remove-connection">
-            <p>Remove this connection? Saved chats and the CLI’s login files are kept.</p>
-            <div class="fleet-actions">
-              <button
-                class="secondary"
-                disabled={busy}
+      {@const usageSettings = {
+        provider: account.provider,
+        model: '',
+        connectionId: connection.id,
+      }}
+      {@const key = usageKey(usageSettings)}
+      <div
+        class="account-connection"
+        aria-label={'Account actions in ' + locationName(connection.environmentId)}
+      >
+        <div class="connection-controls">
+          {#if status !== 'Connected'}<p class="connection-hint">{status}</p>{/if}
+          <div class="fleet-actions">
+            <button class="secondary" onclick={() => chat(account.provider, connection.id)}
+              >Chat<ArrowUpRight size={13} /></button
+            >
+            {#if localEnvironment(connection.environmentId)}<button
+                class="text-button"
+                disabled={busy || !desktop() || running || !statuses[connection.id]?.installed}
                 onclick={() =>
                   action(async () => {
-                    workspace.fleet.connections = workspace.fleet.connections.filter(
-                      (c) => c.id !== connection.id,
-                    );
-                    delete statuses[connection.id];
-                    removing = '';
-                    await save();
-                  })}>Remove connection</button
-              ><button class="text-button" onclick={() => (removing = '')}>Keep connection</button>
-            </div>
+                    signingInConnection = connection.id;
+                    await login(account.provider, connection.id);
+                  })}
+                >{#if signingInConnection === connection.id}<LoaderCircle
+                    size={13}
+                    class="spinning"
+                  />Opening sign-in…{:else}Open sign-in{/if}</button
+              >{/if}
           </div>
-        {:else}<button
-            class="text-button disconnect-connection"
-            onclick={() => (removing = connection.id)}
-            >Disconnect {workspace.fleet.environments.find((e) => e.id === connection.environmentId)
-              ?.name ?? 'environment'}</button
-          >{/if}
-      {/if}
+          {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.detail && statuses[connection.id]?.auth !== 'ready'}<p
+              class="connection-hint"
+            >
+              {statuses[connection.id].detail}
+            </p>{/if}
+        </div>
+        <AccountUsage
+          provider={account.provider}
+          name={account.name}
+          snapshot={snapshotFor(usageSnapshots, usageSettings)}
+          loading={!!usageLoading[key]}
+          error={usageErrors[key] ?? ''}
+          unavailable={status === 'Connected'
+            ? ''
+            : status === 'Offline'
+              ? 'Computer offline. Usage is unavailable.'
+              : status === 'Sign in or refresh'
+                ? 'Sign in to read usage.'
+                : status === 'Checking…'
+                  ? 'Checking account availability…'
+                  : status === 'Install the CLI'
+                    ? 'Install the CLI to read usage.'
+                    : 'Connect the account on its computer to read usage.'}
+        />
+      </div>
     {:else}<p class="connection-hint">No computers connected yet.</p>{/each}
-    {#if editing === editingId}<form
-        class="account-edit"
-        onsubmit={(e) => {
-          e.preventDefault();
-          void action(async () => {
-            Object.assign(
-              account,
-              accountSchema.parse({
-                ...account,
-                name: accountName,
-                purpose: accountPurpose,
-              }),
-            );
-            await save();
-            editing = '';
-          });
-        }}
-      >
-        <div class="fleet-fields">
-          <label
-            >Account name<input
-              aria-label="Edit account name"
-              bind:value={accountName}
-              required
-              maxlength="60"
-            /></label
-          >
-          <div class="fleet-field">
-            <span>Purpose</span><ChoicePicker
-              field
-              label="Edit account purpose"
-              value={accountPurpose}
-              options={purposes}
-              disabled={busy}
-              onchange={(value) => (accountPurpose = value as 'personal' | 'work')}
-            />
-          </div>
-        </div>
-        <div class="fleet-actions">
-          <button class="secondary" disabled={busy}>Save account</button><button
-            class="text-button"
-            type="button"
-            onclick={() => (editing = '')}>Cancel</button
-          ><button
-            class="text-button"
-            type="button"
-            disabled={busy}
-            onclick={() => openAccount(account.provider, account.id, false, ownComputer?.id)}
-            >{computerId === ownComputer?.id
-              ? 'Connect on another environment'
-              : 'Connect on this computer'}</button
-          >
-        </div>
-        {#if !workspace.fleet.connections.some((c) => c.accountId === account.id)}<button
-            class="text-button"
-            type="button"
-            disabled={busy}
-            onclick={() =>
-              action(async () => {
-                workspace.fleet.accounts = workspace.fleet.accounts.filter(
-                  (a) => a.id !== account.id,
-                );
-                editing = '';
-                await save();
-              })}>Remove account label</button
-          >{/if}
-      </form>{/if}
   </div>
 {/snippet}
 
@@ -492,7 +474,7 @@
       <div class="section-heading">
         <div>
           <h2 id="computers-heading">Your computers</h2>
-          <span>Accounts and CLI setup live with the computer that runs them.</span>
+          <span>Accounts and CLIs live with the computer that runs them.</span>
         </div>
         <span class="computer-count"
           >{computers.length} {computers.length === 1 ? 'computer' : 'computers'}</span
@@ -500,13 +482,13 @@
       </div>
       <div class="fleet-computers">
         {#each computers as computer (computer.id)}
-          {@const local = computer.id === ownComputer?.id}
-          {@const environments = workspace.fleet.environments.filter(
-            (environment) => environment.computerId === computer.id,
-          )}
+          {@const environments = computer.environments}
+          {@const local = environments.some((environment) => localEnvironment(environment.id))}
           <article class="fleet-computer" aria-label={computer.name + ' computer'}>
             <header class="computer-heading">
-              <span class="computer-icon"><Monitor size={21} /></span>
+              <span class="computer-icon"
+                >{#if computer.wsl}<Server size={21} />{:else}<Monitor size={21} />{/if}</span
+              >
               <div class="computer-identity">
                 <h3>{computer.name}</h3>
                 <span class="computer-state" class:ready={computerStatus(computer.id) !== 'Offline'}
@@ -516,159 +498,129 @@
               {#if local}<div class="fleet-actions">
                   <button
                     class="secondary"
-                    disabled={busy || !installation}
-                    onclick={() => openAccount('claude', '', false, computer.id)}
+                    disabled={busy || !installation || !connectableProviders(computer.id).length}
+                    onclick={() => openAccount('claude', computer.id)}
                     ><Plus size={14} />Add account</button
-                  ><button
-                    class="icon-button"
-                    aria-label={'Manage computer ' + computer.name}
-                    title="Manage computer"
-                    disabled={busy}
-                    onclick={openComputer}><Settings2 size={17} /></button
-                  >
+                  >{#if computer.id === ownComputer?.id}<button
+                      class="icon-button"
+                      aria-label={'Manage computer ' + computer.name}
+                      title="Manage computer"
+                      disabled={busy}
+                      onclick={openComputer}><Settings2 size={17} /></button
+                    >{/if}
                 </div>{/if}
             </header>
-            <div class="computer-environments">
-              {#each environments as environment}<div class="environment-row">
-                  <div>
-                    <strong>{environment.name}</strong>{#if environment.discoveredOn}<small
-                        >Automatically detected · {distroState(environment) ||
-                          'Managed by Windows'}</small
-                      >{/if}
-                  </div>
-                  <span
-                    class="environment-status"
-                    class:ready={localEnvironment(environment.id) ||
-                      (paired && !!presenceFor(environment.id)?.online)}
-                    >{environment.id === installation?.id
-                      ? 'Here'
-                      : localEnvironment(environment.id)
-                        ? 'Managed here'
-                        : paired && presenceFor(environment.id)?.online
-                          ? presenceFor(environment.id)?.running.length
-                            ? 'Working'
-                            : 'Online'
-                          : 'Offline'}</span
-                  >
-                </div>{/each}
-            </div>
-            {#if local && installation?.platform === 'windows'}<p class="computer-hint">
-                Windows CLI first, WSL when needed. WSL runs through this app automatically.
+            {#if computer.wsl}<p class="computer-hint">
+                Linux CLI installations in this distribution are shown below. Managed through {computer.hostName}.
+                Selecting this computer uses only its Linux CLI and login. Checking installations
+                can start WSL.
+              </p>{:else if local && installation?.platform === 'windows'}<p class="computer-hint">
+                Selecting this computer uses its Windows CLIs, including when you choose a WSL
+                folder.
               </p>{/if}
-            {#if local && wslError}<p class="sync-error" role="alert">{wslError}</p>{/if}
+            {#if computer.id === ownComputer?.id && wslError}<p class="sync-error" role="alert">
+                {wslError}
+              </p>{/if}
+            {#each environments.filter((e) => localEnvironment(e.id) && cliInventories[e.id]?.error) as environment}<p
+                class="sync-error"
+                role="alert"
+              >
+                {environment.name}: {cliInventories[environment.id]
+                  .error}{#if cliInventories[environment.id].entries}
+                  Showing the last successful installation check.{/if}
+              </p>{/each}
             {#if environments.length}
               <div class="computer-providers" aria-label={'Accounts and CLIs on ' + computer.name}>
                 {#each providerIds as id}
                   {@const accounts = computerAccounts(computer.id, id)}
+                  {@const cliEnvironment = environments.find((e) => localEnvironment(e.id))}
+                  {@const cliEntry =
+                    cliEnvironment &&
+                    cliInventories[cliEnvironment.id]?.entries?.find((entry) => entry.id === id)}
                   <article
                     class="connection-card provider-group"
                     aria-label={providers[id].name + ' connections'}
                   >
-                    <header class="provider-heading">
-                      <span class="provider-icon" style:--provider-color={providers[id].color}
-                        >{providers[id].mark}</span
-                      >
-                      <div>
-                        <h4>{providers[id].name}</h4>
-                        <span class="small muted"
-                          >{accounts.length
-                            ? accounts.length + (accounts.length === 1 ? ' account' : ' accounts')
-                            : providers[id].company}</span
+                    <div
+                      class="provider-overview"
+                      aria-label={cliEnvironment
+                        ? providers[id].name + ' installation in ' + cliEnvironment.name
+                        : undefined}
+                    >
+                      <header class="provider-heading">
+                        <span class="provider-icon" style:--provider-color={providers[id].color}
+                          >{providers[id].mark}</span
                         >
-                      </div>
-                      {#if local && !accounts.length}<span
-                          class="connection-badge"
-                          class:connected={providerStatus(id)?.auth === 'ready'}
-                          ><i></i>{providerStatusLabel(id)}</span
-                        >{/if}
-                    </header>
+                        <div class="provider-identity">
+                          <h4>{providers[id].name}</h4>
+                          <span class="small muted"
+                            >{accounts.length
+                              ? accounts.length + (accounts.length === 1 ? ' account' : ' accounts')
+                              : id === 'gemini'
+                                ? 'Google · Antigravity CLI'
+                                : providers[id].company}</span
+                          >
+                        </div>
+                        {#if cliEnvironment}<strong
+                            class="installation-status"
+                            class:ready={!!cliEntry?.path &&
+                              !cliInventories[cliEnvironment.id]?.error}
+                            >{inventoryLabel(cliEnvironment.id, id)}</strong
+                          >{/if}
+                      </header>
+                      {#if cliEntry?.path}<div class="cli-location">
+                          <span>CLI path</span><code title={cliEntry.path}>{cliEntry.path}</code>
+                        </div>{/if}
+                    </div>
                     {#each accounts as account (account.id)}
                       {@render accountCard(account, computer.id)}
-                    {:else}{#if local}
+                    {:else}{#if local && computer.wsl}
                         <div class="current-login">
-                          <div>
-                            <strong
-                              >{providerStatus(id)?.installed
-                                ? 'Current CLI login'
-                                : 'Connect your account'}</strong
-                            >
-                            <p>
-                              {providerStatus(id)?.installed
-                                ? (providerStatus(id)?.location ??
-                                    ownEnvironment?.name ??
-                                    'This computer') +
-                                  ' · ' +
-                                  (providerStatus(id)?.version ?? 'CLI detected')
-                                : 'Set up ' +
-                                  providers[id].name +
-                                  ' on this computer to get started.'}
+                          <p>
+                            {id === 'gemini'
+                              ? 'Antigravity chat connections are not supported through WSL.'
+                              : cliInstalled(environments[0].id, id)
+                                ? 'Connect an account using the Linux CLI in this distribution.'
+                                : cliInventories[environments[0].id]?.error ||
+                                    !cliInventories[environments[0].id]?.entries
+                                  ? 'Refresh Connections to check whether this CLI is installed.'
+                                  : 'Install this CLI in ' +
+                                    computer.name +
+                                    ', then refresh Connections.'}
+                          </p>
+                          {#if id !== 'gemini' && cliInstalled(environments[0].id, id)}<button
+                              class="secondary"
+                              disabled={busy || !desktop() || running}
+                              onclick={() => openAccount(id, computer.id)}>Add account</button
+                            >{/if}
+                        </div>
+                      {:else if local}
+                        <div class="current-login">
+                          {#if !providerStatus(id)}<p>Checking login…</p>
+                          {:else if !providerStatus(id)?.installed}<p>
+                              Install {providers[id].name} to connect an account.
                             </p>
-                          </div>
+                          {:else if providerStatus(id)?.auth !== 'ready'}<p>
+                              {providerStatus(id)?.detail ?? 'Sign in to connect your account.'}
+                            </p>{/if}
                           <div class="fleet-actions">
-                            {#if providerStatus(id)?.auth === 'ready'}<button
-                                class="text-button"
-                                disabled={busy || !installation}
-                                onclick={() => openAccount(id, '', true)}>Name this account</button
-                              ><button class="secondary" onclick={() => chat(id)}
-                                >Start chat<ArrowUpRight size={13} /></button
-                              >{:else}<button
+                            <button
+                              class="text-button"
+                              disabled={busy ||
+                                !desktop() ||
+                                !providerStatus(id)?.installed ||
+                                running}
+                              onclick={() => action(() => login(id))}>Open sign-in</button
+                            >{#if providerStatus(id)?.auth === 'ready'}<button
                                 class="secondary"
-                                disabled={busy ||
-                                  !desktop() ||
-                                  !providerStatus(id)?.installed ||
-                                  running}
-                                onclick={() => action(() => login(id))}
-                                >Open sign-in<ArrowUpRight size={13} /></button
+                                onclick={() => chat(id, undefined, computer.id)}
+                                >Start chat<ArrowUpRight size={13} /></button
                               >{/if}
                           </div>
                         </div>
                       {:else}<p class="connection-hint remote-empty">
                           No account connected on this computer.
                         </p>{/if}{/each}
-                    {#if local}
-                      <details class="provider-setup">
-                        <summary><span>CLI setup</span><ChevronDown size={14} /></summary>
-                        <div class="provider-setup-content">
-                          <p>
-                            {providerStatus(id)?.detail ?? 'Looking for the CLI on this device…'}
-                          </p>
-                          {#if accounts.length}<p>
-                              {providerStatus(id)?.location ??
-                                ownEnvironment?.name ??
-                                'This computer'} · {providerStatus(id)?.version ??
-                                'Checking installation'} · {providerStatusLabel(id)}
-                            </p>{/if}
-                          <div class="connection-commands">
-                            <div><span>INSTALL</span><code>{providers[id].install}</code></div>
-                            <div><span>SIGN IN</span><code>{providers[id].login}</code></div>
-                          </div>
-                          <p>
-                            {id === 'gemini'
-                              ? 'Uses your Google subscription through Antigravity CLI (agy).'
-                              : 'Uses your ' +
-                                providers[id].account +
-                                ' subscription. Separate profiles keep additional accounts independent.'}
-                          </p>
-                          {#if accounts.length}<div class="fleet-actions">
-                              <button
-                                class="secondary"
-                                disabled={busy ||
-                                  !desktop() ||
-                                  !providerStatus(id)?.installed ||
-                                  running}
-                                onclick={() => action(() => login(id))}
-                                >Open current CLI sign-in</button
-                              ><button class="text-button" onclick={() => chat(id)}
-                                >Use current CLI login</button
-                              >
-                            </div>{:else if providerStatus(id)?.auth === 'ready'}<button
-                              class="text-button"
-                              disabled={busy || !desktop() || running}
-                              onclick={() => action(() => login(id))}>Open sign-in</button
-                            >{/if}
-                        </div>
-                      </details>
-                    {/if}
                   </article>
                 {/each}
               </div>
@@ -758,160 +710,192 @@
   </div>
 </div>
 
-{#if dialog === 'account'}<ConnectionDialog title="Connect an account" {busy} close={closeDialog}>
+{#if dialog === 'account'}<ConnectionDialog title="Add account" {busy} close={closeDialog}>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
     <form
-      onsubmit={(e) => {
-        e.preventDefault();
+      aria-busy={busy}
+      onsubmit={(event) => {
+        event.preventDefault();
         void action(add);
       }}
     >
-      <p class="account-target">
-        Connect an account on <strong
-          >{workspace.fleet.computers.find((computer) => computer.id === accountComputerId)?.name ??
+      <p>
+        Add an account on <strong
+          >{computers.find((computer) => computer.id === accountComputerId)?.name ??
             'this computer'}</strong
-        >. Choose its environment and sign-in method.
+        >.
       </p>
       <div class="fleet-fields">
-        <div class="fleet-field">
-          <span>Environment</span><ChoicePicker
-            field
-            label="Connection environment"
-            value={targetEnvironment?.id ?? ''}
-            disabled={busy}
-            options={workspace.fleet.environments
-              .filter((e) => localEnvironment(e.id) && e.computerId === accountComputerId)
-              .map((e) => ({
-                id: e.id,
-                name: e.name,
-                detail: e.discoveredOn ? 'Managed by the Windows app' : 'Native CLI',
-              }))}
-            onchange={(value) => {
-              environmentId = value;
-              if (
-                workspace.fleet.environments.find((e) => e.id === value)?.discoveredOn &&
-                selectedProvider === 'gemini'
-              ) {
-                existingAccount = '';
-                provider = 'claude';
-              }
-            }}
-          />
-        </div>
-        <div class="fleet-field">
-          <span>Account</span><ChoicePicker
-            field
-            label="Account to connect"
-            value={existingAccount}
-            disabled={busy}
-            options={[
-              { id: '', name: 'Add a new account' },
-              ...workspace.fleet.accounts
-                .filter((a) => !targetWsl || a.provider !== 'gemini')
-                .map((account) => ({
-                  id: account.id,
-                  name: account.name,
-                  detail: providers[account.provider].name,
-                })),
-            ]}
-            onchange={(value) => (existingAccount = value)}
-          />
-        </div>
-        {#if !existingAccount}<div class="fleet-field">
+        {#if !linkedAccountId}<div class="fleet-field">
             <span>Provider</span><ChoicePicker
               field
               label="Account provider"
               value={provider}
-              disabled={busy}
-              options={providerIds
-                .filter((id) => !targetWsl || id !== 'gemini')
-                .map((id) => ({
-                  id,
-                  name: providers[id].name,
-                  mark: providers[id].mark,
-                  color: providers[id].color,
-                }))}
+              disabled={busy || !!createdConnectionId}
+              options={connectableProviders(accountComputerId).map((id) => ({
+                id,
+                name: providers[id].name,
+                mark: providers[id].mark,
+                color: providers[id].color,
+              }))}
               onchange={(value) => (provider = value as ProviderId)}
             />
-          </div>
-          <label
-            >Account name<input
-              aria-label="Account name"
-              placeholder="Personal 1 or Company"
-              bind:value={name}
-              maxlength="60"
-              required
-            /></label
-          >
-          <div class="fleet-field">
-            <span>Purpose</span><ChoicePicker
-              field
-              label="Account purpose"
-              value={purpose}
-              options={purposes}
-              disabled={busy}
-              onchange={(value) => (purpose = value as 'personal' | 'work')}
-            />
           </div>{/if}
-        <div class="fleet-field">
-          <span>Login profile</span><ChoicePicker
-            field
-            label="Login profile"
-            value={selectedProvider === 'gemini' ? 'existing' : profile}
-            disabled={busy || selectedProvider === 'gemini'}
-            options={[
-              {
-                id: 'isolated',
-                name: 'Separate login for this account',
-                detail: 'An independent sign-in for another personal or work account',
-              },
-              {
-                id: 'existing',
-                name: 'Use the existing CLI login',
-                detail: 'Share the login and settings you already use in this environment',
-              },
-            ]}
-            onchange={(value) => (profile = value as 'existing' | 'isolated')}
-          />
-        </div>
+        <label
+          >Account name<input
+            aria-label="Account name"
+            bind:value={name}
+            maxlength="60"
+            required
+            disabled={busy || !!createdConnectionId || !!linkedAccountId}
+          /></label
+        >
       </div>
-
-      <div class="login-profile-help" role="note" aria-label="How this login works">
-        {#if selectedProvider === 'gemini'}<strong>Uses your existing Antigravity login</strong>
-          <p>
-            Gemini supports the current CLI login only. Sign-in and settings are shared with
-            Antigravity in this environment.
-          </p>
-        {:else if profile === 'isolated'}<strong
-            >A separate sign-in, using the same installed CLI</strong
-          >
-          <p>
-            Starts with its own login and settings for this connection. Sign in to your other
-            personal or work account without changing the account you use in your terminal.
-          </p>
-        {:else if targetEnvironment?.discoveredOn}<strong
-            >Windows CLI first, WSL as a fallback</strong
-          >
-          <p>
-            Uses your Windows {providers[selectedProvider].name} installation and login first, including
-            for folders in {targetEnvironment.name}. If it is not installed on Windows, uses the
-            existing CLI login in that WSL distribution. The selected folder stays the same.
-          </p>
-        {:else}<strong>The same sign-in you use in your terminal</strong>
-          <p>
-            Uses the current {providers[selectedProvider].name} login and settings in {targetEnvironment?.name ??
-              'this environment'}. Signing out or switching that CLI’s account also changes this
-            connection.
-          </p>{/if}
-        <p class="profile-location-note">
-          Separate profiles and other computers keep their own sign-ins. The relay syncs account
-          labels and chats, never provider logins.
-        </p>
-      </div>
+      <p>Sign in with your additional account in the terminal that opens.</p>
+      {#if creationStage}<p class="account-progress" role="status">
+          <LoaderCircle size={15} class="spinning" />{creationStage}
+        </p>{/if}
       <div class="dialog-actions">
         <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button
-        ><button class="primary" disabled={busy || !installation}
-          >Connect account<Plus size={15} /></button
+        >
+        <button
+          class="primary"
+          disabled={busy ||
+            !installation ||
+            !targetEnvironment ||
+            !name.trim() ||
+            !cliInstalled(targetEnvironment.id, selectedProvider)}
+        >
+          {#if busy}<LoaderCircle
+              size={15}
+              class="spinning"
+            />{creationStage}{:else if createdConnectionId}Retry sign-in{:else}Add account<Plus
+              size={15}
+            />{/if}
+        </button>
+      </div>
+    </form>
+  </ConnectionDialog>
+{:else if dialog === 'manage-account' && managedAccount}<ConnectionDialog
+    title="Manage account"
+    {busy}
+    close={closeDialog}
+  >
+    {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
+    <form
+      onsubmit={(event) => {
+        event.preventDefault();
+        void action(async () => {
+          if (!managedAccount) return;
+          Object.assign(
+            managedAccount,
+            accountSchema.parse({ ...managedAccount, name: accountName }),
+          );
+          await save();
+          closeDialog();
+        });
+      }}
+    >
+      <p class="management-context">
+        {providers[managedAccount.provider].name}{#if managedComputerId}
+          · {computers.find((c) => c.id === managedComputerId)?.name ?? 'Unavailable computer'}{/if}
+      </p>
+      <label
+        >Account name<input
+          aria-label="Edit account name"
+          bind:value={accountName}
+          required
+          maxlength="60"
+        /></label
+      >
+      {#each managedConnections as connection}
+        <section
+          class="managed-connection"
+          aria-label={'Connection in ' + locationName(connection.environmentId)}
+        >
+          <div>
+            <h3>
+              {connection.profile === 'isolated' ? 'Separate CLI profile' : 'Existing CLI login'}
+            </h3>
+            <p>
+              {connection.profile === 'isolated'
+                ? 'This account has its own login and settings.'
+                : 'Shares the login and settings you use in your terminal.'}
+            </p>
+          </div>
+          {#if localEnvironment(connection.environmentId)}
+            {#if removing === connection.id}<div
+                class="remove-connection"
+                role="group"
+                aria-label="Confirm disconnection"
+              >
+                <p>Remove this connection? Saved chats and the CLI’s login files are kept.</p>
+                <div class="fleet-actions">
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={busy}
+                    onclick={() =>
+                      action(async () => {
+                        workspace.fleet.connections = workspace.fleet.connections.filter(
+                          (c) => c.id !== connection.id,
+                        );
+                        delete statuses[connection.id];
+                        await save();
+                        closeDialog();
+                      })}>Remove connection</button
+                  >
+                  <button
+                    class="text-button"
+                    type="button"
+                    disabled={busy}
+                    onclick={() => (removing = '')}>Keep connection</button
+                  >
+                </div>
+              </div>
+            {:else}<button
+                class="text-button disconnect-connection"
+                type="button"
+                disabled={busy}
+                onclick={() => (removing = connection.id)}
+                >{managedConnections.length > 1
+                  ? 'Disconnect ' + locationName(connection.environmentId)
+                  : 'Disconnect account'}</button
+              >{/if}
+          {:else}<p>Manage this connection on its computer.</p>{/if}
+        </section>
+      {/each}
+      {#if canConnectManagedAccountHere}<div class="managed-connect">
+          <button
+            class="text-button"
+            type="button"
+            disabled={busy ||
+              !installation ||
+              !cliInstalled(installation.id, managedAccount.provider)}
+            onclick={() => {
+              if (managedAccount)
+                openAccount(managedAccount.provider, ownComputer?.id, managedAccount.id);
+            }}>Connect on {ownComputer?.name ?? 'this computer'}</button
+          >
+        </div>{/if}
+      {#if !workspace.fleet.connections.some((c) => c.accountId === managedAccountId)}<button
+          class="text-button disconnect-connection"
+          type="button"
+          disabled={busy}
+          onclick={() =>
+            action(async () => {
+              workspace.fleet.accounts = workspace.fleet.accounts.filter(
+                (a) => a.id !== managedAccountId,
+              );
+              await save();
+              closeDialog();
+            })}>Remove account label</button
+        >{/if}
+      <div class="dialog-actions">
+        <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button
+        >
+        <button class="primary" disabled={busy || !accountName.trim() || !!removing}
+          >Save account</button
         >
       </div>
     </form>
@@ -943,8 +927,8 @@
       }}
     >
       <p>
-        Settings for {ownComputer.name}. Windows and its WSL environments belong to the same
-        computer.
+        Settings for {ownComputer.name}. Its WSL distributions appear as separate computers and
+        remain managed by this Windows app.
       </p>
       <label
         >Computer name<input
@@ -1019,6 +1003,56 @@
   </ConnectionDialog>{/if}
 
 <style>
+  .cli-location {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    padding: 0 16px 16px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .cli-location span {
+    flex-shrink: 0;
+  }
+  .cli-location code {
+    min-width: 0;
+    font-size: 10px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .provider-identity {
+    flex: 1;
+    min-width: 0;
+  }
+  .installation-status {
+    flex-shrink: 0;
+    max-width: 104px;
+    text-align: right;
+    font-size: 11px;
+    line-height: 1.4;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .managed-connection {
+    border-top: 1px solid var(--line);
+    padding-top: 18px;
+  }
+  .managed-connection h3 {
+    font-size: 13px;
+    font-weight: 500;
+    margin: 0 0 7px;
+  }
+  .managed-connect {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .remove-connection .fleet-actions {
+    margin-top: 12px;
+  }
+  .management-context {
+    margin-top: -8px;
+  }
   .fleet-page {
     padding-top: 32px;
     padding-bottom: 28px;
@@ -1098,38 +1132,6 @@
     font-size: 11px;
     color: var(--muted);
   }
-  .computer-environments {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .environment-row {
-    display: flex;
-    align-items: center;
-    gap: 26px;
-    justify-content: space-between;
-    padding: 11px 13px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--bg);
-    min-width: 180px;
-  }
-  .environment-row strong {
-    font-size: 12px;
-    font-weight: 500;
-  }
-  .environment-row small {
-    display: block;
-    color: var(--muted);
-    font-size: 10px;
-    margin-top: 5px;
-    line-height: 1.6;
-  }
-  .environment-status {
-    font-size: 10px;
-    color: var(--muted);
-    white-space: nowrap;
-  }
   .ready {
     color: #b7ce98;
   }
@@ -1141,7 +1143,7 @@
   }
   .computer-providers {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 14px;
     align-items: start;
     margin-top: 22px;
@@ -1172,9 +1174,6 @@
     border-radius: 8px;
     flex-shrink: 0;
   }
-  .provider-heading .connection-badge {
-    margin-left: auto;
-  }
   .fleet-actions {
     display: flex;
     gap: 11px;
@@ -1191,10 +1190,6 @@
   .current-login {
     padding: 0 16px 16px;
   }
-  .current-login strong {
-    font-size: 12px;
-    font-weight: 500;
-  }
   .current-login p {
     font-size: 11px;
     color: var(--muted);
@@ -1204,45 +1199,8 @@
   .current-login .fleet-actions {
     justify-content: flex-end;
   }
-  .provider-setup {
-    border-top: 1px solid var(--line);
-  }
-  .provider-setup > summary {
-    display: flex;
-    justify-content: space-between;
-    list-style: none;
-    padding: 10px 16px;
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 11px;
-  }
   summary::-webkit-details-marker {
     display: none;
-  }
-  .provider-setup[open] > summary {
-    color: var(--text);
-  }
-  .provider-setup[open] > summary :global(svg) {
-    transform: rotate(180deg);
-  }
-  .provider-setup-content {
-    padding: 0 16px 16px;
-    font-size: 11px;
-    line-height: 1.7;
-    color: var(--muted);
-  }
-  .connection-commands {
-    display: grid;
-    grid-template-columns: 1fr;
-    margin: 14px 0;
-  }
-  .connection-commands > div + div {
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-  .connection-commands code {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
   }
   .fleet-account {
     border-top: 1px solid var(--line);
@@ -1255,35 +1213,35 @@
     gap: 9px;
   }
   .fleet-account-heading h4 {
-    margin: 0 0 4px;
-    font-size: 13px;
+    margin: 0;
+    font-size: 14px;
     font-weight: 500;
   }
   .fleet-account-heading small {
     font-size: 10px;
     color: var(--muted);
   }
-  .fleet-account-heading > .text-button {
-    font-size: 10px;
+  .fleet-account-heading > .manage-account {
     flex-shrink: 0;
   }
   .account-connection {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(160px, 0.7fr) minmax(0, 2fr);
+    align-items: start;
+    gap: 24px;
     margin-top: 14px;
   }
-  .connection-copy strong {
-    font-size: 11px;
-    font-weight: 400;
+  .connection-controls {
+    min-width: 0;
   }
-  .connection-copy small {
-    display: block;
-    font-size: 10px;
-    color: var(--muted);
-    margin-top: 4px;
+  .connection-controls > .connection-hint:first-child {
+    margin-top: 0;
+  }
+  @media (max-width: 1000px) {
+    .account-connection {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+    }
   }
   .connection-hint {
     font-size: 11px;
@@ -1293,20 +1251,10 @@
   .remote-empty {
     padding: 0 16px 10px;
   }
-  .account-edit {
-    display: grid;
-    gap: 16px;
-    border-top: 1px solid var(--line);
-    margin-top: 16px;
-    padding-top: 16px;
-  }
   .fleet-fields {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
-  }
-  .account-edit .fleet-fields {
-    grid-template-columns: 1fr;
   }
   label,
   .fleet-field {
@@ -1323,6 +1271,7 @@
   .disconnect-connection {
     font-size: 11px;
     margin-top: 12px;
+    color: #d99f95;
   }
   .remove-connection {
     font-size: 12px;
@@ -1425,23 +1374,23 @@
     flex-shrink: 0;
     font-size: 11px;
   }
-  .login-profile-help {
-    border: 1px solid #3d4934;
-    background: #20271c;
-    border-radius: 9px;
-    padding: 14px;
+  .account-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
-  .login-profile-help strong {
-    display: block;
-    font-size: 12px;
-    color: var(--text);
-    margin-bottom: 7px;
+  :global(.spinning) {
+    animation: spin 1s linear infinite;
   }
-  .login-profile-help .profile-location-note {
-    padding-top: 9px;
-    margin-top: 9px;
-    border-top: 1px solid var(--line);
-    font-size: 11px;
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.spinning) {
+      animation: none;
+    }
   }
   @media (max-width: 1190px) {
     .fleet-page {
@@ -1472,9 +1421,6 @@
     .computer-heading > .fleet-actions {
       width: 100%;
       justify-content: flex-end;
-    }
-    .computer-environments {
-      display: grid;
     }
     .fleet-fields {
       grid-template-columns: 1fr;

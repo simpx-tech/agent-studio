@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
+import { expectVisibleQuotaComparison } from './quota-helper';
 
 async function mockDesktop(page: Page, mode = 'success') {
   await page.addInitScript(
@@ -27,7 +28,7 @@ async function mockDesktop(page: Page, mode = 'success') {
             (state.cliCalls ??= []).push({ command, ...args });
             if (state.holdCli?.includes(command))
               await new Promise<void>((resolve) => {
-                (state.pendingCli ??= []).push({ command, resolve });
+                (state.pendingCli ??= []).push({ command, ...args, resolve });
               });
           }
           if (command === 'get_installation')
@@ -40,7 +41,7 @@ async function mockDesktop(page: Page, mode = 'success') {
           if (command === 'discover_wsl')
             return {
               distributions:
-                mode === 'locations' || mode === 'windows-first'
+                mode === 'locations' || mode === 'computer-routing'
                   ? [{ id: '33333333-3333-4333-8333-333333333333', name: 'Ubuntu', running: true }]
                   : [],
               warning: null,
@@ -59,6 +60,16 @@ async function mockDesktop(page: Page, mode = 'success') {
               truncated: false,
             };
           }
+          if (command === 'inspect_environment_clis')
+            return ['codex', 'claude', 'gemini'].map((id) => ({
+              id,
+              path:
+                args.environmentId === '11111111-1111-4111-8111-111111111111'
+                  ? 'C:/CLIs/' + id + '.exe'
+                  : id === 'codex'
+                    ? '/usr/local/bin/codex'
+                    : null,
+            }));
           if (command === 'detect_connection') {
             const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
             const wsl =
@@ -66,9 +77,14 @@ async function mockDesktop(page: Page, mode = 'success') {
               '33333333-3333-4333-8333-333333333333';
             return {
               id: args.provider,
-              installed: mode === 'windows-first' || !wsl || args.provider === 'codex',
-              location: mode === 'windows-first' ? 'Windows' : wsl ? 'WSL · Ubuntu' : 'Windows',
-              auth: 'ready',
+              installed: !wsl || args.provider === 'codex',
+              location: wsl ? 'WSL · Ubuntu' : 'Windows',
+              auth:
+                mode === 'login-flow' &&
+                args.provider === 'gemini' &&
+                localStorage.getItem('test-google-login') !== 'ready'
+                  ? 'login'
+                  : 'ready',
               version: 'Test fixture',
               detail: 'Fixture connection',
             };
@@ -333,17 +349,16 @@ test('browser preview keeps per-chat choices without an agent library', async ({
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
 });
 
-test('Gemini setup directs subscription users to Antigravity', async ({ page }) => {
+test('Gemini automatically exposes its existing CLI login', async ({ page }) => {
   await mockDesktop(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const card = page
     .locator('.connection-card')
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
-  await card.getByText('CLI setup', { exact: true }).click();
-  await expect(card.locator('code').nth(0)).toContainText('antigravity.google/cli/install.ps1');
-  await expect(card.locator('code').nth(1)).toHaveText('agy');
-  await expect(card).toContainText('Google subscription through Antigravity CLI');
+  await expect(card.getByText('CLI setup', { exact: true })).toHaveCount(0);
+  await expect(card).toContainText('Gemini CLI login');
+  await expect(card.getByRole('button', { name: 'Open sign-in', exact: true })).toBeVisible();
   await expect(card).not.toContainText('@google/gemini-cli');
 });
 
@@ -356,22 +371,23 @@ test('external Google sign-in updates on focus and survives reload without a cha
   const card = page
     .locator('.connection-card')
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
-  await expect(card.locator('.connection-badge')).toHaveText('Sign in');
+  await expect(card).toContainText('Sign in or refresh');
   await card.getByRole('button', { name: 'Open sign-in' }).click();
-  await expect(card.locator('.connection-badge')).toHaveText('Sign in');
+  await expect(card).toContainText('Sign in or refresh');
   await page.evaluate(() => {
     localStorage.setItem('test-google-login', 'ready');
     window.dispatchEvent(new Event('focus'));
   });
-  await expect(card.locator('.connection-badge')).toHaveText('Connected');
-  await expect(page.getByRole('status')).toContainText('Gemini is connected');
+  await expect(card).not.toContainText('Sign in or refresh');
+  await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await expect(card.locator('.connection-badge')).toHaveText('Connected');
+  await expect(card.getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
+  await expect(card).not.toContainText('Sign in or refresh');
   await page.evaluate(() => localStorage.removeItem('test-google-login'));
   await page.getByRole('button', { name: 'Refresh connections' }).click();
-  await expect(card.locator('.connection-badge')).toHaveText('Sign in');
+  await expect(card).toContainText('Sign in or refresh');
 });
 
 test('sign-in completion is polled while the external console remains open', async ({ page }) => {
@@ -383,7 +399,10 @@ test('sign-in completion is polled while the external console remains open', asy
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
   await card.getByRole('button', { name: 'Open sign-in' }).click();
   await page.evaluate(() => localStorage.setItem('test-google-login', 'ready'));
-  await expect(card.locator('.connection-badge')).toHaveText('Connected', { timeout: 8000 });
+  await expect(card).not.toContainText('Sign in or refresh', {
+    timeout: 8000,
+  });
+  await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
 });
 
@@ -650,6 +669,7 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
     expect(bars.actual).toBeCloseTo(current / 100, 2);
     expect(bars.recommended).toBeCloseTo(0.5, 2);
     expect(bars.aligned && bars.sameTrack).toBe(true);
+    await expectVisibleQuotaComparison(card.getByRole('meter'), current > 50);
   }
   await expect(page.locator('.usage-strip .recommended-fill')).toHaveCount(2);
   await expect(page.locator('.usage-strip')).not.toContainText(/Recommended|Guide unavailable/);
@@ -896,15 +916,9 @@ test('missing and failed quota readings never show fabricated zero usage', async
   await chooseTestFolder(page);
   await pick(page, 'Agent', 'Codex');
   await page.locator('.context-chip').click();
-  await expect(page.getByTestId('limit-5-hour')).toContainText('Not reported');
-  await expect(page.getByTestId('limit-5-hour').getByRole('meter')).toHaveCount(0);
-  await expect(page.getByRole('progressbar', { name: '5-hour limit used' })).not.toHaveAttribute(
-    'aria-valuenow',
-  );
-  await expect(page.getByRole('progressbar', { name: '5-hour limit used' })).toHaveAttribute(
-    'aria-valuetext',
-    'Not reported',
-  );
+  await expect(page.getByTestId('limit-5-hour')).toHaveCount(0);
+  await expect(page.getByRole('progressbar', { name: '5-hour limit used' })).toHaveCount(0);
+  await expect(page.locator('.usage-strip .usage-chip')).toHaveCount(2);
   await expect(page.getByTestId('limit-weekly')).toContainText('26%');
   await page.evaluate(() => localStorage.setItem('test-usage-error', '1'));
   await returnAfterUsageCacheExpires(page);
@@ -1557,10 +1571,12 @@ test('computer then folder scopes CLI choices and groups active and history with
     ),
   ).toEqual(before.messages);
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await pick(page, 'Computer', 'WSL · Ubuntu');
   await page.getByRole('combobox', { name: 'Folder', exact: true }).click();
   await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Folder environment', exact: true }).click();
-  await page.getByRole('option', { name: 'WSL · Ubuntu', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Folder environment', exact: true })).toHaveText(
+    'WSL · Ubuntu',
+  );
   await expect(page.getByLabel('Folder path', { exact: true })).toHaveValue('/home/test/studio');
   await page.getByLabel('Folder path', { exact: true }).fill('/missing');
   await page.getByRole('button', { name: 'Go', exact: true }).click();
@@ -1594,7 +1610,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.location.environmentId).toBe('33333333-3333-4333-8333-333333333333');
   expect(request.agent.provider).toBe('codex');
-  await expect(active.locator('.conversation-computer')).toHaveCount(1);
+  await expect(active.locator('.conversation-computer')).toHaveCount(2);
   await expect(active.locator('.conversation-folder')).toHaveCount(2);
   await page.getByRole('button', { name: 'Move to history', exact: true }).click();
   await page.screenshot({ path: 'artifacts/folder-groups-browser.png', animations: 'disabled' });
@@ -1633,7 +1649,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   await historyTab.click();
   await history.locator('.folder-group-toggle').click();
   await history
-    .getByRole('button', { name: 'New conversation in studio on Desktop', exact: true })
+    .getByRole('button', { name: 'New conversation in studio on WSL · Ubuntu', exact: true })
     .click();
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
@@ -1728,14 +1744,24 @@ test('cold CLI checks and model requests do not block folder selection or overwr
   page,
 }) => {
   await mockDesktop(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-  await page.evaluate(() => {
+  // Discovery now starts at launch, so hold requests before the first navigation.
+  await page.addInitScript(() => {
     (window as any).holdCli = ['detect_connection', 'list_models'];
   });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await chooseTestFolder(page);
   const picker = (name: string) => page.getByRole('combobox', { name, exact: true });
-  await expect.poll(() => page.evaluate(() => (window as any).pendingCli?.length ?? 0)).toBe(4);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).pendingCli
+          ?.filter((r: any) => r.command === 'detect_connection')
+          .map((r: any) => r.provider)
+          .sort(),
+      ),
+    )
+    .toEqual(['claude', 'codex', 'gemini']);
   await expect(picker('Model')).toBeEnabled();
   await picker('Agent').click();
   await page.getByRole('option', { name: 'Claude', exact: true }).click();
@@ -1745,7 +1771,15 @@ test('cold CLI checks and model requests do not block folder selection or overwr
   await page.getByRole('option', { name: 'High', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('Wait for availability before sending');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
-  await expect.poll(() => page.evaluate(() => (window as any).pendingCli?.length ?? 0)).toBe(5);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).pendingCli?.some(
+          (r: any) => r.command === 'list_models' && r.provider === 'claude',
+        ),
+      ),
+    )
+    .toBe(true);
   await page.evaluate(() => {
     for (const request of (window as any).pendingCli) request.resolve();
   });
@@ -1772,10 +1806,10 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await page.evaluate(() => {
     (window as any).holdCli = ['detect_connection', 'list_models'];
   });
+  await pick(page, 'Computer', 'WSL · Ubuntu');
   await picker('Folder').click();
   await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
-  await picker('Folder environment').click();
-  await page.getByRole('option', { name: 'WSL · Ubuntu', exact: true }).click();
+  await expect(picker('Folder environment')).toHaveText('WSL · Ubuntu');
   await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(picker('Folder')).toHaveAttribute('title', '/home/test/studio');
@@ -1788,7 +1822,26 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await page.getByRole('option', { name: 'Claude', exact: true }).click();
   await picker('Model').click();
   await page.getByRole('option', { name: 'Sonnet (latest)', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).pendingCli?.length ?? 0)).toBe(4);
+  // Ubuntu's installed Codex was already detected at startup; Claude is still unchecked.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).pendingCli
+          ?.filter((r: any) => r.command === 'detect_connection')
+          .map((r: any) => r.provider),
+      ),
+    )
+    .toEqual(['claude']);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).pendingCli
+          ?.filter((r: any) => r.command === 'list_models')
+          .map((r: any) => r.provider)
+          .sort(),
+      ),
+    )
+    .toEqual(['claude', 'codex']);
   await page.evaluate(() => {
     const state = window as any;
     for (const request of state.pendingCli.filter((r: any) => r.command === 'detect_connection'))
@@ -1798,6 +1851,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await expect(picker('Agent')).toHaveText('Claude');
   await page.getByLabel('Message', { exact: true }).fill('Keep my explicit choice');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await pick(page, 'Computer', 'Desktop');
   await picker('Folder').click();
   await page
     .getByRole('option', { name: 'studio', exact: true })
@@ -1816,10 +1870,10 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await expect(picker('Model')).toHaveText('GPT-6 Astra');
 });
 
-test('a WSL folder uses the Windows Claude login while keeping its folder and locked conversation', async ({
+test('Desktop uses its own Claude in a WSL folder and preserves that execution choice in history', async ({
   page,
 }) => {
-  await mockDesktop(page, 'windows-first');
+  await mockDesktop(page, 'computer-routing');
   await page.goto('/');
   await page.getByRole('combobox', { name: 'Folder', exact: true }).click();
   await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
@@ -1843,8 +1897,15 @@ test('a WSL folder uses the Windows Claude login while keeping its folder and lo
   expect(request.agent.provider).toBe('claude');
   expect(request.location).toMatchObject({
     environmentId: '33333333-3333-4333-8333-333333333333',
+    executionEnvironmentId: '11111111-1111-4111-8111-111111111111',
     path: '/home/test/studio',
   });
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  const connection = saved.fleet.connections.find(
+    (c: any) => c.id === saved.conversations[0].settings.connectionId,
+  );
+  expect(connection.environmentId).toBe('11111111-1111-4111-8111-111111111111');
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await page
@@ -1863,6 +1924,44 @@ test('a WSL folder uses the Windows Claude login while keeping its folder and lo
   await page.getByLabel('Message', { exact: true }).fill('Another WSL draft');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   await expect(page.locator('.setup-hint')).toHaveCount(0);
+});
+
+test('WSL uses only its Linux CLI and keeps Desktop accounts out of the agent picker', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'computer-routing');
+  await page.goto('/');
+  await pick(page, 'Computer', 'WSL · Ubuntu');
+  await chooseTestFolder(page);
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText(
+    'WSL · Ubuntu',
+  );
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Codex');
+  await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'Claude', exact: true })).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Agent', exact: true }).press('Escape');
+  await page.getByLabel('Message', { exact: true }).fill('Use the Linux agent');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  const chat = saved.conversations[0];
+  expect(
+    saved.fleet.connections.find((c: any) => c.id === chat.settings.connectionId).environmentId,
+  ).toBe('33333333-3333-4333-8333-333333333333');
+  expect(chat.location.executionEnvironmentId).toBeUndefined();
+  await page.getByLabel('Search conversations').fill('WSL · Ubuntu');
+  await expect(page.locator('.conversation-item')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page
+    .getByRole('article', { name: 'Desktop computer', exact: true })
+    .getByRole('article', { name: 'Claude connections', exact: true })
+    .getByRole('button', { name: 'Chat', exact: true })
+    .click();
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Claude');
+  await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveText(
+    'Browse folders…',
+  );
 });
 
 test('switching computer clears the folder and an offline host never falls back to local CLIs', async ({

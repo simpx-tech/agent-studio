@@ -79,6 +79,7 @@ pub struct Profile {
     pub provider: String,
     pub root: Option<PathBuf>,
     pub distribution: Option<String>,
+    pub folder_distribution: Option<String>,
     pub namespace: String,
     #[cfg_attr(not(windows), allow(dead_code))]
     pub isolated: bool,
@@ -162,6 +163,7 @@ pub fn resolve(
         provider: provider.into(),
         root,
         distribution,
+        folder_distribution: None,
         namespace: app.config().identifier.clone(),
         isolated: connection["profile"] == "isolated",
     })

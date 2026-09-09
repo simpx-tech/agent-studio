@@ -5,6 +5,9 @@ import {
   registerWslEnvironments,
   reconcileDiscoveredWsl,
   fleetSchema,
+  computerViews,
+  computerViewId,
+  executionHost,
   type Installation,
 } from './fleet';
 const windows = (): Installation => ({
@@ -14,6 +17,38 @@ const windows = (): Installation => ({
   platform: 'windows',
 });
 describe('WSL inventory', () => {
+  it('shows separate WSL computers without rewriting saved ownership or leaking environments', () => {
+    const host = windows(),
+      other = windows(),
+      fleet = emptyFleet();
+    registerInstallation(fleet, host);
+    registerInstallation(fleet, other);
+    for (const installation of [host, other])
+      registerWslEnvironments(fleet, installation, {
+        distributions: ['Ubuntu', 'Debian'].map((name) => ({
+          id: crypto.randomUUID(),
+          name,
+          running: true,
+        })),
+        warning: null,
+      });
+    const before = JSON.stringify(fleet);
+    const views = computerViews(fleet);
+    expect(views).toHaveLength(6);
+    expect(
+      views
+        .filter((v) => !v.wsl)
+        .every((v) => v.environments.every((e) => e.platform === 'windows')),
+    ).toBe(true);
+    for (const view of views.filter((v) => v.wsl)) {
+      expect(view.environments).toHaveLength(1);
+      expect(computerViewId(view.environments[0])).toBe(view.id);
+      expect(view.environments[0].computerId).toBe(view.computerId);
+      expect(executionHost(fleet, view.environments[0].id)).toBe(view.environments[0].discoveredOn);
+    }
+    expect(new Set(views.map((v) => v.id)).size).toBe(6);
+    expect(JSON.stringify(fleet)).toBe(before);
+  });
   it('persists one stable distribution under Windows without granting an execution connection', () => {
     const host = windows(),
       fleet = emptyFleet();

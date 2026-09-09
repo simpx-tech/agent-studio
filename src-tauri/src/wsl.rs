@@ -78,7 +78,7 @@ pub fn distribution_id(host: uuid::Uuid, name: &str) -> String {
 
 pub async fn resolve(
     provider: &str,
-    distribution: Option<&str>,
+    distribution: &str,
 ) -> Result<crate::providers::Executable, String> {
     #[cfg(windows)]
     {
@@ -88,7 +88,7 @@ pub async fn resolve(
         let installed = list(&["--list", "--quiet"]).await?.unwrap_or_default();
         let candidates: Vec<_> = installed
             .into_iter()
-            .filter(|d| distribution.is_none_or(|wanted| wanted == d))
+            .filter(|d| distribution == d)
             .collect();
         let profile = crate::profiles::current();
         for distro in candidates {
@@ -145,7 +145,7 @@ pub async fn resolve(
         }
         Err(format!(
             "{provider} CLI was not found in {}. Install its Linux CLI, then refresh Connections.",
-            distribution.unwrap_or("WSL")
+            distribution
         ))
     }
     #[cfg(not(windows))]
@@ -279,9 +279,84 @@ pub async fn discover(environment_id: &str) -> Result<Discovery, String> {
     }
 }
 
+/// Inventory checks PATH inside one distribution, without authentication or Windows fallback.
+pub async fn installations(
+    distribution: &str,
+) -> Result<Vec<crate::providers::CliInstallation>, String> {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "{}\n{}",
+            include_str!("wsl-env.sh"),
+            include_str!("wsl-inventory.sh")
+        );
+        let mut command = tokio::process::Command::new("wsl.exe");
+        command
+            .args([
+                "--distribution",
+                distribution,
+                "--cd",
+                "~",
+                "--exec",
+                "bash",
+                "-lc",
+                &script,
+            ])
+            .creation_flags(0x08000000)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null());
+        let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output())
+            .await
+            .map_err(|_| "WSL CLI inspection timed out. Refresh to retry.")?
+            .map_err(|_| "Could not inspect CLIs in this WSL distribution.")?;
+        if !output.status.success() {
+            return Err("WSL CLI inspection failed. Check that the distribution is available, then refresh.".into());
+        }
+        parse_installations(&String::from_utf8_lossy(&output.stdout))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = distribution;
+        Err("WSL inspection is available from Windows.".into())
+    }
+}
+#[cfg(any(windows, test))]
+fn parse_installations(text: &str) -> Result<Vec<crate::providers::CliInstallation>, String> {
+    ["codex", "claude", "gemini"]
+        .into_iter()
+        .map(|id| {
+            let prefix = format!("agent-studio-cli\t{id}\t");
+            let matches: Vec<_> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .collect();
+            if matches.len() != 1 {
+                return Err("WSL returned an incomplete CLI inventory. Refresh to retry.".into());
+            }
+            let path = matches[0];
+            Ok(crate::providers::CliInstallation {
+                id: id.into(),
+                path: valid_linux_binary(path).then(|| path.to_string()),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installation_inventory_excludes_windows_shims_and_requires_all_results() {
+        let values = parse_installations("profile noise\nagent-studio-cli\tcodex\t/home/test/.local/bin/codex\nagent-studio-cli\tclaude\t/mnt/c/Users/test/claude\nagent-studio-cli\tgemini\t\n").unwrap();
+        assert_eq!(
+            values[0].path.as_deref(),
+            Some("/home/test/.local/bin/codex")
+        );
+        assert!(values[1].path.is_none());
+        assert!(values[2].path.is_none());
+        assert!(parse_installations("agent-studio-cli\tcodex\t/bin/codex\n").is_err());
+        assert!(parse_installations("unavailable distribution").is_err());
+    }
     #[test]
     fn bridge_arguments_are_data_and_windows_shims_are_rejected() {
         assert!(valid_linux_binary("/home/test/.local/bin/claude"));

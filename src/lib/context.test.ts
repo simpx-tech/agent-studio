@@ -62,6 +62,7 @@ describe('context cache', () => {
     for (const change of [
       { computerId: 'laptop' },
       { environmentId: 'wsl' },
+      { executionEnvironmentId: 'other-execution' },
       { path: 'C:\\Other' },
     ]) {
       expect(cache.peek(selected, { ...folder, ...change })).toBeUndefined();

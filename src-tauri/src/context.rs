@@ -619,7 +619,11 @@ pub async fn read(
     let has_location = location.is_some();
     let mut folder = location.map(|l| l.path).unwrap_or(fallback);
     if exe.wsl.is_none() {
-        if let Some(distro) = profile.distribution.as_deref().filter(|_| has_location) {
+        if let Some(distro) = profile
+            .folder_distribution
+            .as_deref()
+            .filter(|_| has_location)
+        {
             folder = crate::folders::windows_path(distro, &folder)
                 .await?
                 .to_string_lossy()

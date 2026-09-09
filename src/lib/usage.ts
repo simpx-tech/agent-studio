@@ -1,6 +1,7 @@
 import {
   historyFor,
   messageText,
+  type ProviderId,
   type ChatSettings,
   type Conversation,
   type RunRequest,
@@ -28,7 +29,7 @@ export const usageKey = (settings: Pick<ChatSettings, 'provider' | 'model' | 'co
   `${settings.provider}:${settings.model}${settings.connectionId ? `:${settings.connectionId}` : ''}`;
 export function snapshotFor(
   snapshots: Record<string, UsageSnapshot>,
-  settings: ChatSettings,
+  settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>,
 ): UsageSnapshot | undefined {
   const exact = snapshots[usageKey(settings)];
   let latest = exact;
@@ -87,25 +88,32 @@ export function visibleLimits(
       ? [{ id: 'fable-weekly', label: 'Fable weekly', minutes: 10080, model: 'fable' }]
       : []),
   ];
-  return expected.map((e) => {
-    const window = windows.find(
-      (w) =>
-        w.windowMinutes === e.minutes &&
-        (e.model ? w.model?.toLowerCase() === e.model : !w.model || settings.provider === 'codex'),
-    );
-    return window
-      ? { ...window, available: window.usedPercent != null }
-      : {
-          id: e.id,
-          label: e.label,
-          windowMinutes: e.minutes,
-          model: e.model,
-          usedPercent: null,
-          resetsAt: null,
-          bucket: settings.provider,
-          available: false,
-        };
-  });
+  return expected
+    .map((e) => {
+      const window = windows.find(
+        (w) =>
+          w.windowMinutes === e.minutes &&
+          (e.model
+            ? w.model?.toLowerCase() === e.model
+            : !w.model || settings.provider === 'codex'),
+      );
+      return window
+        ? { ...window, available: window.usedPercent != null }
+        : {
+            id: e.id,
+            label: e.label,
+            windowMinutes: e.minutes,
+            model: e.model,
+            usedPercent: null,
+            resetsAt: null,
+            bucket: settings.provider,
+            available: false,
+          };
+    })
+    .filter((window) => showLimit(window, settings.provider));
+}
+function showLimit(window: LimitWindow, provider: string) {
+  return provider !== 'codex' || window.windowMinutes !== 300 || window.usedPercent != null;
 }
 export function isStale(snapshot: UsageSnapshot | undefined, window: LimitWindow, now: number) {
   if (!snapshot) return false;
@@ -114,6 +122,23 @@ export function isStale(snapshot: UsageSnapshot | undefined, window: LimitWindow
     now - snapshot.checkedAt * 1000 > 180_000 ||
     (reset != null && now >= reset && snapshot.checkedAt * 1000 < reset)
   );
+}
+// An account view has no selected chat model. Keep model-specific quotas explicitly labelled.
+export function accountLimits(snapshot: UsageSnapshot | undefined, provider: ProviderId) {
+  const primary = visibleLimits(snapshot, { provider, model: '', reasoning: '', instructions: '' });
+  return [
+    ...primary,
+    ...(snapshot?.windows ?? [])
+      .filter((window) => showLimit(window, provider) && !primary.some((p) => p.id === window.id))
+      .map((window) => ({
+        ...window,
+        label:
+          window.model && !window.label.toLowerCase().includes(window.model.toLowerCase())
+            ? `${window.model} · ${window.label}`
+            : window.label,
+        available: window.usedPercent != null,
+      })),
+  ];
 }
 export function estimatePromptTokens(
   settings: ChatSettings,

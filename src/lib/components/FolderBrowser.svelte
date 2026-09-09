@@ -10,6 +10,7 @@
     computerId,
     computerName,
     environments,
+    executionEnvironmentId,
     initialEnvironment,
     browse,
     choose,
@@ -18,6 +19,7 @@
     computerId: string;
     computerName: string;
     environments: Environment[];
+    executionEnvironmentId?: string;
     initialEnvironment?: string;
     browse: (environmentId: string, path?: string) => Promise<FolderListing>;
     choose: (location: ChatLocation) => Promise<void>;
@@ -59,7 +61,14 @@
     if (!listing || loading || saving) return;
     saving = true;
     try {
-      await choose({ computerId, environmentId, path: listing.path });
+      await choose({
+        computerId,
+        environmentId,
+        path: listing.path,
+        ...(executionEnvironmentId && executionEnvironmentId !== environmentId
+          ? { executionEnvironmentId }
+          : {}),
+      });
       close();
     } catch (e) {
       error = String(e);
@@ -128,8 +137,8 @@
       Showing the first 1,000 folders. Enter a path to open another folder.
     </p>{/if}
   <p>
-    The CLI starts in this folder using its environment’s CLIs. Conversation tool restrictions stay
-    in place.
+    Uses the CLI and account on {computerName}. Choosing a folder does not change the computer that
+    runs the agent.
   </p>
   <div class="dialog-actions">
     <button class="secondary" disabled={saving} onclick={close}>Cancel</button><button

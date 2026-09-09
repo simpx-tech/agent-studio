@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { initialWorkspace, settingsFor, restoreWorkspace, type Conversation } from './domain';
 import {
   contextFor,
+  accountLimits,
   estimatePromptTokens,
   isStale,
   recordedUsage,
@@ -50,6 +51,43 @@ const snapshot: UsageSnapshot = {
   ],
 };
 describe('usage and context semantics', () => {
+  it('keeps account windows and model scopes separate, with missing limits distinct from zero', () => {
+    const windows = accountLimits(snapshot, 'claude');
+    expect(windows.map((w) => [w.label, w.usedPercent])).toEqual([
+      ['5-hour', 0],
+      ['Weekly', 31],
+      ['Fable weekly', 62],
+    ]);
+    expect(accountLimits(undefined, 'codex').map((w) => w.usedPercent)).toEqual([null]);
+    const spark = {
+      ...snapshot.windows[0],
+      id: 'spark',
+      bucket: 'spark',
+      model: 'Spark',
+      usedPercent: 99,
+    };
+    const codex = {
+      ...snapshot,
+      provider: 'codex',
+      windows: [{ ...snapshot.windows[0], bucket: 'codex' }, spark],
+    };
+    expect(accountLimits(codex, 'codex').map((w) => [w.label, w.usedPercent])).toEqual([
+      ['5-hour', 0],
+      ['Weekly', null],
+      ['Spark · 5-hour', 99],
+    ]);
+    const scoped = { ...snapshot, connectionId: 'first-account' };
+    expect(
+      snapshotFor(
+        { 'claude::first-account': scoped },
+        {
+          provider: 'claude',
+          model: '',
+          connectionId: 'second-account',
+        },
+      ),
+    ).toBeUndefined();
+  });
   it('shares newer account quotas while keeping context capacity tied to the selected model', () => {
     const fable = { ...settings, provider: 'claude' as const, model: 'fable' };
     const fableSnapshot = {
@@ -95,7 +133,17 @@ describe('usage and context semantics', () => {
         { ...snapshot.windows[0], bucket: 'spark', model: 'GPT-5.3-Codex-Spark' },
       ],
     };
-    expect(visibleLimits(codex, settings)[0].usedPercent).toBeNull();
+    expect(visibleLimits(codex, settings).map((w) => w.windowMinutes)).toEqual([10080]);
+    const missingShortWindow = {
+      ...codex,
+      windows: [...codex.windows, { ...snapshot.windows[0], usedPercent: null, bucket: 'codex' }],
+    };
+    expect(accountLimits(missingShortWindow, 'codex').map((w) => [w.label, w.usedPercent])).toEqual(
+      [
+        ['Weekly', 31],
+        ['GPT-5.3-Codex-Spark · 5-hour', 0],
+      ],
+    );
     expect(visibleLimits(codex, { ...settings, model: 'gpt-5.3-codex-spark' })[0].usedPercent).toBe(
       0,
     );

@@ -58,6 +58,7 @@
     openLink,
     getInstallation,
     discoverWsl,
+    inspectEnvironmentClis,
     configureRuntime,
     detectConnection,
     connectRelay,
@@ -75,8 +76,12 @@
   import FolderBrowser from '$lib/components/FolderBrowser.svelte';
   import {
     locationKey,
+    locationExecutionId,
+    locationExecutionEnvironment,
+    computerFolderEnvironments,
     folderName,
     ensureLocationConnections,
+    ensureEnvironmentConnections,
     locationConnections,
     rememberLocation,
     knownLocations,
@@ -88,6 +93,9 @@
     registerWslEnvironments,
     connectionLabel,
     executionHost,
+    computerViewId,
+    computerViews,
+    type CliInventory,
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
@@ -111,6 +119,7 @@
   let wslError = $state('');
   let wslRefreshing = false;
   let connectionStatuses = $state<Record<string, ProviderStatus>>({});
+  let cliInventories = $state<Record<string, CliInventory>>({});
   const connectionChecks = new Map<string, Promise<void>>();
   let presence = $state<Presence[]>([]);
   let paired = $state(false);
@@ -126,7 +135,7 @@
   let notice = $state('');
   let statuses = $state<ProviderStatus[]>([]);
   let refreshing = $state(false);
-  let pendingSignIn = $state<ProviderId | null>(null);
+  let pendingSignIn = $state<{ provider: ProviderId; connectionId?: string } | null>(null);
   let signInDeadline = 0;
   let activeId = $state<string | null>(null);
   let draftSettings = $state<ChatSettings>(untrack(() => settingsFor(workspace.preferences)));
@@ -164,12 +173,26 @@
   const selectedLocation = $derived(
     locationPending ? undefined : active ? active.location : draftLocation,
   );
-  const selectedComputerId = $derived(selectedLocation?.computerId ?? draftComputerId);
-  const selectedComputer = $derived(
-    workspace.fleet.computers.find((c) => c.id === selectedComputerId),
+  const computers = $derived(computerViews(workspace.fleet));
+  function locationComputerId(location: ChatLocation) {
+    const environment = locationExecutionEnvironment(workspace.fleet, location);
+    return environment ? computerViewId(environment) : location.computerId;
+  }
+  const selectedComputerId = $derived(
+    selectedLocation ? locationComputerId(selectedLocation) : draftComputerId,
   );
+  const selectedComputer = $derived(computers.find((c) => c.id === selectedComputerId));
   const computerEnvironments = $derived(
-    workspace.fleet.environments.filter((e) => e.computerId === selectedComputerId),
+    computerFolderEnvironments(workspace.fleet, selectedComputerId),
+  );
+  const selectedExecutionEnvironment = $derived(
+    selectedComputer?.environments.find(
+      (e) =>
+        e.id ===
+        (selectedLocation
+          ? locationExecutionId(selectedLocation)
+          : selectedConnection?.environmentId),
+    ) ?? selectedComputer?.environments[0],
   );
   const savedLocations = $derived(knownLocations(workspace, selectedComputerId));
   const scopedConnections = $derived(locationConnections(workspace.fleet, selectedLocation));
@@ -216,7 +239,7 @@
           name: providers[provider].name,
           detail:
             selectedLocation && !availableProviders.includes(provider)
-              ? 'Unavailable in this folder’s environment'
+              ? 'Unavailable on this computer'
               : candidates.some((c) => !connectionStatus(c.id))
                 ? 'Checking availability…'
                 : providers[provider].company,
@@ -255,6 +278,28 @@
 
   const selectedUsageKey = $derived(usageKey(selectedSettings));
   const selectedUsage = $derived(snapshotFor(usageSnapshots, selectedSettings));
+  const accountUsageTargets = $derived.by(() =>
+    workspace.fleet.connections.flatMap((connection) => {
+      const account = workspace.fleet.accounts.find((a) => a.id === connection.accountId);
+      const host = executionHost(workspace.fleet, connection.environmentId);
+      const status =
+        host === installation?.id
+          ? connectionStatuses[connection.id]
+          : paired
+            ? presence
+                .find((p) => p.environmentId === host && p.online)
+                ?.connections.find((c) => c.connectionId === connection.id)
+            : undefined;
+      return account && status?.installed && status.auth === 'ready'
+        ? [{ provider: account.provider, model: '', connectionId: connection.id }]
+        : [];
+    }),
+  );
+  const accountUsageTargetKey = $derived(accountUsageTargets.map(usageKey).sort().join('|'));
+  $effect(() => {
+    const key = accountUsageTargetKey;
+    if (loaded && view === 'connections' && key) untrack(() => void refreshAccountUsage());
+  });
   $effect(() => {
     const provider = selectedSettings.provider;
     const model = selectedSettings.model;
@@ -292,7 +337,7 @@
   const recent = $derived(
     [...workspace.conversations]
       .filter((c) =>
-        `${c.title} ${providers[c.settings.provider].name} ${c.location?.path ?? ''} ${workspace.fleet.computers.find((computer) => computer.id === c.location?.computerId)?.name ?? ''}`
+        `${c.title} ${providers[c.settings.provider].name} ${c.location?.path ?? ''} ${computers.find((computer) => computer.id === (c.location ? locationComputerId(c.location) : ''))?.name ?? ''}`
           .toLowerCase()
           .includes(query.toLowerCase()),
       )
@@ -364,7 +409,10 @@
       if (pendingSignIn && Date.now() < signInDeadline && !run) void refresh();
     }, 5000);
     const usagePoll = setInterval(() => {
-      if (loaded && view === 'chat' && document.visibilityState !== 'hidden') void refreshUsage();
+      if (loaded && document.visibilityState !== 'hidden') {
+        if (view === 'chat') void refreshUsage();
+        if (view === 'connections') void refreshAccountUsage();
+      }
     }, 60_000);
     const relayPoll = setInterval(() => {
       if (paired) void syncNow();
@@ -500,15 +548,32 @@
   function saveSoon() {
     void persist().catch(() => {});
   }
-  async function refresh() {
+  async function refresh(forceUsage = false) {
     if (refreshing) return;
     refreshing = true;
     try {
       await refreshWsl();
+      await refreshCliInventories();
       statuses = await detectProviders();
+      const before = workspace.fleet.connections.length;
+      for (const environment of workspace.fleet.environments) {
+        if (executionHost(workspace.fleet, environment.id) !== installation?.id) continue;
+        const inventory = cliInventories[environment.id];
+        if (inventory?.error || !inventory?.entries) continue;
+        ensureEnvironmentConnections(
+          workspace.fleet,
+          environment.id,
+          inventory.entries.filter((entry) => entry.path).map((entry) => entry.id),
+        );
+      }
+      if (workspace.fleet.connections.length !== before) await persist();
       await refreshConnections();
-      if (pendingSignIn && statuses.some((s) => s.id === pendingSignIn && s.auth === 'ready')) {
-        notice = `${providers[pendingSignIn].name} is connected. You're ready to chat.`;
+      if (view === 'connections') void refreshAccountUsage(forceUsage);
+      const loginStatus = pendingSignIn?.connectionId
+        ? connectionStatuses[pendingSignIn.connectionId]
+        : statuses.find((s) => s.id === pendingSignIn?.provider);
+      if (pendingSignIn && loginStatus?.auth === 'ready') {
+        notice = `${providers[pendingSignIn.provider].name} is connected. You're ready to chat.`;
         pendingSignIn = null;
       }
     } catch (e) {
@@ -540,7 +605,7 @@
         .filter(
           (c) =>
             executionHost(workspace.fleet, c.environmentId) === installation?.id &&
-            (!location || c.environmentId === location.environmentId) &&
+            (!location || c.environmentId === locationExecutionId(location)) &&
             (!missingOnly || !connectionStatuses[c.id]),
         )
         .map((c) => {
@@ -566,6 +631,26 @@
             });
           connectionChecks.set(c.id, check);
           return check;
+        }),
+    );
+  }
+  async function refreshCliInventories() {
+    if (!desktop() || !installation) return;
+    await Promise.all(
+      workspace.fleet.environments
+        .filter((e) => executionHost(workspace.fleet, e.id) === installation?.id)
+        .map(async (environment) => {
+          cliInventories[environment.id] = { ...cliInventories[environment.id], checking: true };
+          try {
+            const entries = await inspectEnvironmentClis(environment.id);
+            cliInventories[environment.id] = { entries, checking: false };
+          } catch (e) {
+            cliInventories[environment.id] = {
+              ...cliInventories[environment.id],
+              checking: false,
+              error: String(e),
+            };
+          }
         }),
     );
   }
@@ -641,7 +726,7 @@
     settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> = selectedSettings,
     force = false,
   ) {
-    if (!desktop() || (!active && !selectedLocation)) return;
+    if (!desktop() || (!settings.connectionId && !active && !selectedLocation)) return;
     const key = usageKey(settings);
     if (usageLoading[key]) return;
     usageLoading[key] = true;
@@ -662,6 +747,9 @@
     } finally {
       usageLoading[key] = false;
     }
+  }
+  async function refreshAccountUsage(force = false) {
+    await Promise.all(accountUsageTargets.map((settings) => refreshUsage(settings, force)));
   }
   function changeSettings(settings: ChatSettings) {
     if (!loaded) return;
@@ -768,13 +856,13 @@
       const environment = workspace.fleet.environments.find(
         (e) => e.id === connection.environmentId,
       );
-      draftComputerId = environment?.computerId ?? '';
+      draftComputerId = environment ? computerViewId(environment) : '';
       draftLocation = workspace.preferences.recentLocations?.find(
-        (l) => l.environmentId === connection.environmentId,
+        (l) => locationExecutionId(l) === connection.environmentId,
       );
       draftSettings.connectionId = connection.id;
     } else if (draftLocation) {
-      draftComputerId = draftLocation.computerId;
+      draftComputerId = locationComputerId(draftLocation);
       if (location) draftSettings = settingsAtLocation(draftSettings, location);
       else draftSettings.connectionId = preferredConnection(draftSettings.provider, draftLocation);
     } else delete draftSettings.connectionId;
@@ -785,7 +873,7 @@
     view = 'chat';
     if (location || computerId) {
       query = '';
-      const computerKey = `active/${location?.computerId ?? computerId}`;
+      const computerKey = `active/${location ? locationComputerId(location) : computerId}`;
       collapsedGroups[computerKey] = false;
       if (location) collapsedGroups[`${computerKey}/${locationKey(location)}`] = false;
       void tick().then(() => composerInput?.focus());
@@ -846,7 +934,7 @@
       const settings = settingsAtLocation(selectedSettings, location);
       draftLocation = { ...location };
       locationPending = false;
-      draftComputerId = location.computerId;
+      draftComputerId = locationComputerId(location);
       rememberLocation(workspace, location);
       changeSettings(settings);
       const revision = settingsRevision;
@@ -895,7 +983,7 @@
   function revealConversation(c: Conversation) {
     conversationScope = c.archived ? 'history' : 'active';
     const location = conversationLocation(c, workspace.fleet, installation);
-    const computerKey = `${conversationScope}/${location?.computerId ?? 'unassigned'}`;
+    const computerKey = `${conversationScope}/${location ? locationComputerId(location) : 'unassigned'}`;
     collapsedGroups[computerKey] = false;
     collapsedGroups[`${computerKey}/${location ? locationKey(location) : 'unassigned'}`] = false;
   }
@@ -1096,14 +1184,16 @@
       stopping = false;
     }
   }
-  async function login(id: ProviderId) {
+  async function login(id: ProviderId, connectionId?: string) {
     try {
-      await signIn(id);
-      pendingSignIn = id;
+      await signIn(id, connectionId);
+      pendingSignIn = { provider: id, connectionId };
       signInDeadline = Date.now() + 10 * 60_000;
       notice = `Finish signing in through ${providers[id].name}. We'll update the connection automatically; you can leave the sign-in window open.`;
+      void refresh();
     } catch (e) {
       notice = String(e);
+      throw e;
     }
   }
   async function copyConversation() {
@@ -1269,7 +1359,7 @@
                   aria-label={`New conversation on ${computer.name}`}
                   disabled={!loaded ||
                     selectingLocation ||
-                    !workspace.fleet.computers.some((c) => c.id === computer.id)}
+                    !computers.some((c) => c.id === computer.id)}
                   onclick={() => newChat(undefined, undefined, undefined, computer.id)}
                   ><Plus size={14} /></button
                 >
@@ -1366,7 +1456,11 @@
                   : undefined}
                 value={selectedComputerId}
                 options={[
-                  ...workspace.fleet.computers.map((c) => ({ id: c.id, name: c.name })),
+                  ...computers.map((c) => ({
+                    id: c.id,
+                    name: c.name,
+                    detail: c.wsl ? `On ${c.hostName}` : undefined,
+                  })),
                   ...(selectedComputerId && !selectedComputer
                     ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
                     : []),
@@ -1658,17 +1752,21 @@
       </section>
     {:else if view === 'connections'}
       <FleetManager
-        {workspace}
+        bind:workspace
         {installation}
         {wslDiscovery}
         {wslError}
-        statuses={connectionStatuses}
+        {cliInventories}
+        {usageSnapshots}
+        {usageLoading}
+        {usageErrors}
+        bind:statuses={connectionStatuses}
         {presence}
         {syncStatus}
         {syncError}
         {paired}
         save={persist}
-        {refresh}
+        refresh={() => refresh(true)}
         connect={pair}
         disconnect={unpair}
         resolveConflict={async () => {
@@ -1676,7 +1774,8 @@
           notice = `Local workspace backed up to ${backup}. Using the relay’s computer and account settings.`;
           await syncNow();
         }}
-        chat={newChat}
+        chat={(provider, connectionId, computerId) =>
+          newChat(provider, connectionId, undefined, computerId)}
         providerStatuses={statuses}
         {login}
         {exportWorkspace}
@@ -1687,9 +1786,10 @@
 </div>
 {#if folderBrowserOpen && !active}
   <FolderBrowser
-    computerId={selectedComputerId}
+    computerId={selectedComputer?.computerId ?? selectedComputerId}
     computerName={selectedComputer?.name ?? 'Computer'}
     environments={computerEnvironments}
+    executionEnvironmentId={selectedExecutionEnvironment?.id}
     initialEnvironment={selectedLocation?.environmentId ?? selectedConnection?.environmentId}
     browse={listFolders}
     choose={(location) => chooseLocation(location, true)}

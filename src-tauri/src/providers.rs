@@ -8,6 +8,8 @@ use std::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 pub mod codex_chat;
+#[cfg(windows)]
+mod login_console;
 
 #[derive(Clone, Debug)]
 pub struct Executable {
@@ -77,17 +79,17 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 pub async fn resolve(provider: &str) -> Result<Executable, String> {
     resolve_using(provider, &search_dirs(), |distribution| async move {
-        crate::wsl::resolve(provider, distribution.as_deref()).await
+        crate::wsl::resolve(provider, &distribution).await
     })
     .await
 }
 async fn resolve_using<F, Fut>(
     provider: &str,
     dirs: &[PathBuf],
-    fallback: F,
+    selected_wsl: F,
 ) -> Result<Executable, String>
 where
-    F: FnOnce(Option<String>) -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<Executable, String>>,
 {
     if !valid_provider(provider) {
@@ -96,28 +98,11 @@ where
     let profile = crate::profiles::current();
     if profile.provider == provider {
         if let Some(distribution) = &profile.distribution {
-            // A WSL folder does not require a second CLI installation/login. Existing logins
-            // prefer Windows; a separate WSL account profile must stay in its own environment.
-            if cfg!(windows) && !profile.isolated {
-                if let Ok(native) = resolve_in(provider, dirs) {
-                    return Ok(native);
-                }
-            }
-            return fallback(Some(distribution.clone())).await;
+            return selected_wsl(distribution.clone()).await;
         }
     }
-    let native = resolve_in(provider, dirs);
-    // Explicit account connections never switch environment. Auto falls back only before a run.
-    if native.is_ok()
-        || !cfg!(windows)
-        || (!profile.id.is_empty() && profile.provider == provider)
-        || provider == "gemini"
-    {
-        return native;
-    }
-    fallback(None)
-        .await
-        .map_err(|wsl| format!("{} {wsl}", native.unwrap_err()))
+    // Default/native connections never probe another computer when a CLI is missing.
+    resolve_in(provider, dirs)
 }
 fn resolve_in(provider: &str, dirs: &[PathBuf]) -> Result<Executable, String> {
     // Google's individual subscription access moved to Antigravity on 2026-06-18.
@@ -181,6 +166,28 @@ fn resolve_in(provider: &str, dirs: &[PathBuf]) -> Result<Executable, String> {
     Err(format!(
         "{provider} CLI was not found. Install it, then refresh Connections."
     ))
+}
+#[derive(Serialize)]
+pub struct CliInstallation {
+    pub id: String,
+    pub path: Option<String>,
+}
+pub fn native_installations() -> Vec<CliInstallation> {
+    ["codex", "claude", "gemini"]
+        .into_iter()
+        .map(|id| {
+            let path = resolve_in(id, &search_dirs()).ok().map(|exe| {
+                exe.prefix
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| exe.program.to_string_lossy().into_owned())
+            });
+            CliInstallation {
+                id: id.into(),
+                path,
+            }
+        })
+        .collect()
 }
 #[derive(Serialize)]
 pub struct ProviderStatus {
@@ -490,13 +497,13 @@ pub async fn chat_command(
         .map(|location| location.path.as_str());
     let profile = crate::profiles::current();
     let folder_in_wsl =
-        profile.provider == request.agent.provider && profile.distribution.is_some();
+        profile.provider == request.agent.provider && profile.folder_distribution.is_some();
     let mut native_folder = None;
     if let Some(path) = selected {
         crate::folders::validate_path(path, folder_in_wsl || exe.wsl.is_some() || !cfg!(windows))?;
         if folder_in_wsl && exe.wsl.is_none() {
             native_folder = Some(
-                crate::folders::windows_path(profile.distribution.as_deref().unwrap(), path)
+                crate::folders::windows_path(profile.folder_distribution.as_deref().unwrap(), path)
                     .await?,
             );
         }
@@ -703,7 +710,7 @@ fn login_script(exe: &Executable, provider: &str, directory: &Path) -> String {
         _ => {}
     }
     format!(
-        "$Host.UI.RawUI.WindowTitle = 'Agent Studio - {provider} sign-in'\n{environment}Set-Location -LiteralPath {}\n$env:CLAUDECODE = $null\nWrite-Host 'Complete sign-in here, then return to Agent Studio.'\n& {} {}\nWrite-Host 'Return to Agent Studio and refresh Connections. This window can now be closed.'\n",
+        "$Host.UI.RawUI.WindowTitle = 'Agent Studio - {provider} sign-in'\n{environment}$env:CLAUDECODE = $null\ntry {{\nSet-Location -LiteralPath {} -ErrorAction Stop\nWrite-Host 'Complete sign-in here, then return to Agent Studio.'\n& {} {}\n}} catch {{ Write-Host $_.Exception.Message -ForegroundColor Red }}\nWrite-Host 'Return to Agent Studio. Your account will update automatically. This window can now be closed.'\n",
         ps_literal(&directory.to_string_lossy()), ps_literal(&exe.program.to_string_lossy()),
         args.iter().map(|a| ps_literal(a)).collect::<Vec<_>>().join(" ")
     )
@@ -712,25 +719,11 @@ pub async fn sign_in(provider: &str, directory: &Path) -> Result<(), String> {
     let exe = resolve(provider).await?;
     #[cfg(windows)]
     {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        use std::os::windows::process::CommandExt;
         std::fs::create_dir_all(directory).map_err(|_| "Cannot prepare the sign-in directory")?;
         let script = login_script(&exe, provider, directory);
-        let encoded = STANDARD.encode(
-            script
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>(),
-        );
-        // Own the console process rather than dispatching into an existing
-        // terminal singleton, which can have a different environment/filesystem view.
-        let mut c = std::process::Command::new("conhost.exe");
-        c.creation_flags(0x00000010).arg("powershell.exe");
-        c.args(["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand"])
-            .arg(encoded);
-        c.spawn().map(|_| ()).map_err(|_| {
-            "Could not open the CLI login. Run the command shown in Connections.".into()
-        })
+        tokio::task::spawn_blocking(move || login_console::open(&script).map(|_| ()))
+            .await
+            .map_err(|_| "Could not start the sign-in launcher".to_string())?
     }
     #[cfg(not(windows))]
     {
@@ -785,110 +778,94 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     #[tokio::test]
-    async fn automatic_prefers_windows_falls_back_when_missing_and_pins_explicit_accounts() {
+    async fn desktop_connections_never_probe_wsl_even_when_the_cli_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("claude.exe");
         std::fs::write(&binary, "synthetic executable metadata").unwrap();
-        let dirs = vec![dir.path().to_owned()];
-        let native = resolve_using("claude", &dirs, |_| async {
-            panic!("Windows must win without probing WSL")
-        })
-        .await
-        .unwrap();
-        assert_eq!(native.program, binary);
-        let fallback = resolve_using("claude", &[], |distro| async move {
-            assert!(distro.is_none());
-            Ok(Executable {
-                provider: "claude".into(),
-                program: "wsl.exe".into(),
-                prefix: vec![],
-                wsl: None,
-            })
-        })
-        .await
-        .unwrap();
-        assert_eq!(fallback.program, PathBuf::from("wsl.exe"));
-        crate::profiles::scope(
-            crate::profiles::Profile {
-                id: uuid::Uuid::new_v4().to_string(),
-                provider: "claude".into(),
-                ..Default::default()
-            },
-            async {
-                assert!(resolve_using("claude", &[], |_| async {
-                    panic!("Pinned Windows account must not fall back")
-                })
-                .await
-                .is_err());
-            },
-        )
-        .await;
-        crate::profiles::scope(
-            crate::profiles::Profile {
-                id: uuid::Uuid::new_v4().to_string(),
-                provider: "claude".into(),
-                distribution: Some("Ubuntu".into()),
-                isolated: true,
-                ..Default::default()
-            },
-            async {
-                let selected = resolve_using("claude", &dirs, |distro| async move {
-                    assert_eq!(distro.as_deref(), Some("Ubuntu"));
-                    Err("Selected WSL login needs attention".into())
-                })
-                .await;
-                assert!(selected.unwrap_err().contains("Selected WSL"));
-            },
-        )
-        .await;
-    }
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn existing_wsl_logins_prefer_windows_and_only_fall_back_to_the_selected_distribution() {
-        let root = tempfile::tempdir().unwrap();
-        for provider in ["claude", "codex"] {
-            let binary = root.path().join(format!("{provider}.exe"));
-            std::fs::write(&binary, "synthetic executable metadata").unwrap();
+        for explicit in [false, true] {
             crate::profiles::scope(
                 crate::profiles::Profile {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    provider: provider.into(),
-                    distribution: Some("Selected Ubuntu".into()),
+                    id: if explicit {
+                        uuid::Uuid::new_v4().to_string()
+                    } else {
+                        String::new()
+                    },
+                    provider: "claude".into(),
+                    // A Linux project folder must not change executable resolution.
+                    folder_distribution: Some("Ubuntu".into()),
                     ..Default::default()
                 },
                 async {
-                    let native = resolve_using(provider, &[root.path().into()], |_| async {
-                        panic!("An existing Windows CLI must win without probing a WSL CLI")
+                    let native = resolve_using("claude", &[dir.path().to_owned()], |_| async {
+                        panic!("Desktop must never probe WSL")
                     })
                     .await
                     .unwrap();
                     assert_eq!(native.program, binary);
-                    assert!(native.wsl.is_none());
-                    let missing = resolve_using(provider, &[], |distribution| async move {
-                        assert_eq!(distribution.as_deref(), Some("Selected Ubuntu"));
-                        Err("Selected WSL CLI is missing".into())
-                    })
-                    .await;
-                    assert!(missing.unwrap_err().contains("Selected WSL CLI is missing"));
-                    let fallback = resolve_using(provider, &[], |distribution| async move {
-                        assert_eq!(distribution.as_deref(), Some("Selected Ubuntu"));
-                        Ok(Executable {
-                            provider: provider.into(),
-                            program: "wsl.exe".into(),
-                            prefix: vec![],
-                            wsl: Some(crate::wsl::Launch {
-                                distribution: distribution.unwrap(),
-                                namespace: "test".into(),
-                                job: uuid::Uuid::new_v4().to_string(),
-                            }),
-                        })
+                    assert!(resolve_using("claude", &[], |_| async {
+                        panic!("Missing Desktop CLI must not fall back to WSL")
                     })
                     .await
-                    .unwrap();
-                    assert!(fallback.wsl.is_some());
+                    .is_err());
                 },
             )
             .await;
+        }
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wsl_connections_use_only_the_selected_distribution_for_both_login_modes() {
+        let root = tempfile::tempdir().unwrap();
+        for provider in ["claude", "codex"] {
+            std::fs::write(
+                root.path().join(format!("{provider}.exe")),
+                "synthetic native CLI",
+            )
+            .unwrap();
+            for isolated in [false, true] {
+                crate::profiles::scope(
+                    crate::profiles::Profile {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        provider: provider.into(),
+                        distribution: Some("Selected Ubuntu".into()),
+                        isolated,
+                        ..Default::default()
+                    },
+                    async {
+                        let missing = resolve_using(
+                            provider,
+                            &[root.path().into()],
+                            |distribution| async move {
+                                assert_eq!(distribution, "Selected Ubuntu");
+                                Err("Selected WSL CLI is missing".into())
+                            },
+                        )
+                        .await;
+                        assert!(missing.unwrap_err().contains("Selected WSL CLI is missing"));
+                        let linux = resolve_using(
+                            provider,
+                            &[root.path().into()],
+                            |distribution| async move {
+                                assert_eq!(distribution, "Selected Ubuntu");
+                                Ok(Executable {
+                                    provider: provider.into(),
+                                    program: "wsl.exe".into(),
+                                    prefix: vec![],
+                                    wsl: Some(crate::wsl::Launch {
+                                        distribution,
+                                        namespace: "test".into(),
+                                        job: uuid::Uuid::new_v4().to_string(),
+                                    }),
+                                })
+                            },
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(linux.wsl.unwrap().distribution, "Selected Ubuntu");
+                    },
+                )
+                .await;
+            }
         }
     }
     fn request() -> RunRequest {
@@ -1088,7 +1065,7 @@ mod tests {
             .await
             .unwrap();
         let project = tempfile::Builder::new()
-            .prefix("agent-studio-win-first-")
+            .prefix("agent-studio-desktop-wsl-")
             .tempdir_in(&native_tmp)
             .unwrap();
         assert!(project.path().starts_with(&native_tmp));
@@ -1118,7 +1095,7 @@ mod tests {
             crate::profiles::Profile {
                 id: uuid::Uuid::new_v4().to_string(),
                 provider: "claude".into(),
-                distribution: Some("Ubuntu".into()),
+                folder_distribution: Some("Ubuntu".into()),
                 ..Default::default()
             },
             async {

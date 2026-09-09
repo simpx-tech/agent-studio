@@ -5,19 +5,58 @@ import {
   type ProviderId,
   type Workspace,
 } from './domain';
-import type { Fleet, Installation } from './fleet';
+import { computerViewId, computerViews, type Fleet, type Installation } from './fleet';
 
 export const locationKey = (location: ChatLocation) =>
-  `${location.computerId}/${location.environmentId}/${location.path}`;
+  `${location.computerId}/${locationExecutionId(location)}/${location.environmentId}/${location.path}`;
+export const locationExecutionId = (location: ChatLocation) =>
+  location.executionEnvironmentId ?? location.environmentId;
 export const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
-// A location pins a native/WSL environment; it never uses automatic cross-environment fallback.
-export function ensureLocationConnections(fleet: Fleet, location: ChatLocation) {
-  const environment = fleet.environments.find(
+export function locationExecutionEnvironment(fleet: Fleet, location: ChatLocation) {
+  const folder = fleet.environments.find(
     (e) => e.id === location.environmentId && e.computerId === location.computerId,
   );
-  if (!environment) throw new Error('This folder’s environment is no longer available.');
-  for (const provider of providerIds) {
+  const execution = fleet.environments.find(
+    (e) => e.id === locationExecutionId(location) && e.computerId === location.computerId,
+  );
+  return folder &&
+    execution &&
+    (folder.id === execution.id ||
+      (execution.platform === 'windows' &&
+        folder.platform === 'wsl' &&
+        folder.discoveredOn === execution.id))
+    ? execution
+    : undefined;
+}
+export function computerFolderEnvironments(fleet: Fleet, computerId: string) {
+  const computer = computerViews(fleet).find((c) => c.id === computerId);
+  if (!computer) return [];
+  return fleet.environments.filter((e) =>
+    computer.environments.some(
+      (execution) =>
+        e.id === execution.id ||
+        (execution.platform === 'windows' &&
+          e.platform === 'wsl' &&
+          e.discoveredOn === execution.id &&
+          e.computerId === execution.computerId),
+    ),
+  );
+}
+// Account connections belong to the selected execution computer, independently of the folder.
+export function ensureLocationConnections(fleet: Fleet, location: ChatLocation) {
+  const environment = locationExecutionEnvironment(fleet, location);
+  if (!environment) throw new Error('This folder or execution computer is no longer available.');
+  ensureEnvironmentConnections(fleet, environment.id, providerIds);
+}
+export function ensureEnvironmentConnections(
+  fleet: Fleet,
+  environmentId: string,
+  detectedProviders: readonly ProviderId[],
+) {
+  const environment = fleet.environments.find((e) => e.id === environmentId);
+  if (!environment) return;
+  for (const provider of detectedProviders) {
     if (environment.platform === 'wsl' && environment.discoveredOn && provider === 'gemini')
       continue;
     if (
@@ -46,9 +85,7 @@ export function ensureLocationConnections(fleet: Fleet, location: ChatLocation) 
 }
 export function locationConnections(fleet: Fleet, location?: ChatLocation, provider?: ProviderId) {
   if (!location) return [];
-  const environment = fleet.environments.find(
-    (e) => e.id === location.environmentId && e.computerId === location.computerId,
-  );
+  const environment = locationExecutionEnvironment(fleet, location);
   if (!environment) return [];
   return fleet.connections.filter(
     (c) =>
@@ -65,6 +102,7 @@ export function rememberLocation(workspace: Workspace, location: ChatLocation) {
   ].slice(0, 30);
 }
 export function knownLocations(workspace: Workspace, computerId: string) {
+  const view = computerViews(workspace.fleet).find((c) => c.id === computerId);
   const values = [
     ...(workspace.preferences.recentLocations ?? []),
     ...workspace.conversations.flatMap((c) => (c.location?.path ? [c.location] : [])),
@@ -73,7 +111,10 @@ export function knownLocations(workspace: Workspace, computerId: string) {
     ...new Map(
       values
         .filter(
-          (l) => l.computerId === computerId && locationConnections(workspace.fleet, l).length,
+          (l) =>
+            view?.environments.some(
+              (e) => e.id === locationExecutionId(l) && e.computerId === l.computerId,
+            ) && locationConnections(workspace.fleet, l).length,
         )
         .map((l) => [locationKey(l), l]),
     ).values(),
@@ -121,16 +162,22 @@ export function groupConversations(
     >();
     for (const conversation of conversations.filter((c) => !!c.archived === archived)) {
       const location = conversationLocation(conversation, fleet, installation);
-      const computerId = location?.computerId ?? 'unassigned';
+      const environment = fleet.environments.find(
+        (e) => e.id === location?.environmentId && e.computerId === location?.computerId,
+      );
+      const execution = location ? locationExecutionEnvironment(fleet, location) : undefined;
+      const computerId = execution
+        ? computerViewId(execution)
+        : (location?.computerId ?? 'unassigned');
       if (!computers.has(computerId))
         computers.set(computerId, {
           id: computerId,
-          name: fleet.computers.find((c) => c.id === computerId)?.name ?? 'Unavailable computer',
+          name:
+            computerViews(fleet).find((c) => c.id === computerId)?.name ?? 'Unavailable computer',
           folders: new Map(),
         });
       const computer = computers.get(computerId)!;
       const key = location ? locationKey(location) : 'unassigned';
-      const environment = fleet.environments.find((e) => e.id === location?.environmentId);
       if (!computer.folders.has(key))
         computer.folders.set(key, {
           id: key,

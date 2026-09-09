@@ -79,6 +79,9 @@
     class:compact-meter={compact}
     class:unmeasured={window.usedPercent == null}
     class:paired-meter={window.pace.expectedPercent != null}
+    class:over-guide={window.pace.expectedPercent != null &&
+      window.usedPercent != null &&
+      window.usedPercent > window.pace.expectedPercent}
     title={window.pace.expectedPercent == null || window.usedPercent == null
       ? window.pace.detail
       : `${percentage(window.usedPercent)} used; recommended ${percentage(window.pace.expectedPercent)} at the time of this reading.`}
@@ -112,7 +115,7 @@
 />
 
 <section class="usage-panel" aria-label="Usage and context">
-  <div class="usage-strip">
+  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1}>
     <button
       class="usage-chip context-chip"
       class:usage-warning={(context.percent ?? 0) >= 80}

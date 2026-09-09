@@ -876,7 +876,7 @@ code {
 }
 .usage-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--usage-groups, 3), minmax(0, 1fr));
   align-items: end;
   gap: 12px;
 }
@@ -1038,18 +1038,12 @@ code {
   left: 0;
   top: 0;
   height: 100%;
-  background: #777583;
+  background: #5b7845;
   border-radius: inherit;
 }
-.recommended-fill::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 2px;
+.usage-meter.over-guide .recommended-fill {
   z-index: 2;
-  background: #d4d2df;
+  background: #eeb168;
 }
 .tone-good {
   --pace-ink: #b6ed91;
@@ -1068,6 +1062,9 @@ code {
 }
 .usage-meter i.quota-fill {
   background: var(--pace-ink);
+}
+.usage-meter.over-guide i.quota-fill {
+  background: #ee8276;
 }
 .pace-indicator,
 .usage-chip .pace-indicator {

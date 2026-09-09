@@ -47,6 +47,35 @@ export type WslDiscovery = {
 export function executionHost(fleet: Fleet, environmentId: string): string {
   return fleet.environments.find((e) => e.id === environmentId)?.discoveredOn ?? environmentId;
 }
+// Presentation only: keep stored host/location identities and relay ownership intact.
+export function computerViewId(environment: Environment) {
+  return environment.platform === 'wsl' && environment.discoveredOn
+    ? environment.id
+    : environment.computerId;
+}
+export function computerViews(fleet: Fleet) {
+  return fleet.computers.flatMap((computer) => {
+    const environments = fleet.environments.filter((e) => e.computerId === computer.id);
+    const native = environments.filter((e) => computerViewId(e) === computer.id);
+    return [
+      ...(native.length || !environments.length
+        ? [{ ...computer, computerId: computer.id, environments: native, wsl: false, hostName: '' }]
+        : []),
+      ...environments
+        .filter((e) => computerViewId(e) !== computer.id)
+        .map((e) => ({
+          id: e.id,
+          computerId: computer.id,
+          name: e.name,
+          environments: [e],
+          wsl: true,
+          hostName: computer.name,
+        })),
+    ];
+  });
+}
+export type CliInstallation = { id: 'codex' | 'claude' | 'gemini'; path: string | null };
+export type CliInventory = { entries?: CliInstallation[]; error?: string; checking: boolean };
 export const emptyFleet = (): Fleet => ({
   computers: [],
   environments: [],

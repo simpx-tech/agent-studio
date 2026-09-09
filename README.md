@@ -17,7 +17,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 
 ## Included
 
-- One **Connections** page for agent setup, computers, account profiles, and the relay. Windows manages WSL Codex/Claude connections directly, with Windows-first automatic CLI selection and WSL fallback when the native CLI is missing.
+- One **Connections** page for agent setup, computers, account profiles, and the relay. Each WSL distribution appears as a separate computer managed by Windows. The selected computer supplies the CLI and account, with no fallback; Desktop agents can also work in WSL folders.
 - Separate Claude/Codex CLI login profiles and a self-hosted relay for app chat synchronization, presence, remote progress, and cancellation. See the [setup and VPS deployment guide](docs/MULTI-COMPUTER.md).
 
 - Codex via your ChatGPT login, Claude via Claude Code, and Gemini via Google login in Antigravity CLI.

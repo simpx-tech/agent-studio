@@ -36,6 +36,7 @@ export function contextKey(settings: ContextSelection, location?: ChatLocation):
     settings.connectionId ?? null,
     location?.computerId ?? null,
     location?.environmentId ?? null,
+    location?.executionEnvironmentId ?? location?.environmentId ?? null,
     location?.path ?? null,
   ]);
 }

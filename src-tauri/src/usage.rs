@@ -234,8 +234,9 @@ pub async fn read(
     }
     let _slot = state
         .slots
-        .try_acquire()
-        .map_err(|_| "Usage refresh is already busy")?;
+        .acquire()
+        .await
+        .map_err(|_| "Usage refresh is unavailable")?;
     let directory = app
         .path()
         .app_local_data_dir()

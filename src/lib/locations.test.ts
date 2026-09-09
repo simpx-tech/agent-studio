@@ -8,6 +8,7 @@ import {
   knownLocations,
   locationConnections,
   rememberLocation,
+  computerFolderEnvironments,
 } from './locations';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
 
@@ -33,6 +34,66 @@ function fixture() {
   return { workspace, installation, location };
 }
 describe('computer and folder chat scope', () => {
+  it('uses the selected computer for the same WSL folder and preserves both routes across storage and sync', () => {
+    const { workspace, installation, location } = fixture();
+    const desktopFolder = { ...location, executionEnvironmentId: installation.id };
+    ensureLocationConnections(workspace.fleet, desktopFolder);
+    ensureLocationConnections(workspace.fleet, location);
+    const windowsConnections = locationConnections(workspace.fleet, desktopFolder);
+    expect(windowsConnections).toHaveLength(3);
+    expect(windowsConnections.every((c) => c.environmentId === installation.id)).toBe(true);
+    expect(
+      locationConnections(workspace.fleet, location).every(
+        (c) => c.environmentId === location.environmentId,
+      ),
+    ).toBe(true);
+    expect(
+      computerFolderEnvironments(workspace.fleet, installation.computerId).map((e) => e.id),
+    ).toEqual([installation.id, location.environmentId]);
+    expect(
+      computerFolderEnvironments(workspace.fleet, location.environmentId).map((e) => e.id),
+    ).toEqual([location.environmentId]);
+    rememberLocation(workspace, desktopFolder);
+    rememberLocation(workspace, location);
+    expect(knownLocations(workspace, installation.computerId)).toEqual([desktopFolder]);
+    expect(knownLocations(workspace, location.environmentId)).toEqual([location]);
+    const base: Conversation = {
+      id: crypto.randomUUID(),
+      settings: { ...settingsFor(workspace.preferences), connectionId: windowsConnections[0].id },
+      location: desktopFolder,
+      title: 'Desktop agent',
+      messages: [],
+      createdAt: '',
+      updatedAt: '',
+    };
+    workspace.conversations = [
+      base,
+      { ...base, id: crypto.randomUUID(), location, title: 'Linux agent' },
+    ];
+    const restored = restoreWorkspace(workspace);
+    expect(restored.conversations[0].location).toEqual(desktopFolder);
+    expect(
+      mergeShared(emptyShared(), sharedWorkspace(restored), emptyShared()).conversations[0]
+        .location,
+    ).toEqual(desktopFolder);
+    expect(
+      groupConversations(restored.conversations, restored.fleet)[0].computers.map((c) => c.name),
+    ).toEqual(['Desktop', 'WSL · Ubuntu']);
+    const sibling = crypto.randomUUID();
+    registerWslEnvironments(workspace.fleet, installation, {
+      distributions: [{ id: sibling, name: 'Debian', running: true }],
+      warning: null,
+    });
+    expect(
+      locationConnections(workspace.fleet, { ...location, executionEnvironmentId: sibling }),
+    ).toEqual([]);
+    expect(() =>
+      ensureLocationConnections(workspace.fleet, {
+        ...location,
+        executionEnvironmentId: crypto.randomUUID(),
+      }),
+    ).toThrow();
+  });
   it('pins existing logins to a folder environment without duplicating connections or profiles', () => {
     const { workspace, installation, location } = fixture();
     ensureLocationConnections(workspace.fleet, location);
@@ -83,11 +144,13 @@ describe('computer and folder chat scope', () => {
     ];
     rememberLocation(workspace, location);
     rememberLocation(workspace, location);
-    expect(knownLocations(workspace, installation.computerId)).toHaveLength(1);
+    expect(knownLocations(workspace, installation.computerId)).toHaveLength(0);
+    expect(knownLocations(workspace, location.environmentId)).toHaveLength(1);
     const restored = restoreWorkspace(workspace);
     expect(restored.conversations[1].archived).toBe(true);
     const groups = groupConversations(restored.conversations, restored.fleet, installation);
-    expect(groups[0].computers.map((c) => c.name)).toEqual(['Desktop', 'Laptop']);
+    expect(groups[0].computers.map((c) => c.name)).toEqual(['WSL · Ubuntu', 'Laptop']);
+    expect(restored.conversations[0].location).toEqual(location);
     expect(groups[0].computers[0].folders[0].name).toBe('project');
     expect(groups[1].count).toBe(1);
     const legacy = { ...conversation, location: undefined };

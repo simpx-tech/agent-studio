@@ -4,7 +4,7 @@ import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
 import { createContextCache, type ContextSnapshot } from './context';
-import { executionHost, type Installation, type WslDiscovery } from './fleet';
+import { executionHost, type Installation, type WslDiscovery, type CliInstallation } from './fleet';
 import {
   emptyShared,
   mergeShared,
@@ -106,6 +106,9 @@ export async function detectConnection(
 }
 export async function discoverWsl(): Promise<WslDiscovery> {
   return desktop() ? invoke('discover_wsl') : { distributions: [], warning: null };
+}
+export async function inspectEnvironmentClis(environmentId: string): Promise<CliInstallation[]> {
+  return invoke('inspect_environment_clis', { environmentId });
 }
 function remoteTarget(connectionId?: string, environmentId?: string) {
   if (environmentId) {

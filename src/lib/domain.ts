@@ -81,6 +81,8 @@ export type ChatSettings = z.infer<typeof chatSettingsSchema>;
 export const locationSchema = z.object({
   computerId: z.string().uuid(),
   environmentId: z.string().uuid(),
+  // Folder ownership and CLI execution can differ for Desktop + a WSL folder.
+  executionEnvironmentId: z.string().uuid().optional(),
   path: z.string().max(4096),
 });
 export type ChatLocation = z.infer<typeof locationSchema>;
