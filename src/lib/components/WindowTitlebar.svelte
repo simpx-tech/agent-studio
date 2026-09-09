@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Minus, Square, Copy, X } from '@lucide/svelte';
+  import { Minus, Square, Copy, X, Menu } from '@lucide/svelte';
   import { desktop, controlWindow, watchWindowMaximized, type WindowAction } from '$lib/transport';
 
-  let { title, onerror }: { title: string; onerror: (message: string) => void } = $props();
+  let {
+    title,
+    onerror,
+    onmenu,
+  }: { title: string; onerror: (message: string) => void; onmenu?: () => void } = $props();
   let native = $state(false);
   let maximized = $state(false);
 
@@ -43,6 +47,12 @@
 </script>
 
 <header class="topbar" class:native-titlebar={native} data-tauri-drag-region={native || undefined}>
+  {#if onmenu}<button
+      class="icon-button mobile-menu"
+      aria-label="Open conversations"
+      aria-controls="conversation-sidebar"
+      onclick={onmenu}><Menu size={21} /></button
+    >{/if}
   <strong class="page-title" {title} data-tauri-drag-region={native || undefined}>{title}</strong>
   {#if native}
     <div class="window-controls" role="group" aria-label="Window controls">

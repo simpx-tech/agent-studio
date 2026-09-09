@@ -589,9 +589,9 @@ test('a delayed image read cannot attach to a newer conversation or send before 
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('New draft');
 });
 
-test('browser preview keeps per-chat choices without an agent library', async ({ page }) => {
+test('unpaired browser keeps per-chat choices without an agent library', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('Browser preview ·')).toBeVisible();
+  await expect(page.getByText('Connect your computers', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Your agents' })).toHaveCount(0);
   await chooseTestFolder(page);
   await pick(page, 'Agent', 'Claude');
@@ -830,7 +830,19 @@ test('sidebar divider resizes with pointer and keyboard, remembers width, and ke
   await expect.poll(width).toBe(236);
   await page.setViewportSize({ width: 600, height: 720 });
   await expect(divider).toBeHidden();
-  await expect.poll(width).toBe(64);
+  await expect(sidebar).toBeHidden();
+  await expect
+    .poll(() =>
+      page
+        .locator('.main-area')
+        .evaluate((element) => Math.round(element.getBoundingClientRect().width)),
+    )
+    .toBe(600);
+  await page.getByRole('button', { name: 'Open conversations' }).click();
+  await expect(sidebar).toBeVisible();
+  await expect.poll(width).toBe(320);
+  await page.getByRole('button', { name: 'Close conversations', exact: true }).click();
+  await expect(sidebar).toBeHidden();
 });
 
 async function pick(page: Page, label: string, name: string) {

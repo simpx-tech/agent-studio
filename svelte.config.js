@@ -9,6 +9,7 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 const config = {
   preprocess: vitePreprocess(),
   kit: {
+    serviceWorker: { register: false },
     adapter: adapter({
       fallback: 'index.html',
     }),

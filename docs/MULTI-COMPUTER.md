@@ -70,7 +70,7 @@ $env:AGENT_STUDIO_RELAY_DATA = Join-Path $PWD '.relay-data'
 npm run relay
 ```
 
-Keep the key in your password manager and paste its value into **Relay pairing key** on each app. The server does not print it. On the server computer, use `http://127.0.0.1:4317`. Pairing shares this workspace's chats and account labels with the relay and other paired devices. Browser preview does not pair or execute CLIs.
+Run `npm run build` before starting the relay. Keep the key in your password manager and paste its value into **Relay pairing key** on each app. The server does not print it. On the server computer, use `http://127.0.0.1:4317`. The server hosts the mobile PWA and API together; open its HTTPS address on a phone and pair in Connections. Pairing shares this workspace's chats and account labels with the relay and other paired devices. Browser clients control remote agents; execution and provider sign-in remain on the desktop hosts. See [mobile setup](MOBILE.md).
 
 The default relay listens only on loopback. For another computer, use HTTPS or forward the relay port through an authenticated SSH tunnel and use the forwarded loopback URL. Remote plain HTTP is rejected; redirects are disabled so the pairing key cannot be forwarded to another origin.
 

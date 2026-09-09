@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { emptyFleet, fleetSchema } from './fleet.ts';
-import { toolActivitySchema, type ToolActivity } from './activity';
+import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 
 export const providerIds = ['codex', 'claude', 'gemini'] as const;

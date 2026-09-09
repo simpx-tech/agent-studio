@@ -1,6 +1,6 @@
 import { workspaceSchema, messageText, type Conversation, type Workspace } from './domain.ts';
 import { emptyFleet } from './fleet.ts';
-import { mergeActivityBlocks } from './activity';
+import { mergeActivityBlocks } from './activity.ts';
 
 export type SharedWorkspace = Pick<Workspace, 'fleet' | 'conversations'>;
 export const sharedSchema = workspaceSchema.pick({ fleet: true, conversations: true });

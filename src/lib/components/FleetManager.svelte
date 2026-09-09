@@ -93,7 +93,7 @@
   let signingInConnection = $state('');
   let error = $state('');
   let busy = $state(false);
-  let url = $state('http://127.0.0.1:4317');
+  let url = $state(desktop() ? 'http://127.0.0.1:4317' : window.location.origin);
   let key = $state('');
   let computerName = $state('');
   let computerGroup = $state('');
@@ -667,7 +667,7 @@
       <p>
         {paired
           ? syncStatus
-          : 'Connect your desktop and MacBook to share chats, accounts, and live progress.'}
+          : 'Connect your computers and phone to share chats and control your agents.'}
       </p>
       {#if syncError}<p class="sync-error" role="alert">{syncError}</p>{/if}
       {#if syncError.includes('changed on both devices')}<button
@@ -675,7 +675,7 @@
           disabled={busy}
           onclick={() => action(resolveConflict)}>Back up local data & use relay settings</button
         >{/if}
-      {#if paired}<details class="sync-settings">
+      {#if paired && !syncError}<details class="sync-settings">
           <summary>Sync settings</summary>
           <p>Keep Agent Studio open on each computer you want to use. WSL uses its Windows host.</p>
           <button class="text-button" disabled={busy} onclick={() => action(disconnect)}
@@ -975,10 +975,18 @@
       }}
     >
       <p>
-        Enter the same relay address and pairing key on each computer. You can host the relay
-        locally or on your VPS.
+        {desktop()
+          ? 'Enter the same relay address and pairing key on each computer. You can host the relay locally or on your VPS.'
+          : 'Enter your server’s pairing key to control agents on connected computers. Keep Agent Studio open on those computers.'}
       </p>
-      <label>Relay URL<input aria-label="Relay URL" type="url" bind:value={url} required /></label
+      <label
+        >Relay URL<input
+          aria-label="Relay URL"
+          type="url"
+          bind:value={url}
+          readonly={!desktop()}
+          required
+        /></label
       ><label
         >Pairing key<input
           aria-label="Relay pairing key"
@@ -991,13 +999,13 @@
       >
       <p>
         Pairing shares chat content and account labels with the relay and your paired computers.
-        Provider credentials stay on each host. The pairing key stays in memory until the app
-        closes.
+        Provider credentials stay on each host. {desktop()
+          ? 'The pairing key stays in memory until the app closes.'
+          : 'This device stays paired for seven days, or until you disconnect or the server restarts. The pairing key is not saved in your browser.'}
       </p>
       <div class="dialog-actions">
         <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button
-        ><button class="primary" disabled={busy || !desktop()}>Pair & sync<Link size={15} /></button
-        >
+        ><button class="primary" disabled={busy}>Pair & sync<Link size={15} /></button>
       </div>
     </form>
   </ConnectionDialog>{/if}

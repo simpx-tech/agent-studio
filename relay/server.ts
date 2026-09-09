@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 
 const uuid = z.string().uuid();
@@ -46,14 +47,18 @@ const terminal = (status: string) => ['complete', 'error', 'cancelled'].includes
 export function createRelay({
   token,
   directory,
+  webDirectory,
   now = Date.now,
 }: {
   token: string;
   directory: string;
+  webDirectory?: string;
   now?: () => number;
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
+  const files = publicFiles(webDirectory);
+  const sessions = browserSessions(token, now);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = join(directory, 'workspace.json');
   let state: z.infer<typeof diskSchema> = {
@@ -114,14 +119,32 @@ export function createRelay({
       res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
     };
+    if (req.url?.split('?')[0] === '/v1/browser-session') {
+      await sessions.handle(req, res);
+      return;
+    }
+    try {
+      if (servePublic(req, res, files)) return;
+    } catch {
+      if (!res.headersSent)
+        send(503, { error: 'The app build is unavailable. Restart the server after rebuilding.' });
+      else res.end();
+      return;
+    }
     // Pairing key holders are trusted workspace members. No CORS or request logging.
     const supplied = Buffer.from(req.headers.authorization ?? ''),
       expected = Buffer.from(`Bearer ${token}`);
-    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    const browserActor = sessions.actor(req);
+    const bearer = supplied.length === expected.length && timingSafeEqual(supplied, expected);
+    if (!bearer && !browserActor) {
       send(401, { error: 'Relay pairing key rejected.' });
       return;
     }
     const actor = req.headers['x-environment-id'];
+    if (!bearer && actor !== browserActor) {
+      send(403, { error: 'Device identity mismatch. Pair this device again.' });
+      return;
+    }
     if (!uuid.safeParse(actor).success) {
       send(400, { error: 'A valid environment identity is required.' });
       return;
@@ -152,6 +175,10 @@ export function createRelay({
       }
       if (url.pathname === '/v1/heartbeat' && req.method === 'POST') {
         const value = presenceInput.parse(await body(req));
+        if (!bearer && (value.connections.length || value.running.length)) {
+          send(403, { error: 'Browser devices cannot execute agent jobs.' });
+          return;
+        }
         if (value.environmentId !== actor) {
           send(403, { error: 'Environment identity mismatch.' });
           return;
@@ -210,6 +237,10 @@ export function createRelay({
         return;
       }
       if (url.pathname === '/v1/jobs' && req.method === 'GET') {
+        if (!bearer) {
+          send(403, { error: 'Browser devices cannot claim agent jobs.' });
+          return;
+        }
         // Claim once. Lost claims expire; retries never execute them again.
         const work = [...jobs.values()].filter((j) => j.target === actor && j.status === 'queued');
         for (const job of work) {

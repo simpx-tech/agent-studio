@@ -1,9 +1,19 @@
+FROM node:24-alpine AS frontend
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY svelte.config.js vite.config.js tsconfig.json ./
+COPY src ./src
+COPY static ./static
+RUN npm run build
+
 FROM node:24-alpine
 WORKDIR /app
 COPY relay/package.json relay/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && mkdir /data && chown node:node /data
-COPY relay/server.ts relay/start.ts ./relay/
-COPY src/lib/domain.ts src/lib/fleet.ts src/lib/sync.ts ./src/lib/
+COPY relay/server.ts relay/start.ts relay/web.ts ./relay/
+COPY src/lib/domain.ts src/lib/fleet.ts src/lib/sync.ts src/lib/activity.ts src/lib/images.ts ./src/lib/
+COPY --from=frontend /app/build ./build
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
 USER node
 EXPOSE 4317

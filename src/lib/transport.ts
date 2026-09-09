@@ -130,7 +130,23 @@ async function relayRaw(
   path: string,
   body?: unknown,
 ): Promise<{ status: number; body: any }> {
-  return invoke('relay_request', { method, path, body: body ?? null });
+  if (desktop()) return invoke('relay_request', { method, path, body: body ?? null });
+  if (!runtime) throw new Error('This device is still loading.');
+  const response = await fetch(`/${path}`, {
+    method,
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-Environment-Id': runtime.installation.id },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000),
+  });
+  return {
+    status: response.status,
+    body: response.headers.get('content-type')?.includes('application/json')
+      ? await response.json()
+      : { error: 'Open the PWA on your Agent Studio server.' },
+  };
 }
 async function relayApi<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await relayRaw(method, path, body);
@@ -139,17 +155,27 @@ async function relayApi<T = any>(method: string, path: string, body?: unknown): 
   return response.body;
 }
 export async function connectRelay(url: string, token: string) {
-  if (!desktop() || !runtime) throw new Error('Pair environments from the desktop app.');
+  if (!runtime) throw new Error('This device is still loading.');
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Wait for remote requests to finish before changing relays.');
-  await invoke('relay_connect', { url, token });
+  if (desktop()) await invoke('relay_connect', { url, token });
+  else {
+    if (url !== window.location.origin)
+      throw new Error('Open the PWA on your relay server to pair this device.');
+    await relayApi('POST', 'v1/browser-session', { token, environmentId: runtime.installation.id });
+  }
+  await acceptRelay(url);
+}
+async function acceptRelay(url: string) {
   const state = await relayApi<{ instanceId: string }>('GET', 'v1/state');
   if (!state.instanceId) throw new Error('Relay protocol version is not supported.');
-  const checkpoint = await invoke<{
-    url: string;
-    instanceId: string;
-    base: SharedWorkspace;
-  } | null>('load_sync_state');
+  const checkpoint = desktop()
+    ? await invoke<{
+        url: string;
+        instanceId: string;
+        base: SharedWorkspace;
+      } | null>('load_sync_state')
+    : JSON.parse(localStorage.getItem('agent-studio.browser-sync') ?? 'null');
   baseline =
     checkpoint?.url === url && checkpoint.instanceId === state.instanceId
       ? sharedSchema.parse(checkpoint.base)
@@ -158,12 +184,22 @@ export async function connectRelay(url: string, token: string) {
   relayUrl = url;
   relayConnected = true;
 }
+export async function resumeBrowserRelay(): Promise<boolean> {
+  if (desktop() || !runtime) return false;
+  const response = await relayRaw('GET', 'v1/browser-session');
+  if (response.status === 401 || response.status === 404) return false;
+  if (response.status !== 200 || response.body.environmentId !== runtime.installation.id)
+    throw new Error('Pair this device again to restore its server connection.');
+  await acceptRelay(window.location.origin);
+  return true;
+}
 export async function disconnectRelay() {
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Stop remote responses and wait for requests to finish before disconnecting.');
-  relayConnected = false;
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
-  await invoke('relay_disconnect');
+  if (desktop()) await invoke('relay_disconnect');
+  else await relayApi('DELETE', 'v1/browser-session');
+  relayConnected = false;
 }
 export async function pollRelay(): Promise<Presence[] | null> {
   if (!relayConnected || !runtime || relayBusy) return null;
@@ -204,9 +240,9 @@ export async function pollRelay(): Promise<Presence[] | null> {
     const combined = mergeShared(start, current, accepted);
     await runtime.apply(combined);
     // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
-    await invoke('save_sync_state', {
-      value: { url: relayUrl, instanceId: relayInstance, base: accepted },
-    });
+    const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
+    if (desktop()) await invoke('save_sync_state', { value: checkpoint });
+    else localStorage.setItem('agent-studio.browser-sync', JSON.stringify(checkpoint));
     baseline = accepted;
     const connections = Object.entries(runtime.statuses()).map(([connectionId, s]) => ({
       connectionId,
@@ -218,9 +254,9 @@ export async function pollRelay(): Promise<Presence[] | null> {
     const presence = await relayApi<Presence[]>('POST', 'v1/heartbeat', {
       environmentId: runtime.installation.id,
       connections,
-      running: [...runtime.localRuns(), ...workerRuns.keys()],
+      running: desktop() ? [...runtime.localRuns(), ...workerRuns.keys()] : [],
     });
-    const jobs = await relayApi<RelayJob[]>('GET', 'v1/jobs');
+    const jobs = desktop() ? await relayApi<RelayJob[]>('GET', 'v1/jobs') : [];
     for (const job of jobs)
       if (!workerRuns.has(job.id)) {
         workerRuns.set(job.id, job);
@@ -236,7 +272,13 @@ export async function resolveRelaySettings(): Promise<string> {
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
   relayBusy = true;
   try {
-    const backup = await invoke<string>('export_workspace', { workspace: runtime.workspace() });
+    let backup: string;
+    if (desktop())
+      backup = await invoke<string>('export_workspace', { workspace: runtime.workspace() });
+    else {
+      localStorage.setItem('agent-studio.browser-backup', JSON.stringify(runtime.workspace()));
+      backup = 'this browser’s local backup';
+    }
     const remote = await relayApi<{ workspace: SharedWorkspace }>('GET', 'v1/state');
     await runtime.apply({
       ...sharedWorkspace(runtime.workspace()),
@@ -252,6 +294,8 @@ async function localCall(
   args: Record<string, unknown>,
   onEvent?: (event: RunEvent) => void,
 ): Promise<any> {
+  if (!desktop())
+    throw new Error('Choose a connected computer to run its agents from this device.');
   if (method === 'run') {
     const channel = new Channel<RunEvent>();
     channel.onmessage = onEvent ?? (() => {});
@@ -408,7 +452,6 @@ export async function readContext(
   settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>,
   location?: ChatLocation,
 ): Promise<ContextSnapshot> {
-  if (!desktop()) throw new Error('Open the desktop app to inspect this model’s CLI context.');
   return routed(
     'context',
     {
@@ -428,7 +471,6 @@ export type FolderListing = {
   truncated: boolean;
 };
 export async function listFolders(environmentId: string, path = ''): Promise<FolderListing> {
-  if (!desktop()) throw new Error('Browse computer folders in the desktop app.');
   return routed('folders', { environmentId, path });
 }
 export async function generateTitle(
@@ -449,12 +491,12 @@ export async function generateTitle(
   );
 }
 export async function cancelTitle(conversationId: string) {
-  await invoke('cancel_title', { conversationId });
+  if (desktop()) await invoke('cancel_title', { conversationId });
 }
 export async function loadModels(
   settings?: Pick<ChatSettings, 'provider' | 'connectionId'>,
 ): Promise<ModelCatalog> {
-  return desktop()
+  return desktop() || (relayConnected && settings?.connectionId)
     ? routed(
         'models',
         { provider: settings?.provider, connectionId: settings?.connectionId },
@@ -465,12 +507,16 @@ export async function loadModels(
 export async function loadWorkspace(): Promise<Workspace> {
   const value = desktop()
     ? await invoke<unknown>('load_workspace')
-    : JSON.parse(localStorage.getItem('agent-studio.preview.v1') ?? 'null');
+    : JSON.parse(
+        localStorage.getItem('agent-studio.browser.v1') ??
+          localStorage.getItem('agent-studio.preview.v1') ??
+          'null',
+      );
   return value ? restoreWorkspace(value) : initialWorkspace();
 }
 export async function saveWorkspace(workspace: Workspace): Promise<void> {
   if (desktop()) await invoke('save_workspace', { workspace });
-  else localStorage.setItem('agent-studio.preview.v1', JSON.stringify(workspace));
+  else localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
 }
 export async function detectProviders(): Promise<ProviderStatus[]> {
   if (desktop()) return invoke('detect_providers');
@@ -486,7 +532,6 @@ export async function runAgent(
   request: RunRequest,
   onEvent: (event: RunEvent) => void,
 ): Promise<'complete' | 'cancelled'> {
-  if (!desktop()) throw new Error('Chat runs in the desktop app. Start it with npm run tauri dev.');
   return routed(
     'run',
     { request, connectionId: request.agent.connectionId },

@@ -1,6 +1,6 @@
 # Agent Studio
 
-A local desktop workspace for your AI agents. Tauri 2 + Svelte 5 + TypeScript, with an HTML interface and a Rust bridge to installed CLIs.
+A desktop workspace for your AI agents, with a mobile PWA to control them from your phone. Tauri 2 + Svelte 5 + TypeScript, with an HTML interface and a Rust bridge to installed CLIs.
 
 ## Start
 
@@ -13,7 +13,7 @@ Choose **Codex**, **Claude**, or **Gemini**, then send a message. The app uses t
 
 The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The installer is `src-tauri/target/release/bundle/nsis/Agent Studio_0.1.0_x64-setup.exe`.
 
-`npm run dev` opens a browser preview of the same interface. It supports local chat preferences, but chat requires the desktop runtime. No mock AI responses are shipped in the app.
+`npm run dev` opens the frontend for development. For phone access, build the frontend and run the relay server; it hosts the PWA and API together. Open its HTTPS address on your phone, pair in **Connections**, and install it from your browser. Agents execute on your paired computers. See [mobile setup](docs/MOBILE.md). No mock AI responses are shipped in the app.
 
 ## Included
 

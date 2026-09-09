@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.mobile-qa",
+  "productName": "Agent Studio Mobile QA",
+  "build": { "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Mobile QA",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

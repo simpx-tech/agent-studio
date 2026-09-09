@@ -287,4 +287,24 @@
     flex-shrink: 0;
     color: var(--green);
   }
+  @media (max-width: 650px) {
+    .picker-popover {
+      position: fixed;
+      left: 12px !important;
+      right: 12px !important;
+      top: auto;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      width: auto;
+      z-index: 60;
+    }
+    .picker-options {
+      max-height: min(360px, calc(var(--mobile-height, 100dvh) - 100px));
+    }
+    .picker-option {
+      min-height: 48px;
+    }
+    .option-name {
+      font-size: 14px;
+    }
+  }
 </style>

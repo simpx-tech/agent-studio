@@ -6,6 +6,7 @@ const port = Number(process.env.AGENT_STUDIO_RELAY_PORT ?? 4317);
 const server = createRelay({
   token,
   directory: resolve(process.env.AGENT_STUDIO_RELAY_DATA ?? '.relay-data'),
+  webDirectory: resolve(process.env.AGENT_STUDIO_WEB_DIR ?? 'build'),
 });
 server.listen(port, host, () =>
   process.stdout.write(

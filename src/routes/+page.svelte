@@ -67,11 +67,14 @@
     pollRelay,
     resolveRelaySettings,
     listFolders,
+    resumeBrowserRelay,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
   import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
+  import BrowserStatus from '$lib/components/BrowserStatus.svelte';
+  import ToolbarActions from '$lib/components/ToolbarActions.svelte';
   import SidebarResize from '$lib/components/SidebarResize.svelte';
   import FleetManager from '$lib/components/FleetManager.svelte';
   import FolderBrowser from '$lib/components/FolderBrowser.svelte';
@@ -139,6 +142,17 @@
   let syncError = $state('');
   let view = $state<View>('chat');
   let sidebarWidth = $state<number>();
+  let viewportWidth = $state(1024);
+  let sidebarOpen = $state(false);
+  let online = $state(true);
+  const mobile = $derived(viewportWidth <= 650);
+  let sidebarElement: HTMLElement;
+  async function toggleSidebar(open: boolean) {
+    sidebarOpen = open;
+    await tick();
+    if (open) sidebarElement?.querySelector<HTMLButtonElement>('.mobile-close')?.focus();
+    else document.querySelector<HTMLButtonElement>('.mobile-menu')?.focus();
+  }
   let workspace = $state<Workspace>(initialWorkspace());
   let loaded = $state(false);
   let storageError = $state('');
@@ -401,7 +415,8 @@
       !run &&
       !activeRunning &&
       (selectedRemote || !hostBusy) &&
-      desktop() &&
+      (desktop() || paired) &&
+      (desktop() || online) &&
       (!selectedRemote || (paired && !syncError)) &&
       !!selectedStatus?.installed,
   );
@@ -413,9 +428,33 @@
   );
 
   onMount(() => {
+    const network = () => {
+      online = navigator.onLine;
+    };
+    network();
+    window.addEventListener('online', network);
+    window.addEventListener('offline', network);
+    const viewport = () =>
+      document.documentElement.style.setProperty(
+        '--mobile-height',
+        `${window.visualViewport?.height ?? window.innerHeight}px`,
+      );
+    viewport();
+    window.visualViewport?.addEventListener('resize', viewport);
     let focusTimer: ReturnType<typeof setTimeout>;
     const onReturn = () => {
-      if (!loaded || !desktop() || document.visibilityState === 'hidden' || run) return;
+      if (!loaded || document.visibilityState === 'hidden') return;
+      if (paired) void syncNow();
+      else if (!desktop())
+        void resumeBrowserRelay()
+          .then(async (connected) => {
+            if (connected) {
+              paired = true;
+              await syncNow();
+            }
+          })
+          .catch(() => {});
+      if (run) return;
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
         void refresh();
@@ -423,6 +462,7 @@
       }, 250);
     };
     window.addEventListener('focus', onReturn);
+    window.addEventListener('online', onReturn);
     document.addEventListener('visibilitychange', onReturn);
     const loginPoll = setInterval(() => {
       if (pendingSignIn && Date.now() < signInDeadline && !run) void refresh();
@@ -444,11 +484,11 @@
       try {
         workspace = await loadWorkspace();
         installation = await getInstallation();
-        if (installation) registerInstallation(workspace.fleet, installation);
+        if (installation && desktop()) registerInstallation(workspace.fleet, installation);
         // Legacy chats retain a stable owning computer when the workspace is synchronized.
         for (const conversation of workspace.conversations) {
           // Start each app session with a clean Active list without changing chat recency.
-          conversation.archived = true;
+          if (desktop()) conversation.archived = true;
           if (!conversation.location)
             conversation.location = conversationLocation(
               conversation,
@@ -509,6 +549,14 @@
             },
           });
         await persist();
+        if (!desktop()) {
+          try {
+            paired = await resumeBrowserRelay();
+            if (paired) await syncNow();
+          } catch {
+            syncError = 'Could not reconnect. Open Connections to pair this device again.';
+          }
+        }
       } catch (e) {
         storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
       }
@@ -516,12 +564,16 @@
       await refresh();
     })();
     return () => {
+      window.removeEventListener('online', network);
+      window.removeEventListener('offline', network);
+      window.visualViewport?.removeEventListener('resize', viewport);
       clearTimeout(focusTimer);
       clearInterval(loginPoll);
       clearInterval(usagePoll);
       clearInterval(relayPoll);
       clearInterval(wslPoll);
       window.removeEventListener('focus', onReturn);
+      window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
     };
   });
@@ -543,6 +595,7 @@
     await connectRelay(url, key);
     paired = true;
     await syncNow();
+    if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
   }
   async function unpair() {
     await disconnectRelay();
@@ -745,7 +798,7 @@
     settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> = selectedSettings,
     force = false,
   ) {
-    if (!desktop() || (!settings.connectionId && !active && !selectedLocation)) return;
+    if ((!desktop() && !paired) || (!settings.connectionId && !active && !selectedLocation)) return;
     const key = usageKey(settings);
     if (usageLoading[key]) return;
     usageLoading[key] = true;
@@ -842,6 +895,7 @@
     computerId?: string,
   ) {
     if (!loaded || selectingLocation) return;
+    sidebarOpen = false;
     folderBrowserOpen = false;
     locationGeneration++;
     conversationScope = 'active';
@@ -989,6 +1043,7 @@
     saveSoon();
   }
   function openConversation(c: Conversation) {
+    sidebarOpen = false;
     locationGeneration++;
     folderBrowserOpen = false;
     revealConversation(c);
@@ -1369,7 +1424,31 @@
   /></svelte:head
 >
 <svelte:window
+  bind:innerWidth={viewportWidth}
   onkeydown={(event) => {
+    if (mobile && sidebarOpen) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void toggleSidebar(false);
+        return;
+      }
+      if (event.key === 'Tab') {
+        const elements = [
+          ...sidebarElement.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input, [tabindex="0"]',
+          ),
+        ].filter((element) => element.getClientRects().length);
+        const first = elements[0],
+          last = elements.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }
+    }
     if (event.key === 'Escape') imageDragDepth = 0;
     keyboard(event);
   }}
@@ -1385,12 +1464,34 @@
 />
 
 <div class="app-shell" style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}>
-  <aside class="sidebar" id="conversation-sidebar">
+  {#if mobile && sidebarOpen}<button
+      class="sidebar-backdrop"
+      aria-label="Close conversation menu"
+      onclick={() => toggleSidebar(false)}
+    ></button>{/if}
+  <aside
+    class="sidebar"
+    class:mobile-open={mobile && sidebarOpen}
+    id="conversation-sidebar"
+    bind:this={sidebarElement}
+    inert={mobile && !sidebarOpen}
+    role={mobile ? 'dialog' : undefined}
+    aria-modal={mobile && sidebarOpen ? true : undefined}
+    aria-label="Conversations"
+  >
+    <button
+      class="icon-button mobile-close"
+      aria-label="Close conversations"
+      onclick={() => toggleSidebar(false)}><X size={20} /></button
+    >
     <button
       class="brand"
       class:draggable-brand={desktop()}
       data-tauri-drag-region={desktop() ? 'deep' : undefined}
-      onclick={() => (view = 'chat')}
+      onclick={() => {
+        view = 'chat';
+        sidebarOpen = false;
+      }}
       aria-label="Back to conversation"
       title="Back to conversation"
     >
@@ -1527,15 +1628,21 @@
         aria-label="Connections"
         aria-pressed={view === 'connections'}
         title={view === 'connections' ? 'Back to conversation' : 'Connections'}
-        onclick={() => (view = view === 'connections' ? 'chat' : 'connections')}
-        ><Plug size={17} aria-hidden="true" /></button
+        onclick={() => {
+          view = view === 'connections' ? 'chat' : 'connections';
+          sidebarOpen = false;
+        }}><Plug size={17} aria-hidden="true" /></button
       >
     </div>
     <SidebarResize onresize={(width) => (sidebarWidth = width)} />
   </aside>
 
-  <main class="main-area">
-    <WindowTitlebar title={viewTitle} onerror={(message) => (notice = message)} />
+  <main class="main-area" inert={mobile && sidebarOpen}>
+    <WindowTitlebar
+      title={viewTitle}
+      onerror={(message) => (notice = message)}
+      onmenu={() => toggleSidebar(true)}
+    />
     {#if storageError}<div class="error-banner" role="alert">
         <CircleAlert size={17} />{storageError}
       </div>{/if}
@@ -1546,10 +1653,11 @@
           onclick={() => (notice = '')}><X size={16} /></button
         >
       </div>{/if}
-    {#if !desktop()}<div class="preview-banner">
-        <Laptop size={14} />Browser preview · Run <code>npm run tauri dev</code> to chat through your
-        installed CLIs.
-      </div>{/if}
+    {#if !desktop()}<BrowserStatus
+        {paired}
+        error={syncError}
+        connect={() => (view = 'connections')}
+      />{/if}
 
     {#if view === 'chat'}
       <section
@@ -1701,7 +1809,7 @@
               </ChoicePicker>
             </div>
           </div>
-          <div class="toolbar-actions">
+          <ToolbarActions>
             <button
               class="icon-button"
               title="Model context"
@@ -1751,7 +1859,7 @@
               onclick={() => void refreshModels()}
               ><RefreshCw size={15} class={modelsLoading ? 'spinning' : ''} /></button
             >
-          </div>
+          </ToolbarActions>
         </div>
         {#if nextReplyChanged}
           <p class="next-reply-settings" role="status">
@@ -1869,7 +1977,7 @@
                 }
               }}
               onkeydown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobile) {
                   e.preventDefault();
                   void send();
                 }
@@ -1918,7 +2026,7 @@
             snapshot={selectedUsage}
             loading={!!usageLoading[selectedUsageKey]}
             error={usageErrors[selectedUsageKey] ?? ''}
-            preview={!desktop()}
+            preview={!desktop() && !paired}
           />
         </div>
       </section>
