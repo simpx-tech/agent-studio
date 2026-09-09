@@ -2,13 +2,13 @@
 
 ## Image attachments
 
-With Codex or Claude selected, click the paperclip below the message input, paste a screenshot, or drop image files into the composer. Click a thumbnail to inspect the image at a larger size; Escape or Close returns to the chat. Use its remove button to discard an attachment before sending. You can send images with or without a text message.
+With Codex or Claude selected, click the paperclip below the message input, paste a screenshot, or drop image files anywhere in the chat area, including over the conversation. A highlighted drop area appears while dragging. Dropping adds the previews to your current draft and focuses the message input without sending. Click a thumbnail to inspect the image at a larger size; Escape or Close returns to the chat. Use its remove button to discard an attachment before sending. You can send images with or without a text message.
 
 PNG, JPEG, and WebP files are supported, with up to four images per message and 2 MiB per image. Original image bytes are preserved; the app does not resize or recompress them. A conversation can contain 8 MiB of image data. Images remain visible after reopening the conversation, are included on retries and later turns, and travel with workspace exports and relay sync. Update both computers to an image-capable app version. The existing 20 MB workspace limit still applies; an attachment that would exceed it stays in the draft with an explanation.
 
 Codex receives structured `image` inputs with data URLs through its app-server stdin; Claude receives base64 image content blocks using `--input-format stream-json`. Each image is labelled with its original message position. No attachment paths are passed to the CLI, and image bytes are excluded from the text prompt, background titles, token estimates, and activity cards. See the [Codex app-server reference](https://learn.chatgpt.com/docs/app-server) and [Claude streaming image input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode). Gemini's current [Antigravity stream input](https://www.antigravity.google/docs/cli/headless/) accepts text blocks only, so its paperclip is disabled with an explanation.
 
-Tauri's native file-drop interception is disabled to let the WebView deliver file drops to the HTML composer. File contents stay inside the selected conversation and are delivered to its selected CLI/account through the existing transport. Provider-reported vision usage contributes to the usual context meter; the app does not estimate vision tokens from base64 length.
+Tauri's native file-drop interception is disabled to let the WebView deliver file drops to the chat. Drops outside chat cannot open the file in place of the app. Ordinary text drops keep their normal behavior. File contents stay inside the selected conversation and are delivered to its selected CLI/account through the existing transport. Provider-reported vision usage contributes to the usual context meter; the app does not estimate vision tokens from base64 length.
 
 ## Tools and activity
 

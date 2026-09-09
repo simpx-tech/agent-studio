@@ -762,10 +762,39 @@ code {
   margin-top: 15px;
 }
 .chat-layout {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+.image-drop-overlay {
+  position: absolute;
+  inset: 12px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  border: 2px dashed #b8d58d;
+  border-radius: 14px;
+  background: #182015ed;
+  color: #d6ebbb;
+  pointer-events: none;
+  text-align: center;
+}
+.image-drop-overlay > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.image-drop-overlay strong {
+  font-size: 18px;
+  font-weight: 550;
+}
+.image-drop-overlay span {
+  font-size: 12px;
+  color: #a6b995;
 }
 .chat-toolbar {
   display: flex;

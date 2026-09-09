@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Drop images anywhere in chat — 2026-09-09
+
+- Expanded the file drop target from the message input to the entire chat area. A highlighted overlay explains the action, supported formats, or unavailable provider/attachment state. Drops attach once, preserve the text draft, and focus the composer. Leaving the chat, dropping, Escape, drag end, and window blur dismiss the hint. File drops outside chat are prevented from navigating the app, and ordinary text drops remain unaffected.
+- `scripts/images-drop-native-smoke.mjs` verified a trusted WebView2 file drop through CDP `Input.dispatchDragEvent` at coordinates inside the message area. The native event delivered the original PNG bytes exactly once, withdrew the overlay, and focused the message input. Moving the file drag out of chat and pressing Escape cleared the hint. No provider request was sent, the persisted QA workspace was unchanged, and renderer exceptions were empty. This exercises native browser file input rather than constructing a DOM drop event or filling the hidden file input; a manual Explorer mouse gesture was not used.
+- Evidence: `artifacts/images-native-drop-result.json`, `artifacts/images-native/drop-hint.png`, `artifacts/images-native/drop-attached.png`, and `artifacts/images-chat-drop-hint.png`. Reviewed the native 2070×1350 drop hint and attached preview. Reuses the isolated images QA identity on CDP 9461 and the existing Vite server; no native backend change was required.
+- Browser regression coverage includes dropping on the welcome/message area, nested drag transitions, Escape, exactly-once attachment, preserved text/focus, Gemini feedback, and drops outside chat. Full pipeline logs: `artifacts/images-drop-verify.log` and `artifacts/images-drop-rust.log`.
+- Native QA detail: CDP `dragCancel` alone did not emit destination DOM `dragleave`/`dragend` in this WebView2 build. Use a native drag-over outside the chat and actual Escape key events to verify hint dismissal; do not treat that protocol acknowledgement as a delivered cancellation event.
+
 ## Chat image attachments — 2026-09-09
 
 - Added file selection, screenshot paste, composer file drop, removable thumbnails, keyboard-closeable image previews, and image-only messages for Codex and Claude. PNG/JPEG/WebP bytes persist in optional workspace v3 user-message images. Gemini displays the current Antigravity text-input limitation. No original images are resized or recompressed.

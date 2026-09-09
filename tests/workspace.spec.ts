@@ -486,6 +486,80 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
 });
 
+test('the whole chat accepts file drops with a hint and ignores drops outside chat', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const file = await imageFixture(page);
+  await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+  const transfer = await page.evaluateHandle((data) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([Uint8Array.from(atob(data), (c) => c.charCodeAt(0))], 'chat-drop.png', {
+        type: 'image/png',
+      }),
+    );
+    return transfer;
+  }, file.buffer.toString('base64'));
+  const welcome = page.locator('.chat-empty');
+  await welcome.dispatchEvent('dragenter', { dataTransfer: transfer });
+  await welcome.dispatchEvent('dragover', { dataTransfer: transfer });
+  await expect(page.getByRole('status').filter({ hasText: 'Drop images to attach' })).toBeVisible();
+  await page.screenshot({ path: 'artifacts/images-chat-drop-hint.png' });
+  await welcome.locator('h1').dispatchEvent('dragenter', { dataTransfer: transfer });
+  await welcome.dispatchEvent('dragleave', { dataTransfer: transfer });
+  await expect(page.locator('.image-drop-overlay')).toBeVisible();
+  await welcome.locator('h1').dispatchEvent('dragleave', { dataTransfer: transfer });
+  await expect(page.locator('.image-drop-overlay')).toHaveCount(0);
+  await welcome.dispatchEvent('dragenter', { dataTransfer: transfer });
+  await welcome.dispatchEvent('drop', { dataTransfer: transfer });
+  await expect(page.getByRole('button', { name: 'Remove chat-drop.png' })).toBeVisible();
+  await expect(page.locator('.composer .image-thumbnail')).toHaveCount(1);
+  await expect(page.locator('.image-drop-overlay')).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
+  await expect(page.locator('.message')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Remove chat-drop.png' }).click();
+  await welcome.dispatchEvent('dragenter', { dataTransfer: transfer });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.image-drop-overlay')).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
+  await page
+    .getByRole('option', { name: /^Gemini/ })
+    .first()
+    .click();
+  await welcome.dispatchEvent('dragenter', { dataTransfer: transfer });
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Images are available in Codex and Claude chats' }),
+  ).toBeVisible();
+  await welcome.dispatchEvent('drop', { dataTransfer: transfer });
+  await expect(page.locator('.image-drop-overlay')).toHaveCount(0);
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Image attachments are available' }),
+  ).toBeVisible();
+  await expect(page.locator('.composer .image-thumbnail')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  expect(
+    await page.evaluate((data) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(
+        new File([Uint8Array.from(atob(data), (c) => c.charCodeAt(0))], 'outside.png', {
+          type: 'image/png',
+        }),
+      );
+      return document.body.dispatchEvent(
+        new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }),
+      );
+    }, file.buffer.toString('base64')),
+  ).toBe(false);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.locator('.composer .image-thumbnail')).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  await transfer.dispose();
+});
+
 test('a delayed image read cannot attach to a newer conversation or send before it finishes', async ({
   page,
 }) => {

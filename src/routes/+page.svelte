@@ -170,6 +170,7 @@
   let attachedImages = $state<ChatImage[]>([]);
   let attachmentError = $state('');
   let imagesLoading = $state(false);
+  let imageDragDepth = $state(0);
   let attachmentGeneration = 0;
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
@@ -1037,6 +1038,7 @@
     saveSoon();
   }
   function clearImages() {
+    imageDragDepth = 0;
     attachmentGeneration++;
     attachedImages = [];
     attachmentError = '';
@@ -1069,6 +1071,27 @@
     } finally {
       if (generation === attachmentGeneration) imagesLoading = false;
     }
+  }
+  function hasDraggedFiles(event: DragEvent) {
+    return event.dataTransfer?.types.includes('Files') || !!event.dataTransfer?.files.length;
+  }
+  function dragImagesOver(event: DragEvent) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    imageDragDepth = Math.max(1, imageDragDepth);
+    if (event.dataTransfer)
+      event.dataTransfer.dropEffect =
+        imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage
+          ? 'copy'
+          : 'none';
+  }
+  function dropImages(event: DragEvent) {
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    event.preventDefault();
+    imageDragDepth = 0;
+    composerInput?.focus();
+    void attachImages(files);
   }
   async function send(retry = false) {
     if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
@@ -1345,7 +1368,21 @@
     content="Your AI agents, together in one local workspace."
   /></svelte:head
 >
-<svelte:window onkeydown={keyboard} />
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape') imageDragDepth = 0;
+    keyboard(event);
+  }}
+  ondragover={(event) => {
+    if (hasDraggedFiles(event)) event.preventDefault();
+  }}
+  ondrop={(event) => {
+    if (hasDraggedFiles(event)) event.preventDefault();
+    imageDragDepth = 0;
+  }}
+  ondragend={() => (imageDragDepth = 0)}
+  onblur={() => (imageDragDepth = 0)}
+/>
 
 <div class="app-shell" style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}>
   <aside class="sidebar" id="conversation-sidebar">
@@ -1515,7 +1552,38 @@
       </div>{/if}
 
     {#if view === 'chat'}
-      <section class="chat-layout">
+      <section
+        class="chat-layout"
+        aria-label="Chat"
+        ondragenter={(event) => {
+          if (hasDraggedFiles(event)) {
+            event.preventDefault();
+            imageDragDepth++;
+          }
+        }}
+        ondragover={dragImagesOver}
+        ondragleave={() => (imageDragDepth = Math.max(0, imageDragDepth - 1))}
+        ondrop={dropImages}
+      >
+        {#if imageDragDepth > 0}
+          <div class="image-drop-overlay" role="status">
+            <div>
+              <Paperclip size={28} aria-hidden="true" />
+              <strong
+                >{!imagesSupported
+                  ? 'Images are available in Codex and Claude chats'
+                  : imagesLoading
+                    ? 'Reading images…'
+                    : attachedImages.length >= maxImagesPerMessage
+                      ? 'Remove an attachment to add more images'
+                      : 'Drop images to attach'}</strong
+              >
+              {#if imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage}<span
+                  >PNG, JPEG or WebP · Up to 4 images · 2 MB each</span
+                >{/if}
+            </div>
+          </div>
+        {/if}
         <div class="chat-toolbar" aria-label="Conversation settings">
           <div class="chat-configuration">
             <div class="chat-setting computer-setting">
@@ -1760,16 +1828,6 @@
           <form
             class="composer"
             aria-label="Message composer"
-            ondragover={(event) => {
-              if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
-            }}
-            ondrop={(event) => {
-              const files = Array.from(event.dataTransfer?.files ?? []);
-              if (files.length) {
-                event.preventDefault();
-                void attachImages(files);
-              }
-            }}
             onsubmit={(e) => {
               e.preventDefault();
               void send();
