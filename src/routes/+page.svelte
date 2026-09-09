@@ -1631,7 +1631,7 @@
                 chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 100;
           }}
         >
-          <div class="message-column">
+          <div class="message-column" class:empty={!active?.messages.length}>
             {#if active?.messages.length}
               {#each active.messages as m, i (m.id)}<MessageView
                   message={m}
