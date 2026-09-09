@@ -1518,9 +1518,11 @@
             <div class="chat-setting agent-setting">
               <span>Agent</span><ChoicePicker
                 label="Agent"
-                title={active
-                  ? 'Fixed for this conversation. Start a new conversation to change it.'
-                  : undefined}
+                title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}${
+                  selectedSettings.provider === 'gemini'
+                    ? 'Gemini conversations cannot use tools.'
+                    : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'
+                }`}
                 value={selectedAgentOption}
                 options={agentOptions}
                 disabled={!loaded ||
@@ -1649,12 +1651,6 @@
                 ><span class="eyebrow">A CONVERSATION WITH {selectedAgent.name.toUpperCase()}</span>
                 <h1>What’s on your mind?</h1>
                 <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
-                <div class="suggestions">
-                  {#each ['Help me think through an idea', 'Explain something complex, simply', 'Turn a rough plan into next steps'] as suggestion}<button
-                      onclick={() => (prompt = suggestion)}
-                      >{suggestion}<ArrowUpRight size={14} /></button
-                    >{/each}
-                </div>
               </div>{/if}
             <div bind:this={messagesEnd}></div>
           </div>
@@ -1713,17 +1709,7 @@
                 }
               }}></textarea>
             <div class="composer-bottom">
-              <span
-                title={selectedSettings.provider === 'gemini'
-                  ? 'Gemini conversations cannot use tools.'
-                  : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'}
-                ><span class="status-dot"></span>{selectedSettings.connectionId
-                  ? connectionLabel(workspace.fleet, selectedSettings.connectionId)
-                  : providers[selectedAgent.provider].account} via {selectedAgent.provider ===
-                'gemini'
-                  ? 'Antigravity'
-                  : providers[selectedAgent.provider].name} CLI</span
-              >{#if activeRunning}<button
+              {#if activeRunning}<button
                   class="stop-button"
                   type="button"
                   onclick={stop}

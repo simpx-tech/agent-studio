@@ -948,7 +948,7 @@ test('a late usage result cannot replace the selected providers reading', async 
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toContainText('Claude');
 });
 
-test('composer shows three usage bars below the input and keeps tool access in the account hover', async ({
+test('composer shows three usage bars below the input and keeps tool access in the Agent hover', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -968,11 +968,14 @@ test('composer shows three usage bars below the input and keeps tool access in t
         document.querySelector('.composer')!.getBoundingClientRect().bottom,
     ),
   ).toBe(true);
-  await expect(page.locator('.composer-bottom > span')).toHaveAttribute('title', /Full access/);
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveAttribute(
+    'title',
+    /Full access/,
+  );
   for (const provider of ['Claude', 'Gemini', 'Codex']) {
     await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
     await page.getByRole('option', { name: provider, exact: true }).click();
-    await expect(page.locator('.composer-bottom > span')).toHaveAttribute(
+    await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveAttribute(
       'title',
       provider === 'Gemini' ? /cannot use tools/ : /Full access/,
     );

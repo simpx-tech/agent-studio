@@ -1149,27 +1149,6 @@ code {
   font-size: 12px;
   margin-top: 13px;
 }
-.suggestions {
-  display: flex;
-  flex-direction: column;
-  max-width: 350px;
-  margin: 30px auto 0;
-  gap: 10px;
-}
-.suggestions button {
-  border: 1px solid #37482a;
-  border-radius: 7px;
-  padding: 13px 16px;
-  text-align: left;
-  justify-content: space-between;
-  font-size: 11px;
-  color: #acbf99;
-  background: #1d2816;
-}
-.suggestions button:hover {
-  border-color: #607c49;
-  background: #26371c;
-}
 .composer-area {
   position: relative;
   --composer-inset: 44px;
@@ -1205,21 +1184,10 @@ code {
 }
 .composer-bottom {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   margin-top: 6px;
   gap: 10px;
-}
-.composer-bottom > span {
-  font-size: 9px;
-  color: #9bb183;
-  display: flex;
-  gap: 7px;
-  align-items: center;
-}
-.composer-bottom .status-dot {
-  width: 4px;
-  height: 4px;
 }
 .send-button {
   width: 33px;
@@ -1761,9 +1729,6 @@ code {
   }
   .modal-backdrop {
     padding: 14px;
-  }
-  .composer-bottom > span {
-    font-size: 8px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
