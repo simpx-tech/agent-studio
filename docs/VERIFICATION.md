@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Public VPS deployment — 2026-09-09
+
+- Deployed application commit `12f2d6d` to `72.61.63.95` as a dedicated unprivileged systemd service behind the existing Caddy proxy. Public endpoint: https://studio.72.61.63.95.sslip.io. The VPS production build and all 66 unit tests passed; Node's release archive and the transferred source archive were checksum verified.
+- Public browser checks passed for trusted HTTPS, app/manifest/service-worker loading, PWA installability, pairing, Secure/HttpOnly/SameSite session cookies, reload restoration, logout, and offline shell. Unauthorized API calls returned 401; source and workspace-file paths returned 404. Evidence: `artifacts/vps-deploy/public-result.json` and `public-mobile.png`.
+- Added and verified a dedicated SSH key with password authentication disabled, while preserving existing keys. Credentials are outside the repository. Existing `deck-server`, Minecraft, and Caddy process IDs were unchanged; `deck.simpx.net` continued returning HTTP 200. See [DEPLOYMENT.md](DEPLOYMENT.md) for operations and remaining physical-phone/public-provider boundaries.
+
 ## Hosted mobile PWA — 2026-09-09
 
 - The production frontend is served by the relay on the same origin. `tests/mobile.spec.ts` uses the actual HTTP server and browser cookie authentication with a synthetic desktop executor. It verifies wrong-key rejection, exact host/account routing, folder browsing, replies, streaming/cancellation, session restoration, draft-preserving drawer navigation, 320/390/650/768 px widths, a 460 px keyboard-height viewport, offline shell loading, blocked offline sends, and absence of API responses or pairing keys in browser caches/storage.

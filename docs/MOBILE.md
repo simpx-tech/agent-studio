@@ -1,5 +1,7 @@
 # Mobile PWA
 
+The initial VPS deployment is live at [studio.72.61.63.95.sslip.io](https://studio.72.61.63.95.sslip.io). See [production operations and pairing](DEPLOYMENT.md) for service paths, SSH access, updates, and verification boundaries.
+
 The same Agent Studio frontend runs as an installable web app. Its server serves both the public app build and the authenticated relay API on one origin. Your phone can select a computer and folder, start chats, change the next reply’s model/reasoning, send image attachments, read progress and history, inspect context/usage, and stop remote replies. The computer running each CLI must keep Agent Studio open and paired.
 
 ## Hosting
