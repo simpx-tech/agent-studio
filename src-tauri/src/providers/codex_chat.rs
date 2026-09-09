@@ -21,6 +21,13 @@ fn start_params(request: &RunRequest) -> Value {
 }
 fn turn_params(request: &RunRequest, thread: &str) -> Value {
     let mut params = json!({"threadId":thread,"input":[{"type":"text","text":request.prompt(),"text_elements":[]}]});
+    let input = params["input"].as_array_mut().expect("input is an array");
+    for (message_index, message) in request.messages.iter().enumerate() {
+        for (image_index, image) in message.images.iter().enumerate() {
+            input.push(json!({"type":"text","text":image.label(message_index, image_index),"text_elements":[]}));
+            input.push(json!({"type":"image","url":image.data_url()}));
+        }
+    }
     if !request.agent.reasoning.is_empty() {
         params["effort"] = json!(request.agent.reasoning);
     }
@@ -53,6 +60,7 @@ pub async fn run(
     tokio::pin!(deadline);
     let mut thread = String::new();
     let mut decoder = Decoder::default();
+    let output_limit = request.output_line_limit();
     loop {
         tokio::select! {
             biased;
@@ -61,7 +69,7 @@ pub async fn run(
             line = stderr.next_line(), if !stderr_done => { if !matches!(line, Ok(Some(_))) { stderr_done = true; } },
             line = output.next_line() => {
                 let Some(line) = line.map_err(|_| "Could not read the Codex response")? else { return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
-                if line.len() > 2_000_000 { return Err("Provider output exceeded the message limit".into()); }
+                if line.len() > output_limit { return Err("Provider output exceeded the message limit".into()); }
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
                 if value["id"].as_u64().is_some_and(|id| (1..=3).contains(&id)) && value.get("method").is_none() {
                     if value["error"].is_object() { return Err("Codex could not start this reply. Check its login, model access, and CLI version.".into()); }
@@ -106,6 +114,27 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_inputs_preserve_order_and_replay_images_as_visual_data() {
+        let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[{"role":"user","text":"first","images":[{"id":uuid::Uuid::new_v4(),"name":"first.png","mediaType":"image/png","data":"aGVsbG8="}]},{"role":"assistant","text":"seen"},{"role":"user","text":"second","images":[{"id":uuid::Uuid::new_v4(),"name":"second.jpeg","mediaType":"image/jpeg","data":"d29ybGQ="}]}]})).unwrap();
+        let params = turn_params(&request, "thread");
+        assert_eq!(
+            params["input"][2],
+            json!({"type":"image","url":"data:image/png;base64,aGVsbG8="})
+        );
+        assert_eq!(
+            params["input"][4],
+            json!({"type":"image","url":"data:image/jpeg;base64,d29ybGQ="})
+        );
+        assert!(params["input"][3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("message 3"));
+        assert!(!params["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("aGVsbG8="));
+    }
     #[test]
     fn server_requests_keep_full_access_ephemeral_state_and_prompt_as_data() {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();

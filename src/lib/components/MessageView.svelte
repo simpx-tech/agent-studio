@@ -6,6 +6,7 @@
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import ToolActivity from './ToolActivity.svelte';
   import ReplyUsage from './ReplyUsage.svelte';
+  import ImageAttachments from './ImageAttachments.svelte';
   let {
     message,
     agent,
@@ -66,7 +67,9 @@
           ><i class="pulse-dot"></i> Responding</span
         >{/if}
     </div>
-    {#if message.role === 'user'}<div class="user-text">{text}</div>
+    {#if message.role === 'user'}
+      {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
+      {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
       {#if message.status === 'running'}<ToolActivity
           {tools}

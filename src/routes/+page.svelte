@@ -25,6 +25,7 @@
     Archive,
     ArchiveRestore,
     BookOpen,
+    Paperclip,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -103,6 +104,15 @@
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import MessageView from '$lib/components/MessageView.svelte';
+  import ImageAttachments from '$lib/components/ImageAttachments.svelte';
+  import {
+    readImage,
+    imageTypes,
+    supportsImages,
+    maxImagesPerMessage,
+    checkImageBudget,
+    type ChatImage,
+  } from '$lib/images';
   import {
     replySettingsChanged,
     replySwitches,
@@ -157,6 +167,11 @@
   let usageLoading = $state<Record<string, boolean>>({});
   let usageErrors = $state<Record<string, string>>({});
   let prompt = $state('');
+  let attachedImages = $state<ChatImage[]>([]);
+  let attachmentError = $state('');
+  let imagesLoading = $state(false);
+  let attachmentGeneration = 0;
+  let imageInput = $state<HTMLInputElement>();
   let query = $state('');
   let run = $state<{ id: string; conversationId: string } | null>(null);
   let stopping = $state(false);
@@ -170,6 +185,7 @@
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
   const selectedSettings = $derived(active?.settings ?? draftSettings);
+  const imagesSupported = $derived(supportsImages(selectedSettings.provider));
   const selectedLocation = $derived(
     locationPending ? undefined : active ? active.location : draftLocation,
   );
@@ -370,6 +386,8 @@
   );
   const canSend = $derived(
     loaded &&
+      !imagesLoading &&
+      (!attachedImages.length || imagesSupported) &&
       !selectingLocation &&
       !locationPending &&
       (!selectedLocation ||
@@ -868,6 +886,7 @@
     } else delete draftSettings.connectionId;
     activeId = null;
     prompt = '';
+    clearImages();
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
@@ -975,6 +994,7 @@
     locationPending = false;
     activeId = c.id;
     prompt = '';
+    clearImages();
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
@@ -1016,8 +1036,54 @@
     deletion = null;
     saveSoon();
   }
+  function clearImages() {
+    attachmentGeneration++;
+    attachedImages = [];
+    attachmentError = '';
+    imagesLoading = false;
+  }
+  async function attachImages(files: File[]) {
+    if (!files.length || imagesLoading) return;
+    attachmentError = '';
+    if (!imagesSupported) {
+      attachmentError =
+        'Image attachments are available with Codex and Claude. Choose one in Agent to attach images.';
+      return;
+    }
+    if (attachedImages.length + files.length > maxImagesPerMessage) {
+      attachmentError = 'Attach up to 4 images per message. Remove an image before adding more.';
+      return;
+    }
+    const generation = attachmentGeneration;
+    imagesLoading = true;
+    try {
+      const images = await Promise.all(files.map(readImage));
+      if (generation !== attachmentGeneration) return;
+      checkImageBudget([
+        ...(active ? historyFor(active) : []),
+        { images: [...attachedImages, ...images] },
+      ]);
+      attachedImages = [...attachedImages, ...images];
+    } catch (error) {
+      if (generation === attachmentGeneration) attachmentError = (error as Error).message;
+    } finally {
+      if (generation === attachmentGeneration) imagesLoading = false;
+    }
+  }
   async function send(retry = false) {
-    if (!canSend || (!retry && !prompt.trim())) return;
+    if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
+    if (!retry && attachedImages.length) {
+      // Keep the draft intact when the portable workspace cannot fit the images.
+      const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
+      const addition = new TextEncoder().encode(
+        JSON.stringify($state.snapshot(attachedImages)),
+      ).length;
+      if (bytes + addition + prompt.length * 4 + 64000 > 20_000_000) {
+        attachmentError =
+          'The saved workspace is nearly full (20 MB). Export and delete older chats, or remove an attachment before sending.';
+        return;
+      }
+    }
     nearBottom = true;
     const now = new Date().toISOString();
     const isNewConversation = !active;
@@ -1026,7 +1092,7 @@
         id: crypto.randomUUID(),
         settings: structuredClone($state.snapshot(selectedSettings)),
         location: selectedLocation ? { ...selectedLocation } : undefined,
-        title: prompt.trim().slice(0, 80),
+        title: prompt.trim().slice(0, 80) || 'Image conversation',
         titleStatus: 'pending',
         createdAt: now,
         updatedAt: now,
@@ -1046,10 +1112,14 @@
         id: crypto.randomUUID(),
         role: 'user',
         blocks: [{ type: 'markdown', text: prompt.trim() }],
+        ...(attachedImages.length
+          ? { images: structuredClone($state.snapshot(attachedImages)) }
+          : {}),
         status: 'complete',
         createdAt: now,
       });
       prompt = '';
+      clearImages();
     }
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
@@ -1080,7 +1150,7 @@
         void nameConversation(
           conversation.id,
           responseSettings.provider,
-          history[0].text,
+          history[0].text || 'A conversation about attached images',
           conversation.title,
           responseSettings.connectionId,
         );
@@ -1689,11 +1759,42 @@
             >{/if}
           <form
             class="composer"
+            aria-label="Message composer"
+            ondragover={(event) => {
+              if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+            }}
+            ondrop={(event) => {
+              const files = Array.from(event.dataTransfer?.files ?? []);
+              if (files.length) {
+                event.preventDefault();
+                void attachImages(files);
+              }
+            }}
             onsubmit={(e) => {
               e.preventDefault();
               void send();
             }}
           >
+            {#if attachedImages.length}<ImageAttachments
+                images={attachedImages}
+                remove={(id) => {
+                  attachedImages = attachedImages.filter((image) => image.id !== id);
+                  attachmentError = '';
+                }}
+              />{/if}
+            <input
+              bind:this={imageInput}
+              type="file"
+              accept={imageTypes.join(',')}
+              multiple
+              hidden
+              aria-label="Image files"
+              onchange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                event.currentTarget.value = '';
+                void attachImages(files);
+              }}
+            />
             <textarea
               bind:this={composerInput}
               aria-label="Message"
@@ -1702,13 +1803,40 @@
               bind:value={prompt}
               rows="3"
               maxlength="30000"
+              onpaste={(event) => {
+                const files = Array.from(event.clipboardData?.files ?? []);
+                if (files.length) {
+                  event.preventDefault();
+                  void attachImages(files);
+                }
+              }}
               onkeydown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                   e.preventDefault();
                   void send();
                 }
               }}></textarea>
+            {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
+            {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
+            {:else if attachedImages.length && !imagesSupported}<p
+                class="attachment-notice"
+                role="alert"
+              >
+                Choose Codex or Claude to send these images, or remove them to use Gemini.
+              </p>{/if}
             <div class="composer-bottom">
+              <button
+                type="button"
+                class="attach-button"
+                aria-label="Attach images"
+                title={imagesSupported
+                  ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
+                  : 'Image attachments are available with Codex and Claude'}
+                disabled={!imagesSupported ||
+                  imagesLoading ||
+                  attachedImages.length >= maxImagesPerMessage}
+                onclick={() => imageInput?.click()}><Paperclip size={17} /></button
+              >
               {#if activeRunning}<button
                   class="stop-button"
                   type="button"
@@ -1720,7 +1848,7 @@
                 >{:else}<button
                   class="send-button"
                   type="submit"
-                  disabled={!canSend || !prompt.trim()}
+                  disabled={!canSend || (!prompt.trim() && !attachedImages.length)}
                   aria-label="Send message"><ArrowUp size={19} /></button
                 >{/if}
             </div>

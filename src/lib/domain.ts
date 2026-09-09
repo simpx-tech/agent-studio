@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity';
+import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 
 export const providerIds = ['codex', 'claude', 'gemini'] as const;
 export type ProviderId = (typeof providerIds)[number];
@@ -123,6 +124,7 @@ export const messageSchema = z.object({
   id: z.string().uuid(),
   role: z.enum(['user', 'assistant']),
   blocks: z.array(blockSchema),
+  images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
   status: z.enum(['complete', 'running', 'error', 'cancelled']),
   createdAt: z.string(),
   error: z.string().optional(),
@@ -178,7 +180,7 @@ export type RunRequest = {
   assistantId?: string;
   runId: string;
   agent: ChatSettings;
-  messages: { role: 'user' | 'assistant'; text: string }[];
+  messages: { role: 'user' | 'assistant'; text: string; images?: ChatImage[] }[];
 };
 
 export function initialWorkspace(): Workspace {
@@ -198,8 +200,12 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
   // Interrupted and failed responses never become fabricated assistant history.
   return conversation.messages
     .filter((m) => m.role === 'user' || m.status === 'complete')
-    .map((m) => ({ role: m.role, text: messageText(m) }))
-    .filter((m) => m.text.trim());
+    .map((m) => ({
+      role: m.role,
+      text: messageText(m),
+      ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
+    }))
+    .filter((m) => m.text.trim() || m.images?.length);
 }
 export function restoreWorkspace(value: unknown): Workspace {
   const oldSchema = z.object({

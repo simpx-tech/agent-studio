@@ -373,7 +373,10 @@ pub struct Agent {
 pub struct ChatMessage {
     pub role: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<images::ChatImage>,
 }
+mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
         uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid run id")?;
@@ -416,10 +419,30 @@ impl RunRequest {
         if self.messages.iter().map(|m| m.text.len()).sum::<usize>() > 400_000 {
             return Err("Conversation is too large. Start a new conversation.".into());
         }
+        let mut image_bytes = 0;
+        for message in &self.messages {
+            if message.images.is_empty() {
+                continue;
+            }
+            if !self.tools_enabled() || message.role != "user" {
+                return Err(
+                    "Image attachments are available only in Codex and Claude user messages".into(),
+                );
+            }
+            if message.images.len() > 4 {
+                return Err("Attach up to 4 images per message".into());
+            }
+            for image in &message.images {
+                image_bytes += image.validate()?;
+                if image_bytes > images::MAX_CONVERSATION_IMAGE_BYTES {
+                    return Err("This conversation has reached its 8 MB image limit. Start a new conversation to attach more images.".into());
+                }
+            }
+        }
         if self
             .messages
             .last()
-            .is_none_or(|m| m.role != "user" || m.text.trim().is_empty())
+            .is_none_or(|m| m.role != "user" || (m.text.trim().is_empty() && m.images.is_empty()))
         {
             return Err("Enter a message first".into());
         }
@@ -431,8 +454,35 @@ impl RunRequest {
     pub fn uses_codex_server(&self) -> bool {
         self.agent.provider == "codex" && self.tools_enabled()
     }
+    pub fn output_line_limit(&self) -> usize {
+        // Providers can echo visual input in user-message lifecycle events.
+        // Retain the text limit plus only the already-validated image payload.
+        2_000_000
+            + self
+                .messages
+                .iter()
+                .flat_map(|m| &m.images)
+                .map(|image| image.data.len())
+                .sum::<usize>()
+    }
     pub fn prompt(&self) -> String {
-        let context = serde_json::json!({ "agent_instructions": self.agent.instructions, "conversation": self.messages });
+        // Image bytes are separate visual inputs, never text tokens or shell paths.
+        let messages: Vec<_> = self
+            .messages
+            .iter()
+            .map(|message| {
+                let mut value = serde_json::json!({"role":message.role,"text":message.text});
+                if !message.images.is_empty() {
+                    value["images"] = serde_json::json!(message
+                        .images
+                        .iter()
+                        .map(|image| &image.name)
+                        .collect::<Vec<_>>());
+                }
+                value
+            })
+            .collect();
+        let context = serde_json::json!({ "agent_instructions": self.agent.instructions, "conversation": messages });
         let tools = if self.tools_enabled() {
             "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
         } else {
@@ -441,7 +491,19 @@ impl RunRequest {
         format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
     }
     pub fn stdin_payload(&self) -> String {
-        if self.agent.provider == "gemini" {
+        if self.agent.provider == "claude" && self.messages.iter().any(|m| !m.images.is_empty()) {
+            let mut content = vec![serde_json::json!({"type":"text","text":self.prompt()})];
+            for (message_index, message) in self.messages.iter().enumerate() {
+                for (image_index, image) in message.images.iter().enumerate() {
+                    content.push(serde_json::json!({"type":"text","text":image.label(message_index, image_index)}));
+                    content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                }
+            }
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"user","message":{"role":"user","content":content}})
+            )
+        } else if self.agent.provider == "gemini" {
             format!(
                 "{}\n",
                 serde_json::json!({"event":"user","message":{"content":self.prompt()}})
@@ -578,6 +640,9 @@ pub async fn chat_command(
                 "--include-partial-messages",
                 "--no-session-persistence",
             ]);
+            if request.messages.iter().any(|m| !m.images.is_empty()) {
+                c.args(["--input-format", "stream-json"]);
+            }
             if request.tools_enabled() {
                 c.args([
                     "--tools",
@@ -882,6 +947,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 text: "Quotes \" & $(echo) `hello`\nこんにちは".into(),
+                images: vec![],
             }],
         }
     }

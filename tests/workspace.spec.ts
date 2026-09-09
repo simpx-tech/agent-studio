@@ -325,6 +325,196 @@ async function mockDesktop(page: Page, mode = 'success') {
   );
 }
 
+async function imageFixture(page: Page, name = 'diagram.png') {
+  const data = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 360;
+    canvas.height = 220;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#f4eee2';
+    ctx.fillRect(0, 0, 360, 220);
+    ctx.fillStyle = '#267fcb';
+    ctx.beginPath();
+    ctx.moveTo(180, 30);
+    ctx.lineTo(80, 180);
+    ctx.lineTo(280, 180);
+    ctx.closePath();
+    ctx.fill();
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  return { name, mimeType: 'image/png', buffer: Buffer.from(data, 'base64') };
+}
+
+test('images can be previewed, sent without text, reopened and retried with the original bytes', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'error');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const file = await imageFixture(page);
+  await page.getByLabel('Image files').setInputFiles(file);
+  await expect(page.getByRole('button', { name: 'Remove diagram.png' })).toBeVisible();
+  await page.getByRole('button', { name: 'Preview diagram.png' }).click();
+  await expect(page.getByRole('dialog', { name: 'Image preview' }).getByRole('img')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(request.messages[0].text).toBe('');
+  expect(request.messages[0].images[0].data).toBe(file.buffer.toString('base64'));
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+  await expect(page.locator('.message.user')).toHaveCount(1);
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!).messages),
+  ).toEqual(request.messages);
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.locator('.conversation-item').first().click();
+  await expect(
+    page.locator('.message.user').getByRole('img', { name: 'diagram.png' }),
+  ).toBeVisible();
+});
+
+test('pasting and dropping images preserves drafts and supports removal at compact widths', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const file = await imageFixture(page);
+  await page.getByLabel('Message', { exact: true }).fill('Please explain this diagram.');
+  expect(
+    await page.evaluate(() => {
+      const text = new DataTransfer();
+      text.setData('text/plain', 'Ordinary text');
+      return document.querySelector('textarea')!.dispatchEvent(
+        new DragEvent('drop', {
+          dataTransfer: text,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }),
+  ).toBe(true);
+  await page.evaluate((data) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([Uint8Array.from(atob(data), (c) => c.charCodeAt(0))], 'pasted.png', {
+        type: 'image/png',
+      }),
+    );
+    document
+      .querySelector('textarea')!
+      .dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }),
+      );
+  }, file.buffer.toString('base64'));
+  await expect(page.getByRole('button', { name: 'Remove pasted.png' })).toBeVisible();
+  await page.evaluate((data) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([Uint8Array.from(atob(data), (c) => c.charCodeAt(0))], 'dropped.png', {
+        type: 'image/png',
+      }),
+    );
+    document
+      .querySelector('.composer')!
+      .dispatchEvent(
+        new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }),
+      );
+  }, file.buffer.toString('base64'));
+  await expect(page.getByRole('button', { name: 'Remove dropped.png' })).toBeVisible();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Please explain this diagram.',
+  );
+  await expect(page.getByRole('button', { name: 'Remove pasted.png' })).toBeVisible();
+  await page.setViewportSize({ width: 840, height: 640 });
+  await page.screenshot({ path: 'artifacts/images-composer-compact.png' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: 'Remove pasted.png' }).click();
+  await expect(page.getByRole('button', { name: 'Preview pasted.png' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('.message[data-status="complete"]')).toHaveCount(2);
+  await page.getByLabel('Message', { exact: true }).fill('And what shape is it?');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(request.messages[0].images.map((image: any) => image.name)).toEqual(['dropped.png']);
+  expect(request.messages.at(-1).text).toBe('And what shape is it?');
+});
+
+test('invalid and excess images stay out of the draft and Gemini attachment input is explicit', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  for (const [file, error] of [
+    [{ name: 'bad.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg/>') }, 'Choose a PNG'],
+    [
+      { name: 'bad.png', mimeType: 'image/png', buffer: Buffer.from('not an image') },
+      'not a valid image',
+    ],
+    [
+      { name: 'large.png', mimeType: 'image/png', buffer: Buffer.alloc(2 * 1024 * 1024 + 1) },
+      '2 MB',
+    ],
+  ] as const) {
+    await page.getByLabel('Image files').setInputFiles(file);
+    await expect(page.getByRole('alert').filter({ hasText: error })).toBeVisible();
+  }
+  const file = await imageFixture(page);
+  await page
+    .getByLabel('Image files')
+    .setInputFiles(Array.from({ length: 5 }, (_, n) => ({ ...file, name: `${n}.png` })));
+  await expect(page.getByRole('alert').filter({ hasText: 'up to 4' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Remove .*\.png$/ })).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
+  await page
+    .getByRole('option', { name: /^Gemini/ })
+    .first()
+    .click();
+  await expect(page.getByRole('button', { name: 'Attach images' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach images' })).toHaveAttribute(
+    'title',
+    /Codex and Claude/,
+  );
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+});
+
+test('a delayed image read cannot attach to a newer conversation or send before it finishes', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const file = await imageFixture(page);
+  await page.evaluate(() => {
+    const decode = Image.prototype.decode;
+    Image.prototype.decode = async function () {
+      await decode.call(this);
+      await new Promise<void>((resolve) => ((window as any).finishImageRead = resolve));
+    };
+  });
+  await page.getByLabel('Message', { exact: true }).fill('Old draft');
+  await page.getByLabel('Image files').setInputFiles(file);
+  await expect(page.getByRole('status').filter({ hasText: 'Reading images' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).finishImageRead))
+    .toBe('function');
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await page.getByLabel('Message', { exact: true }).fill('New draft');
+  await page.evaluate(() => (window as any).finishImageRead());
+  await expect(page.getByRole('status').filter({ hasText: 'Reading images' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Preview diagram.png' })).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('New draft');
+});
+
 test('browser preview keeps per-chat choices without an agent library', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Browser preview ·')).toBeVisible();

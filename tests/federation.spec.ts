@@ -1118,6 +1118,21 @@ test('two app environments pair, share accounts, route chats, retain progress an
     await expect(desktop.getByRole('combobox', { name: 'Account and environment' })).toHaveCount(0);
     await desktop.getByRole('combobox', { name: 'Agent', exact: true }).click();
     await desktop.getByRole('option', { name: 'Claude · Claude personal 1', exact: true }).click();
+    const imageData = await desktop.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 80;
+      canvas.height = 60;
+      canvas.getContext('2d')!.fillRect(0, 0, 80, 60);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+    await desktop
+      .getByLabel('Image files')
+      .setInputFiles({
+        name: 'remote-image.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(imageData, 'base64'),
+      });
+    await expect(desktop.getByRole('button', { name: 'Remove remote-image.png' })).toBeVisible();
     await desktop
       .getByRole('textbox', { name: 'Message', exact: true })
       .fill('Hello from another computer');
@@ -1129,6 +1144,11 @@ test('two app environments pair, share accounts, route chats, retain progress an
       desktop.getByTestId('message').filter({ hasText: 'Response from MacBook, completed.' }),
     ).toHaveAttribute('data-status', 'complete', { timeout: 20_000 });
     expect(await desktop.evaluate(() => localStorage.getItem('fixture-run'))).toBeNull();
+    expect(
+      await mac.evaluate(
+        () => JSON.parse(localStorage.getItem('fixture-run')!).messages[0].images[0].data,
+      ),
+    ).toBe(imageData);
     await expect(desktop.locator('.activity-summary')).not.toHaveAttribute('open', '');
     await expect(desktop.getByLabel('Reply usage and cost')).toContainText(
       '$0.012345 estimated cost',
@@ -1163,6 +1183,13 @@ test('two app environments pair, share accounts, route chats, retain progress an
         ),
       )
       .toBe('complete');
+    expect(
+      await mac.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem('fixture-workspace')!).conversations[0].messages[0]
+            .images[0].data,
+      ),
+    ).toBe(imageData);
     expect(
       await mac.evaluate(
         () =>

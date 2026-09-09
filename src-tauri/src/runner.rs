@@ -112,6 +112,7 @@ async fn execute(
     let mut stderr =
         BufReader::new(child.stderr.take().ok_or("CLI stderr is unavailable")?).lines();
     let mut decoder = Decoder::default();
+    let output_limit = request.output_line_limit();
     let mut stdout_done = false;
     let mut stderr_done = false;
     let mut diagnostics = String::new();
@@ -124,7 +125,7 @@ async fn execute(
             _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { "The provider did not finish within 5 minutes. Try again or check its CLI login." } else { "Title generation timed out" }.into()); }
             line = stdout.next_line(), if !stdout_done => match line {
                 Ok(Some(line)) => {
-                    if line.len() > 2_000_000 { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
+                    if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { exe.kill(&mut child).await; break Err("Title response exceeded the limit".into()); }
                 }

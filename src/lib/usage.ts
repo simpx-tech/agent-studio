@@ -147,7 +147,8 @@ export function estimatePromptTokens(
   // Explicit estimate, not a tokenizer. UTF-8 handles non-Latin text better than JS length.
   const body = JSON.stringify({
     agent_instructions: settings.instructions,
-    conversation: messages,
+    // Image encoding is not text usage. Only provider-reported counts measure vision input.
+    conversation: messages.map(({ role, text }) => ({ role, text })),
   });
   return 85 + Math.ceil(new TextEncoder().encode(body).length / 4);
 }
