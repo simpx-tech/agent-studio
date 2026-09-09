@@ -1,0 +1,7 @@
+{
+  "name": "agent-studio-relay",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "dependencies": { "zod": "^4.3.0" }
+}

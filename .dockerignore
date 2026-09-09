@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/target
+artifacts
+test-results
+playwright-report
+.svelte-kit
+build
+.relay-data
+.env
+.env.*
+**/*.log

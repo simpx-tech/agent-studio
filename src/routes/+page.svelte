@@ -1,0 +1,1742 @@
+<script lang="ts">
+  import { onMount, tick, untrack } from 'svelte';
+  import {
+    ArrowUp,
+    ArrowUpRight,
+    ArrowRight,
+    Plus,
+    Bot,
+    Cpu,
+    Brain,
+    Plug,
+    Search,
+    ChevronRight,
+    SlidersHorizontal,
+    RefreshCw,
+    Square,
+    X,
+    Trash2,
+    Pencil,
+    Check,
+    Laptop,
+    Copy,
+    CircleAlert,
+    Folder,
+    Archive,
+    ArchiveRestore,
+    BookOpen,
+  } from '@lucide/svelte';
+  import {
+    initialWorkspace,
+    providerIds,
+    providers,
+    historyFor,
+    messageText,
+    settingsFor,
+    rememberSettings,
+    type ChatSettings,
+    type Reasoning,
+    type Conversation,
+    type Message,
+    type ProviderId,
+    type ProviderStatus,
+    type Workspace,
+    type ChatLocation,
+  } from '$lib/domain';
+  import {
+    desktop,
+    loadWorkspace,
+    loadModels,
+    readUsage,
+    generateTitle,
+    cancelTitle,
+    saveWorkspace,
+    detectProviders,
+    runAgent,
+    cancelRun,
+    signIn,
+    openLink,
+    getInstallation,
+    discoverWsl,
+    configureRuntime,
+    detectConnection,
+    connectRelay,
+    disconnectRelay,
+    pollRelay,
+    resolveRelaySettings,
+    listFolders,
+  } from '$lib/transport';
+  import ChatInstructions from '$lib/components/ChatInstructions.svelte';
+  import ModelContext from '$lib/components/ModelContext.svelte';
+  import { applyRunEvent } from '$lib/activity';
+  import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
+  import SidebarResize from '$lib/components/SidebarResize.svelte';
+  import FleetManager from '$lib/components/FleetManager.svelte';
+  import FolderBrowser from '$lib/components/FolderBrowser.svelte';
+  import {
+    locationKey,
+    folderName,
+    ensureLocationConnections,
+    locationConnections,
+    rememberLocation,
+    knownLocations,
+    conversationLocation,
+    groupConversations,
+  } from '$lib/locations';
+  import {
+    registerInstallation,
+    registerWslEnvironments,
+    connectionLabel,
+    executionHost,
+    type Installation,
+    type WslDiscovery,
+  } from '$lib/fleet';
+  import type { Presence } from '$lib/sync';
+  import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
+  import ChoicePicker from '$lib/components/ChoicePicker.svelte';
+  import MessageView from '$lib/components/MessageView.svelte';
+  import {
+    replySettingsChanged,
+    replySwitches,
+    selectedModelName,
+    replyTimeTotals,
+  } from '$lib/replies';
+  import UsagePanel from '$lib/components/UsagePanel.svelte';
+  import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
+  import '$lib/styles.css';
+
+  type View = 'chat' | 'connections';
+  let installation = $state<Installation>();
+  let wslDiscovery = $state<WslDiscovery>();
+  let wslError = $state('');
+  let wslRefreshing = false;
+  let connectionStatuses = $state<Record<string, ProviderStatus>>({});
+  const connectionChecks = new Map<string, Promise<void>>();
+  let presence = $state<Presence[]>([]);
+  let paired = $state(false);
+  let syncStatus = $state(
+    'Saved on this environment. Pair a relay to bring your workspace together.',
+  );
+  let syncError = $state('');
+  let view = $state<View>('chat');
+  let sidebarWidth = $state<number>();
+  let workspace = $state<Workspace>(initialWorkspace());
+  let loaded = $state(false);
+  let storageError = $state('');
+  let notice = $state('');
+  let statuses = $state<ProviderStatus[]>([]);
+  let refreshing = $state(false);
+  let pendingSignIn = $state<ProviderId | null>(null);
+  let signInDeadline = 0;
+  let activeId = $state<string | null>(null);
+  let draftSettings = $state<ChatSettings>(untrack(() => settingsFor(workspace.preferences)));
+  let draftLocation = $state<ChatLocation>();
+  let draftComputerId = $state('');
+  let folderBrowserOpen = $state(false);
+  let selectingLocation = $state(false);
+  let locationPending = $state(false);
+  let locationGeneration = 0;
+  let settingsRevision = 0;
+  let collapsedGroups = $state<Record<string, boolean>>({});
+  let conversationScope = $state<'active' | 'history'>('active');
+  let modelGeneration = 0;
+  let models = $state<ModelCatalog>(structuredClone(fallbackModels));
+  let modelsLoading = $state(false);
+  const modelCache = new Map<string, { catalog: ModelCatalog; checkedAt: number }>();
+  const modelRequests = new Map<string, Promise<ModelCatalog>>();
+  let usageSnapshots = $state<Record<string, UsageSnapshot>>({});
+  let usageLoading = $state<Record<string, boolean>>({});
+  let usageErrors = $state<Record<string, string>>({});
+  let prompt = $state('');
+  let query = $state('');
+  let run = $state<{ id: string; conversationId: string } | null>(null);
+  let stopping = $state(false);
+  let editorOpen = $state(false);
+  let contextOpen = $state(false);
+  let deletion = $state<{ type: 'conversation'; id: string; name: string } | null>(null);
+  let messagesEnd = $state<HTMLDivElement>();
+  let composerInput = $state<HTMLTextAreaElement>();
+  let chatScroll = $state<HTMLDivElement>();
+  let nearBottom = true;
+  let saveQueue = Promise.resolve();
+  const active = $derived(workspace.conversations.find((c) => c.id === activeId));
+  const selectedSettings = $derived(active?.settings ?? draftSettings);
+  const selectedLocation = $derived(
+    locationPending ? undefined : active ? active.location : draftLocation,
+  );
+  const selectedComputerId = $derived(selectedLocation?.computerId ?? draftComputerId);
+  const selectedComputer = $derived(
+    workspace.fleet.computers.find((c) => c.id === selectedComputerId),
+  );
+  const computerEnvironments = $derived(
+    workspace.fleet.environments.filter((e) => e.computerId === selectedComputerId),
+  );
+  const savedLocations = $derived(knownLocations(workspace, selectedComputerId));
+  const scopedConnections = $derived(locationConnections(workspace.fleet, selectedLocation));
+  const availableProviders = $derived(
+    providerIds.filter((provider) =>
+      scopedConnections.some(
+        (c) =>
+          workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider &&
+          canChooseConnection(c.id),
+      ),
+    ),
+  );
+  const providerOptions = $derived([
+    ...new Set([...availableProviders, selectedSettings.provider]),
+  ]);
+  const agentOptions = $derived.by(() => {
+    const ids = selectedLocation ? providerOptions : providerIds;
+    return ids.flatMap((provider) => {
+      const candidates = scopedConnections.filter(
+        (c) =>
+          workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider &&
+          (canChooseConnection(c.id) || c.id === selectedSettings.connectionId),
+      );
+      const base = { mark: providers[provider].mark, color: providers[provider].color };
+      if (candidates.length > 1)
+        return candidates.map((c) => ({
+          ...base,
+          id: `connection:${c.id}`,
+          provider,
+          connectionId: c.id,
+          name: `${providers[provider].name} · ${workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ?? 'Account'}`,
+          detail: connectionStatus(c.id)?.installed
+            ? providers[provider].company
+            : canChooseConnection(c.id)
+              ? 'Checking availability…'
+              : 'Unavailable connection',
+        }));
+      return [
+        {
+          ...base,
+          id: provider,
+          provider,
+          connectionId: candidates[0]?.id,
+          name: providers[provider].name,
+          detail:
+            selectedLocation && !availableProviders.includes(provider)
+              ? 'Unavailable in this folder’s environment'
+              : candidates.some((c) => !connectionStatus(c.id))
+                ? 'Checking availability…'
+                : providers[provider].company,
+        },
+      ];
+    });
+  });
+  const selectedAgentOption = $derived(
+    agentOptions.find(
+      (option) =>
+        option.provider === selectedSettings.provider &&
+        option.connectionId === selectedSettings.connectionId,
+    )?.id ?? selectedSettings.provider,
+  );
+  const selectedConnection = $derived(
+    workspace.fleet.connections.find((c) => c.id === selectedSettings.connectionId),
+  );
+  const selectedRemote = $derived(
+    !!selectedConnection &&
+      executionHost(workspace.fleet, selectedConnection.environmentId) !== installation?.id,
+  );
+  const selectedStatus = $derived(
+    selectedSettings.connectionId
+      ? selectedRemote
+        ? presence
+            .find(
+              (p) =>
+                p.environmentId ===
+                  executionHost(workspace.fleet, selectedConnection?.environmentId ?? '') &&
+                p.online,
+            )
+            ?.connections.find((c) => c.connectionId === selectedSettings.connectionId)
+        : connectionStatuses[selectedSettings.connectionId]
+      : statusFor(selectedSettings.provider),
+  );
+
+  const selectedUsageKey = $derived(usageKey(selectedSettings));
+  const selectedUsage = $derived(snapshotFor(usageSnapshots, selectedSettings));
+  $effect(() => {
+    const provider = selectedSettings.provider;
+    const model = selectedSettings.model;
+    const connectionId = selectedSettings.connectionId;
+    if (loaded && view === 'chat')
+      untrack(() => void refreshUsage({ provider, model, connectionId }));
+  });
+  $effect(() => {
+    const key = modelScopeKey(selectedSettings);
+    if (loaded)
+      untrack(() => {
+        models = modelCache.get(key)?.catalog ?? structuredClone(fallbackModels);
+        void refreshModels(false);
+      });
+  });
+  const selectedAgent = $derived({
+    ...selectedSettings,
+    name: providers[selectedSettings.provider].name,
+  });
+  const availableModels = $derived(
+    modelChoices(models, selectedSettings.provider, selectedSettings.model),
+  );
+  const currentModel = $derived(
+    availableModels.find((model) => model.id === selectedSettings.model)!,
+  );
+  const reasoningOptions = $derived(
+    [
+      ...new Set([
+        '',
+        ...currentModel.reasoningLevels,
+        ...(selectedSettings.reasoning ? [selectedSettings.reasoning] : []),
+      ]),
+    ].map((id) => ({ id, name: reasoningName(id as Reasoning) })),
+  );
+  const recent = $derived(
+    [...workspace.conversations]
+      .filter((c) =>
+        `${c.title} ${providers[c.settings.provider].name} ${c.location?.path ?? ''} ${workspace.fleet.computers.find((computer) => computer.id === c.location?.computerId)?.name ?? ''}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+  );
+  const conversationGroups = $derived(groupConversations(recent, workspace.fleet, installation));
+  const observedReply = $derived(
+    active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
+  );
+  const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
+  const switchNotices = $derived(replySwitches(active?.messages ?? []));
+  const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
+  const nextReplyChanged = $derived(
+    !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),
+  );
+  const hostBusy = $derived(
+    workspace.conversations.some((c) =>
+      c.messages.some(
+        (m) =>
+          m.status === 'running' &&
+          m.settings?.connectionId &&
+          executionHost(
+            workspace.fleet,
+            workspace.fleet.connections.find(
+              (connection) => connection.id === m.settings?.connectionId,
+            )?.environmentId ?? '',
+          ) === installation?.id,
+      ),
+    ),
+  );
+  const canSend = $derived(
+    loaded &&
+      !selectingLocation &&
+      !locationPending &&
+      (!selectedLocation ||
+        selectedSettings.connectionId ||
+        executionHost(workspace.fleet, selectedLocation.environmentId) === installation?.id) &&
+      (!!selectedLocation || !!active) &&
+      (!selectedLocation ||
+        (!!active && !selectedLocation.path) ||
+        scopedConnections.some((c) => c.id === selectedSettings.connectionId)) &&
+      !run &&
+      !activeRunning &&
+      (selectedRemote || !hostBusy) &&
+      desktop() &&
+      (!selectedRemote || (paired && !syncError)) &&
+      !!selectedStatus?.installed,
+  );
+  const viewTitle = $derived(
+    {
+      chat: active?.title ?? 'New conversation',
+      connections: 'Connections',
+    }[view],
+  );
+
+  onMount(() => {
+    let focusTimer: ReturnType<typeof setTimeout>;
+    const onReturn = () => {
+      if (!loaded || !desktop() || document.visibilityState === 'hidden' || run) return;
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => {
+        void refresh();
+        if (view === 'chat') void refreshUsage();
+      }, 250);
+    };
+    window.addEventListener('focus', onReturn);
+    document.addEventListener('visibilitychange', onReturn);
+    const loginPoll = setInterval(() => {
+      if (pendingSignIn && Date.now() < signInDeadline && !run) void refresh();
+    }, 5000);
+    const usagePoll = setInterval(() => {
+      if (loaded && view === 'chat' && document.visibilityState !== 'hidden') void refreshUsage();
+    }, 60_000);
+    const relayPoll = setInterval(() => {
+      if (paired) void syncNow();
+    }, 2500);
+    const wslPoll = setInterval(() => {
+      if (loaded && view === 'connections' && document.visibilityState !== 'hidden')
+        void refreshWsl();
+    }, 15_000);
+    void (async () => {
+      try {
+        workspace = await loadWorkspace();
+        installation = await getInstallation();
+        if (installation) registerInstallation(workspace.fleet, installation);
+        // Legacy chats retain a stable owning computer when the workspace is synchronized.
+        for (const conversation of workspace.conversations) {
+          // Start each app session with a clean Active list without changing chat recency.
+          conversation.archived = true;
+          if (!conversation.location)
+            conversation.location = conversationLocation(
+              conversation,
+              workspace.fleet,
+              installation,
+            );
+        }
+        draftComputerId =
+          workspace.fleet.environments.find((e) => e.id === installation?.id)?.computerId ??
+          installation?.computerId ??
+          '';
+        draftLocation = workspace.preferences.recentLocations?.find(
+          (l) => locationConnections(workspace.fleet, l).length,
+        );
+        draftSettings = settingsFor(workspace.preferences);
+        loaded = true;
+        newChat();
+        if (installation)
+          configureRuntime({
+            installation,
+            workspace: () => $state.snapshot(workspace),
+            statuses: () => $state.snapshot(connectionStatuses),
+            localRuns: () => (run ? [run.id] : []),
+            checkpointRun: async (request, event, status, error) => {
+              const conversation = workspace.conversations.find(
+                (c) => c.id === request.conversationId,
+              );
+              const message = conversation?.messages.find((m) => m.id === request.assistantId);
+              if (!conversation || !message) return;
+              if (event) applyRunEvent(message, event);
+              if (status) {
+                message.status = status;
+                message.error = error;
+                conversation.updatedAt = new Date().toISOString();
+              }
+              await persist();
+            },
+            apply: async (value) => {
+              workspace.fleet = value.fleet;
+              // Preserve active object identities while network responses arrive.
+              workspace.conversations = value.conversations.map((incoming) => {
+                const existing = workspace.conversations.find((c) => c.id === incoming.id);
+                if (existing) {
+                  Object.assign(existing, incoming);
+                  return existing;
+                }
+                return incoming;
+              });
+              await persist();
+              if (
+                workspace.fleet.connections.some(
+                  (c) =>
+                    executionHost(workspace.fleet, c.environmentId) === installation?.id &&
+                    !connectionStatuses[c.id],
+                )
+              )
+                void refreshConnections();
+            },
+          });
+        await persist();
+      } catch (e) {
+        storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
+      }
+      void refreshModels();
+      await refresh();
+    })();
+    return () => {
+      clearTimeout(focusTimer);
+      clearInterval(loginPoll);
+      clearInterval(usagePoll);
+      clearInterval(relayPoll);
+      clearInterval(wslPoll);
+      window.removeEventListener('focus', onReturn);
+      document.removeEventListener('visibilitychange', onReturn);
+    };
+  });
+  async function syncNow() {
+    try {
+      const peers = await pollRelay();
+      if (peers) {
+        presence = peers;
+        syncError = '';
+        syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · Environments report every few seconds`;
+      }
+    } catch (e) {
+      syncError = String(e);
+      presence = presence.map((p) => ({ ...p, online: false }));
+    }
+  }
+  async function pair(url: string, key: string) {
+    await persist();
+    await connectRelay(url, key);
+    paired = true;
+    await syncNow();
+  }
+  async function unpair() {
+    await disconnectRelay();
+    paired = false;
+    presence = [];
+    syncError = '';
+    syncStatus = 'Disconnected. Changes continue to save on this environment.';
+  }
+  async function persist() {
+    if (!loaded) return;
+    const snapshot = $state.snapshot(workspace);
+    const next = saveQueue.catch(() => {}).then(() => saveWorkspace(snapshot));
+    saveQueue = next;
+    try {
+      await next;
+      storageError = '';
+    } catch (e) {
+      storageError = `Changes could not be saved: ${String(e)}`;
+      throw e;
+    }
+  }
+  function saveSoon() {
+    void persist().catch(() => {});
+  }
+  async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      await refreshWsl();
+      statuses = await detectProviders();
+      await refreshConnections();
+      if (pendingSignIn && statuses.some((s) => s.id === pendingSignIn && s.auth === 'ready')) {
+        notice = `${providers[pendingSignIn].name} is connected. You're ready to chat.`;
+        pendingSignIn = null;
+      }
+    } catch (e) {
+      notice = String(e);
+    } finally {
+      refreshing = false;
+    }
+  }
+  async function refreshWsl() {
+    if (installation?.platform !== 'windows' || wslRefreshing) return;
+    wslRefreshing = true;
+    try {
+      const discovery = await discoverWsl();
+      wslDiscovery = discovery;
+      wslError = discovery.warning ?? '';
+      const before = JSON.stringify(workspace.fleet);
+      registerWslEnvironments(workspace.fleet, installation, discovery);
+      if (JSON.stringify(workspace.fleet) !== before) await persist();
+    } catch (e) {
+      wslError = String(e);
+    } finally {
+      wslRefreshing = false;
+    }
+  }
+  async function refreshConnections(location?: ChatLocation, missingOnly = false) {
+    if (!desktop() || !installation) return;
+    await Promise.all(
+      workspace.fleet.connections
+        .filter(
+          (c) =>
+            executionHost(workspace.fleet, c.environmentId) === installation?.id &&
+            (!location || c.environmentId === location.environmentId) &&
+            (!missingOnly || !connectionStatuses[c.id]),
+        )
+        .map((c) => {
+          const pending = connectionChecks.get(c.id);
+          if (pending) return pending;
+          const account = workspace.fleet.accounts.find((a) => a.id === c.accountId);
+          if (!account) return;
+          const check = detectConnection(account.provider, c.id)
+            .then((status) => {
+              connectionStatuses[c.id] = status;
+            })
+            .catch((e) => {
+              connectionStatuses[c.id] = {
+                id: account.provider,
+                installed: false,
+                auth: 'unknown',
+                version: null,
+                detail: String(e),
+              };
+            })
+            .finally(() => {
+              connectionChecks.delete(c.id);
+            });
+          connectionChecks.set(c.id, check);
+          return check;
+        }),
+    );
+  }
+  function statusFor(id: ProviderId) {
+    return statuses.find((s) => s.id === id);
+  }
+  function connectionStatus(id: string) {
+    const connection = workspace.fleet.connections.find((c) => c.id === id);
+    if (!connection) return undefined;
+    const host = executionHost(workspace.fleet, connection.environmentId);
+    return host === installation?.id
+      ? connectionStatuses[id]
+      : presence
+          .find((p) => p.environmentId === host && p.online)
+          ?.connections.find((c) => c.connectionId === id);
+  }
+  function canChooseConnection(id: string) {
+    const status = connectionStatus(id);
+    if (status) return status.installed;
+    const connection = workspace.fleet.connections.find((c) => c.id === id);
+    // Local choices can be prepared while detection runs; sending still requires a ready result.
+    return (
+      !!connection &&
+      desktop() &&
+      executionHost(workspace.fleet, connection.environmentId) === installation?.id
+    );
+  }
+  function modelScopeKey(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
+    const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
+    return JSON.stringify([settings.provider, connection ?? settings.connectionId ?? null]);
+  }
+  async function refreshModels(force = true) {
+    const generation = ++modelGeneration;
+    if (!active && !selectedLocation) {
+      modelsLoading = false;
+      return;
+    }
+    const selected = { ...selectedSettings };
+    const key = modelScopeKey(selected);
+    const cached = modelCache.get(key);
+    if (!force && cached && Date.now() - cached.checkedAt < 300_000) {
+      models = cached.catalog;
+      modelsLoading = false;
+      return;
+    }
+    modelsLoading = true;
+    try {
+      let request = modelRequests.get(key);
+      if (!request) {
+        // A newly created connection must reach native storage before its catalog is queried.
+        request = saveQueue
+          .then(() => loadModels(selected))
+          .then((catalog) => {
+            modelCache.set(key, { catalog, checkedAt: Date.now() });
+            return catalog;
+          })
+          .finally(() => {
+            modelRequests.delete(key);
+          });
+        modelRequests.set(key, request);
+      }
+      const catalog = await request;
+      if (generation === modelGeneration && key === modelScopeKey(selectedSettings))
+        models = catalog;
+    } catch {
+      if (generation === modelGeneration)
+        notice = 'Could not refresh models. Your saved choices are still available.';
+    } finally {
+      if (generation === modelGeneration) modelsLoading = false;
+    }
+  }
+  async function refreshUsage(
+    settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> = selectedSettings,
+    force = false,
+  ) {
+    if (!desktop() || (!active && !selectedLocation)) return;
+    const key = usageKey(settings);
+    if (usageLoading[key]) return;
+    usageLoading[key] = true;
+    try {
+      await saveQueue;
+      const snapshot = await readUsage(
+        settings.provider,
+        settings.model,
+        force,
+        settings.connectionId,
+      );
+      if (!snapshot || !Array.isArray(snapshot.windows))
+        throw new Error('Usage was not reported by this CLI.');
+      usageSnapshots[key] = { ...snapshot, connectionId: settings.connectionId };
+      usageErrors[key] = '';
+    } catch (e) {
+      usageErrors[key] = String(e);
+    } finally {
+      usageLoading[key] = false;
+    }
+  }
+  function changeSettings(settings: ChatSettings) {
+    if (!loaded) return;
+    // Only the next request's model/reasoning may change while a reply is running.
+    if (
+      (run || activeRunning) &&
+      (settings.provider !== selectedSettings.provider ||
+        settings.connectionId !== selectedSettings.connectionId ||
+        settings.instructions !== selectedSettings.instructions)
+    )
+      return;
+    if (
+      active &&
+      (settings.provider !== active.settings.provider ||
+        settings.connectionId !== active.settings.connectionId)
+    )
+      return;
+    settingsRevision++;
+    if (active) {
+      active.settings = settings;
+      active.updatedAt = new Date().toISOString();
+    } else draftSettings = settings;
+    rememberSettings(workspace.preferences, settings);
+    saveSoon();
+  }
+  function chooseProvider(value: string) {
+    if (active) return;
+    if (selectedLocation && !availableProviders.includes(value as ProviderId)) return;
+    const settings = settingsFor(workspace.preferences, value as ProviderId);
+    if (selectedLocation)
+      settings.connectionId = preferredConnection(settings.provider, selectedLocation);
+    const model = models[settings.provider].find((m) => m.id === settings.model);
+    if (
+      workspace.preferences.reasoningByProvider[settings.provider]?.[settings.model] ===
+        undefined &&
+      model
+    )
+      settings.reasoning = model.defaultReasoning;
+    changeSettings({ ...settings, instructions: selectedSettings.instructions });
+  }
+  function chooseAgent(value: string) {
+    if (active) return;
+    const option = agentOptions.find((option) => option.id === value);
+    if (!option) return;
+    if (!value.startsWith('connection:')) {
+      chooseProvider(option.provider);
+      return;
+    }
+    if (!option.connectionId || !canChooseConnection(option.connectionId)) return;
+    const settings =
+      option.provider === selectedSettings.provider
+        ? selectedSettings
+        : settingsFor(workspace.preferences, option.provider);
+    changeSettings({
+      ...settings,
+      connectionId: option.connectionId,
+      instructions: selectedSettings.instructions,
+    });
+  }
+  function chooseModel(model: string) {
+    const reasoning =
+      workspace.preferences.reasoningByProvider[selectedSettings.provider]?.[model] ??
+      availableModels.find((m) => m.id === model)?.defaultReasoning ??
+      '';
+    changeSettings({ ...selectedSettings, model, reasoning });
+  }
+  function newChat(
+    provider?: ProviderId,
+    connectionId?: string,
+    location?: ChatLocation,
+    computerId?: string,
+  ) {
+    if (!loaded || selectingLocation) return;
+    folderBrowserOpen = false;
+    locationGeneration++;
+    conversationScope = 'active';
+    locationPending = false;
+    draftSettings = settingsFor(workspace.preferences, provider);
+    draftLocation = location
+      ? { ...location }
+      : computerId
+        ? undefined
+        : workspace.preferences.recentLocations?.find(
+            (l) => locationConnections(workspace.fleet, l).length,
+          );
+    if (computerId) draftComputerId = computerId;
+    if (
+      location &&
+      !location.path &&
+      workspace.fleet.environments.some(
+        (e) => e.id === location.environmentId && e.computerId === location.computerId,
+      )
+    ) {
+      ensureLocationConnections(workspace.fleet, location);
+      saveSoon();
+      void saveQueue
+        .then(() => refreshConnections(location, true))
+        .catch((e) => {
+          notice = String(e);
+        });
+    }
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    if (connection) {
+      const environment = workspace.fleet.environments.find(
+        (e) => e.id === connection.environmentId,
+      );
+      draftComputerId = environment?.computerId ?? '';
+      draftLocation = workspace.preferences.recentLocations?.find(
+        (l) => l.environmentId === connection.environmentId,
+      );
+      draftSettings.connectionId = connection.id;
+    } else if (draftLocation) {
+      draftComputerId = draftLocation.computerId;
+      if (location) draftSettings = settingsAtLocation(draftSettings, location);
+      else draftSettings.connectionId = preferredConnection(draftSettings.provider, draftLocation);
+    } else delete draftSettings.connectionId;
+    activeId = null;
+    prompt = '';
+    editorOpen = false;
+    contextOpen = false;
+    view = 'chat';
+    if (location || computerId) {
+      query = '';
+      const computerKey = `active/${location?.computerId ?? computerId}`;
+      collapsedGroups[computerKey] = false;
+      if (location) collapsedGroups[`${computerKey}/${locationKey(location)}`] = false;
+      void tick().then(() => composerInput?.focus());
+    }
+    if (provider) {
+      rememberSettings(workspace.preferences, draftSettings);
+      saveSoon();
+    }
+  }
+  function preferredConnection(provider: ProviderId, location: ChatLocation) {
+    const candidates = locationConnections(workspace.fleet, location, provider);
+    const remembered = workspace.preferences.connectionByProvider?.[provider];
+    return (
+      candidates.find((c) => c.id === remembered)?.id ??
+      candidates.find((c) => c.profile === 'existing' && connectionStatus(c.id)?.installed)?.id ??
+      candidates[0]?.id
+    );
+  }
+  function chooseComputer(id: string) {
+    if (active || run || activeRunning || selectingLocation || id === selectedComputerId) return;
+    locationGeneration++;
+    draftComputerId = id;
+    locationPending = true;
+  }
+  function settingsAtLocation(settings: ChatSettings, location: ChatLocation): ChatSettings {
+    const installed = providerIds.filter((p) =>
+      locationConnections(workspace.fleet, location, p).some(
+        (c) => connectionStatus(c.id)?.installed,
+      ),
+    );
+    const supported = providerIds.filter(
+      (p) => locationConnections(workspace.fleet, location, p).length,
+    );
+    const provider = installed.includes(settings.provider)
+      ? settings.provider
+      : (installed[0] ??
+        (supported.includes(settings.provider) ? settings.provider : supported[0]) ??
+        settings.provider);
+    return {
+      ...(provider === settings.provider ? settings : settingsFor(workspace.preferences, provider)),
+      instructions: settings.instructions,
+      connectionId: preferredConnection(provider, location),
+    };
+  }
+  async function chooseLocation(location: ChatLocation, verified = false) {
+    if (active || run || activeRunning || selectingLocation) return;
+    if (selectedLocation && locationKey(location) === locationKey(selectedLocation)) return;
+    const generation = ++locationGeneration;
+    const conversationId = activeId;
+    selectingLocation = true;
+    try {
+      if (!verified) {
+        const listing = await listFolders(location.environmentId, location.path);
+        location = { ...location, path: listing.path };
+      }
+      if (generation !== locationGeneration || conversationId !== activeId) return;
+      ensureLocationConnections(workspace.fleet, location);
+      const settings = settingsAtLocation(selectedSettings, location);
+      draftLocation = { ...location };
+      locationPending = false;
+      draftComputerId = location.computerId;
+      rememberLocation(workspace, location);
+      changeSettings(settings);
+      const revision = settingsRevision;
+      await persist();
+      // CLI availability belongs to the environment, not each folder. Reuse known results.
+      void (async () => {
+        await refreshConnections(location, true);
+        if (paired) await syncNow();
+        if (
+          generation !== locationGeneration ||
+          conversationId !== activeId ||
+          revision !== settingsRevision ||
+          !selectedLocation ||
+          locationKey(selectedLocation) !== locationKey(location) ||
+          JSON.stringify(selectedSettings) !== JSON.stringify(settings)
+        )
+          return;
+        const resolved = settingsAtLocation(selectedSettings, location);
+        if (JSON.stringify(resolved) !== JSON.stringify(selectedSettings)) changeSettings(resolved);
+      })().catch((e) => {
+        notice = String(e);
+      });
+    } finally {
+      selectingLocation = false;
+    }
+  }
+  function toggleArchive() {
+    if (!active || activeRunning) return;
+    active.archived = !active.archived;
+    active.updatedAt = new Date().toISOString();
+    revealConversation(active);
+    saveSoon();
+  }
+  function openConversation(c: Conversation) {
+    locationGeneration++;
+    folderBrowserOpen = false;
+    revealConversation(c);
+    locationPending = false;
+    activeId = c.id;
+    prompt = '';
+    editorOpen = false;
+    contextOpen = false;
+    view = 'chat';
+    void scrollToEnd();
+  }
+  function revealConversation(c: Conversation) {
+    conversationScope = c.archived ? 'history' : 'active';
+    const location = conversationLocation(c, workspace.fleet, installation);
+    const computerKey = `${conversationScope}/${location?.computerId ?? 'unassigned'}`;
+    collapsedGroups[computerKey] = false;
+    collapsedGroups[`${computerKey}/${location ? locationKey(location) : 'unassigned'}`] = false;
+  }
+  async function conversationTabKey(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const tablist = (event.currentTarget as HTMLElement).parentElement;
+    conversationScope =
+      event.key === 'Home'
+        ? 'active'
+        : event.key === 'End'
+          ? 'history'
+          : conversationScope === 'active'
+            ? 'history'
+            : 'active';
+    await tick();
+    tablist?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+  }
+  async function scrollToEnd() {
+    await tick();
+    if (nearBottom) messagesEnd?.scrollIntoView({ block: 'end' });
+  }
+  function remove() {
+    if (!deletion || run?.conversationId === deletion.id) return;
+    void cancelTitle(deletion.id).catch(() => {});
+    workspace.conversations = workspace.conversations.filter((c) => c.id !== deletion!.id);
+    if (activeId === deletion.id) {
+      newChat();
+    }
+    deletion = null;
+    saveSoon();
+  }
+  async function send(retry = false) {
+    if (!canSend || (!retry && !prompt.trim())) return;
+    nearBottom = true;
+    const now = new Date().toISOString();
+    const isNewConversation = !active;
+    if (!active) {
+      const c: Conversation = {
+        id: crypto.randomUUID(),
+        settings: structuredClone($state.snapshot(selectedSettings)),
+        location: selectedLocation ? { ...selectedLocation } : undefined,
+        title: prompt.trim().slice(0, 80),
+        titleStatus: 'pending',
+        createdAt: now,
+        updatedAt: now,
+        messages: [],
+      };
+      workspace.conversations.unshift(c);
+      activeId = c.id;
+    }
+    const conversation = workspace.conversations.find((c) => c.id === activeId)!;
+    if (conversation.archived) {
+      conversation.archived = false;
+      revealConversation(conversation);
+    }
+    if (retry && conversation.messages.at(-1)?.role === 'assistant') conversation.messages.pop();
+    if (!retry) {
+      conversation.messages.push({
+        id: crypto.randomUUID(),
+        role: 'user',
+        blocks: [{ type: 'markdown', text: prompt.trim() }],
+        status: 'complete',
+        createdAt: now,
+      });
+      prompt = '';
+    }
+    const history = historyFor(conversation);
+    const assistantId = crypto.randomUUID();
+    const responseSettings = structuredClone($state.snapshot(conversation.settings));
+    const runId = crypto.randomUUID();
+    rememberSettings(workspace.preferences, responseSettings);
+    conversation.messages.push({
+      id: assistantId,
+      role: 'assistant',
+      settings: responseSettings,
+      modelName: selectedModelName(responseSettings.model, availableModels),
+      executionLabel: responseSettings.connectionId
+        ? connectionLabel(workspace.fleet, responseSettings.connectionId)
+        : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
+      runId,
+      promptTokensEstimate: estimatePromptTokens(responseSettings, history),
+      blocks: [],
+      status: 'running',
+      createdAt: now,
+    });
+    conversation.updatedAt = now;
+    const message = () => conversation.messages.find((m) => m.id === assistantId)!;
+    run = { id: runId, conversationId: conversation.id };
+    const started = performance.now();
+    try {
+      await persist();
+      if (isNewConversation)
+        void nameConversation(
+          conversation.id,
+          responseSettings.provider,
+          history[0].text,
+          conversation.title,
+          responseSettings.connectionId,
+        );
+      const result = stopping
+        ? 'cancelled'
+        : await runAgent(
+            {
+              runId,
+              agent: responseSettings,
+              messages: history,
+              conversationId: conversation.id,
+              assistantId,
+              location: conversation.location?.path ? { ...conversation.location } : undefined,
+            },
+            (event) => {
+              if (stopping) void cancelRun(runId).catch(() => {});
+              const m = message();
+              applyRunEvent(m, event);
+              if (activeId === conversation.id) void scrollToEnd();
+            },
+          );
+      message().status = result;
+      if (result === 'complete') {
+        const s = responseSettings.connectionId
+          ? connectionStatuses[responseSettings.connectionId]
+          : statusFor(responseSettings.provider);
+        if (s) {
+          s.auth = 'ready';
+          s.detail = 'Connection verified by a completed response.';
+        }
+      }
+    } catch (e) {
+      message().status = 'error';
+      message().error = String(e);
+      if (String(e).includes('login needs attention')) {
+        const s = responseSettings.connectionId
+          ? connectionStatuses[responseSettings.connectionId]
+          : statusFor(responseSettings.provider);
+        if (s) {
+          s.auth = 'login';
+          s.detail = 'Sign in through the CLI, then send another message.';
+        }
+      }
+    } finally {
+      message().durationMs = performance.now() - started;
+      conversation.updatedAt = new Date().toISOString();
+      run = null;
+      stopping = false;
+      saveSoon();
+      void scrollToEnd();
+      void refreshUsage(responseSettings, true);
+    }
+  }
+  async function nameConversation(
+    id: string,
+    provider: ProviderId,
+    firstMessage: string,
+    fallback: string,
+    connectionId?: string,
+  ) {
+    try {
+      const result = await generateTitle(id, provider, firstMessage, connectionId);
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      if (
+        !conversation ||
+        conversation.titleStatus !== 'pending' ||
+        conversation.title !== fallback
+      )
+        return;
+      if (!result?.title?.trim() || result.title.length > 100) throw new Error('No title returned');
+      conversation.title = result.title;
+      conversation.titleStatus = 'generated';
+      conversation.titleSource = { provider: result.provider, model: result.model };
+      saveSoon();
+      void refreshUsage(conversation.settings, true);
+    } catch {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      if (conversation?.titleStatus === 'pending') {
+        conversation.titleStatus = 'fallback';
+        saveSoon();
+      }
+    }
+  }
+  async function stop() {
+    const ownedRun = run?.conversationId === activeId ? run : null;
+    const id = ownedRun?.id ?? observedReply?.runId;
+    if (!id || stopping) return;
+    if (!ownedRun) {
+      try {
+        await cancelRun(id, observedReply?.settings?.connectionId);
+      } catch (e) {
+        notice = String(e);
+      }
+      return;
+    }
+    stopping = true;
+    try {
+      await cancelRun(id, observedReply?.settings?.connectionId);
+    } catch (e) {
+      notice = String(e);
+      stopping = false;
+    }
+  }
+  async function login(id: ProviderId) {
+    try {
+      await signIn(id);
+      pendingSignIn = id;
+      signInDeadline = Date.now() + 10 * 60_000;
+      notice = `Finish signing in through ${providers[id].name}. We'll update the connection automatically; you can leave the sign-in window open.`;
+    } catch (e) {
+      notice = String(e);
+    }
+  }
+  async function copyConversation() {
+    if (!active) return;
+    try {
+      await navigator.clipboard.writeText(
+        active.messages
+          .map(
+            (m) =>
+              `## ${m.role === 'user' ? 'You' : providers[(m.settings ?? active.settings).provider].name}\n\n${messageText(m)}`,
+          )
+          .join('\n\n'),
+      );
+      notice = 'Conversation copied as Markdown.';
+    } catch {
+      notice = 'Clipboard unavailable. Select the conversation text to copy it.';
+    }
+  }
+  async function exportWorkspace() {
+    try {
+      if (desktop()) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const path = await invoke<string>('export_workspace', {
+          workspace: $state.snapshot(workspace),
+        });
+        notice = `Workspace exported to ${path}`;
+      } else {
+        const url = URL.createObjectURL(
+          new Blob([JSON.stringify($state.snapshot(workspace), null, 2)], {
+            type: 'application/json',
+          }),
+        );
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'agent-studio-workspace.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (e) {
+      notice = String(e);
+    }
+  }
+  function keyboard(event: KeyboardEvent) {
+    if (event.key === 'Tab' && (editorOpen || contextOpen || deletion)) {
+      const modal = document.querySelector('[aria-modal="true"]');
+      const elements = modal?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input, textarea, select, summary, [tabindex="0"]',
+      );
+      if (elements?.length) {
+        const first = elements[0],
+          last = elements[elements.length - 1];
+        if (
+          !modal?.contains(document.activeElement) ||
+          (event.shiftKey && document.activeElement === first)
+        ) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    if (event.key === 'Escape') {
+      editorOpen = false;
+      contextOpen = false;
+      deletion = null;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
+      event.preventDefault();
+      newChat();
+    }
+  }
+</script>
+
+<svelte:head
+  ><title>Agent Studio</title><meta
+    name="description"
+    content="Your AI agents, together in one local workspace."
+  /></svelte:head
+>
+<svelte:window onkeydown={keyboard} />
+
+<div class="app-shell" style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}>
+  <aside class="sidebar" id="conversation-sidebar">
+    <button
+      class="brand"
+      class:draggable-brand={desktop()}
+      data-tauri-drag-region={desktop() ? 'deep' : undefined}
+      onclick={() => (view = 'chat')}
+      aria-label="Back to conversation"
+      title="Back to conversation"
+    >
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span>agent<span class="brand-light">studio</span></span>
+    </button>
+    <div class="sidebar-section">
+      <span>CONVERSATIONS</span><button
+        class="icon-button"
+        onclick={() => newChat()}
+        aria-label="New conversation"
+        title="New conversation (Ctrl+N)"
+        aria-keyshortcuts="Control+N Meta+N"
+        disabled={!loaded}><Plus size={15} /></button
+      >
+    </div>
+    <label class="search"
+      ><Search size={14} /><input
+        aria-label="Search conversations"
+        placeholder="Search conversations"
+        bind:value={query}
+      />{#if query}<button
+          class="icon-button"
+          onclick={() => (query = '')}
+          aria-label="Clear search"><X size={12} /></button
+        >{/if}</label
+    >
+    <div class="conversation-tabs" role="tablist" aria-label="Conversation status">
+      {#each conversationGroups as group}
+        <button
+          id={`conversation-tab-${group.id}`}
+          role="tab"
+          aria-selected={conversationScope === group.id}
+          aria-controls={`conversation-panel-${group.id}`}
+          tabindex={conversationScope === group.id ? 0 : -1}
+          onclick={() => (conversationScope = group.id as 'active' | 'history')}
+          onkeydown={conversationTabKey}
+          ><span>{group.name}</span><span class="conversation-tab-count">{group.count}</span
+          ></button
+        >
+      {/each}
+    </div>
+    <div class="conversation-list">
+      {#each conversationGroups as group}
+        <div
+          id={`conversation-panel-${group.id}`}
+          class="conversation-section"
+          role="tabpanel"
+          tabindex="0"
+          aria-labelledby={`conversation-tab-${group.id}`}
+          hidden={conversationScope !== group.id}
+        >
+          {#each group.computers as computer}
+            {@const computerKey = `${group.id}/${computer.id}`}
+            <div
+              class="conversation-computer"
+              aria-label={`${computer.name} ${group.name.toLowerCase()} chats`}
+            >
+              <div class="computer-group-row">
+                <button
+                  class="computer-group-toggle"
+                  title={computer.name}
+                  aria-expanded={!collapsedGroups[computerKey]}
+                  onclick={() => (collapsedGroups[computerKey] = !collapsedGroups[computerKey])}
+                  ><Laptop size={13} /><span>{computer.name}</span><ChevronRight
+                    size={12}
+                    class={!collapsedGroups[computerKey] ? 'expanded-chevron' : ''}
+                  /></button
+                >
+                <button
+                  class="computer-new-chat"
+                  title={`New conversation on ${computer.name}`}
+                  aria-label={`New conversation on ${computer.name}`}
+                  disabled={!loaded ||
+                    selectingLocation ||
+                    !workspace.fleet.computers.some((c) => c.id === computer.id)}
+                  onclick={() => newChat(undefined, undefined, undefined, computer.id)}
+                  ><Plus size={14} /></button
+                >
+              </div>
+              {#if !collapsedGroups[computerKey]}{#each computer.folders as folder}
+                  {@const folderKey = `${computerKey}/${folder.id}`}
+                  <div class="conversation-folder" aria-label={folder.detail}>
+                    <div class="folder-group-row">
+                      <button
+                        class="folder-group-toggle"
+                        title={folder.detail}
+                        aria-expanded={!collapsedGroups[folderKey]}
+                        onclick={() => (collapsedGroups[folderKey] = !collapsedGroups[folderKey])}
+                        ><Folder size={14} /><span>{folder.name}</span><ChevronRight
+                          size={12}
+                          class={!collapsedGroups[folderKey] ? 'expanded-chevron' : ''}
+                        /></button
+                      >
+                      <button
+                        class="folder-new-chat"
+                        title={`New conversation in ${folder.name}`}
+                        aria-label={`New conversation in ${folder.name} on ${computer.name}`}
+                        disabled={!loaded || selectingLocation || !folder.location}
+                        onclick={() => newChat(undefined, undefined, folder.location)}
+                        ><Plus size={14} /></button
+                      >
+                    </div>
+                    {#if !collapsedGroups[folderKey]}<div class="folder-conversations">
+                        {#each folder.conversations as c}<button
+                            class="conversation-item"
+                            class:current={activeId === c.id && view === 'chat'}
+                            aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
+                            onclick={() => openConversation(c)}
+                            title={c.title}
+                            ><span>{c.title}</span
+                            >{#if c.messages.some((m) => m.status === 'running')}<i
+                                class="pulse-dot"
+                              ></i>{/if}</button
+                          >{/each}
+                      </div>{/if}
+                  </div>
+                {/each}{/if}
+            </div>
+          {:else}<p class="sidebar-empty">
+              {query
+                ? `No matches in ${group.name.toLowerCase()}.`
+                : group.id === 'active'
+                  ? 'No active conversations yet.'
+                  : 'No conversations in history.'}
+            </p>{/each}
+        </div>
+      {/each}
+    </div>
+    <div class="sidebar-tools">
+      <button
+        class="icon-button connections-button"
+        class:active={view === 'connections'}
+        aria-label="Connections"
+        aria-pressed={view === 'connections'}
+        title={view === 'connections' ? 'Back to conversation' : 'Connections'}
+        onclick={() => (view = view === 'connections' ? 'chat' : 'connections')}
+        ><Plug size={17} aria-hidden="true" /></button
+      >
+    </div>
+    <SidebarResize onresize={(width) => (sidebarWidth = width)} />
+  </aside>
+
+  <main class="main-area">
+    <WindowTitlebar title={viewTitle} onerror={(message) => (notice = message)} />
+    {#if storageError}<div class="error-banner" role="alert">
+        <CircleAlert size={17} />{storageError}
+      </div>{/if}
+    {#if notice}<div class="notice" role="status">
+        <span>{notice}</span><button
+          class="icon-button"
+          aria-label="Dismiss notification"
+          onclick={() => (notice = '')}><X size={16} /></button
+        >
+      </div>{/if}
+    {#if !desktop()}<div class="preview-banner">
+        <Laptop size={14} />Browser preview · Run <code>npm run tauri dev</code> to chat through your
+        installed CLIs.
+      </div>{/if}
+
+    {#if view === 'chat'}
+      <section class="chat-layout">
+        <div class="chat-toolbar" aria-label="Conversation settings">
+          <div class="chat-configuration">
+            <div class="chat-setting computer-setting">
+              <span>Computer</span><ChoicePicker
+                label="Computer"
+                title={active
+                  ? 'Fixed for this conversation. Start a new conversation to change it.'
+                  : undefined}
+                value={selectedComputerId}
+                options={[
+                  ...workspace.fleet.computers.map((c) => ({ id: c.id, name: c.name })),
+                  ...(selectedComputerId && !selectedComputer
+                    ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
+                    : []),
+                ]}
+                disabled={!loaded || !!run || activeRunning || selectingLocation || !!active}
+                onchange={chooseComputer}
+              >
+                {#snippet icon()}<Laptop size={16} />{/snippet}
+              </ChoicePicker>
+            </div>
+            <div class="chat-setting folder-setting">
+              <span>Folder</span><ChoicePicker
+                label="Folder"
+                title={selectedLocation?.path}
+                value={selectedLocation ? locationKey(selectedLocation) : 'browse'}
+                options={[
+                  ...savedLocations.map((l) => ({
+                    id: locationKey(l),
+                    name: folderName(l.path),
+                    detail:
+                      workspace.fleet.environments.find((e) => e.id === l.environmentId)?.name ??
+                      'Environment',
+                    title: l.path,
+                  })),
+                  ...(selectedLocation &&
+                  !savedLocations.some((l) => locationKey(l) === locationKey(selectedLocation))
+                    ? [
+                        {
+                          id: locationKey(selectedLocation),
+                          name: selectedLocation.path
+                            ? folderName(selectedLocation.path)
+                            : 'No folder',
+                          title: selectedLocation.path,
+                        },
+                      ]
+                    : []),
+                  { id: 'browse', name: 'Browse folders…' },
+                ]}
+                disabled={!loaded ||
+                  !selectedComputer ||
+                  !!run ||
+                  activeRunning ||
+                  selectingLocation ||
+                  !!active}
+                onchange={(id) => {
+                  if (active) return;
+                  const location = savedLocations.find((l) => locationKey(l) === id);
+                  if (location) void chooseLocation(location).catch((e) => (notice = String(e)));
+                  else folderBrowserOpen = true;
+                }}
+              >
+                {#snippet icon()}<Folder size={16} />{/snippet}
+              </ChoicePicker>
+            </div>
+            <div class="chat-setting agent-setting">
+              <span>Agent</span><ChoicePicker
+                label="Agent"
+                title={active
+                  ? 'Fixed for this conversation. Start a new conversation to change it.'
+                  : undefined}
+                value={selectedAgentOption}
+                options={agentOptions}
+                disabled={!loaded ||
+                  !!run ||
+                  activeRunning ||
+                  selectingLocation ||
+                  (desktop() && !selectedLocation && !active) ||
+                  !!active}
+                onchange={chooseAgent}
+              >
+                {#snippet icon()}<Bot size={16} />{/snippet}
+              </ChoicePicker>
+            </div>
+            <div class="chat-setting model-setting">
+              <span>Model</span><ChoicePicker
+                label="Model"
+                value={selectedSettings.model}
+                options={availableModels}
+                disabled={!loaded ||
+                  (desktop() && (locationPending || (!selectedLocation && !active)))}
+                onchange={chooseModel}
+              >
+                {#snippet icon()}<Cpu size={16} />{/snippet}
+              </ChoicePicker>
+            </div>
+            <div class="chat-setting">
+              <span>Reasoning</span><ChoicePicker
+                label="Reasoning"
+                value={selectedSettings.reasoning}
+                options={reasoningOptions}
+                disabled={!loaded ||
+                  reasoningOptions.length < 2 ||
+                  (desktop() && (locationPending || (!selectedLocation && !active)))}
+                onchange={(value) =>
+                  changeSettings({ ...selectedSettings, reasoning: value as Reasoning })}
+              >
+                {#snippet icon()}<Brain size={16} />{/snippet}
+              </ChoicePicker>
+            </div>
+          </div>
+          <div class="toolbar-actions">
+            <button
+              class="icon-button"
+              title="Model context"
+              aria-label="Model context"
+              disabled={!loaded || locationPending || (desktop() && !selectedLocation && !active)}
+              onclick={async () => {
+                await saveQueue;
+                contextOpen = true;
+              }}><BookOpen size={16} /></button
+            >
+            {#if active}<button
+                class="icon-button"
+                disabled={activeRunning}
+                onclick={toggleArchive}
+                title={active.archived ? 'Restore conversation' : 'Move to history'}
+                aria-label={active.archived ? 'Restore conversation' : 'Move to history'}
+                >{#if active.archived}<ArchiveRestore size={16} />{:else}<Archive
+                    size={16}
+                  />{/if}</button
+              ><button
+                class="icon-button"
+                onclick={copyConversation}
+                title="Copy conversation"
+                aria-label="Copy conversation"><Copy size={16} /></button
+              ><button
+                class="icon-button"
+                disabled={activeRunning}
+                onclick={() =>
+                  (deletion = { type: 'conversation', id: active.id, name: active.title })}
+                aria-label="Delete conversation"><Trash2 size={16} /></button
+              >{/if}<button
+              class="icon-button"
+              onclick={() => (editorOpen = true)}
+              disabled={!loaded || !!run || activeRunning}
+              title="Chat instructions"
+              aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
+            >
+            <button
+              class="icon-button"
+              title="Refresh model list"
+              aria-label="Refresh model list"
+              disabled={modelsLoading ||
+                !!run ||
+                activeRunning ||
+                locationPending ||
+                (!selectedLocation && !active)}
+              onclick={() => void refreshModels()}
+              ><RefreshCw size={15} class={modelsLoading ? 'spinning' : ''} /></button
+            >
+          </div>
+        </div>
+        {#if nextReplyChanged}
+          <p class="next-reply-settings" role="status">
+            Next message: {selectedModelName(selectedSettings.model, availableModels)} · {reasoningName(
+              selectedSettings.reasoning,
+            )} reasoning
+          </p>
+        {/if}
+        <div
+          class="chat-scroll"
+          bind:this={chatScroll}
+          onscroll={() => {
+            if (chatScroll)
+              nearBottom =
+                chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 100;
+          }}
+        >
+          <div class="message-column">
+            {#if active?.messages.length}
+              {#each active.messages as m, i (m.id)}<MessageView
+                  message={m}
+                  timeTotal={timeTotals.get(m.id)}
+                  switchNotice={switchNotices.get(m.id)}
+                  agent={active.settings}
+                  canRetry={i === active.messages.length - 1 &&
+                    (m.status === 'error' || m.status === 'cancelled') &&
+                    !run}
+                  retry={() => void send(true)}
+                />{/each}
+            {:else}<div class="chat-empty">
+                <span
+                  class="large-provider"
+                  style:--provider-color={providers[selectedAgent.provider].color}
+                  >{providers[selectedAgent.provider].mark}</span
+                ><span class="eyebrow">A CONVERSATION WITH {selectedAgent.name.toUpperCase()}</span>
+                <h1>What’s on your mind?</h1>
+                <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
+                <div class="suggestions">
+                  {#each ['Help me think through an idea', 'Explain something complex, simply', 'Turn a rough plan into next steps'] as suggestion}<button
+                      onclick={() => (prompt = suggestion)}
+                      >{suggestion}<ArrowUpRight size={14} /></button
+                    >{/each}
+                </div>
+              </div>{/if}
+            <div bind:this={messagesEnd}></div>
+          </div>
+        </div>
+        <div class="composer-area">
+          {#if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
+              <Folder size={15} />Choose a computer and folder to see its available CLIs.<button
+                class="text-button"
+                disabled={!selectedComputer}
+                onclick={() => (folderBrowserOpen = true)}
+                >Choose folder<ArrowRight size={13} /></button
+              >
+            </div>
+          {:else if !selectedStatus && desktop()}<div class="setup-hint">
+              {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.
+              {:else if selectedSettings.connectionId && !selectedConnection}<Plug size={15} />This
+                CLI connection is no longer available. Choose another connection.
+              {:else}<RefreshCw size={15} class="spinning" />Checking this folder’s CLIs…{/if}
+            </div>
+          {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
+              <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
+                class="text-button"
+                onclick={() => (view = 'connections')}
+                >Open Connections<ArrowRight size={13} /></button
+              >
+            </div>{/if}
+          {#if run && !activeRunning}<button
+              class="setup-hint"
+              onclick={() => {
+                const c = workspace.conversations.find((c) => c.id === run?.conversationId);
+                if (c) openConversation(c);
+              }}
+              ><i class="pulse-dot"></i>An agent is responding in another conversation. View it<ArrowUpRight
+                size={14}
+              /></button
+            >{/if}
+          <form
+            class="composer"
+            onsubmit={(e) => {
+              e.preventDefault();
+              void send();
+            }}
+          >
+            <textarea
+              bind:this={composerInput}
+              aria-label="Message"
+              title="Enter to send · Shift + Enter for a new line"
+              placeholder={`Message ${selectedAgent.name}…`}
+              bind:value={prompt}
+              rows="3"
+              maxlength="30000"
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}></textarea>
+            <div class="composer-bottom">
+              <span
+                title={selectedSettings.provider === 'gemini'
+                  ? 'Gemini conversations cannot use tools.'
+                  : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'}
+                ><span class="status-dot"></span>{selectedSettings.connectionId
+                  ? connectionLabel(workspace.fleet, selectedSettings.connectionId)
+                  : providers[selectedAgent.provider].account} via {selectedAgent.provider ===
+                'gemini'
+                  ? 'Antigravity'
+                  : providers[selectedAgent.provider].name} CLI</span
+              >{#if activeRunning}<button
+                  class="stop-button"
+                  type="button"
+                  onclick={stop}
+                  disabled={stopping}
+                  ><Square size={12} fill="currentColor" />{stopping
+                    ? 'Stopping…'
+                    : 'Stop response'}</button
+                >{:else}<button
+                  class="send-button"
+                  type="submit"
+                  disabled={!canSend || !prompt.trim()}
+                  aria-label="Send message"><ArrowUp size={19} /></button
+                >{/if}
+            </div>
+          </form>
+          <UsagePanel
+            conversation={active}
+            settings={selectedSettings}
+            model={currentModel}
+            snapshot={selectedUsage}
+            loading={!!usageLoading[selectedUsageKey]}
+            error={usageErrors[selectedUsageKey] ?? ''}
+            preview={!desktop()}
+          />
+        </div>
+      </section>
+    {:else if view === 'connections'}
+      <FleetManager
+        {workspace}
+        {installation}
+        {wslDiscovery}
+        {wslError}
+        statuses={connectionStatuses}
+        {presence}
+        {syncStatus}
+        {syncError}
+        {paired}
+        save={persist}
+        {refresh}
+        connect={pair}
+        disconnect={unpair}
+        resolveConflict={async () => {
+          const backup = await resolveRelaySettings();
+          notice = `Local workspace backed up to ${backup}. Using the relay’s computer and account settings.`;
+          await syncNow();
+        }}
+        chat={newChat}
+        providerStatuses={statuses}
+        {login}
+        {exportWorkspace}
+        running={!!run}
+      />
+    {/if}
+  </main>
+</div>
+{#if folderBrowserOpen && !active}
+  <FolderBrowser
+    computerId={selectedComputerId}
+    computerName={selectedComputer?.name ?? 'Computer'}
+    environments={computerEnvironments}
+    initialEnvironment={selectedLocation?.environmentId ?? selectedConnection?.environmentId}
+    browse={listFolders}
+    choose={(location) => chooseLocation(location, true)}
+    close={() => (folderBrowserOpen = false)}
+  />
+{/if}
+{#if contextOpen}<ModelContext
+    settings={selectedSettings}
+    location={selectedLocation?.path ? selectedLocation : undefined}
+    modelName={selectedModelName(selectedSettings.model, availableModels)}
+    accountName={workspace.fleet.accounts.find((a) => a.id === selectedConnection?.accountId)
+      ?.name ?? 'Existing CLI login'}
+    computerName={selectedComputer?.name ?? 'This computer'}
+    close={() => (contextOpen = false)}
+    useSkill={(name, path) => {
+      prompt = `Use the skill ${JSON.stringify(name)} at ${JSON.stringify(path)} for this request.\n\n${prompt}`;
+      contextOpen = false;
+      void tick().then(() =>
+        document.querySelector<HTMLTextAreaElement>('[aria-label="Message"]')?.focus(),
+      );
+    }}
+  />{/if}
+{#if editorOpen}<ChatInstructions
+    instructions={selectedSettings.instructions}
+    close={() => (editorOpen = false)}
+    save={(instructions) => {
+      changeSettings({ ...selectedSettings, instructions });
+      editorOpen = false;
+    }}
+  />{/if}
+{#if deletion}<div class="modal-backdrop" role="presentation">
+    <div
+      class="modal small-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="delete-title"
+      tabindex="-1"
+    >
+      <h2 id="delete-title">Delete {deletion.type}?</h2>
+      <p>
+        “{deletion.name}” will be removed from this workspace. This cannot be undone.
+      </p>
+      <footer>
+        <button class="secondary" onclick={() => (deletion = null)}>Cancel</button><button
+          class="danger"
+          onclick={remove}>Delete {deletion.type}</button
+        >
+      </footer>
+    </div>
+  </div>{/if}

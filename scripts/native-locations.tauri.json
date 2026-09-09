@@ -1,0 +1,6 @@
+{
+  "identifier": "com.vinicius.agentstudio.locations-qa",
+  "productName": "Agent Studio Folder QA",
+  "build": { "beforeDevCommand": "" },
+  "app": { "windows": [{ "title": "Agent Studio Folder QA", "width": 1380, "height": 900, "minWidth": 840, "minHeight": 640 }] }
+}

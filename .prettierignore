@@ -1,0 +1,10 @@
+node_modules
+build
+.svelte-kit
+src-tauri/target
+src-tauri/gen
+src-tauri/icons
+package-lock.json
+artifacts
+test-results
+playwright-report

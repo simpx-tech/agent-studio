@@ -1,0 +1,18 @@
+{
+  "identifier": "com.vinicius.agentstudio.replies-qa",
+  "productName": "Agent Studio Replies QA",
+  "build": { "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Replies QA",
+        "decorations": false,
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "backgroundColor": "#141615"
+      }
+    ]
+  }
+}
