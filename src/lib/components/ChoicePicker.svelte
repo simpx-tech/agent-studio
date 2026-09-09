@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
   import { Check, ChevronDown } from '@lucide/svelte';
+  import { anchorPopover } from '$lib/anchorPopover';
   type Option = {
     id: string;
     name: string;
@@ -31,7 +32,7 @@
   } = $props();
   const id = $props.id();
   let root: HTMLDivElement;
-  let trigger: HTMLButtonElement;
+  let trigger = $state<HTMLButtonElement>();
   let open = $state(false);
   let highlighted = $state(0);
   let search = '';
@@ -41,7 +42,14 @@
   async function highlight(index: number) {
     highlighted = Math.max(0, Math.min(index, options.length - 1));
     await tick();
-    document.getElementById(`${id}-option-${highlighted}`)?.scrollIntoView({ block: 'nearest' });
+    const option = document.getElementById(`${id}-option-${highlighted}`);
+    const list = document.getElementById(`${id}-list`);
+    if (option && list) {
+      const item = option.getBoundingClientRect();
+      const bounds = list.getBoundingClientRect();
+      if (item.top < bounds.top) list.scrollTop -= bounds.top - item.top;
+      else if (item.bottom > bounds.bottom) list.scrollTop += item.bottom - bounds.bottom;
+    }
   }
 
   $effect(() => {
@@ -51,6 +59,9 @@
   function show() {
     if (disabled) return;
     open = true;
+    // Safari does not focus buttons on a pointer click. Keep combobox keyboard
+    // navigation and focus ownership consistent after opening with touch/mouse.
+    trigger?.focus({ preventScroll: true });
     search = '';
     void highlight(options.findIndex((option) => option.id === value));
   }
@@ -59,7 +70,7 @@
     if (!options[index]) return;
     onchange(options[index].id);
     open = false;
-    trigger.focus();
+    trigger?.focus({ preventScroll: true });
   }
 
   function keyboard(event: KeyboardEvent) {
@@ -123,7 +134,7 @@
   </button>
 
   {#if open}
-    <div class="picker-popover">
+    <div class="picker-popover" popover="manual" use:anchorPopover={trigger!}>
       <div class="picker-heading" id={`${id}-label`}>Choose {label.toLowerCase()}</div>
       <div id={`${id}-list`} role="listbox" aria-labelledby={`${id}-label`} class="picker-options">
         {#each options as option, index (option.id)}
@@ -188,10 +199,6 @@
     background: #141a12;
     border-color: #34412a;
   }
-  .field .picker-popover {
-    width: max(100%, 250px);
-    max-width: calc(100vw - 110px);
-  }
   .picker-trigger.expanded {
     color: var(--green);
   }
@@ -210,11 +217,12 @@
     text-align: left;
   }
   .picker-popover {
-    position: absolute;
+    position: fixed;
     z-index: 30;
-    top: calc(100% + 8px);
-    left: 0;
-    width: min(288px, calc(100vw - 150px));
+    inset: auto;
+    margin: 0;
+    color: var(--text);
+    overflow: hidden;
     padding: 6px;
     border: 1px solid #3a4433;
     border-radius: 12px;
@@ -223,7 +231,12 @@
       0 16px 40px #0006,
       0 2px 8px #0004;
   }
+  .picker-popover:popover-open {
+    display: flex;
+    flex-direction: column;
+  }
   .picker-heading {
+    flex-shrink: 0;
     padding: 9px 10px 11px;
     color: #99a58c;
     font-size: 9px;
@@ -231,8 +244,10 @@
     text-transform: uppercase;
   }
   .picker-options {
-    max-height: min(320px, calc(100dvh - 220px));
+    min-height: 0;
+    max-height: 360px;
     overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .picker-option {
     width: 100%;
@@ -288,18 +303,6 @@
     color: var(--green);
   }
   @media (max-width: 650px) {
-    .picker-popover {
-      position: fixed;
-      left: 12px !important;
-      right: 12px !important;
-      top: auto;
-      bottom: max(12px, env(safe-area-inset-bottom));
-      width: auto;
-      z-index: 60;
-    }
-    .picker-options {
-      max-height: min(360px, calc(var(--mobile-height, 100dvh) - 100px));
-    }
     .picker-option {
       min-height: 48px;
     }

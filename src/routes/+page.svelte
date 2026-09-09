@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
+  import { trackMobileViewport } from '$lib/mobileViewport';
   import {
     ArrowUp,
     ArrowUpRight,
@@ -193,7 +194,6 @@
   let editorOpen = $state(false);
   let contextOpen = $state(false);
   let deletion = $state<{ type: 'conversation'; id: string; name: string } | null>(null);
-  let messagesEnd = $state<HTMLDivElement>();
   let composerInput = $state<HTMLTextAreaElement>();
   let chatScroll = $state<HTMLDivElement>();
   let nearBottom = true;
@@ -434,13 +434,7 @@
     network();
     window.addEventListener('online', network);
     window.addEventListener('offline', network);
-    const viewport = () =>
-      document.documentElement.style.setProperty(
-        '--mobile-height',
-        `${window.visualViewport?.height ?? window.innerHeight}px`,
-      );
-    viewport();
-    window.visualViewport?.addEventListener('resize', viewport);
+    const stopViewport = trackMobileViewport();
     let focusTimer: ReturnType<typeof setTimeout>;
     const onReturn = () => {
       if (!loaded || document.visibilityState === 'hidden') return;
@@ -566,7 +560,7 @@
     return () => {
       window.removeEventListener('online', network);
       window.removeEventListener('offline', network);
-      window.visualViewport?.removeEventListener('resize', viewport);
+      stopViewport();
       clearTimeout(focusTimer);
       clearInterval(loginPoll);
       clearInterval(usagePoll);
@@ -1080,7 +1074,7 @@
   }
   async function scrollToEnd() {
     await tick();
-    if (nearBottom) messagesEnd?.scrollIntoView({ block: 'end' });
+    if (nearBottom && chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
   }
   function remove() {
     if (!deletion || run?.conversationId === deletion.id) return;
@@ -1898,7 +1892,6 @@
                 <h1>What’s on your mind?</h1>
                 <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
               </div>{/if}
-            <div bind:this={messagesEnd}></div>
           </div>
         </div>
         <div class="composer-area">

@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## iPhone keyboard layout and anchored dropdowns — 2026-09-09
+
+- The mobile shell is fixed to the visual viewport's height and vertical offset while the keyboard occludes the layout viewport. Resize, pan, focus, return, and delayed animation updates are handled together. Dismissal removes the stored height/offset, restores the dynamic CSS viewport and home-indicator inset, and clears document scroll. Pinch zoom remains browser-controlled. Message updates and highlighted dropdown options scroll only their own container.
+- Shared ChoicePicker menus use the browser top layer and measured trigger coordinates, with horizontal clamping, upward placement when needed, and bounded option scrolling. This replaces the mobile bottom-sheet override and prevents clipping by the horizontally scrolling toolbar and dialogs. Safari pointer activation explicitly focuses the combobox without scrolling.
+- New regression scenarios simulate separate keyboard height/pan signals, typing, scroll-only offset changes, stale 44px dismissal geometry, repeated focus, a delayed geometry update without another resize event, and restored screen height. Dropdown checks cover trigger adjacency, screen bounds, horizontal toolbar scrolling, keyboard selection, focus, and no document scroll. Screenshots from Chromium and Windows WebKit 26.6 were reviewed under `artifacts/mobile-layout/` and `test-results/`.
+- An additional Windows WebKit diagnostic completed hosted pairing, a synthetic remote reply, stop, session restoration, history, and drawer checks. Its final offline reload failed with `WebKit encountered an internal error`; that additional WebKit offline check remains unverified. That diagnostic confirmed the real `SameSite=Strict` response header because this WebKit automation run reported `None` in cookie metadata. The normal Chromium cookie assertion remains unchanged. Physical iPhone home-screen keyboard animation and home-indicator behavior still require device confirmation; simulated visual viewport signals are not a real software keyboard.
+- Required pipeline evidence: `artifacts/mobile-layout/verify.log`, `rust-clippy.log`, and `rust-tests.log`. No provider credentials or native execution routing changed.
+
 ## Public VPS deployment — 2026-09-09
 
 - Deployed application commit `12f2d6d` to `72.61.63.95` as a dedicated unprivileged systemd service behind the existing Caddy proxy. Public endpoint: https://studio.72.61.63.95.sslip.io. The VPS production build and all 66 unit tests passed; Node's release archive and the transferred source archive were checksum verified.

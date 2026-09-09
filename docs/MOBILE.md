@@ -4,6 +4,10 @@ The initial VPS deployment is live at [studio.72.61.63.95.sslip.io](https://stud
 
 The same Agent Studio frontend runs as an installable web app. Its server serves both the public app build and the authenticated relay API on one origin. Your phone can select a computer and folder, start chats, change the next reply’s model/reasoning, send image attachments, read progress and history, inspect context/usage, and stop remote replies. The computer running each CLI must keep Agent Studio open and paired.
 
+The phone shell follows both the height and vertical offset of the visible viewport while the keyboard is open. After dismissal it returns to the CSS dynamic viewport, clears stale offsets, and restores the home-indicator inset. The keyboard does not need that bottom inset. Focus transitions are checked through their animation, and pinch zoom stays under browser control. Message updates scroll only the conversation pane. These choices account for the distinction between the [layout and visual viewports](https://developer.mozilla.org/en-US/docs/Web/API/VisualViewport).
+
+Shared dropdowns open next to their trigger, shift inside the visible screen, and open upward when there is more room above. The browser top layer keeps them outside the horizontally scrolling settings row and dialog clipping. Scrolling a dropdown does not scroll the surrounding page or toolbar.
+
 ## Hosting
 
 The existing Docker setup builds the frontend in a separate stage and includes it in the relay image:
