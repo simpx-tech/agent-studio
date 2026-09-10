@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -6,6 +6,14 @@ import { createRelay } from '../relay/server';
 import { emptyShared } from '../src/lib/sync';
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+
+async function expectSynced(page: Page) {
+  await page.waitForResponse(
+    (response) => response.url().endsWith('/v1/heartbeat') && response.status() === 200,
+  );
+  await expect(page.locator('.browser-status [role="status"]')).toHaveCount(0);
+  await expect(page.getByText('Connected to your server', { exact: true })).toHaveCount(0);
+}
 
 test('pairing survives a relay restart and worker update, and startup retries an unavailable server', async ({
   page,
@@ -28,8 +36,7 @@ test('pairing survives a relay restart and worker update, and startup retries an
     await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
     await page.getByLabel('Relay pairing key').fill(token);
     await page.getByRole('button', { name: 'Pair & sync' }).click();
-    const connected = page.getByText('Connected to your server', { exact: true });
-    await expect(connected).toBeVisible();
+    await expectSynced(page);
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     const installation = await page.evaluate(() =>
       localStorage.getItem('agent-studio.installation'),
@@ -61,10 +68,10 @@ test('pairing survives a relay restart and worker update, and startup retries an
     await expect
       .poll(() => page.evaluate(async () => !!(await navigator.serviceWorker.ready).waiting))
       .toBe(true);
-    await expect(connected).toBeVisible();
+    await expect(page.getByText('Connected to your server', { exact: true })).toHaveCount(0);
     await page.goto('about:blank');
     await page.goto(url);
-    await expect(connected).toBeVisible();
+    await expectSynced(page);
     await expect
       .poll(() =>
         page.evaluate(async () =>
@@ -88,8 +95,11 @@ test('pairing survives a relay restart and worker update, and startup retries an
         page.getByRole('status').filter({ hasText: /Server unavailable/ }),
       ).toBeVisible();
       unavailablePath = '';
-      await expect(connected).toBeVisible({ timeout: 15_000 });
+      await expectSynced(page);
     }
+    await expect(page.getByRole('button', { name: 'Install app', exact: true })).toBeVisible();
+    await page.evaluate(() => window.dispatchEvent(new Event('appinstalled')));
+    await expect(page.locator('.browser-status')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('mobile-update-reconnected.png') });
     expect(
       await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
@@ -100,7 +110,7 @@ test('pairing survives a relay restart and worker update, and startup retries an
     await page.getByRole('button', { name: 'Connections', exact: true }).click();
     await page.getByText('Sync settings', { exact: true }).click();
     await page.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
-    await expect(connected).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
     await page.reload();
     await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
     expect(
@@ -257,7 +267,7 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
       'HttpOnly; SameSite=Strict',
     );
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(page.getByText('Connected to your server', { exact: true })).toBeVisible();
+    await expectSynced(page);
     await page.screenshot({ path: testInfo.outputPath('mobile-connections.png') });
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
@@ -300,7 +310,7 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await page.getByRole('button', { name: 'Stop response' }).click();
     await expect.poll(() => running.size).toBe(0);
     await page.reload();
-    await expect(page.getByText('Connected to your server', { exact: true })).toBeVisible();
+    await expectSynced(page);
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this draft');

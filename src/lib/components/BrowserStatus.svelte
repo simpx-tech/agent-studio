@@ -48,25 +48,24 @@
   }
 </script>
 
-<div class="browser-status">
-  <div class="browser-status-row">
-    <span role="status"
-      >{#if offline}<WifiOff size={15} />Offline · Reconnect to control agents.
-      {:else if error}<WifiOff size={15} />Server unavailable · Reconnect to control agents.
-      {:else if paired}<span class="browser-online"></span>Connected to your server
-      {:else}<Link size={15} />Connect your computers{/if}</span
-    >
-    {#if !paired || error}<button class="text-button" onclick={connect}
-        >{paired ? 'Reconnect' : 'Set up'}</button
-      >{/if}
-    {#if !installed}<button
-        class="text-button install-button"
-        onclick={install}
-        aria-expanded={help}><Download size={14} />Install app</button
-      >{/if}
-  </div>
-  {#if help}<p>
-      On iPhone, open this page in Safari, tap Share, then Add to Home Screen. On Android, choose
-      Install app or Add to Home screen in your browser menu.
-    </p>{/if}
-</div>
+{#if offline || error || !paired || !installed}<div class="browser-status">
+    <div class="browser-status-row">
+      {#if offline || error || !paired}<span role="status"
+          >{#if offline}<WifiOff size={15} />Offline · Reconnect to control agents.
+          {:else if error}<WifiOff size={15} />Server unavailable · Reconnect to control agents.
+          {:else}<Link size={15} />Connect your computers{/if}</span
+        >{/if}
+      {#if !paired || error}<button class="text-button" onclick={connect}
+          >{paired ? 'Reconnect' : 'Set up'}</button
+        >{/if}
+      {#if !installed}<button
+          class="text-button install-button"
+          onclick={install}
+          aria-expanded={help}><Download size={14} />Install app</button
+        >{/if}
+    </div>
+    {#if help}<p>
+        On iPhone, open this page in Safari, tap Share, then Add to Home Screen. On Android, choose
+        Install app or Add to Home screen in your browser menu.
+      </p>{/if}
+  </div>{/if}

@@ -1,5 +1,9 @@
 # Verification — 2026-09-08
 
+## Quiet mobile connection status — 2026-09-10
+
+Removed the persistent connected message and green dot. A healthy installed PWA now has no status row; browser tabs retain the Install app action. Setup, offline, and server-error notices remain, along with detailed sync state in Connections. Existing mobile regressions now confirm successful heartbeat responses independently of the removed text, verify that the installed row disappears, and retain restart, update, reload, outage, and disconnect coverage. The connected screenshot was visually reviewed. `npm run verify` passed (71 unit/HTTP tests, 65 browser scenarios, zero diagnostics); Rust formatting, Clippy, and 63 Rust tests passed with four existing opt-in tests ignored. Both mobile scenarios also passed in Windows WebKit. Evidence is under `artifacts/pwa-quiet-status/`. No native provider or physical-phone execution was needed for this presentation change.
+
 ## PWA pairing across updates — 2026-09-10
 
 - Browser sessions previously lived only in the relay's memory, so a deployment restart discarded every phone's pairing. Session-ID digests now persist separately from workspace/public files, with atomic restricted writes and pairing-key binding. Coverage verifies restart/reload, daily renewal with retained Secure/HttpOnly/SameSite flags, inactivity expiry, durable logout, key rotation including switching back, unreadable-file preservation, failed writes, and rejection of a digest used as a cookie. Older memory-only sessions require one final pairing when first upgrading.
