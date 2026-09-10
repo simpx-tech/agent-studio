@@ -1806,11 +1806,8 @@ code {
     overflow: hidden;
     overscroll-behavior: none;
   }
-  :root {
-    --safe-area-top: env(safe-area-inset-top, 0px);
-    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
-    --mobile-safe-top: max(0px, calc(var(--safe-area-top) - var(--mobile-top, 0px)));
-  }
+  /* viewport-fit=auto lets the browser provide a safe content rectangle.
+     Applying device env() insets here would reserve that area a second time. */
   .app-shell {
     position: fixed;
     top: var(--mobile-top, 0px);
@@ -1820,13 +1817,10 @@ code {
     grid-template-rows: minmax(0, 1fr);
     height: var(--mobile-height, 100dvh);
     min-height: 0;
-    padding-top: var(--mobile-safe-top);
   }
   .main-area {
     height: auto;
     min-height: 0;
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
   }
   .sidebar {
     position: fixed;
@@ -1834,7 +1828,7 @@ code {
     height: var(--mobile-height, 100dvh);
     width: min(320px, calc(100vw - 44px));
     z-index: 40;
-    padding: var(--mobile-safe-top) 14px var(--safe-area-bottom);
+    padding: 0 14px;
     visibility: hidden;
     transform: translateX(-100%);
     box-shadow: 16px 0 60px #0005;
@@ -1862,7 +1856,7 @@ code {
   }
   .mobile-close {
     position: absolute;
-    top: var(--mobile-safe-top);
+    top: 0;
     right: 8px;
   }
   .mobile-menu {
@@ -1965,14 +1959,8 @@ code {
   }
   .composer-area {
     --composer-inset: 12px;
-    padding: 8px 12px max(10px, var(--safe-area-bottom));
+    padding: 8px 12px 10px;
     flex-shrink: 0;
-  }
-  .mobile-keyboard .composer-area {
-    padding-bottom: 10px;
-  }
-  .mobile-keyboard .sidebar {
-    padding-bottom: 0;
   }
   .chat-toolbar {
     padding: 0 12px;

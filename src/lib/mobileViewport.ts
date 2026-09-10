@@ -10,7 +10,6 @@ export function trackMobileViewport() {
   function reset() {
     root.style.removeProperty('--mobile-height');
     root.style.removeProperty('--mobile-top');
-    root.classList.remove('mobile-keyboard');
   }
   function update() {
     frame = 0;
@@ -25,7 +24,6 @@ export function trackMobileViewport() {
     if (keyboard) {
       root.style.setProperty('--mobile-height', `${height}px`);
       root.style.setProperty('--mobile-top', `${Math.max(0, viewport?.offsetTop ?? 0)}px`);
-      root.classList.add('mobile-keyboard');
     } else {
       reset();
       // The page and shell share 100dvh at rest. Fullscreen vh/innerHeight can

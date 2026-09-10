@@ -136,13 +136,8 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
   await page.goto('/');
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
   await expect(input).toBeVisible();
-  // Desktop automation has no notch/home indicator. Supply nonzero insets and
-  // check the tracks themselves, including hit testing at both vertical edges.
-  await page.addStyleTag({
-    content: `
-    :root { --safe-area-top: 59px; --safe-area-bottom: 34px; }
-  `,
-  });
+  // Check the tracks themselves, including hit testing at both vertical edges.
+  // The browser provides the safe rectangle; the app must not pad it again.
   const bottom = (selector: string) =>
     page.locator(selector).evaluate((node) => Math.round(node.getBoundingClientRect().bottom));
   await expect.poll(() => bottom('.app-shell')).toBe(844);
@@ -168,12 +163,12 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
       ).toBe(true);
     }
   };
-  await assertTracks(844, 34);
+  await assertTracks(844, 0);
   await page.screenshot({ path: testInfo.outputPath('standalone-safe-area-tracks.png') });
   await page.getByRole('button', { name: 'Open conversations' }).click();
   await expect.poll(() => bottom('.sidebar')).toBe(844);
   await expect.poll(() => bottom('.sidebar-backdrop')).toBe(844);
-  await expect.poll(() => bottom('.sidebar-tools')).toBe(810);
+  await expect.poll(() => bottom('.sidebar-tools')).toBe(844);
   await page.screenshot({ path: testInfo.outputPath('standalone-safe-area-drawer.png') });
   await page.keyboard.press('Escape');
   await input.focus();
@@ -186,14 +181,14 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
   await visualViewport(page, 844);
   await expect.poll(() => bottom('.app-shell')).toBe(844);
   await expect.poll(() => bottom('.sidebar')).toBe(844);
-  await assertTracks(844, 34);
+  await assertTracks(844, 0);
 
   // A changed window must replace, not retain, the previous full-screen size.
   await page.setViewportSize({ width: 390, height: 740 });
   await visualViewport(page, 740);
   await expect.poll(() => bottom('.composer-area')).toBe(740);
   await expect.poll(() => bottom('.sidebar')).toBe(740);
-  await assertTracks(740, 34);
+  await assertTracks(740, 0);
 
   // A normal browser tab still reserves space for its real browser controls.
   await page.evaluate(() => {
@@ -202,5 +197,56 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
   });
   await expect.poll(() => bottom('.app-shell')).toBe(740);
   await expect.poll(() => bottom('.sidebar')).toBe(740);
-  await assertTracks(740, 34);
+  await assertTracks(740, 0);
+});
+
+test('the phone reserves its safe area once, without adding a second navigation inset', async ({
+  page,
+  browserName,
+}, testInfo) => {
+  await page.setViewportSize({ width: 430, height: 932 });
+  // Exercise actual env() values in Chromium, rather than substituting a
+  // stylesheet variable. Other engines still verify the fitted-page layout.
+  if (browserName === 'chromium') {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setSafeAreaInsetsOverride', {
+      insets: { top: 59, bottom: 93, left: 0, right: 0 },
+    });
+  }
+  await page.goto('/');
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+  const bottomGap = async () =>
+    page
+      .locator('.compact-meter')
+      .first()
+      .evaluate(
+        (node) =>
+          document.documentElement.getBoundingClientRect().bottom -
+          node.getBoundingClientRect().bottom,
+      );
+  await page.screenshot({ path: testInfo.outputPath('automatic-safe-area-chat.png') });
+  await expect.poll(bottomGap).toBe(15);
+  await expect(page.locator('meta[name="viewport"]')).toHaveAttribute(
+    'content',
+    /viewport-fit=auto/,
+  );
+  await page.getByRole('button', { name: 'Open conversations' }).click();
+  await expect(page.locator('.sidebar-tools')).toBeVisible();
+  expect(
+    await page
+      .locator('.sidebar-tools')
+      .evaluate(
+        (node) =>
+          document.documentElement.getBoundingClientRect().bottom -
+          node.getBoundingClientRect().bottom,
+      ),
+  ).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath('automatic-safe-area-drawer.png') });
+  await page.keyboard.press('Escape');
+
+  // The browser owns the excluded screen area. Resize to a smaller usable
+  // rectangle, as when browser controls change, without changing it back
+  // to a physical fullscreen height or adding the device insets a second time.
+  await page.setViewportSize({ width: 390, height: 751 });
+  await expect.poll(bottomGap).toBe(15);
 });
