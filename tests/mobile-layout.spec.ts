@@ -107,7 +107,7 @@ test('mobile dropdowns stay beside their trigger and remain usable in a scrolled
   await expect(model).toBeFocused();
 });
 
-test('installed app fills the screen behind both chat and drawer when Safari underreports its CSS height', async ({
+test('installed app keeps full usage tracks inside the page when fullscreen metrics exceed its visible height', async ({
   page,
 }, testInfo) => {
   await page.addInitScript(() => {
@@ -116,11 +116,17 @@ test('installed app fills the screen behind both chat and drawer when Safari und
       writable: true,
       value: true,
     });
+    // iOS 26 can report a fullscreen size larger than its drawable web view.
+    // Keep the real test viewport at 844px; this metric must not enlarge it.
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      get: () => window.visualViewport!.height + 62,
+    });
     Object.defineProperty(window, 'visualViewport', {
       configurable: true,
       value: Object.assign(new EventTarget(), {
         width: 390,
-        height: 810,
+        height: 844,
         offsetTop: 0,
         offsetLeft: 0,
         scale: 1,
@@ -130,44 +136,71 @@ test('installed app fills the screen behind both chat and drawer when Safari und
   await page.goto('/');
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
   await expect(input).toBeVisible();
-  // Model Safari's short dvh fallback; desktop WebKit has no iPhone safe area.
+  // Desktop automation has no notch/home indicator. Supply nonzero insets and
+  // check the tracks themselves, including hit testing at both vertical edges.
   await page.addStyleTag({
     content: `
-    .app-shell, .sidebar, .sidebar-backdrop {
-      height: var(--mobile-height, calc(100dvh - 34px)) !important;
-    }
+    :root { --safe-area-top: 59px; --safe-area-bottom: 34px; }
   `,
   });
   const bottom = (selector: string) =>
     page.locator(selector).evaluate((node) => Math.round(node.getBoundingClientRect().bottom));
   await expect.poll(() => bottom('.app-shell')).toBe(844);
+  await expect.poll(() => bottom('html')).toBe(844);
+  await expect.poll(() => bottom('body')).toBe(844);
   await expect.poll(() => bottom('.composer-area')).toBe(844);
+  const tracks = page.locator('.usage-meter.compact-meter');
+  const assertTracks = async (visibleBottom: number, bottomInset: number) => {
+    expect(await tracks.count()).toBeGreaterThan(0);
+    for (const track of await tracks.all()) {
+      const box = (await track.boundingBox())!;
+      expect(box.height).toBe(6);
+      expect(box.y + box.height).toBeLessThanOrEqual(visibleBottom - bottomInset);
+      expect(visibleBottom - bottomInset - box.y - box.height).toBeLessThanOrEqual(15);
+      expect(
+        await track.evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return [rect.top + 0.5, rect.bottom - 0.5].every((y) => {
+            const hit = document.elementFromPoint(rect.x + rect.width / 2, y);
+            return hit !== null && (node.contains(hit) || hit.contains(node));
+          });
+        }),
+      ).toBe(true);
+    }
+  };
+  await assertTracks(844, 34);
+  await page.screenshot({ path: testInfo.outputPath('standalone-safe-area-tracks.png') });
   await page.getByRole('button', { name: 'Open conversations' }).click();
   await expect.poll(() => bottom('.sidebar')).toBe(844);
   await expect.poll(() => bottom('.sidebar-backdrop')).toBe(844);
-  await page.screenshot({ path: testInfo.outputPath('standalone-full-height-drawer.png') });
+  await expect.poll(() => bottom('.sidebar-tools')).toBe(810);
+  await page.screenshot({ path: testInfo.outputPath('standalone-safe-area-drawer.png') });
   await page.keyboard.press('Escape');
   await input.focus();
   await visualViewport(page, 460, 80);
   await expect.poll(() => bottom('.app-shell')).toBe(540);
   await expect.poll(() => bottom('.composer-area')).toBe(540);
   await expect.poll(() => bottom('.sidebar')).toBe(540);
+  await assertTracks(540, 0);
   await input.blur();
-  await visualViewport(page, 810);
+  await visualViewport(page, 844);
   await expect.poll(() => bottom('.app-shell')).toBe(844);
   await expect.poll(() => bottom('.sidebar')).toBe(844);
+  await assertTracks(844, 34);
 
   // A changed window must replace, not retain, the previous full-screen size.
   await page.setViewportSize({ width: 390, height: 740 });
-  await visualViewport(page, 706);
+  await visualViewport(page, 740);
   await expect.poll(() => bottom('.composer-area')).toBe(740);
   await expect.poll(() => bottom('.sidebar')).toBe(740);
+  await assertTracks(740, 34);
 
   // A normal browser tab still reserves space for its real browser controls.
   await page.evaluate(() => {
     Object.assign(navigator, { standalone: false });
     window.dispatchEvent(new Event('pageshow'));
   });
-  await expect.poll(() => bottom('.app-shell')).toBe(706);
-  await expect.poll(() => bottom('.sidebar')).toBe(706);
+  await expect.poll(() => bottom('.app-shell')).toBe(740);
+  await expect.poll(() => bottom('.sidebar')).toBe(740);
+  await assertTracks(740, 34);
 });

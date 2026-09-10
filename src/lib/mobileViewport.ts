@@ -4,7 +4,6 @@ export function trackMobileViewport() {
   const root = document.documentElement;
   const viewport = window.visualViewport;
   const mobile = window.matchMedia('(max-width: 650px)');
-  const standalone = window.matchMedia('(display-mode: standalone)');
   let frame = 0;
   let settlingUntil = 0;
 
@@ -29,19 +28,9 @@ export function trackMobileViewport() {
       root.classList.add('mobile-keyboard');
     } else {
       reset();
-      if (
-        standalone.matches ||
-        (navigator as Navigator & { standalone?: boolean }).standalone === true
-      ) {
-        // Installed Safari can report dvh/percentage heights without the safe
-        // areas even with viewport-fit=cover. Use the full window/large viewport
-        // for every surface; keep safe-area padding INSIDE that shared height.
-        // Browser tabs retain dvh so their real navigation bars stay respected.
-        root.style.setProperty(
-          '--mobile-height',
-          `max(100vh, 100dvh, ${Math.max(window.innerHeight, root.clientHeight)}px)`,
-        );
-      }
+      // The page and shell share 100dvh at rest. Fullscreen vh/innerHeight can
+      // include space outside iOS's drawable web view; enlarging the shell to
+      // those values clips its footer instead of recovering the system area.
       if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
     }
     if (performance.now() < settlingUntil) frame = requestAnimationFrame(update);
@@ -63,7 +52,6 @@ export function trackMobileViewport() {
   document.addEventListener('focusout', settle);
   document.addEventListener('visibilitychange', settle);
   mobile.addEventListener('change', settle);
-  standalone.addEventListener('change', settle);
   update();
   return () => {
     cancelAnimationFrame(frame);
@@ -76,7 +64,6 @@ export function trackMobileViewport() {
     document.removeEventListener('focusout', settle);
     document.removeEventListener('visibilitychange', settle);
     mobile.removeEventListener('change', settle);
-    standalone.removeEventListener('change', settle);
     reset();
   };
 }

@@ -1800,9 +1800,16 @@ code {
 @media (max-width: 650px) {
   html,
   body {
-    height: 100%;
+    /* Size the root canvas too: an oversized fixed child cannot extend the
+       web view's drawable area beyond a shorter percentage-height document. */
+    height: 100dvh;
     overflow: hidden;
     overscroll-behavior: none;
+  }
+  :root {
+    --safe-area-top: env(safe-area-inset-top, 0px);
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    --mobile-safe-top: max(0px, calc(var(--safe-area-top) - var(--mobile-top, 0px)));
   }
   .app-shell {
     position: fixed;
@@ -1810,12 +1817,13 @@ code {
     left: 0;
     right: 0;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     height: var(--mobile-height, 100dvh);
     min-height: 0;
-    padding-top: env(safe-area-inset-top);
+    padding-top: var(--mobile-safe-top);
   }
   .main-area {
-    height: 100%;
+    height: auto;
     min-height: 0;
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
@@ -1826,7 +1834,7 @@ code {
     height: var(--mobile-height, 100dvh);
     width: min(320px, calc(100vw - 44px));
     z-index: 40;
-    padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom);
+    padding: var(--mobile-safe-top) 14px var(--safe-area-bottom);
     visibility: hidden;
     transform: translateX(-100%);
     box-shadow: 16px 0 60px #0005;
@@ -1854,7 +1862,7 @@ code {
   }
   .mobile-close {
     position: absolute;
-    top: env(safe-area-inset-top);
+    top: var(--mobile-safe-top);
     right: 8px;
   }
   .mobile-menu {
@@ -1957,11 +1965,14 @@ code {
   }
   .composer-area {
     --composer-inset: 12px;
-    padding: 8px 12px max(10px, env(safe-area-inset-bottom));
+    padding: 8px 12px max(10px, var(--safe-area-bottom));
     flex-shrink: 0;
   }
   .mobile-keyboard .composer-area {
     padding-bottom: 10px;
+  }
+  .mobile-keyboard .sidebar {
+    padding-bottom: 0;
   }
   .chat-toolbar {
     padding: 0 12px;
