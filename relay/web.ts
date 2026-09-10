@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
+import { sessionStore } from './sessions.ts';
 
 const cookieName = 'agent_studio_session';
 const lifetime = 7 * 24 * 60 * 60 * 1000;
@@ -62,8 +63,8 @@ export function servePublic(req: IncomingMessage, res: ServerResponse, files: Ma
   return true;
 }
 
-export function browserSessions(token: string, now: () => number) {
-  const sessions = new Map<string, { actor: string; expires: number }>();
+export function browserSessions(token: string, now: () => number, directory: string) {
+  const sessions = sessionStore(directory, token, now);
   const attempts = new Map<string, { count: number; expires: number }>();
   const validKey = (key: string) => {
     const supplied = Buffer.from(key),
@@ -103,6 +104,16 @@ export function browserSessions(token: string, now: () => number) {
     };
     if (req.method === 'GET') {
       const environmentId = actor(req);
+      const id = sessionId(req);
+      const session = sessions.get(id);
+      // Keep actively used devices paired, with at most one durable renewal per day.
+      if (environmentId && session && session.expires - now() <= lifetime - 24 * 60 * 60 * 1000) {
+        sessions.replace(id, id, { ...session, expires: now() + lifetime });
+        res.setHeader(
+          'Set-Cookie',
+          `${cookieName}=${id}; Path=/v1; HttpOnly; SameSite=Strict; Max-Age=${lifetime / 1000}${session.secure ? '; Secure' : ''}`,
+        );
+      }
       send(
         environmentId ? 200 : 401,
         environmentId ? { environmentId } : { error: 'Pair this device to connect.' },
@@ -115,7 +126,7 @@ export function browserSessions(token: string, now: () => number) {
     }
     const secure = req.headers.origin?.startsWith('https:') ? '; Secure' : '';
     if (req.method === 'DELETE') {
-      sessions.delete(sessionId(req));
+      sessions.replace(sessionId(req));
       res.setHeader(
         'Set-Cookie',
         `${cookieName}=; Path=/v1; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,
@@ -127,11 +138,10 @@ export function browserSessions(token: string, now: () => number) {
       send(405, { error: 'Method not allowed.' });
       return;
     }
-    for (const [id, session] of sessions) if (session.expires <= now()) sessions.delete(id);
     for (const [id, value] of attempts) if (value.expires <= now()) attempts.delete(id);
     const address = req.socket.remoteAddress ?? 'unknown';
     const attempt = attempts.get(address) ?? { count: 0, expires: now() + 60_000 };
-    if (attempt.count >= 10 || attempts.size >= 10_000 || sessions.size >= 1000) {
+    if (attempt.count >= 10 || attempts.size >= 10_000 || sessions.size() >= 1000) {
       send(429, { error: 'Too many pairing attempts. Try again in a minute.' });
       return;
     }
@@ -157,9 +167,17 @@ export function browserSessions(token: string, now: () => number) {
         send(400, { error: 'A valid device identity is required.' });
         return;
       }
-      sessions.delete(sessionId(req));
       const id = randomBytes(32).toString('hex');
-      sessions.set(id, { actor: value.environmentId, expires: now() + lifetime });
+      try {
+        sessions.replace(sessionId(req), id, {
+          actor: value.environmentId,
+          expires: now() + lifetime,
+          secure: !!secure,
+        });
+      } catch {
+        send(503, { error: 'Browser session storage is unavailable. Please try again shortly.' });
+        return;
+      }
       res.setHeader(
         'Set-Cookie',
         `${cookieName}=${id}; Path=/v1; HttpOnly; SameSite=Strict; Max-Age=${lifetime / 1000}${secure}`,

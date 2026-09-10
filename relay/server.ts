@@ -58,8 +58,8 @@ export function createRelay({
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
   const files = publicFiles(webDirectory);
-  const sessions = browserSessions(token, now);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const sessions = browserSessions(token, now, directory);
   const file = join(directory, 'workspace.json');
   let state: z.infer<typeof diskSchema> = {
     instanceId: crypto.randomUUID(),
@@ -120,7 +120,11 @@ export function createRelay({
       res.end(JSON.stringify(data));
     };
     if (req.url?.split('?')[0] === '/v1/browser-session') {
-      await sessions.handle(req, res);
+      try {
+        await sessions.handle(req, res);
+      } catch {
+        send(503, { error: 'Browser session storage is unavailable. Please try again shortly.' });
+      }
       return;
     }
     try {

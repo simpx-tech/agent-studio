@@ -24,7 +24,9 @@ Read status with `systemctl status agent-studio` and logs with `journalctl -u ag
 
 Build and test the final candidate before deployment. Create a new release directory, install dependencies using its lockfile, build the frontend, and run tests as an unprivileged user. Keep release files root-owned after building. Checksum source archives after transfer. Point `current` at the new release and restart only `agent-studio`. Keep the previous release for rollback. Never overwrite persistent data or generate a replacement pairing key as part of an ordinary update.
 
-A restart invalidates browser sessions and transient relay jobs; check for active replies and coordinate maintenance before restarting. Durable workspace checkpoints survive. Back up `/var/lib/agent-studio/workspace.json` and the pairing configuration separately with restricted access. A scheduled/off-server backup is not configured by this deployment.
+A restart preserves browser sessions when `/var/lib/agent-studio` and the pairing key are retained. Sessions are saved separately in `browser-sessions.json` with mode 0600 and keyed ID digests; keep it outside release directories and public assets. Pairing-key rotation invalidates these sessions. The first upgrade from the older memory-only implementation requires devices to pair once again; subsequent releases retain them. Unreadable session files fail startup without overwriting the file.
+
+Transient relay jobs still do not survive a restart; check for active replies and coordinate maintenance before restarting. Durable workspace checkpoints survive. Back up `/var/lib/agent-studio/workspace.json`, `browser-sessions.json`, and the pairing configuration with restricted access, keeping pairing configuration separate. A scheduled/off-server backup is not configured by this deployment.
 
 Validate a Caddy change before reloading with `caddy validate --config /etc/caddy/Caddyfile`. Use `systemctl reload caddy` rather than stopping it: the VPS also serves `deck.simpx.net`. The `deck-server`, `minecraft`, and `atm10sky` services belong to other workloads and must remain untouched.
 

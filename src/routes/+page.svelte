@@ -427,6 +427,32 @@
     }[view],
   );
 
+  let browserRestorePending = true;
+  let browserRestoreBusy = false;
+  let relaySelectionVersion = 0;
+  async function restoreBrowserConnection() {
+    if (desktop() || !loaded || browserRestoreBusy) return;
+    browserRestoreBusy = true;
+    const version = relaySelectionVersion;
+    try {
+      const connected = await resumeBrowserRelay();
+      if (version !== relaySelectionVersion) return;
+      browserRestorePending = false;
+      paired = connected;
+      syncError = '';
+      if (connected) await syncNow();
+    } catch (error) {
+      if (version !== relaySelectionVersion) return;
+      browserRestorePending = true;
+      syncError =
+        error instanceof Error && error.message.includes('Pair this device')
+          ? error.message
+          : 'Server unavailable. Reconnecting automatically…';
+    } finally {
+      browserRestoreBusy = false;
+    }
+  }
+
   onMount(() => {
     const network = () => {
       online = navigator.onLine;
@@ -439,15 +465,7 @@
     const onReturn = () => {
       if (!loaded || document.visibilityState === 'hidden') return;
       if (paired) void syncNow();
-      else if (!desktop())
-        void resumeBrowserRelay()
-          .then(async (connected) => {
-            if (connected) {
-              paired = true;
-              await syncNow();
-            }
-          })
-          .catch(() => {});
+      else if (!desktop()) void restoreBrowserConnection();
       if (run) return;
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
@@ -469,6 +487,8 @@
     }, 60_000);
     const relayPoll = setInterval(() => {
       if (paired) void syncNow();
+      else if (browserRestorePending && online && document.visibilityState !== 'hidden')
+        void restoreBrowserConnection();
     }, 2500);
     const wslPoll = setInterval(() => {
       if (loaded && view === 'connections' && document.visibilityState !== 'hidden')
@@ -543,14 +563,7 @@
             },
           });
         await persist();
-        if (!desktop()) {
-          try {
-            paired = await resumeBrowserRelay();
-            if (paired) await syncNow();
-          } catch {
-            syncError = 'Could not reconnect. Open Connections to pair this device again.';
-          }
-        }
+        if (!desktop()) await restoreBrowserConnection();
       } catch (e) {
         storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
       }
@@ -585,15 +598,19 @@
     }
   }
   async function pair(url: string, key: string) {
+    ++relaySelectionVersion;
     await persist();
     await connectRelay(url, key);
     paired = true;
+    browserRestorePending = false;
     await syncNow();
     if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
   }
   async function unpair() {
+    ++relaySelectionVersion;
     await disconnectRelay();
     paired = false;
+    browserRestorePending = false;
     presence = [];
     syncError = '';
     syncStatus = 'Disconnected. Changes continue to save on this environment.';

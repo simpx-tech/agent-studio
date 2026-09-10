@@ -80,6 +80,8 @@ let relayInstance = '';
 let baseline = emptyShared();
 let relayBusy = false;
 let relayConnected = false;
+let relayGeneration = 0;
+let browserSessionCheckedAt = 0;
 const remoteRuns = new Set<string>();
 const workerRuns = new Map<string, RelayJob>();
 export function configureRuntime(context: RuntimeContext) {
@@ -158,15 +160,16 @@ export async function connectRelay(url: string, token: string) {
   if (!runtime) throw new Error('This device is still loading.');
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Wait for remote requests to finish before changing relays.');
+  const generation = ++relayGeneration;
   if (desktop()) await invoke('relay_connect', { url, token });
   else {
     if (url !== window.location.origin)
       throw new Error('Open the PWA on your relay server to pair this device.');
     await relayApi('POST', 'v1/browser-session', { token, environmentId: runtime.installation.id });
   }
-  await acceptRelay(url);
+  await acceptRelay(url, generation);
 }
-async function acceptRelay(url: string) {
+async function acceptRelay(url: string, generation: number) {
   const state = await relayApi<{ instanceId: string }>('GET', 'v1/state');
   if (!state.instanceId) throw new Error('Relay protocol version is not supported.');
   const checkpoint = desktop()
@@ -176,26 +179,33 @@ async function acceptRelay(url: string) {
         base: SharedWorkspace;
       } | null>('load_sync_state')
     : JSON.parse(localStorage.getItem('agent-studio.browser-sync') ?? 'null');
-  baseline =
+  const nextBaseline =
     checkpoint?.url === url && checkpoint.instanceId === state.instanceId
       ? sharedSchema.parse(checkpoint.base)
       : emptyShared();
+  if (generation !== relayGeneration) return false;
+  baseline = nextBaseline;
   relayInstance = state.instanceId;
   relayUrl = url;
   relayConnected = true;
+  return true;
 }
 export async function resumeBrowserRelay(): Promise<boolean> {
   if (desktop() || !runtime) return false;
+  const generation = relayGeneration;
   const response = await relayRaw('GET', 'v1/browser-session');
   if (response.status === 401 || response.status === 404) return false;
-  if (response.status !== 200 || response.body.environmentId !== runtime.installation.id)
+  if (response.status !== 200) throw new Error('Server unavailable. Reconnecting automatically…');
+  if (response.body.environmentId !== runtime.installation.id)
     throw new Error('Pair this device again to restore its server connection.');
-  await acceptRelay(window.location.origin);
-  return true;
+  if (generation !== relayGeneration) return false;
+  browserSessionCheckedAt = Date.now();
+  return relayConnected || acceptRelay(window.location.origin, generation);
 }
 export async function disconnectRelay() {
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Stop remote responses and wait for requests to finish before disconnecting.');
+  ++relayGeneration;
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
   if (desktop()) await invoke('relay_disconnect');
   else await relayApi('DELETE', 'v1/browser-session');
@@ -205,6 +215,10 @@ export async function pollRelay(): Promise<Presence[] | null> {
   if (!relayConnected || !runtime || relayBusy) return null;
   relayBusy = true;
   try {
+    if (!desktop() && Date.now() - browserSessionCheckedAt >= 60_000) {
+      if (!(await resumeBrowserRelay()))
+        throw new Error('Pair this device again to restore its server connection.');
+    }
     const start = sharedWorkspace(runtime.workspace());
     let remote = await relayApi<{
       instanceId: string;

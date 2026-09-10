@@ -1001,7 +1001,7 @@
         Pairing shares chat content and account labels with the relay and your paired computers.
         Provider credentials stay on each host. {desktop()
           ? 'The pairing key stays in memory until the app closes.'
-          : 'This device stays paired for seven days, or until you disconnect or the server restarts. The pairing key is not saved in your browser.'}
+          : 'This device stays paired across app updates and server restarts. Pairing renews while you use it and expires after seven days without renewal, or when you disconnect or change the server pairing key. The pairing key is not saved in your browser.'}
       </p>
       <div class="dialog-actions">
         <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button
