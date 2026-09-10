@@ -219,6 +219,7 @@ export function createRelay({
         }
         if (!peers.has(value.target) || now() - peers.get(value.target)!.seenAt >= 15_000) {
           send(409, {
+            code: 'host_offline',
             error:
               'That environment is offline. Open Agent Studio there and connect it to the relay.',
           });

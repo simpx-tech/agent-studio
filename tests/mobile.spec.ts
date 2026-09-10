@@ -133,13 +133,32 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
   test.setTimeout(90_000);
   const directory = mkdtempSync(join(tmpdir(), 'studio-mobile-'));
   const token = 'synthetic-mobile-pairing-key-'.repeat(2);
-  const server = createRelay({ token, directory, webDirectory: resolve('build') });
+  let timeOffset = 0;
+  const server = createRelay({
+    token,
+    directory,
+    webDirectory: resolve('build'),
+    now: () => Date.now() + timeOffset,
+  });
+  let jobRequests = 0;
+  let expireBeforeNextJob = false;
+  server.on('request', (request) => {
+    if (request.method === 'POST' && request.url === '/v1/jobs') {
+      ++jobRequests;
+      if (expireBeforeNextJob) {
+        timeOffset += 16_000;
+        expireBeforeNextJob = false;
+      }
+    }
+  });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const host = crypto.randomUUID(),
     computer = crypto.randomUUID(),
     account = crypto.randomUUID(),
-    connection = crypto.randomUUID();
+    connection = crypto.randomUUID(),
+    wsl = crypto.randomUUID(),
+    wslConnection = crypto.randomUUID();
   const call = async (method: string, path: string, body?: unknown) => {
     const response = await fetch(`${url}/v1/${path}`, {
       method,
@@ -161,6 +180,14 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     name: 'Windows',
     platform: 'windows',
   });
+  shared.fleet.environments.push({
+    id: wsl,
+    computerId: computer,
+    name: 'WSL · Ubuntu QA',
+    platform: 'wsl',
+    distribution: 'Ubuntu',
+    discoveredOn: host,
+  });
   shared.fleet.accounts.push({
     id: account,
     name: 'Codex QA',
@@ -173,33 +200,47 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     environmentId: host,
     profile: 'existing',
   });
+  shared.fleet.connections.push({
+    id: wslConnection,
+    accountId: account,
+    environmentId: wsl,
+    profile: 'existing',
+  });
   await call('PUT', 'state', { revision: 0, workspace: shared });
   const running = new Set<string>();
   const jobs: any[] = [];
   let busy = false;
   let hold = false;
+  let hostOpen = true;
+  let modelFailure = false;
   let workerError = '';
   async function work() {
-    if (busy) return;
+    if (busy || !hostOpen) return;
     busy = true;
     try {
       await call('POST', 'heartbeat', {
         environmentId: host,
-        connections: [
-          {
-            connectionId: connection,
-            installed: true,
-            auth: 'ready',
-            detail: 'Synthetic executor',
-            version: 'test',
-          },
-        ],
+        connections: [connection, wslConnection].map((connectionId) => ({
+          connectionId,
+          installed: true,
+          auth: 'ready',
+          detail: 'Synthetic executor',
+          version: 'test',
+        })),
         running: [...running],
       });
       for (const job of await call('GET', 'jobs')) {
         jobs.push(job);
         if (job.method === 'run') {
           running.add(job.id);
+          continue;
+        }
+        if (job.method === 'models' && modelFailure) {
+          await call('PUT', `jobs/${job.id}`, {
+            status: 'error',
+            events: [],
+            error: 'Synthetic model query failure',
+          });
           continue;
         }
         const result =
@@ -309,11 +350,91 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await expect(page.getByText('Working from your phone…', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Stop response' }).click();
     await expect.poll(() => running.size).toBe(0);
+
+    // A real provider error is actionable, but a host going offline is normal state.
+    const savedModel = await page.getByRole('combobox', { name: 'Model', exact: true }).innerText();
+    const savedAgent = await page.getByRole('combobox', { name: 'Agent', exact: true }).innerText();
+    modelFailure = true;
+    await page.getByRole('button', { name: 'Conversation actions' }).click();
+    await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Could not refresh models' }),
+    ).toBeVisible();
+    modelFailure = false;
+    hostOpen = false;
+    while (busy) await new Promise((resolve) => setTimeout(resolve, 20));
+    // Expire the real heartbeat when the next query reaches the server, before the
+    // PWA can poll it. This also covers the online-to-offline request race (409).
+    expireBeforeNextJob = true;
+    const offlineResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/jobs') && response.status() === 409,
+    );
+    await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
+    expect((await (await offlineResponse).json()).code).toBe('host_offline');
+    await expect(page.locator('.computer-setting')).toContainText('Offline');
+    await expect(page.locator('.setup-hint')).toContainText('Desktop QA is offline');
+    await expect(page.getByText(/Could not refresh models/)).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: 'Refresh model list', exact: true }),
+    ).toBeDisabled();
+    await page.keyboard.press('Escape');
+    const offlineJobRequests = jobRequests;
     await page.reload();
     await expectSynced(page);
     await page.getByRole('button', { name: 'Open conversations' }).click();
+    await expect(
+      page.locator('.computer-group-toggle').filter({ hasText: 'Desktop QA' }),
+    ).toContainText('Offline');
     await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
+    await expect(page.locator('.computer-setting')).toContainText('Offline');
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveText(savedModel);
+    await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText(savedAgent);
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Offline draft');
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath('mobile-host-offline.png') });
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await expect(page.locator('.computer-state')).toHaveText(['Offline', 'Offline']);
+    await expect(page.locator('.computer-state.ready')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Computer', exact: true }).click();
+    await expect(page.getByRole('option', { name: 'Desktop QA', exact: true })).toContainText(
+      'Offline',
+    );
+    await expect(page.getByRole('option', { name: 'WSL · Ubuntu QA', exact: true })).toContainText(
+      'Offline · On Desktop QA',
+    );
+    await page.getByRole('option', { name: 'WSL · Ubuntu QA', exact: true }).click();
+    await expect(page.locator('.setup-hint')).toContainText(
+      'WSL · Ubuntu QA is offline. Open Agent Studio on Desktop QA',
+    );
+    await expectSynced(page);
+    await expect(page.getByText(/Could not refresh models/)).toHaveCount(0);
+    expect(jobRequests).toBe(offlineJobRequests);
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
+    const beforeReconnect = jobs.length;
+    hostOpen = true;
+    await work();
+    await expect(page.locator('.computer-setting')).not.toContainText('Offline');
+    await expect
+      .poll(() =>
+        jobs
+          .slice(beforeReconnect)
+          .some(
+            (job) =>
+              job.method === 'models' &&
+              job.target === host &&
+              job.args.connectionId === connection,
+          ),
+      )
+      .toBe(true);
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveText(savedModel);
+    await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText(savedAgent);
+    await expect(page.getByText(/Could not refresh models/)).toHaveCount(0);
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this draft');
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.screenshot({ path: testInfo.outputPath('mobile-drawer.png') });
     await page.keyboard.press('Escape');

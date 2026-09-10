@@ -128,17 +128,15 @@ describe('real HTTP relay', () => {
     expect(peers.body.find((p: any) => p.environmentId === f.target).online).toBe(false);
     expect((await f.call('GET', `jobs/${id}`)).body.status).toBe('error');
     expect((await f.call('GET', 'jobs', undefined, f.target)).body).toEqual([]);
-    expect(
-      (
-        await f.call('POST', 'jobs', {
-          id: crypto.randomUUID(),
-          source: f.source,
-          target: f.target,
-          method: 'run',
-          args: {},
-        })
-      ).status,
-    ).toBe(409);
+    const offline = await f.call('POST', 'jobs', {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: {},
+    });
+    expect(offline.status).toBe(409);
+    expect(offline.body.code).toBe('host_offline');
   });
   it('preserves corrupt disk state and rejects invalid payloads', async () => {
     const f = await fixture();

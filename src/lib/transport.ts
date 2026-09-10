@@ -150,8 +150,10 @@ async function relayRaw(
       : { error: 'Open the PWA on your Agent Studio server.' },
   };
 }
+export class OfflineHostError extends Error {}
 async function relayApi<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await relayRaw(method, path, body);
+  if (response.body?.code === 'host_offline') throw new OfflineHostError(response.body.error);
   if (response.status >= 300)
     throw new Error(response.body?.error ?? `Relay request failed (${response.status}).`);
   return response.body;

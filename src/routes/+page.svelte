@@ -69,6 +69,7 @@
     resolveRelaySettings,
     listFolders,
     resumeBrowserRelay,
+    OfflineHostError,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import ModelContext from '$lib/components/ModelContext.svelte';
@@ -213,6 +214,9 @@
     selectedLocation ? locationComputerId(selectedLocation) : draftComputerId,
   );
   const selectedComputer = $derived(computers.find((c) => c.id === selectedComputerId));
+  const selectedComputerOffline = $derived(
+    !!selectedComputer && !computerOnline(selectedComputer.id),
+  );
   const computerEnvironments = $derived(
     computerFolderEnvironments(workspace.fleet, selectedComputerId),
   );
@@ -338,12 +342,22 @@
     if (loaded && view === 'chat')
       untrack(() => void refreshUsage({ provider, model, connectionId }));
   });
+  const selectedModelScope = $derived(modelScopeKey(selectedSettings));
+  const selectedModelReady = $derived(!!active || !!selectedLocation);
+  const selectedConnectionAvailable = $derived(canQueryConnection(selectedSettings.connectionId));
   $effect(() => {
-    const key = modelScopeKey(selectedSettings);
+    const key = selectedModelScope;
+    const ready = selectedModelReady;
+    const available = selectedConnectionAvailable;
     if (loaded)
       untrack(() => {
         models = modelCache.get(key)?.catalog ?? structuredClone(fallbackModels);
-        void refreshModels(false);
+        if (ready && available) void refreshModels(false);
+        else {
+          ++modelGeneration;
+          modelsLoading = false;
+          if (notice === modelRefreshWarning) notice = '';
+        }
       });
   });
   const selectedAgent = $derived({
@@ -740,6 +754,31 @@
   function statusFor(id: ProviderId) {
     return statuses.find((s) => s.id === id);
   }
+  function environmentOnline(environmentId: string) {
+    const host = executionHost(workspace.fleet, environmentId);
+    if (desktop() && host === installation?.id) return true;
+    return (
+      paired && !syncError && online && presence.some((p) => p.environmentId === host && p.online)
+    );
+  }
+  function computerOnline(computerId: string) {
+    return (
+      computers
+        .find((c) => c.id === computerId)
+        ?.environments.some((e) => environmentOnline(e.id)) ?? false
+    );
+  }
+  function canQueryConnection(connectionId?: string) {
+    if (!connectionId) return desktop();
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    if (!connection) return false;
+    if (desktop() && executionHost(workspace.fleet, connection.environmentId) === installation?.id)
+      return true;
+    const status = connectionStatus(connectionId);
+    return (
+      environmentOnline(connection.environmentId) && !!status?.installed && status.auth === 'ready'
+    );
+  }
   function connectionStatus(id: string) {
     const connection = workspace.fleet.connections.find((c) => c.id === id);
     if (!connection) return undefined;
@@ -765,9 +804,10 @@
     const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
     return JSON.stringify([settings.provider, connection ?? settings.connectionId ?? null]);
   }
+  const modelRefreshWarning = 'Could not refresh models. Your saved choices are still available.';
   async function refreshModels(force = true) {
     const generation = ++modelGeneration;
-    if (!active && !selectedLocation) {
+    if ((!active && !selectedLocation) || !canQueryConnection(selectedSettings.connectionId)) {
       modelsLoading = false;
       return;
     }
@@ -785,7 +825,11 @@
       if (!request) {
         // A newly created connection must reach native storage before its catalog is queried.
         request = saveQueue
-          .then(() => loadModels(selected))
+          .then(() => {
+            if (!canQueryConnection(selected.connectionId))
+              throw new Error('The selected connection is unavailable.');
+            return loadModels(selected);
+          })
           .then((catalog) => {
             modelCache.set(key, { catalog, checkedAt: Date.now() });
             return catalog;
@@ -796,11 +840,17 @@
         modelRequests.set(key, request);
       }
       const catalog = await request;
-      if (generation === modelGeneration && key === modelScopeKey(selectedSettings))
+      if (generation === modelGeneration && key === modelScopeKey(selectedSettings)) {
         models = catalog;
-    } catch {
-      if (generation === modelGeneration)
-        notice = 'Could not refresh models. Your saved choices are still available.';
+        if (notice === modelRefreshWarning) notice = '';
+      }
+    } catch (error) {
+      if (error instanceof OfflineHostError) {
+        const connection = workspace.fleet.connections.find((c) => c.id === selected.connectionId);
+        const host = connection && executionHost(workspace.fleet, connection.environmentId);
+        presence = presence.map((p) => (p.environmentId === host ? { ...p, online: false } : p));
+      } else if (generation === modelGeneration && canQueryConnection(selected.connectionId))
+        notice = modelRefreshWarning;
     } finally {
       if (generation === modelGeneration) modelsLoading = false;
     }
@@ -809,7 +859,11 @@
     settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> = selectedSettings,
     force = false,
   ) {
-    if ((!desktop() && !paired) || (!settings.connectionId && !active && !selectedLocation)) return;
+    if (
+      !canQueryConnection(settings.connectionId) ||
+      (!settings.connectionId && !active && !selectedLocation)
+    )
+      return;
     const key = usageKey(settings);
     if (usageLoading[key]) return;
     usageLoading[key] = true;
@@ -1567,7 +1621,9 @@
                   title={computer.name}
                   aria-expanded={!collapsedGroups[computerKey]}
                   onclick={() => (collapsedGroups[computerKey] = !collapsedGroups[computerKey])}
-                  ><Laptop size={13} /><span>{computer.name}</span><ChevronRight
+                  ><Laptop size={13} /><span>{computer.name}</span
+                  >{#if !computerOnline(computer.id)}<small class="computer-offline">Offline</small
+                    >{/if}<ChevronRight
                     size={12}
                     class={!collapsedGroups[computerKey] ? 'expanded-chevron' : ''}
                   /></button
@@ -1706,7 +1762,7 @@
         <div class="chat-toolbar" aria-label="Conversation settings">
           <div class="chat-configuration">
             <div class="chat-setting computer-setting">
-              <span>Computer</span><ChoicePicker
+              <span>Computer{selectedComputerOffline ? ' · Offline' : ''}</span><ChoicePicker
                 label="Computer"
                 title={active
                   ? 'Fixed for this conversation. Start a new conversation to change it.'
@@ -1716,7 +1772,13 @@
                   ...computers.map((c) => ({
                     id: c.id,
                     name: c.name,
-                    detail: c.wsl ? `On ${c.hostName}` : undefined,
+                    detail: !computerOnline(c.id)
+                      ? c.wsl
+                        ? `Offline · On ${c.hostName}`
+                        : 'Offline'
+                      : c.wsl
+                        ? `On ${c.hostName}`
+                        : undefined,
                   })),
                   ...(selectedComputerId && !selectedComputer
                     ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
@@ -1863,6 +1925,7 @@
               title="Refresh model list"
               aria-label="Refresh model list"
               disabled={modelsLoading ||
+                !selectedConnectionAvailable ||
                 !!run ||
                 activeRunning ||
                 locationPending ||
@@ -1912,7 +1975,12 @@
           </div>
         </div>
         <div class="composer-area">
-          {#if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
+          {#if selectedComputerOffline}<div class="setup-hint">
+              <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
+                ? selectedComputer.hostName
+                : selectedComputer?.name} and connect it to sync.
+            </div>
+          {:else if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
               <Folder size={15} />Choose a computer and folder to see its available CLIs.<button
                 class="text-button"
                 disabled={!selectedComputer}

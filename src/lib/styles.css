@@ -359,6 +359,12 @@ code {
 .computer-group-toggle > svg:first-child {
   color: #7e8a75;
 }
+.computer-group-toggle .computer-offline {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--muted);
+}
 .computer-group-toggle > svg:last-child {
   opacity: 0.5;
 }
