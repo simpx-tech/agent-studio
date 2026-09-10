@@ -1,8 +1,12 @@
 use serde_json::{json, Value};
 use std::{sync::Mutex, time::Duration};
+mod credentials;
 
 #[derive(Default)]
-pub struct Relay(pub Mutex<Option<(reqwest::Client, reqwest::Url, String, String)>>);
+pub struct Relay {
+    connection: Mutex<Option<(reqwest::Client, reqwest::Url, String, String)>>,
+    change: tokio::sync::Mutex<()>,
+}
 fn endpoint(value: &str) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(value).map_err(|_| "Enter a valid relay URL")?;
     let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -24,11 +28,63 @@ fn endpoint(value: &str) -> Result<reqwest::Url, String> {
 }
 pub async fn connect(
     state: &Relay,
+    identifier: &str,
     url: String,
     token: String,
     environment: String,
 ) -> Result<(), String> {
-    let url = endpoint(&url)?;
+    let _change = state.change.lock().await;
+    let (client, url) = validate(&url, &token, &environment).await?;
+    credentials::save(
+        &credentials::target(identifier, &environment),
+        &credentials::Pairing {
+            url: url.to_string(),
+            token: token.clone(),
+        },
+    )?;
+    *state.connection.lock().map_err(|_| "Relay state failed")? =
+        Some((client, url, token, environment));
+    Ok(())
+}
+
+pub async fn resume(
+    state: &Relay,
+    identifier: &str,
+    environment: String,
+) -> Result<Option<String>, String> {
+    let _change = state.change.lock().await;
+    if let Some((_, url, _, _)) = state
+        .connection
+        .lock()
+        .map_err(|_| "Relay state failed")?
+        .as_ref()
+    {
+        return Ok(Some(url.to_string()));
+    }
+    let Some(pairing) = credentials::load(&credentials::target(identifier, &environment))? else {
+        return Ok(None);
+    };
+    let (client, url) = validate(&pairing.url, &pairing.token, &environment).await?;
+    let origin = url.to_string();
+    *state.connection.lock().map_err(|_| "Relay state failed")? =
+        Some((client, url, pairing.token, environment));
+    Ok(Some(origin))
+}
+
+pub async fn disconnect(state: &Relay, identifier: &str, environment: &str) -> Result<(), String> {
+    // Serialize changes so a pending restoration cannot resurrect an explicit disconnect.
+    let _change = state.change.lock().await;
+    credentials::remove(&credentials::target(identifier, environment))?;
+    *state.connection.lock().map_err(|_| "Relay state failed")? = None;
+    Ok(())
+}
+
+async fn validate(
+    url: &str,
+    token: &str,
+    environment: &str,
+) -> Result<(reqwest::Client, reqwest::Url), String> {
+    let url = endpoint(url)?;
     if token.len() < 32 || token.chars().any(char::is_control) {
         return Err("Enter the relay pairing key (at least 32 characters)".into());
     }
@@ -39,8 +95,8 @@ pub async fn connect(
         .map_err(|_| "Cannot initialize relay client")?;
     let response = client
         .get(url.join("v1/state").map_err(|_| "Invalid relay URL")?)
-        .bearer_auth(&token)
-        .header("x-environment-id", &environment)
+        .bearer_auth(token)
+        .header("x-environment-id", environment)
         .send()
         .await
         .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?;
@@ -49,8 +105,7 @@ pub async fn connect(
             "Relay rejected the connection. Check the pairing key and server version.".into(),
         );
     }
-    *state.0.lock().map_err(|_| "Relay state failed")? = Some((client, url, token, environment));
-    Ok(())
+    Ok((client, url))
 }
 pub async fn request(
     state: &Relay,
@@ -66,7 +121,7 @@ pub async fn request(
         return Err("Invalid relay operation".into());
     }
     let (client, url, token, environment) = state
-        .0
+        .connection
         .lock()
         .map_err(|_| "Relay state failed")?
         .clone()

@@ -142,12 +142,38 @@ async fn relay_connect(
     url: String,
     token: String,
 ) -> Result<(), String> {
-    relay::connect(&state, url, token, profiles::installation(&app)?.id).await
+    relay::connect(
+        &state,
+        &app.config().identifier,
+        url,
+        token,
+        profiles::installation(&app)?.id,
+    )
+    .await
 }
 #[tauri::command]
-fn relay_disconnect(state: State<'_, relay::Relay>) -> Result<(), String> {
-    *state.0.lock().map_err(|_| "Relay state failed")? = None;
-    Ok(())
+async fn relay_resume(
+    app: tauri::AppHandle,
+    state: State<'_, relay::Relay>,
+) -> Result<Option<String>, String> {
+    relay::resume(
+        &state,
+        &app.config().identifier,
+        profiles::installation(&app)?.id,
+    )
+    .await
+}
+#[tauri::command]
+async fn relay_disconnect(
+    app: tauri::AppHandle,
+    state: State<'_, relay::Relay>,
+) -> Result<(), String> {
+    relay::disconnect(
+        &state,
+        &app.config().identifier,
+        &profiles::installation(&app)?.id,
+    )
+    .await
 }
 #[tauri::command]
 async fn relay_request(
@@ -417,6 +443,7 @@ pub fn run() {
             list_folders,
             detect_connection,
             relay_connect,
+            relay_resume,
             relay_disconnect,
             relay_request,
             load_sync_state,

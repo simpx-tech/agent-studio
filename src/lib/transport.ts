@@ -171,7 +171,7 @@ export async function connectRelay(url: string, token: string) {
   }
   await acceptRelay(url, generation);
 }
-async function acceptRelay(url: string, generation: number) {
+async function acceptRelay(url: string, generation: number, restoring = false) {
   const state = await relayApi<{ instanceId: string }>('GET', 'v1/state');
   if (!state.instanceId) throw new Error('Relay protocol version is not supported.');
   const checkpoint = desktop()
@@ -181,6 +181,11 @@ async function acceptRelay(url: string, generation: number) {
         base: SharedWorkspace;
       } | null>('load_sync_state')
     : JSON.parse(localStorage.getItem('agent-studio.browser-sync') ?? 'null');
+  if (generation !== relayGeneration) return false;
+  if (restoring && checkpoint?.url === url && checkpoint.instanceId !== state.instanceId)
+    throw new Error(
+      'Relay data was replaced. Disconnect and pair again to merge your local workspace safely.',
+    );
   const nextBaseline =
     checkpoint?.url === url && checkpoint.instanceId === state.instanceId
       ? sharedSchema.parse(checkpoint.base)
@@ -192,6 +197,15 @@ async function acceptRelay(url: string, generation: number) {
   relayConnected = true;
   return true;
 }
+export async function resumeRelay(): Promise<boolean> {
+  if (!desktop()) return resumeBrowserRelay();
+  if (!runtime) return false;
+  const generation = relayGeneration;
+  // Native returns only the origin. Saved pairing keys never enter the renderer.
+  const url = await invoke<string | null>('relay_resume');
+  if (!url || generation !== relayGeneration) return false;
+  return relayConnected || acceptRelay(url.replace(/\/$/, ''), generation, true);
+}
 export async function resumeBrowserRelay(): Promise<boolean> {
   if (desktop() || !runtime) return false;
   const generation = relayGeneration;
@@ -202,7 +216,7 @@ export async function resumeBrowserRelay(): Promise<boolean> {
     throw new Error('Pair this device again to restore its server connection.');
   if (generation !== relayGeneration) return false;
   browserSessionCheckedAt = Date.now();
-  return relayConnected || acceptRelay(window.location.origin, generation);
+  return relayConnected || acceptRelay(window.location.origin, generation, true);
 }
 export async function disconnectRelay() {
   if (workerRuns.size || remoteRuns.size)

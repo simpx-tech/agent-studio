@@ -20,6 +20,7 @@ async function mockDesktop(page: Page, mode = 'success') {
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          if (command === 'relay_resume') return null;
           if (command === 'plugin:window|is_maximized') return false;
           if (command === 'plugin:event|listen') return 0;
           if (command === 'plugin:event|unlisten') return;

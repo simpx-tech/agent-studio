@@ -91,7 +91,15 @@ async function host(page: Page, relay: string, token: string, name: string, plat
             localStorage.setItem('fixture-sync', JSON.stringify(args.value));
             return;
           }
-          if (command === 'relay_connect' || command === 'relay_disconnect') return;
+          if (command === 'relay_resume') return localStorage.getItem('fixture-relay-origin');
+          if (command === 'relay_connect') {
+            localStorage.setItem('fixture-relay-origin', args.url);
+            return;
+          }
+          if (command === 'relay_disconnect') {
+            localStorage.removeItem('fixture-relay-origin');
+            return;
+          }
           if (command === 'relay_request') return w.relayBridge(args.method, args.path, args.body);
           const status = (id: string) => ({
             id,
@@ -1125,13 +1133,11 @@ test('two app environments pair, share accounts, route chats, retain progress an
       canvas.getContext('2d')!.fillRect(0, 0, 80, 60);
       return canvas.toDataURL('image/png').split(',')[1];
     });
-    await desktop
-      .getByLabel('Image files')
-      .setInputFiles({
-        name: 'remote-image.png',
-        mimeType: 'image/png',
-        buffer: Buffer.from(imageData, 'base64'),
-      });
+    await desktop.getByLabel('Image files').setInputFiles({
+      name: 'remote-image.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(imageData, 'base64'),
+    });
     await expect(desktop.getByRole('button', { name: 'Remove remote-image.png' })).toBeVisible();
     await desktop
       .getByRole('textbox', { name: 'Message', exact: true })

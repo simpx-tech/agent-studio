@@ -52,6 +52,26 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('retains an empty relay identity across restart before the first workspace write', async () => {
+    const f = await fixture();
+    const before = (await f.call('GET', 'state')).body;
+    expect(before.revision).toBe(0);
+    expect(before.workspace).toEqual(emptyShared());
+    const restarted = createRelay({ token: f.token, directory: f.directory });
+    await new Promise<void>((resolve) => restarted.listen(0, '127.0.0.1', resolve));
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${(restarted.address() as { port: number }).port}/v1/state`,
+        {
+          headers: { authorization: `Bearer ${f.token}`, 'x-environment-id': f.source },
+        },
+      );
+      expect(await response.json()).toEqual(before);
+    } finally {
+      restarted.closeAllConnections();
+      await new Promise<void>((resolve) => restarted.close(() => resolve()));
+    }
+  });
   it('requires authentication, rejects stale writes, and persists acknowledged workspace data', async () => {
     const f = await fixture();
     expect((await f.call('GET', 'state', undefined, f.source, 'wrong')).status).toBe(401);

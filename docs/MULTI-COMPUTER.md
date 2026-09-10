@@ -74,7 +74,9 @@ Run `npm run build` before starting the relay. Keep the key in your password man
 
 The default relay listens only on loopback. For another computer, use HTTPS or forward the relay port through an authenticated SSH tunnel and use the forwarded loopback URL. Remote plain HTTP is rejected; redirects are disabled so the pairing key cannot be forwarded to another origin.
 
-The pairing key stays in native process memory. Pair again after reopening the app; the saved sync checkpoint retains offline changes and deletions. Provider logins remain persisted by their CLIs, independently of relay pairing.
+Windows remembers the relay address and pairing key in the current user's Windows Credential Manager, scoped to this app and installation. It reconnects when Agent Studio opens and retries temporary outages, including while minimized. **Disconnect relay** removes that saved pairing; it is also available when reconnection fails. The restored key stays in native code and is excluded from workspace files, exports, browser storage, and logs. This uses a credential local to this Windows user and machine, following [Windows credential persistence](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
+
+Pair once after upgrading from the memory-only version. Other native platforms still require pairing after reopening until an OS-protected store is implemented. The saved sync checkpoint retains offline changes and deletions. Provider logins remain persisted by their CLIs, independently of relay pairing. A replaced relay database requires deliberate re-pairing rather than an automatic merge.
 
 ## VPS deployment
 

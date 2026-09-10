@@ -67,11 +67,13 @@ export function createRelay({
     revision: 0,
     workspace: emptyShared(),
   };
+  let fresh = false;
   try {
     state = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT')
       throw new Error('Relay data is unreadable; preserved without overwriting.');
+    fresh = true;
   }
   const peers = new Map<string, Presence>();
   const jobs = new Map<string, RelayJob & { created: number; updated: number }>();
@@ -90,6 +92,8 @@ export function createRelay({
     renameSync(temporary, file);
     state = next;
   };
+  // A paired but empty relay must retain its identity before the first workspace edit.
+  if (fresh) save(state);
   const expire = () => {
     for (const [id, job] of jobs) {
       if (

@@ -47,6 +47,7 @@
     usageLoading,
     usageErrors,
     presence,
+    reconnecting = false,
     syncStatus,
     syncError,
     paired,
@@ -71,6 +72,7 @@
     usageLoading: Record<string, boolean>;
     usageErrors: Record<string, string>;
     presence: Presence[];
+    reconnecting?: boolean;
     syncStatus: string;
     syncError: string;
     paired: boolean;
@@ -661,7 +663,11 @@
       </div>
       <div class="relay-state">
         <span class="connection-badge" class:connected={paired && !syncError}
-          ><i></i>{paired ? (syncError ? 'Reconnecting' : 'Paired') : 'Local only'}</span
+          ><i></i>{paired || reconnecting
+            ? syncError
+              ? 'Reconnecting'
+              : 'Paired'
+            : 'Local only'}</span
         >
       </div>
       <p>
@@ -688,6 +694,11 @@
             error = '';
             dialog = 'relay';
           }}><Link size={14} />Set up sync</button
+        >{/if}
+      {#if syncError && (paired || reconnecting)}<button
+          class="text-button"
+          disabled={busy}
+          onclick={() => action(disconnect)}>Disconnect relay</button
         >{/if}
     </section>
     <footer class="connections-footer">
@@ -1000,7 +1011,9 @@
       <p>
         Pairing shares chat content and account labels with the relay and your paired computers.
         Provider credentials stay on each host. {desktop()
-          ? 'The pairing key stays in memory until the app closes.'
+          ? installation?.platform === 'windows'
+            ? 'Windows protects the saved pairing and reconnects when you open the app. Disconnect relay removes it from this computer.'
+            : 'The pairing key stays in memory until the app closes.'
           : 'This device stays paired across app updates and server restarts. Pairing renews while you use it and expires after seven days without renewal, or when you disconnect or change the server pairing key. The pairing key is not saved in your browser.'}
       </p>
       <div class="dialog-actions">

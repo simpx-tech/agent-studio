@@ -68,7 +68,7 @@
     pollRelay,
     resolveRelaySettings,
     listFolders,
-    resumeBrowserRelay,
+    resumeRelay,
     OfflineHostError,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
@@ -441,29 +441,30 @@
     }[view],
   );
 
-  let browserRestorePending = true;
-  let browserRestoreBusy = false;
+  let relayRestorePending = $state(true);
+  let relayRestoreBusy = false;
   let relaySelectionVersion = 0;
-  async function restoreBrowserConnection() {
-    if (desktop() || !loaded || browserRestoreBusy) return;
-    browserRestoreBusy = true;
+  async function restoreRelayConnection() {
+    if (!loaded || relayRestoreBusy) return;
+    relayRestoreBusy = true;
     const version = relaySelectionVersion;
     try {
-      const connected = await resumeBrowserRelay();
+      const connected = await resumeRelay();
       if (version !== relaySelectionVersion) return;
-      browserRestorePending = false;
+      relayRestorePending = false;
       paired = connected;
       syncError = '';
       if (connected) await syncNow();
     } catch (error) {
       if (version !== relaySelectionVersion) return;
-      browserRestorePending = true;
+      relayRestorePending = true;
       syncError =
-        error instanceof Error && error.message.includes('Pair this device')
-          ? error.message
+        desktop() ||
+        (error instanceof Error && /Pair this device|Relay data was replaced/.test(error.message))
+          ? String(error).replace(/^Error: /, '')
           : 'Server unavailable. Reconnecting automatically…';
     } finally {
-      browserRestoreBusy = false;
+      relayRestoreBusy = false;
     }
   }
 
@@ -479,7 +480,7 @@
     const onReturn = () => {
       if (!loaded || document.visibilityState === 'hidden') return;
       if (paired) void syncNow();
-      else if (!desktop()) void restoreBrowserConnection();
+      else void restoreRelayConnection();
       if (run) return;
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
@@ -501,8 +502,12 @@
     }, 60_000);
     const relayPoll = setInterval(() => {
       if (paired) void syncNow();
-      else if (browserRestorePending && online && document.visibilityState !== 'hidden')
-        void restoreBrowserConnection();
+      else if (
+        relayRestorePending &&
+        online &&
+        (desktop() || document.visibilityState !== 'hidden')
+      )
+        void restoreRelayConnection();
     }, 2500);
     const wslPoll = setInterval(() => {
       if (loaded && view === 'connections' && document.visibilityState !== 'hidden')
@@ -577,7 +582,7 @@
             },
           });
         await persist();
-        if (!desktop()) await restoreBrowserConnection();
+        await restoreRelayConnection();
       } catch (e) {
         storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
       }
@@ -616,7 +621,7 @@
     await persist();
     await connectRelay(url, key);
     paired = true;
-    browserRestorePending = false;
+    relayRestorePending = false;
     await syncNow();
     if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
   }
@@ -624,7 +629,7 @@
     ++relaySelectionVersion;
     await disconnectRelay();
     paired = false;
-    browserRestorePending = false;
+    relayRestorePending = false;
     presence = [];
     syncError = '';
     syncStatus = 'Disconnected. Changes continue to save on this environment.';
@@ -2120,6 +2125,7 @@
         {usageErrors}
         bind:statuses={connectionStatuses}
         {presence}
+        reconnecting={relayRestorePending && !!syncError}
         {syncStatus}
         {syncError}
         {paired}
