@@ -1,5 +1,10 @@
 # Verification — 2026-09-08
 
+## Installed-app bottom gap — 2026-09-09
+
+- A follow-up iPhone report identified unused space below both the main screen and sidebar on launch and after keyboard dismissal, with the space absent while the keyboard was open. Both surfaces were falling back to `100dvh` outside keyboard mode. Installed mode now uses a shared height covering the full window/large viewport, avoiding Safari's short dynamic-height report. Normal browser tabs still use their dynamic height and reserve actual browser controls. Keyboard height/offset handling and safe-area padding remain separate.
+- The added regression models a 34px short CSS-height report and verifies the bottom edges of the shell, composer, sidebar, and backdrop on launch. It also checks keyboard opening/dismissal, replacement of the resting height after window resizing, and return to browser-tab sizing. This is a simulated Safari geometry regression; physical iPhone confirmation remains necessary.
+
 ## iPhone keyboard layout and anchored dropdowns — 2026-09-09
 
 - The mobile shell is fixed to the visual viewport's height and vertical offset while the keyboard occludes the layout viewport. Resize, pan, focus, return, and delayed animation updates are handled together. Dismissal removes the stored height/offset, restores the dynamic CSS viewport and home-indicator inset, and clears document scroll. Pinch zoom remains browser-controlled. Message updates and highlighted dropdown options scroll only their own container.
