@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Reply footer ordering and spacing — 2026-09-11
+
+Artifact, plan/TODO, and native workflow cards now precede the reply token/time row. Completed tool activity follows immediately below token/time with its former 14px top margin removed, and Retry is the final action. Live tool-activity spacing is unchanged.
+
+Read-only native checks reused completed and cancelled Claude replies in the isolated bundled QA app (`com.vinicius.agentstudio.work-features-qa`, CDP 9487). At 1380×900 and an emulated 390×844, cards were above usage, usage and activity containers had no intervening margin, and Retry was last and enabled on the stopped reply. Usage/activity disclosures opened and closed; there was no horizontal overflow or renderer exception. Desktop/mobile screenshots were visually reviewed. Evidence: `artifacts/reply-footer-order-native-result.json` and `artifacts/reply-footer-order-{wide,mobile}-{complete,cancelled}-native.png`. No provider replies were rerun for this presentation change; physical-phone input was not tested.
+
+All required checks passed: `npm run verify` (zero diagnostics, 87 unit/HTTP tests, production build, 75 browser scenarios), Cargo formatting, Clippy with warnings denied, and 72 Rust tests (four existing opt-in tests ignored). Logs: `artifacts/reply-footer-order-{verify,fmt,clippy,rust-tests}.log`. The isolated native QA app remains running with the updated layout.
+
 ## Completed progress cards in the reply footer — 2026-09-11
 
 Completed replies now place their collapsed plan/TODO and native workflow cards at the bottom beside artifact cards. The cards share a row when space permits and wrap on narrow screens. Live progress stays above the composer; saved stopped and unconfirmed outcomes retain their existing labels.

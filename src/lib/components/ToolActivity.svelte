@@ -271,6 +271,9 @@
     gap: 7px;
     min-width: 0;
   }
+  .tool-activity:not(.live-activity) {
+    margin-top: 0;
+  }
   .activity-timeline {
     display: grid;
     gap: 7px;

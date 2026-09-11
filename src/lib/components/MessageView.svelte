@@ -106,6 +106,18 @@
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
           Response stopped. Partial text has been kept.
         </p>{/if}
+      {#if artifacts.length || savedProgress}<div class="response-extras">
+          {#if savedProgress}<PlanPanel {message} compact />{/if}
+          {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+              {#each artifacts as artifact (artifact.id)}<button
+                  class="secondary"
+                  onclick={() => openArtifact(artifact)}
+                  ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                    >Open {artifact.language.toUpperCase()}</small
+                  ></button
+                >{/each}
+            </div>{/if}
+        </div>{/if}
       {#if message.status !== 'running'}<ReplyUsage {message} {timeTotal} /><ToolActivity
           {tools}
           replyStatus={message.status}
@@ -115,26 +127,14 @@
       {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
         >
+          {#if linkError}<span role="alert">{linkError}</span>{/if}
           {#if canRetry && !message.workflowDefinition}<button
               class="text-button"
               onclick={retry}
               disabled={retryDisabled}><RotateCcw size={13} />Retry</button
             >{/if}
-          {#if linkError}<span role="alert">{linkError}</span>{/if}
         </div>{/if}
     {/if}
-    {#if artifacts.length || savedProgress}<div class="response-extras">
-        {#if savedProgress}<PlanPanel {message} compact />{/if}
-        {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
-            {#each artifacts as artifact (artifact.id)}<button
-                class="secondary"
-                onclick={() => openArtifact(artifact)}
-                ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                  >Open {artifact.language.toUpperCase()}</small
-                ></button
-              >{/each}
-          </div>{/if}
-      </div>{/if}
   </div>
 </article>
 
