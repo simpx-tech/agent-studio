@@ -398,6 +398,8 @@ code {
   margin: 1px 0 3px;
 }
 .conversation-list .conversation-item {
+  user-select: none;
+  -webkit-touch-callout: none;
   position: relative;
   width: 100%;
   min-height: 34px;
@@ -430,6 +432,9 @@ code {
 }
 .expanded-chevron {
   transform: rotate(90deg);
+}
+.modal-backdrop.confirmation-backdrop {
+  z-index: 50;
 }
 .sidebar-empty {
   font-size: 11px;

@@ -1595,7 +1595,8 @@ test('a late title follows its original chat and cannot restore a deleted conver
   await page.getByLabel('Message', { exact: true }).fill('A second garden question');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
-  await page.getByRole('button', { name: 'Delete conversation', exact: true }).click();
+  await page.locator('.conversation-item[aria-current="page"]').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Delete conversation', exact: true }).click();
   await page
     .getByRole('alertdialog')
     .getByRole('button', { name: 'Delete conversation', exact: true })
@@ -1609,6 +1610,124 @@ test('a late title follows its original chat and cannot restore a deleted conver
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
   expect(saved.conversations[0].title).toBe('Planning a balcony garden');
   expect(await page.evaluate(() => localStorage.getItem('test-cancelled-title'))).toBeTruthy();
+});
+
+test('sidebar deletion targets a History chat without opening it or clearing the current draft', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Older sidebar conversation');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  await page.getByRole('button', { name: 'Move to history' }).click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await message.fill('Current sidebar conversation');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  const before = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('test-workspace')!).conversations,
+  );
+  await message.fill('Preserve this unsent draft');
+  await page.getByRole('tab', { name: /^History/ }).click();
+  const row = page.getByRole('button', { name: 'Older sidebar conversation', exact: true });
+  const menu = page.getByRole('menu', {
+    name: 'Actions for Older sidebar conversation',
+    exact: true,
+  });
+  await row.click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await expect(page.locator('.page-title')).toHaveText('Current sidebar conversation');
+  await expect(message).toHaveValue('Preserve this unsent draft');
+  await expect(
+    page.locator('.chat-toolbar').getByRole('button', { name: 'Delete conversation' }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: 'artifacts/sidebar-context-menu-browser.png',
+    animations: 'disabled',
+  });
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(row).toBeFocused();
+  await row.click({ button: 'right' });
+  await message.click();
+  await expect(menu).toHaveCount(0);
+  await row.focus();
+  await row.press('Shift+F10');
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toContainText('Older sidebar conversation');
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(row).toBeFocused();
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!).conversations),
+  ).toEqual(before);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Open conversations' }).click();
+  const bounds = (await row.boundingBox())!;
+  const pointer = {
+    pointerId: 1,
+    pointerType: 'touch',
+    clientX: bounds.x + 20,
+    clientY: bounds.y + bounds.height / 2,
+    bubbles: true,
+  };
+  await row.dispatchEvent('pointerdown', pointer);
+  await expect(menu).toBeVisible();
+  await row.dispatchEvent('pointerup', pointer);
+  await row.dispatchEvent('click');
+  await expect(page.locator('.page-title')).toHaveText('Current sidebar conversation');
+  const menuBounds = (await menu.boundingBox())!;
+  expect(menuBounds.x).toBeGreaterThanOrEqual(0);
+  expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(390);
+  await page.screenshot({
+    path: 'artifacts/sidebar-context-menu-mobile.png',
+    animations: 'disabled',
+  });
+  await menu.getByRole('menuitem', { name: 'Delete conversation' }).click();
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(row).toBeFocused();
+  await row.press('Shift+F10');
+  await menu.getByRole('menuitem', { name: 'Delete conversation' }).click();
+  await dialog.getByRole('button', { name: 'Delete conversation', exact: true }).click();
+  await expect(row).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!).conversations),
+    )
+    .toEqual(before.filter((c: any) => c.title !== 'Older sidebar conversation'));
+  await page.getByRole('button', { name: 'Close conversations' }).click();
+  await expect(message).toHaveValue('Preserve this unsent draft');
+  await expect(page.locator('.page-title')).toHaveText('Current sidebar conversation');
+});
+
+test('sidebar deletion remains disabled until that conversation finishes running', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'settings-deferred');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Running sidebar conversation');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'running');
+  await page.locator('.conversation-item[aria-current="page"]').click({ button: 'right' });
+  const item = page.getByRole('menuitem', { name: 'Delete conversation', exact: true });
+  await expect(item).toHaveAttribute('aria-disabled', 'true');
+  await item.press('Enter');
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await page.evaluate(() => (window as any).finishReply());
+  await expect(item).toHaveAttribute('aria-disabled', 'false');
+  await item.click();
+  await expect(page.getByRole('alertdialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('.conversation-item')).toHaveCount(1);
 });
 
 test('opening the app archives saved chats and sending from History restores the same conversation', async ({

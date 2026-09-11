@@ -16,7 +16,6 @@
     RefreshCw,
     Square,
     X,
-    Trash2,
     Pencil,
     Check,
     Laptop,
@@ -70,6 +69,7 @@
     OfflineHostError,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
+  import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
   import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
@@ -192,7 +192,25 @@
   let stopping = $state(false);
   let editorOpen = $state(false);
   let contextOpen = $state(false);
-  let deletion = $state<{ type: 'conversation'; id: string; name: string } | null>(null);
+  let deletion = $state<{
+    type: 'conversation';
+    id: string;
+    name: string;
+    trigger: HTMLButtonElement;
+  } | null>(null);
+  let conversationMenu = $state<{
+    id: string;
+    trigger: HTMLButtonElement;
+    x: number;
+    y: number;
+  } | null>(null);
+  const menuConversation = $derived(
+    workspace.conversations.find((c) => c.id === conversationMenu?.id),
+  );
+  const deletingConversation = $derived(workspace.conversations.find((c) => c.id === deletion?.id));
+  let touchMenuTimer: ReturnType<typeof setTimeout> | undefined;
+  let touchMenuOrigin: { x: number; y: number } | undefined;
+  let longPressedConversation: string | undefined;
   let composerInput = $state<HTMLTextAreaElement>();
   let chatScroll = $state<HTMLDivElement>();
   let nearBottom = true;
@@ -594,6 +612,7 @@
       await refresh();
     })();
     return () => {
+      cancelTouchMenu();
       window.removeEventListener('online', network);
       window.removeEventListener('offline', network);
       stopViewport();
@@ -1156,8 +1175,80 @@
     await tick();
     if (nearBottom && chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
   }
+  function conversationRunning(conversation: Conversation) {
+    return (
+      run?.conversationId === conversation.id ||
+      conversation.messages.some((m) => m.status === 'running')
+    );
+  }
+  function closeConversationMenu(restoreFocus = false) {
+    const trigger = conversationMenu?.trigger;
+    conversationMenu = null;
+    if (restoreFocus) void tick().then(() => trigger?.focus({ preventScroll: true }));
+  }
+  function openConversationMenu(event: MouseEvent | KeyboardEvent, conversation: Conversation) {
+    event.preventDefault();
+    cancelTouchMenu();
+    if ('pointerType' in event && event.pointerType === 'touch')
+      longPressedConversation = conversation.id;
+    const trigger = event.currentTarget as HTMLButtonElement;
+    const bounds = trigger.getBoundingClientRect();
+    const pointer = 'clientX' in event && (event.clientX !== 0 || event.clientY !== 0);
+    conversationMenu = {
+      id: conversation.id,
+      trigger,
+      x: pointer ? event.clientX : bounds.left + 12,
+      y: pointer ? event.clientY : bounds.bottom,
+    };
+  }
+  function cancelTouchMenu() {
+    clearTimeout(touchMenuTimer);
+    touchMenuOrigin = undefined;
+  }
+  function startTouchMenu(event: PointerEvent, conversation: Conversation) {
+    cancelTouchMenu();
+    longPressedConversation = undefined;
+    if (event.pointerType !== 'touch') return;
+    const trigger = event.currentTarget as HTMLButtonElement;
+    const x = event.clientX,
+      y = event.clientY;
+    touchMenuOrigin = { x, y };
+    touchMenuTimer = setTimeout(() => {
+      touchMenuOrigin = undefined;
+      if (!trigger.isConnected || !trigger.getClientRects().length) return;
+      longPressedConversation = conversation.id;
+      conversationMenu = { id: conversation.id, trigger, x, y };
+    }, 500);
+  }
+  function requestConversationDeletion() {
+    if (!conversationMenu || !menuConversation || conversationRunning(menuConversation)) return;
+    deletion = {
+      type: 'conversation',
+      id: menuConversation.id,
+      name: menuConversation.title,
+      trigger: conversationMenu.trigger,
+    };
+    closeConversationMenu();
+  }
+  function focusDeletionDialog(node: HTMLElement) {
+    const trigger = deletion?.trigger;
+    node.querySelector<HTMLButtonElement>('button')?.focus();
+    return {
+      destroy() {
+        void tick().then(() => {
+          if (trigger?.isConnected && trigger.getClientRects().length)
+            trigger.focus({ preventScroll: true });
+          else if (mobile && sidebarOpen)
+            sidebarElement
+              .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+              ?.focus();
+          else composerInput?.focus();
+        });
+      },
+    };
+  }
   function remove() {
-    if (!deletion || run?.conversationId === deletion.id) return;
+    if (!deletion || !deletingConversation || conversationRunning(deletingConversation)) return;
     void cancelTitle(deletion.id).catch(() => {});
     workspace.conversations = workspace.conversations.filter((c) => c.id !== deletion!.id);
     if (activeId === deletion.id) {
@@ -1444,7 +1535,9 @@
   }
   function keyboard(event: KeyboardEvent) {
     if (event.key === 'Tab' && (editorOpen || contextOpen || deletion)) {
-      const modal = document.querySelector('[aria-modal="true"]');
+      const modal = document.querySelector(
+        deletion ? '[role="alertdialog"]' : '[aria-modal="true"]',
+      );
       const elements = modal?.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input, textarea, select, summary, [tabindex="0"]',
       );
@@ -1484,7 +1577,7 @@
 <svelte:window
   bind:innerWidth={viewportWidth}
   onkeydown={(event) => {
-    if (mobile && sidebarOpen) {
+    if (mobile && sidebarOpen && !deletion) {
       if (event.key === 'Escape') {
         event.preventDefault();
         void toggleSidebar(false);
@@ -1532,7 +1625,7 @@
     class:mobile-open={mobile && sidebarOpen}
     id="conversation-sidebar"
     bind:this={sidebarElement}
-    inert={mobile && !sidebarOpen}
+    inert={mobile && (!sidebarOpen || !!deletion)}
     role={mobile ? 'dialog' : undefined}
     aria-modal={mobile && sidebarOpen ? true : undefined}
     aria-label="Conversations"
@@ -1666,7 +1759,34 @@
                             class="conversation-item"
                             class:current={activeId === c.id && view === 'chat'}
                             aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
-                            onclick={() => openConversation(c)}
+                            aria-haspopup="menu"
+                            oncontextmenu={(event) => openConversationMenu(event, c)}
+                            onkeydown={(event) => {
+                              if (
+                                event.key === 'ContextMenu' ||
+                                (event.shiftKey && event.key === 'F10')
+                              )
+                                openConversationMenu(event, c);
+                            }}
+                            onpointerdown={(event) => startTouchMenu(event, c)}
+                            onpointermove={(event) => {
+                              if (
+                                touchMenuOrigin &&
+                                Math.hypot(
+                                  event.clientX - touchMenuOrigin.x,
+                                  event.clientY - touchMenuOrigin.y,
+                                ) > 8
+                              )
+                                cancelTouchMenu();
+                            }}
+                            onpointerup={cancelTouchMenu}
+                            onpointercancel={cancelTouchMenu}
+                            onclick={(event) => {
+                              if (longPressedConversation === c.id) {
+                                event.preventDefault();
+                                longPressedConversation = undefined;
+                              } else openConversation(c);
+                            }}
                             title={c.title}
                             ><span>{c.title}</span
                             >{#if c.messages.some((m) => m.status === 'running')}<i
@@ -1908,13 +2028,7 @@
                 title="Move to history"
                 aria-label="Move to history"><Archive size={16} /></button
               >{/if}
-            {#if active}<button
-                class="icon-button"
-                disabled={activeRunning}
-                onclick={() =>
-                  (deletion = { type: 'conversation', id: active.id, name: active.title })}
-                aria-label="Delete conversation"><Trash2 size={16} /></button
-              >{/if}<button
+            <button
               class="icon-button"
               onclick={() => (editorOpen = true)}
               disabled={!loaded || !!run || activeRunning}
@@ -2167,13 +2281,27 @@
       editorOpen = false;
     }}
   />{/if}
-{#if deletion}<div class="modal-backdrop" role="presentation">
+{#if conversationMenu && menuConversation}
+  {#key conversationMenu}
+    <ConversationContextMenu
+      x={conversationMenu.x}
+      y={conversationMenu.y}
+      name={menuConversation.title}
+      trigger={conversationMenu.trigger}
+      disabled={conversationRunning(menuConversation)}
+      close={closeConversationMenu}
+      remove={requestConversationDeletion}
+    />
+  {/key}
+{/if}
+{#if deletion}<div class="modal-backdrop confirmation-backdrop" role="presentation">
     <div
       class="modal small-modal"
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="delete-title"
       tabindex="-1"
+      use:focusDeletionDialog
     >
       <h2 id="delete-title">Delete {deletion.type}?</h2>
       <p>
@@ -2182,6 +2310,7 @@
       <footer>
         <button class="secondary" onclick={() => (deletion = null)}>Cancel</button><button
           class="danger"
+          disabled={!deletingConversation || conversationRunning(deletingConversation)}
           onclick={remove}>Delete {deletion.type}</button
         >
       </footer>
