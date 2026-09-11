@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { trackMobileViewport } from '$lib/mobileViewport';
-  import { notificationConversation } from '$lib/notifications';
+  import { notificationConversation, requestsAttention } from '$lib/notifications';
+  import { watchDesktopNotifications } from '$lib/transport';
   import {
     ArrowUp,
     ArrowUpRight,
@@ -548,6 +549,15 @@
   }
 
   onMount(() => {
+    let disposed = false;
+    let stopNotifications = () => {};
+    void watchDesktopNotifications((id) => {
+      notificationTarget = notificationConversation(`#conversation=${id}`);
+      followNotification();
+    }).then((stop) => {
+      if (disposed) stop();
+      else stopNotifications = stop;
+    });
     const notificationHash = () => {
       notificationTarget = notificationConversation(window.location.hash);
       followNotification();
@@ -689,6 +699,8 @@
       await refresh();
     })();
     return () => {
+      disposed = true;
+      stopNotifications();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
       cancelTouchMenu();
@@ -1528,11 +1540,13 @@
             (event) => {
               if (stopping) void cancelRun(runId).catch(() => {});
               const m = message();
+              const hadQuestion = requestsAttention(m);
               applyRunEvent(m, event);
               if (
                 event.kind === 'nativeworkflow' ||
                 event.kind === 'plan' ||
-                event.kind === 'visualization'
+                event.kind === 'visualization' ||
+                (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               )
                 saveSoon();
               if (activeId === conversation.id) void scrollToEnd();

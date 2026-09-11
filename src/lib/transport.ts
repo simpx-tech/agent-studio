@@ -1,5 +1,7 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listen } from '@tauri-apps/api/event';
+import { createDesktopNotificationTracker } from './desktop-notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
@@ -29,6 +31,28 @@ import {
 } from './domain';
 
 export const desktop = () => isTauri();
+
+export type DesktopNotificationSettings = {
+  enabled: boolean;
+  sound: boolean;
+  lastError?: string;
+  lastSent?: number;
+};
+export const desktopNotificationSettings = (): Promise<DesktopNotificationSettings> =>
+  invoke('desktop_notification_settings');
+export const setDesktopNotifications = (
+  enabled: boolean,
+  sound: boolean,
+): Promise<DesktopNotificationSettings> => invoke('set_desktop_notifications', { enabled, sound });
+export const testDesktopNotification = (): Promise<void> =>
+  invoke('desktop_notification', { notice: { kind: 'test', tag: `test:${crypto.randomUUID()}` } });
+export async function watchDesktopNotifications(
+  open: (conversationId: string) => void,
+): Promise<() => void> {
+  if (!desktop()) return () => {};
+  return listen<string>('studio-notification-open', ({ payload }) => open(payload));
+}
+const desktopNotices = createDesktopNotificationTracker();
 
 export async function artifactPreviewUrl(): Promise<string> {
   if (!desktop()) return '/artifact-preview';
@@ -589,8 +613,14 @@ export async function loadWorkspace(): Promise<Workspace> {
   return value ? restoreWorkspace(value) : initialWorkspace();
 }
 export async function saveWorkspace(workspace: Workspace): Promise<void> {
-  if (desktop()) await invoke('save_workspace', { workspace });
-  else localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
+  if (desktop()) {
+    await invoke('save_workspace', { workspace });
+    for (const notice of desktopNotices(workspace)) {
+      // Notification/audio failure must never fail saving or interrupt a CLI run.
+      // Native delivery retains an actionable error in Connections.
+      void invoke('desktop_notification', { notice }).catch(() => {});
+    }
+  } else localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
 }
 export async function detectProviders(): Promise<ProviderStatus[]> {
   if (desktop()) return invoke('detect_providers');

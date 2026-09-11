@@ -19,6 +19,13 @@ export async function nativePage(port) {
   let next = 0;
   const pending = new Map();
   const errors = [];
+  socket.onclose = () => {
+    for (const request of pending.values()) {
+      clearTimeout(request.timeout);
+      request.reject(new Error('Native page closed.'));
+    }
+    pending.clear();
+  };
   socket.onmessage = ({ data }) => {
     const response = JSON.parse(data);
     if (response.method === 'Runtime.exceptionThrown')

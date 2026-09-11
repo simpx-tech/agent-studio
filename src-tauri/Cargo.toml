@@ -29,12 +29,16 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+notify-rust = { version = "4.18.0", features = ["preview-macos-un"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "wav"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7.3"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_System_Threading", "Win32_System_SystemInformation"] }
+winreg = "0.55"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

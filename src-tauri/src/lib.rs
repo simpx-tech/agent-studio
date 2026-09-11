@@ -3,6 +3,7 @@ mod cli_queries;
 mod context;
 mod folders;
 mod models;
+mod notifications;
 mod profiles;
 mod protocol;
 mod providers;
@@ -400,6 +401,7 @@ pub fn run() {
         .manage(runner::Runs::default())
         .manage(titles::Titles::default())
         .manage(Storage::default())
+        .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
         .on_window_event(|window, event| {
@@ -465,6 +467,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            notifications::desktop_notification_settings,
+            notifications::set_desktop_notifications,
+            notifications::desktop_notification,
             artifacts::save_artifact,
             get_installation,
             discover_wsl,

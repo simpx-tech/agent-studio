@@ -8,16 +8,25 @@ import { join, resolve } from 'node:path';
 import { createRelay } from '../relay/server.ts';
 import { nativePage } from './native-page.mjs';
 
-const page = await nativePage(9497);
+const desktopQa = process.env.QA_DESKTOP_NOTIFICATIONS === '1';
+const prefix = desktopQa ? 'desktop-notifications' : 'notifications';
+const page = await nativePage(desktopQa ? 9498 : 9497);
 assert.equal(
   await page.invoke('plugin:app|identifier'),
-  'com.vinicius.agentstudio.notifications-qa',
+  `com.vinicius.agentstudio.${desktopQa ? 'desktop-notifications' : 'notifications'}-qa`,
 );
 await page.waitFor(
   () => document.querySelector('[aria-label="New conversation"]')?.disabled === false,
 );
 const identity = await page.invoke('get_installation');
 const workspace = await page.invoke('load_workspace');
+if (desktopQa) {
+  await page.invoke('set_desktop_notifications', { enabled: true, sound: true });
+  await page.invoke('desktop_notification', {
+    notice: { kind: 'test', tag: `test:${crypto.randomUUID()}` },
+  });
+  assert.equal((await page.invoke('desktop_notification_settings')).lastError, undefined);
+}
 assert.equal(
   workspace.conversations.length,
   0,
@@ -112,6 +121,9 @@ await page.waitFor(
   () => document.querySelector('[aria-label="New conversation"]')?.disabled === false,
 );
 for (const chat of chats) {
+  const lastDesktopSent = desktopQa
+    ? (await page.invoke('desktop_notification_settings')).lastSent
+    : undefined;
   await page.evaluate(() =>
     [...document.querySelectorAll('[role="tab"]')]
       .find((e) => e.textContent.includes('History'))
@@ -165,9 +177,20 @@ for (const chat of chats) {
     deliveries.filter((d) => d.conversationId === chat.id && d.kind === 'complete').length,
     1,
   );
+  if (desktopQa) {
+    const status = await page.invoke('desktop_notification_settings');
+    assert(
+      status.lastSent > lastDesktopSent,
+      'The real provider completion must send a native notification.',
+    );
+    assert.equal(status.lastError, undefined);
+    const duplicate = { kind: 'complete', conversationId: chat.id, tag: `${reply.runId}:terminal` };
+    await page.invoke('desktop_notification', { notice: duplicate });
+    assert.equal((await page.invoke('desktop_notification_settings')).lastSent, status.lastSent);
+  }
   const shot = await page.cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(
-    `artifacts/notifications-native-${chat.settings.provider}.png`,
+    `artifacts/${prefix}-native-${chat.settings.provider}.png`,
     Buffer.from(shot.data, 'base64'),
   );
   results.push({
@@ -176,11 +199,12 @@ for (const chat of chats) {
     verified: true,
     questionReply: true,
     pushQueuedOnce: true,
+    nativeNotification: desktopQa,
   });
 }
 assert.equal(await page.evaluate(() => !!document.querySelector('.push-settings')), false);
 await writeFile(
-  'artifacts/notifications-native-result.json',
+  `artifacts/${prefix}-native-result.json`,
   JSON.stringify(
     {
       checkedAt: new Date().toISOString(),

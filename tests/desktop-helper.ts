@@ -19,6 +19,23 @@ export async function mockDesktop(page: Page, mode = 'success') {
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          if (command === 'desktop_notification_settings')
+            return JSON.parse(
+              localStorage.getItem('test-notifications') ?? '{"enabled":false,"sound":true}',
+            );
+          if (command === 'set_desktop_notifications') {
+            localStorage.setItem('test-notifications', JSON.stringify(args));
+            return args;
+          }
+          if (command === 'desktop_notification') {
+            const settings = JSON.parse(localStorage.getItem('test-notifications') ?? '{}');
+            if (settings.enabled) {
+              const sent = JSON.parse(localStorage.getItem('test-notices') ?? '[]');
+              sent.push(args.notice);
+              localStorage.setItem('test-notices', JSON.stringify(sent));
+            }
+            return;
+          }
           if (command === 'save_artifact') {
             (window as any).savedArtifact = args;
             return 'C:/Downloads/' + args.filename;

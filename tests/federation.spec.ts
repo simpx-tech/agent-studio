@@ -38,6 +38,8 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          if (command === 'desktop_notification_settings') return { enabled: false, sound: true };
+          if (command === 'desktop_notification') return;
           if (command === 'plugin:window|is_maximized') return false;
           if (command === 'plugin:event|listen') return 0;
           if (command === 'plugin:event|unlisten') return;
