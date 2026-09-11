@@ -4,6 +4,7 @@
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
+  import ArtifactResize from './ArtifactResize.svelte';
   let {
     artifact,
     mode = 'modal',
@@ -16,7 +17,9 @@
     close: () => void;
   } = $props();
   let viewportWidth = $state(0);
-  const docked = $derived(mode === 'panel' && viewportWidth >= 1100);
+  let workspaceWidth = $state(0);
+  let panelWidth = $state<number>();
+  const docked = $derived(mode === 'panel' && viewportWidth >= 1100 && workspaceWidth >= 780);
   let tab = $state<'preview' | 'source'>('preview');
   let url = $state('');
   let error = $state('');
@@ -46,11 +49,22 @@
   });
   onMount(() => {
     const focused = document.activeElement as HTMLElement | null;
+    const workspace = dialog?.parentElement;
+    const observer = new ResizeObserver(() => {
+      if (workspace) workspaceWidth = workspace.getBoundingClientRect().width;
+    });
+    if (workspace) {
+      workspaceWidth = workspace.getBoundingClientRect().width;
+      observer.observe(workspace);
+    }
     mounted = true;
     void artifactPreviewUrl()
       .then((value) => (url = value))
       .catch(() => (error = 'Could not open the artifact preview. The source is still available.'));
-    return () => focused?.isConnected && focused.focus();
+    return () => {
+      observer.disconnect();
+      if (focused?.isConnected) focused.focus();
+    };
   });
   function initialize(event: Event) {
     // Send once to the constant renderer; artifact-authored messages are never handled by the app.
@@ -64,7 +78,9 @@
 <svelte:window bind:innerWidth={viewportWidth} />
 <dialog
   bind:this={dialog}
+  id="artifact-viewer"
   class="artifact-viewer"
+  style:--artifact-panel-width={panelWidth ? `${panelWidth}px` : undefined}
   class:side-panel={mode === 'panel'}
   class:docked
   aria-modal={docked ? undefined : 'true'}
@@ -81,6 +97,10 @@
     close();
   }}
 >
+  {#if docked}<ArtifactResize
+      availableWidth={workspaceWidth}
+      onresize={(width) => (panelWidth = width)}
+    />{/if}
   <header>
     <div>
       <span class="eyebrow">ARTIFACT</span>
@@ -189,9 +209,8 @@
     position: relative;
     inset: auto;
     align-self: stretch;
-    flex: 0 0 42%;
-    width: 42%;
-    max-width: 620px;
+    flex: 0 0 var(--artifact-panel-width, 42%);
+    width: var(--artifact-panel-width, 42%);
     min-width: 360px;
     height: auto;
     min-height: 0;

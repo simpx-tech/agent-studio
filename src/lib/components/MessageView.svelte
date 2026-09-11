@@ -156,9 +156,12 @@
   .response-extras {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 8px;
     margin: 14px 0;
+  }
+  .response-extras:has(> :global(details[open])) {
+    align-items: flex-start;
   }
   .response-extras > :global(.plan-panel),
   .response-extras > :global(.native-workflow-panel) {
