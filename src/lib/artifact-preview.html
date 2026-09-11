@@ -4,8 +4,34 @@
 window.addEventListener('message', function receive(event) {
   if (event.source !== parent || event.data?.type !== 'studio-artifact' || typeof event.data.source !== 'string' || new TextEncoder().encode(event.data.source).length > 520000) return;
   window.removeEventListener('message', receive);
+  // Presentation-only options from the owning parent. No child commands are accepted.
+  const font = typeof event.data.font === 'string' && event.data.font.length < 80000 && /^data:font\/woff2;base64,[A-Za-z0-9+/=]+$/.test(event.data.font) ? event.data.font : null;
+  const token = typeof event.data.sizeToken === 'string' && event.data.sizeToken.length <= 80 ? event.data.sizeToken : null;
   document.open();
   document.write(event.data.source);
   document.close();
+  if (font) {
+    const style = document.createElement('style');
+    style.textContent = '@font-face{font-family:"DM Sans Variable";font-style:normal;font-weight:100 1000;font-display:swap;src:url("' + font + '") format("woff2")}html,body{background:transparent!important;margin:0!important;padding:0!important;min-height:0!important;height:auto!important}body{display:flow-root}';
+    document.head.append(style);
+  }
+  if (token) {
+    let scheduled = false, previous = -1;
+    const measure = () => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const height = Math.ceil(Math.max(document.body.getBoundingClientRect().height, document.body.scrollHeight));
+        if (height === previous) return;
+        previous = height;
+        parent.postMessage({type:'studio-visualization-size',token,height}, '*');
+      });
+    };
+    new ResizeObserver(measure).observe(document.body);
+    new MutationObserver(measure).observe(document.body, {childList:true,subtree:true,attributes:true,characterData:true});
+    document.fonts.ready.then(measure);
+    measure();
+  }
 });
 </script></body></html>

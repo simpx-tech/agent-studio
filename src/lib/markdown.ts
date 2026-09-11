@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
-import { Marked } from 'marked';
+import { Marked, type Token, type TokensList } from 'marked';
+import type { Visualization } from './visualizations';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
 
@@ -50,8 +51,53 @@ const markdown = new Marked({
 });
 
 export function renderMarkdown(text: string): string {
+  return sanitizeMarkdown(markdown.parse(text, { async: false }));
+}
+
+type ReplyPart = { key: string } & (
+  { type: 'text'; html: string } | { type: 'visual'; visual: Visualization }
+);
+
+// Only standalone, top-level markers can position a visual already accepted by
+// the provider adapter. Code examples and quoted/nested markers remain inert.
+export function replyContent(text: string, visuals: Visualization[] = []): ReplyPart[] {
+  const tokens = markdown.lexer(text);
+  const result: ReplyPart[] = [];
+  const placed = new Set<string>();
+  let pending: Token[] = [];
+  let key = 'text:start';
+  function flush() {
+    if (!pending.length) return;
+    const group = Object.assign(pending, { links: tokens.links }) as TokensList;
+    const html = sanitizeMarkdown(markdown.parser(group));
+    if (html.trim()) result.push({ key, type: 'text', html });
+    pending = [];
+  }
+  for (const token of tokens) {
+    const marker =
+      token.type === 'html' && token.raw.trim().match(/^<!-- visualize:([a-zA-Z0-9_-]{1,80}) -->$/);
+    if (!marker) {
+      pending.push(token);
+      continue;
+    }
+    const visual = visuals.find((v) => v.id === marker[1]);
+    if (!visual || placed.has(visual.id)) continue;
+    flush();
+    result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
+    placed.add(visual.id);
+    key = `text:${visual.id}`;
+  }
+  flush();
+  // Older replies and visuals received before their prose keep an inline fallback.
+  for (const visual of visuals) {
+    if (!placed.has(visual.id)) result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
+  }
+  return result;
+}
+
+function sanitizeMarkdown(html: string): string {
   // Sanitize after highlighting so source code remains inert in the privileged document.
-  return DOMPurify.sanitize(markdown.parse(text, { async: false }), {
+  return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
       'p',
       'br',

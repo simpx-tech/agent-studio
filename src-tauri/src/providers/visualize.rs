@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_SOURCE: usize = 512_000;
 const MAX_TOTAL: usize = 2_000_000;
-pub const GUIDANCE: &str = "For interactive charts, diagrams, simulations, or visual explanations in this conversation, call the visualize tool (Claude: mcp__agent_studio__visualize). Supply a stable id, concise title, and complete self-contained HTML fragment in html. Use inline CSS/JavaScript, SVG, and data images only; network resources and host APIs are unavailable. The visual appears inline and can expand, restart, or download. Do not duplicate its source in your final answer. If an installed visualize skill directs a local-file content reference, submit the fragment through this tool instead: Agent Studio does not load paths from replies. Use ordinary Markdown for simple tables or prose. This tool displays content; it does not execute project work.";
+pub const GUIDANCE: &str = "For interactive charts, diagrams, simulations, or visual explanations in this conversation, call the visualize tool (Claude: mcp__agent_studio__visualize). Supply a stable id, concise title, and complete self-contained HTML fragment in html. After a successful call, put <!-- visualize:ID --> on its own line between blank lines at the relevant point in your final explanation, replacing ID with the submitted id. Write explanatory prose before and after the visual so it flows with the answer. Each visual appears once. Design a transparent, unframed fragment that blends with the reply: no outer card, page background, repeated title, or dashboard shell. The host supplies the chat font (DM Sans, 13px), text color, transparent background, and content-based height. Use CSS variables --foreground, --muted-foreground, --border, --primary and --viz-series-1 through --viz-series-6. Use responsive content with natural height; avoid viewport/min-height sizing and hard-coded page colors or fonts. Use inline CSS/JavaScript, SVG, and data images only; network resources and host APIs are unavailable. Viewing controls are supplied by the host. Do not duplicate its source in your final answer. If an installed visualize skill directs a local-file content reference, submit the fragment through this tool instead: Agent Studio does not load paths from replies. Use ordinary Markdown for simple tables or prose. This tool displays content; it does not execute project work.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Visualization {
@@ -119,7 +119,11 @@ impl Visualizer {
             Err("Visualizations must be submitted by the parent conversation.")
         };
         self.published |= result.is_ok();
-        let response = json!({"id":value["id"],"result":{"success":result.is_ok(),"contentItems":[{"type":"inputText","text":result.as_ref().map(|_| "Visualization displayed in the conversation.").unwrap_or_else(|e| e)}]}});
+        let text = result
+            .as_ref()
+            .map(|v| placement(&v.id))
+            .unwrap_or_else(|e| (*e).into());
+        let response = json!({"id":value["id"],"result":{"success":result.is_ok(),"contentItems":[{"type":"inputText","text":text}]}});
         Some((
             response,
             result
@@ -186,7 +190,12 @@ impl Visualizer {
                 } else {
                     Err("Only a registered parent-conversation visualize call can display a visual.")
                 };
-                response["result"] = json!({"isError":result.is_err(),"content":[{"type":"text","text":result.err().unwrap_or("Visualization displayed in the conversation.")}]});
+                let text = result
+                    .as_ref()
+                    .map(|_| placement(args["id"].as_str().unwrap()))
+                    .unwrap_or_else(|e| (*e).into());
+                response["result"] =
+                    json!({"isError":result.is_err(),"content":[{"type":"text","text":text}]});
             }
             _ => {
                 response["error"] = json!({"code":-32601,"message":"Unknown visualization method"})
@@ -194,6 +203,10 @@ impl Visualizer {
         }
         json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"mcp_response":response}}})
     }
+}
+
+fn placement(id: &str) -> String {
+    format!("Visualization accepted. Place <!-- visualize:{id} --> on its own line between blank lines in your final answer, between the paragraphs it helps explain. Do not repeat the HTML or add a separate attachment heading.")
 }
 
 // Mirror the SDK's stdin lifetime: a result with background tasks still running

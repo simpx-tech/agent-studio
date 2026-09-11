@@ -3,7 +3,7 @@
   import { X, Download, RotateCcw, Code, Eye, PanelRightOpen, Maximize2 } from '@lucide/svelte';
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
-  import { visualizationDocument } from '$lib/visualizations';
+  import { visualizationPreview } from '$lib/visualization-preview';
   import { highlightCode } from '$lib/markdown';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import ArtifactResize from './ArtifactResize.svelte';
@@ -72,15 +72,17 @@
     };
   });
   function initialize(event: Event) {
-    // Send once to the constant renderer; artifact-authored messages are never handled by the app.
+    // Send once to the constant renderer; this expanded viewer accepts no child messages.
     const frame = event.currentTarget as HTMLIFrameElement;
     if (frame.dataset.initialized) return;
     frame.dataset.initialized = 'true';
     frame.contentWindow?.postMessage(
-      {
-        type: 'studio-artifact',
-        source: artifact.visualization ? visualizationDocument(artifact.source) : artifact.source,
-      },
+      artifact.visualization
+        ? visualizationPreview(artifact.source)
+        : {
+            type: 'studio-artifact',
+            source: artifact.source,
+          },
       '*',
     );
   }
@@ -169,6 +171,7 @@
   </div>
   <div
     class="artifact-content"
+    class:visualization-preview={artifact.visualization && tab === 'preview'}
     role="tabpanel"
     aria-label={tab === 'preview' ? 'Artifact preview' : 'Artifact source'}
   >
@@ -290,6 +293,11 @@
     height: 100%;
     border: 0;
     display: block;
+  }
+  .visualization-preview {
+    background: var(--bg);
+    color: var(--text);
+    padding: 16px;
   }
   pre {
     margin: 0;

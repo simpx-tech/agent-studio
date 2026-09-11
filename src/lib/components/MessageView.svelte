@@ -7,7 +7,7 @@
     PanelRightOpen,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
-  import { renderMarkdown } from '$lib/markdown';
+  import { replyContent } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import ToolActivity from './ToolActivity.svelte';
@@ -47,6 +47,7 @@
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
   const artifacts = $derived(messageArtifacts(message));
+  const content = $derived(replyContent(text, message.visualizations));
   const savedProgress = $derived(
     message.role === 'assistant' &&
       message.status !== 'running' &&
@@ -99,17 +100,21 @@
           blocks={message.blocks}
           finalText={text}
         />{/if}
-      {#if text}
-        <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
-        <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->
-        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-        <div class="prose" onclick={linkClick}>{@html renderMarkdown(text)}</div>
-      {:else if message.status === 'running' && !message.blocks.length}<div class="thinking">
+      {#each content as part (part.key)}
+        {#if part.type === 'visual'}
+          <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
+        {:else}
+          <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
+          <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+          <div class="prose" onclick={linkClick}>{@html part.html}</div>
+        {/if}
+      {/each}
+      {#if !content.length && message.status === 'running' && !message.blocks.length}<div
+          class="thinking"
+        >
           <span></span><span></span><span></span><small>Making room for a good answer…</small>
         </div>{/if}
-      {#each message.visualizations ?? [] as visual (visual.id)}
-        <VisualizationView {visual} messageId={message.id} {openArtifact} />
-      {/each}
       {#if message.error}<div class="message-error" role="status">
           <CircleAlert size={15} />{message.error}
         </div>{/if}

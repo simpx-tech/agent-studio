@@ -5,10 +5,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { nativePage } from './native-page.mjs';
 import { checkNativeArtifact } from './artifact-native-check.mjs';
+import {
+  explanationBefore,
+  explanationAfter,
+  explanationSource,
+} from './visualization-example.mjs';
 
 const port = 9493;
 const page = await nativePage(port);
 const report = { checkedAt: new Date().toISOString() };
+const explanation = process.env.QA_EXPLANATION === '1';
 try {
   assert.equal(await page.invoke('plugin:app|identifier'), 'com.vinicius.agentstudio.visualize-qa');
   await page.waitFor(
@@ -77,11 +83,20 @@ try {
           .click(),
       chat.title,
     );
-    await page.evaluate((provider) => {
-      const el = document.querySelector('[aria-label="Message"]');
-      el.value = `Test the actual ${provider === 'claude' ? 'mcp__agent_studio__visualize' : 'visualize'} tool. Call it with id counter, title Native Visual, and self-contained HTML with a heading Native Visual, button Add one, output id count initially 0, and inline JavaScript incrementing the output on click. Then call that same tool again with id counter to replace it with the same counter starting at 10. Exactly two visualization calls. Do not read files, run shell commands, search the web, delegate, or use other integrations. Do not emit HTML fences or local-file references. Finish with one short sentence.`;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }, chat.provider);
+    await page.evaluate(
+      (provider, explanation, source, before, after) => {
+        const el = document.querySelector('[aria-label="Message"]');
+        el.value = explanation
+          ? `Explain parallel work using the visualize tool once, id parallel, title Native Visual, with this exact HTML:\n${source}\n\nUse this paragraph before the visual: ${before}\n\nUse this paragraph after the visual: ${after}\nDo not read files, run shell commands, search, delegate, or call other integrations. Do not repeat the HTML in the answer.`
+          : `Test the actual ${provider === 'claude' ? 'mcp__agent_studio__visualize' : 'visualize'} tool. Call it with id counter, title Native Visual, and self-contained HTML with a heading Native Visual, button Add one, output id count initially 0, and inline JavaScript incrementing the output on click. Then call that same tool again with id counter to replace it with the same counter starting at 10. Exactly two visualization calls. Do not read files, run shell commands, search the web, delegate, or use other integrations. Do not emit HTML fences or local-file references. Finish with one short sentence.`;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      },
+      chat.provider,
+      explanation,
+      explanationSource,
+      explanationBefore,
+      explanationAfter,
+    );
     await page.waitFor(
       () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
     );
@@ -97,18 +112,45 @@ try {
     }
     assert.equal(reply?.status, 'complete', reply?.error);
     assert.equal(reply.visualizations?.length, 1, 'No accepted native visualization');
-    assert.equal(reply.visualizations[0].revision, 2, 'Second tool call did not replace the first');
+    assert.equal(
+      reply.visualizations[0].revision,
+      explanation ? 1 : 2,
+      'Unexpected visualization revision',
+    );
     const tools = reply.blocks.flatMap((b) => (b.tool ? [b.tool] : []));
     assert.equal(
       tools.filter((t) => /visualize/i.test(t.name) && t.status === 'complete').length,
-      2,
+      explanation ? 1 : 2,
     );
     await page.waitFor(() => document.querySelector('iframe[title="Native Visual visualization"]'));
-    const boundaries = await checkNativeArtifact(port);
-    assert.equal(boundaries.before, 10);
+    const boundaries = await checkNativeArtifact(port, explanation);
+    assert.equal(boundaries.before, explanation ? 3 : 10);
+    if (explanation) {
+      const text = reply.blocks
+        .filter((b) => b.type === 'markdown')
+        .map((b) => b.text)
+        .join('');
+      assert(text.includes('<!-- visualize:parallel -->'), 'Provider did not position its visual');
+      assert.equal(boundaries.background, 'rgba(0, 0, 0, 0)');
+      assert.equal(boundaries.fontLoaded, true);
+      await page.waitFor((contentHeight) => {
+        const content = document.querySelector('.message:not(.user):last-of-type .message-content');
+        const visual = content?.querySelector('.visualization');
+        return (
+          visual?.previousElementSibling?.classList.contains('prose') &&
+          visual?.nextElementSibling?.classList.contains('prose') &&
+          Math.abs(visual.querySelector('iframe').clientHeight - contentHeight) < 2
+        );
+      }, Math.ceil(boundaries.height));
+      await page.evaluate(() =>
+        document
+          .querySelector('.message:not(.user):last-of-type')
+          ?.scrollIntoView({ block: 'start' }),
+      );
+    }
     const shot = await page.cdp('Page.captureScreenshot', { format: 'png' });
     await writeFile(
-      `artifacts/visualize-native-${chat.provider}.png`,
+      `artifacts/visualize-${explanation ? 'flow-' : ''}native-${chat.provider}.png`,
       Buffer.from(shot.data, 'base64'),
     );
     report[chat.provider] = {
@@ -123,7 +165,10 @@ try {
     console.log(`${chat.provider}: actual visualization calls and native interaction passed`);
   }
   assert.equal(page.errors.length, 0);
-  await writeFile('artifacts/visualize-native-result.json', JSON.stringify(report, null, 2));
+  await writeFile(
+    `artifacts/visualize-${explanation ? 'flow-' : ''}native-result.json`,
+    JSON.stringify(report, null, 2),
+  );
 } finally {
   page.close();
 }

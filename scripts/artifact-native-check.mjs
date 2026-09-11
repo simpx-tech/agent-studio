@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 // Attach only to the isolated preview target, never another app or browser session.
-export async function checkNativeArtifact(port) {
+export async function checkNativeArtifact(port, explanation = false) {
   let target;
   const deadline = Date.now() + 15000;
   while (!target && Date.now() < deadline) {
@@ -37,10 +37,21 @@ export async function checkNativeArtifact(port) {
             returnByValue: true,
             expression: `(async()=>{
         const deadline = Date.now() + 10000;
-        while (!document.querySelector('#count') && Date.now() < deadline) await new Promise(resolve=>setTimeout(resolve,50));
+        while (!document.querySelector('${explanation ? '#workers' : '#count'}') && Date.now() < deadline) await new Promise(resolve=>setTimeout(resolve,50));
+        ${
+          explanation
+            ? `
+        const slider=document.querySelector('input[aria-label="Workers"]');
+        if (!slider) throw Error('Diagram is not rendered');
+        const before=Number(document.querySelector('#workers').textContent);
+        slider.value=String(before+1);slider.dispatchEvent(new Event('input',{bubbles:true}));
+        `
+            : `
         const button = [...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Add one');
         if (!button || !document.querySelector('#count')) throw Error('Counter is not rendered');
         const before = Number(document.querySelector('#count').textContent); button.click();
+        `
+        }
         let parentBlocked=false, storageBlocked=false, networkBlocked=false;
         try { void parent.document.body; } catch { parentBlocked=true; }
         try { localStorage.getItem('fixture'); } catch { storageBlocked=true; }
@@ -51,7 +62,8 @@ export async function checkNativeArtifact(port) {
           new Promise(resolve=>setTimeout(()=>resolve(true),1500))
         ]);
         const nativeIpcBlocked = await probe('plugin:app|identifier') && await probe('get_installation');
-        return {before, after:Number(document.querySelector('#count').textContent), parentBlocked,storageBlocked,networkBlocked,bridgeHelpersPresent,nativeIpcBlocked};
+        await document.fonts.ready;
+        return {before, after:Number(document.querySelector('${explanation ? '#workers' : '#count'}').textContent), parentBlocked,storageBlocked,networkBlocked,bridgeHelpersPresent,nativeIpcBlocked,background:getComputedStyle(document.body).backgroundColor,fontLoaded:document.fonts.check('13px "DM Sans Variable"'),height:document.body.getBoundingClientRect().height};
       })()`,
           },
         }),
