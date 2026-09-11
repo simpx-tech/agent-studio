@@ -229,6 +229,88 @@ impl Scan {
         }
         serde_json::from_slice(&std::fs::read(physical).ok()?).ok()
     }
+    fn memory_index(&mut self, directory: &Path, folder: &Path) {
+        for name in ["memory_summary.md", "MEMORY.md"] {
+            self.file(&directory.join(name), "memories", "Global", "Global memory entrypoint for the selected profile; topic lookup depends on the task.");
+        }
+        // The Codex memory registry labels source references with their workspace cwd.
+        // Inspect only those labels and paths, never return memory text or crawl archives.
+        let index = self.physical(&directory.join("MEMORY.md"));
+        let Some(body) = std::fs::metadata(&index)
+            .ok()
+            .filter(|m| m.len() <= 2_000_000)
+            .and_then(|_| std::fs::read_to_string(&index).ok())
+        else {
+            return;
+        };
+        let dirs = ancestors(folder, true, |p| self.physical(p));
+        let project = dirs.first().map_or(folder, PathBuf::as_path);
+        let project_path = self.display(project);
+        let is_repository = self.physical(project).join(".git").exists();
+        for line in body.lines().take(MAX_VISITS) {
+            let Some((reference, metadata)) =
+                line.strip_prefix("- ").and_then(|s| s.split_once(" (cwd="))
+            else {
+                continue;
+            };
+            let cwd = metadata.split(", rollout_path=").next().unwrap_or("");
+            if !path_within(cwd, &project_path)
+                || (!is_repository && !path_within(&project_path, cwd))
+            {
+                continue;
+            }
+            let relative = Path::new(reference);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                || relative.extension().is_none_or(|e| e != "md")
+            {
+                continue;
+            }
+            let path = directory.join(relative);
+            let contained = std::fs::canonicalize(self.physical(&path))
+                .ok()
+                .zip(std::fs::canonicalize(self.physical(directory)).ok())
+                .is_some_and(|(p, root)| p.starts_with(root));
+            if contained {
+                self.file(
+                    &path,
+                    "memories",
+                    "Project memory",
+                    "Indexed for this project. Read on demand when the task calls for this memory.",
+                );
+            }
+        }
+    }
+    fn mcp(&mut self, name: &str, scope: &str, status: &str, detail: &str) {
+        if name.is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+            return;
+        }
+        if let Some(entry) = self
+            .snapshot
+            .entries
+            .iter_mut()
+            .find(|e| e.kind == "mcps" && e.name == name)
+        {
+            entry.scope = scope.into();
+            entry.status = status.into();
+            entry.detail = detail.into();
+            return;
+        }
+        if self.snapshot.entries.len() >= MAX_ENTRIES {
+            self.snapshot.truncated = true;
+            return;
+        }
+        self.snapshot.entries.push(ContextEntry {
+            name: name.into(),
+            path: name.into(),
+            kind: "mcps".into(),
+            scope: scope.into(),
+            status: status.into(),
+            detail: detail.into(),
+        });
+    }
     fn codex_guidance(&mut self, dir: &Path, scope: &str, fallbacks: &[String]) {
         let mut names = vec!["AGENTS.override.md".into(), "AGENTS.md".into()];
         names.extend(
@@ -256,6 +338,27 @@ impl Scan {
             }
         }
     }
+}
+
+fn path_within(path: &str, root: &str) -> bool {
+    let normalize = |s: &str| {
+        let path = s.replace('\\', "/");
+        let path = path
+            .strip_prefix("//?/")
+            .unwrap_or(&path)
+            .trim_end_matches('/');
+        if path.as_bytes().get(1) == Some(&b':') || path.starts_with("//") {
+            path.to_lowercase()
+        } else {
+            path.into()
+        }
+    };
+    let path = normalize(path);
+    let root = normalize(root);
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn ancestors(folder: &Path, codex: bool, physical: impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
@@ -305,8 +408,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         }
         scan.walk(&home.join(".agents/skills"), "skills", "User", true, 0);
         scan.walk(&config.join("skills"), "skills", "Profile", true, 0);
-        scan.walk(&config.join("memories"), "memories", "Profile", false, 0);
-        scan.note("Instruction files are discovered from disk. Custom config layers, imports, trust, and size limits can change what Codex loads. Skills marked Reported come from the CLI catalog; memory files are available on disk, with use unconfirmed.");
+        scan.memory_index(&config.join("memories"), &folder);
+        scan.note("Instruction files are discovered from disk; configuration and trust can change loading. Memories include global entrypoints and indexed sources for this project, not other projects or unscoped archives. Topic use depends on the task. This is a startup inventory, not a previous reply's read history.");
     } else if provider == "claude" {
         scan.file(
             &config.join("CLAUDE.md"),
@@ -386,7 +489,14 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 }
             }
         }
-        if let Some(dir) = user_settings["autoMemoryDirectory"].as_str() {
+        let memory_enabled = user_settings["autoMemoryEnabled"] != false
+            && (scan.bridge.is_some()
+                || std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+                    .map_or(true, |v| v != "1" && v != "true"));
+        if let Some(dir) = user_settings["autoMemoryDirectory"]
+            .as_str()
+            .filter(|_| memory_enabled)
+        {
             let path = dir
                 .strip_prefix("~/")
                 .map(|p| home.join(p))
@@ -408,13 +518,15 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        scan.walk(
-            &config.join("projects").join(key).join("memory"),
-            "memories",
-            "Project memory",
-            false,
-            0,
-        );
+        if memory_enabled && user_settings["autoMemoryDirectory"].as_str().is_none() {
+            scan.walk(
+                &config.join("projects").join(key).join("memory"),
+                "memories",
+                "Project memory",
+                false,
+                0,
+            );
+        }
         let managed = if scan.bridge.is_some() || cfg!(target_os = "linux") {
             PathBuf::from("/etc/claude-code/CLAUDE.md")
         } else if cfg!(windows) {
@@ -462,8 +574,134 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             0,
         );
         scan.note("Antigravity does not expose a verified context inventory here. Listed files are candidates only; memory availability is unknown. Agent Studio runs Gemini in conversation-only mode with skill commands disabled.");
+        scan.note("MCP servers are unavailable in Agent Studio's Gemini conversation-only mode.");
     }
     scan
+}
+
+async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
+    use std::process::Stdio;
+    let mut command = exe.command();
+    if exe.wsl.is_some() {
+        command.args(["--agent-studio-cwd", folder]);
+    } else {
+        command.current_dir(folder);
+    }
+    let mut child = command
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "Could not start the Codex context query")?;
+    let mut input = child.stdin.take().ok_or("Missing query input")?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("Missing query output")?).lines();
+    let mut report = json!({});
+    let query = async {
+        let init = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"}}});
+        input
+            .write_all(format!("{init}\n").as_bytes())
+            .await
+            .map_err(|_| "Context query input failed")?;
+        let mut remaining = HashSet::from([2, 3, 4]);
+        let mut cursors = HashSet::new();
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|_| "Context query output failed")?
+        {
+            if line.len() > 2_000_000 {
+                return Err("Context query exceeded its output limit");
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(id) = value["id"].as_i64() else {
+                continue;
+            };
+            if id == 1 {
+                if value["error"].is_object() {
+                    return Err("Codex context initialization failed");
+                }
+                input
+                    .write_all(b"{\"method\":\"initialized\"}\n")
+                    .await
+                    .map_err(|_| "Context query input failed")?;
+                for request in [
+                    json!({"id":2,"method":"skills/list","params":{"cwds":[folder],"forceReload":true}}),
+                    json!({"id":3,"method":"config/read","params":{"cwd":folder,"includeLayers":false}}),
+                    json!({"id":4,"method":"mcpServerStatus/list","params":{"limit":100,"detail":"toolsAndAuthOnly"}}),
+                ] {
+                    input
+                        .write_all(format!("{request}\n").as_bytes())
+                        .await
+                        .map_err(|_| "Context query input failed")?;
+                }
+            } else if remaining.contains(&id) {
+                if !value["error"].is_object() {
+                    let result = &value["result"];
+                    match id {
+                        2 => report["data"] = result["data"].clone(),
+                        3 => {
+                            // Keep names and enabled flags only; discard commands, URLs, env and auth.
+                            if let Some(servers) = result["config"]["mcp_servers"].as_object() {
+                                report["mcpConfig"] = Value::Object(
+                                    servers
+                                        .iter()
+                                        .take(200)
+                                        .map(|(name, config)| {
+                                            (
+                                                name.clone(),
+                                                json!({"enabled":config["enabled"] != false}),
+                                            )
+                                        })
+                                        .collect(),
+                                );
+                            } else {
+                                report["mcpConfig"] = json!({});
+                            }
+                        }
+                        4 => {
+                            if let Some(servers) = result["data"].as_array() {
+                                if !report["mcps"].is_array() {
+                                    report["mcps"] = json!([]);
+                                }
+                                let entries = report["mcps"].as_array_mut().unwrap();
+                                for server in
+                                    servers.iter().take(200usize.saturating_sub(entries.len()))
+                                {
+                                    entries.push(json!({"name":server["name"],"status":server["runtimeStatus"],"authStatus":server["authStatus"],"plugin":server["pluginId"].is_string()}));
+                                }
+                                if let Some(cursor) = result["nextCursor"].as_str() {
+                                    if entries.len() < 200 && cursors.insert(cursor.to_string()) {
+                                        let request = json!({"id":4,"method":"mcpServerStatus/list","params":{"limit":100,"detail":"toolsAndAuthOnly","cursor":cursor}});
+                                        input
+                                            .write_all(format!("{request}\n").as_bytes())
+                                            .await
+                                            .map_err(|_| "Context query input failed")?;
+                                        continue;
+                                    }
+                                    report["mcpTruncated"] = json!(true);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                remaining.remove(&id);
+                if remaining.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+        Err("Codex exited without a context report")
+    };
+    let result = tokio::time::timeout(Duration::from_secs(25), query).await;
+    exe.kill(&mut child).await;
+    if !matches!(result, Ok(Ok(()))) {
+        report["incomplete"] = json!(true);
+    }
+    Ok(report)
 }
 
 async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Value, String> {
@@ -483,7 +721,6 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
             "stream-json",
             "--verbose",
             "--no-session-persistence",
-            "--strict-mcp-config",
             "--tools",
             "",
             "--permission-mode",
@@ -504,6 +741,7 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
         .map_err(|_| "Could not start the Claude context query")?;
     let mut input = child.stdin.take().ok_or("Missing query input")?;
     let mut lines = BufReader::new(child.stdout.take().ok_or("Missing query output")?).lines();
+    let mut report = json!({});
     let query = async {
         let mut commands = Value::Null;
         input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"init\",\"request\":{\"subtype\":\"initialize\"}}\n").await.map_err(|_| "Context query input failed")?;
@@ -523,8 +761,13 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
             }
             let response = &v["response"];
             if response["subtype"] == "error" {
+                if response["request_id"] == "mcp" {
+                    return Ok(());
+                }
                 if response["request_id"] == "context" && commands.is_array() {
-                    return Ok(json!({"commands": commands}));
+                    report["commands"] = commands.clone();
+                    input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"mcp\",\"request\":{\"subtype\":\"mcp_status\"}}\n").await.map_err(|_| "Context query input failed")?;
+                    continue;
                 }
                 return Err("Claude could not report context for this model");
             }
@@ -532,23 +775,90 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
                 commands = response["response"]["commands"].clone();
                 input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"context\",\"request\":{\"subtype\":\"get_context_usage\",\"detail\":\"full\"}}\n").await.map_err(|_| "Context query input failed")?;
             } else if response["request_id"] == "context" {
-                let mut report = response["response"].clone();
-                report["commands"] = commands;
-                return Ok(report);
+                report["memoryFiles"] = response["response"]["memoryFiles"].clone();
+                report["commands"] = commands.clone();
+                input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"mcp\",\"request\":{\"subtype\":\"mcp_status\"}}\n").await.map_err(|_| "Context query input failed")?;
+            } else if response["request_id"] == "mcp" {
+                if let Some(servers) = response["response"]["mcpServers"].as_array() {
+                    report["mcps"] = Value::Array(servers.iter().take(200).map(|server| json!({"name":server["name"],"status":server["status"],"scope":server["scope"]})).collect());
+                    report["mcpTruncated"] = json!(servers.len() > 200);
+                }
+                return Ok(());
             }
         }
         Err("Claude exited without a context report")
     };
-    let result = tokio::time::timeout(Duration::from_secs(20), query)
+    let result = tokio::time::timeout(Duration::from_secs(25), query)
         .await
         .map_err(|_| "Claude context query timed out")
         .and_then(|r| r)
         .map_err(String::from);
     exe.kill(&mut child).await;
-    result
+    if result.is_err() {
+        report["incomplete"] = json!(true);
+    }
+    Ok(report)
+}
+
+fn merge_mcps(scan: &mut Scan, report: &Value) {
+    if report["mcpTruncated"] == true {
+        scan.snapshot.truncated = true;
+    }
+    if let Some(servers) = report["mcpConfig"].as_object() {
+        for (name, config) in servers.iter().take(200) {
+            scan.mcp(name, "CLI", if config["enabled"] == false { "disabled" } else { "configured" }, "Reported by the selected CLI's effective configuration. Connection status is unconfirmed.");
+        }
+    }
+    if let Some(servers) = report["mcps"].as_array() {
+        for server in servers.iter().take(200) {
+            let Some(name) = server["name"].as_str() else {
+                continue;
+            };
+            let status = match server["status"].as_str() {
+                Some("connected") => "connected",
+                Some("disabled") => "disabled",
+                Some("failed" | "cancelled") => "failed",
+                Some("pending" | "starting") => "pending",
+                Some("needs-auth" | "authenticationRequired") => "needsAuth",
+                _ if server["authStatus"] == "notLoggedIn" => "needsAuth",
+                _ => "configured",
+            };
+            // An unstarted runtime must not erase a configured disabled state.
+            if status == "configured"
+                && scan
+                    .snapshot
+                    .entries
+                    .iter()
+                    .any(|e| e.kind == "mcps" && e.name == name)
+            {
+                continue;
+            }
+            let scope = match server["scope"].as_str() {
+                Some("user") => "User",
+                Some("project") => "Project",
+                Some("local") => "Local",
+                Some("managed") => "Managed",
+                Some("plugin") => "Plugin",
+                _ if server["plugin"] == true => "Plugin",
+                _ => "CLI",
+            };
+            scan.mcp(
+                name,
+                scope,
+                status,
+                "Reported by a fresh MCP inspection for the selected CLI profile and folder.",
+            );
+        }
+    } else {
+        scan.note("MCP status could not be reported by this CLI. Configured entries, if present, have unconfirmed connection status.");
+    }
+    if report["incomplete"] == true {
+        scan.note("The CLI inspection did not finish. Some source or MCP metadata is unavailable; refresh to retry.");
+    }
 }
 
 fn merge_report(scan: &mut Scan, report: &Value) {
+    merge_mcps(scan, report);
     if scan.snapshot.provider == "codex" {
         if !report["data"].is_array() {
             scan.note("Codex did not return a skill catalog. Skill availability is unconfirmed.");
@@ -592,6 +902,10 @@ fn merge_report(scan: &mut Scan, report: &Value) {
             scan.note("Claude did not return instruction-file metadata. Loading is unconfirmed.");
             return;
         }
+        // The CLI resolves custom memory directories, worktrees, disabled memory and imports.
+        // Its successful report supersedes guessed project-memory directories.
+        scan.snapshot.entries.retain(|e| e.kind != "memories");
+        scan.visited.clear();
         for file in report["memoryFiles"].as_array().into_iter().flatten() {
             let Some(path) = file["path"].as_str() else {
                 continue;
@@ -608,7 +922,11 @@ fn merge_report(scan: &mut Scan, report: &Value) {
             scan.add(
                 Path::new(path),
                 kind,
-                "CLI",
+                if kind == "memories" {
+                    "Project memory"
+                } else {
+                    "CLI"
+                },
                 "reported",
                 "Loaded in a fresh CLI context query for the selected folder and model.",
             );
@@ -718,14 +1036,7 @@ pub async fn read(
         .await
         .map_err(|_| "Context inspection failed")?;
     let report = match provider.as_str() {
-        "codex" => Some(
-            crate::cli_queries::codex(
-                "skills/list",
-                json!({"cwds":[folder], "forceReload":true}),
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await,
-        ),
+        "codex" => Some(codex_report(&exe, &folder).await),
         "claude" => Some(claude_report(&exe, &folder, &model).await),
         _ => None,
     };
@@ -802,6 +1113,154 @@ async fn wsl_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_memories_include_global_and_exact_project_without_archive_crawl() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let config = home.join(".codex");
+        let project = root.path().join("repo");
+        let folder = project.join("sub");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir(project.join(".git")).unwrap();
+        let memories = config.join("memories");
+        file(
+            &memories.join("memory_summary.md"),
+            "private global summary",
+        );
+        file(&memories.join("MEMORY.md"), &format!(
+            "- rollout_summaries/selected.md (cwd={}, rollout_path=private transcript)\n- rollout_summaries/other.md (cwd={}-other, rollout_path=private transcript)\n- ../escaped.md (cwd={}, rollout_path=private transcript)\n", project.display(), project.display(), folder.display()
+        ));
+        for name in [
+            "rollout_summaries/selected.md",
+            "rollout_summaries/other.md",
+            "raw_memories.md",
+            "extensions/internal.md",
+        ] {
+            file(&memories.join(name), "private memory body");
+        }
+        file(&config.join("escaped.md"), "outside memory directory");
+        let scan = inventory(scanner("codex", &folder), home.clone(), config.clone());
+        let names: Vec<_> = scan
+            .snapshot
+            .entries
+            .iter()
+            .filter(|e| e.kind == "memories")
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, ["memory_summary.md", "MEMORY.md", "selected.md"]);
+        let encoded = serde_json::to_string(&scan.snapshot).unwrap();
+        assert!(!encoded.contains("private"));
+        assert!(!scan.snapshot.truncated);
+        assert!(path_within(
+            r"\\?\C:\Projects\Studio\sub",
+            r"c:\projects\studio"
+        ));
+        assert!(!path_within("/repo-other", "/repo"));
+        assert!(!path_within("/Repo", "/repo"));
+        let standalone = inventory(scanner("codex", root.path()), home, config);
+        assert_eq!(
+            standalone
+                .snapshot
+                .entries
+                .iter()
+                .filter(|e| e.kind == "memories")
+                .count(),
+            2
+        );
+    }
+    #[test]
+    fn claude_custom_memory_replaces_default_and_successful_report_replaces_guesses() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("project");
+        let home = root.path().join("home");
+        let config = home.join(".claude");
+        let custom = home.join("custom-memory");
+        let key: String = folder
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        file(
+            &config.join("projects").join(key).join("memory/default.md"),
+            "old memory",
+        );
+        file(&custom.join("MEMORY.md"), "custom index");
+        file(&custom.join("topic.md"), "custom topic");
+        file(
+            &config.join("settings.json"),
+            &json!({"autoMemoryDirectory":custom}).to_string(),
+        );
+        let mut scan = inventory(scanner("claude", &folder), home.clone(), config.clone());
+        assert_eq!(
+            scan.snapshot
+                .entries
+                .iter()
+                .filter(|e| e.kind == "memories")
+                .count(),
+            2
+        );
+        assert!(!scan.snapshot.entries.iter().any(|e| e.name == "default.md"));
+        merge_report(
+            &mut scan,
+            &json!({"memoryFiles":[{"path":custom.join("MEMORY.md"),"type":"AutoMem"}]}),
+        );
+        assert!(scan.snapshot.entries.iter().any(|e| e.name == "topic.md"));
+        merge_report(&mut scan, &json!({"memoryFiles":[]}));
+        assert!(!scan.snapshot.entries.iter().any(|e| e.kind == "memories"));
+        file(
+            &config.join("settings.json"),
+            &json!({"autoMemoryDirectory":custom,"autoMemoryEnabled":false}).to_string(),
+        );
+        let scan = inventory(scanner("claude", &folder), home, config);
+        assert!(!scan.snapshot.entries.iter().any(|e| e.kind == "memories"));
+    }
+    #[test]
+    fn mcp_metadata_preserves_status_and_never_exposes_configuration_or_errors() {
+        let mut scan = scanner("codex", Path::new("/project"));
+        merge_mcps(
+            &mut scan,
+            &json!({
+                "mcpConfig": {"docs":{"enabled":true,"env":{"TOKEN":"private-secret"}},"off":{"enabled":false},"empty":{"enabled":true}},
+                "mcps": [
+                    {"name":"docs","status":"connected","tools":{"search":{"description":"private-description"}},"url":"https://private.example"},
+                    {"name":"off","status":null},
+                    {"name":"auth","status":"needs-auth","scope":"user","error":"private-error"},
+                    {"name":"failed","status":"failed","scope":"project"},
+                    {"name":"plugin:fixture","status":"pending","plugin":true},
+                    {"name":"bad\nname","status":"connected"}
+                ]
+            }),
+        );
+        assert_eq!(scan.snapshot.entries.len(), 6);
+        for (name, status) in [
+            ("docs", "connected"),
+            ("off", "disabled"),
+            ("empty", "configured"),
+            ("auth", "needsAuth"),
+            ("failed", "failed"),
+            ("plugin:fixture", "pending"),
+        ] {
+            assert!(scan
+                .snapshot
+                .entries
+                .iter()
+                .any(|e| e.name == name && e.status == status));
+        }
+        let encoded = serde_json::to_string(&scan.snapshot).unwrap();
+        assert!(!encoded.contains("private"));
+        assert!(!encoded.contains("TOKEN"));
+        assert!(!encoded.contains("tools"));
+        let mut unknown = scanner("claude", Path::new("/project"));
+        merge_mcps(&mut unknown, &Value::Null);
+        assert!(unknown
+            .snapshot
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be reported")));
+        let mut empty = scanner("claude", Path::new("/project"));
+        merge_mcps(&mut empty, &json!({"mcps":[]}));
+        assert!(empty.snapshot.notes.is_empty());
+    }
     #[test]
     fn command_metadata_is_bounded_and_excludes_bodies_and_accounts() {
         let commands = command_catalog(&json!([
@@ -921,7 +1380,11 @@ mod tests {
         );
         merge_report(&mut scan, &Value::Null);
         assert_eq!(scan.snapshot.entries.len(), 1);
-        assert!(scan.snapshot.notes[0].contains("unconfirmed"));
+        assert!(scan
+            .snapshot
+            .notes
+            .iter()
+            .any(|n| n.contains("unconfirmed")));
     }
     #[test]
     fn claude_reports_imports_and_only_selected_project_memory() {

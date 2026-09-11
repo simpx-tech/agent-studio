@@ -2854,6 +2854,23 @@ test('model context shows scoped sources, filters, refresh failures, and preserv
   await expect(dialog).toContainText('No sources match this filter.');
   await dialog.getByRole('button', { name: /^Memories/ }).click();
   await expect(dialog.getByText('MEMORY.md', { exact: true })).toBeVisible();
+  await expect(dialog).toContainText('Global memory entrypoints');
+  await dialog.getByRole('button', { name: /^MCPs/ }).click();
+  await expect(dialog.getByText('docs-mcp', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Connected', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Disabled', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /Copy path/ })).toHaveCount(0);
+  await page.screenshot({ path: 'artifacts/context-mcps-browser.png' });
+  await dialog.getByRole('textbox', { name: 'Filter context sources' }).fill('disabled');
+  await expect(dialog.getByText('docs-mcp', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText('disabled-mcp', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const name of [/^Instructions/, /^Skills/, /^Memories/, /^MCPs/]) {
+    await expect(dialog.getByRole('button', { name })).toBeVisible();
+  }
+  expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await page.screenshot({ path: 'artifacts/context-mcps-mobile.png' });
+  await dialog.getByRole('button', { name: /^Memories/ }).click();
   await page.setViewportSize({ width: 880, height: 720 });
   await page.screenshot({ path: 'artifacts/context-memories-narrow-browser.png' });
   expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);

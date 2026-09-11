@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.context-mcp-qa",
+  "productName": "Agent Studio Context MCP QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Context MCP QA",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

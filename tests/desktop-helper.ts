@@ -188,6 +188,22 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   : [],
               entries: [
                 {
+                  name: 'docs-mcp',
+                  path: 'docs-mcp',
+                  kind: 'mcps',
+                  scope: 'Project',
+                  status: 'connected',
+                  detail: 'Reported by the selected CLI profile.',
+                },
+                {
+                  name: 'disabled-mcp',
+                  path: 'disabled-mcp',
+                  kind: 'mcps',
+                  scope: 'User',
+                  status: 'disabled',
+                  detail: 'Disabled in the selected profile.',
+                },
+                {
                   name: args.provider === 'claude' ? 'CLAUDE.md' : 'AGENTS.md',
                   path: `${args.location?.path}\\${args.provider === 'claude' ? 'CLAUDE.md' : 'AGENTS.md'}`,
                   kind: 'instructions',

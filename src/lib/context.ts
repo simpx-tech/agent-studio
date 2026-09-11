@@ -1,12 +1,23 @@
 import type { ChatLocation, ChatSettings, ProviderId } from './domain';
 
-export type ContextKind = 'instructions' | 'skills' | 'memories';
+export type ContextKind = 'instructions' | 'skills' | 'memories' | 'mcps';
 export type ContextEntry = {
   name: string;
   path: string;
   kind: ContextKind;
   scope: string;
-  status: 'discovered' | 'reported' | 'disabled' | 'shadowed' | 'reference';
+  status:
+    | 'discovered'
+    | 'reported'
+    | 'disabled'
+    | 'shadowed'
+    | 'reference'
+    | 'configured'
+    | 'connected'
+    | 'failed'
+    | 'pending'
+    | 'needsAuth'
+    | 'unknown';
   detail: string;
 };
 export type ContextSnapshot = {
@@ -27,6 +38,12 @@ export const contextStatuses: Record<ContextEntry['status'], string> = {
   disabled: 'Disabled',
   shadowed: 'Overridden',
   reference: 'Reference',
+  configured: 'Configured',
+  connected: 'Connected',
+  failed: 'Failed',
+  pending: 'Connecting',
+  needsAuth: 'Sign-in required',
+  unknown: 'Unknown',
 };
 
 export type ContextSelection = Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>;

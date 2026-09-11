@@ -1,6 +1,16 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { X, RefreshCw, Search, FileText, Sparkles, Brain, Copy, Check } from '@lucide/svelte';
+  import {
+    X,
+    RefreshCw,
+    Search,
+    FileText,
+    Sparkles,
+    Brain,
+    Plug,
+    Copy,
+    Check,
+  } from '@lucide/svelte';
   import { providers, type ChatSettings, type ChatLocation } from '$lib/domain';
   import { contextCache } from '$lib/transport';
   import {
@@ -40,6 +50,7 @@
     { id: 'instructions', name: 'Instructions', icon: FileText },
     { id: 'skills', name: 'Skills', icon: Sparkles },
     { id: 'memories', name: 'Memories', icon: Brain },
+    { id: 'mcps', name: 'MCPs', icon: Plug },
   ] as const;
   const entries = $derived((snapshot?.entries ?? []).filter((e) => e.kind === category));
   const filtered = $derived(
@@ -164,13 +175,26 @@
     </div>
     {#if error}<p class="error-banner" role="alert">{error}</p>{/if}
     <div class="context-entries" aria-busy={loading}>
+      {#if category === 'memories'}
+        <p class="context-category-help">
+          Global memory entrypoints and sources for this project or folder. Topic files are read
+          when relevant to the task.
+        </p>
+      {:else if category === 'mcps'}
+        <p class="context-category-help">
+          MCP servers for the selected CLI profile and folder. Configured servers may still need to
+          connect.
+        </p>
+      {/if}
       {#if loading && !snapshot}<p class="context-empty" role="status">
           Inspecting the selected CLI profile…
         </p>
       {:else if snapshot && !filtered.length}<p class="context-empty">
           {search
             ? 'No sources match this filter.'
-            : `No ${category} were reported or found in the inspected locations.`}
+            : category === 'mcps'
+              ? 'No MCP servers were reported. Check the inspection notes for availability.'
+              : `No ${category} were reported or found in the inspected locations.`}
         </p>
       {:else}
         {#each filtered as entry (entry.kind + entry.path)}
@@ -181,17 +205,17 @@
                 class:reported={entry.status === 'reported'}>{contextStatuses[entry.status]}</span
               >
             </div>
-            <div class="context-path">
-              <code>{entry.path}</code><button
-                class="icon-button"
-                aria-label={`Copy path for ${entry.name}`}
-                title="Copy path"
-                onclick={() => copyPath(entry.path)}
-                >{#if copied === entry.path}<Check size={14} />{:else}<Copy
-                    size={14}
-                  />{/if}</button
-              >
-            </div>
+            {#if entry.kind !== 'mcps'}<div class="context-path">
+                <code>{entry.path}</code><button
+                  class="icon-button"
+                  aria-label={`Copy path for ${entry.name}`}
+                  title="Copy path"
+                  onclick={() => copyPath(entry.path)}
+                  >{#if copied === entry.path}<Check size={14} />{:else}<Copy
+                      size={14}
+                    />{/if}</button
+                >
+              </div>{/if}
             <p>{entry.detail}</p>
             {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
               <button
@@ -221,7 +245,7 @@
           >Checked {new Date(snapshot.checkedAt).toLocaleTimeString([], {
             hour: '2-digit',
             minute: '2-digit',
-          })} · File inventory
+          })} · Context inventory
           <span role="status"
             >{loading ? '· Updating…' : error ? '· Showing last saved result' : ''}</span
           ></span
@@ -297,6 +321,7 @@
   }
   .context-categories {
     display: flex;
+    flex-wrap: wrap;
     margin-top: 20px;
     gap: 8px;
     border-bottom: 1px solid #35472b;
@@ -384,6 +409,12 @@
     color: #9ab187;
     font-size: 12px;
     line-height: 1.7;
+  }
+  .context-category-help {
+    color: #9ab187;
+    font-size: 11px;
+    line-height: 1.6;
+    margin: 10px 0;
   }
   .context-notes {
     margin-top: 15px;
