@@ -29,6 +29,7 @@
     "dompurify": "^3.3.0",
     "highlight.js": "^11.12.0",
     "marked": "^17.0.0",
+    "web-push": "^3.6.7",
     "zod": "^4.3.0"
   },
   "devDependencies": {
@@ -38,6 +39,7 @@
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tauri-apps/cli": "^2",
     "@types/node": "^24.0.0",
+    "@types/web-push": "^3.6.4",
     "prettier": "^3.9.6",
     "prettier-plugin-svelte": "^4.1.1",
     "svelte": "^5.56.3",

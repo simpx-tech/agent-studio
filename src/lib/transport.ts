@@ -170,6 +170,25 @@ async function relayRaw(
   };
 }
 export class OfflineHostError extends Error {}
+export type PushStatus = {
+  publicKey: string;
+  enabled: boolean;
+  unavailable: boolean;
+  deliveryFailed: boolean;
+  lastSent?: number;
+};
+export async function pushSettings(): Promise<PushStatus> {
+  return relayApi('GET', 'v1/push');
+}
+export async function savePushSubscription(subscription: PushSubscription): Promise<PushStatus> {
+  return relayApi('PUT', 'v1/push', subscription.toJSON());
+}
+export async function disablePushNotifications(): Promise<void> {
+  await relayApi('DELETE', 'v1/push');
+}
+export async function testPushNotification(): Promise<void> {
+  await relayApi('POST', 'v1/push/test');
+}
 async function relayApi<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await relayRaw(method, path, body);
   if (response.body?.code === 'host_offline') throw new OfflineHostError(response.body.error);

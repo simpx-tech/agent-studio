@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { trackMobileViewport } from '$lib/mobileViewport';
+  import { notificationConversation } from '$lib/notifications';
   import {
     ArrowUp,
     ArrowUpRight,
@@ -501,6 +502,25 @@
   );
 
   let relayRestorePending = $state(true);
+  let notificationTarget = $state<string>();
+  function followNotification() {
+    if (!notificationTarget || !loaded) return;
+    const conversation = workspace.conversations.find((c) => c.id === notificationTarget);
+    if (!conversation) return; // A cold start may still be downloading the checkpoint.
+    if (activeId !== conversation.id && (prompt || attachedImages.length || imagesLoading)) {
+      notice =
+        'A reply is ready in another chat. Your draft is preserved; finish it before opening the notification.';
+      return;
+    }
+    notificationTarget = undefined;
+    if (activeId !== conversation.id) openConversation(conversation);
+    else {
+      view = 'chat';
+      sidebarOpen = false;
+    }
+    if (notificationConversation(window.location.hash))
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
   let relayRestoreBusy = false;
   let relaySelectionVersion = 0;
   async function restoreRelayConnection() {
@@ -528,6 +548,24 @@
   }
 
   onMount(() => {
+    const notificationHash = () => {
+      notificationTarget = notificationConversation(window.location.hash);
+      followNotification();
+    };
+    const notificationMessage = (event: MessageEvent) => {
+      if (
+        event.source !== navigator.serviceWorker.controller ||
+        event.data?.type !== 'studio-notification-open'
+      )
+        return;
+      notificationTarget = notificationConversation(event.data.hash);
+      followNotification();
+    };
+    if (!desktop()) {
+      notificationHash();
+      window.addEventListener('hashchange', notificationHash);
+      navigator.serviceWorker?.addEventListener('message', notificationMessage);
+    }
     const network = () => {
       online = navigator.onLine;
     };
@@ -643,6 +681,7 @@
           });
         await persist();
         await restoreRelayConnection();
+        followNotification();
       } catch (e) {
         storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
       }
@@ -650,6 +689,8 @@
       await refresh();
     })();
     return () => {
+      window.removeEventListener('hashchange', notificationHash);
+      navigator.serviceWorker?.removeEventListener('message', notificationMessage);
       cancelTouchMenu();
       window.removeEventListener('online', network);
       window.removeEventListener('offline', network);
@@ -668,6 +709,7 @@
     try {
       const peers = await pollRelay();
       if (peers) {
+        followNotification();
         presence = peers;
         syncError = '';
         syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · Environments report every few seconds`;

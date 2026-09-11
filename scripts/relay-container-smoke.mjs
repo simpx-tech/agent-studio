@@ -18,6 +18,8 @@ for (const icon of manifest.icons) {
 }
 assert.equal((await fetch(url + '/service-worker.js')).status, 200);
 assert.equal((await fetch(url + '/v1/state')).status, 401);
+assert.equal((await fetch(url + '/v1/push')).status, 401);
+assert.equal((await fetch(url + '/web-push.json')).status, 404);
 assert.equal((await fetch(url + '/workspace.json')).status, 404);
 assert.equal((await fetch(url + '/src/lib/domain.ts')).status, 404);
 const actor = crypto.randomUUID();
@@ -32,5 +34,12 @@ assert.equal(
   (await fetch(url + '/v1/state', { headers: { cookie, 'x-environment-id': actor } })).status,
   200,
 );
-console.log('Container PWA, manifest, icons, worker, pairing and API boundaries passed.');
+const push = await (
+  await fetch(url + '/v1/push', { headers: { cookie, 'x-environment-id': actor } })
+).json();
+assert.equal(push.enabled, false);
+assert.equal(Buffer.from(push.publicKey, 'base64url').length, 65);
+console.log(
+  'Container PWA, manifest, icons, worker, pairing, push configuration and API boundaries passed.',
+);
 process.exit(0);

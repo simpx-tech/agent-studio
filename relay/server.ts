@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
+import { pushService, type PushSender } from './push.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z.object({
@@ -50,17 +51,26 @@ export function createRelay({
   directory,
   webDirectory,
   now = Date.now,
+  pushSender,
 }: {
   token: string;
   directory: string;
   webDirectory?: string;
   now?: () => number;
+  pushSender?: PushSender;
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
   const files = publicFiles(webDirectory);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const sessions = browserSessions(token, now, directory);
+  const push = pushService({
+    directory,
+    token,
+    now,
+    sessionActive: sessions.active,
+    send: pushSender,
+  });
   const file = join(directory, 'workspace.json');
   let state: z.infer<typeof diskSchema> = {
     instanceId: crypto.randomUUID(),
@@ -111,21 +121,22 @@ export function createRelay({
         job.error =
           'The execution environment disconnected or the request expired. It will not be replayed automatically.';
         job.updated = now();
+        push.jobUpdated(job);
       }
       if (terminal(job.status) && now() - job.updated > 600_000) jobs.delete(id);
     }
   };
-  async function body(req: IncomingMessage) {
+  async function body(req: IncomingMessage, limit = 20_000_000) {
     let length = 0;
     const chunks: Buffer[] = [];
     for await (const chunk of req) {
       length += chunk.length;
-      if (length > 20_000_000) throw new Error('Request exceeds the 20 MB limit.');
+      if (length > limit) throw new Error('Request exceeds its size limit.');
       chunks.push(chunk);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const send = (code: number, data: unknown) => {
       res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
@@ -167,6 +178,40 @@ export function createRelay({
     expire();
     try {
       const url = new URL(req.url ?? '/', 'http://relay.local');
+      if (url.pathname === '/v1/push' || url.pathname === '/v1/push/test') {
+        if (!browserActor || actor !== browserActor) {
+          send(403, { error: 'Manage notifications from the paired browser on this device.' });
+          return;
+        }
+        const session = sessions.identity(req);
+        try {
+          if (url.pathname === '/v1/push/test' && req.method === 'POST') {
+            push.test(session);
+            send(202, { queued: true });
+          } else if (url.pathname === '/v1/push' && req.method === 'GET') {
+            send(200, push.status(session));
+          } else if (url.pathname === '/v1/push' && req.method === 'PUT') {
+            push.subscribe(session, browserActor, await body(req, 8192), req.headers.origin!);
+            send(200, push.status(session));
+          } else if (url.pathname === '/v1/push' && req.method === 'DELETE') {
+            push.unsubscribe(session);
+            send(200, { enabled: false });
+          } else send(405, { error: 'Method not allowed.' });
+        } catch (error) {
+          send(400, {
+            error:
+              error instanceof z.ZodError
+                ? 'Invalid push subscription.'
+                : error instanceof Error &&
+                    /^(Enable notifications|Wait 30 seconds|Notification device limit)/.test(
+                      error.message,
+                    )
+                  ? error.message
+                  : 'Notification settings could not be saved. Please try again.',
+          });
+        }
+        return;
+      }
       if (url.pathname === '/v1/state' && req.method === 'GET') {
         send(200, state);
         return;
@@ -179,12 +224,14 @@ export function createRelay({
           send(409, state);
           return;
         }
+        const previous = state.workspace;
         save({
           instanceId: state.instanceId,
           version: 1,
           revision: state.revision + 1,
           workspace: value.workspace,
         });
+        push.changed(previous, state.workspace);
         send(200, state);
         return;
       }
@@ -283,6 +330,7 @@ export function createRelay({
         if (match[2] && req.method === 'POST') {
           job.cancel = true;
           if (job.status === 'queued') job.status = 'cancelled';
+          push.jobUpdated(job);
           send(200, job);
           return;
         }
@@ -300,6 +348,7 @@ export function createRelay({
             })
             .parse(await body(req));
           Object.assign(job, update, { updated: now() });
+          push.jobUpdated(job);
           send(200, job);
           return;
         }
@@ -318,4 +367,15 @@ export function createRelay({
       });
     }
   });
+  let pushTimer: ReturnType<typeof setInterval>;
+  server.on('listening', () => {
+    void push.drain();
+    pushTimer = setInterval(() => {
+      expire();
+      void push.drain();
+    }, 10_000);
+    pushTimer.unref();
+  });
+  server.on('close', () => clearInterval(pushTimer));
+  return server;
 }

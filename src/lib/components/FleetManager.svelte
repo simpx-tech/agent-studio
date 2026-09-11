@@ -33,6 +33,7 @@
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
+  import PushNotifications from './PushNotifications.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
   import { desktop } from '$lib/transport';
@@ -701,6 +702,7 @@
           onclick={() => action(disconnect)}>Disconnect relay</button
         >{/if}
     </section>
+    {#if !desktop()}<PushNotifications {paired} />{/if}
     <footer class="connections-footer">
       <div>
         <ShieldCheck size={16} /><span

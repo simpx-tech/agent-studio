@@ -1,9 +1,52 @@
 /// <reference lib="webworker" />
 import { build, files, version } from '$service-worker';
+import { notificationContent, type PushNotice } from './lib/notifications';
 
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const name = `agent-studio-shell-${version}`;
 const assets = new Set([...build, ...files, '/']);
+worker.addEventListener('push', (event) => {
+  // Every accepted push produces a visible notification, including in foreground
+  // (required by Safari's userVisibleOnly contract). Never include reply text.
+  let notice: PushNotice = { kind: 'complete', tag: 'studio-reply' };
+  try {
+    const value = event.data?.json();
+    if (value && ['complete', 'attention', 'error', 'cancelled', 'test'].includes(value.kind)) {
+      notice = { kind: value.kind, tag: String(value.tag ?? 'studio-reply').slice(0, 100) };
+      if (typeof value.conversationId === 'string' && /^[a-f0-9-]{36}$/i.test(value.conversationId))
+        notice.conversationId = value.conversationId;
+    }
+  } catch {
+    /* A payload-less push still needs a visible notification. */
+  }
+  const { title, body } = notificationContent(notice);
+  event.waitUntil(
+    worker.registration.showNotification(title, {
+      body,
+      tag: notice.tag,
+      icon: '/icons/icon-192.png',
+      data: { conversationId: notice.conversationId },
+    }),
+  );
+});
+worker.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const id = event.notification.data?.conversationId;
+  const hash = typeof id === 'string' && /^[a-f0-9-]{36}$/i.test(id) ? `#conversation=${id}` : '';
+  event.waitUntil(
+    (async () => {
+      const clients = await worker.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const client = clients.find(
+        (c) => new URL(c.url).origin === worker.location.origin && new URL(c.url).pathname === '/',
+      ) as WindowClient | undefined;
+      if (client) {
+        // Message an existing page to preserve its draft instead of navigating it.
+        client.postMessage({ type: 'studio-notification-open', hash });
+        await client.focus();
+      } else await worker.clients.openWindow('/' + hash);
+    })(),
+  );
+});
 worker.addEventListener('install', (event) => {
   event.waitUntil(caches.open(name).then((cache) => cache.addAll([...assets])));
   // Let an existing tab finish its reply before activating a newer app version.

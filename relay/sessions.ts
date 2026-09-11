@@ -57,6 +57,8 @@ export function sessionStore(directory: string, token: string, now: () => number
       throw new Error('Browser session data is unreadable; preserved without overwriting.');
   }
   return {
+    identity: digest,
+    active: (identity: string) => (sessions.get(identity)?.expires ?? 0) > now(),
     get: (id: string) => sessions.get(digest(id)),
     size: () => [...sessions.values()].filter((session) => session.expires > now()).length,
     replace(oldId: string, id?: string, session?: Session) {

@@ -193,5 +193,10 @@ export function browserSessions(token: string, now: () => number, directory: str
       send(400, { error: 'Invalid pairing request.' });
     }
   }
-  return { actor, handle };
+  return {
+    actor,
+    handle,
+    identity: (req: IncomingMessage) => sessions.identity(sessionId(req)),
+    active: sessions.active,
+  };
 }

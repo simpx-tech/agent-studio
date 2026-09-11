@@ -4,6 +4,8 @@
 
 Tauri 2 desktop app with Svelte 5, TypeScript, and a static SvelteKit frontend.
 
+- Mobile push notifications are opt-in per paired browser under Connections. Send generic alerts for completed, failed, stopped, and explicit parent question-tool updates through the relay, including desktop-started chats; normal prose questions are covered by reply completion. Keep notification content free of chat text/titles. Persist VAPID keys, session-bound subscriptions, deduplication receipts, and bounded retry queues only in private relay data. Validate push-service endpoints, revoke with browser sessions and pairing-key rotation, deduplicate workspace/job updates by run, and never replay imported history. Every worker push displays a visible alert; clicks open the matching chat after sync and preserve an existing draft. Desktop Tauri never registers a service worker. See docs/MOBILE.md.
+
 - The relay server also hosts the installable mobile PWA at its origin root. Browser clients are controllers: route all execution, folder, model, context, and usage requests through the selected host using transport; never register a browser as a CLI computer or claim worker jobs there. Browser pairing uses the same-origin HttpOnly session endpoint, never persistent pairing keys. Cache only the public app shell, never relay APIs or commands; do not replay offline work. Keep the mobile conversation drawer, touch controls, safe areas, and keyboard-height behavior usable without hiding history or settings. Build the frontend before server/PWA tests and serialize them with native builds. See docs/MOBILE.md.
 
 - Read this file before changes. Keep UI components independent of desktop IPC; use `src/lib/transport.ts`.
