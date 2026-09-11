@@ -1655,6 +1655,10 @@ test('opening the app archives saved chats and sending from History restores the
   await page.getByRole('button', { name: original.title, exact: true }).click();
   await expect(message).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Restore to continue' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Restore conversation', exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole('button', { name: 'Move to history', exact: true })).toHaveCount(0);
   for (const name of ['Computer', 'Folder', 'Agent'])
     await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
   await message.fill('   ');
@@ -1845,7 +1849,12 @@ test('computer then folder scopes CLI choices and groups active and history with
   await historyTab.click();
   await history.locator('.conversation-item').click();
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Restore conversation', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Restore conversation', exact: true })).toHaveCount(
+    0,
+  );
+  await page.getByLabel('Message', { exact: true }).fill('Continue this folder conversation');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
   for (const name of ['Computer', 'Folder', 'Agent'])
     await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
@@ -1853,7 +1862,12 @@ test('computer then folder scopes CLI choices and groups active and history with
   await expect(active.locator('.conversation-item')).toHaveCount(1);
   expect(
     await page.evaluate(
-      () => JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].messages,
+      (count) =>
+        JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].messages.slice(
+          0,
+          count,
+        ),
+      before.messages.length,
     ),
   ).toEqual(before.messages);
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();

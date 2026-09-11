@@ -25,7 +25,6 @@
     Folder,
     MessageCircle,
     Archive,
-    ArchiveRestore,
     BookOpen,
     Paperclip,
   } from '@lucide/svelte';
@@ -1112,9 +1111,9 @@
       selectingLocation = false;
     }
   }
-  function toggleArchive() {
-    if (!active || activeRunning) return;
-    active.archived = !active.archived;
+  function archiveConversation() {
+    if (!active || activeRunning || active.archived) return;
+    active.archived = true;
     active.updatedAt = new Date().toISOString();
     revealConversation(active);
     saveSoon();
@@ -1920,16 +1919,14 @@
                 contextOpen = true;
               }}><BookOpen size={16} /></button
             >
-            {#if active}<button
+            {#if active && !active.archived}<button
                 class="icon-button"
                 disabled={activeRunning}
-                onclick={toggleArchive}
-                title={active.archived ? 'Restore conversation' : 'Move to history'}
-                aria-label={active.archived ? 'Restore conversation' : 'Move to history'}
-                >{#if active.archived}<ArchiveRestore size={16} />{:else}<Archive
-                    size={16}
-                  />{/if}</button
-              ><button
+                onclick={archiveConversation}
+                title="Move to history"
+                aria-label="Move to history"><Archive size={16} /></button
+              >{/if}
+            {#if active}<button
                 class="icon-button"
                 onclick={copyConversation}
                 title="Copy conversation"

@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Restore through chatting only — 2026-09-11
+
+Removed the Restore conversation button and ArchiveRestore icon from the chat toolbar. Active conversations retain Move to history; its handler now only archives. History chats keep an enabled composer, and sending a valid message restores the same conversation automatically. Updated the existing browser scenarios and the older native folder smoke script to use the current behavior.
+
+The full required gate passed: `npm run verify` (zero diagnostics, 77 unit/HTTP tests, production build, 66 browser scenarios), Rust formatting, Clippy with warnings denied, and 64 Rust tests with four existing opt-in integrations ignored. Existing browser coverage verifies empty submissions remain in History, valid sends restore the same chat, earlier messages survive, and active chats can still be archived. Logs: `artifacts/remove-restore-{verify,rust}.log`.
+
+The existing isolated Standalone QA app, launched through `npm run tauri dev`, rendered the final frontend at 1380×900 and 880×720 CSS pixels / DPR 1.5. Verified the absence of Restore and archive controls for a History chat, retained Copy/Delete actions, an enabled composer, unchanged saved conversations, and no renderer errors or horizontal overflow. Both screenshots were visually reviewed. Evidence: `artifacts/remove-restore-native-result.json`, `artifacts/remove-restore-native.png`, and `artifacts/remove-restore-native-compact.png`. No provider prompts or sign-in flows were run; the older live-provider folder smoke was updated but not executed for this UI change.
+
 ## Standalone chat labels and icons — 2026-09-11
 
 Chats without a project folder now show **Standalone** with a MessageCircle chat-bubble icon in Active/History groups and the selected Folder toolbar value. Hover text explains that they have no project folder, and their plus action is labelled **New standalone conversation**. Project folders retain their folder icon and path title. This changes presentation only; saved location identities, execution routing, and draft creation remain intact.

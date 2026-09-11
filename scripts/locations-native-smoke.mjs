@@ -75,8 +75,10 @@ try {
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('#conversation-panel-history').locator('.conversation-item').click();
-  await expect(page.getByLabel('Message', { exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Restore conversation', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Restore conversation', exact: true })).toHaveCount(
+    0,
+  );
   await page.screenshot({ path: 'artifacts/folder-conversation-native.png' });
   const saved = await invoke('load_workspace');
   const conversation = saved.conversations[0];
