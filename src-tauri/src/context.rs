@@ -35,6 +35,51 @@ pub struct ContextSnapshot {
     entries: Vec<ContextEntry>,
     notes: Vec<String>,
     truncated: bool,
+    commands: Vec<ContextCommand>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextCommand {
+    name: String,
+    description: String,
+    argument_hint: String,
+}
+
+fn command_catalog(value: &Value) -> Vec<ContextCommand> {
+    let mut names = HashSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(MAX_ENTRIES)
+        .filter_map(|entry| {
+            let name = entry["name"].as_str()?.trim_start_matches('/');
+            if name.is_empty()
+                || name.len() > 200
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
+                || !names.insert(name.to_string())
+            {
+                return None;
+            }
+            let bounded = |key: &str, limit| {
+                entry[key]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(limit)
+                    .collect()
+            };
+            Some(ContextCommand {
+                name: name.into(),
+                description: bounded("description", 500),
+                argument_hint: bounded("argumentHint", 200),
+            })
+        })
+        .collect()
 }
 
 struct Scan {
@@ -460,6 +505,7 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
     let mut input = child.stdin.take().ok_or("Missing query input")?;
     let mut lines = BufReader::new(child.stdout.take().ok_or("Missing query output")?).lines();
     let query = async {
+        let mut commands = Value::Null;
         input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"init\",\"request\":{\"subtype\":\"initialize\"}}\n").await.map_err(|_| "Context query input failed")?;
         while let Some(line) = lines
             .next_line()
@@ -477,12 +523,18 @@ async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Va
             }
             let response = &v["response"];
             if response["subtype"] == "error" {
+                if response["request_id"] == "context" && commands.is_array() {
+                    return Ok(json!({"commands": commands}));
+                }
                 return Err("Claude could not report context for this model");
             }
             if response["request_id"] == "init" {
+                commands = response["response"]["commands"].clone();
                 input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"context\",\"request\":{\"subtype\":\"get_context_usage\",\"detail\":\"full\"}}\n").await.map_err(|_| "Context query input failed")?;
             } else if response["request_id"] == "context" {
-                return Ok(response["response"].clone());
+                let mut report = response["response"].clone();
+                report["commands"] = commands;
+                return Ok(report);
             }
         }
         Err("Claude exited without a context report")
@@ -535,6 +587,7 @@ fn merge_report(scan: &mut Scan, report: &Value) {
             }
         }
     } else {
+        scan.snapshot.commands = command_catalog(&report["commands"]);
         if !report["memoryFiles"].is_array() {
             scan.note("Claude did not return instruction-file metadata. Loading is unconfirmed.");
             return;
@@ -652,6 +705,7 @@ pub async fn read(
             entries: vec![],
             notes: vec![],
             truncated: false,
+            commands: vec![],
         },
         bridge,
         visited: HashSet::new(),
@@ -748,6 +802,21 @@ async fn wsl_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_metadata_is_bounded_and_excludes_bodies_and_accounts() {
+        let commands = command_catalog(&json!([
+            {"name":"/plugin:review","description":"Review files","argumentHint":"[file]","body":"private body","account":"private account"},
+            {"name":"plugin:review","description":"duplicate"},
+            {"name":"bad\nname"}, {"name":"../path"},
+            {"name":"long","description":"x".repeat(1000)}
+        ]));
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name, "plugin:review");
+        assert_eq!(commands[1].description.len(), 500);
+        let serialized = serde_json::to_string(&commands).unwrap();
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains("body"));
+    }
     fn scanner(provider: &str, folder: &Path) -> Scan {
         Scan {
             snapshot: ContextSnapshot {
@@ -760,6 +829,7 @@ mod tests {
                 entries: vec![],
                 notes: vec![],
                 truncated: false,
+                commands: vec![],
             },
             bridge: None,
             visited: HashSet::new(),

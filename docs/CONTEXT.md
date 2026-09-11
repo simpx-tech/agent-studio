@@ -4,6 +4,8 @@ Choose an Agent and Model in the chat toolbar, then open **Model context** using
 
 In Skills, **Use in next message** adds a skill request to the existing draft without sending it. Disabled skills cannot be selected, and Gemini has no invocation action. Actual skill invocations and observed skill-file reads appear in the reply's [tool activity](CAPABILITIES.md); inventory entries do not claim a skill was used.
 
+Typing `/` in the composer also uses this selection's inventory/cache to offer [commands and skills](CAPABILITIES.md#slash-commands-and-skills). Claude initialization contributes bounded command names, descriptions, and argument hints, without account information or command bodies. Codex uses only enabled CLI-reported skills. The catalog remains session metadata; only an explicitly submitted Codex skill's name and path are saved on its user message.
+
 After the first inspection, reopening shows the latest cached result immediately with an **Updating…** indicator while refreshing. A failed refresh keeps that result and its original check time visible. Reopening during an existing refresh shares the same request. The cache holds up to 32 recently viewed selections for the current app session, separated by provider, model, connection, computer, environment, and folder; restarting the app clears it.
 
 The inspector keeps the same height while loading, refreshing, or showing errors. Its height is capped by the available viewport; longer content scrolls inside the dialog without moving its frame.

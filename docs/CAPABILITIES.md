@@ -1,5 +1,17 @@
 # Workflows, artifacts, plans, and tools
 
+## Slash commands and skills
+
+Start a message with `/` to search commands and skills for the selected agent. Use the arrow keys and Enter or Tab to complete a choice, or click/tap it. Escape closes suggestions. Completing a native command or skill inserts its name and a space without sending, so you can add arguments before submitting. You can also type the full `/name arguments` directly. Namespaced Claude commands, including plugin skills and saved native workflows, keep their CLI spelling.
+
+App shortcuts are `/help`, `/new`, `/model`, `/reasoning`, `/instructions`, `/context`, `/usage`, and `/connections`. They open existing app controls without creating a provider reply; remaining text stays in the draft. `/new` starts a conversation on the selected computer and folder. Instructions remain editable between replies. Model and reasoning changes use their existing next-message behavior.
+
+Claude suggestions use the command metadata returned by the selected CLI profile's initialization. Codex suggestions include only enabled, CLI-reported skills; selecting a duplicate name retains the exact source path. The app translates `/skill-name` into Codex's `$skill-name` spelling plus a structured `skill` input on stdin. The visible user message retains its slash spelling, with bounded name/path metadata preserved through saved history, export, relay delivery, and retry. Earlier skill references are not injected again on subsequent replies. Selecting a skill does not claim it ran. See the official [Codex skill input contract](https://learn.chatgpt.com/docs/app-server#start-a-turn-invoke-a-skill) and [Claude command discovery and dispatch](https://code.claude.com/docs/en/agent-sdk/slash-commands).
+
+Discovery shares the Model context cache and owning-host transport. It does not load file bodies into the composer or expose CLI initialization/account payloads. Switching agents, models, folders, or computers cannot reuse another selection's results. Failed refreshes preserve cached suggestions but block invocation until a fresh discovery succeeds. Offline or signed-out agents expose only app shortcuts. The installable PWA uses its selected computer's catalog and execution. Update the relay and execution computers together: older desktop hosts without command-catalog support show an update notice instead of silently discarding native skill references.
+
+Terminal/session operations such as `/compact`, `/resume`, `/workflows`, and `/loop` are unavailable because Agent Studio starts an ephemeral CLI process for each reply. Use `/new` for a fresh app conversation and the installed CLI for persistent-session controls. Unknown commands keep the draft and explain the problem. Absolute paths, fenced/inline code, and slash text inside ordinary prose remain ordinary messages. Gemini offers app shortcuts only.
+
 ## Claude workflows
 
 Ask for a workflow directly in chat, or enter a saved `/workflow-name` command and its input in the composer. The selected Claude Code CLI uses its native `Workflow` tool and controls orchestration, branching, parallel agents, and intermediate results. There is no separate workflow toolbar button or launcher. See [Claude Code Dynamic Workflows](https://code.claude.com/docs/en/workflows).

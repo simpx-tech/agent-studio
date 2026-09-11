@@ -23,7 +23,11 @@ export function anchorPopover(node: HTMLElement, trigger: HTMLElement) {
         node.lastElementChild!.scrollHeight +
         14,
     );
-    const openAbove = below < naturalHeight && above > below;
+    // Composer completions belong above the input, leaving its Send button and
+    // usage row exposed even when a short list could fit below the textarea.
+    const openAbove =
+      (trigger instanceof HTMLTextAreaElement && above >= naturalHeight) ||
+      (below < naturalHeight && above > below);
     node.style.maxHeight = `${openAbove ? above : below}px`;
     const panelHeight = node.getBoundingClientRect().height;
     node.style.left = `${Math.max(left + margin, Math.min(anchor.left, left + width - panelWidth - margin))}px`;

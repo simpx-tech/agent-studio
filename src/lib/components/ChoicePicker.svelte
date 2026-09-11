@@ -21,6 +21,10 @@
     disabled = false,
     field = false,
     fallbackToFirst = true,
+    anchor,
+    open = $bindable(false),
+    heading,
+    emptyMessage = 'No matches',
     onchange,
   }: {
     options: Option[];
@@ -32,12 +36,15 @@
     disabled?: boolean;
     field?: boolean;
     fallbackToFirst?: boolean;
+    anchor?: HTMLTextAreaElement;
+    open?: boolean;
+    heading?: string;
+    emptyMessage?: string;
     onchange: (value: string) => void;
   } = $props();
   const id = $props.id();
   let root: HTMLDivElement;
   let trigger = $state<HTMLButtonElement>();
-  let open = $state(false);
   let highlighted = $state(0);
   let search = '';
   let searchedAt = 0;
@@ -71,13 +78,65 @@
     search = '';
     void highlight(options.findIndex((option) => option.id === value));
   }
+  export function showPicker() {
+    show();
+  }
 
   function choose(index: number) {
     if (!options[index]) return;
     onchange(options[index].id);
     open = false;
-    trigger?.focus({ preventScroll: true });
+    (anchor ?? trigger)?.focus({ preventScroll: true });
   }
+
+  // The composer uses the same options and focus behavior with its text field
+  // as the anchor, without replacing the user's typing with typeahead search.
+  export function handleKeydown(event: KeyboardEvent) {
+    if (!open || event.isComposing) return false;
+    if (event.key === 'Escape') {
+      open = false;
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      void highlight(
+        (highlighted + (event.key === 'ArrowDown' ? 1 : -1) + options.length) %
+          Math.max(1, options.length),
+      );
+    } else if (
+      (event.key === 'Enter' || event.key === 'Tab') &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      options[highlighted]
+    ) {
+      choose(highlighted);
+    } else return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  $effect(() => {
+    if (anchor) {
+      options;
+      highlighted = 0;
+    }
+  });
+  $effect(() => {
+    if (!anchor) return;
+    anchor.setAttribute('aria-autocomplete', 'list');
+    anchor.setAttribute('aria-controls', `${id}-list`);
+    if (open && options[highlighted])
+      anchor.setAttribute('aria-activedescendant', `${id}-option-${highlighted}`);
+    else anchor.removeAttribute('aria-activedescendant');
+    const blur = () => {
+      open = false;
+    };
+    anchor.addEventListener('blur', blur);
+    return () => {
+      anchor?.removeEventListener('blur', blur);
+      for (const key of ['aria-autocomplete', 'aria-controls', 'aria-activedescendant'])
+        anchor?.removeAttribute(key);
+    };
+  });
 
   function keyboard(event: KeyboardEvent) {
     if (event.key === 'Escape' && open) {
@@ -112,39 +171,46 @@
 
 <svelte:document
   onpointerdown={(event) => {
-    if (open && !root.contains(event.target as Node)) open = false;
+    if (open && event.target !== anchor && !root.contains(event.target as Node)) open = false;
   }}
 />
 
 <div class="agent-picker" class:field bind:this={root}>
-  <button
-    class="picker-trigger"
-    class:expanded={open}
-    type="button"
-    role="combobox"
-    aria-label={label}
-    {title}
-    {disabled}
-    aria-haspopup="listbox"
-    aria-expanded={open}
-    aria-controls={`${id}-list`}
-    aria-activedescendant={open && options[highlighted] ? `${id}-option-${highlighted}` : undefined}
-    bind:this={trigger}
-    onclick={() => (open ? (open = false) : show())}
-    onkeydown={keyboard}
-    onblur={() => (open = false)}
-  >
-    {#if icon}<span class="picker-icon" aria-hidden="true">{@render icon()}</span>{/if}
-    <span class="selected-name" class:placeholder={!selected && !!placeholder}>
-      {selected?.name ?? placeholder ?? value}
-    </span>
-    <ChevronDown size={15} aria-hidden="true" />
-  </button>
+  {#if !anchor}
+    <button
+      class="picker-trigger"
+      class:expanded={open}
+      type="button"
+      role="combobox"
+      aria-label={label}
+      {title}
+      {disabled}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={`${id}-list`}
+      aria-activedescendant={open && options[highlighted]
+        ? `${id}-option-${highlighted}`
+        : undefined}
+      bind:this={trigger}
+      onclick={() => (open ? (open = false) : show())}
+      onkeydown={keyboard}
+      onblur={() => (open = false)}
+    >
+      {#if icon}<span class="picker-icon" aria-hidden="true">{@render icon()}</span>{/if}
+      <span class="selected-name" class:placeholder={!selected && !!placeholder}>
+        {selected?.name ?? placeholder ?? value}
+      </span>
+      <ChevronDown size={15} aria-hidden="true" />
+    </button>
+  {/if}
 
   {#if open}
-    <div class="picker-popover" popover="manual" use:anchorPopover={trigger!}>
-      <div class="picker-heading" id={`${id}-label`}>Choose {label.toLowerCase()}</div>
+    <div class="picker-popover" popover="manual" use:anchorPopover={anchor ?? trigger!}>
+      <div class="picker-heading" id={`${id}-label`}>
+        {heading ?? `Choose ${label.toLowerCase()}`}
+      </div>
       <div id={`${id}-list`} role="listbox" aria-labelledby={`${id}-label`} class="picker-options">
+        {#if !options.length}<p class="picker-empty" role="status">{emptyMessage}</p>{/if}
         {#each options as option, index (option.id)}
           <button
             id={`${id}-option-${index}`}
@@ -253,6 +319,11 @@
     font-size: 9px;
     letter-spacing: 1.3px;
     text-transform: uppercase;
+  }
+  .picker-empty {
+    padding: 8px 10px;
+    color: var(--muted);
+    font-size: 12px;
   }
   .picker-options {
     min-height: 0;

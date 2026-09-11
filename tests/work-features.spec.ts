@@ -268,6 +268,7 @@ test('native workflow commands in chat retain reported phases and agents through
   ).toHaveCount(0);
   await page.getByLabel('Message', { exact: true }).fill('/audit-routes src/routes');
   await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('button', { name: 'Stop response', exact: true })).toBeVisible();
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.workflow).toBeUndefined();
   expect(request.agent.provider).toBe('claude');

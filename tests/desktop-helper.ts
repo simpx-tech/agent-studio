@@ -170,6 +170,22 @@ export async function mockDesktop(page: Page, mode = 'success') {
               execution: 'Windows',
               folder: args.location?.path ?? 'C:\\Runtime',
               profile: `C:\\Profiles\\${args.connectionId}`,
+              commands:
+                args.provider === 'claude'
+                  ? [
+                      {
+                        name: 'fixture:review',
+                        description: 'Review with a fixture skill',
+                        argumentHint: '[file]',
+                      },
+                      {
+                        name: 'audit-routes',
+                        description: 'Audit routes with a saved native workflow',
+                        argumentHint: '[folder]',
+                      },
+                      { name: 'compact', description: 'Session-only command', argumentHint: '' },
+                    ]
+                  : [],
               entries: [
                 {
                   name: args.provider === 'claude' ? 'CLAUDE.md' : 'AGENTS.md',

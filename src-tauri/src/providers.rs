@@ -392,11 +392,18 @@ pub struct Agent {
     pub reasoning: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
+pub struct SkillReference {
+    pub name: String,
+    pub path: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<images::ChatImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillReference>,
 }
 mod images;
 impl RunRequest {
@@ -446,6 +453,24 @@ impl RunRequest {
         }
         let mut image_bytes = 0;
         for message in &self.messages {
+            if !message.skills.is_empty()
+                && (!self.uses_codex_server()
+                    || message.role != "user"
+                    || message.skills.len() > 4
+                    || message.skills.iter().any(|skill| {
+                        skill.name.is_empty()
+                            || skill.name.len() > 200
+                            || !skill
+                                .name
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
+                            || skill.path.is_empty()
+                            || skill.path.len() > 4096
+                            || skill.path.chars().any(char::is_control)
+                    }))
+            {
+                return Err("Invalid Codex skill reference".into());
+            }
             if message.images.is_empty() {
                 continue;
             }
@@ -989,6 +1014,7 @@ mod tests {
                 role: "user".into(),
                 text: "Quotes \" & $(echo) `hello`\nこんにちは".into(),
                 images: vec![],
+                skills: vec![],
             }],
         }
     }
@@ -1469,6 +1495,7 @@ mod tests {
             role: "user".into(),
             text: "/saved-audit today".into(),
             images: vec![],
+            skills: vec![],
         });
         let lines: Vec<serde_json::Value> = r
             .stdin_payload()

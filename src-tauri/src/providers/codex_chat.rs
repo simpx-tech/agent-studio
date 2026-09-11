@@ -73,8 +73,25 @@ fn start_params(request: &RunRequest) -> Value {
     params
 }
 fn turn_params(request: &RunRequest, thread: &str) -> Value {
-    let mut params = json!({"threadId":thread,"input":[{"type":"text","text":request.prompt(),"text_elements":[]}]});
+    // Keep the visible slash spelling in history; only the current invocation
+    // becomes a native skill input. Earlier skills must not execute again.
+    let mut current = request.clone();
+    let skills = request
+        .messages
+        .last()
+        .map(|m| m.skills.as_slice())
+        .unwrap_or_default();
+    if let (Some(skill), Some(message)) = (skills.first(), current.messages.last_mut()) {
+        let trimmed = message.text.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&format!("/{}", skill.name)) {
+            message.text = format!("${}{}", skill.name, rest);
+        }
+    }
+    let mut params = json!({"threadId":thread,"input":[{"type":"text","text":current.prompt(),"text_elements":[]}]});
     let input = params["input"].as_array_mut().expect("input is an array");
+    for skill in skills {
+        input.push(json!({"type":"skill","name":skill.name,"path":skill.path}));
+    }
     for (message_index, message) in request.messages.iter().enumerate() {
         for (image_index, image) in message.images.iter().enumerate() {
             input.push(json!({"type":"text","text":image.label(message_index, image_index),"text_elements":[]}));
@@ -172,6 +189,35 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_current_skills_are_native_inputs_and_arguments_remain_literal() {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[
+            {"role":"user","text":"/old","skills":[{"name":"old","path":"/old/SKILL.md"}]},
+            {"role":"assistant","text":"Done"},
+            {"role":"user","text":"/review quote $(literal)","skills":[{"name":"review","path":"/selected/profile/review/SKILL.md"}]}
+        ]})).unwrap();
+        assert!(request.validate().is_ok());
+        let params = turn_params(&request, "thread");
+        assert_eq!(params["input"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            params["input"][1],
+            json!({"type":"skill","name":"review","path":"/selected/profile/review/SKILL.md"})
+        );
+        let text = params["input"][0]["text"].as_str().unwrap();
+        assert!(text.contains("$review quote $(literal)"));
+        assert!(text.contains("/old"));
+        assert_eq!(request.messages[2].text, "/review quote $(literal)");
+        request.messages[2].skills.clear();
+        assert_eq!(
+            turn_params(&request, "thread")["input"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        request.agent.provider = "claude".into();
+        assert!(request.validate().is_err());
+    }
     #[test]
     fn image_inputs_preserve_order_and_replay_images_as_visual_data() {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[{"role":"user","text":"first","images":[{"id":uuid::Uuid::new_v4(),"name":"first.png","mediaType":"image/png","data":"aGVsbG8="}]},{"role":"assistant","text":"seen"},{"role":"user","text":"second","images":[{"id":uuid::Uuid::new_v4(),"name":"second.jpeg","mediaType":"image/jpeg","data":"d29ybGQ="}]}]})).unwrap();

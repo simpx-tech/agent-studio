@@ -106,6 +106,12 @@
   import type { Presence } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
+  import ComposerCommands from '$lib/components/ComposerCommands.svelte';
+  let composerCommands = $state<ComposerCommands>();
+  let modelPicker = $state<ChoicePicker>();
+  let reasoningPicker = $state<ChoicePicker>();
+  let usageExpanded = $state(false);
+  let preparingCommand = false;
   import MessageView from '$lib/components/MessageView.svelte';
   import PlanPanel from '$lib/components/PlanPanel.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
@@ -1350,6 +1356,19 @@
     void attachImages(files);
   }
   async function send(retry = false) {
+    if (preparingCommand) return;
+    let command: Awaited<ReturnType<ComposerCommands['submission']>>;
+    if (!retry) {
+      const draft = prompt,
+        selected = activeId;
+      preparingCommand = true;
+      try {
+        command = await composerCommands?.submission();
+      } finally {
+        preparingCommand = false;
+      }
+      if (!command || command.handled || prompt !== draft || activeId !== selected) return;
+    }
     if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
     if (!retry && attachedImages.length) {
       // Keep the draft intact when the portable workspace cannot fit the images.
@@ -1390,6 +1409,7 @@
       conversation.messages.push({
         id: crypto.randomUUID(),
         role: 'user',
+        ...(command?.skills?.length ? { skills: command.skills } : {}),
         blocks: [
           {
             type: 'markdown',
@@ -2036,6 +2056,7 @@
               </div>
               <div class="chat-setting model-setting">
                 <span>Model</span><ChoicePicker
+                  bind:this={modelPicker}
                   label="Model"
                   value={selectedSettings.model}
                   options={availableModels}
@@ -2048,6 +2069,7 @@
               </div>
               <div class="chat-setting">
                 <span>Reasoning</span><ChoicePicker
+                  bind:this={reasoningPicker}
                   label="Reasoning"
                   value={selectedSettings.reasoning}
                   options={reasoningOptions}
@@ -2214,8 +2236,8 @@
               <textarea
                 bind:this={composerInput}
                 aria-label="Message"
-                title="Enter to send · Shift + Enter for a new line"
-                placeholder={`Message ${selectedAgent.name}…`}
+                title="Enter to send · Shift + Enter for a new line · / for commands and skills"
+                placeholder={`Message ${selectedAgent.name}… Type / for commands`}
                 bind:value={prompt}
                 rows="3"
                 maxlength="30000"
@@ -2227,11 +2249,45 @@
                   }
                 }}
                 onkeydown={(e) => {
+                  if (composerCommands?.keydown(e)) return;
                   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobile) {
                     e.preventDefault();
                     void send();
                   }
                 }}></textarea>
+              <ComposerCommands
+                bind:this={composerCommands}
+                input={composerInput}
+                bind:prompt
+                settings={selectedSettings}
+                location={selectedLocation?.path ? selectedLocation : undefined}
+                available={selectedConnectionAvailable &&
+                  !!selectedStatus?.installed &&
+                  selectedStatus.auth === 'ready'}
+                busy={!!run || activeRunning}
+                scope={activeId ?? 'draft'}
+                oncommand={(name) => {
+                  if (name === 'model') void tick().then(() => modelPicker?.showPicker());
+                  else if (name === 'reasoning')
+                    void tick().then(() => reasoningPicker?.showPicker());
+                  else if (name === 'instructions') editorOpen = true;
+                  else if (name === 'context') contextOpen = true;
+                  else if (name === 'usage') usageExpanded = true;
+                  else if (name === 'connections') view = 'connections';
+                  else if (name === 'new') {
+                    const remaining = prompt,
+                      images = attachedImages;
+                    newChat(
+                      selectedSettings.provider,
+                      selectedSettings.connectionId,
+                      selectedLocation,
+                      selectedComputerId,
+                    );
+                    prompt = remaining;
+                    attachedImages = images;
+                  }
+                }}
+              />
               {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
               {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
               {:else if attachedImages.length && !imagesSupported}<p
@@ -2270,6 +2326,7 @@
               </div>
             </form>
             <UsagePanel
+              bind:expanded={usageExpanded}
               conversation={active}
               settings={selectedSettings}
               model={currentModel}

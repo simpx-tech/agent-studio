@@ -23,6 +23,7 @@
     loading,
     error,
     preview = false,
+    expanded = $bindable(false),
   }: {
     conversation?: Conversation;
     settings: ChatSettings;
@@ -31,8 +32,8 @@
     loading: boolean;
     error: string;
     preview?: boolean;
+    expanded?: boolean;
   } = $props();
-  let expanded = $state(false);
   let now = $state(Date.now());
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 15000);

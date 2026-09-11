@@ -128,11 +128,25 @@ export const tokenUsageSchema = z.object({
   model: z.string().nullable().optional(),
 });
 export type TokenUsage = z.infer<typeof tokenUsageSchema>;
+export const skillReferenceSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[a-zA-Z0-9_:.-]+$/),
+  path: z
+    .string()
+    .min(1)
+    .max(4096)
+    .refine((path) => !/[\u0000-\u001f]/.test(path)),
+});
+export type SkillReference = z.infer<typeof skillReferenceSchema>;
 export const messageSchema = z.object({
   id: z.string().uuid(),
   role: z.enum(['user', 'assistant']),
   blocks: z.array(blockSchema),
   images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
+  skills: z.array(skillReferenceSchema).max(4).optional(),
   status: z.enum(['complete', 'running', 'error', 'cancelled']),
   createdAt: z.string(),
   error: z.string().optional(),
@@ -205,7 +219,12 @@ export type RunRequest = {
   assistantId?: string;
   runId: string;
   agent: ChatSettings;
-  messages: { role: 'user' | 'assistant'; text: string; images?: ChatImage[] }[];
+  messages: {
+    role: 'user' | 'assistant';
+    text: string;
+    images?: ChatImage[];
+    skills?: SkillReference[];
+  }[];
 };
 
 export function initialWorkspace(): Workspace {
@@ -229,6 +248,7 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
       role: m.role,
       text: messageText(m),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
+      ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
     }))
     .filter((m) => m.text.trim() || m.images?.length);
 }

@@ -19,6 +19,7 @@ export type ContextSnapshot = {
   entries: ContextEntry[];
   notes: string[];
   truncated: boolean;
+  commands?: { name: string; description: string; argumentHint: string }[];
 };
 export const contextStatuses: Record<ContextEntry['status'], string> = {
   discovered: 'Discovered',
