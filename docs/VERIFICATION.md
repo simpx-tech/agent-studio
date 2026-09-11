@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Remove manual model refresh and Markdown copy — 2026-09-11
+
+Removed Refresh model list and Copy conversation from the shared chat toolbar, including the mobile actions menu, and deleted the unused Markdown clipboard handler/imports. Automatic catalog loading, cached choices, and refresh when the selected computer reconnects remain unchanged. Existing tests now exercise automatic loading instead of invoking the removed control; the old native folder smoke checks model availability after folder selection rather than claiming a manual refresh.
+
+The first full browser run exposed a fixture assumption: ordinary New conversation reuses the recent folder, so reopening the same chat did not trigger the expected automatic request. A computer-scoped draft clears the folder and resets readiness before reopening. The corrected mobile test passed, and the final full gate passed `npm run verify` (zero diagnostics, 77 unit/HTTP tests, production build, 66 browser scenarios), Rust formatting, Clippy with warnings denied, and 64 Rust tests with four existing opt-in integrations ignored. The mobile scenario retains real model-error, heartbeat-expiration/409, offline, and reconnect coverage. The test setup learning was recorded in local memory. Logs: `artifacts/header-actions-{verify,rust,mobile}.log`.
+
+The existing isolated native QA app rendered the final toolbar at 1380×900, 880×720, and an emulated 390×844 viewport, all at DPR 1.5. Both removed actions were absent, the History composer and remaining Delete/context/instructions actions were retained, saved conversations were unchanged, and no renderer errors or page overflow occurred. Desktop and phone-width screenshots were visually reviewed. Evidence: `artifacts/header-actions-native-result.json`, `artifacts/header-actions-native.png`, `artifacts/header-actions-native-compact.png`, and `artifacts/header-actions-native-mobile.png`. No provider prompts or sign-in flows were run; phone width was emulated, not checked on a physical device.
+
 ## Restore through chatting only — 2026-09-11
 
 Removed the Restore conversation button and ArchiveRestore icon from the chat toolbar. Active conversations retain Move to history; its handler now only archives. History chats keep an enabled composer, and sending a valid message restores the same conversation automatically. Updated the existing browser scenarios and the older native folder smoke script to use the current behavior.

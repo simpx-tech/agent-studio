@@ -355,29 +355,40 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     const savedModel = await page.getByRole('combobox', { name: 'Model', exact: true }).innerText();
     const savedAgent = await page.getByRole('combobox', { name: 'Agent', exact: true }).innerText();
     modelFailure = true;
+    // Reopening after reload starts a fresh automatic catalog query.
+    await page.reload();
+    await expectSynced(page);
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
     await page.getByRole('button', { name: 'Conversation actions' }).click();
-    await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Refresh model list', exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.getByRole('button', { name: 'Copy conversation', exact: true })).toHaveCount(
+      0,
+    );
+    await page.keyboard.press('Escape');
     await expect(
       page.getByRole('status').filter({ hasText: 'Could not refresh models' }),
     ).toBeVisible();
     modelFailure = false;
     hostOpen = false;
     while (busy) await new Promise((resolve) => setTimeout(resolve, 20));
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    // A computer-scoped draft clears the folder and resets automatic query readiness.
+    await page.getByRole('button', { name: 'New conversation on Desktop QA', exact: true }).click();
     // Expire the real heartbeat when the next query reaches the server, before the
     // PWA can poll it. This also covers the online-to-offline request race (409).
     expireBeforeNextJob = true;
     const offlineResponse = page.waitForResponse(
       (response) => response.url().endsWith('/v1/jobs') && response.status() === 409,
     );
-    await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
     expect((await (await offlineResponse).json()).code).toBe('host_offline');
     await expect(page.locator('.computer-setting')).toContainText('Offline');
     await expect(page.locator('.setup-hint')).toContainText('Desktop QA is offline');
     await expect(page.getByText(/Could not refresh models/)).toHaveCount(0);
-    await expect(
-      page.getByRole('button', { name: 'Refresh model list', exact: true }),
-    ).toBeDisabled();
-    await page.keyboard.press('Escape');
     const offlineJobRequests = jobRequests;
     await page.reload();
     await expectSynced(page);

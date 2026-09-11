@@ -1690,7 +1690,10 @@ test('opening the app archives saved chats and sending from History restores the
   expect(resumed.settings.model).toBe('gpt-5.6-sol');
   expect(after.filter((c: any) => c.id !== original.id).every((c: any) => c.archived)).toBe(true);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Refresh model list', exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole('button', { name: 'Copy conversation', exact: true })).toHaveCount(0);
   await expect(activeTab).toHaveText('Active1');
   await page.setViewportSize({ width: 880, height: 720 });
   await page.screenshot({
@@ -2028,16 +2031,6 @@ test('reselecting the computer preserves the draft and folders reuse ready CLI a
       (window as any).cliCalls.filter((c: any) => c.command !== 'list_folders'),
     ),
   ).toEqual(calls.filter((c: any) => c.command !== 'list_folders'));
-  // An explicit catalog refresh also keeps the cached options usable while its reply is pending.
-  await page.getByRole('button', { name: 'Refresh model list', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).pendingCli?.length ?? 0)).toBe(1);
-  await picker('Model').click();
-  await page.getByRole('option', { name: 'GPT-6 Astra', exact: true }).click();
-  await page.evaluate(() => {
-    for (const request of (window as any).pendingCli) request.resolve();
-  });
-  await expect(picker('Model')).toHaveText('GPT-6 Astra');
-  await expect(picker('Reasoning')).toHaveText('High');
 });
 
 test('cold CLI checks and model requests do not block folder selection or overwrite user choices', async ({
@@ -2171,7 +2164,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await page.evaluate(() => {
     for (const request of (window as any).pendingCli) request.resolve();
   });
-  await expect(page.getByRole('button', { name: 'Refresh model list', exact: true })).toBeEnabled();
+  await expect(picker('Model')).toBeEnabled();
   await expect(picker('Folder')).toHaveAttribute('title', 'C:\\Projects\\studio');
   await expect(picker('Agent')).toHaveText('Codex');
   await expect(picker('Model')).toHaveText('GPT-6 Astra');

@@ -176,7 +176,7 @@ try {
       await waitFor(
         () =>
           !document.querySelector('.setup-hint') &&
-          !document.querySelector('[aria-label="Refresh model list"]').disabled,
+          !document.querySelector('[role="combobox"][aria-label="Model"]').disabled,
       );
       const folder = await evaluate(
         () => document.querySelector('[role="combobox"][aria-label="Folder"]').title,
@@ -222,7 +222,6 @@ try {
       await click(picker('Model'));
       await click(picker('Folder'));
       const savedFolderMs = await measure(option(win32.basename(folder)), folder);
-      await button('Refresh model list');
       assert(
         await evaluate(
           () => !document.querySelector('[role="combobox"][aria-label="Model"]').disabled,
@@ -246,7 +245,7 @@ try {
         sameComputerPreservesSettings: true,
         existingConversationIdentityLocked: true,
         newConversationIdentityEditable: true,
-        modelsUsableDuringRefresh: true,
+        modelsUsableAfterFolderSelection: true,
         conversationsUnchanged: true,
         providerPromptsSent: 0,
         viewport: await evaluate(() => ({

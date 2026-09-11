@@ -20,7 +20,6 @@
     Pencil,
     Check,
     Laptop,
-    Copy,
     CircleAlert,
     Folder,
     MessageCircle,
@@ -33,7 +32,6 @@
     providerIds,
     providers,
     historyFor,
-    messageText,
     settingsFor,
     rememberSettings,
     type ChatSettings,
@@ -1420,22 +1418,6 @@
       throw e;
     }
   }
-  async function copyConversation() {
-    if (!active) return;
-    try {
-      await navigator.clipboard.writeText(
-        active.messages
-          .map(
-            (m) =>
-              `## ${m.role === 'user' ? 'You' : providers[(m.settings ?? active.settings).provider].name}\n\n${messageText(m)}`,
-          )
-          .join('\n\n'),
-      );
-      notice = 'Conversation copied as Markdown.';
-    } catch {
-      notice = 'Clipboard unavailable. Select the conversation text to copy it.';
-    }
-  }
   async function exportWorkspace() {
     try {
       if (desktop()) {
@@ -1928,11 +1910,6 @@
               >{/if}
             {#if active}<button
                 class="icon-button"
-                onclick={copyConversation}
-                title="Copy conversation"
-                aria-label="Copy conversation"><Copy size={16} /></button
-              ><button
-                class="icon-button"
                 disabled={activeRunning}
                 onclick={() =>
                   (deletion = { type: 'conversation', id: active.id, name: active.title })}
@@ -1943,19 +1920,6 @@
               disabled={!loaded || !!run || activeRunning}
               title="Chat instructions"
               aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
-            >
-            <button
-              class="icon-button"
-              title="Refresh model list"
-              aria-label="Refresh model list"
-              disabled={modelsLoading ||
-                !selectedConnectionAvailable ||
-                !!run ||
-                activeRunning ||
-                locationPending ||
-                (!selectedLocation && !active)}
-              onclick={() => void refreshModels()}
-              ><RefreshCw size={15} class={modelsLoading ? 'spinning' : ''} /></button
             >
           </ToolbarActions>
         </div>
