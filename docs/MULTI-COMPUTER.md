@@ -18,7 +18,7 @@ Folder selection organizes chats and sets the provider process's working directo
 
 Computer labels provide context; folder groups expand and collapse, and the open conversation is highlighted. Moving a conversation to History or restoring it reveals its destination tab and folder. Switching tabs leaves the open conversation in place. Search filters both tabs and updates their counts. Use Left/Right, Home, or End while a tab is focused to switch tabs.
 
-To delete a conversation, right-click its sidebar row in Active or History and choose **Delete conversation**, then confirm. Keyboard users can focus a row and press **Shift+F10** or the context-menu key; touch users can press and hold the row. Opening the menu preserves the currently open chat and draft. Delete is unavailable while that conversation is running.
+To delete a conversation, right-click its sidebar row in Active or History and choose **Delete conversation**, then confirm. Keyboard users can focus a row and press **Shift+F10** or the context-menu key; touch users can press and hold the row. Opening the menu preserves the currently open chat and draft. Active conversations can be deleted while responding. Confirmation stops the exact local or remote run and waits for completion before removal. A cancellation failure keeps the chat and offers a retry; remote final checkpoints are merged before publishing deletion.
 
 ## Desktop + MacBook setup
 

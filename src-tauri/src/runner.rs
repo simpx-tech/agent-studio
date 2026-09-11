@@ -79,6 +79,12 @@ async fn execute(
     std::fs::create_dir_all(&root)
         .map_err(|_| "Cannot create the conversation runtime directory")?;
     let exe = crate::providers::resolve(&request.agent.provider).await?;
+    if request.agent.provider == "gemini" {
+        let login = crate::providers::require_gemini_login(&exe, &cancel).await;
+        if !cancel.is_cancelled() {
+            login?;
+        }
+    }
     if cancel.is_cancelled() {
         return Ok(("cancelled".into(), String::new()));
     }
@@ -133,7 +139,13 @@ async fn execute(
                 Err(_) => { exe.kill(&mut child).await; break Err("Could not read the provider response".into()); }
             },
             line = stderr.next_line(), if !stderr_done => match line {
-                Ok(Some(line)) => { if diagnostics.len() < 16000 { diagnostics.push_str(&line.chars().take(1000).collect::<String>()); diagnostics.push('\n'); } },
+                Ok(Some(line)) => {
+                    if request.agent.provider == "gemini" && line.trim().to_lowercase().starts_with("authentication required") {
+                        exe.kill(&mut child).await;
+                        break Err(provider_error(&line).into());
+                    }
+                    if diagnostics.len() < 16000 { diagnostics.push_str(&line.chars().take(1000).collect::<String>()); diagnostics.push('\n'); }
+                },
                 _ => stderr_done = true,
             },
             status = child.wait(), if stdout_done && stderr_done => {

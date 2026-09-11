@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { initialWorkspace } from './domain';
-import { emptyShared } from './sync';
+import { emptyShared, sharedWorkspace } from './sync';
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
@@ -14,8 +14,34 @@ beforeEach(() => {
   native.invoke.mockReset();
 });
 
-async function fixture() {
+async function fixture(remoteConnection?: string) {
   const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  if (remoteConnection) {
+    const host = crypto.randomUUID(),
+      computer = crypto.randomUUID(),
+      account = crypto.randomUUID();
+    workspace.fleet.computers.push({ id: computer, name: 'Remote' });
+    workspace.fleet.environments.push({
+      id: host,
+      computerId: computer,
+      name: 'Remote',
+      platform: 'linux',
+    });
+    workspace.fleet.accounts.push({
+      id: account,
+      name: 'Remote Gemini',
+      provider: 'gemini',
+      purpose: 'personal',
+    });
+    workspace.fleet.connections.push({
+      id: remoteConnection,
+      accountId: account,
+      environmentId: host,
+      profile: 'existing',
+    });
+  }
+  const shared = sharedWorkspace(workspace);
   transport.configureRuntime({
     installation: {
       id: crypto.randomUUID(),
@@ -23,7 +49,7 @@ async function fixture() {
       name: 'QA',
       platform: 'windows',
     },
-    workspace: initialWorkspace,
+    workspace: () => workspace,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async () => {},
@@ -32,13 +58,13 @@ async function fixture() {
   native.invoke.mockImplementation(async (command, args) => {
     if (command === 'relay_resume') return 'https://relay.example.com/';
     if (command === 'load_sync_state')
-      return { url: 'https://relay.example.com', instanceId: 'same-relay', base: emptyShared() };
+      return { url: 'https://relay.example.com', instanceId: 'same-relay', base: shared };
     if (command === 'relay_request')
       return {
         status: 200,
         body:
           args.path === 'v1/state'
-            ? { instanceId: 'same-relay', workspace: emptyShared(), revision: 0 }
+            ? { instanceId: 'same-relay', workspace: shared, revision: 0 }
             : [],
       };
     return null;
@@ -57,6 +83,43 @@ it('restores native pairing without sending its key through IPC and resumes hear
       ([command, args]) => command === 'relay_request' && args.path === 'v1/heartbeat',
     ),
   ).toBe(true);
+});
+
+it('deletion waits for the remote response to stop and merges its final checkpoint', async () => {
+  const connection = crypto.randomUUID(),
+    runId = crypto.randomUUID();
+  const transport = await fixture(connection);
+  await transport.resumeRelay();
+  const original = native.invoke.getMockImplementation()!;
+  const order: string[] = [];
+  let reads = 0;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request') {
+      if (args.path === `v1/jobs/${runId}/cancel`) {
+        order.push('cancel');
+        return { status: 200, body: {} };
+      }
+      if (args.path === `v1/jobs/${runId}`) {
+        const status = ++reads === 1 ? 'running' : 'cancelled';
+        order.push(status);
+        return { status: 200, body: { status } };
+      }
+      if (args.path === 'v1/state') order.push('checkpoint');
+    }
+    return original(command, args);
+  });
+  await transport.cancelRun(runId, connection, true);
+  expect(order).toEqual(['cancel', 'running', 'cancelled', 'checkpoint']);
+  expect(native.invoke.mock.calls.some(([command]) => command === 'cancel_run')).toBe(false);
+});
+
+it('a remote cancellation error never falls back to stopping a local run', async () => {
+  const connection = crypto.randomUUID();
+  const transport = await fixture(connection);
+  await transport.resumeRelay();
+  native.invoke.mockResolvedValueOnce({ status: 503, body: { error: 'Host unavailable' } });
+  await expect(transport.cancelRun(crypto.randomUUID(), connection, true)).rejects.toThrow();
+  expect(native.invoke.mock.calls.some(([command]) => command === 'cancel_run')).toBe(false);
 });
 
 it('leaves an unpaired desktop local and retries a temporary startup outage', async () => {

@@ -84,6 +84,34 @@ export function sharedWorkspace(workspace: Workspace): SharedWorkspace {
   return sharedSchema.parse(workspace);
 }
 
+// A stopped host can publish its last checkpoint after another device deletes
+// the chat. Only background reply/title updates yield to that deletion; retain
+// conflict copies for new messages or deliberate settings/location/title edits.
+function backgroundUpdate(before: Conversation, updated: Conversation): boolean {
+  const metadata = { ...updated, updatedAt: before.updatedAt, messages: before.messages };
+  if (
+    before.titleStatus === 'pending' &&
+    ((updated.titleStatus === 'generated' && updated.titleSource) ||
+      (updated.titleStatus === 'fallback' && updated.title === before.title))
+  ) {
+    metadata.title = before.title;
+    metadata.titleStatus = before.titleStatus;
+    metadata.titleSource = before.titleSource;
+  }
+  if (!equal(metadata, before) || before.messages.length !== updated.messages.length) return false;
+  if (equal(before.messages, updated.messages)) return true;
+  return (
+    !!sameRun(before, updated, before) &&
+    before.messages.every(
+      (message, index) =>
+        equal(message, updated.messages[index]) ||
+        (message.status === 'running' &&
+          !!message.runId &&
+          message.id === updated.messages[index].id),
+    )
+  );
+}
+
 // Preferences and credentials are not replicated. Retain divergent chat edits as a copy;
 // stop on metadata conflicts instead of silently changing execution routing.
 export function mergeShared(
@@ -110,6 +138,15 @@ export function mergeShared(
       } else if (equal(before, left)) {
         if (right) result.push(right);
       } else if (chats) {
+        if (
+          before &&
+          (!left || !right) &&
+          backgroundUpdate(
+            before as unknown as Conversation,
+            (left ?? right) as unknown as Conversation,
+          )
+        )
+          continue;
         if (left && right) {
           const response = sameRun(
             left as unknown as Conversation,

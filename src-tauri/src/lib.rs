@@ -97,7 +97,11 @@ async fn list_models(
         provider.as_deref().unwrap_or("codex"),
         connection_id.as_deref(),
     )?;
-    Ok(profiles::scope(profile, models::catalog()).await)
+    Ok(profiles::scope(
+        profile,
+        models::catalog(provider.as_deref().unwrap_or("codex")),
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -327,10 +331,30 @@ async fn run_agent(
     result
 }
 #[tauri::command]
-fn cancel_run(runs: State<runner::Runs>, run_id: String) -> Result<(), String> {
-    let active = runs.0.lock().map_err(|_| "Run registry lock failed")?;
-    if let Some(token) = active.get(&run_id) {
-        token.cancel();
+async fn cancel_run(
+    runs: State<'_, runner::Runs>,
+    run_id: String,
+    wait_for_completion: Option<bool>,
+) -> Result<(), String> {
+    {
+        let active = runs.0.lock().map_err(|_| "Run registry lock failed")?;
+        if let Some(token) = active.get(&run_id) {
+            token.cancel();
+        }
+    }
+    if wait_for_completion.unwrap_or(false) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while runs
+            .0
+            .lock()
+            .map_err(|_| "Run registry lock failed")?
+            .contains_key(&run_id)
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err("The response has not stopped yet. Try deleting again.".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
     Ok(())
 }

@@ -61,6 +61,55 @@ describe('workspace replication', () => {
     remote.conversations = [];
     expect(mergeShared(base, local, remote).conversations[0].title).toBe('Local (conflict copy)');
   });
+  it('deletion wins over late reply and generated-title checkpoints while deliberate edits survive', () => {
+    const base = emptyShared();
+    const conversation = { ...chat(), titleStatus: 'pending' as const };
+    conversation.messages.push({
+      id: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+      role: 'assistant',
+      createdAt: '',
+      status: 'running',
+      blocks: [{ type: 'markdown', text: 'Hello' }],
+    });
+    base.conversations.push(conversation);
+    const deleted = structuredClone(base);
+    deleted.conversations = [];
+    const checkpoint = structuredClone(base);
+    const completed = checkpoint.conversations[0];
+    completed.messages[0].status = 'cancelled';
+    completed.messages[0].blocks[0].text = 'Hello world';
+    completed.messages[0].durationMs = 500;
+    completed.title = 'Generated title';
+    completed.titleStatus = 'generated';
+    completed.titleSource = { provider: 'codex', model: 'fixture' };
+    completed.updatedAt = '2026-09-11';
+    for (const [local, remote] of [
+      [deleted, checkpoint],
+      [checkpoint, deleted],
+    ]) {
+      expect(mergeShared(base, local, remote).conversations).toEqual([]);
+    }
+    for (const edit of ['settings', 'title', 'message']) {
+      const deliberate = structuredClone(checkpoint);
+      const chat = deliberate.conversations[0];
+      if (edit === 'settings') chat.settings.instructions = 'Keep this deliberate edit';
+      if (edit === 'title') {
+        chat.title = 'My title';
+        chat.titleStatus = 'fallback';
+      }
+      if (edit === 'message')
+        chat.messages.push({
+          id: crypto.randomUUID(),
+          role: 'user',
+          createdAt: '',
+          status: 'complete',
+          blocks: [{ type: 'markdown', text: 'A new turn' }],
+        });
+      expect(mergeShared(base, deleted, deliberate).conversations).toHaveLength(1);
+      expect(mergeShared(base, deliberate, deleted).conversations).toHaveLength(1);
+    }
+  });
   it('coalesces copies of the same live response and never downgrades completion', () => {
     const base = emptyShared();
     const c = chat();

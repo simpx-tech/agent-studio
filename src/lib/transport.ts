@@ -570,12 +570,30 @@ export async function runAgent(
     request.runId,
   );
 }
-export async function cancelRun(runId: string, connectionId?: string) {
+export async function cancelRun(runId: string, connectionId?: string, waitForCompletion = false) {
   if (remoteRuns.has(runId) || remoteTarget(connectionId)) {
     await relayApi('POST', `v1/jobs/${runId}/cancel`);
+    if (waitForCompletion) {
+      const deadline = Date.now() + 20_000;
+      while (true) {
+        const job = await relayApi<RelayJob>('GET', `v1/jobs/${runId}`);
+        if (['complete', 'cancelled', 'error'].includes(job.status)) break;
+        if (Date.now() >= deadline)
+          throw new Error(
+            'The computer has not confirmed stopping the response. Try again when it is connected.',
+          );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      // Merge the host's final checkpoint before publishing the deletion.
+      while (relayBusy) {
+        if (Date.now() >= deadline) throw new Error('Sync is still busy. Try deleting again.');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await pollRelay();
+    }
     return;
   }
-  await invoke('cancel_run', { runId });
+  await invoke('cancel_run', { runId, waitForCompletion });
 }
 export async function signIn(provider: string, connectionId?: string) {
   if (remoteTarget(connectionId))

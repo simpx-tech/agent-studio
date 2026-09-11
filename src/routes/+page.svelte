@@ -198,6 +198,8 @@
     name: string;
     trigger: HTMLButtonElement;
   } | null>(null);
+  let deleting = $state(false);
+  let deletionError = $state('');
   let conversationMenu = $state<{
     id: string;
     trigger: HTMLButtonElement;
@@ -454,7 +456,8 @@
       (desktop() || paired) &&
       (desktop() || online) &&
       (!selectedRemote || (paired && !syncError)) &&
-      !!selectedStatus?.installed,
+      !!selectedStatus?.installed &&
+      selectedStatus.auth === 'ready',
   );
   const viewTitle = $derived(
     {
@@ -796,12 +799,10 @@
         ?.environments.some((e) => environmentOnline(e.id)) ?? false
     );
   }
-  function canQueryConnection(connectionId?: string) {
-    if (!connectionId) return desktop();
+  function canQueryConnection(connectionId?: string, provider = selectedSettings.provider) {
+    if (!connectionId) return desktop() && statusFor(provider)?.auth === 'ready';
     const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
     if (!connection) return false;
-    if (desktop() && executionHost(workspace.fleet, connection.environmentId) === installation?.id)
-      return true;
     const status = connectionStatus(connectionId);
     return (
       environmentOnline(connection.environmentId) && !!status?.installed && status.auth === 'ready'
@@ -854,7 +855,7 @@
         // A newly created connection must reach native storage before its catalog is queried.
         request = saveQueue
           .then(() => {
-            if (!canQueryConnection(selected.connectionId))
+            if (!canQueryConnection(selected.connectionId, selected.provider))
               throw new Error('The selected connection is unavailable.');
             return loadModels(selected);
           })
@@ -877,7 +878,10 @@
         const connection = workspace.fleet.connections.find((c) => c.id === selected.connectionId);
         const host = connection && executionHost(workspace.fleet, connection.environmentId);
         presence = presence.map((p) => (p.environmentId === host ? { ...p, online: false } : p));
-      } else if (generation === modelGeneration && canQueryConnection(selected.connectionId))
+      } else if (
+        generation === modelGeneration &&
+        canQueryConnection(selected.connectionId, selected.provider)
+      )
         notice = modelRefreshWarning;
     } finally {
       if (generation === modelGeneration) modelsLoading = false;
@@ -888,7 +892,7 @@
     force = false,
   ) {
     if (
-      !canQueryConnection(settings.connectionId) ||
+      !canQueryConnection(settings.connectionId, settings.provider) ||
       (!settings.connectionId && !active && !selectedLocation)
     )
       return;
@@ -1221,7 +1225,8 @@
     }, 500);
   }
   function requestConversationDeletion() {
-    if (!conversationMenu || !menuConversation || conversationRunning(menuConversation)) return;
+    if (!conversationMenu || !menuConversation || deleting) return;
+    deletionError = '';
     deletion = {
       type: 'conversation',
       id: menuConversation.id,
@@ -1247,15 +1252,31 @@
       },
     };
   }
-  function remove() {
-    if (!deletion || !deletingConversation || conversationRunning(deletingConversation)) return;
-    void cancelTitle(deletion.id).catch(() => {});
-    workspace.conversations = workspace.conversations.filter((c) => c.id !== deletion!.id);
-    if (activeId === deletion.id) {
-      newChat();
+  async function remove() {
+    if (!deletion || !deletingConversation || deleting) return;
+    const target = deletingConversation;
+    const ownedRun = run?.conversationId === target.id ? run : null;
+    const reply = target.messages.find((m) => m.status === 'running');
+    const runId = ownedRun?.id ?? reply?.runId;
+    deleting = true;
+    deletionError = '';
+    try {
+      if (ownedRun) stopping = true;
+      if (runId)
+        await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
+      await cancelTitle(target.id).catch(() => {});
+      workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
+      await persist();
+      if (activeId === target.id) newChat();
+      deletion = null;
+    } catch (e) {
+      if (!workspace.conversations.some((c) => c.id === target.id))
+        workspace.conversations.unshift(target);
+      deletionError = `Could not delete this conversation: ${String(e)}`;
+      if (ownedRun && run?.id === ownedRun.id) stopping = false;
+    } finally {
+      deleting = false;
     }
-    deletion = null;
-    saveSoon();
   }
   function clearImages() {
     imageDragDepth = 0;
@@ -1436,6 +1457,11 @@
           s.auth = 'login';
           s.detail = 'Sign in through the CLI, then send another message.';
         }
+      } else if (String(e).includes('Gemini connection could not be verified')) {
+        const s = responseSettings.connectionId
+          ? connectionStatuses[responseSettings.connectionId]
+          : statusFor(responseSettings.provider);
+        if (s) s.auth = 'unknown';
       }
     } finally {
       message().durationMs = performance.now() - started;
@@ -1559,11 +1585,11 @@
     if (event.key === 'Escape') {
       editorOpen = false;
       contextOpen = false;
-      deletion = null;
+      if (!deleting) deletion = null;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
       event.preventDefault();
-      newChat();
+      if (!deletion) newChat();
     }
   }
 </script>
@@ -2064,6 +2090,7 @@
                     (m.status === 'error' || m.status === 'cancelled') &&
                     !run}
                   retry={() => void send(true)}
+                  retryDisabled={!canSend}
                 />{/each}
             {:else}<div class="chat-empty">
                 <span
@@ -2100,6 +2127,19 @@
               <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
                 class="text-button"
                 onclick={() => (view = 'connections')}
+                >Open Connections<ArrowRight size={13} /></button
+              >
+            </div>
+          {:else if selectedStatus?.installed && selectedStatus.auth !== 'ready'}<div
+              class="setup-hint"
+              role="status"
+            >
+              <Plug size={15} />
+              {#if selectedStatus.auth === 'login'}Connect to {providers[selectedAgent.provider]
+                  .name} before sending a message.
+              {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection. Open
+                Connections to check it before sending.{/if}
+              <button class="text-button" onclick={() => (view = 'connections')}
                 >Open Connections<ArrowRight size={13} /></button
               >
             </div>{/if}
@@ -2288,7 +2328,6 @@
       y={conversationMenu.y}
       name={menuConversation.title}
       trigger={conversationMenu.trigger}
-      disabled={conversationRunning(menuConversation)}
       close={closeConversationMenu}
       remove={requestConversationDeletion}
     />
@@ -2307,11 +2346,15 @@
       <p>
         “{deletion.name}” will be removed from this workspace. This cannot be undone.
       </p>
+      {#if deletingConversation && conversationRunning(deletingConversation)}<p>
+          The running response will be stopped before this conversation is deleted.
+        </p>{/if}
+      {#if deletionError}<p role="alert">{deletionError}</p>{/if}
       <footer>
-        <button class="secondary" onclick={() => (deletion = null)}>Cancel</button><button
-          class="danger"
-          disabled={!deletingConversation || conversationRunning(deletingConversation)}
-          onclick={remove}>Delete {deletion.type}</button
+        <button class="secondary" disabled={deleting} onclick={() => (deletion = null)}
+          >Cancel</button
+        ><button class="danger" disabled={!deletingConversation || deleting} onclick={remove}
+          >{deleting ? 'Deleting…' : `Delete ${deletion.type}`}</button
         >
       </footer>
     </div>

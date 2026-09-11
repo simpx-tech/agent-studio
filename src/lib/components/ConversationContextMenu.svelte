@@ -7,7 +7,6 @@
     y,
     name,
     trigger,
-    disabled,
     close,
     remove,
   }: {
@@ -15,7 +14,6 @@
     y: number;
     name: string;
     trigger: HTMLElement;
-    disabled: boolean;
     close: (restoreFocus?: boolean) => void;
     remove: () => void;
   } = $props();
@@ -80,16 +78,8 @@
   onkeydown={keyboard}
   oncontextmenu={(event) => event.preventDefault()}
 >
-  <button
-    type="button"
-    role="menuitem"
-    tabindex="-1"
-    aria-disabled={disabled}
-    title={disabled ? 'Stop the response before deleting this conversation.' : undefined}
-    bind:this={item}
-    onclick={() => {
-      if (!disabled) remove();
-    }}><Trash2 size={15} aria-hidden="true" />Delete conversation</button
+  <button type="button" role="menuitem" tabindex="-1" bind:this={item} onclick={remove}
+    ><Trash2 size={15} aria-hidden="true" />Delete conversation</button
   >
 </div>
 
@@ -120,10 +110,6 @@
   button:hover,
   button:focus-visible {
     background: #392921;
-  }
-  button[aria-disabled='true'] {
-    color: var(--muted);
-    cursor: not-allowed;
   }
   @media (pointer: coarse) {
     button {

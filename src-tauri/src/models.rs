@@ -24,8 +24,19 @@ fn automatic() -> ModelInfo {
         context_source: None,
     }
 }
-pub async fn catalog() -> BTreeMap<String, Vec<ModelInfo>> {
-    let (codex, gemini) = tokio::join!(codex_models(), gemini_models());
+pub async fn catalog(provider: &str) -> BTreeMap<String, Vec<ModelInfo>> {
+    // A catalog request belongs to one exact provider/profile. Do not start a
+    // different provider's CLI (and potentially its interactive login fallback).
+    let codex = if provider == "codex" {
+        codex_models().await
+    } else {
+        None
+    };
+    let gemini = if provider == "gemini" {
+        gemini_models().await
+    } else {
+        None
+    };
     let mut claude = vec![automatic()];
     // Documented Claude Code aliases; their availability is enforced by its CLI.
     for (id, name) in [
@@ -278,12 +289,13 @@ fn parse_gemini(text: &str) -> Vec<ModelInfo> {
     models
 }
 async fn gemini_models() -> Option<Vec<ModelInfo>> {
+    let exe = resolve("gemini").await.ok()?;
+    crate::providers::require_gemini_login(&exe, &tokio_util::sync::CancellationToken::new())
+        .await
+        .ok()?;
     let output = tokio::time::timeout(
         Duration::from_secs(15),
-        resolve("gemini")
-            .await
-            .ok()?
-            .command()
+        exe.command()
             .arg("models")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

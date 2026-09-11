@@ -12,6 +12,7 @@
     agent,
     retry,
     canRetry = false,
+    retryDisabled = false,
     switchNotice = '',
     timeTotal,
   }: {
@@ -19,6 +20,7 @@
     agent: ChatSettings;
     retry: () => void;
     canRetry?: boolean;
+    retryDisabled?: boolean;
     switchNotice?: string;
     timeTotal?: ReplyTimeTotal;
   } = $props();
@@ -98,7 +100,7 @@
           finalText={text}
         />{/if}
       {#if message.status !== 'running' && (canRetry || linkError)}<div class="message-actions">
-          {#if canRetry}<button class="text-button" onclick={retry}
+          {#if canRetry}<button class="text-button" onclick={retry} disabled={retryDisabled}
               ><RotateCcw size={13} />Retry</button
             >{/if}
           {#if linkError}<span role="alert">{linkError}</span>{/if}

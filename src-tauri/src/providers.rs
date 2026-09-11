@@ -227,7 +227,7 @@ fn gemini_login_result(success: bool, stdout: &str, diagnostics: &str) -> LoginC
             }
         }
     }
-    let diagnostics = diagnostics.to_lowercase();
+    let diagnostics = format!("{diagnostics}\n{stdout}").to_lowercase();
     if diagnostics.contains("authentication required") || diagnostics.contains("please sign in") {
         LoginCheck::Login
     } else {
@@ -235,7 +235,10 @@ fn gemini_login_result(success: bool, stdout: &str, diagnostics: &str) -> LoginC
     }
 }
 
-async fn check_gemini_login(exe: &Executable) -> LoginCheck {
+async fn check_gemini_login(
+    exe: &Executable,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> LoginCheck {
     // /usage is a built-in account query, not a model prompt. Keep it headless;
     // never infer authentication from credential files or a surviving terminal.
     let Ok(mut child) = exe
@@ -259,29 +262,46 @@ async fn check_gemini_login(exe: &Executable) -> LoginCheck {
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            _ = &mut deadline => { let _ = child.kill().await; return LoginCheck::Unknown; }
+            _ = cancel.cancelled() => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
+            _ = &mut deadline => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
             line = stdout.next_line(), if !out_done => match line {
-                Ok(Some(line)) if text.len() + line.len() < 512_000 => { text.push_str(&line); text.push('\n'); }
+                Ok(Some(line)) if text.len() + line.len() < 512_000 => {
+                    if gemini_login_result(false, &line, "") == LoginCheck::Login {
+                        exe.kill(&mut child).await;
+                        return LoginCheck::Login;
+                    }
+                    text.push_str(&line); text.push('\n');
+                }
                 Ok(None) => out_done = true,
-                _ => { let _ = child.kill().await; return LoginCheck::Unknown; }
+                _ => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
             },
             line = stderr.next_line(), if !err_done => match line {
                 Ok(Some(line)) => {
                     // Stop at the CLI's headless OAuth fallback, without waiting
                     // for a code or treating noisy startup logs as a sign-out.
                     if line.trim().to_lowercase().starts_with("authentication required") {
-                        let _ = child.kill().await;
+                        exe.kill(&mut child).await;
                         return LoginCheck::Login;
                     }
                     if diagnostics.len() < 16_000 { diagnostics.push_str(&line); diagnostics.push('\n'); }
                 },
                 Ok(None) => err_done = true,
-                Err(_) => { let _ = child.kill().await; return LoginCheck::Unknown; }
+                Err(_) => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
             },
             status = child.wait(), if out_done && err_done => {
                 return gemini_login_result(status.is_ok_and(|s| s.success()), &text, &diagnostics);
             }
         }
+    }
+}
+pub async fn require_gemini_login(
+    exe: &Executable,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    match check_gemini_login(exe, cancel).await {
+        LoginCheck::Ready => Ok(()),
+        LoginCheck::Login => Err("Your CLI login needs attention. Open Connections and connect to Gemini before sending a message.".into()),
+        LoginCheck::Unknown => Err("Your Gemini connection could not be verified. Open Connections and refresh before sending a message.".into()),
     }
 }
 pub async fn detect_one(id: &str) -> ProviderStatus {
@@ -315,7 +335,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         });
     s.detail = "Installed. Send a message to verify your login.".into();
     if id == "gemini" {
-        let (auth, detail) = match check_gemini_login(&exe).await {
+        let (auth, detail) = match check_gemini_login(&exe, &tokio_util::sync::CancellationToken::new()).await {
             LoginCheck::Ready => ("ready", "Signed in to Google through Antigravity CLI. Your account connection is verified."),
             LoginCheck::Login => ("login", "Sign in to Google through Antigravity CLI. This status updates automatically after sign-in."),
             LoginCheck::Unknown => ("unknown", "Antigravity CLI is installed, but account status could not be verified. Check your connection and refresh; no new sign-in is required unless the CLI asks for it."),
@@ -1282,6 +1302,18 @@ mod tests {
         assert_eq!(gemini_login_result(true, reply, ""), LoginCheck::Ready);
         assert_eq!(gemini_login_result(false, reply, ""), LoginCheck::Unknown);
         assert_eq!(
+            gemini_login_result(
+                false,
+                r#"{"status":"ERROR","error":"Authentication required"}"#,
+                ""
+            ),
+            LoginCheck::Login
+        );
+        assert_eq!(
+            gemini_login_result(true, r#"{"status":"SUCCESS","response":"Hello"}"#, ""),
+            LoginCheck::Unknown
+        );
+        assert_eq!(
             gemini_login_result(true, "not JSON", ""),
             LoginCheck::Unknown
         );
@@ -1309,6 +1341,59 @@ mod tests {
             gemini_login_result(true, reply, "startup: not signed in yet"),
             LoginCheck::Ready
         );
+    }
+    #[tokio::test]
+    async fn gemini_preflight_uses_only_a_headless_account_query() {
+        let directory = tempfile::tempdir().unwrap();
+        for (result, expected) in [
+            (
+                r#"{"status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{}}}"#,
+                LoginCheck::Ready,
+            ),
+            (
+                r#"{"status":"ERROR","error":"Authentication required"}"#,
+                LoginCheck::Login,
+            ),
+            (
+                r#"{"status":"ERROR","error":"Network unavailable"}"#,
+                LoginCheck::Unknown,
+            ),
+        ] {
+            let script = directory.path().join(if cfg!(windows) {
+                "query.ps1"
+            } else {
+                "query.sh"
+            });
+            let (program, prefix) = if cfg!(windows) {
+                std::fs::write(&script, format!(
+                    "if (($args -join '|') -ne '--print|/usage|--output-format|json') {{ exit 9 }}\nif ([Console]::In.ReadToEnd().Length -ne 0) {{ exit 8 }}\n[Console]::Out.WriteLine('{result}')\n"
+                )).unwrap();
+                (
+                    "powershell.exe",
+                    vec![
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-File".into(),
+                        script.to_string_lossy().into_owned(),
+                    ],
+                )
+            } else {
+                std::fs::write(&script, format!("[ \"$*\" = '--print /usage --output-format json' ] || exit 9\n[ -z \"$(cat)\" ] || exit 8\nprintf '%s\\n' '{result}'\n")).unwrap();
+                ("/bin/sh", vec![script.to_string_lossy().into_owned()])
+            };
+            let exe = Executable {
+                provider: "gemini".into(),
+                program: program.into(),
+                prefix,
+                wsl: None,
+            };
+            let cancel = tokio_util::sync::CancellationToken::new();
+            assert_eq!(check_gemini_login(&exe, &cancel).await, expected);
+            assert_eq!(
+                require_gemini_login(&exe, &cancel).await.is_ok(),
+                expected == LoginCheck::Ready
+            );
+        }
     }
     #[test]
     fn prompts_preserve_untrusted_text_as_data() {

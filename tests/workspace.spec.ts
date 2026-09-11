@@ -87,11 +87,12 @@ async function mockDesktop(page: Page, mode = 'success') {
                   !localStorage.getItem('test-wsl-missing')),
               location: wsl ? 'WSL · Ubuntu' : 'Windows',
               auth:
-                mode === 'login-flow' &&
+                localStorage.getItem(`test-auth-${args.provider}`) ??
+                (mode === 'login-flow' &&
                 args.provider === 'gemini' &&
                 localStorage.getItem('test-google-login') !== 'ready'
                   ? 'login'
-                  : 'ready',
+                  : 'ready'),
               version: 'Test fixture',
               detail: 'Fixture connection',
             };
@@ -140,11 +141,12 @@ async function mockDesktop(page: Page, mode = 'success') {
               installed: true,
               version: 'Test fixture',
               auth:
-                mode === 'login-flow' &&
+                localStorage.getItem(`test-auth-${id}`) ??
+                (mode === 'login-flow' &&
                 id === 'gemini' &&
                 localStorage.getItem('test-google-login') !== 'ready'
                   ? 'login'
-                  : 'ready',
+                  : 'ready'),
               detail: 'Fixture connection',
             }));
           if (command === 'sign_in') {
@@ -275,6 +277,12 @@ async function mockDesktop(page: Page, mode = 'success') {
             return;
           }
           if (command === 'cancel_run') {
+            const state = window as any;
+            (state.cancelCalls ??= []).push(args);
+            if (state.failCancel)
+              throw new Error('The owning computer could not stop the response.');
+            if (state.holdCancel)
+              await new Promise<void>((resolve) => (state.releaseCancel = resolve));
             pending?.();
             return;
           }
@@ -369,6 +377,9 @@ test('images can be previewed, sent without text, reopened and retried with the 
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.messages[0].text).toBe('');
   expect(request.messages[0].images[0].data).toBe(file.buffer.toString('base64'));
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
   await expect(page.locator('.message.user')).toHaveCount(1);
@@ -633,6 +644,98 @@ test('Gemini automatically exposes its existing CLI login', async ({ page }) => 
   await expect(card).not.toContainText('@google/gemini-cli');
 });
 
+test('signed-out Gemini warns before submission and preserves the draft through Connections', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'login-flow');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Gemini');
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
+  await message.fill('Keep this Gemini draft until connected');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await message.press('Enter');
+  await page.locator('form.composer').dispatchEvent('submit');
+  await expect(page.locator('.conversation-item')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('test-sign-in-provider'))).toBeNull();
+  expect(
+    await page.evaluate(() =>
+      (window as any).cliCalls.filter(
+        (call: any) => call.command === 'list_models' && call.provider === 'gemini',
+      ),
+    ),
+  ).toEqual([]);
+  await page.getByRole('button', { name: 'Open Connections', exact: true }).click();
+  const card = page
+    .locator('.connection-card')
+    .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
+  await card.getByRole('button', { name: 'Open sign-in', exact: true }).click();
+  expect(await page.evaluate(() => localStorage.getItem('test-sign-in-provider'))).toBe('gemini');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(message).toHaveValue('Keep this Gemini draft until connected');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await page.evaluate(() => {
+    localStorage.setItem('test-google-login', 'ready');
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+  await expect(page.locator('.setup-hint')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).cliCalls.some(
+          (call: any) => call.command === 'list_models' && call.provider === 'gemini',
+        ),
+      ),
+    )
+    .toBe(true);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  await page.evaluate(() => {
+    localStorage.removeItem('test-google-login');
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
+  await message.fill('Do not restore while signed out');
+  await message.press('Enter');
+  await expect(page.getByRole('tab', { name: /^History/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('1');
+  expect(
+    await page.evaluate(
+      () => JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].archived,
+    ),
+  ).toBe(true);
+});
+
+test('unknown provider authentication blocks sending until verified', async ({ page }) => {
+  await mockDesktop(page);
+  await page.addInitScript(() => localStorage.setItem('test-auth-claude', 'unknown'));
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  await page.getByLabel('Message', { exact: true }).fill('Wait for this account');
+  await expect(page.locator('.setup-hint')).toContainText("couldn't verify your Claude connection");
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await page.screenshot({ path: 'artifacts/auth-required-browser.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    page.getByRole('button', { name: 'Open Connections', exact: true }),
+  ).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'artifacts/auth-required-mobile.png' });
+  await page.evaluate(() => {
+    localStorage.setItem('test-auth-claude', 'ready');
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+});
+
 test('external Google sign-in updates on focus and survives reload without a chat', async ({
   page,
 }) => {
@@ -733,7 +836,8 @@ test('login errors never masquerade as a completed answer', async ({ page }) => 
   await page.getByLabel('Message', { exact: true }).fill('Hello');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-status="error"]')).toContainText('login needs attention');
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled();
+  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
   await expect(page.locator('[data-testid="message"]')).toHaveCount(2);
 });
 
@@ -1708,10 +1812,8 @@ test('sidebar deletion targets a History chat without opening it or clearing the
   await expect(page.locator('.page-title')).toHaveText('Current sidebar conversation');
 });
 
-test('sidebar deletion remains disabled until that conversation finishes running', async ({
-  page,
-}) => {
-  await mockDesktop(page, 'settings-deferred');
+test('sidebar deletion stops a running Active chat and ignores late events', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
   await page.getByLabel('Message', { exact: true }).fill('Running sidebar conversation');
@@ -1719,15 +1821,66 @@ test('sidebar deletion remains disabled until that conversation finishes running
   await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'running');
   await page.locator('.conversation-item[aria-current="page"]').click({ button: 'right' });
   const item = page.getByRole('menuitem', { name: 'Delete conversation', exact: true });
-  await expect(item).toHaveAttribute('aria-disabled', 'true');
-  await item.press('Enter');
-  await expect(page.getByRole('alertdialog')).toHaveCount(0);
-  await page.evaluate(() => (window as any).finishReply());
-  await expect(item).toHaveAttribute('aria-disabled', 'false');
   await item.click();
-  await expect(page.getByRole('alertdialog')).toBeVisible();
+  await expect(page.getByRole('alertdialog')).toContainText('The running response will be stopped');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).cancelCalls ?? [])).toEqual([]);
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await page.getByLabel('Message', { exact: true }).fill('Keep the other draft');
+  await page.locator('.conversation-item').click({ button: 'right' });
+  await item.click();
+  await page.evaluate(() => ((window as any).holdCancel = true));
+  await page
+    .getByRole('alertdialog')
+    .getByRole('button', { name: 'Delete conversation', exact: true })
+    .click();
+  await expect(page.getByRole('button', { name: 'Deleting…' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('alertdialog')).toBeVisible();
   await expect(page.locator('.conversation-item')).toHaveCount(1);
+  expect(await page.evaluate(() => (window as any).cancelCalls)).toEqual([
+    { runId: request.runId, waitForCompletion: true },
+  ]);
+  await page.evaluate(() => (window as any).releaseCancel());
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.locator('.conversation-item')).toHaveCount(0);
+  await page.evaluate(() => (window as any).emitCapability({ kind: 'text', text: 'Late output' }));
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep the other draft');
+  await expect
+    .poll(() =>
+      page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!).conversations),
+    )
+    .toEqual([]);
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+});
+
+test('failed cancellation preserves the Active conversation and deletion can be retried', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Delete this current Active chat');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+  await page.locator('.conversation-item').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Delete conversation' }).click();
+  await page.evaluate(() => ((window as any).failCancel = true));
+  const confirm = page
+    .getByRole('alertdialog')
+    .getByRole('button', { name: 'Delete conversation' });
+  await confirm.click();
+  await expect(page.getByRole('alertdialog')).toContainText('could not stop the response');
+  await expect(page.locator('.conversation-item')).toHaveCount(1);
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'running');
+  await page.evaluate(() => ((window as any).failCancel = false));
+  await confirm.click();
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.locator('.page-title')).toHaveText('New conversation');
+  await expect(page.locator('.conversation-item')).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.conversation-item')).toHaveCount(0);
 });
 
 test('opening the app archives saved chats and sending from History restores the same conversation', async ({
@@ -2183,6 +2336,17 @@ test('cold CLI checks and model requests do not block folder selection or overwr
   await page.getByRole('option', { name: 'High', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('Wait for availability before sending');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  expect(
+    await page.evaluate(() =>
+      (window as any).pendingCli.filter((r: any) => r.command === 'list_models'),
+    ),
+  ).toEqual([]);
+  await page.evaluate(() => {
+    for (const request of (window as any).pendingCli.filter(
+      (r: any) => r.command === 'detect_connection',
+    ))
+      request.resolve();
+  });
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -2253,7 +2417,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
           .sort(),
       ),
     )
-    .toEqual(['claude', 'codex']);
+    .toEqual(['codex']);
   await page.evaluate(() => {
     const state = window as any;
     for (const request of state.pendingCli.filter((r: any) => r.command === 'detect_connection'))
