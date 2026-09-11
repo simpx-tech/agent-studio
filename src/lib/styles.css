@@ -1496,7 +1496,54 @@ code {
 .prose pre code {
   padding: 0;
   background: none;
-  color: #c6daaf;
+  color: #d9e2dc;
+}
+.prose .hljs-comment,
+.prose .hljs-quote {
+  color: #98a398;
+  font-style: italic;
+}
+.prose .hljs-keyword,
+.prose .hljs-selector-tag,
+.prose .hljs-literal,
+.prose .hljs-doctag {
+  color: #d8a9ed;
+}
+.prose .hljs-string,
+.prose .hljs-regexp,
+.prose .hljs-template-tag,
+.prose .hljs-template-variable,
+.prose .hljs-addition {
+  color: #c5df91;
+}
+.prose .hljs-number,
+.prose .hljs-attr,
+.prose .hljs-attribute,
+.prose .hljs-variable,
+.prose .hljs-symbol,
+.prose .hljs-bullet {
+  color: #e8bd86;
+}
+.prose .hljs-title,
+.prose .hljs-section,
+.prose .hljs-selector-id,
+.prose .hljs-selector-class {
+  color: #91c9f2;
+}
+.prose .hljs-type,
+.prose .hljs-built_in,
+.prose .hljs-name,
+.prose .hljs-meta {
+  color: #8bd4c1;
+}
+.prose .hljs-deletion {
+  color: #f2a39d;
+}
+.prose .hljs-emphasis {
+  font-style: italic;
+}
+.prose .hljs-strong {
+  font-weight: 700;
 }
 .prose table {
   border-collapse: collapse;

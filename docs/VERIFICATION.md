@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Syntax highlighting for code snippets — 2026-09-11
+
+The shared Markdown renderer now highlights declared code languages with bundled Highlight.js grammars, including PowerShell. Its isolated Marked instance leaves artifact extraction unchanged. Sanitization runs after highlighting, allowing presentation spans while keeping script tags, event handlers, and unsafe links out of the chat document. Missing/unknown languages and oversized blocks fall back to escaped code. Source remains unchanged in saved messages.
+
+`npm run verify` passed with zero diagnostics, 87 unit/HTTP tests, the production build, and 78 browser scenarios. New coverage verifies partial and completed text snapshots, progress code, aliases, distinct computed colors, history restoration, 390px layout, production PWA rendering, inert HTML, entity preservation, inline/plain/unknown languages, malformed fence metadata, and the large-block fallback. The streaming fixture uses cumulative typed text snapshots; sending just a new suffix replaces the earlier text by design. Cargo formatting, Clippy with warnings denied, and 72 Rust tests passed (four existing opt-in checks ignored). Logs: `artifacts/syntax-verify.log`, `syntax-clippy.log`, and `syntax-rust-tests.log`.
+
+An isolated `npm run tauri dev` app (`com.vinicius.agentstudio.syntax-qa`, CDP 9467, separate Cargo target and WebView profile) saved a synthetic conversation through native IPC and reopened it from History. At 1380×900 / DPR 1.5, TypeScript and HTML had distinct token colors, exact source text, no executable snippet elements, no horizontal page overflow, and no renderer errors. Desktop/mobile browser screenshots and the native screenshot were visually reviewed. Evidence: `artifacts/syntax-highlighting-{desktop,mobile,native}.png`, `syntax-native-result.json`, and `syntax-native-smoke.mjs`. No new provider replies or physical-phone checks were requested. The native QA app and local Vite service remain running.
+
 ## Resizable artifact panel and matching card heights — 2026-09-11
 
 The artifact panel's left divider supports pointer dragging, arrow keys with larger Shift steps, Home/End bounds, and Enter/double-click reset. Escape during a drag restores the previous width without closing the viewer. The width is stored as a local layout preference and clamped against the actual chat workspace, reserving 420px for chat; insufficient space uses the existing drawer. Pointer capture and temporary iframe pointer-event suppression keep a drag reliable over the preview. Resizing leaves the live iframe intact. Closed progress and artifact cards now stretch to a shared row height; open progress panels retain independent heights.
