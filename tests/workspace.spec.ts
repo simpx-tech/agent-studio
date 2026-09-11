@@ -42,7 +42,7 @@ async function mockDesktop(page: Page, mode = 'success') {
           if (command === 'discover_wsl')
             return {
               distributions:
-                mode === 'locations' || mode === 'computer-routing'
+                mode === 'locations' || mode === 'computer-routing' || mode === 'wsl-empty'
                   ? [{ id: '33333333-3333-4333-8333-333333333333', name: 'Ubuntu', running: true }]
                   : [],
               warning: null,
@@ -67,7 +67,9 @@ async function mockDesktop(page: Page, mode = 'success') {
               path:
                 args.environmentId === '11111111-1111-4111-8111-111111111111'
                   ? 'C:/CLIs/' + id + '.exe'
-                  : id === 'codex'
+                  : id === 'codex' &&
+                      mode !== 'wsl-empty' &&
+                      !localStorage.getItem('test-wsl-missing')
                     ? '/usr/local/bin/codex'
                     : null,
             }));
@@ -78,7 +80,11 @@ async function mockDesktop(page: Page, mode = 'success') {
               '33333333-3333-4333-8333-333333333333';
             return {
               id: args.provider,
-              installed: !wsl || args.provider === 'codex',
+              installed:
+                !wsl ||
+                (args.provider === 'codex' &&
+                  mode !== 'wsl-empty' &&
+                  !localStorage.getItem('test-wsl-missing')),
               location: wsl ? 'WSL · Ubuntu' : 'Windows',
               auth:
                 mode === 'login-flow' &&
@@ -2128,7 +2134,14 @@ test('a pending environment uses its own model catalog and late checks cannot ch
       request.resolve();
   });
   await expect(page.locator('.setup-hint')).toContainText('Claude needs to be set up.');
-  await expect(picker('Agent')).toHaveText('Claude');
+  await expect(picker('Agent')).toHaveText('');
+  await picker('Agent').click();
+  await expect(page.getByRole('option', { name: 'Claude', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveAttribute(
+    'aria-selected',
+    'false',
+  );
+  await picker('Agent').press('Escape');
   await page.getByLabel('Message', { exact: true }).fill('Keep my explicit choice');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await pick(page, 'Computer', 'Desktop');
@@ -2206,6 +2219,38 @@ test('Desktop uses its own Claude in a WSL folder and preserves that execution c
   await expect(page.locator('.setup-hint')).toHaveCount(0);
 });
 
+test('a WSL computer without installed CLIs has an empty Agent dropdown', async ({ page }) => {
+  await mockDesktop(page, 'wsl-empty');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  await pick(page, 'Computer', 'WSL · Ubuntu');
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await expect(agent).toHaveText('');
+  await chooseTestFolder(page);
+  await expect(page.locator('.setup-hint')).toContainText('Claude needs to be set up.');
+  await expect(agent).toHaveText('');
+  await agent.click();
+  await expect(page.locator('.picker-popover:popover-open')).toBeVisible();
+  await expect(page.getByRole('listbox')).toHaveCount(1);
+  await expect(page.getByRole('option')).toHaveCount(0);
+  await expect(agent).not.toHaveAttribute('aria-activedescendant');
+  await page.screenshot({ path: 'artifacts/empty-agent-browser.png' });
+  await agent.press('ArrowDown');
+  await agent.press('Enter');
+  await expect(agent).toHaveText('');
+  await agent.press('Escape');
+  await expect(agent).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await pick(page, 'Computer', 'Desktop');
+  await chooseTestFolder(page);
+  await expect(agent).toHaveText('Claude');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+  expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
+});
+
 test('WSL uses only its Linux CLI and keeps Desktop accounts out of the agent picker', async ({
   page,
 }) => {
@@ -2231,6 +2276,14 @@ test('WSL uses only its Linux CLI and keeps Desktop accounts out of the agent pi
   expect(chat.location.executionEnvironmentId).toBeUndefined();
   await page.getByLabel('Search conversations').fill('WSL · Ubuntu');
   await expect(page.locator('.conversation-item')).toHaveCount(1);
+  // A saved chat keeps its fixed agent when that computer later loses the CLI.
+  await page.evaluate(() => localStorage.setItem('test-wsl-missing', 'true'));
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: 'Use the Linux agent', exact: true }).click();
+  await expect(page.locator('.setup-hint')).toContainText('Codex needs to be set up.');
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Codex');
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await page
     .getByRole('article', { name: 'Desktop computer', exact: true })

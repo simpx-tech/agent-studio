@@ -230,7 +230,13 @@
     ) ?? selectedComputer?.environments[0],
   );
   const savedLocations = $derived(knownLocations(workspace, selectedComputerId));
-  const scopedConnections = $derived(locationConnections(workspace.fleet, selectedLocation));
+  const scopedConnections = $derived(
+    selectedLocation
+      ? locationConnections(workspace.fleet, selectedLocation)
+      : workspace.fleet.connections.filter((c) =>
+          selectedComputer?.environments.some((e) => e.id === c.environmentId),
+        ),
+  );
   const availableProviders = $derived(
     providerIds.filter((provider) =>
       scopedConnections.some(
@@ -240,17 +246,17 @@
       ),
     ),
   );
-  const providerOptions = $derived([
-    ...new Set([...availableProviders, selectedSettings.provider]),
-  ]);
   const agentOptions = $derived.by(() => {
-    const ids = selectedLocation ? providerOptions : providerIds;
-    return ids.flatMap((provider) => {
+    const preview = !desktop() && !paired && !selectedComputer;
+    return providerIds.flatMap((provider) => {
       const candidates = scopedConnections.filter(
         (c) =>
           workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider &&
-          (canChooseConnection(c.id) || c.id === selectedSettings.connectionId),
+          (canChooseConnection(c.id) || (!!active && c.id === selectedSettings.connectionId)),
       );
+      // Saved chats retain their fixed agent; drafts only offer this computer's available CLIs.
+      if (!preview && !candidates.length && !(active && provider === selectedSettings.provider))
+        return [];
       const base = { mark: providers[provider].mark, color: providers[provider].color };
       if (candidates.length > 1)
         return candidates.map((c) => ({
@@ -287,7 +293,7 @@
       (option) =>
         option.provider === selectedSettings.provider &&
         option.connectionId === selectedSettings.connectionId,
-    )?.id ?? selectedSettings.provider,
+    )?.id ?? (active ? selectedSettings.provider : ''),
   );
   const selectedConnection = $derived(
     workspace.fleet.connections.find((c) => c.id === selectedSettings.connectionId),
@@ -1849,6 +1855,7 @@
                 }`}
                 value={selectedAgentOption}
                 options={agentOptions}
+                fallbackToFirst={false}
                 disabled={!loaded ||
                   !!run ||
                   activeRunning ||

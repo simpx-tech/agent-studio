@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Empty Agent choices for missing CLIs — 2026-09-11
+
+New chats exclude unavailable connections even when that provider was previously selected. Choices are scoped to the selected computer before and after folder selection. A missing draft selection stays blank instead of displaying the first remaining option; saved conversations retain their fixed agent label. The empty menu has no invalid active-descendant reference, and keyboard interaction cannot select a nonexistent option. The first full browser pass caught two unpaired-preview regressions: that preview has no computer or fleet connections, so it still needs demo provider options. Keep that fallback limited to an unpaired browser with no selected computer; both existing preview scenarios and the empty-WSL regression passed after the correction.
+
+Browser regressions cover an empty WSL installation after choosing Desktop Claude, draft preservation, returning to Desktop, a late missing-Claude result while Codex remains installed, and reopening a saved WSL conversation after its CLI is removed. Native `npm run tauri dev -- --no-watch --config artifacts/empty-agent.tauri.json` used a separate app identity, Cargo target, and WebView profile on CDP 9480. Real Ubuntu inventory reported all three CLIs absent; the rendered Agent selection and menu were empty, Send was disabled, and there were no renderer errors. No provider prompts or sign-in flows were run. Screenshots `artifacts/empty-agent-{browser,native}.png` were visually reviewed; native results are in `artifacts/empty-agent-native-result.json`.
+
+Final full gate passed: `npm run verify` with zero Svelte/TypeScript diagnostics, 77 unit/HTTP tests, the production build, and 66 browser scenarios; Rust formatting, Clippy with warnings denied, and 64 Rust tests passed (four existing opt-in integrations remain ignored). The native check was repeated on the final code. Logs: `artifacts/empty-agent-{verify,rust}.log`.
+
 ## Windows desktop pairing and automatic reconnect — 2026-09-10
 
 The user's PWA correctly remained Offline after the desktop reopened in **Local only** mode: desktop relay authentication was intentionally memory-only. With the user's approval, Windows now saves its own relay origin/key in Windows Credential Manager, scoped to the current Windows user, app identifier, and installation. Native restoration returns only the origin to the renderer. Startup retries temporary failures, including while minimized; explicit disconnect removes the saved pairing and cannot be undone by an older restoration. Other native platforms keep temporary pairing. No provider credential behavior changed.

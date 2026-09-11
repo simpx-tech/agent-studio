@@ -19,6 +19,7 @@
     icon,
     disabled = false,
     field = false,
+    fallbackToFirst = true,
     onchange,
   }: {
     options: Option[];
@@ -28,6 +29,7 @@
     icon?: Snippet;
     disabled?: boolean;
     field?: boolean;
+    fallbackToFirst?: boolean;
     onchange: (value: string) => void;
   } = $props();
   const id = $props.id();
@@ -37,7 +39,9 @@
   let highlighted = $state(0);
   let search = '';
   let searchedAt = 0;
-  const selected = $derived(options.find((option) => option.id === value) ?? options[0]);
+  const selected = $derived(
+    options.find((option) => option.id === value) ?? (fallbackToFirst ? options[0] : undefined),
+  );
 
   async function highlight(index: number) {
     highlighted = Math.max(0, Math.min(index, options.length - 1));
@@ -122,7 +126,7 @@
     aria-haspopup="listbox"
     aria-expanded={open}
     aria-controls={`${id}-list`}
-    aria-activedescendant={open ? `${id}-option-${highlighted}` : undefined}
+    aria-activedescendant={open && options[highlighted] ? `${id}-option-${highlighted}` : undefined}
     bind:this={trigger}
     onclick={() => (open ? (open = false) : show())}
     onkeydown={keyboard}
