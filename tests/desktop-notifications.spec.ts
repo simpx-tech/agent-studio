@@ -2,19 +2,20 @@ import { test, expect } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
-test('desktop opts in, retains mute, notifies for parent questions and completion, and does not replay history', async ({
+test('desktop defaults on, retains mute and disable, notifies for questions and completion, and skips history', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await page.getByRole('button', { name: 'Enable notifications', exact: true }).click();
   await expect(page.getByText('Enabled on this computer', { exact: true })).toBeVisible();
-  await page.getByLabel('Play the Agent Studio chime').uncheck();
+  await expect(page.getByLabel('Play the Agent Studio chime')).toBeChecked();
+  expect(await page.evaluate(() => localStorage.getItem('test-notifications'))).toBeNull();
   await page.getByRole('button', { name: 'Send test notification' }).click();
   const notices = () =>
     page.evaluate(() => JSON.parse(localStorage.getItem('test-notices') ?? '[]'));
   await expect.poll(notices).toHaveLength(1);
+  await page.getByLabel('Play the Agent Studio chime').uncheck();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByLabel('Play the Agent Studio chime')).not.toBeChecked();
@@ -47,5 +48,14 @@ test('desktop opts in, retains mute, notifies for parent questions and completio
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await page.getByRole('button', { name: 'Disable notifications', exact: true }).click();
   await expect(page.getByText('Off on this computer', { exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.getByText('Off on this computer', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Play the Agent Studio chime')).not.toBeChecked();
+  await page.evaluate(() =>
+    (window as any).__TAURI_INTERNALS__.invoke('desktop_notification', {
+      notice: { kind: 'test', tag: `test:${crypto.randomUUID()}` },
+    }),
+  );
   expect(await notices()).toHaveLength(3);
 });

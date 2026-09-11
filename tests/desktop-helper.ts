@@ -21,14 +21,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
         async invoke(command: string, args: any) {
           if (command === 'desktop_notification_settings')
             return JSON.parse(
-              localStorage.getItem('test-notifications') ?? '{"enabled":false,"sound":true}',
+              localStorage.getItem('test-notifications') ?? '{"enabled":true,"sound":true}',
             );
           if (command === 'set_desktop_notifications') {
             localStorage.setItem('test-notifications', JSON.stringify(args));
             return args;
           }
           if (command === 'desktop_notification') {
-            const settings = JSON.parse(localStorage.getItem('test-notifications') ?? '{}');
+            const settings = JSON.parse(
+              localStorage.getItem('test-notifications') ?? '{"enabled":true,"sound":true}',
+            );
             if (settings.enabled) {
               const sent = JSON.parse(localStorage.getItem('test-notices') ?? '[]');
               sent.push(args.notice);

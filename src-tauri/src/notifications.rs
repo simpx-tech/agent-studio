@@ -6,7 +6,7 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager};
 
 const CHIME: &[u8] = include_bytes!("../sounds/agent-chime.wav");
 static AUDIO: Mutex<Option<Instant>> = Mutex::new(None);
@@ -26,7 +26,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             sound: true,
             last_error: None,
             last_sent: None,
@@ -143,18 +143,18 @@ fn write(app: &tauri::AppHandle, saved: &Saved) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-pub fn desktop_notification_settings(
-    app: tauri::AppHandle,
-    state: State<Notifications>,
-) -> Result<Settings, String> {
-    Ok(read(
-        &app,
-        &mut *state
+pub async fn desktop_notification_settings(app: tauri::AppHandle) -> Result<Settings, String> {
+    // A delivery may be waiting for macOS authorization; never block the UI thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Notifications>();
+        let mut lock = state
             .0
             .lock()
-            .map_err(|_| "Notification settings unavailable")?,
-    )?
-    .settings)
+            .map_err(|_| "Notification settings unavailable")?;
+        Ok(read(&app, &mut lock)?.settings)
+    })
+    .await
+    .map_err(|_| "Notification settings unavailable")?
 }
 #[tauri::command]
 pub async fn set_desktop_notifications(
@@ -165,14 +165,6 @@ pub async fn set_desktop_notifications(
     tauri::async_runtime::spawn_blocking(move || {
         if enabled {
             prepare(&app)?;
-            #[cfg(target_os = "macos")]
-            if !notify_rust::request_auth_blocking().map_err(|_| {
-                "Cannot request notification permission. Open the installed Agent Studio app."
-            })? {
-                return Err(
-                    "Allow Agent Studio notifications in System Settings to enable alerts.".into(),
-                );
-            }
         }
         let state = app.state::<Notifications>();
         let mut lock = state
@@ -194,6 +186,14 @@ pub async fn set_desktop_notifications(
 // Windows requires an application identity even in an unpackaged/dev build.
 // Register only this app's identifier, without modifying system sound settings.
 fn prepare(app: &tauri::AppHandle) -> Result<(), String> {
+    // Default-on delivery must also request authorization, without requiring a trip
+    // through Connections. macOS remembers the answer and will not prompt again.
+    #[cfg(target_os = "macos")]
+    if !notify_rust::request_auth_blocking().map_err(|_| {
+        "Cannot request notification permission. Open the installed Agent Studio app."
+    })? {
+        return Err("Allow Agent Studio notifications in System Settings to enable alerts.".into());
+    }
     #[cfg(target_os = "windows")]
     {
         let (key, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
@@ -376,16 +376,23 @@ mod tests {
         assert!((0.1..0.8).contains(&peak));
     }
     #[test]
-    fn preferences_are_device_local_and_default_to_a_custom_chime() {
+    fn notifications_default_on_without_overriding_saved_disable_or_mute() {
         let saved = Saved::default();
-        assert!(!saved.settings.enabled);
+        assert!(saved.settings.enabled);
         assert!(saved.settings.sound);
-        let encoded = serde_json::to_vec(&saved).unwrap();
-        assert!(
-            serde_json::from_slice::<Saved>(&encoded)
-                .unwrap()
-                .settings
-                .sound
-        );
+        for json in ["{}", r#"{"settings":{}}"#] {
+            let restored: Saved = serde_json::from_str(json).unwrap();
+            assert!(restored.settings.enabled && restored.settings.sound);
+        }
+        for enabled in [false, true] {
+            for sound in [false, true] {
+                let json = serde_json::json!({"settings": {"enabled": enabled, "sound": sound}});
+                let saved: Saved = serde_json::from_value(json).unwrap();
+                let encoded = serde_json::to_vec(&saved).unwrap();
+                let restored: Saved = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(restored.settings.enabled, enabled);
+                assert_eq!(restored.settings.sound, sound);
+            }
+        }
     }
 }
