@@ -2134,7 +2134,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
       request.resolve();
   });
   await expect(page.locator('.setup-hint')).toContainText('Claude needs to be set up.');
-  await expect(picker('Agent')).toHaveText('');
+  await expect(picker('Agent')).toHaveText('Select agent');
   await picker('Agent').click();
   await expect(page.getByRole('option', { name: 'Claude', exact: true })).toHaveCount(0);
   await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveAttribute(
@@ -2227,10 +2227,10 @@ test('a WSL computer without installed CLIs has an empty Agent dropdown', async 
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   await pick(page, 'Computer', 'WSL · Ubuntu');
   const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
-  await expect(agent).toHaveText('');
+  await expect(agent).toHaveText('No agents');
   await chooseTestFolder(page);
   await expect(page.locator('.setup-hint')).toContainText('Claude needs to be set up.');
-  await expect(agent).toHaveText('');
+  await expect(agent).toHaveText('No agents');
   await agent.click();
   await expect(page.locator('.picker-popover:popover-open')).toBeVisible();
   await expect(page.getByRole('listbox')).toHaveCount(1);
@@ -2239,7 +2239,7 @@ test('a WSL computer without installed CLIs has an empty Agent dropdown', async 
   await page.screenshot({ path: 'artifacts/empty-agent-browser.png' });
   await agent.press('ArrowDown');
   await agent.press('Enter');
-  await expect(agent).toHaveText('');
+  await expect(agent).toHaveText('No agents');
   await agent.press('Escape');
   await expect(agent).toHaveAttribute('aria-expanded', 'false');
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');

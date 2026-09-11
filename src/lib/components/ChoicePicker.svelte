@@ -16,6 +16,7 @@
     value,
     label,
     title,
+    placeholder,
     icon,
     disabled = false,
     field = false,
@@ -26,6 +27,7 @@
     value: string;
     label: string;
     title?: string;
+    placeholder?: string;
     icon?: Snippet;
     disabled?: boolean;
     field?: boolean;
@@ -133,7 +135,9 @@
     onblur={() => (open = false)}
   >
     {#if icon}<span class="picker-icon" aria-hidden="true">{@render icon()}</span>{/if}
-    <span class="selected-name">{selected?.name ?? value}</span>
+    <span class="selected-name" class:placeholder={!selected && !!placeholder}>
+      {selected?.name ?? placeholder ?? value}
+    </span>
     <ChevronDown size={15} aria-hidden="true" />
   </button>
 
@@ -210,6 +214,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .selected-name.placeholder {
+    color: var(--muted);
   }
   .picker-icon {
     display: flex;

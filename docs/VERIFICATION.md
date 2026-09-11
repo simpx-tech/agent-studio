@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Agent dropdown placeholders — 2026-09-11
+
+The Agent trigger now shows a muted **No agents** placeholder when the selected computer has no available CLI options, or **Select agent** when options exist but none matches the draft selection. These are display labels, not selectable agents. Existing regression checks retain zero menu options for missing WSL CLIs, disabled sending, keyboard safety, and fixed saved-chat agent labels.
+
+Visually verified the label in the isolated native Ubuntu scenario at 1380×900 CSS pixels: it fits without truncation, the menu has zero options, sending is disabled, and there are no renderer errors. Evidence: `artifacts/agent-placeholder-toolbar.png`, `artifacts/agent-placeholder-native.png`, and `artifacts/agent-placeholder-native-result.json`. No provider replies or sign-in flows were run.
+
+The final required gate passed: `npm run verify` (zero diagnostics, 77 unit/HTTP tests, production build, 66 browser scenarios), Rust formatting, Clippy with warnings denied, and 64 Rust tests with four existing opt-in integrations ignored. Logs: `artifacts/agent-placeholder-{verify,rust}.log`.
+
 ## Empty Agent choices for missing CLIs — 2026-09-11
 
 New chats exclude unavailable connections even when that provider was previously selected. Choices are scoped to the selected computer before and after folder selection. A missing draft selection stays blank instead of displaying the first remaining option; saved conversations retain their fixed agent label. The empty menu has no invalid active-descendant reference, and keyboard interaction cannot select a nonexistent option. The first full browser pass caught two unpaired-preview regressions: that preview has no computer or fleet connections, so it still needs demo provider options. Keep that fallback limited to an unpaired browser with no selected computer; both existing preview scenarios and the empty-WSL regression passed after the correction.

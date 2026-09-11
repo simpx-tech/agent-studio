@@ -1856,6 +1856,7 @@
                 value={selectedAgentOption}
                 options={agentOptions}
                 fallbackToFirst={false}
+                placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                 disabled={!loaded ||
                   !!run ||
                   activeRunning ||
