@@ -125,21 +125,18 @@ try {
   for (const chat of chats) {
     await openChat(chat.title);
     if (chat.provider === 'claude') {
-      await page.button('Claude workflows');
       await page.evaluate((folder) => {
-        const el = document.querySelector('[aria-label="Workflow request"]');
+        const el = document.querySelector('[aria-label="Message"]');
         el.value =
           'Run the saved native /studio-native-check workflow through the Workflow tool. Wait for the result. Then use TaskCreate and TaskUpdate to track returning that marker with a tiny self-contained HTML counter in a fenced html block titled Native Counter, heading Native Counter, button Add one, output id count initially 0 and inline JavaScript increments it. Actually use those task tools. Finally save this native workflow for reuse as /studio-native-saved in ' +
           folder +
           '/.claude/workflows/studio-native-saved.js (copy the original script, changing only meta.name). Do not use a custom prompt sequence. Read only the fixture and these workflow scripts; no external files, web, or integrations.';
         el.dispatchEvent(new Event('input', { bubbles: true }));
       }, folder);
-      await page.waitFor(() =>
-        [...document.querySelectorAll('dialog button')].some(
-          (el) => el.textContent.trim() === 'Run native workflow' && !el.disabled,
-        ),
+      await page.waitFor(
+        () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
       );
-      await page.button('Run native workflow');
+      await page.button('Send message');
     } else {
       await page.evaluate((folder) => {
         const el = document.querySelector('[aria-label="Message"]');

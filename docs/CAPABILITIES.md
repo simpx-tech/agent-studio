@@ -2,7 +2,7 @@
 
 ## Claude workflows
 
-Open **Claude workflows** from the chat toolbar and describe the task or enter a saved `/workflow-name` command and its input. **Run native workflow** asks the selected Claude Code CLI to use its native `Workflow` tool. The current composer draft and attachments remain untouched; the launcher sends only its request. You can also ask for a workflow directly in chat. Claude controls orchestration, branching, parallel agents, and intermediate results. See [Claude Code Dynamic Workflows](https://code.claude.com/docs/en/workflows).
+Ask for a workflow directly in chat, or enter a saved `/workflow-name` command and its input in the composer. The selected Claude Code CLI uses its native `Workflow` tool and controls orchestration, branching, parallel agents, and intermediate results. There is no separate workflow toolbar button or launcher. See [Claude Code Dynamic Workflows](https://code.claude.com/docs/en/workflows).
 
 Native saved scripts load from the selected project's `.claude/workflows/`, the selected CLI profile's personal workflow directory, and configured plugins. Include “save it for reuse,” a name, and a project or personal location in your request to have Claude save its script. Invoke that native command in later chats. These files belong to the execution computer and are not copied into workspace exports or relayed to another computer. Existing profile/organization workflow settings still apply. The app does not create a second workflow library or run JavaScript itself.
 

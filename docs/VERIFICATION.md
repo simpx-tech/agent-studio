@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Remove Claude workflows toolbar button — 2026-09-11
+
+Removed the Claude workflows button from the desktop toolbar and mobile actions menu, along with its unused launcher component and separate submission path. Native workflow requests use the ordinary composer, including saved `/name` commands. Workflow execution and saved progress cards remain supported.
+
+The full local pipeline passed: zero Svelte diagnostics, 87 unit/HTTP tests, a production build, 78 browser scenarios, Cargo formatting, Clippy with warnings denied, and 72 Rust tests (four existing opt-in checks ignored). The workflow scenario now submits through chat and checks reported phases, agents, plans, cancellation, draft preservation during a run, saved history, and the button's absence at desktop/mobile widths. Logs: `artifacts/workflow-button-removal-{verify,fmt,clippy,rust-tests}.log`.
+
+The existing isolated native dev app (`com.vinicius.agentstudio.syntax-qa`, CDP 9467) confirmed the button is absent at 1380×900 and an emulated 390×844. The remaining toolbar actions are visible, with no horizontal overflow or renderer exceptions. Desktop/mobile screenshots were visually reviewed; the viewport and menu state were restored. Evidence: `artifacts/workflow-button-removal-native-result.json`, `workflow-button-removal-native-smoke.mjs`, and `workflow-button-removed-{desktop,mobile}-native.png`. No new provider replies or physical-phone checks were run for this UI removal. Existing services remain running.
+
 ## Highlighted artifact source — 2026-09-11
 
 HTML/SVG Source tabs now share the chat token colors and a span-only sanitized highlighting helper. They display original source directly, without reparsing it as Markdown. Highlighting is derived when Source is selected; oversized sources retain escaped plain text. Modal/panel switching and source downloads keep their existing behavior.

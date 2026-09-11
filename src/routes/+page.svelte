@@ -25,7 +25,6 @@
     Archive,
     BookOpen,
     Paperclip,
-    GitBranch,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -109,7 +108,6 @@
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import MessageView from '$lib/components/MessageView.svelte';
   import PlanPanel from '$lib/components/PlanPanel.svelte';
-  import NativeWorkflowLauncher from '$lib/components/NativeWorkflowLauncher.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -194,7 +192,6 @@
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
   let run = $state<{ id: string; conversationId: string } | null>(null);
-  let workflowsOpen = $state(false);
   let selectedArtifact = $state<Artifact | null>(null);
   let artifactMode = $state<'modal' | 'panel'>('modal');
   let artifactConversationId = $state<string | null>(null);
@@ -1352,10 +1349,9 @@
     composerInput?.focus();
     void attachImages(files);
   }
-  async function send(retry = false, submission?: string) {
-    if (!canSend || (!retry && !submission && !prompt.trim() && !attachedImages.length)) return;
-    if (submission && selectedSettings.provider !== 'claude') return;
-    if (!retry && !submission && attachedImages.length) {
+  async function send(retry = false) {
+    if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
+    if (!retry && attachedImages.length) {
       // Keep the draft intact when the portable workspace cannot fit the images.
       const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
       const addition = new TextEncoder().encode(
@@ -1375,7 +1371,7 @@
         id: crypto.randomUUID(),
         settings: structuredClone($state.snapshot(selectedSettings)),
         location: selectedLocation ? { ...selectedLocation } : undefined,
-        title: (submission ?? prompt).trim().slice(0, 80) || 'Image conversation',
+        title: prompt.trim().slice(0, 80) || 'Image conversation',
         titleStatus: 'pending',
         createdAt: now,
         updatedAt: now,
@@ -1397,19 +1393,17 @@
         blocks: [
           {
             type: 'markdown',
-            text: submission ?? prompt.trim(),
+            text: prompt.trim(),
           },
         ],
-        ...(!submission && attachedImages.length
+        ...(attachedImages.length
           ? { images: structuredClone($state.snapshot(attachedImages)) }
           : {}),
         status: 'complete',
         createdAt: now,
       });
-      if (!submission) {
-        prompt = '';
-        clearImages();
-      }
+      prompt = '';
+      clearImages();
     }
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
@@ -2070,13 +2064,6 @@
             <ToolbarActions>
               <button
                 class="icon-button"
-                title="Claude workflows"
-                aria-label="Claude workflows"
-                disabled={!loaded || selectedSettings.provider !== 'claude'}
-                onclick={() => (workflowsOpen = true)}><GitBranch size={16} /></button
-              >
-              <button
-                class="icon-button"
                 title="Model context"
                 aria-label="Model context"
                 disabled={!loaded || locationPending || (desktop() && !selectedLocation && !active)}
@@ -2361,14 +2348,6 @@
       void tick().then(() =>
         document.querySelector<HTMLTextAreaElement>('[aria-label="Message"]')?.focus(),
       );
-    }}
-  />{/if}
-{#if workflowsOpen}<NativeWorkflowLauncher
-    canRun={canSend && selectedSettings.provider === 'claude'}
-    close={() => (workflowsOpen = false)}
-    run={async (input) => {
-      workflowsOpen = false;
-      await send(false, input);
     }}
   />{/if}
 {#if editorOpen}<ChatInstructions

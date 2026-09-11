@@ -255,7 +255,7 @@ test('artifacts dock beside chat and switch to a modal without resetting the pre
   await expect(viewer).toHaveCount(0);
 });
 
-test('native Claude workflows retain drafts, reported phases and agents through stop and history', async ({
+test('native workflow commands in chat retain reported phases and agents through stop and history', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
@@ -263,17 +263,17 @@ test('native Claude workflows retain drafts, reported phases and agents through 
   await chooseTestFolder(page);
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   await page.getByRole('option', { name: /Claude/ }).click();
-  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
-  await page.getByRole('button', { name: 'Claude workflows', exact: true }).click();
-  const launcher = page.getByRole('dialog', { name: 'Claude workflows' });
-  await expect(launcher.getByRole('button', { name: 'Add step' })).toHaveCount(0);
-  await launcher.getByLabel('Workflow request').fill('/audit-routes src/routes');
-  await launcher.getByRole('button', { name: 'Run native workflow' }).click();
+  await expect(
+    page.getByRole('button', { name: 'Claude workflows', exact: true, includeHidden: true }),
+  ).toHaveCount(0);
+  await page.getByLabel('Message', { exact: true }).fill('/audit-routes src/routes');
+  await page.getByRole('button', { name: 'Send message' }).click();
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.workflow).toBeUndefined();
   expect(request.agent.provider).toBe('claude');
   expect(request.messages.at(-1).text).toContain('/audit-routes src/routes');
-  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   await page.evaluate((snapshot) => {
     (window as any).emitCapability({ kind: 'nativeworkflow', nativeWorkflows: snapshot });
     (window as any).emitCapability({
@@ -289,6 +289,7 @@ test('native Claude workflows retain drafts, reported phases and agents through 
   await expect(page.locator('.composer-area .plan-panel')).toContainText('Verify sources');
   await page.screenshot({ path: 'artifacts/native-workflow-progress-browser.png' });
   await page.getByRole('button', { name: 'Stop response' }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
   const saved = page.locator('.message .native-workflow-panel').last();
   await expect(saved).toContainText('Stopped');
   await saved.locator(':scope > summary').click();
@@ -298,6 +299,9 @@ test('native Claude workflows retain drafts, reported phases and agents through 
   await page.locator('.conversation-item').first().click();
   await expect(page.locator('.message .native-workflow-panel')).toContainText('audit-routes');
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    page.getByRole('button', { name: 'Claude workflows', exact: true, includeHidden: true }),
+  ).toHaveCount(0);
   await page.locator('.message .native-workflow-panel > summary').click();
   await page.screenshot({ path: 'artifacts/native-workflow-progress-mobile.png' });
 });
