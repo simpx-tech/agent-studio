@@ -66,7 +66,7 @@ fn plan_response(
 }
 
 fn start_params(request: &RunRequest) -> Value {
-    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool()]});
+    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool()]});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -130,6 +130,7 @@ pub async fn run(
     tokio::pin!(deadline);
     let mut thread = String::new();
     let mut decoder = Decoder::default();
+    let mut visualizer = super::visualize::Visualizer::default();
     let output_limit = request.output_line_limit();
     loop {
         tokio::select! {
@@ -159,6 +160,11 @@ pub async fn run(
                     continue;
                 }
                 if value.get("id").is_some() && value["method"].is_string() {
+                    if let Some((response, event)) = visualizer.codex_response(&value, &thread) {
+                        if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
+                        input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
+                        continue;
+                    }
                     if let Some((response, events)) = plan_response(&value, &thread, &mut decoder) {
                         for event in events { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                         input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex plan")?;
@@ -178,7 +184,7 @@ pub async fn run(
                     let status = value["params"]["turn"]["status"].as_str().unwrap_or_default();
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }
                     if status != "completed" { return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
-                    if decoder.text.trim().is_empty() { return Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { return Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
                     return Ok(("complete".into(), decoder.text));
                 }
             }
@@ -244,7 +250,7 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool()]})
+            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool()]})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");

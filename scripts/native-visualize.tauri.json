@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.visualize-qa",
+  "productName": "Agent Studio Visualize QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Visualize QA",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

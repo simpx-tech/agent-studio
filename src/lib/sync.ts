@@ -1,6 +1,7 @@
 import { workspaceSchema, messageText, type Conversation, type Workspace } from './domain.ts';
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
+import { mergeVisualizations } from './visualizations.ts';
 
 export type SharedWorkspace = Pick<Workspace, 'fleet' | 'conversations' | 'workflows'>;
 export const sharedSchema = workspaceSchema.pick({
@@ -66,6 +67,9 @@ function sameRun(
       ...selected,
       blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
+      ...(a.visualizations || b.visualizations
+        ? { visualizations: mergeVisualizations(a.visualizations, b.visualizations) }
+        : {}),
       workflow:
         (a.workflow?.revision ?? -1) >= (b.workflow?.revision ?? -1) ? a.workflow : b.workflow,
       nativeWorkflows:

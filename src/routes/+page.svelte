@@ -203,6 +203,20 @@
   let artifactConversationId = $state<string | null>(null);
   $effect(() => {
     if (view !== 'chat' || activeId !== artifactConversationId) selectedArtifact = null;
+    else if (selectedArtifact?.visualization) {
+      for (const message of active?.messages ?? []) {
+        const visual = message.visualizations?.find(
+          (v) => `${message.id}:visual:${v.id}` === selectedArtifact?.id,
+        );
+        if (visual && visual.revision > (selectedArtifact.revision ?? 0))
+          selectedArtifact = {
+            ...selectedArtifact,
+            title: visual.title,
+            source: visual.source,
+            revision: visual.revision,
+          };
+      }
+    }
   });
   function openArtifact(artifact: Artifact, mode: 'modal' | 'panel' = 'modal') {
     artifactMode = mode;
@@ -1473,7 +1487,12 @@
               if (stopping) void cancelRun(runId).catch(() => {});
               const m = message();
               applyRunEvent(m, event);
-              if (event.kind === 'nativeworkflow' || event.kind === 'plan') saveSoon();
+              if (
+                event.kind === 'nativeworkflow' ||
+                event.kind === 'plan' ||
+                event.kind === 'visualization'
+              )
+                saveSoon();
               if (activeId === conversation.id) void scrollToEnd();
             },
           );

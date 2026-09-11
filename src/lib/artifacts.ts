@@ -1,7 +1,14 @@
 import { marked } from 'marked';
 import type { Message } from './domain';
 
-export type Artifact = { id: string; title: string; language: 'html' | 'svg'; source: string };
+export type Artifact = {
+  id: string;
+  title: string;
+  language: 'html' | 'svg';
+  source: string;
+  visualization?: boolean;
+  revision?: number;
+};
 export const maxArtifactBytes = 512_000;
 
 // Only complete, explicitly labelled output blocks become artifacts. Never read

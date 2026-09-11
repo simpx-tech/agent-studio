@@ -26,6 +26,9 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    Visualization {
+        visualization: crate::providers::visualize::Visualization,
+    },
     Plan {
         plan: plan::Plan,
     },

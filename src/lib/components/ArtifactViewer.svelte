@@ -3,6 +3,7 @@
   import { X, Download, RotateCcw, Code, Eye, PanelRightOpen, Maximize2 } from '@lucide/svelte';
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
+  import { visualizationDocument } from '$lib/visualizations';
   import { highlightCode } from '$lib/markdown';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import ArtifactResize from './ArtifactResize.svelte';
@@ -75,7 +76,13 @@
     const frame = event.currentTarget as HTMLIFrameElement;
     if (frame.dataset.initialized) return;
     frame.dataset.initialized = 'true';
-    frame.contentWindow?.postMessage({ type: 'studio-artifact', source: artifact.source }, '*');
+    frame.contentWindow?.postMessage(
+      {
+        type: 'studio-artifact',
+        source: artifact.visualization ? visualizationDocument(artifact.source) : artifact.source,
+      },
+      '*',
+    );
   }
 </script>
 
@@ -166,7 +173,9 @@
     aria-label={tab === 'preview' ? 'Artifact preview' : 'Artifact source'}
   >
     {#if tab === 'preview'}
-      {#if error}<p role="alert">{error}</p>{:else if url}{#key revision}<iframe
+      {#if error}<p role="alert">
+          {error}
+        </p>{:else if url}{#key `${artifact.id}:${artifact.revision ?? 0}:${revision}`}<iframe
             title={`${artifact.title} preview`}
             src={url}
             sandbox="allow-scripts"

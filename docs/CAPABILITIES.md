@@ -1,4 +1,16 @@
-# Workflows, artifacts, plans, and tools
+# Workflows, visualizations, artifacts, plans, and tools
+
+## Interactive visualizations
+
+Ask Codex or Claude to visualize a process, chart, comparison, or simulation. Both can call **visualize** to show an interactive HTML/SVG view inline while the reply runs. Each view has restart, expand, and side-panel actions. The larger viewer offers source inspection and downloads. Controls inside a visual stay local; follow-up questions go through the composer.
+
+Agent Studio supplies this tool through Codex app-server dynamic tools and Claude Code's SDK MCP stream (`mcp__agent_studio__visualize`). It uses the installed CLI and selected account, computer, and folder. This is an Agent Studio integration, not an embedded Codex or Claude chat application. Codex's installed visualization skill can guide content creation, but must submit its fragment through the tool rather than emitting a local-file reference. Agent Studio does not read files named in responses. The tool is not enabled for Gemini, titles, or other restricted background queries.
+
+The tool takes `id`, `title`, and `html`. Reusing an ID updates that visual in the current reply. Only validated parent submissions are displayed; Claude submissions also require successful matching tool results. Visual source and revisions survive history, exports, and relay checkpoints. Completed visual source is provided as earlier context for follow-up edits, without replaying tool calls. Limits are 512,000 UTF-8 bytes per source, 12 visuals and 2,000,000 bytes per reply, and 8,000,000 bytes of visual source in request history. The existing 20 MB workspace limit still applies.
+
+Visuals use the artifact sandbox with inline CSS/JavaScript, SVG, and data images. External scripts, styles, network calls, nested frames, local file access, application commands, and host follow-up APIs are unavailable. Include required data and code directly. Source inspection and downloads retain the original submitted source. Reloading restores the saved visual, resetting any temporary interactions such as a slider position.
+
+Integration references: [Codex dynamic tool calls](https://learn.chatgpt.com/docs/app-server), [Claude Code custom tools](https://code.claude.com/docs/en/agent-sdk/custom-tools). Claude Code's SDK requires bidirectional stdin for custom tools; Agent Studio retains it until a result arrives with no delegated agent/workflow tasks pending, then waits for the owned process to exit. Persistent background shell tasks do not hold that input open.
 
 ## Slash commands and skills
 

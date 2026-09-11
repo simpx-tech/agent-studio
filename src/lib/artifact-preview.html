@@ -2,7 +2,7 @@
 // This constant bootstrap is served independently of the privileged application.
 // The iframe and the HTTP CSP sandbox both withhold same-origin privileges.
 window.addEventListener('message', function receive(event) {
-  if (event.source !== parent || event.data?.type !== 'studio-artifact' || typeof event.data.source !== 'string' || new TextEncoder().encode(event.data.source).length > 512000) return;
+  if (event.source !== parent || event.data?.type !== 'studio-artifact' || typeof event.data.source !== 'string' || new TextEncoder().encode(event.data.source).length > 520000) return;
   window.removeEventListener('message', receive);
   document.open();
   document.write(event.data.source);

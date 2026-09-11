@@ -14,6 +14,7 @@
   import ReplyUsage from './ReplyUsage.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
+  import VisualizationView from './VisualizationView.svelte';
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
@@ -106,6 +107,9 @@
       {:else if message.status === 'running' && !message.blocks.length}<div class="thinking">
           <span></span><span></span><span></span><small>Making room for a good answer…</small>
         </div>{/if}
+      {#each message.visualizations ?? [] as visual (visual.id)}
+        <VisualizationView {visual} messageId={message.id} {openArtifact} />
+      {/each}
       {#if message.error}<div class="message-error" role="status">
           <CircleAlert size={15} />{message.error}
         </div>{/if}

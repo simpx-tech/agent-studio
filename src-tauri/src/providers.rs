@@ -10,6 +10,7 @@ use tokio::process::Command;
 pub mod codex_chat;
 #[cfg(windows)]
 mod login_console;
+pub mod visualize;
 
 #[derive(Clone, Debug)]
 pub struct Executable {
@@ -404,6 +405,8 @@ pub struct ChatMessage {
     pub images: Vec<images::ChatImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visualizations: Vec<visualize::Visualization>,
 }
 mod images;
 impl RunRequest {
@@ -452,7 +455,23 @@ impl RunRequest {
             return Err("Conversation is too large. Start a new conversation.".into());
         }
         let mut image_bytes = 0;
+        if self
+            .messages
+            .iter()
+            .flat_map(|m| &m.visualizations)
+            .map(|v| v.source.len())
+            .sum::<usize>()
+            > 8_000_000
+        {
+            return Err("Visualization history is too large. Start a new conversation.".into());
+        }
         for message in &self.messages {
+            if !visualize::valid_history(&message.visualizations)
+                || (!message.visualizations.is_empty()
+                    && (message.role != "assistant" || !self.tools_enabled()))
+            {
+                return Err("Invalid visualization history".into());
+            }
             if !message.skills.is_empty()
                 && (!self.uses_codex_server()
                     || message.role != "user"
@@ -504,9 +523,12 @@ impl RunRequest {
     pub fn uses_codex_server(&self) -> bool {
         self.agent.provider == "codex" && self.tools_enabled()
     }
+    pub fn uses_claude_visualizer(&self) -> bool {
+        self.agent.provider == "claude" && self.tools_enabled()
+    }
     pub fn output_line_limit(&self) -> usize {
         // Providers can echo visual input in user-message lifecycle events.
-        // Retain the text limit plus only the already-validated image payload.
+        // Retain the text limit plus only already-validated visual payloads.
         2_000_000
             + self
                 .messages
@@ -514,6 +536,13 @@ impl RunRequest {
                 .flat_map(|m| &m.images)
                 .map(|image| image.data.len())
                 .sum::<usize>()
+            + self
+                .messages
+                .iter()
+                .flat_map(|m| &m.visualizations)
+                .map(|v| serde_json::to_string(v).map_or(0, |s| s.len()))
+                .sum::<usize>()
+                * 2
     }
     pub fn prompt(&self) -> String {
         // Image bytes are separate visual inputs, never text tokens or shell paths.
@@ -522,6 +551,9 @@ impl RunRequest {
             .iter()
             .map(|message| {
                 let mut value = serde_json::json!({"role":message.role,"text":message.text});
+                if !message.visualizations.is_empty() && self.tools_enabled() {
+                    value["visualizations"] = serde_json::json!(message.visualizations);
+                }
                 if !message.images.is_empty() {
                     value["images"] = serde_json::json!(message
                         .images
@@ -538,7 +570,12 @@ impl RunRequest {
         } else {
             "Do not use tools, inspect files, execute commands, or delegate."
         };
-        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
+        let visuals = if self.tools_enabled() {
+            visualize::GUIDANCE
+        } else {
+            ""
+        };
+        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
     }
     pub fn stdin_payload(&self) -> String {
         if self.agent.provider == "claude" {
@@ -714,6 +751,8 @@ pub async fn chat_command(
                     "bypassPermissions",
                     "--settings",
                     r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#,
+                    "--mcp-config",
+                    r#"{"mcpServers":{"agent_studio":{"type":"sdk","name":"agent_studio"}}}"#,
                 ]);
             } else {
                 c.args([
@@ -1015,6 +1054,7 @@ mod tests {
                 text: "Quotes \" & $(echo) `hello`\nこんにちは".into(),
                 images: vec![],
                 skills: vec![],
+                visualizations: vec![],
             }],
         }
     }
@@ -1496,6 +1536,7 @@ mod tests {
             text: "/saved-audit today".into(),
             images: vec![],
             skills: vec![],
+            visualizations: vec![],
         });
         let lines: Vec<serde_json::Value> = r
             .stdin_payload()

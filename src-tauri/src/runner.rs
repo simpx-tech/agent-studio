@@ -129,8 +129,27 @@ pub(crate) async fn execute(
     }
     let mut stdin = child.stdin.take().ok_or("CLI stdin is unavailable")?;
     let prompt = request.stdin_payload();
-    let writer = tokio::spawn(async move {
-        stdin.write_all(prompt.as_bytes()).await?;
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let mut input_tx = Some(input_tx);
+    let claude_visualizer = request.uses_claude_visualizer();
+    let first = if claude_visualizer {
+        "{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n".into()
+    } else {
+        prompt.clone()
+    };
+    input_tx
+        .as_ref()
+        .unwrap()
+        .send(first)
+        .await
+        .map_err(|_| "CLI input is unavailable")?;
+    if !claude_visualizer {
+        input_tx.take();
+    }
+    let mut writer = tokio::spawn(async move {
+        while let Some(payload) = input_rx.recv().await {
+            stdin.write_all(payload.as_bytes()).await?;
+        }
         stdin.shutdown().await
     });
     let mut stdout =
@@ -138,6 +157,12 @@ pub(crate) async fn execute(
     let mut stderr =
         BufReader::new(child.stderr.take().ok_or("CLI stderr is unavailable")?).lines();
     let mut decoder = Decoder::default();
+    let mut visualizer = crate::providers::visualize::Visualizer::default();
+    let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::default();
+    let mut initialized = false;
+    let mut writer_done = false;
+    let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
+    tokio::pin!(initialization_deadline);
     let output_limit = request.output_line_limit();
     let mut stdout_done = false;
     let mut stderr_done = false;
@@ -148,10 +173,32 @@ pub(crate) async fn execute(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => { exe.kill(&mut child).await; break Ok(("cancelled".to_string(), String::new())); }
+            _ = &mut initialization_deadline, if claude_visualizer && !initialized => { exe.kill(&mut child).await; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
+            result = &mut writer, if !writer_done => {
+                writer_done = true;
+                if !matches!(result, Ok(Ok(()))) { exe.kill(&mut child).await; break Err("Could not send input to the provider CLI.".into()); }
+            }
             _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.as_secs() / 60) } else { "Title generation timed out".into() }); }
             line = stdout.next_line(), if !stdout_done => match line {
                 Ok(Some(line)) => {
                     if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
+                    if claude_visualizer {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
+                                if value["response"]["subtype"] != "success" { exe.kill(&mut child).await; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
+                                initialized = true;
+                                if let Some(tx) = &input_tx { let _ = tx.send(prompt.clone()).await; }
+                                continue;
+                            }
+                            for event in visualizer.observe_claude(&value) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                            if value["type"] == "control_request" {
+                                let response = visualizer.claude_response(&value);
+                                if let Some(tx) = &input_tx { let _ = tx.send(format!("{response}\n")).await; }
+                                continue;
+                            }
+                            if input_lifetime.ended(&value) { input_tx.take(); }
+                        }
+                    }
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { exe.kill(&mut child).await; break Err("Title response exceeded the limit".into()); }
                 }
@@ -175,7 +222,8 @@ pub(crate) async fn execute(
                     break Err(provider_error(&diagnostic).into());
                 }
                 if request.agent.provider == "gemini" && !decoder.completed { break Err("Antigravity ended before confirming the response. Try again.".into()); }
-                if decoder.text.trim().is_empty() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                if claude_visualizer && input_tx.is_some() { break Err("Claude exited before confirming the final reply. Partial output has been kept.".into()); }
+                if decoder.text.trim().is_empty() && !visualizer.has_visuals() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
                 break Ok(("complete".to_string(), decoder.text));
             }
         }

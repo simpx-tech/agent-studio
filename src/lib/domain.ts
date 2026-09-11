@@ -3,6 +3,7 @@ import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
+import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -159,6 +160,7 @@ export const messageSchema = z.object({
   executionLabel: z.string().optional(),
   runId: z.string().uuid().optional(),
   plan: planSchema.optional(),
+  visualizations: visualizationsSchema.optional(),
   workflow: workflowProgressSchema.optional(),
   workflowDefinition: workflowSchema.optional(),
   nativeWorkflows: nativeWorkflowsSchema.optional(),
@@ -203,6 +205,7 @@ export type RunEvent = TokenUsage & {
     | 'tool'
     | 'progress'
     | 'plan'
+    | 'visualization'
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
@@ -210,6 +213,7 @@ export type RunEvent = TokenUsage & {
   text?: string;
   tool?: ToolActivity;
   plan?: Plan;
+  visualization?: Visualization;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
 };
@@ -224,6 +228,7 @@ export type RunRequest = {
     text: string;
     images?: ChatImage[];
     skills?: SkillReference[];
+    visualizations?: Visualization[];
   }[];
 };
 
@@ -249,8 +254,11 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
       text: messageText(m),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
+      ...(m.role === 'assistant' && m.visualizations?.length
+        ? { visualizations: m.visualizations }
+        : {}),
     }))
-    .filter((m) => m.text.trim() || m.images?.length);
+    .filter((m) => m.text.trim() || m.images?.length || m.visualizations?.length);
 }
 export function restoreWorkspace(value: unknown): Workspace {
   const oldSchema = z.object({
