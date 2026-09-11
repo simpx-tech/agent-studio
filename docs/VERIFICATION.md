@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Standalone chat labels and icons — 2026-09-11
+
+Chats without a project folder now show **Standalone** with a MessageCircle chat-bubble icon in Active/History groups and the selected Folder toolbar value. Hover text explains that they have no project folder, and their plus action is labelled **New standalone conversation**. Project folders retain their folder icon and path title. This changes presentation only; saved location identities, execution routing, and draft creation remain intact.
+
+The full required gate passed: `npm run verify` (zero diagnostics, 77 unit/HTTP tests, production build, 66 browser scenarios), Rust formatting, Clippy with warnings denied, and 64 Rust tests with four existing opt-in integrations ignored. The existing standalone draft scenario still covers collapsed History groups, the correct environment, draft focus, sending, and preservation of prior conversations. Logs: `artifacts/standalone-{verify,rust}.log`.
+
+Native `npm run tauri dev -- --no-watch --config artifacts/standalone.tauri.json` used a separate app identity and WebView profile with the unused mobile QA Cargo target. Synthetic project and standalone chats verified the distinct icons, explanatory titles, a fresh standalone draft, and no horizontal overflow at 1380×900 and 880×720 CSS pixels / DPR 1.5. Screenshots were visually reviewed; compact labels retain the existing ellipsis behavior and full hover text. No renderer errors or provider prompts occurred. Evidence: `artifacts/standalone-native-result.json`, `artifacts/standalone-native.png`, `artifacts/standalone-native-compact.png`, and `artifacts/standalone-sidebar.png`. Existing app processes were preserved; provider execution and sign-in were not retested for this presentation change.
+
 ## Agent dropdown placeholders — 2026-09-11
 
 The Agent trigger now shows a muted **No agents** placeholder when the selected computer has no available CLI options, or **Select agent** when options exist but none matches the draft selection. These are display labels, not selectable agents. Existing regression checks retain zero menu options for missing WSL CLIs, disabled sending, keyboard safety, and fixed saved-chat agent labels.

@@ -1698,7 +1698,7 @@ test('opening the app archives saved chats and sending from History restores the
   await expect(historyTab).toHaveText('History3');
 });
 
-test('computer and No folder plus buttons start fresh scoped drafts from collapsed history groups', async ({
+test('computer and Standalone plus buttons start fresh scoped drafts from collapsed history groups', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -1744,11 +1744,11 @@ test('computer and No folder plus buttons start fresh scoped drafts from collaps
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await historyTab.click();
   await history.locator('.computer-group-toggle').click();
-  await history.getByRole('button', { name: 'No folder', exact: true }).click();
+  await history.getByRole('button', { name: 'Standalone', exact: true }).click();
   await history
-    .getByRole('button', { name: 'New conversation in No folder on Desktop', exact: true })
+    .getByRole('button', { name: 'New standalone conversation on Desktop', exact: true })
     .click();
-  await expect(picker('Folder')).toHaveText('No folder');
+  await expect(picker('Folder')).toHaveText('Standalone');
   await expect(picker('Agent')).toBeEnabled();
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
@@ -1782,7 +1782,7 @@ test('computer and No folder plus buttons start fresh scoped drafts from collaps
     active.getByRole('button', { name: 'New conversation on Desktop', exact: true }),
   ).toBeVisible();
   await expect(
-    active.getByRole('button', { name: 'New conversation in No folder on Desktop', exact: true }),
+    active.getByRole('button', { name: 'New standalone conversation on Desktop', exact: true }),
   ).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'artifacts/sidebar-plus-compact.png', animations: 'disabled' });

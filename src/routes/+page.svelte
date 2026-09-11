@@ -23,6 +23,7 @@
     Copy,
     CircleAlert,
     Folder,
+    MessageCircle,
     Archive,
     ArchiveRestore,
     BookOpen,
@@ -1659,15 +1660,21 @@
                         title={folder.detail}
                         aria-expanded={!collapsedGroups[folderKey]}
                         onclick={() => (collapsedGroups[folderKey] = !collapsedGroups[folderKey])}
-                        ><Folder size={14} /><span>{folder.name}</span><ChevronRight
+                        >{#if folder.location?.path}<Folder size={14} />{:else}<MessageCircle
+                            size={14}
+                          />{/if}<span>{folder.name}</span><ChevronRight
                           size={12}
                           class={!collapsedGroups[folderKey] ? 'expanded-chevron' : ''}
                         /></button
                       >
                       <button
                         class="folder-new-chat"
-                        title={`New conversation in ${folder.name}`}
-                        aria-label={`New conversation in ${folder.name} on ${computer.name}`}
+                        title={folder.location?.path
+                          ? `New conversation in ${folder.name}`
+                          : 'New standalone conversation'}
+                        aria-label={folder.location?.path
+                          ? `New conversation in ${folder.name} on ${computer.name}`
+                          : `New standalone conversation on ${computer.name}`}
                         disabled={!loaded || selectingLocation || !folder.location}
                         onclick={() => newChat(undefined, undefined, folder.location)}
                         ><Plus size={14} /></button
@@ -1804,7 +1811,9 @@
             <div class="chat-setting folder-setting">
               <span>Folder</span><ChoicePicker
                 label="Folder"
-                title={selectedLocation?.path}
+                title={selectedLocation
+                  ? selectedLocation.path || 'Standalone chat without a project folder'
+                  : undefined}
                 value={selectedLocation ? locationKey(selectedLocation) : 'browse'}
                 options={[
                   ...savedLocations.map((l) => ({
@@ -1822,8 +1831,9 @@
                           id: locationKey(selectedLocation),
                           name: selectedLocation.path
                             ? folderName(selectedLocation.path)
-                            : 'No folder',
-                          title: selectedLocation.path,
+                            : 'Standalone',
+                          title:
+                            selectedLocation.path || 'Standalone chat without a project folder',
                         },
                       ]
                     : []),
@@ -1842,7 +1852,11 @@
                   else folderBrowserOpen = true;
                 }}
               >
-                {#snippet icon()}<Folder size={16} />{/snippet}
+                {#snippet icon()}
+                  {#if selectedLocation && !selectedLocation.path}<MessageCircle
+                      size={16}
+                    />{:else}<Folder size={16} />{/if}
+                {/snippet}
               </ChoicePicker>
             </div>
             <div class="chat-setting agent-setting">

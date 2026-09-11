@@ -181,8 +181,8 @@ export function groupConversations(
       if (!computer.folders.has(key))
         computer.folders.set(key, {
           id: key,
-          name: location?.path ? folderName(location.path) : 'No folder',
-          detail: `${environment?.name ?? 'Unavailable environment'}${location?.path ? ` · ${location.path}` : ''}`,
+          name: location?.path ? folderName(location.path) : 'Standalone',
+          detail: `${environment?.name ?? 'Unavailable environment'} · ${location?.path || 'Standalone chats without a project folder'}`,
           location: location ? { ...location } : undefined,
           conversations: [],
         });
