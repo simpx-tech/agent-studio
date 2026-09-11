@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import type { Message } from './domain';
 
 export type Artifact = { id: string; title: string; language: 'html' | 'svg'; source: string };
 export const maxArtifactBytes = 512_000;
@@ -45,4 +46,23 @@ export function artifactFilename(artifact: Artifact) {
   return base.toLowerCase().endsWith(`.${artifact.language}`)
     ? base
     : `${base}.${artifact.language}`;
+}
+
+// Native background workflows can finish with a short status after the parent
+// already delivered the artifact. Preserve those parent-authored fences too.
+export function messageArtifacts(message: Message): Artifact[] {
+  if (message.role !== 'assistant') return [];
+  const result: Artifact[] = [];
+  const blocks = [
+    ...message.blocks.filter((b) => b.type === 'markdown'),
+    ...message.blocks.filter((b) => b.type === 'activity' && b.progress && !b.tool),
+  ];
+  for (const [index, block] of blocks.entries()) {
+    for (const artifact of responseArtifacts(block.text, `${message.id}:${index}`)) {
+      if (!result.some((a) => a.language === artifact.language && a.source === artifact.source))
+        result.push(artifact);
+      if (result.length >= 12) return result;
+    }
+  }
+  return result;
 }

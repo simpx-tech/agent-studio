@@ -6,7 +6,8 @@ import { planSchema, type Plan } from './plans.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
-  type Workflow,
+  nativeWorkflowsSchema,
+  type NativeWorkflows,
   type WorkflowProgress,
 } from './workflows.ts';
 
@@ -146,6 +147,7 @@ export const messageSchema = z.object({
   plan: planSchema.optional(),
   workflow: workflowProgressSchema.optional(),
   workflowDefinition: workflowSchema.optional(),
+  nativeWorkflows: nativeWorkflowsSchema.optional(),
 });
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
@@ -179,16 +181,25 @@ export type ProviderStatus = {
   location?: string | null;
 };
 export type RunEvent = TokenUsage & {
-  kind: 'text' | 'activity' | 'usage' | 'error' | 'tool' | 'progress' | 'plan' | 'workflow';
+  kind:
+    | 'text'
+    | 'activity'
+    | 'usage'
+    | 'error'
+    | 'tool'
+    | 'progress'
+    | 'plan'
+    | 'workflow'
+    | 'nativeworkflow';
   id?: string;
   revision?: number;
   text?: string;
   tool?: ToolActivity;
   plan?: Plan;
   workflow?: WorkflowProgress;
+  nativeWorkflows?: NativeWorkflows;
 };
 export type RunRequest = {
-  workflow?: Workflow;
   location?: ChatLocation;
   conversationId?: string;
   assistantId?: string;

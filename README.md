@@ -89,7 +89,7 @@ message content blocks ← normalized events ← JSONL decoder
 
 There is no terminal emulator. Raw CLI events and ANSI output are not the interface. Scripts, remote images, embeds, and unsafe links are stripped from model output; the desktop CSP limits renderer access. Fonts and icons are bundled locally.
 
-The chat toolbar opens saved **Claude workflows** with ordered prompt steps and optional run input. The selected host executes every step with the captured conversation settings, passes results forward, and stops on failure or cancellation. A live **Plan and progress** panel presents workflow status and provider-reported tasks. Completed HTML/SVG code blocks open in a separate sandboxed artifact viewer with interactive previews, source inspection, and downloads. Definitions, progress, and results survive history, export, and relay sync. See [capabilities and limits](docs/CAPABILITIES.md).
+The chat toolbar launches **Claude Code native Dynamic Workflows** through the selected CLI's `Workflow` tool, including native saved `/name` commands. The progress panel shows reported phases, agents, results, and usage alongside provider plans. Saved scripts remain in Claude's own project/profile/plugin locations; reported progress survives history, export, and relay sync. Completed HTML/SVG code blocks open in a separate sandboxed artifact viewer with interactive previews, source inspection, and downloads. See [capabilities and limits](docs/CAPABILITIES.md).
 
 ## Development and verification
 

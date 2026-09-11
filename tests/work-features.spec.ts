@@ -1,3 +1,4 @@
+import { nativeWorkflowFixture } from './native-workflow-fixture';
 import { test, expect } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
@@ -118,7 +119,7 @@ fetch('/v1/state').catch(()=>{});</script></body></html>`;
   await expect(page.getByRole('button', { name: 'Counter Open HTML' })).toBeVisible();
 });
 
-test('saved Claude workflows preserve drafts, capture the exact definition, and persist step progress', async ({
+test('native Claude workflows retain drafts, reported phases and agents through stop and history', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
@@ -128,69 +129,41 @@ test('saved Claude workflows preserve drafts, capture the exact definition, and 
   await page.getByRole('option', { name: /Claude/ }).click();
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   await page.getByRole('button', { name: 'Claude workflows', exact: true }).click();
-  const manager = page.getByRole('dialog', { name: 'Claude workflows' });
-  await manager.getByLabel('Workflow name', { exact: true }).fill('Research and review');
-  await manager.getByLabel('Step 1 title', { exact: true }).fill('Research');
-  await manager.getByLabel('Step 1 prompt', { exact: true }).fill('Read the supplied source');
-  await manager.getByRole('button', { name: 'Add step' }).click();
-  await manager.getByLabel('Step 2 title', { exact: true }).fill('Review');
-  await manager.getByLabel('Step 2 prompt', { exact: true }).fill('Check the preceding result');
-  await manager.getByLabel('Workflow input', { exact: true }).fill('Synthetic input');
-  await manager.getByRole('button', { name: 'Save workflow', exact: true }).click();
-  await expect(manager.getByRole('button', { name: 'Run workflow', exact: true })).toBeEnabled();
-  await page.screenshot({ path: 'artifacts/workflow-editor-browser.png' });
-  await manager.getByRole('button', { name: 'Run workflow', exact: true }).click();
-  await expect(manager).toHaveCount(0);
+  const launcher = page.getByRole('dialog', { name: 'Claude workflows' });
+  await expect(launcher.getByRole('button', { name: 'Add step' })).toHaveCount(0);
+  await launcher.getByLabel('Workflow request').fill('/audit-routes src/routes');
+  await launcher.getByRole('button', { name: 'Run native workflow' }).click();
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
-  expect(request.workflow.steps).toEqual([
-    { title: 'Research', prompt: 'Read the supplied source' },
-    { title: 'Review', prompt: 'Check the preceding result' },
-  ]);
+  expect(request.workflow).toBeUndefined();
   expect(request.agent.provider).toBe('claude');
+  expect(request.messages.at(-1).text).toContain('/audit-routes src/routes');
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
-  await page.evaluate(() => {
-    (window as any).emitCapability({
-      kind: 'workflow',
-      workflow: {
-        revision: 3,
-        name: 'Research and review',
-        steps: [
-          { title: 'Research', status: 'complete' },
-          { title: 'Review', status: 'running' },
-        ],
-      },
-    });
+  await page.evaluate((snapshot) => {
+    (window as any).emitCapability({ kind: 'nativeworkflow', nativeWorkflows: snapshot });
     (window as any).emitCapability({
       kind: 'plan',
       plan: { revision: 2, steps: [{ id: 'a', title: 'Verify sources', status: 'running' }] },
     });
-  });
-  const panel = page.locator('.composer-area .plan-panel');
-  await expect(panel).toContainText('1/2 complete');
-  await expect(panel).toContainText('Verify sources');
-  await page.screenshot({ path: 'artifacts/workflow-progress-browser.png' });
+  }, nativeWorkflowFixture());
+  const panel = page.locator('.composer-area .native-workflow-panel');
+  await expect(panel).toContainText('1/2 agents complete');
+  await expect(panel).toContainText('Review');
+  await panel.locator('.workflow-agent summary').first().click();
+  await expect(panel).toContainText('Route verified');
+  await expect(page.locator('.composer-area .plan-panel')).toContainText('Verify sources');
+  await page.screenshot({ path: 'artifacts/native-workflow-progress-browser.png' });
   await page.getByRole('button', { name: 'Stop response' }).click();
-  await expect(page.locator('.message .plan-panel').last()).toContainText('1/2 complete');
-  await page.locator('.message .plan-panel').last().locator('summary').click();
-  await expect(page.locator('.message .plan-panel').last()).toContainText(
-    'Stopped. Remaining steps were not run.',
-  );
+  const saved = page.locator('.message .native-workflow-panel').last();
+  await expect(saved).toContainText('Stopped');
+  await saved.locator(':scope > summary').click();
+  await expect(saved).toContainText('1/2 agents complete');
   await page.reload();
   await page.getByRole('tab', { name: /History/ }).click();
-  await page
-    .getByRole('button', { name: /Research and review/ })
-    .first()
-    .click();
-  await expect(page.locator('.message .plan-panel')).toContainText('1/2 complete');
-  await page.getByRole('button', { name: 'Claude workflows', exact: true }).click();
-  await manager.getByRole('combobox', { name: 'Saved workflow', exact: true }).click();
-  await manager.getByRole('option', { name: 'Research and review', exact: true }).click();
-  await expect(manager.getByLabel('Step 2 prompt', { exact: true })).toHaveValue(
-    'Check the preceding result',
-  );
+  await page.locator('.conversation-item').first().click();
+  await expect(page.locator('.message .native-workflow-panel')).toContainText('audit-routes');
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(manager.getByRole('button', { name: 'Run workflow', exact: true })).toBeVisible();
-  await page.screenshot({ path: 'artifacts/workflow-editor-mobile.png' });
+  await page.locator('.message .native-workflow-panel > summary').click();
+  await page.screenshot({ path: 'artifacts/native-workflow-progress-mobile.png' });
 });
 
 test('plan snapshots reject stale revisions and do not fabricate success when the reply ends', async ({

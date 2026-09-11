@@ -391,8 +391,9 @@ async function routed<T>(
       Date.now() +
       (method === 'folders'
         ? 30_000
-        : runTimeoutMs(method === 'run' ? (args.request as RunRequest)?.workflow : undefined) +
-          10_000);
+        : runTimeoutMs(
+            method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
+          ) + 10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
       const job = await relayApi<RelayJob>('GET', `v1/jobs/${id}`);

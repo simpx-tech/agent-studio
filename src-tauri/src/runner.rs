@@ -47,15 +47,17 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<String, String> {
     let output = EventSink::new(move |event| channel.send(event).map_err(|e| e.to_string()));
-    if request.workflow.is_some() {
-        return crate::workflows::run(app, request, output, cancel).await;
-    }
+    let timeout = if request.agent.provider == "claude" {
+        3600
+    } else {
+        300
+    };
     execute(
         app,
         request,
         Some(output),
         cancel,
-        Duration::from_secs(300),
+        Duration::from_secs(timeout),
         "chat-runtime",
     )
     .await
@@ -146,7 +148,7 @@ pub(crate) async fn execute(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => { exe.kill(&mut child).await; break Ok(("cancelled".to_string(), String::new())); }
-            _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { "The provider did not finish within 5 minutes. Try again or check its CLI login." } else { "Title generation timed out" }.into()); }
+            _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.as_secs() / 60) } else { "Title generation timed out".into() }); }
             line = stdout.next_line(), if !stdout_done => match line {
                 Ok(Some(line)) => {
                     if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }

@@ -103,7 +103,7 @@ export function createRelay({
           now() - job.created >
             runTimeoutMs(
               job.method === 'run'
-                ? (job.args.request as { workflow?: unknown })?.workflow
+                ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
                 : undefined,
             ))
       ) {

@@ -68,7 +68,10 @@ mod tests {
         r.messages.push(
             serde_json::from_value(json!({"role":"user","text":"Describe it again"})).unwrap(),
         );
-        let payload: Value = serde_json::from_str(&r.stdin_payload()).unwrap();
+        let payload: Value =
+            serde_json::from_str(r.stdin_payload().lines().next().unwrap()).unwrap();
+        assert_eq!(payload["shouldQuery"], false);
+        assert!(payload["origin"].is_null());
         assert_eq!(
             payload["message"]["content"][2]["source"]["data"],
             image.data

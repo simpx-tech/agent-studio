@@ -8,7 +8,7 @@
   import ReplyUsage from './ReplyUsage.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
-  import { responseArtifacts, type Artifact } from '$lib/artifacts';
+  import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
     agent,
@@ -39,7 +39,7 @@
   const tools = $derived(
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
-  const artifacts = $derived(responseArtifacts(text, message.id));
+  const artifacts = $derived(messageArtifacts(message));
   function linkClick(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) {
@@ -105,11 +105,13 @@
           blocks={message.blocks}
           finalText={text}
         />{/if}
-      {#if message.status !== 'running' && (canRetry || linkError)}<div class="message-actions">
-          {#if canRetry}<button class="text-button" onclick={retry} disabled={retryDisabled}
-              ><RotateCcw size={13} />{message.workflowDefinition
-                ? 'Retry workflow from step 1'
-                : 'Retry'}</button
+      {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
+          class="message-actions"
+        >
+          {#if canRetry && !message.workflowDefinition}<button
+              class="text-button"
+              onclick={retry}
+              disabled={retryDisabled}><RotateCcw size={13} />Retry</button
             >{/if}
           {#if linkError}<span role="alert">{linkError}</span>{/if}
         </div>{/if}

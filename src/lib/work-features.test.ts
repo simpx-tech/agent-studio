@@ -1,12 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { responseArtifacts, maxArtifactBytes, artifactFilename } from './artifacts';
+import {
+  responseArtifacts,
+  messageArtifacts,
+  maxArtifactBytes,
+  artifactFilename,
+} from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
 import { applyRunEvent, retainRunEvent } from './activity';
 import { planStepLabel } from './plans';
 import { workflowSchema } from './workflows';
 import { mergeShared, sharedWorkspace } from './sync';
+import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
 
 describe('artifacts and portable progress', () => {
+  it('keeps parent artifacts after a native completion summary without treating tool output as source', () => {
+    const html = '```html Counter\n<h1>Counter</h1>\n```';
+    const message: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      status: 'complete',
+      createdAt: new Date().toISOString(),
+      blocks: [
+        { type: 'markdown', text: 'All tasks done. The artifact is above.' },
+        { type: 'activity', progress: { id: 'parent', revision: 2 }, text: html },
+        { type: 'activity', text: '```html\n<h1>Tool output</h1>\n```' },
+      ],
+    };
+    expect(messageArtifacts(message).map((a) => a.source)).toEqual(['<h1>Counter</h1>']);
+    message.blocks.push({ type: 'markdown', text: html });
+    expect(messageArtifacts(message)).toHaveLength(1);
+    message.role = 'user';
+    expect(messageArtifacts(message)).toEqual([]);
+  });
   it('extracts only closed HTML/SVG fences and preserves exact source for download', () => {
     const source = '<h1>Hi</h1>\n<script>document.body.dataset.ready="yes"</script>';
     const a = responseArtifacts(
@@ -63,7 +88,7 @@ describe('artifacts and portable progress', () => {
     expect(merged.conversations).toHaveLength(1);
     expect(merged.conversations[0].messages[0].plan!.revision).toBe(3);
   });
-  it('bounds workflow definitions and preserves concurrent edits as copies', () => {
+  it('retains legacy definitions for export without converting them to native scripts', () => {
     const workflow = {
       id: crypto.randomUUID(),
       name: 'Draft',
@@ -78,5 +103,51 @@ describe('artifacts and portable progress', () => {
     const result = mergeShared(base, left, right);
     expect(result.workflows!.map((w) => w.name)).toEqual(['Remote', 'Local (conflict copy)']);
     expect(restoreWorkspace({ ...initialWorkspace(), ...result }).workflows).toHaveLength(2);
+  });
+  it('retains native run identity and latest metadata across history and same-run relay merges', () => {
+    const message: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      status: 'running',
+      blocks: [],
+      createdAt: new Date().toISOString(),
+      runId: crypto.randomUUID(),
+    };
+    const snapshot = nativeWorkflowFixture();
+    const event: RunEvent = { kind: 'nativeworkflow', nativeWorkflows: snapshot };
+    applyRunEvent(message, event);
+    applyRunEvent(message, { kind: 'nativeworkflow', nativeWorkflows: { revision: 1, runs: [] } });
+    const events: RunEvent[] = [];
+    retainRunEvent(events, event);
+    retainRunEvent(events, { kind: 'nativeworkflow', nativeWorkflows: { revision: 0, runs: [] } });
+    expect(events).toEqual([event]);
+    expect(message.nativeWorkflows).toEqual(snapshot);
+    const workspace = initialWorkspace();
+    workspace.conversations.push({
+      id: crypto.randomUUID(),
+      title: 'Native',
+      settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
+      createdAt: message.createdAt,
+      updatedAt: message.createdAt,
+      messages: [message],
+    });
+    expect(restoreWorkspace(workspace).conversations[0].messages[0].nativeWorkflows).toEqual(
+      snapshot,
+    );
+    const base = sharedWorkspace(workspace),
+      left = structuredClone(base),
+      right = structuredClone(base);
+    left.conversations[0].messages[0].nativeWorkflows!.revision = 4;
+    left.conversations[0].messages[0].nativeWorkflows!.runs[0].status = 'complete';
+    right.conversations[0].messages[0].blocks = [{ type: 'markdown', text: 'Result' }];
+    right.conversations[0].messages[0].status = 'complete';
+    const merged = mergeShared(base, left, right);
+    expect(merged.conversations).toHaveLength(1);
+    expect(merged.conversations[0].messages[0].nativeWorkflows!.runs[0].status).toBe('complete');
+    applyRunEvent(message, {
+      kind: 'nativeworkflow',
+      nativeWorkflows: { ...snapshot, revision: 99, runs: Array(17).fill(snapshot.runs[0]) },
+    });
+    expect(message.nativeWorkflows!.revision).toBe(3);
   });
 });

@@ -1,3 +1,4 @@
+import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,7 +53,7 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
-  it('keeps healthy multi-step workflows past one reply deadline while expiring abandoned work', async () => {
+  it('keeps healthy native workflows past one reply deadline while expiring abandoned work', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();
     await f.call(
@@ -61,20 +62,12 @@ describe('real HTTP relay', () => {
       { environmentId: f.target, connections: [], running: [] },
       f.target,
     );
-    const workflow = {
-      id: crypto.randomUUID(),
-      name: 'Long workflow',
-      steps: [
-        { title: 'First', prompt: 'First' },
-        { title: 'Second', prompt: 'Second' },
-      ],
-    };
     await f.call('POST', 'jobs', {
       id,
       source: f.source,
       target: f.target,
       method: 'run',
-      args: { request: { runId: id, workflow } },
+      args: { request: { runId: id, agent: { provider: 'claude' } } },
     });
     await f.call('GET', 'jobs', undefined, f.target);
     for (let i = 0; i < 13; i++) {
@@ -86,15 +79,8 @@ describe('real HTTP relay', () => {
           status: 'running',
           events: [
             {
-              kind: 'workflow',
-              workflow: {
-                revision: i,
-                name: 'Long workflow',
-                steps: [
-                  { title: 'First', status: 'complete' },
-                  { title: 'Second', status: 'running' },
-                ],
-              },
+              kind: 'nativeworkflow',
+              nativeWorkflows: { ...nativeWorkflowFixture(), revision: i },
             },
           ],
         },
@@ -102,9 +88,9 @@ describe('real HTTP relay', () => {
       );
       expect(updated.body.status).toBe('running');
     }
-    expect((await f.call('GET', `jobs/${id}`)).body.events[0].workflow.steps[0].status).toBe(
-      'complete',
-    );
+    expect(
+      (await f.call('GET', `jobs/${id}`)).body.events[0].nativeWorkflows.runs[0].agents[0].status,
+    ).toBe('complete');
     f.advance(46_000);
     expect((await f.call('GET', `jobs/${id}`)).body.status).toBe('error');
   });

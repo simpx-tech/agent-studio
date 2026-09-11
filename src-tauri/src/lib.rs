@@ -10,7 +10,6 @@ mod relay;
 mod runner;
 mod titles;
 mod usage;
-mod workflows;
 mod wsl;
 use std::io::Write;
 use std::sync::Mutex;

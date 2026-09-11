@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 mod activity;
 pub mod plan;
+mod workflow;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,8 +29,9 @@ pub enum RunEvent {
     Plan {
         plan: plan::Plan,
     },
-    Workflow {
-        workflow: crate::workflows::Progress,
+    NativeWorkflow {
+        #[serde(rename = "nativeWorkflows")]
+        native_workflows: workflow::Snapshot,
     },
     Text {
         text: String,
@@ -60,6 +62,7 @@ pub struct Decoder {
     model: Option<String>,
     tools: activity::ToolDecoder,
     plan: plan::PlanDecoder,
+    workflows: workflow::WorkflowDecoder,
     progress: Vec<(String, String, u64)>,
     current_message: String,
     message_number: u64,
@@ -184,6 +187,9 @@ impl Decoder {
             return events;
         }
         if provider == "claude" {
+            if let Some(native_workflows) = self.workflows.decode(&v) {
+                events.push(RunEvent::NativeWorkflow { native_workflows });
+            }
             if let Some(plan) = self.plan.claude(&v) {
                 events.push(RunEvent::Plan { plan });
             }

@@ -48,23 +48,6 @@ pub struct ToolActivity {
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
 }
-impl ToolActivity {
-    pub fn scope(&mut self, prefix: &str) {
-        self.id = format!("{prefix}{}", self.id);
-        if let Some(id) = &mut self.parent_id {
-            *id = format!("{prefix}{id}");
-        }
-        for agent in &mut self.agents {
-            agent.id = format!("{prefix}{}", agent.id);
-            if let Some(id) = &mut agent.agent_id {
-                *id = format!("{prefix}{id}");
-            }
-            if let Some(id) = &mut agent.parent_id {
-                *id = format!("{prefix}{id}");
-            }
-        }
-    }
-}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivityFact {
     label: String,
@@ -875,9 +858,48 @@ impl ToolDecoder {
                 Some("task_started" | "task_progress" | "task_notification")
             )
         {
+            if let Some(progress) = v["workflow_progress"].as_array() {
+                let mut group = self.group("claude");
+                for entry in progress
+                    .iter()
+                    .filter(|e| e["type"] == "workflow_agent")
+                    .take(128)
+                {
+                    let Some(id) = field(entry, "agentId", 240) else {
+                        continue;
+                    };
+                    if let Some(agent) = Self::agent(&mut group, &id) {
+                        agent.agent_id = Some(id);
+                        agent.name =
+                            field(entry, "label", 200).unwrap_or_else(|| "Workflow agent".into());
+                        agent.status = match entry["state"].as_str() {
+                            Some("done" | "cached") => "complete",
+                            Some("start") => "running",
+                            Some("error" | "failed") => "error",
+                            Some("cancelled" | "stopped") => "cancelled",
+                            _ => "unknown",
+                        }
+                        .into();
+                        agent.result = field(entry, "resultPreview", 2000);
+                    }
+                }
+                self.publish_group(group, out);
+            }
             let task = field(v, "task_id", 240).unwrap_or_default();
             let id = field(v, "tool_use_id", 240).or_else(|| self.tasks.get(&task).cloned());
             if let Some(id) = id {
+                // A workflow is an orchestrator, not another child agent.
+                if v["task_type"] == "local_workflow"
+                    || self
+                        .tools
+                        .iter()
+                        .any(|t| t.id == format!("claude:{id}") && t.name == "Workflow")
+                {
+                    if self.tasks.len() < 64 {
+                        self.tasks.insert(task, id);
+                    }
+                    return;
+                }
                 if self.tasks.len() < 64 {
                     self.tasks.insert(task, id.clone());
                 }
@@ -1214,4 +1236,18 @@ mod tests {
         assert_eq!(group.agents.len(), 2);
         assert_eq!(group.agents[0].agent_id, group.agents[1].agent_id);
     }
+}
+#[test]
+fn workflow_progress_counts_real_children_without_counting_the_orchestrator() {
+    let mut d = ToolDecoder::default();
+    d.decode("claude", &serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"wfcall","name":"Workflow","input":{"name":"audit"}}]}}));
+    d.decode("claude", &serde_json::json!({"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"wfcall","task_type":"local_workflow"}));
+    let event = serde_json::json!({"type":"system","subtype":"task_progress","task_id":"task","tool_use_id":"wfcall","workflow_progress":[{"type":"workflow_agent","index":1,"agentId":"child","label":"Reader","state":"done","resultPreview":"Checked"}]});
+    d.decode("claude", &event);
+    d.decode("claude", &event);
+    d.decode("claude", &serde_json::json!({"type":"system","subtype":"task_notification","task_id":"task","status":"completed"}));
+    let group = d.group("claude");
+    assert_eq!(group.agents.len(), 1);
+    assert_eq!(group.agents[0].agent_id.as_deref(), Some("child"));
+    assert_eq!(group.agents[0].status, "complete");
 }

@@ -10,11 +10,13 @@
   } from '@lucide/svelte';
   import type { Message } from '$lib/domain';
   import { planStepLabel } from '$lib/plans';
+  import NativeWorkflowPanel from './NativeWorkflowPanel.svelte';
   let { message, compact = false }: { message: Message; compact?: boolean } = $props();
   const steps = $derived(message.workflow?.steps ?? message.plan?.steps ?? []);
   const completed = $derived(steps.filter((step) => step.status === 'complete').length);
 </script>
 
+{#if message.nativeWorkflows}<NativeWorkflowPanel {message} {compact} />{/if}
 {#if message.plan || message.workflow}
   <details class="plan-panel" class:compact open={message.status === 'running'}>
     <summary
@@ -23,6 +25,9 @@
       ><ChevronDown size={14} /></summary
     >
     <div class="plan-body">
+      {#if message.workflow}<p class="plan-note">
+          Legacy prompt sequence. This is saved history from the removed custom sequencer.
+        </p>{/if}
       {#if !steps.length}<p class="muted small">The agent cleared its plan.</p>{/if}
       {#if message.plan?.explanation && !message.workflow}<p class="plan-explanation">
           {message.plan.explanation}

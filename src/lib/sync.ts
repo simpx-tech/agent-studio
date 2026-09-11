@@ -68,6 +68,10 @@ function sameRun(
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
       workflow:
         (a.workflow?.revision ?? -1) >= (b.workflow?.revision ?? -1) ? a.workflow : b.workflow,
+      nativeWorkflows:
+        (a.nativeWorkflows?.revision ?? -1) >= (b.nativeWorkflows?.revision ?? -1)
+          ? a.nativeWorkflows
+          : b.nativeWorkflows,
       ...(a.durationMs != null || b.durationMs != null
         ? { durationMs: Math.max(a.durationMs ?? 0, b.durationMs ?? 0) }
         : {}),

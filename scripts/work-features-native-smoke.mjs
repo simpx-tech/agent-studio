@@ -1,6 +1,6 @@
 // Opt-in native composer/provider checks. Only touches this isolated QA workspace.
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { nativePage } from './native-page.mjs';
@@ -78,22 +78,17 @@ try {
   const folder = await mkdtemp(join(tmpdir(), 'studio-work-features-'));
   const marker = crypto.randomUUID();
   await writeFile(join(folder, 'marker.txt'), marker);
-  const workflow = {
-    id: crypto.randomUUID(),
-    name: 'Native workflow check',
-    steps: [
-      {
-        title: 'Read fixture',
-        prompt: `Task tracking is the feature under test. First call ToolSearch with query select:TaskCreate,TaskUpdate; then actually call TaskCreate and TaskUpdate to track reading marker.txt in ${folder} and returning its value. Update the plan as you work, marking tasks complete only after doing them. Read only that fixture file, using Read. Return its exact marker. No web search, integrations, subagents, or file edits.`,
-      },
-      {
-        title: 'Build counter',
-        prompt:
-          'Use the previous step result without reading any files: repeat its exact marker in your answer. Task tracking is the feature under test. First call ToolSearch with query select:TaskCreate,TaskUpdate, then actually invoke TaskCreate and TaskUpdate to track creating and returning one tiny self-contained HTML counter. Actual task-tool calls are required; a text checklist is insufficient. Deliver a fenced html code block titled Native Counter. Use heading "Native Counter", a button "Add one", and output with id count initially 0. Inline JavaScript increments the output. No external resources, file edits, searches, or subagents. Mark the plan complete once you have prepared the source.',
-      },
-    ],
-  };
-  workspace.workflows = [workflow];
+  const workflowDirectory = join(folder, '.claude', 'workflows');
+  await mkdir(workflowDirectory, { recursive: true });
+  const nativeScript =
+    'export const meta = { name: "studio-native-check", description: "Read one fixture", phases: ["Read fixture"] }; phase("Read fixture"); return await agent(' +
+    JSON.stringify(
+      'Read only ' +
+        join(folder, 'marker.txt') +
+        ' and return its exact content. Use no other tools, files, integrations, or web access.',
+    ) +
+    ', {label:"Fixture reader"});';
+  await writeFile(join(workflowDirectory, 'studio-native-check.js'), nativeScript);
   const chats = [];
   for (const provider of (process.env.QA_PROVIDERS ?? 'claude,codex').split(',')) {
     const account = workspace.fleet.accounts.find((a) => a.provider === provider);
@@ -131,18 +126,20 @@ try {
     await openChat(chat.title);
     if (chat.provider === 'claude') {
       await page.button('Claude workflows');
-      await page.click('[aria-label="Saved workflow"]');
-      await page.evaluate(() =>
-        [...document.querySelectorAll('[role="option"]')]
-          .find((el) => el.textContent.includes('Native workflow check'))
-          .click(),
-      );
+      await page.evaluate((folder) => {
+        const el = document.querySelector('[aria-label="Workflow request"]');
+        el.value =
+          'Run the saved native /studio-native-check workflow through the Workflow tool. Wait for the result. Then use TaskCreate and TaskUpdate to track returning that marker with a tiny self-contained HTML counter in a fenced html block titled Native Counter, heading Native Counter, button Add one, output id count initially 0 and inline JavaScript increments it. Actually use those task tools. Finally save this native workflow for reuse as /studio-native-saved in ' +
+          folder +
+          '/.claude/workflows/studio-native-saved.js (copy the original script, changing only meta.name). Do not use a custom prompt sequence. Read only the fixture and these workflow scripts; no external files, web, or integrations.';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }, folder);
       await page.waitFor(() =>
-        [...document.querySelectorAll('button')].some(
-          (el) => el.textContent.trim() === 'Run workflow' && !el.disabled,
+        [...document.querySelectorAll('dialog button')].some(
+          (el) => el.textContent.trim() === 'Run native workflow' && !el.disabled,
         ),
       );
-      await page.button('Run workflow');
+      await page.button('Run native workflow');
     } else {
       await page.evaluate((folder) => {
         const el = document.querySelector('[aria-label="Message"]');
@@ -163,9 +160,15 @@ try {
     assert(answer.includes(marker), 'Fixture marker missing');
     assert(reply.plan?.steps.length, `${chat.provider}: no provider plan decoded`);
     if (chat.provider === 'claude') {
-      assert.equal(reply.workflow.steps.filter((s) => s.status === 'complete').length, 2);
-      assert(answer.split(marker).length >= 3, 'Second step did not carry the first result');
-      assert.equal(reply.workflowDefinition.id, workflow.id);
+      assert.equal(reply.nativeWorkflows?.runs[0]?.name, 'studio-native-check');
+      assert.equal(reply.nativeWorkflows.runs[0].status, 'complete');
+      assert.equal(reply.nativeWorkflows.runs[0].agents[0].status, 'complete');
+      assert(reply.nativeWorkflows.runs[0].agents[0].result.includes(marker));
+      assert(
+        (await readFile(join(workflowDirectory, 'studio-native-saved.js'), 'utf8')).includes(
+          'studio-native-saved',
+        ),
+      );
       await page.waitFor(() => !!document.querySelector('.response-artifacts button'));
     }
     report[chat.provider] = {
@@ -173,7 +176,7 @@ try {
       markerVerified: true,
       status: reply.status,
       plan: reply.plan,
-      workflow: reply.workflow,
+      nativeWorkflows: reply.nativeWorkflows,
       usage: reply.usage,
     };
     await page.evaluate(() => {
@@ -189,6 +192,23 @@ try {
     await reload();
     await openChat(chat.title);
     await page.waitFor(() => !!document.querySelector('.message .plan-panel'));
+    if (chat.provider === 'claude') {
+      await page.evaluate(() => {
+        const el = document.querySelector('[aria-label="Message"]');
+        el.value =
+          'Run /studio-native-saved with the native Workflow tool, wait for completion, and return the exact fixture marker. No changes or other work.';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.waitFor(
+        () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
+      );
+      await page.button('Send message');
+      const reused = await finish(chat.id);
+      assert.equal(reused.nativeWorkflows?.runs[0]?.name, 'studio-native-saved');
+      assert.equal(reused.nativeWorkflows.runs[0].status, 'complete');
+      assert(reused.blocks.some((b) => b.type === 'markdown' && b.text.includes(marker)));
+      report.claude.nativeSaveAndReuseVerified = true;
+    }
     report[chat.provider].reloadVerified = true;
     await writeFile('artifacts/work-features-native-result.json', JSON.stringify(report, null, 2));
     console.log(`Native ${chat.provider}: plan and saved history verified`);

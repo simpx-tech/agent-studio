@@ -373,7 +373,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     #[serde(default)]
-    pub workflow: Option<crate::workflows::Workflow>,
+    pub workflow: Option<serde_json::Value>,
     pub run_id: String,
     // Internal background requests must never inherit interactive chat permissions.
     #[serde(skip)]
@@ -401,11 +401,8 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(workflow) = &self.workflow {
-            if self.agent.provider != "claude" || self.conversation_only {
-                return Err("Workflows require a Claude conversation".into());
-            }
-            workflow.validate()?;
+        if self.workflow.is_some() {
+            return Err("The app-owned step sequencer was removed. Ask Claude to run a native Workflow or a saved /workflow-name command.".into());
         }
         uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid run id")?;
         if !valid_provider(&self.agent.provider) {
@@ -519,18 +516,33 @@ impl RunRequest {
         format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
     }
     pub fn stdin_payload(&self) -> String {
-        if self.agent.provider == "claude" && self.messages.iter().any(|m| !m.images.is_empty()) {
-            let mut content = vec![serde_json::json!({"type":"text","text":self.prompt()})];
-            for (message_index, message) in self.messages.iter().enumerate() {
+        if self.agent.provider == "claude" {
+            if !self.tools_enabled() {
+                return format!(
+                    "{}\n",
+                    serde_json::json!({"type":"user","message":{"role":"user","content":self.prompt()}})
+                );
+            }
+            // Only the current user submission is human input. History and app
+            // instructions must not opt a new turn into ultracode accidentally.
+            let mut history = self.clone();
+            let current = history.messages.pop().expect("validated conversation");
+            let mut content = vec![
+                serde_json::json!({"type":"text","text":format!("{}\nThis is earlier context only. Answer the NEXT user message, not the history above.", history.prompt())}),
+            ];
+            for (message_index, message) in history.messages.iter().enumerate() {
                 for (image_index, image) in message.images.iter().enumerate() {
                     content.push(serde_json::json!({"type":"text","text":image.label(message_index, image_index)}));
                     content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
                 }
             }
-            format!(
-                "{}\n",
-                serde_json::json!({"type":"user","message":{"role":"user","content":content}})
-            )
+            let context = serde_json::json!({"type":"user","shouldQuery":false,"message":{"role":"user","content":content}});
+            let mut content = vec![serde_json::json!({"type":"text","text":current.text})];
+            for image in current.images {
+                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+            }
+            let input = serde_json::json!({"type":"user","uuid":self.run_id,"origin":{"kind":"human"},"message":{"role":"user","content":content}});
+            format!("{context}\n{input}\n")
         } else if self.agent.provider == "gemini" {
             format!(
                 "{}\n",
@@ -668,9 +680,7 @@ pub async fn chat_command(
                 "--include-partial-messages",
                 "--no-session-persistence",
             ]);
-            if request.messages.iter().any(|m| !m.images.is_empty()) {
-                c.args(["--input-format", "stream-json"]);
-            }
+            c.args(["--input-format", "stream-json"]);
             if request.tools_enabled() {
                 c.args([
                     "--tools",
@@ -1449,6 +1459,35 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["event"], "user");
         assert_eq!(value["message"]["content"], r.prompt());
+    }
+    #[test]
+    fn claude_stamps_only_current_human_input_and_rejects_legacy_sequencing() {
+        let mut r = request();
+        r.agent.provider = "claude".into();
+        r.messages[0].text = "Earlier ultracode request".into();
+        r.messages.push(ChatMessage {
+            role: "user".into(),
+            text: "/saved-audit today".into(),
+            images: vec![],
+        });
+        let lines: Vec<serde_json::Value> = r
+            .stdin_payload()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["shouldQuery"], false);
+        assert!(lines[0]["origin"].is_null());
+        assert_eq!(lines[1]["origin"]["kind"], "human");
+        assert_eq!(
+            lines[1]["message"]["content"][0]["text"],
+            "/saved-audit today"
+        );
+        r.conversation_only = true;
+        let background: serde_json::Value = serde_json::from_str(&r.stdin_payload()).unwrap();
+        assert!(background["origin"].is_null());
+        r.workflow = Some(serde_json::json!({"steps":[{"prompt":"legacy"}]}));
+        assert!(r.validate().unwrap_err().contains("sequencer was removed"));
     }
     #[test]
     fn invalid_inputs_never_spawn() {
