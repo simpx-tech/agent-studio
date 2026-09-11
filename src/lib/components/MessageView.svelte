@@ -40,6 +40,14 @@
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
   const artifacts = $derived(messageArtifacts(message));
+  const savedProgress = $derived(
+    message.role === 'assistant' &&
+      message.status !== 'running' &&
+      (message.plan ||
+        message.workflow ||
+        message.nativeWorkflows?.runs.length ||
+        message.nativeWorkflows?.limited),
+  );
   function linkClick(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) {
@@ -78,7 +86,6 @@
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
-      {#if message.status !== 'running'}<PlanPanel {message} compact />{/if}
       {#if message.status === 'running'}<ToolActivity
           {tools}
           replyStatus={message.status}
@@ -116,26 +123,43 @@
           {#if linkError}<span role="alert">{linkError}</span>{/if}
         </div>{/if}
     {/if}
-    {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
-        {#each artifacts as artifact (artifact.id)}<button
-            class="secondary"
-            onclick={() => openArtifact(artifact)}
-            ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-              >Open {artifact.language.toUpperCase()}</small
-            ></button
-          >{/each}
+    {#if artifacts.length || savedProgress}<div class="response-extras">
+        {#if savedProgress}<PlanPanel {message} compact />{/if}
+        {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+            {#each artifacts as artifact (artifact.id)}<button
+                class="secondary"
+                onclick={() => openArtifact(artifact)}
+                ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                  >Open {artifact.language.toUpperCase()}</small
+                ></button
+              >{/each}
+          </div>{/if}
       </div>{/if}
   </div>
 </article>
 
 <style>
+  .response-extras {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 14px 0;
+  }
+  .response-extras > :global(.plan-panel),
+  .response-extras > :global(.native-workflow-panel) {
+    flex: 1 1 240px;
+    min-width: 0;
+    margin: 0;
+  }
   .response-artifacts {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin: 14px 0;
+    flex: 1 1 auto;
   }
   .response-artifacts button {
+    flex: 1 1 auto;
     text-align: left;
     max-width: 100%;
   }

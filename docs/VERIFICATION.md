@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Completed progress cards in the reply footer — 2026-09-11
+
+Completed replies now place their collapsed plan/TODO and native workflow cards at the bottom beside artifact cards. The cards share a row when space permits and wrap on narrow screens. Live progress stays above the composer; saved stopped and unconfirmed outcomes retain their existing labels.
+
+Read-only native verification reused the real saved Claude workflow reply in the isolated bundled QA app at `http://tauri.localhost/`, identifier `com.vinicius.agentstudio.work-features-qa`, CDP 9487. At 1380×900, the three cards aligned beneath the answer and activity summary; at an emulated 390×844, they stacked without horizontal overflow. Plan/workflow expansion and opening the HTML artifact succeeded with no renderer exceptions. Settled desktop/mobile screenshots were visually reviewed. Evidence: `artifacts/progress-footer-native-result.json`, `progress-footer-native.png`, `progress-footer-expanded-native.png`, `progress-footer-mobile-native.png`, and `progress-footer-mobile-expanded-native.png`. No new provider replies were requested for this layout-only change; physical-phone input was not tested.
+
+The full local pipeline passed: `npm run verify` reported zero diagnostics, 87 unit/HTTP tests, a production build, and 75 browser scenarios. Cargo formatting, Clippy with warnings denied, and 72 Rust tests passed (four existing opt-in tests ignored). Logs: `artifacts/progress-footer-{verify,fmt,clippy,rust-tests}.log`. The isolated native QA app remains running with the updated frontend.
+
 ## Native Claude workflow correction — 2026-09-11
 
 The initial app-owned prompt sequencer below misunderstood the requested feature. It has been removed from execution and replaced with Claude Code's native `Workflow` tool and saved project/profile/plugin scripts. Legacy definitions remain available in history/export only. The launcher preserves the draft and runs a task or native `/name` request on the selected connection. Typed input is human-origin; earlier context uses `shouldQuery: false` without human provenance. Native phases, agents, results, and usage come from bounded task notifications and `task_progress.workflow_progress` frames, with revision-safe persistence and a one-hour Claude deadline. The runner waits for background completion and later results, rather than closing on the first answer. Terminal menus, pause/resume controls, and native session resumption across replies are not implemented.
