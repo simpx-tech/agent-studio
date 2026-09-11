@@ -1,5 +1,9 @@
 # Verification — 2026-09-08
 
+## Smaller conversation badge — 2026-09-11
+
+The sidebar's pending-chat badge is reduced from 18px to 16px high, with 4px horizontal padding and an 8px radius. Its 10px numerals retain their readability. This is a CSS-only adjustment to the sidebar badge. Visual evidence and the full repository gate use `artifacts/smaller-badge-*`.
+
 ## Pending chat badges and foreground completion alerts — 2026-09-11
 
 A shared count includes all Active chats without a running assistant reply, independently of the selected chat, History tab, or search query. It drives the sidebar's numbered badge and device-local app-icon updates through transport. Windows renders an application-owned taskbar overlay (99+ above 99), macOS/Linux use native count APIs, and supported browsers use `setAppBadge`/`clearAppBadge`. Relay delivery computes the current count for each push attempt, including a matching terminal job before its final workspace checkpoint; workers apply the exact count without requiring a page or incrementing per notification. Closed PWAs update on a lifecycle push or their next open/sync, rather than receiving extra visible alerts for archive-only changes.
