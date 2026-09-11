@@ -39,7 +39,7 @@ async function host(page: Page, relay: string, token: string, name: string, plat
         },
         async invoke(command: string, args: any) {
           if (command === 'desktop_notification_settings') return { enabled: true, sound: true };
-          if (command === 'desktop_notification') return;
+          if (command === 'desktop_notification' || command === 'set_pending_chat_badge') return;
           if (command === 'plugin:window|is_maximized') return false;
           if (command === 'plugin:event|listen') return 0;
           if (command === 'plugin:event|unlisten') return;

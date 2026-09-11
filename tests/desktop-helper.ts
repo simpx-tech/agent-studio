@@ -19,6 +19,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          if (command === 'set_pending_chat_badge') {
+            localStorage.setItem('test-badge-count', String(args.count));
+            return;
+          }
           if (command === 'desktop_notification_settings')
             return JSON.parse(
               localStorage.getItem('test-notifications') ?? '{"enabled":true,"sound":true}',

@@ -2,6 +2,7 @@ import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import { createDesktopNotificationTracker } from './desktop-notifications';
+import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
@@ -53,6 +54,23 @@ export async function watchDesktopNotifications(
   return listen<string>('studio-notification-open', ({ payload }) => open(payload));
 }
 const desktopNotices = createDesktopNotificationTracker();
+let badgeQueue = Promise.resolve();
+let lastBadgeCount: number | undefined;
+function updatePendingBadge(count: number) {
+  // Serialize writes so an older count cannot land after a newer checkpoint.
+  badgeQueue = badgeQueue
+    .catch(() => {})
+    .then(async () => {
+      // A background service worker can also change a PWA's badge. Reapply the
+      // current workspace count when it syncs, even if this page's value is unchanged.
+      if (desktop() && lastBadgeCount === count) return;
+      if (desktop()) await invoke('set_pending_chat_badge', { count });
+      else await applyAppBadge(navigator, count);
+      lastBadgeCount = count;
+    });
+  // Badge failures are independent of workspace persistence and agent execution.
+  void badgeQueue.catch(() => {});
+}
 
 export async function artifactPreviewUrl(): Promise<string> {
   if (!desktop()) return '/artifact-preview';
@@ -616,11 +634,14 @@ export async function saveWorkspace(workspace: Workspace): Promise<void> {
   if (desktop()) {
     await invoke('save_workspace', { workspace });
     for (const notice of desktopNotices(workspace)) {
+      // Observe every chat, including while another chat has focus. Never gate
+      // lifecycle notifications on activeId, document focus, or visibility.
       // Notification/audio failure must never fail saving or interrupt a CLI run.
       // Native delivery retains an actionable error in Connections.
       void invoke('desktop_notification', { notice }).catch(() => {});
     }
   } else localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
+  updatePendingBadge(pendingChatCount(workspace.conversations));
 }
 export async function detectProviders(): Promise<ProviderStatus[]> {
   if (desktop()) return invoke('detect_providers');

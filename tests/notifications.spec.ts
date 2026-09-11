@@ -16,7 +16,7 @@ test('mobile opts in, receives a real worker push without an app page, opens its
   test.setTimeout(60_000);
   const directory = mkdtempSync(join(tmpdir(), 'studio-notifications-browser-'));
   const token = 'synthetic-push-browser-test-pairing-key';
-  const deliveries: { kind: string; conversationId?: string }[] = [];
+  const deliveries: { kind: string; conversationId?: string; pendingCount?: number }[] = [];
   const server = createRelay({
     directory,
     token,
@@ -134,12 +134,34 @@ test('mobile opts in, receives a real worker push without an app page, opens its
       body: JSON.stringify({ revision: current.revision, workspace: current.workspace }),
     });
     await expect.poll(() => deliveries.length).toBe(2);
+    expect(deliveries[1].pendingCount).toBe(2);
+    const worker = context.serviceWorkers().find((w) => w.url() === url + '/service-worker.js')!;
+    await worker.evaluate(() => {
+      const nav = navigator as any;
+      const set = nav.setAppBadge?.bind(nav);
+      nav.setAppBadge = async (count: number) => {
+        (self as any).qaBadgeCount = count;
+        await set?.(count);
+      };
+      const clear = nav.clearAppBadge?.bind(nav);
+      nav.clearAppBadge = async () => {
+        (self as any).qaBadgeCount = 0;
+        await clear?.();
+      };
+    });
     await cdp.send('ServiceWorker.deliverPushMessage', {
       origin: url,
       registrationId,
       data: JSON.stringify({ ...deliveries[1], tag: 'qa-finished' }),
     });
-    const worker = context.serviceWorkers().find((w) => w.url() === url + '/service-worker.js')!;
+    await expect.poll(() => worker.evaluate(() => (self as any).qaBadgeCount)).toBe(2);
+    // Zero is an explicit clear; repeated deliveries never increment the count.
+    await cdp.send('ServiceWorker.deliverPushMessage', {
+      origin: url,
+      registrationId,
+      data: JSON.stringify({ kind: 'test', tag: 'qa-zero-badge', pendingCount: 0 }),
+    });
+    await expect.poll(() => worker.evaluate(() => (self as any).qaBadgeCount)).toBe(0);
     await expect
       .poll(async () =>
         worker.evaluate(async () => {

@@ -29,7 +29,8 @@ function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'studio-push-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   let time = Date.now();
-  const send = vi.fn(async () => {});
+  const send = vi.fn(async (_subscription: webpush.PushSubscription, _payload: string) => {});
+  let pending = 0;
   const active = new Set(['session']);
   const args = {
     directory,
@@ -37,6 +38,7 @@ function fixture() {
     now: () => time,
     sessionActive: (id: string) => active.has(id),
     send,
+    pendingCount: () => pending,
   };
   let service = pushService(args);
   const device = subscription();
@@ -51,8 +53,22 @@ function fixture() {
     directory,
     restart: (token = args.token) => (service = pushService({ ...args, token })),
     advance: (ms: number) => (time += ms),
+    pending: (count: number) => (pending = count),
   };
 }
+it('sends the exact current pending count and refreshes it on retries instead of incrementing alerts', async () => {
+  const f = fixture();
+  f.pending(7);
+  f.send.mockRejectedValueOnce({ statusCode: 503 });
+  f.service.changed(emptyShared(), workspace('complete'));
+  await vi.waitFor(() => expect(f.service.status('session').deliveryFailed).toBe(true));
+  expect(JSON.parse(f.send.mock.calls[0][1]).pendingCount).toBe(7);
+  f.pending(0);
+  f.restart();
+  f.advance(10_001);
+  await f.service.drain();
+  expect(JSON.parse(f.send.mock.calls[1][1]).pendingCount).toBe(0);
+});
 function workspace(status: Message['status'] = 'running') {
   const value = emptyShared();
   value.conversations.push({

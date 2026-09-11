@@ -95,12 +95,14 @@ export function pushService({
   now,
   sessionActive,
   send = webpush.sendNotification,
+  pendingCount,
 }: {
   directory: string;
   token: string;
   now: () => number;
   sessionActive: (session: string) => boolean;
   send?: PushSender;
+  pendingCount?: () => number;
 }) {
   const file = join(directory, 'web-push.json');
   const keyId = createHmac('sha256', token).update('web-push-v1').digest('hex');
@@ -191,7 +193,13 @@ export function pushService({
         let failed = false,
           gone = false;
         try {
-          await send(subscriber.subscription, JSON.stringify(item.notice), {
+          // Read the current total for every attempt, including delayed retries.
+          // Do not increment per notification: one chat can send several alerts.
+          const notice = {
+            ...item.notice,
+            ...(pendingCount ? { pendingCount: pendingCount() } : {}),
+          };
+          await send(subscriber.subscription, JSON.stringify(notice), {
             TTL: Math.max(0, Math.floor((item.expires - now()) / 1000)),
             urgency: 'normal',
             timeout: 10_000,

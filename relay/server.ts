@@ -15,6 +15,7 @@ import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
+import { pendingChatCount } from '../src/lib/notifications.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z.object({
@@ -70,6 +71,15 @@ export function createRelay({
     now,
     sessionActive: sessions.active,
     send: pushSender,
+    pendingCount: () =>
+      pendingChatCount(
+        state.workspace.conversations,
+        new Map(
+          [...jobs.values()]
+            .filter((job) => job.method === 'run')
+            .map((job) => [job.id, job.status]),
+        ),
+      ),
   });
   const file = join(directory, 'workspace.json');
   let state: z.infer<typeof diskSchema> = {

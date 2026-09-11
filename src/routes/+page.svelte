@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { trackMobileViewport } from '$lib/mobileViewport';
-  import { notificationConversation, requestsAttention } from '$lib/notifications';
+  import {
+    notificationConversation,
+    requestsAttention,
+    pendingChatCount,
+  } from '$lib/notifications';
   import { watchDesktopNotifications } from '$lib/transport';
   import {
     ArrowUp,
@@ -449,6 +453,7 @@
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
   );
   const conversationGroups = $derived(groupConversations(recent, workspace.fleet, installation));
+  const pendingChats = $derived(pendingChatCount(workspace.conversations));
   const observedReply = $derived(
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
   );
@@ -1792,7 +1797,15 @@
       <span>agent<span class="brand-light">studio</span></span>
     </button>
     <div class="sidebar-section">
-      <span>CONVERSATIONS</span><button
+      <span class="sidebar-section-label"
+        >CONVERSATIONS
+        <span role="status" aria-live="polite" aria-label={`${pendingChats} pending chats`}>
+          {#if pendingChats > 0}<span
+              class="pending-chat-count"
+              title="Pending chats: active conversations that are not working">{pendingChats}</span
+            >{/if}
+        </span>
+      </span><button
         class="icon-button"
         onclick={() => newChat()}
         aria-label="New conversation"

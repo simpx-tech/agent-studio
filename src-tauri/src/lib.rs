@@ -1,4 +1,5 @@
 mod artifacts;
+mod badges;
 mod cli_queries;
 mod context;
 mod folders;
@@ -467,6 +468,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            badges::set_pending_chat_badge,
             notifications::desktop_notification_settings,
             notifications::set_desktop_notifications,
             notifications::desktop_notification,

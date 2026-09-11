@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import { build, files, version } from '$service-worker';
-import { notificationContent, type PushNotice } from './lib/notifications';
+import { applyAppBadge, notificationContent, type PushNotice } from './lib/notifications';
 
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const name = `agent-studio-shell-${version}`;
@@ -15,18 +15,25 @@ worker.addEventListener('push', (event) => {
       notice = { kind: value.kind, tag: String(value.tag ?? 'studio-reply').slice(0, 100) };
       if (typeof value.conversationId === 'string' && /^[a-f0-9-]{36}$/i.test(value.conversationId))
         notice.conversationId = value.conversationId;
+      if (Number.isSafeInteger(value.pendingCount) && value.pendingCount >= 0)
+        notice.pendingCount = value.pendingCount;
     }
   } catch {
     /* A payload-less push still needs a visible notification. */
   }
   const { title, body } = notificationContent(notice);
   event.waitUntil(
-    worker.registration.showNotification(title, {
-      body,
-      tag: notice.tag,
-      icon: '/icons/icon-192.png',
-      data: { conversationId: notice.conversationId },
-    }),
+    Promise.all([
+      worker.registration.showNotification(title, {
+        body,
+        tag: notice.tag,
+        icon: '/icons/icon-192.png',
+        data: { conversationId: notice.conversationId },
+      }),
+      notice.pendingCount === undefined
+        ? Promise.resolve()
+        : applyAppBadge(worker.navigator, notice.pendingCount).catch(() => {}),
+    ]),
   );
 });
 worker.addEventListener('notificationclick', (event) => {

@@ -1,11 +1,41 @@
-import type { Message } from './domain';
+import type { Conversation, Message } from './domain';
 
 export type NotificationKind = 'complete' | 'attention' | 'error' | 'cancelled' | 'test';
 export type PushNotice = {
   kind: NotificationKind;
   conversationId?: string;
   tag: string;
+  pendingCount?: number;
 };
+
+// Pending means Active and not working. Reading/opening a chat is irrelevant.
+// The relay may know a run has ended before its final workspace checkpoint arrives.
+export function pendingChatCount(
+  conversations: readonly Pick<Conversation, 'archived' | 'messages'>[],
+  runStatuses?: ReadonlyMap<string, string>,
+): number {
+  return conversations.filter(
+    (c) =>
+      !c.archived &&
+      !c.messages.some(
+        (m) =>
+          m.role === 'assistant' &&
+          m.status === 'running' &&
+          !['complete', 'cancelled', 'error'].includes(
+            runStatuses?.get(m.runId ?? '') ?? 'running',
+          ),
+      ),
+  ).length;
+}
+
+export async function applyAppBadge(
+  target: { setAppBadge?: (count: number) => Promise<void>; clearAppBadge?: () => Promise<void> },
+  count: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(count) || count < 0) return;
+  if (count === 0 && target.clearAppBadge) await target.clearAppBadge();
+  else await target.setAppBadge?.(count);
+}
 
 // Only explicit parent tool identities indicate an in-progress question. Prose
 // questions are covered by the finished-reply notification, in every language.
