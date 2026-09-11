@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Highlighted artifact source — 2026-09-11
+
+HTML/SVG Source tabs now share the chat token colors and a span-only sanitized highlighting helper. They display original source directly, without reparsing it as Markdown. Highlighting is derived when Source is selected; oversized sources retain escaped plain text. Modal/panel switching and source downloads keep their existing behavior.
+
+The full local pipeline passed: zero Svelte diagnostics, 87 unit/HTTP tests, a production build, 78 browser scenarios, Cargo formatting, Clippy with warnings denied, and 72 Rust tests (four existing opt-in checks ignored). Browser checks cover source colors in modal/panel/mobile/PWA views, exact text and entity preservation, the large-source fallback, inert markup, and unchanged downloads. Logs: `artifacts/source-highlight-{verify,clippy,rust}.log`. A new PWA assertion initially expected a `title` tag from another fixture; it was corrected to the fixture's actual `h1` tag before rerunning the full pipeline.
+
+The existing isolated `com.vinicius.agentstudio.syntax-qa` native dev app (CDP 9467) verified HTML with embedded CSS/JavaScript in modal and panel views, plus SVG source. Source text retained leading whitespace and entities; distinct computed colors, span-only markup, no execution in the main document, no page overflow, and zero renderer errors were verified. Desktop, panel, and mobile screenshots were visually reviewed. Evidence: `artifacts/source-native-result.json`, `source-native-smoke.mjs`, `artifact-source-native.png`, `artifact-source-panel-native.png`, `artifact-source-svg-native.png`, and browser `artifact-source-{browser,panel,mobile,pwa}.png`. Screenshot capture waits for the selected Source tab and two animation frames. Checks used saved fixtures; no new provider replies or physical-phone tests were requested. The QA app and Vite service remain running.
+
 ## Syntax highlighting for code snippets — 2026-09-11
 
 The shared Markdown renderer now highlights declared code languages with bundled Highlight.js grammars, including PowerShell. Its isolated Marked instance leaves artifact extraction unchanged. Sanitization runs after highlighting, allowing presentation spans while keeping script tags, event handlers, and unsafe links out of the chat document. Missing/unknown languages and oversized blocks fall back to escaped code. Source remains unchanged in saved messages.

@@ -53,11 +53,18 @@ test('the production PWA renders and downloads artifacts through the real relay 
     await frame.getByRole('button', { name: 'Add one' }).click();
     await expect(frame.locator('output')).toHaveText('1');
     expect(await page.locator('iframe').getAttribute('src')).toBe('/artifact-preview');
+    await page.getByRole('tab', { name: 'Source', exact: true }).click();
+    const sourceCode = page.getByRole('tabpanel', { name: 'Artifact source' }).locator('code');
+    expect(await sourceCode.textContent()).toBe(source);
+    await expect(sourceCode.locator('.hljs-name').first()).toHaveText('h1');
+    await page.screenshot({ path: 'artifacts/artifact-source-pwa.png' });
     const received = page.waitForEvent('download');
     await page.getByRole('button', { name: 'Download', exact: true }).click();
     const download = await received;
     expect(download.suggestedFilename()).toBe('PWA Counter.html');
     expect(readFileSync((await download.path())!, 'utf8')).toBe(source);
+    await page.getByRole('tab', { name: 'Preview', exact: true }).click();
+    await expect(frame.getByRole('heading', { name: 'PWA Counter' })).toBeVisible();
     await page.screenshot({ path: 'artifacts/artifact-preview-pwa.png' });
   } finally {
     server.closeAllConnections();
@@ -97,6 +104,18 @@ fetch('/v1/state').catch(()=>{});</script></body></html>`;
   expect(await page.locator('body').getAttribute('data-compromised')).toBeNull();
   await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
   await expect(viewer.locator('pre')).toHaveText(source);
+  expect(await viewer.locator('pre code').textContent()).toBe(source);
+  const colors = await viewer
+    .locator('pre code')
+    .evaluate((element) =>
+      ['.hljs-name', '.hljs-attr', '.hljs-string'].map(
+        (selector) => getComputedStyle(element.querySelector(selector)!).color,
+      ),
+    );
+  expect(new Set(colors).size).toBe(3);
+  await expect(viewer.locator('pre script, pre style, pre [onclick], pre button')).toHaveCount(0);
+  expect(await page.locator('body').getAttribute('data-compromised')).toBeNull();
+  await page.screenshot({ path: 'artifacts/artifact-source-browser.png' });
   await viewer.getByRole('button', { name: 'Download', exact: true }).click();
   expect(await page.evaluate(() => (window as any).savedArtifact)).toEqual({
     source,
@@ -110,6 +129,10 @@ fetch('/v1/state').catch(()=>{});</script></body></html>`;
   await expect(viewer.getByRole('button', { name: 'Close artifact' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'artifacts/artifact-preview-mobile.png' });
+  await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
+  await expect(viewer.locator('pre code .hljs-name').first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'artifacts/artifact-source-mobile.png' });
   await page.keyboard.press('Escape');
   await expect(viewer).toHaveCount(0);
   await page.setViewportSize({ width: 1380, height: 900 });
@@ -195,6 +218,8 @@ test('artifacts dock beside chat and switch to a modal without resetting the pre
   await expect(frame.getByRole('button', { name: '0', exact: true })).toBeVisible();
   await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
   await expect(viewer.locator('pre')).toHaveText(source);
+  await expect(viewer.locator('pre code .hljs-name').first()).toHaveText('title');
+  await page.screenshot({ path: 'artifacts/artifact-source-panel.png' });
   await viewer.getByRole('button', { name: 'Download', exact: true }).click();
   expect(await page.evaluate(() => (window as any).savedArtifact)).toEqual({
     source,

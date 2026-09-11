@@ -3,6 +3,7 @@
   import { X, Download, RotateCcw, Code, Eye, PanelRightOpen, Maximize2 } from '@lucide/svelte';
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
+  import { highlightCode } from '$lib/markdown';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import ArtifactResize from './ArtifactResize.svelte';
   let {
@@ -21,6 +22,9 @@
   let panelWidth = $state<number>();
   const docked = $derived(mode === 'panel' && viewportWidth >= 1100 && workspaceWidth >= 780);
   let tab = $state<'preview' | 'source'>('preview');
+  const highlightedSource = $derived(
+    tab === 'source' ? highlightCode(artifact.source, artifact.language) : null,
+  );
   let url = $state('');
   let error = $state('');
   let downloadStatus = $state('');
@@ -170,7 +174,9 @@
             allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"
             onload={initialize}
           ></iframe>{/key}{:else}<p>Loading preview…</p>{/if}
-    {:else}<pre><code>{artifact.source}</code></pre>{/if}
+    {:else}<pre><code class="hljs"
+          >{#if highlightedSource}{@html highlightedSource.html}{:else}{artifact.source}{/if}</code
+        ></pre>{/if}
   </div>
   <footer>
     <span role="status">{downloadStatus}</span>Self-contained HTML and SVG · External resources are

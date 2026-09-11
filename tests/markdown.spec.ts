@@ -83,6 +83,7 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
     ['text', plain],
     ['js" onclick="window.codeExecuted=true', plain],
     ['js', large],
+    ['html Large source', '<!--\n' + large + '-->'],
   ];
   const workspace = initialWorkspace(),
     now = new Date().toISOString();
@@ -141,6 +142,20 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
         .first()
         .evaluate((el) => getComputedStyle(el).color),
     ).not.toBe(await firstCode.evaluate((el) => getComputedStyle(el).color));
+    // The source viewer bypasses Markdown parsing, preserving entities and inert markup exactly.
+    await page.getByRole('button', { name: 'Example Open HTML', exact: true }).click();
+    const viewer = page.getByRole('dialog', { name: 'Example', exact: true });
+    await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
+    expect(await viewer.locator('pre code').textContent()).toBe(html);
+    expect(await viewer.locator('pre code span').count()).toBeGreaterThan(0);
+    await expect(viewer.locator('pre code :not(span)')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).codeExecuted)).toBeUndefined();
+    await viewer.getByRole('button', { name: 'Close artifact' }).click();
+    await page.getByRole('button', { name: 'Large source Open HTML', exact: true }).click();
+    const largeViewer = page.getByRole('dialog', { name: 'Large source', exact: true });
+    await largeViewer.getByRole('tab', { name: 'Source', exact: true }).click();
+    expect(await largeViewer.locator('pre code').textContent()).toBe(snippets.at(-1)![1]);
+    await expect(largeViewer.locator('pre code span')).toHaveCount(0);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

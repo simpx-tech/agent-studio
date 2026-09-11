@@ -7,25 +7,44 @@ hljs.registerLanguage('powershell', powershell);
 
 // Keep streaming renders bounded; unsupported or large blocks use Marked's escaped fallback.
 const maxHighlightedCodeLength = 64 * 1024;
+
+// Only presentation spans leave this boundary. Callers can safely display the result
+// as HTML, while falling back to their normal escaped text when highlighting is unavailable.
+export function highlightCode(
+  text: string,
+  info?: string,
+): { language: string; html: string } | null {
+  const language = info?.trim().split(/\s+/, 1)[0].toLowerCase();
+  if (
+    !language ||
+    !/^[a-z0-9_+#.-]+$/.test(language) ||
+    !hljs.getLanguage(language) ||
+    text.length > maxHighlightedCodeLength
+  )
+    return null;
+  try {
+    const html = DOMPurify.sanitize(
+      hljs.highlight(text, { language, ignoreIllegals: true }).value,
+      {
+        ALLOWED_TAGS: ['span'],
+        ALLOWED_ATTR: ['class'],
+        ALLOW_DATA_ATTR: false,
+      },
+    );
+    return { language, html };
+  } catch {
+    return null;
+  }
+}
+
 const markdown = new Marked({
   gfm: true,
   breaks: true,
   renderer: {
     code({ text, lang }) {
-      const language = lang?.trim().split(/\s+/, 1)[0].toLowerCase();
-      if (
-        !language ||
-        !/^[a-z0-9_+#.-]+$/.test(language) ||
-        !hljs.getLanguage(language) ||
-        text.length > maxHighlightedCodeLength
-      )
-        return false;
-      try {
-        const highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value;
-        return `<pre><code class="hljs language-${language}">${highlighted}\n</code></pre>\n`;
-      } catch {
-        return false;
-      }
+      const highlighted = highlightCode(text, lang);
+      if (!highlighted) return false;
+      return `<pre><code class="hljs language-${highlighted.language}">${highlighted.html}\n</code></pre>\n`;
     },
   },
 });
