@@ -12,7 +12,7 @@ Typing `/` in the composer also uses this selection's inventory/cache to offer [
 
 After the first inspection, reopening shows the latest cached result immediately with an **Updating…** indicator while refreshing. A failed refresh keeps that result and its original check time visible. Reopening during an existing refresh shares the same request. The cache holds up to 32 recently viewed selections for the current app session, separated by provider, model, connection, computer, environment, and folder; restarting the app clears it.
 
-The inspector keeps the same height while loading, refreshing, or showing errors. Its height is capped by the available viewport; longer content scrolls inside the dialog without moving its frame.
+The inspector keeps the same height while loading, refreshing, or showing errors. Its height is capped by the available viewport, with no scrollbar on the outer frame. The source list fills and scrolls within the remaining space. On narrow or short screens, the body uses one scroll area so all context details remain reachable. The header and Done footer stay in place.
 
 Context sources belong to the CLI profile and project, so models using the same account and folder generally share sources. A fresh inspection uses the selected model. Historical replies retain their captured model settings, but the inspector is not a record of every file they read. File contents are not exported by the inspector, and inventories are not saved in conversation history.
 

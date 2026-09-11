@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Model context outer scrollbar — 2026-09-11
+
+The packaged Windows inspector had a 799px client height and 806px scroll height, so its inherited modal overflow created a second scrollbar alongside the 33vh source list. The fixed-height dialog now uses a flexible inner body and source list, with the header/footer outside the scroll area. Narrow or short screens scroll the body as one region so metadata and all category controls remain reachable; the outer frame never scrolls.
+
+Rendered layout checks cover all four categories at 1380x900, 880x720, 840x640, 390x844, and 320x460, including long skill lists, loading, filtering, and refresh errors. They verify equal outer scroll/client height, stable frame geometry, actual positive inner scrolling, fixed header/footer positions, reachable controls, and no page errors. The rebuilt isolated Windows QA app repeats the category and scrolling checks against its real CLI inventory; no generated provider replies were needed for this layout change. Evidence: `artifacts/context-scroll-{result,native-result}.json`, `context-scroll-native.png`, and `context-scroll-WIDTHxHEIGHT.png`. Full repository gate logs are `artifacts/context-scroll-{verify,fmt,clippy,rust}.log`. Native QA and the local preview remain running; other operating systems and physical-phone interaction were not repeated.
+
 ## Model context MCPs and scoped memories — 2026-09-11
 
 Model context now includes an MCPs category with bounded server names and status/scope metadata. Codex starts its metadata app-server in the selected folder, reads effective configuration, and follows bounded MCP status pagination. Claude retains MCP discovery during its tool-disabled, hook-disabled context query and reads native MCP status. No model replies, tool calls, or sign-in flows are requested. Configured and connected are distinct; disabled, failed, connecting, and authentication-required states remain visible. Commands, URLs, environment values, tool definitions, and raw errors are excluded from returned metadata.

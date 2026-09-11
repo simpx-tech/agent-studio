@@ -125,121 +125,125 @@
         aria-label="Close model context"><X size={20} /></button
       >
     </header>
-    <p class="context-intro">
-      Instructions and resources for this model’s selected account and folder. Models using the same
-      CLI profile and folder share these sources.
-    </p>
-    <div class="context-location">
-      <strong>{computerName} · {accountName}</strong>
-      <span>{snapshot?.execution ?? providers[settings.provider].name}</span>
-      <code>{snapshot?.folder ?? location?.path ?? 'Isolated conversation folder'}</code>
-      {#if snapshot}<span class="context-profile">Profile: <code>{snapshot.profile}</code></span
-        >{/if}
-    </div>
-    {#if settings.instructions.trim()}
-      <details class="context-custom">
-        <summary>Conversation instructions <span>Included with the next message</span></summary>
-        <pre>{settings.instructions}</pre>
-      </details>
-    {/if}
-    <div class="context-categories" aria-label="Context categories">
-      {#each categories as tab}
-        <button
-          class:active={category === tab.id}
-          aria-pressed={category === tab.id}
-          onclick={() => {
-            category = tab.id;
-            search = '';
-          }}
-        >
-          <tab.icon size={15} />{tab.name}<span
-            >{snapshot ? snapshot.entries.filter((e) => e.kind === tab.id).length : '—'}</span
-          >
-        </button>
-      {/each}
-    </div>
-    <div class="context-search">
-      <Search size={15} aria-hidden="true" /><input
-        aria-label="Filter context sources"
-        placeholder="Filter by name, path, or scope…"
-        bind:value={search}
-      />
-      <button
-        class="icon-button"
-        disabled={loading}
-        onclick={() => refresh++}
-        aria-label="Refresh model context"
-        title="Refresh model context"
-        ><RefreshCw size={15} class={loading ? 'spinning' : ''} /></button
-      >
-    </div>
-    {#if error}<p class="error-banner" role="alert">{error}</p>{/if}
-    <div class="context-entries" aria-busy={loading}>
-      {#if category === 'memories'}
-        <p class="context-category-help">
-          Global memory entrypoints and sources for this project or folder. Topic files are read
-          when relevant to the task.
-        </p>
-      {:else if category === 'mcps'}
-        <p class="context-category-help">
-          MCP servers for the selected CLI profile and folder. Configured servers may still need to
-          connect.
-        </p>
+    <div class="context-body">
+      <p class="context-intro">
+        Instructions and resources for this model’s selected account and folder. Models using the
+        same CLI profile and folder share these sources.
+      </p>
+      <div class="context-location">
+        <strong>{computerName} · {accountName}</strong>
+        <span>{snapshot?.execution ?? providers[settings.provider].name}</span>
+        <code>{snapshot?.folder ?? location?.path ?? 'Isolated conversation folder'}</code>
+        {#if snapshot}<span class="context-profile">Profile: <code>{snapshot.profile}</code></span
+          >{/if}
+      </div>
+      {#if settings.instructions.trim()}
+        <details class="context-custom">
+          <summary>Conversation instructions <span>Included with the next message</span></summary>
+          <pre>{settings.instructions}</pre>
+        </details>
       {/if}
-      {#if loading && !snapshot}<p class="context-empty" role="status">
-          Inspecting the selected CLI profile…
-        </p>
-      {:else if snapshot && !filtered.length}<p class="context-empty">
-          {search
-            ? 'No sources match this filter.'
-            : category === 'mcps'
-              ? 'No MCP servers were reported. Check the inspection notes for availability.'
-              : `No ${category} were reported or found in the inspected locations.`}
-        </p>
-      {:else}
-        {#each filtered as entry (entry.kind + entry.path)}
-          <article class="context-entry">
-            <div class="context-entry-title">
-              <strong>{entry.name}</strong><span class="context-scope">{entry.scope}</span><span
-                class="context-status"
-                class:reported={entry.status === 'reported'}>{contextStatuses[entry.status]}</span
-              >
-            </div>
-            {#if entry.kind !== 'mcps'}<div class="context-path">
-                <code>{entry.path}</code><button
-                  class="icon-button"
-                  aria-label={`Copy path for ${entry.name}`}
-                  title="Copy path"
-                  onclick={() => copyPath(entry.path)}
-                  >{#if copied === entry.path}<Check size={14} />{:else}<Copy
-                      size={14}
-                    />{/if}</button
-                >
-              </div>{/if}
-            <p>{entry.detail}</p>
-            {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
-              <button
-                class="text-button"
-                disabled={entry.status === 'disabled'}
-                aria-label={`Use skill ${entry.name}`}
-                title={entry.status === 'disabled'
-                  ? 'Disabled in the selected CLI profile'
-                  : 'Add this skill to your next message'}
-                onclick={() => useSkill(entry.name, entry.path)}
-                ><Sparkles size={13} />Use in next message</button
-              >
-            {/if}
-          </article>
+      <div class="context-categories" aria-label="Context categories">
+        {#each categories as tab}
+          <button
+            class:active={category === tab.id}
+            aria-pressed={category === tab.id}
+            onclick={() => {
+              category = tab.id;
+              search = '';
+            }}
+          >
+            <tab.icon size={15} />{tab.name}<span
+              >{snapshot ? snapshot.entries.filter((e) => e.kind === tab.id).length : '—'}</span
+            >
+          </button>
         {/each}
+      </div>
+      <div class="context-search">
+        <Search size={15} aria-hidden="true" /><input
+          aria-label="Filter context sources"
+          placeholder="Filter by name, path, or scope…"
+          bind:value={search}
+        />
+        <button
+          class="icon-button"
+          disabled={loading}
+          onclick={() => refresh++}
+          aria-label="Refresh model context"
+          title="Refresh model context"
+          ><RefreshCw size={15} class={loading ? 'spinning' : ''} /></button
+        >
+      </div>
+      {#if error}<p class="error-banner" role="alert">{error}</p>{/if}
+      <div class="context-entries" aria-busy={loading}>
+        {#if category === 'memories'}
+          <p class="context-category-help">
+            Global memory entrypoints and sources for this project or folder. Topic files are read
+            when relevant to the task.
+          </p>
+        {:else if category === 'mcps'}
+          <p class="context-category-help">
+            MCP servers for the selected CLI profile and folder. Configured servers may still need
+            to connect.
+          </p>
+        {/if}
+        {#if loading && !snapshot}<p class="context-empty" role="status">
+            Inspecting the selected CLI profile…
+          </p>
+        {:else if snapshot && !filtered.length}<p class="context-empty">
+            {search
+              ? 'No sources match this filter.'
+              : category === 'mcps'
+                ? 'No MCP servers were reported. Check the inspection notes for availability.'
+                : `No ${category} were reported or found in the inspected locations.`}
+          </p>
+        {:else}
+          {#each filtered as entry (entry.kind + entry.path)}
+            <article class="context-entry">
+              <div class="context-entry-title">
+                <strong>{entry.name}</strong><span class="context-scope">{entry.scope}</span><span
+                  class="context-status"
+                  class:reported={entry.status === 'reported'}>{contextStatuses[entry.status]}</span
+                >
+              </div>
+              {#if entry.kind !== 'mcps'}<div class="context-path">
+                  <code>{entry.path}</code><button
+                    class="icon-button"
+                    aria-label={`Copy path for ${entry.name}`}
+                    title="Copy path"
+                    onclick={() => copyPath(entry.path)}
+                    >{#if copied === entry.path}<Check size={14} />{:else}<Copy
+                        size={14}
+                      />{/if}</button
+                  >
+                </div>{/if}
+              <p>{entry.detail}</p>
+              {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
+                <button
+                  class="text-button"
+                  disabled={entry.status === 'disabled'}
+                  aria-label={`Use skill ${entry.name}`}
+                  title={entry.status === 'disabled'
+                    ? 'Disabled in the selected CLI profile'
+                    : 'Add this skill to your next message'}
+                  onclick={() => useSkill(entry.name, entry.path)}
+                  ><Sparkles size={13} />Use in next message</button
+                >
+              {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+      {#if snapshot}
+        <div class="context-notes">
+          {#if snapshot.truncated}<p role="status">
+              The inventory reached its size limit. Additional sources may exist.
+            </p>{/if}
+          {#each snapshot.notes as note}<p>{note}</p>{/each}
+        </div>
       {/if}
     </div>
     {#if snapshot}
-      <div class="context-notes">
-        {#if snapshot.truncated}<p role="status">
-            The inventory reached its size limit. Additional sources may exist.
-          </p>{/if}
-        {#each snapshot.notes as note}<p>{note}</p>{/each}
-      </div>
       <footer>
         <span
           >Checked {new Date(snapshot.checkedAt).toLocaleTimeString([], {
@@ -260,8 +264,24 @@
     width: min(820px, 100%);
     height: min(800px, 100%);
     max-height: 100%;
-    scrollbar-gutter: stable;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     padding: 26px;
+  }
+  .context-modal > header,
+  .context-modal > footer {
+    flex-shrink: 0;
+  }
+  .context-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .context-body > * {
+    flex-shrink: 0;
   }
   .context-modal header {
     margin-bottom: 14px;
@@ -354,9 +374,9 @@
     width: 100%;
     padding: 9px 10px;
   }
-  .context-entries {
-    min-height: 125px;
-    height: 33vh;
+  .context-body > .context-entries {
+    flex: 1;
+    min-height: 0;
     overflow: auto;
     scrollbar-gutter: stable;
   }
@@ -434,6 +454,16 @@
     margin-right: auto;
     font-size: 10px;
     color: #8ba179;
+  }
+  @media (max-width: 700px), (max-height: 700px) {
+    .context-body {
+      overflow: auto;
+      scrollbar-gutter: stable;
+    }
+    .context-body > .context-entries {
+      flex: none;
+      overflow: visible;
+    }
   }
   @media (max-width: 700px) {
     .context-modal {
