@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Artifact side panel with retained modal — 2026-09-11
+
+Each HTML/SVG card retains its modal opener and adds a side-panel button. The viewer can switch presentation without replacing its sandboxed iframe, so interactive state survives. At widths of 1100px and above the panel docks beside the chat; smaller windows use a right-side modal drawer. Preview/Source, restart, download, focus return, and Escape remain available. The composer stays usable beside the docked panel, and leaving chat or changing conversations closes it. Narrowed chat settings scroll horizontally so their labels remain readable even when the full window still uses desktop breakpoints.
+
+A browser integration scenario verifies panel geometry, editable/preserved drafts, counter state across modal/panel switches, restart, source, download, mobile drawer bounds, Escape/focus return, and closure on a new conversation. The existing modal, PWA, and sandbox scenarios remain in the suite.
+
+Native verification reused the saved real Claude HTML counter in the isolated bundled QA app (`com.vinicius.agentstudio.work-features-qa`, CDP 9487), without generating another provider reply. At 1380×900 the panel began exactly at the chat's right edge, and the composer remained focusable. The counter advanced from 0 to 1 in the panel and from 1 to 2 after switching to the modal. Both modes blocked parent DOM, storage, network, and actual read-only native IPC probes. At an emulated 390×844, the drawer filled the available viewport without overflow. The draft survived close, and renderer errors were empty. Settled native desktop/mobile and browser screenshots were visually reviewed. Evidence: `artifacts/artifact-side-panel-native-result.json`, `artifact-side-panel-native.png`, `artifact-side-panel-modal-native.png`, `artifact-side-panel-mobile-native.png`, and `artifact-side-panel-{browser,mobile}.png`. Physical phones and non-Windows native apps were not exercised.
+
+All required checks passed: `npm run verify` (zero diagnostics, 87 unit/HTTP tests, production build, 76 browser scenarios), Cargo formatting, Clippy with warnings denied, and 72 Rust tests (four existing opt-in tests ignored). Logs: `artifacts/artifact-panel-{verify,fmt,clippy,rust-tests}.log`. The native QA app remains running with the panel open. The narrowed-toolbar layout finding was recorded as a reusable local learning.
+
 ## Reply footer ordering and spacing — 2026-09-11
 
 Artifact, plan/TODO, and native workflow cards now precede the reply token/time row. Completed tool activity follows immediately below token/time with its former 14px top margin removed, and Retry is the final action. Live tool-activity spacing is unchanged.

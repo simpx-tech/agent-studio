@@ -119,6 +119,79 @@ fetch('/v1/state').catch(()=>{});</script></body></html>`;
   await expect(page.getByRole('button', { name: 'Counter Open HTML' })).toBeVisible();
 });
 
+test('artifacts dock beside chat and switch to a modal without resetting the preview', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Create a panel counter');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const source =
+    '<!doctype html><title>Panel counter</title><button onclick="this.textContent=Number(this.textContent)+1">0</button>';
+  await page.evaluate((source) => {
+    (window as any).emitCapability({
+      kind: 'text',
+      text: '```html Panel counter\n' + source + '\n```',
+    });
+    (window as any).finishCapabilities('complete');
+  }, source);
+  const openPanel = page.getByRole('button', {
+    name: 'Open Panel counter in side panel',
+    exact: true,
+  });
+  await openPanel.click();
+  const viewer = page.getByRole('dialog', { name: 'Panel counter', exact: true });
+  const frame = page.frameLocator('iframe[title="Panel counter preview"]');
+  await expect(viewer).toHaveClass(/docked/);
+  expect(await viewer.evaluate((element) => element.matches(':modal'))).toBe(false);
+  const chatBox = (await page.locator('.chat-layout').boundingBox())!;
+  const panelBox = (await viewer.boundingBox())!;
+  expect(panelBox.x).toBeGreaterThanOrEqual(chatBox.x + chatBox.width - 1);
+  await page.getByLabel('Message', { exact: true }).fill('Draft stays usable beside the preview');
+  await frame.getByRole('button', { name: '0', exact: true }).click();
+  await expect(frame.getByRole('button', { name: '1', exact: true })).toBeVisible();
+  await viewer.getByRole('button', { name: 'Open in modal', exact: true }).click();
+  expect(await viewer.evaluate((element) => element.matches(':modal'))).toBe(true);
+  await expect(frame.getByRole('button', { name: '1', exact: true })).toBeVisible();
+  await viewer.getByRole('button', { name: 'Open in side panel', exact: true }).click();
+  await expect(viewer).toHaveClass(/docked/);
+  await expect(frame.getByRole('button', { name: '1', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Draft stays usable beside the preview',
+  );
+  await viewer.getByRole('button', { name: 'Restart preview' }).click();
+  await expect(frame.getByRole('button', { name: '0', exact: true })).toBeVisible();
+  await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
+  await expect(viewer.locator('pre')).toHaveText(source);
+  await viewer.getByRole('button', { name: 'Download', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).savedArtifact)).toEqual({
+    source,
+    filename: 'Panel counter.html',
+    language: 'html',
+  });
+  await viewer.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(frame.getByRole('button', { name: '0', exact: true })).toBeVisible();
+  await page.screenshot({ path: 'artifacts/artifact-side-panel-browser.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(viewer).not.toHaveClass(/docked/);
+  expect(await viewer.evaluate((element) => element.matches(':modal'))).toBe(true);
+  const narrowBox = (await viewer.boundingBox())!;
+  expect(narrowBox.x).toBeGreaterThanOrEqual(0);
+  expect(narrowBox.x + narrowBox.width).toBeLessThanOrEqual(391);
+  await page.screenshot({ path: 'artifacts/artifact-side-panel-mobile.png' });
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  await expect(openPanel).toBeFocused();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Draft stays usable beside the preview',
+  );
+  await page.setViewportSize({ width: 1380, height: 900 });
+  await openPanel.click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect(viewer).toHaveCount(0);
+});
+
 test('native Claude workflows retain drafts, reported phases and agents through stop and history', async ({
   page,
 }) => {

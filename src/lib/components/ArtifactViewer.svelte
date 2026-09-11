@@ -1,10 +1,22 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { X, Download, RotateCcw, Code, Eye } from '@lucide/svelte';
+  import { X, Download, RotateCcw, Code, Eye, PanelRightOpen, Maximize2 } from '@lucide/svelte';
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
-  let { artifact, close }: { artifact: Artifact; close: () => void } = $props();
+  let {
+    artifact,
+    mode = 'modal',
+    changeMode,
+    close,
+  }: {
+    artifact: Artifact;
+    mode?: 'modal' | 'panel';
+    changeMode: (mode: 'modal' | 'panel') => void;
+    close: () => void;
+  } = $props();
+  let viewportWidth = $state(0);
+  const docked = $derived(mode === 'panel' && viewportWidth >= 1100);
   let tab = $state<'preview' | 'source'>('preview');
   let url = $state('');
   let error = $state('');
@@ -22,10 +34,19 @@
     }
   }
   let revision = $state(0);
-  let dialog: HTMLDialogElement;
+  let dialog = $state<HTMLDialogElement>();
+  let mounted = $state(false);
+  $effect(() => {
+    if (!mounted || !dialog) return;
+    // Keep the same sandboxed iframe when changing presentation.
+    dialog.close();
+    if (docked) dialog.show();
+    else dialog.showModal();
+    dialog.querySelector<HTMLButtonElement>('[aria-label="Close artifact"]')?.focus();
+  });
   onMount(() => {
     const focused = document.activeElement as HTMLElement | null;
-    dialog.showModal();
+    mounted = true;
     void artifactPreviewUrl()
       .then((value) => (url = value))
       .catch(() => (error = 'Could not open the artifact preview. The source is still available.'));
@@ -40,10 +61,21 @@
   }
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} />
 <dialog
   bind:this={dialog}
   class="artifact-viewer"
+  class:side-panel={mode === 'panel'}
+  class:docked
+  aria-modal={docked ? undefined : 'true'}
   aria-labelledby="artifact-title"
+  onkeydown={(event) => {
+    if (docked && event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    }
+  }}
   oncancel={(event) => {
     event.preventDefault();
     close();
@@ -54,7 +86,20 @@
       <span class="eyebrow">ARTIFACT</span>
       <h2 id="artifact-title">{artifact.title}</h2>
     </div>
-    <button class="icon-button" onclick={close} aria-label="Close artifact"><X size={19} /></button>
+    <div class="viewer-actions">
+      <button
+        class="icon-button"
+        onclick={() => changeMode(mode === 'panel' ? 'modal' : 'panel')}
+        aria-label={mode === 'panel' ? 'Open in modal' : 'Open in side panel'}
+        title={mode === 'panel' ? 'Open in modal' : 'Open in side panel'}
+        >{#if mode === 'panel'}<Maximize2 size={17} />{:else}<PanelRightOpen
+            size={17}
+          />{/if}</button
+      >
+      <button class="icon-button" onclick={close} aria-label="Close artifact"
+        ><X size={19} /></button
+      >
+    </div>
   </header>
   <div class="artifact-toolbar">
     <div role="tablist" aria-label="Artifact view">
@@ -75,7 +120,7 @@
                       ? 'source'
                       : 'preview';
               await tick();
-              dialog.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+              dialog?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
             }
           }}
           >{#if index === 0}<Eye size={14} />{:else}<Code size={14} />{/if}{index === 0
@@ -132,6 +177,32 @@
   }
   dialog::backdrop {
     background: #080b0dcc;
+  }
+  dialog.side-panel {
+    top: var(--mobile-top, 0px);
+    margin: 0 0 0 auto;
+    width: min(620px, 100vw);
+    height: var(--mobile-height, 100dvh);
+    border-radius: 0;
+  }
+  dialog.docked {
+    position: relative;
+    inset: auto;
+    align-self: stretch;
+    flex: 0 0 42%;
+    width: 42%;
+    max-width: 620px;
+    min-width: 360px;
+    height: auto;
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-left: 1px solid var(--line);
+  }
+  .viewer-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
   }
   header {
     display: flex;

@@ -196,6 +196,16 @@
   let run = $state<{ id: string; conversationId: string } | null>(null);
   let workflowsOpen = $state(false);
   let selectedArtifact = $state<Artifact | null>(null);
+  let artifactMode = $state<'modal' | 'panel'>('modal');
+  let artifactConversationId = $state<string | null>(null);
+  $effect(() => {
+    if (view !== 'chat' || activeId !== artifactConversationId) selectedArtifact = null;
+  });
+  function openArtifact(artifact: Artifact, mode: 'modal' | 'panel' = 'modal') {
+    artifactMode = mode;
+    artifactConversationId = activeId;
+    selectedArtifact = artifact;
+  }
   let stopping = $state(false);
   let editorOpen = $state(false);
   let contextOpen = $state(false);
@@ -1889,393 +1899,407 @@
       />{/if}
 
     {#if view === 'chat'}
-      <section
-        class="chat-layout"
-        aria-label="Chat"
-        ondragenter={(event) => {
-          if (hasDraggedFiles(event)) {
-            event.preventDefault();
-            imageDragDepth++;
-          }
-        }}
-        ondragover={dragImagesOver}
-        ondragleave={() => (imageDragDepth = Math.max(0, imageDragDepth - 1))}
-        ondrop={dropImages}
+      <div
+        class="chat-workspace"
+        class:has-artifact-panel={selectedArtifact && artifactMode === 'panel'}
       >
-        {#if imageDragDepth > 0}
-          <div class="image-drop-overlay" role="status">
-            <div>
-              <Paperclip size={28} aria-hidden="true" />
-              <strong
-                >{!imagesSupported
-                  ? 'Images are available in Codex and Claude chats'
-                  : imagesLoading
-                    ? 'Reading images…'
-                    : attachedImages.length >= maxImagesPerMessage
-                      ? 'Remove an attachment to add more images'
-                      : 'Drop images to attach'}</strong
-              >
-              {#if imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage}<span
-                  >PNG, JPEG or WebP · Up to 4 images · 2 MB each</span
-                >{/if}
-            </div>
-          </div>
-        {/if}
-        <div class="chat-toolbar" aria-label="Conversation settings">
-          <div class="chat-configuration">
-            <div class="chat-setting computer-setting">
-              <span>Computer{selectedComputerOffline ? ' · Offline' : ''}</span><ChoicePicker
-                label="Computer"
-                title={active
-                  ? 'Fixed for this conversation. Start a new conversation to change it.'
-                  : undefined}
-                value={selectedComputerId}
-                options={[
-                  ...computers.map((c) => ({
-                    id: c.id,
-                    name: c.name,
-                    detail: !computerOnline(c.id)
-                      ? c.wsl
-                        ? `Offline · On ${c.hostName}`
-                        : 'Offline'
-                      : c.wsl
-                        ? `On ${c.hostName}`
-                        : undefined,
-                  })),
-                  ...(selectedComputerId && !selectedComputer
-                    ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
-                    : []),
-                ]}
-                disabled={!loaded || !!run || activeRunning || selectingLocation || !!active}
-                onchange={chooseComputer}
-              >
-                {#snippet icon()}<Laptop size={16} />{/snippet}
-              </ChoicePicker>
-            </div>
-            <div class="chat-setting folder-setting">
-              <span>Folder</span><ChoicePicker
-                label="Folder"
-                title={selectedLocation
-                  ? selectedLocation.path || 'Standalone chat without a project folder'
-                  : undefined}
-                value={selectedLocation ? locationKey(selectedLocation) : 'browse'}
-                options={[
-                  ...savedLocations.map((l) => ({
-                    id: locationKey(l),
-                    name: folderName(l.path),
-                    detail:
-                      workspace.fleet.environments.find((e) => e.id === l.environmentId)?.name ??
-                      'Environment',
-                    title: l.path,
-                  })),
-                  ...(selectedLocation &&
-                  !savedLocations.some((l) => locationKey(l) === locationKey(selectedLocation))
-                    ? [
-                        {
-                          id: locationKey(selectedLocation),
-                          name: selectedLocation.path
-                            ? folderName(selectedLocation.path)
-                            : 'Standalone',
-                          title:
-                            selectedLocation.path || 'Standalone chat without a project folder',
-                        },
-                      ]
-                    : []),
-                  { id: 'browse', name: 'Browse folders…' },
-                ]}
-                disabled={!loaded ||
-                  !selectedComputer ||
-                  !!run ||
-                  activeRunning ||
-                  selectingLocation ||
-                  !!active}
-                onchange={(id) => {
-                  if (active) return;
-                  const location = savedLocations.find((l) => locationKey(l) === id);
-                  if (location) void chooseLocation(location).catch((e) => (notice = String(e)));
-                  else folderBrowserOpen = true;
-                }}
-              >
-                {#snippet icon()}
-                  {#if selectedLocation && !selectedLocation.path}<MessageCircle
-                      size={16}
-                    />{:else}<Folder size={16} />{/if}
-                {/snippet}
-              </ChoicePicker>
-            </div>
-            <div class="chat-setting agent-setting">
-              <span>Agent</span><ChoicePicker
-                label="Agent"
-                title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}${
-                  selectedSettings.provider === 'gemini'
-                    ? 'Gemini conversations cannot use tools.'
-                    : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'
-                }`}
-                value={selectedAgentOption}
-                options={agentOptions}
-                fallbackToFirst={false}
-                placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
-                disabled={!loaded ||
-                  !!run ||
-                  activeRunning ||
-                  selectingLocation ||
-                  (desktop() && !selectedLocation && !active) ||
-                  !!active}
-                onchange={chooseAgent}
-              >
-                {#snippet icon()}<Bot size={16} />{/snippet}
-              </ChoicePicker>
-            </div>
-            <div class="chat-setting model-setting">
-              <span>Model</span><ChoicePicker
-                label="Model"
-                value={selectedSettings.model}
-                options={availableModels}
-                disabled={!loaded ||
-                  (desktop() && (locationPending || (!selectedLocation && !active)))}
-                onchange={chooseModel}
-              >
-                {#snippet icon()}<Cpu size={16} />{/snippet}
-              </ChoicePicker>
-            </div>
-            <div class="chat-setting">
-              <span>Reasoning</span><ChoicePicker
-                label="Reasoning"
-                value={selectedSettings.reasoning}
-                options={reasoningOptions}
-                disabled={!loaded ||
-                  reasoningOptions.length < 2 ||
-                  (desktop() && (locationPending || (!selectedLocation && !active)))}
-                onchange={(value) =>
-                  changeSettings({ ...selectedSettings, reasoning: value as Reasoning })}
-              >
-                {#snippet icon()}<Brain size={16} />{/snippet}
-              </ChoicePicker>
-            </div>
-          </div>
-          <ToolbarActions>
-            <button
-              class="icon-button"
-              title="Claude workflows"
-              aria-label="Claude workflows"
-              disabled={!loaded || selectedSettings.provider !== 'claude'}
-              onclick={() => (workflowsOpen = true)}><GitBranch size={16} /></button
-            >
-            <button
-              class="icon-button"
-              title="Model context"
-              aria-label="Model context"
-              disabled={!loaded || locationPending || (desktop() && !selectedLocation && !active)}
-              onclick={async () => {
-                await saveQueue;
-                contextOpen = true;
-              }}><BookOpen size={16} /></button
-            >
-            {#if active && !active.archived}<button
-                class="icon-button"
-                disabled={activeRunning}
-                onclick={archiveConversation}
-                title="Move to history"
-                aria-label="Move to history"><Archive size={16} /></button
-              >{/if}
-            <button
-              class="icon-button"
-              onclick={() => (editorOpen = true)}
-              disabled={!loaded || !!run || activeRunning}
-              title="Chat instructions"
-              aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
-            >
-          </ToolbarActions>
-        </div>
-        {#if nextReplyChanged}
-          <p class="next-reply-settings" role="status">
-            Next message: {selectedModelName(selectedSettings.model, availableModels)} · {reasoningName(
-              selectedSettings.reasoning,
-            )} reasoning
-          </p>
-        {/if}
-        <div
-          class="chat-scroll"
-          bind:this={chatScroll}
-          onscroll={() => {
-            if (chatScroll)
-              nearBottom =
-                chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 100;
+        <section
+          class="chat-layout"
+          aria-label="Chat"
+          ondragenter={(event) => {
+            if (hasDraggedFiles(event)) {
+              event.preventDefault();
+              imageDragDepth++;
+            }
           }}
+          ondragover={dragImagesOver}
+          ondragleave={() => (imageDragDepth = Math.max(0, imageDragDepth - 1))}
+          ondrop={dropImages}
         >
-          <div class="message-column" class:empty={!active?.messages.length}>
-            {#if active?.messages.length}
-              {#each active.messages as m, i (m.id)}<MessageView
-                  message={m}
-                  timeTotal={timeTotals.get(m.id)}
-                  switchNotice={switchNotices.get(m.id)}
-                  agent={active.settings}
-                  canRetry={i === active.messages.length - 1 &&
-                    (m.status === 'error' || m.status === 'cancelled') &&
-                    !run}
-                  retry={() => void send(true)}
-                  retryDisabled={!canSend}
-                  openArtifact={(artifact) => (selectedArtifact = artifact)}
-                />{/each}
-            {:else}<div class="chat-empty">
-                <span
-                  class="large-provider"
-                  style:--provider-color={providers[selectedAgent.provider].color}
-                  >{providers[selectedAgent.provider].mark}</span
-                ><span class="eyebrow">A CONVERSATION WITH {selectedAgent.name.toUpperCase()}</span>
-                <h1>What’s on your mind?</h1>
-                <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
-              </div>{/if}
+          {#if imageDragDepth > 0}
+            <div class="image-drop-overlay" role="status">
+              <div>
+                <Paperclip size={28} aria-hidden="true" />
+                <strong
+                  >{!imagesSupported
+                    ? 'Images are available in Codex and Claude chats'
+                    : imagesLoading
+                      ? 'Reading images…'
+                      : attachedImages.length >= maxImagesPerMessage
+                        ? 'Remove an attachment to add more images'
+                        : 'Drop images to attach'}</strong
+                >
+                {#if imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage}<span
+                    >PNG, JPEG or WebP · Up to 4 images · 2 MB each</span
+                  >{/if}
+              </div>
+            </div>
+          {/if}
+          <div class="chat-toolbar" aria-label="Conversation settings">
+            <div class="chat-configuration">
+              <div class="chat-setting computer-setting">
+                <span>Computer{selectedComputerOffline ? ' · Offline' : ''}</span><ChoicePicker
+                  label="Computer"
+                  title={active
+                    ? 'Fixed for this conversation. Start a new conversation to change it.'
+                    : undefined}
+                  value={selectedComputerId}
+                  options={[
+                    ...computers.map((c) => ({
+                      id: c.id,
+                      name: c.name,
+                      detail: !computerOnline(c.id)
+                        ? c.wsl
+                          ? `Offline · On ${c.hostName}`
+                          : 'Offline'
+                        : c.wsl
+                          ? `On ${c.hostName}`
+                          : undefined,
+                    })),
+                    ...(selectedComputerId && !selectedComputer
+                      ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
+                      : []),
+                  ]}
+                  disabled={!loaded || !!run || activeRunning || selectingLocation || !!active}
+                  onchange={chooseComputer}
+                >
+                  {#snippet icon()}<Laptop size={16} />{/snippet}
+                </ChoicePicker>
+              </div>
+              <div class="chat-setting folder-setting">
+                <span>Folder</span><ChoicePicker
+                  label="Folder"
+                  title={selectedLocation
+                    ? selectedLocation.path || 'Standalone chat without a project folder'
+                    : undefined}
+                  value={selectedLocation ? locationKey(selectedLocation) : 'browse'}
+                  options={[
+                    ...savedLocations.map((l) => ({
+                      id: locationKey(l),
+                      name: folderName(l.path),
+                      detail:
+                        workspace.fleet.environments.find((e) => e.id === l.environmentId)?.name ??
+                        'Environment',
+                      title: l.path,
+                    })),
+                    ...(selectedLocation &&
+                    !savedLocations.some((l) => locationKey(l) === locationKey(selectedLocation))
+                      ? [
+                          {
+                            id: locationKey(selectedLocation),
+                            name: selectedLocation.path
+                              ? folderName(selectedLocation.path)
+                              : 'Standalone',
+                            title:
+                              selectedLocation.path || 'Standalone chat without a project folder',
+                          },
+                        ]
+                      : []),
+                    { id: 'browse', name: 'Browse folders…' },
+                  ]}
+                  disabled={!loaded ||
+                    !selectedComputer ||
+                    !!run ||
+                    activeRunning ||
+                    selectingLocation ||
+                    !!active}
+                  onchange={(id) => {
+                    if (active) return;
+                    const location = savedLocations.find((l) => locationKey(l) === id);
+                    if (location) void chooseLocation(location).catch((e) => (notice = String(e)));
+                    else folderBrowserOpen = true;
+                  }}
+                >
+                  {#snippet icon()}
+                    {#if selectedLocation && !selectedLocation.path}<MessageCircle
+                        size={16}
+                      />{:else}<Folder size={16} />{/if}
+                  {/snippet}
+                </ChoicePicker>
+              </div>
+              <div class="chat-setting agent-setting">
+                <span>Agent</span><ChoicePicker
+                  label="Agent"
+                  title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}${
+                    selectedSettings.provider === 'gemini'
+                      ? 'Gemini conversations cannot use tools.'
+                      : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'
+                  }`}
+                  value={selectedAgentOption}
+                  options={agentOptions}
+                  fallbackToFirst={false}
+                  placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
+                  disabled={!loaded ||
+                    !!run ||
+                    activeRunning ||
+                    selectingLocation ||
+                    (desktop() && !selectedLocation && !active) ||
+                    !!active}
+                  onchange={chooseAgent}
+                >
+                  {#snippet icon()}<Bot size={16} />{/snippet}
+                </ChoicePicker>
+              </div>
+              <div class="chat-setting model-setting">
+                <span>Model</span><ChoicePicker
+                  label="Model"
+                  value={selectedSettings.model}
+                  options={availableModels}
+                  disabled={!loaded ||
+                    (desktop() && (locationPending || (!selectedLocation && !active)))}
+                  onchange={chooseModel}
+                >
+                  {#snippet icon()}<Cpu size={16} />{/snippet}
+                </ChoicePicker>
+              </div>
+              <div class="chat-setting">
+                <span>Reasoning</span><ChoicePicker
+                  label="Reasoning"
+                  value={selectedSettings.reasoning}
+                  options={reasoningOptions}
+                  disabled={!loaded ||
+                    reasoningOptions.length < 2 ||
+                    (desktop() && (locationPending || (!selectedLocation && !active)))}
+                  onchange={(value) =>
+                    changeSettings({ ...selectedSettings, reasoning: value as Reasoning })}
+                >
+                  {#snippet icon()}<Brain size={16} />{/snippet}
+                </ChoicePicker>
+              </div>
+            </div>
+            <ToolbarActions>
+              <button
+                class="icon-button"
+                title="Claude workflows"
+                aria-label="Claude workflows"
+                disabled={!loaded || selectedSettings.provider !== 'claude'}
+                onclick={() => (workflowsOpen = true)}><GitBranch size={16} /></button
+              >
+              <button
+                class="icon-button"
+                title="Model context"
+                aria-label="Model context"
+                disabled={!loaded || locationPending || (desktop() && !selectedLocation && !active)}
+                onclick={async () => {
+                  await saveQueue;
+                  contextOpen = true;
+                }}><BookOpen size={16} /></button
+              >
+              {#if active && !active.archived}<button
+                  class="icon-button"
+                  disabled={activeRunning}
+                  onclick={archiveConversation}
+                  title="Move to history"
+                  aria-label="Move to history"><Archive size={16} /></button
+                >{/if}
+              <button
+                class="icon-button"
+                onclick={() => (editorOpen = true)}
+                disabled={!loaded || !!run || activeRunning}
+                title="Chat instructions"
+                aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
+              >
+            </ToolbarActions>
           </div>
-        </div>
-        <div class="composer-area">
-          {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
-          {#if selectedComputerOffline}<div class="setup-hint">
-              <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
-                ? selectedComputer.hostName
-                : selectedComputer?.name} and connect it to sync.
-            </div>
-          {:else if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
-              <Folder size={15} />Choose a computer and folder to see its available CLIs.<button
-                class="text-button"
-                disabled={!selectedComputer}
-                onclick={() => (folderBrowserOpen = true)}
-                >Choose folder<ArrowRight size={13} /></button
-              >
-            </div>
-          {:else if !selectedStatus && desktop()}<div class="setup-hint">
-              {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.
-              {:else if selectedSettings.connectionId && !selectedConnection}<Plug size={15} />This
-                CLI connection is no longer available. Choose another connection.
-              {:else}<RefreshCw size={15} class="spinning" />Checking this folder’s CLIs…{/if}
-            </div>
-          {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
-              <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
-                class="text-button"
-                onclick={() => (view = 'connections')}
-                >Open Connections<ArrowRight size={13} /></button
-              >
-            </div>
-          {:else if selectedStatus?.installed && selectedStatus.auth !== 'ready'}<div
-              class="setup-hint"
-              role="status"
-            >
-              <Plug size={15} />
-              {#if selectedStatus.auth === 'login'}Connect to {providers[selectedAgent.provider]
-                  .name} before sending a message.
-              {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection. Open
-                Connections to check it before sending.{/if}
-              <button class="text-button" onclick={() => (view = 'connections')}
-                >Open Connections<ArrowRight size={13} /></button
-              >
-            </div>{/if}
-          {#if run && !activeRunning}<button
-              class="setup-hint"
-              onclick={() => {
-                const c = workspace.conversations.find((c) => c.id === run?.conversationId);
-                if (c) openConversation(c);
-              }}
-              ><i class="pulse-dot"></i>An agent is responding in another conversation. View it<ArrowUpRight
-                size={14}
-              /></button
-            >{/if}
-          <form
-            class="composer"
-            aria-label="Message composer"
-            onsubmit={(e) => {
-              e.preventDefault();
-              void send();
+          {#if nextReplyChanged}
+            <p class="next-reply-settings" role="status">
+              Next message: {selectedModelName(selectedSettings.model, availableModels)} · {reasoningName(
+                selectedSettings.reasoning,
+              )} reasoning
+            </p>
+          {/if}
+          <div
+            class="chat-scroll"
+            bind:this={chatScroll}
+            onscroll={() => {
+              if (chatScroll)
+                nearBottom =
+                  chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 100;
             }}
           >
-            {#if attachedImages.length}<ImageAttachments
-                images={attachedImages}
-                remove={(id) => {
-                  attachedImages = attachedImages.filter((image) => image.id !== id);
-                  attachmentError = '';
-                }}
-              />{/if}
-            <input
-              bind:this={imageInput}
-              type="file"
-              accept={imageTypes.join(',')}
-              multiple
-              hidden
-              aria-label="Image files"
-              onchange={(event) => {
-                const files = Array.from(event.currentTarget.files ?? []);
-                event.currentTarget.value = '';
-                void attachImages(files);
-              }}
-            />
-            <textarea
-              bind:this={composerInput}
-              aria-label="Message"
-              title="Enter to send · Shift + Enter for a new line"
-              placeholder={`Message ${selectedAgent.name}…`}
-              bind:value={prompt}
-              rows="3"
-              maxlength="30000"
-              onpaste={(event) => {
-                const files = Array.from(event.clipboardData?.files ?? []);
-                if (files.length) {
-                  event.preventDefault();
-                  void attachImages(files);
-                }
-              }}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobile) {
-                  e.preventDefault();
-                  void send();
-                }
-              }}></textarea>
-            {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
-            {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
-            {:else if attachedImages.length && !imagesSupported}<p
-                class="attachment-notice"
-                role="alert"
-              >
-                Choose Codex or Claude to send these images, or remove them to use Gemini.
-              </p>{/if}
-            <div class="composer-bottom">
-              <button
-                type="button"
-                class="attach-button"
-                aria-label="Attach images"
-                title={imagesSupported
-                  ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
-                  : 'Image attachments are available with Codex and Claude'}
-                disabled={!imagesSupported ||
-                  imagesLoading ||
-                  attachedImages.length >= maxImagesPerMessage}
-                onclick={() => imageInput?.click()}><Paperclip size={17} /></button
-              >
-              {#if activeRunning}<button
-                  class="stop-button"
-                  type="button"
-                  onclick={stop}
-                  disabled={stopping}
-                  ><Square size={12} fill="currentColor" />{stopping
-                    ? 'Stopping…'
-                    : 'Stop response'}</button
-                >{:else}<button
-                  class="send-button"
-                  type="submit"
-                  disabled={!canSend || (!prompt.trim() && !attachedImages.length)}
-                  aria-label="Send message"><ArrowUp size={19} /></button
-                >{/if}
+            <div class="message-column" class:empty={!active?.messages.length}>
+              {#if active?.messages.length}
+                {#each active.messages as m, i (m.id)}<MessageView
+                    message={m}
+                    timeTotal={timeTotals.get(m.id)}
+                    switchNotice={switchNotices.get(m.id)}
+                    agent={active.settings}
+                    canRetry={i === active.messages.length - 1 &&
+                      (m.status === 'error' || m.status === 'cancelled') &&
+                      !run}
+                    retry={() => void send(true)}
+                    retryDisabled={!canSend}
+                    {openArtifact}
+                  />{/each}
+              {:else}<div class="chat-empty">
+                  <span
+                    class="large-provider"
+                    style:--provider-color={providers[selectedAgent.provider].color}
+                    >{providers[selectedAgent.provider].mark}</span
+                  ><span class="eyebrow"
+                    >A CONVERSATION WITH {selectedAgent.name.toUpperCase()}</span
+                  >
+                  <h1>What’s on your mind?</h1>
+                  <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
+                </div>{/if}
             </div>
-          </form>
-          <UsagePanel
-            conversation={active}
-            settings={selectedSettings}
-            model={currentModel}
-            snapshot={selectedUsage}
-            loading={!!usageLoading[selectedUsageKey]}
-            error={usageErrors[selectedUsageKey] ?? ''}
-            preview={!desktop() && !paired}
-          />
-        </div>
-      </section>
+          </div>
+          <div class="composer-area">
+            {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
+            {#if selectedComputerOffline}<div class="setup-hint">
+                <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
+                  ? selectedComputer.hostName
+                  : selectedComputer?.name} and connect it to sync.
+              </div>
+            {:else if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
+                <Folder size={15} />Choose a computer and folder to see its available CLIs.<button
+                  class="text-button"
+                  disabled={!selectedComputer}
+                  onclick={() => (folderBrowserOpen = true)}
+                  >Choose folder<ArrowRight size={13} /></button
+                >
+              </div>
+            {:else if !selectedStatus && desktop()}<div class="setup-hint">
+                {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.
+                {:else if selectedSettings.connectionId && !selectedConnection}<Plug
+                    size={15}
+                  />This CLI connection is no longer available. Choose another connection.
+                {:else}<RefreshCw size={15} class="spinning" />Checking this folder’s CLIs…{/if}
+              </div>
+            {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
+                <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
+                  class="text-button"
+                  onclick={() => (view = 'connections')}
+                  >Open Connections<ArrowRight size={13} /></button
+                >
+              </div>
+            {:else if selectedStatus?.installed && selectedStatus.auth !== 'ready'}<div
+                class="setup-hint"
+                role="status"
+              >
+                <Plug size={15} />
+                {#if selectedStatus.auth === 'login'}Connect to {providers[selectedAgent.provider]
+                    .name} before sending a message.
+                {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection. Open
+                  Connections to check it before sending.{/if}
+                <button class="text-button" onclick={() => (view = 'connections')}
+                  >Open Connections<ArrowRight size={13} /></button
+                >
+              </div>{/if}
+            {#if run && !activeRunning}<button
+                class="setup-hint"
+                onclick={() => {
+                  const c = workspace.conversations.find((c) => c.id === run?.conversationId);
+                  if (c) openConversation(c);
+                }}
+                ><i class="pulse-dot"></i>An agent is responding in another conversation. View it<ArrowUpRight
+                  size={14}
+                /></button
+              >{/if}
+            <form
+              class="composer"
+              aria-label="Message composer"
+              onsubmit={(e) => {
+                e.preventDefault();
+                void send();
+              }}
+            >
+              {#if attachedImages.length}<ImageAttachments
+                  images={attachedImages}
+                  remove={(id) => {
+                    attachedImages = attachedImages.filter((image) => image.id !== id);
+                    attachmentError = '';
+                  }}
+                />{/if}
+              <input
+                bind:this={imageInput}
+                type="file"
+                accept={imageTypes.join(',')}
+                multiple
+                hidden
+                aria-label="Image files"
+                onchange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = '';
+                  void attachImages(files);
+                }}
+              />
+              <textarea
+                bind:this={composerInput}
+                aria-label="Message"
+                title="Enter to send · Shift + Enter for a new line"
+                placeholder={`Message ${selectedAgent.name}…`}
+                bind:value={prompt}
+                rows="3"
+                maxlength="30000"
+                onpaste={(event) => {
+                  const files = Array.from(event.clipboardData?.files ?? []);
+                  if (files.length) {
+                    event.preventDefault();
+                    void attachImages(files);
+                  }
+                }}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobile) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}></textarea>
+              {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
+              {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
+              {:else if attachedImages.length && !imagesSupported}<p
+                  class="attachment-notice"
+                  role="alert"
+                >
+                  Choose Codex or Claude to send these images, or remove them to use Gemini.
+                </p>{/if}
+              <div class="composer-bottom">
+                <button
+                  type="button"
+                  class="attach-button"
+                  aria-label="Attach images"
+                  title={imagesSupported
+                    ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
+                    : 'Image attachments are available with Codex and Claude'}
+                  disabled={!imagesSupported ||
+                    imagesLoading ||
+                    attachedImages.length >= maxImagesPerMessage}
+                  onclick={() => imageInput?.click()}><Paperclip size={17} /></button
+                >
+                {#if activeRunning}<button
+                    class="stop-button"
+                    type="button"
+                    onclick={stop}
+                    disabled={stopping}
+                    ><Square size={12} fill="currentColor" />{stopping
+                      ? 'Stopping…'
+                      : 'Stop response'}</button
+                  >{:else}<button
+                    class="send-button"
+                    type="submit"
+                    disabled={!canSend || (!prompt.trim() && !attachedImages.length)}
+                    aria-label="Send message"><ArrowUp size={19} /></button
+                  >{/if}
+              </div>
+            </form>
+            <UsagePanel
+              conversation={active}
+              settings={selectedSettings}
+              model={currentModel}
+              snapshot={selectedUsage}
+              loading={!!usageLoading[selectedUsageKey]}
+              error={usageErrors[selectedUsageKey] ?? ''}
+              preview={!desktop() && !paired}
+            />
+          </div>
+        </section>
+        {#if selectedArtifact}{#key selectedArtifact.id}<ArtifactViewer
+              artifact={selectedArtifact}
+              mode={artifactMode}
+              changeMode={(mode) => (artifactMode = mode)}
+              close={() => (selectedArtifact = null)}
+            />{/key}{/if}
+      </div>
     {:else if view === 'connections'}
       <FleetManager
         bind:workspace
@@ -2339,10 +2363,6 @@
       );
     }}
   />{/if}
-{#if selectedArtifact}{#key selectedArtifact.id}<ArtifactViewer
-      artifact={selectedArtifact}
-      close={() => (selectedArtifact = null)}
-    />{/key}{/if}
 {#if workflowsOpen}<NativeWorkflowLauncher
     canRun={canSend && selectedSettings.provider === 'claude'}
     close={() => (workflowsOpen = false)}

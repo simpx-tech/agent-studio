@@ -772,12 +772,36 @@ code {
 .local-note button {
   margin-top: 15px;
 }
+.chat-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .chat-layout {
   position: relative;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+}
+@media (min-width: 1100px) {
+  .has-artifact-panel .chat-configuration {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .has-artifact-panel .chat-setting {
+    flex: 0 0 128px;
+  }
+  .has-artifact-panel .message-column {
+    padding-inline: 24px;
+  }
+  .has-artifact-panel .composer-area {
+    --composer-inset: 24px;
+    padding-inline: 24px;
+  }
 }
 .image-drop-overlay {
   position: absolute;

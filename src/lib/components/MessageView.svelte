@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { RotateCcw, CircleAlert, ArrowRightLeft, PanelsTopLeft } from '@lucide/svelte';
+  import {
+    RotateCcw,
+    CircleAlert,
+    ArrowRightLeft,
+    PanelsTopLeft,
+    PanelRightOpen,
+  } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
   import { openLink } from '$lib/transport';
@@ -26,7 +32,7 @@
     retryDisabled?: boolean;
     switchNotice?: string;
     timeTotal?: ReplyTimeTotal;
-    openArtifact: (artifact: Artifact) => void;
+    openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
   } = $props();
   let linkError = $state('');
   const author = $derived(message.settings ?? agent);
@@ -109,13 +115,21 @@
       {#if artifacts.length || savedProgress}<div class="response-extras">
           {#if savedProgress}<PlanPanel {message} compact />{/if}
           {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
-              {#each artifacts as artifact (artifact.id)}<button
-                  class="secondary"
-                  onclick={() => openArtifact(artifact)}
-                  ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                    >Open {artifact.language.toUpperCase()}</small
-                  ></button
-                >{/each}
+              {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
+                  <button
+                    class="secondary artifact-open"
+                    onclick={() => openArtifact(artifact, 'modal')}
+                    ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                      >Open {artifact.language.toUpperCase()}</small
+                    ></button
+                  ><button
+                    class="secondary artifact-side"
+                    aria-label={`Open ${artifact.title} in side panel`}
+                    title="Open in side panel"
+                    onclick={() => openArtifact(artifact, 'panel')}
+                    ><PanelRightOpen size={16} /></button
+                  >
+                </div>{/each}
             </div>{/if}
         </div>{/if}
       {#if message.status !== 'running'}<ReplyUsage {message} {timeTotal} /><ToolActivity
@@ -158,10 +172,23 @@
     gap: 8px;
     flex: 1 1 auto;
   }
-  .response-artifacts button {
+  .artifact-card {
+    display: flex;
     flex: 1 1 auto;
-    text-align: left;
+    min-width: 0;
     max-width: 100%;
+  }
+  .artifact-open {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    border-radius: 6px 0 0 6px;
+  }
+  .artifact-side {
+    flex-shrink: 0;
+    border-left: 0;
+    border-radius: 0 6px 6px 0;
+    padding-inline: 10px;
   }
   .response-artifacts span {
     overflow-wrap: anywhere;
