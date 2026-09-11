@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { sessionStore } from './sessions.ts';
+import { artifactPreviewHtml, artifactPreviewHeaders } from './artifact-preview.ts';
 
 const cookieName = 'agent_studio_session';
 const lifetime = 7 * 24 * 60 * 60 * 1000;
@@ -41,6 +42,11 @@ export function publicFiles(directory?: string) {
 }
 
 export function servePublic(req: IncomingMessage, res: ServerResponse, files: Map<string, string>) {
+  if (req.url === '/artifact-preview' && ['GET', 'HEAD'].includes(req.method ?? '')) {
+    res.writeHead(200, artifactPreviewHeaders);
+    res.end(req.method === 'HEAD' ? undefined : artifactPreviewHtml);
+    return true;
+  }
   if (req.url?.startsWith('/v1/') || req.url === '/v1') return false;
   const path = (req.url ?? '/').split('?')[0];
   const file = files.get(path);
@@ -57,7 +63,7 @@ export function servePublic(req: IncomingMessage, res: ServerResponse, files: Ma
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Content-Security-Policy':
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'",
   });
   res.end(req.method === 'HEAD' ? undefined : readFileSync(file));
   return true;

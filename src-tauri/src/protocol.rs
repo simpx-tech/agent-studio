@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 mod activity;
+pub mod plan;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +25,12 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    Plan {
+        plan: plan::Plan,
+    },
+    Workflow {
+        workflow: crate::workflows::Progress,
+    },
     Text {
         text: String,
     },
@@ -52,6 +59,7 @@ pub struct Decoder {
     context_input: Option<u64>,
     model: Option<String>,
     tools: activity::ToolDecoder,
+    plan: plan::PlanDecoder,
     progress: Vec<(String, String, u64)>,
     current_message: String,
     message_number: u64,
@@ -107,6 +115,11 @@ impl Decoder {
             return events;
         }
         match value["method"].as_str().unwrap_or_default() {
+            "turn/plan/updated" => {
+                if let Some(plan) = self.plan.codex(params) {
+                    events.push(RunEvent::Plan { plan });
+                }
+            }
             "item/agentMessage/delta" => {
                 let id = string(params, "/itemId");
                 let delta = string(params, "/delta");
@@ -169,6 +182,11 @@ impl Decoder {
         // Child-agent text and usage belong to its activity, never the main reply.
         if provider == "claude" && v["parent_tool_use_id"].as_str().is_some() {
             return events;
+        }
+        if provider == "claude" {
+            if let Some(plan) = self.plan.claude(&v) {
+                events.push(RunEvent::Plan { plan });
+            }
         }
         if provider == "claude" && kind == "assistant" {
             self.context_input = input_with_cache(&v["message"]["usage"]);

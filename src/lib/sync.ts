@@ -2,8 +2,12 @@ import { workspaceSchema, messageText, type Conversation, type Workspace } from 
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 
-export type SharedWorkspace = Pick<Workspace, 'fleet' | 'conversations'>;
-export const sharedSchema = workspaceSchema.pick({ fleet: true, conversations: true });
+export type SharedWorkspace = Pick<Workspace, 'fleet' | 'conversations' | 'workflows'>;
+export const sharedSchema = workspaceSchema.pick({
+  fleet: true,
+  conversations: true,
+  workflows: true,
+});
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 function sameRun(
@@ -61,6 +65,9 @@ function sameRun(
     messages.push({
       ...selected,
       blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
+      plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
+      workflow:
+        (a.workflow?.revision ?? -1) >= (b.workflow?.revision ?? -1) ? a.workflow : b.workflow,
       ...(a.durationMs != null || b.durationMs != null
         ? { durationMs: Math.max(a.durationMs ?? 0, b.durationMs ?? 0) }
         : {}),
@@ -123,7 +130,7 @@ export function mergeShared(
     old: T[],
     ours: T[],
     theirs: T[],
-    chats = false,
+    chats: boolean | 'workflow' = false,
   ): T[] => {
     const b = new Map(old.map((v) => [v.id, v])),
       l = new Map(ours.map((v) => [v.id, v])),
@@ -138,6 +145,16 @@ export function mergeShared(
       } else if (equal(before, left)) {
         if (right) result.push(right);
       } else if (chats) {
+        if (chats === 'workflow') {
+          if (right) result.push(right);
+          if (left)
+            result.push({
+              ...left,
+              id: crypto.randomUUID(),
+              name: `${(left as T & { name: string }).name.slice(0, 60)} (conflict copy)`,
+            });
+          continue;
+        }
         if (
           before &&
           (!left || !right) &&
@@ -185,6 +202,16 @@ export function mergeShared(
       connections: merge(base.fleet.connections, local.fleet.connections, remote.fleet.connections),
     },
     conversations: merge(base.conversations, local.conversations, remote.conversations, true),
+    ...(local.workflows || remote.workflows || base.workflows
+      ? {
+          workflows: merge(
+            base.workflows ?? [],
+            local.workflows ?? [],
+            remote.workflows ?? [],
+            'workflow',
+          ),
+        }
+      : {}),
   };
 }
 export type Presence = {

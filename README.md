@@ -69,7 +69,7 @@ Claude and Codex conversations enable their built-in tools, including file readi
 
 Existing CLI project sessions are not resumed. The complete local conversation is replayed on each turn, up to 200 messages / 400 KB, with an explicit error at the limit. This is portable across providers but less token-efficient than native session resumption.
 
-## Architecture and future workflows
+## Architecture and workflows
 
 ```text
 Svelte components → transport.ts → Tauri IPC → Rust CLI adapters
@@ -89,7 +89,7 @@ message content blocks ← normalized events ← JSONL decoder
 
 There is no terminal emulator. Raw CLI events and ANSI output are not the interface. Scripts, remote images, embeds, and unsafe links are stripped from model output; the desktop CSP limits renderer access. Fonts and icons are bundled locally.
 
-Workflow execution is a future feature. The Workflows page describes the planned direction. A later version can add saved steps with their own provider/model settings, input/output mappings, typed tool/artifact blocks, approvals, and run history. Executable HTML artifacts should live in a separate sandboxed renderer, not the privileged Tauri document. A browser version needs a secure backend to execute CLIs; static HTML alone cannot access local processes.
+The chat toolbar opens saved **Claude workflows** with ordered prompt steps and optional run input. The selected host executes every step with the captured conversation settings, passes results forward, and stops on failure or cancellation. A live **Plan and progress** panel presents workflow status and provider-reported tasks. Completed HTML/SVG code blocks open in a separate sandboxed artifact viewer with interactive previews, source inspection, and downloads. Definitions, progress, and results survive history, export, and relay sync. See [capabilities and limits](docs/CAPABILITIES.md).
 
 ## Development and verification
 

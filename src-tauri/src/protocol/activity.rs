@@ -48,6 +48,23 @@ pub struct ToolActivity {
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
 }
+impl ToolActivity {
+    pub fn scope(&mut self, prefix: &str) {
+        self.id = format!("{prefix}{}", self.id);
+        if let Some(id) = &mut self.parent_id {
+            *id = format!("{prefix}{id}");
+        }
+        for agent in &mut self.agents {
+            agent.id = format!("{prefix}{}", agent.id);
+            if let Some(id) = &mut agent.agent_id {
+                *id = format!("{prefix}{id}");
+            }
+            if let Some(id) = &mut agent.parent_id {
+                *id = format!("{prefix}{id}");
+            }
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivityFact {
     label: String,
@@ -247,6 +264,27 @@ impl ToolDecoder {
                 }
             }
             self.publish_group(group, &mut out);
+        } else if matches!(method, "item/started" | "item/completed") && kind == "dynamicToolCall" {
+            if let Some(id) = field(item, "id", 220) {
+                let mut tool = fresh(
+                    format!("codex:{thread}:{id}"),
+                    "tool",
+                    &field(item, "tool", 200).unwrap_or_else(|| "Application tool".into()),
+                );
+                tool.status = if method == "item/started" {
+                    "running"
+                } else if item["success"] == false {
+                    "error"
+                } else {
+                    status(item["status"].as_str().unwrap_or_default())
+                }
+                .into();
+                tool.detail = Some("Application tool call reported by Codex. Arguments and returned content are not displayed.".into());
+                if thread != root {
+                    tool.parent_id = Some(thread.into());
+                }
+                self.publish(tool, &mut out);
+            }
         } else if matches!(method, "item/started" | "item/completed") {
             let normalized = match kind {
                 "commandExecution" => "command_execution",

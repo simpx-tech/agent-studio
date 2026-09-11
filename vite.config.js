@@ -1,11 +1,29 @@
 import { defineConfig } from 'vite';
 import { sveltekit } from '@sveltejs/kit/vite';
 import process from 'node:process';
+import { artifactPreviewHtml, artifactPreviewHeaders } from './relay/artifact-preview.ts';
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [sveltekit()],
+  plugins: [
+    sveltekit(),
+    {
+      name: 'artifact-preview',
+      configureServer(server) {
+        server.middlewares.use('/artifact-preview', (_req, res) => {
+          res.writeHead(200, artifactPreviewHeaders);
+          res.end(artifactPreviewHtml);
+        });
+      },
+      configurePreviewServer(server) {
+        server.middlewares.use('/artifact-preview', (_req, res) => {
+          res.writeHead(200, artifactPreviewHeaders);
+          res.end(artifactPreviewHtml);
+        });
+      },
+    },
+  ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

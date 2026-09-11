@@ -109,6 +109,17 @@ it('serves only public build files and keeps API authentication and cross-origin
   ).toBe(200);
   expect((await fetch(f.url + '/v1/state', { headers })).status).toBe(401);
 });
+it('serves an empty artifact bootstrap with an independent sandbox policy and no stored data', async () => {
+  const f = await fixture();
+  const response = await fetch(f.url + '/artifact-preview');
+  expect(response.status).toBe(200);
+  expect(response.headers.get('content-security-policy')).toContain('sandbox allow-scripts');
+  expect(response.headers.get('content-security-policy')).toContain("connect-src 'none'");
+  expect(response.headers.get('content-security-policy')).not.toContain('allow-same-origin');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.text()).toContain('event.source !== parent');
+  expect((await fetch(f.url + '/artifact-preview?path=workspace.json')).status).toBe(404);
+});
 it('expires browser sessions and rate limits pairing attempts', async () => {
   const f = await fixture();
   const response = await f.pair();

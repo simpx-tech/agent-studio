@@ -1,3 +1,4 @@
+mod artifacts;
 mod cli_queries;
 mod context;
 mod folders;
@@ -9,6 +10,7 @@ mod relay;
 mod runner;
 mod titles;
 mod usage;
+mod workflows;
 mod wsl;
 use std::io::Write;
 use std::sync::Mutex;
@@ -392,6 +394,9 @@ fn export_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Resu
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_uri_scheme_protocol("studio-artifact", |_context, request| {
+            artifacts::response(request.uri().path())
+        })
         .plugin(tauri_plugin_opener::init())
         .manage(runner::Runs::default())
         .manage(titles::Titles::default())
@@ -461,6 +466,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            artifacts::save_artifact,
             get_installation,
             discover_wsl,
             inspect_environment_clis,

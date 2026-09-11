@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
+import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot } from './context';
 import { executionHost, type Installation, type WslDiscovery, type CliInstallation } from './fleet';
 import {
@@ -28,6 +29,24 @@ import {
 } from './domain';
 
 export const desktop = () => isTauri();
+
+export async function artifactPreviewUrl(): Promise<string> {
+  if (!desktop()) return '/artifact-preview';
+  const { convertFileSrc } = await import('@tauri-apps/api/core');
+  return convertFileSrc('', 'studio-artifact');
+}
+
+export async function downloadArtifact(source: string, filename: string, language: 'html' | 'svg') {
+  if (desktop()) return await invoke<string>('save_artifact', { source, filename, language });
+  const url = URL.createObjectURL(
+    new Blob([source], { type: language === 'svg' ? 'image/svg+xml' : 'text/html' }),
+  );
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
 
 export type WindowAction = 'minimize' | 'toggleMaximize' | 'close';
 
@@ -368,7 +387,12 @@ async function routed<T>(
       method,
       args,
     });
-    const deadline = Date.now() + (method === 'folders' ? 30_000 : 370_000);
+    const deadline =
+      Date.now() +
+      (method === 'folders'
+        ? 30_000
+        : runTimeoutMs(method === 'run' ? (args.request as RunRequest)?.workflow : undefined) +
+          10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
       const job = await relayApi<RelayJob>('GET', `v1/jobs/${id}`);

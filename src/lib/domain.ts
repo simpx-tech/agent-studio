@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
+import { planSchema, type Plan } from './plans.ts';
+import {
+  workflowSchema,
+  workflowProgressSchema,
+  type Workflow,
+  type WorkflowProgress,
+} from './workflows.ts';
 
 export const providerIds = ['codex', 'claude', 'gemini'] as const;
 export type ProviderId = (typeof providerIds)[number];
@@ -136,6 +143,9 @@ export const messageSchema = z.object({
   authorName: z.string().optional(),
   executionLabel: z.string().optional(),
   runId: z.string().uuid().optional(),
+  plan: planSchema.optional(),
+  workflow: workflowProgressSchema.optional(),
+  workflowDefinition: workflowSchema.optional(),
 });
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
@@ -157,6 +167,7 @@ export const workspaceSchema = z.object({
   preferences: preferencesSchema,
   legacyAgents: z.array(agentSchema).optional(),
   conversations: z.array(conversationSchema),
+  workflows: z.array(workflowSchema).max(100).optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {
@@ -168,13 +179,16 @@ export type ProviderStatus = {
   location?: string | null;
 };
 export type RunEvent = TokenUsage & {
-  kind: 'text' | 'activity' | 'usage' | 'error' | 'tool' | 'progress';
+  kind: 'text' | 'activity' | 'usage' | 'error' | 'tool' | 'progress' | 'plan' | 'workflow';
   id?: string;
   revision?: number;
   text?: string;
   tool?: ToolActivity;
+  plan?: Plan;
+  workflow?: WorkflowProgress;
 };
 export type RunRequest = {
+  workflow?: Workflow;
   location?: ChatLocation;
   conversationId?: string;
   assistantId?: string;

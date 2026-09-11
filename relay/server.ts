@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
+import { runTimeoutMs } from '../src/lib/workflows.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z.object({
@@ -98,7 +99,13 @@ export function createRelay({
     for (const [id, job] of jobs) {
       if (
         !terminal(job.status) &&
-        (now() - job.updated > 45_000 || now() - job.created > 360_000)
+        (now() - job.updated > 45_000 ||
+          now() - job.created >
+            runTimeoutMs(
+              job.method === 'run'
+                ? (job.args.request as { workflow?: unknown })?.workflow
+                : undefined,
+            ))
       ) {
         job.status = 'error';
         job.error =

@@ -1,4 +1,32 @@
-# Skills, web search, and sub-agents
+# Workflows, artifacts, plans, and tools
+
+## Claude workflows
+
+Open **Claude workflows** from the chat toolbar. Create a named workflow with 1–12 ordered steps, each with a title and a prompt. Save it for reuse, edit or reorder its steps, or supply optional input and choose **Run workflow**. Running requires a ready Claude connection and a selected folder or an existing Standalone conversation. The current composer draft is retained. Remove image attachments before starting a workflow; existing conversation images remain part of its context.
+
+The selected host executes the sequence. All steps use the captured Claude account, model, reasoning, instructions, and working folder. Each step receives the earlier conversation and completed step outputs; the app launches the next step only after the previous CLI process confirms completion. A failure, quota error, cancellation, or context limit stops the sequence. Each step retains the normal five-minute timeout. Changing the next-reply model while a workflow runs does not change its captured settings. A browser controller can close after dispatch while the owning host continues and checkpoints progress.
+
+The progress panel identifies completed, running, failed, stopped, and pending workflow steps. Results appear under numbered step headings in the reply. The executed workflow definition is saved with the reply, so editing the reusable definition cannot rewrite that run. **Retry workflow from step 1** reruns the entire sequence using that saved definition; previously completed actions can run again. There is no automatic retry or restart after app/relay interruption, and this feature does not schedule background runs. Workflows and their results travel with workspace v3 exports and relay sync; conflicting definition edits are preserved as a separate copy. Up to 100 definitions can be saved within the existing 20 MB workspace limit.
+
+## Plan and progress
+
+Provider-reported plans appear directly above the composer while a reply runs. Expand or collapse the panel to inspect step status. After completion, the last plan remains expandable with its saved reply. Workflow progress and the agent's current plan are labelled separately. A completed reply never automatically completes pending plan steps; stopped, failed, or unconfirmed work stays visibly unfinished. Plans remain out of the conversation text replay.
+
+Codex plans come from [`turn/plan/updated`](https://learn.chatgpt.com/docs/app-server#turn-events). Claude supports both `TodoWrite` and the newer `TaskCreate`, `TaskUpdate`, `TaskGet`, and `TaskList` tools, applying updates only after successful tool results and associating task IDs from creation results. Child-agent plans cannot overwrite the parent's panel. Snapshots are bounded to 64 items and merged by revision through checkpoints and relay delivery.
+
+Agent Studio also supplies Codex with `studio_update_plan` using the app-server's [dynamic tool API](https://learn.chatgpt.com/docs/app-server#dynamic-tool-calls-experimental). Codex 0.153.4 did not expose its built-in `update_plan` in live checks with GPT-5.5 and GPT-5.6 Sol. The app tool accepts a bounded plan snapshot from the parent thread and updates the same panel; it executes no work or filesystem operations. Invalid arguments and child calls are rejected, repeated identical snapshots retain their revision, and tool activity records the invocation without arbitrary arguments. Models still choose when to report a plan; a plain-text checklist is not treated as a tool event.
+
+Current Claude models disable todo tools by default. Agent Studio passes the process-local `--settings` override `{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}` for tool-enabled chats, as documented in the [Claude Code release notes](https://platform.claude.com/docs/en/release-notes/claude-code). It does not edit profile settings, and background title/usage requests retain their restrictions. The override also travels as a fixed CLI argument through the WSL bridge. The decoder follows the [Claude task tracking protocol](https://code.claude.com/docs/en/agent-sdk/todo-tracking).
+
+## Artifacts and HTML previews
+
+Complete `html` and `svg` fenced code blocks in an assistant reply get an **Open HTML** or **Open SVG** artifact card. Put an optional short title after the language on the opening fence. Open the card for a large Preview/Source viewer, restart interactive content, or download the original source. Desktop downloads are written to Downloads with unique filenames, without overwriting existing files; browser clients use their browser's download flow. Up to 12 artifacts of 512 KB each can be previewed per reply. Incomplete or oversized blocks remain available as code. Source is retained in the original reply, so saved history, exports, and relay updates preserve the artifact without reading local file paths.
+
+HTML previews support inline CSS and JavaScript, SVG, and embedded data images. They use a separate constant renderer: the `studio-artifact` custom protocol in native apps and `/artifact-preview` in browser clients. Both enforce their own response CSP and `sandbox allow-scripts`, without same-origin privileges, application IPC, storage access, external resources, nested frames, forms, popups, or top-level navigation. The main chat continues to render only sanitized Markdown. The app sends source into the renderer once; it does not accept messages or commands from artifact code. The public route serves only the empty bootstrap and is never used to store source or credentials. See the [iframe sandbox reference](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/iframe#sandbox).
+
+This is a self-contained artifact viewer. Raw JSX/React requiring a build step, CDN dependencies, local file URLs, and arbitrary websites are not rendered. Compile such output to standalone HTML with inline dependencies first. There is no in-app web browser or artifact source editor.
+
+Windows WebView2 injects Tauri JavaScript helper objects into subframes even when Wry requests main-frame-only initialization. Their presence does not grant the sandbox access: the renderer CSP blocks the IPC fetch transport, the iframe remains an opaque origin, and Wry's native message listener belongs to the main frame. Native QA checks actual read-only app/plugin invocations in the preview as well as blocked parent DOM, storage, and network access; checking only whether a helper object exists would be misleading. No artifact-authored message is handled by the application.
 
 ## Image attachments
 

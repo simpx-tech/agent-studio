@@ -2,13 +2,27 @@ use crate::{
     protocol::{Decoder, RunEvent},
     providers::{chat_command, RunRequest},
 };
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tauri::{ipc::Channel, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub struct Runs(pub Mutex<HashMap<String, CancellationToken>>);
+#[derive(Clone)]
+pub struct EventSink(Arc<dyn Fn(RunEvent) -> Result<(), String> + Send + Sync>);
+impl EventSink {
+    pub fn new(f: impl Fn(RunEvent) -> Result<(), String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+    pub fn send(&self, event: RunEvent) -> Result<(), String> {
+        (self.0)(event)
+    }
+}
 pub async fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         #[cfg(windows)]
@@ -32,10 +46,14 @@ pub async fn run(
     channel: Channel<RunEvent>,
     cancel: CancellationToken,
 ) -> Result<String, String> {
+    let output = EventSink::new(move |event| channel.send(event).map_err(|e| e.to_string()));
+    if request.workflow.is_some() {
+        return crate::workflows::run(app, request, output, cancel).await;
+    }
     execute(
         app,
         request,
-        Some(channel),
+        Some(output),
         cancel,
         Duration::from_secs(300),
         "chat-runtime",
@@ -63,10 +81,10 @@ pub async fn title_text(
         Err("Title generation cancelled".into())
     }
 }
-async fn execute(
+pub(crate) async fn execute(
     app: tauri::AppHandle,
     request: RunRequest,
-    channel: Option<Channel<RunEvent>>,
+    channel: Option<EventSink>,
     cancel: CancellationToken,
     timeout: Duration,
     directory: &str,

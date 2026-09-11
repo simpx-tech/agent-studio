@@ -372,6 +372,8 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
+    #[serde(default)]
+    pub workflow: Option<crate::workflows::Workflow>,
     pub run_id: String,
     // Internal background requests must never inherit interactive chat permissions.
     #[serde(skip)]
@@ -399,6 +401,12 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(workflow) = &self.workflow {
+            if self.agent.provider != "claude" || self.conversation_only {
+                return Err("Workflows require a Claude conversation".into());
+            }
+            workflow.validate()?;
+        }
         uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid run id")?;
         if !valid_provider(&self.agent.provider) {
             return Err("Unknown provider".into());
@@ -504,7 +512,7 @@ impl RunRequest {
             .collect();
         let context = serde_json::json!({ "agent_instructions": self.agent.instructions, "conversation": messages });
         let tools = if self.tools_enabled() {
-            "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
+            "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. When delivering an HTML or SVG artifact, include its complete self-contained source in a fenced html or svg code block, optionally followed by a short title on the opening fence. Artifact previews support inline CSS and JavaScript, SVG and data images; they cannot load external scripts, styles, or network resources. Do not generate an artifact unless it serves the user's request. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
         } else {
             "Do not use tools, inspect files, execute commands, or delegate."
         };
@@ -669,6 +677,8 @@ pub async fn chat_command(
                     "default",
                     "--permission-mode",
                     "bypassPermissions",
+                    "--settings",
+                    r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#,
                 ]);
             } else {
                 c.args([
@@ -955,6 +965,7 @@ mod tests {
     }
     fn request() -> RunRequest {
         RunRequest {
+            workflow: None,
             conversation_only: false,
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
@@ -1072,6 +1083,10 @@ mod tests {
                 }
                 "claude" => {
                     assert!(args_contain("--tools", "default"));
+                    assert!(args_contain(
+                        "--settings",
+                        r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#
+                    ));
                     assert!(args_contain("--permission-mode", "bypassPermissions"));
                     assert!(!args.iter().any(|a| matches!(
                         a.as_ref(),

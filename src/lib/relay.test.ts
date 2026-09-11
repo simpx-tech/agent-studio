@@ -52,6 +52,62 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('keeps healthy multi-step workflows past one reply deadline while expiring abandoned work', async () => {
+    const f = await fixture(),
+      id = crypto.randomUUID();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const workflow = {
+      id: crypto.randomUUID(),
+      name: 'Long workflow',
+      steps: [
+        { title: 'First', prompt: 'First' },
+        { title: 'Second', prompt: 'Second' },
+      ],
+    };
+    await f.call('POST', 'jobs', {
+      id,
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: { request: { runId: id, workflow } },
+    });
+    await f.call('GET', 'jobs', undefined, f.target);
+    for (let i = 0; i < 13; i++) {
+      f.advance(30_000);
+      const updated = await f.call(
+        'PUT',
+        `jobs/${id}`,
+        {
+          status: 'running',
+          events: [
+            {
+              kind: 'workflow',
+              workflow: {
+                revision: i,
+                name: 'Long workflow',
+                steps: [
+                  { title: 'First', status: 'complete' },
+                  { title: 'Second', status: 'running' },
+                ],
+              },
+            },
+          ],
+        },
+        f.target,
+      );
+      expect(updated.body.status).toBe('running');
+    }
+    expect((await f.call('GET', `jobs/${id}`)).body.events[0].workflow.steps[0].status).toBe(
+      'complete',
+    );
+    f.advance(46_000);
+    expect((await f.call('GET', `jobs/${id}`)).body.status).toBe('error');
+  });
   it('retains an empty relay identity across restart before the first workspace write', async () => {
     const f = await fixture();
     const before = (await f.call('GET', 'state')).body;

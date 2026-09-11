@@ -25,6 +25,7 @@
     Archive,
     BookOpen,
     Paperclip,
+    GitBranch,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -107,6 +108,11 @@
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import MessageView from '$lib/components/MessageView.svelte';
+  import PlanPanel from '$lib/components/PlanPanel.svelte';
+  import WorkflowManager from '$lib/components/WorkflowManager.svelte';
+  import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
+  import { workflowMessage, type Workflow } from '$lib/workflows';
+  import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
   import {
     readImage,
@@ -189,6 +195,8 @@
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
   let run = $state<{ id: string; conversationId: string } | null>(null);
+  let workflowsOpen = $state(false);
+  let selectedArtifact = $state<Artifact | null>(null);
   let stopping = $state(false);
   let editorOpen = $state(false);
   let contextOpen = $state(false);
@@ -586,6 +594,7 @@
             },
             apply: async (value) => {
               workspace.fleet = value.fleet;
+              workspace.workflows = value.workflows;
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
@@ -1334,8 +1343,10 @@
     composerInput?.focus();
     void attachImages(files);
   }
-  async function send(retry = false) {
-    if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
+  async function send(retry = false, workflow?: Workflow, workflowInput = '') {
+    if (retry) workflow = active?.messages.at(-1)?.workflowDefinition;
+    if (!canSend || (!retry && !workflow && !prompt.trim() && !attachedImages.length)) return;
+    if (workflow && selectedSettings.provider !== 'claude') return;
     if (!retry && attachedImages.length) {
       // Keep the draft intact when the portable workspace cannot fit the images.
       const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
@@ -1356,7 +1367,7 @@
         id: crypto.randomUUID(),
         settings: structuredClone($state.snapshot(selectedSettings)),
         location: selectedLocation ? { ...selectedLocation } : undefined,
-        title: prompt.trim().slice(0, 80) || 'Image conversation',
+        title: workflow?.name ?? (prompt.trim().slice(0, 80) || 'Image conversation'),
         titleStatus: 'pending',
         createdAt: now,
         updatedAt: now,
@@ -1375,15 +1386,22 @@
       conversation.messages.push({
         id: crypto.randomUUID(),
         role: 'user',
-        blocks: [{ type: 'markdown', text: prompt.trim() }],
-        ...(attachedImages.length
+        blocks: [
+          {
+            type: 'markdown',
+            text: workflow ? workflowMessage(workflow, workflowInput) : prompt.trim(),
+          },
+        ],
+        ...(!workflow && attachedImages.length
           ? { images: structuredClone($state.snapshot(attachedImages)) }
           : {}),
         status: 'complete',
         createdAt: now,
       });
-      prompt = '';
-      clearImages();
+      if (!workflow) {
+        prompt = '';
+        clearImages();
+      }
     }
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
@@ -1399,6 +1417,7 @@
         ? connectionLabel(workspace.fleet, responseSettings.connectionId)
         : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
       runId,
+      ...(workflow ? { workflowDefinition: structuredClone($state.snapshot(workflow)) } : {}),
       promptTokensEstimate: estimatePromptTokens(responseSettings, history),
       blocks: [],
       status: 'running',
@@ -1423,6 +1442,7 @@
         : await runAgent(
             {
               runId,
+              workflow,
               agent: responseSettings,
               messages: history,
               conversationId: conversation.id,
@@ -1433,6 +1453,7 @@
               if (stopping) void cancelRun(runId).catch(() => {});
               const m = message();
               applyRunEvent(m, event);
+              if (event.kind === 'workflow' || event.kind === 'plan') saveSoon();
               if (activeId === conversation.id) void scrollToEnd();
             },
           );
@@ -2039,6 +2060,13 @@
           <ToolbarActions>
             <button
               class="icon-button"
+              title="Claude workflows"
+              aria-label="Claude workflows"
+              disabled={!loaded}
+              onclick={() => (workflowsOpen = true)}><GitBranch size={16} /></button
+            >
+            <button
+              class="icon-button"
               title="Model context"
               aria-label="Model context"
               disabled={!loaded || locationPending || (desktop() && !selectedLocation && !active)}
@@ -2091,6 +2119,7 @@
                     !run}
                   retry={() => void send(true)}
                   retryDisabled={!canSend}
+                  openArtifact={(artifact) => (selectedArtifact = artifact)}
                 />{/each}
             {:else}<div class="chat-empty">
                 <span
@@ -2104,6 +2133,7 @@
           </div>
         </div>
         <div class="composer-area">
+          {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
           {#if selectedComputerOffline}<div class="setup-hint">
               <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
                 ? selectedComputer.hostName
@@ -2311,6 +2341,23 @@
       void tick().then(() =>
         document.querySelector<HTMLTextAreaElement>('[aria-label="Message"]')?.focus(),
       );
+    }}
+  />{/if}
+{#if selectedArtifact}{#key selectedArtifact.id}<ArtifactViewer
+      artifact={selectedArtifact}
+      close={() => (selectedArtifact = null)}
+    />{/key}{/if}
+{#if workflowsOpen}<WorkflowManager
+    workflows={workspace.workflows ?? []}
+    canRun={canSend && selectedSettings.provider === 'claude' && !attachedImages.length}
+    close={() => (workflowsOpen = false)}
+    save={async (values) => {
+      workspace.workflows = values;
+      await persist();
+    }}
+    run={async (workflow, input) => {
+      workflowsOpen = false;
+      await send(false, workflow, input);
     }}
   />{/if}
 {#if editorOpen}<ChatInstructions

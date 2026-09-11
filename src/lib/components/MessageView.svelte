@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { RotateCcw, CircleAlert, ArrowRightLeft } from '@lucide/svelte';
+  import { RotateCcw, CircleAlert, ArrowRightLeft, PanelsTopLeft } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
   import { openLink } from '$lib/transport';
@@ -7,6 +7,8 @@
   import ToolActivity from './ToolActivity.svelte';
   import ReplyUsage from './ReplyUsage.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
+  import PlanPanel from './PlanPanel.svelte';
+  import { responseArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
     agent,
@@ -15,6 +17,7 @@
     retryDisabled = false,
     switchNotice = '',
     timeTotal,
+    openArtifact,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -23,6 +26,7 @@
     retryDisabled?: boolean;
     switchNotice?: string;
     timeTotal?: ReplyTimeTotal;
+    openArtifact: (artifact: Artifact) => void;
   } = $props();
   let linkError = $state('');
   const author = $derived(message.settings ?? agent);
@@ -35,6 +39,7 @@
   const tools = $derived(
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
+  const artifacts = $derived(responseArtifacts(text, message.id));
   function linkClick(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) {
@@ -73,6 +78,7 @@
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
+      {#if message.status !== 'running'}<PlanPanel {message} compact />{/if}
       {#if message.status === 'running'}<ToolActivity
           {tools}
           replyStatus={message.status}
@@ -101,10 +107,43 @@
         />{/if}
       {#if message.status !== 'running' && (canRetry || linkError)}<div class="message-actions">
           {#if canRetry}<button class="text-button" onclick={retry} disabled={retryDisabled}
-              ><RotateCcw size={13} />Retry</button
+              ><RotateCcw size={13} />{message.workflowDefinition
+                ? 'Retry workflow from step 1'
+                : 'Retry'}</button
             >{/if}
           {#if linkError}<span role="alert">{linkError}</span>{/if}
         </div>{/if}
     {/if}
+    {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+        {#each artifacts as artifact (artifact.id)}<button
+            class="secondary"
+            onclick={() => openArtifact(artifact)}
+            ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+              >Open {artifact.language.toUpperCase()}</small
+            ></button
+          >{/each}
+      </div>{/if}
   </div>
 </article>
+
+<style>
+  .response-artifacts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 14px 0;
+  }
+  .response-artifacts button {
+    text-align: left;
+    max-width: 100%;
+  }
+  .response-artifacts span {
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  small {
+    color: var(--muted);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+</style>

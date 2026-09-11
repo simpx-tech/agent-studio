@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import type { ContentBlock, Message, RunEvent } from './domain';
+import { planSchema } from './plans.ts';
+import { workflowProgressSchema } from './workflows.ts';
 
 export const activityStatusSchema = z.enum([
   'running',
@@ -84,7 +86,15 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
-  if (event.kind === 'tool') {
+  if (event.kind === 'plan') {
+    const parsed = planSchema.safeParse(event.plan);
+    if (parsed.success && parsed.data.revision > (message.plan?.revision ?? -1))
+      message.plan = parsed.data;
+  } else if (event.kind === 'workflow') {
+    const parsed = workflowProgressSchema.safeParse(event.workflow);
+    if (parsed.success && parsed.data.revision > (message.workflow?.revision ?? -1))
+      message.workflow = parsed.data;
+  } else if (event.kind === 'tool') {
     const parsed = toolActivitySchema.safeParse(event.tool);
     if (!parsed.success) return;
     const tool = parsed.data;
@@ -173,10 +183,14 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
           : events.findIndex((e) => e.kind === event.kind);
   if (index >= 0) {
     if (
-      event.kind === 'progress'
-        ? (event.revision ?? -1) > (events[index].revision ?? -1)
-        : event.kind !== 'tool' ||
-          (event.tool?.revision ?? -1) > (events[index].tool?.revision ?? -1)
+      event.kind === 'plan'
+        ? (event.plan?.revision ?? -1) > (events[index].plan?.revision ?? -1)
+        : event.kind === 'workflow'
+          ? (event.workflow?.revision ?? -1) > (events[index].workflow?.revision ?? -1)
+          : event.kind === 'progress'
+            ? (event.revision ?? -1) > (events[index].revision ?? -1)
+            : event.kind !== 'tool' ||
+              (event.tool?.revision ?? -1) > (events[index].tool?.revision ?? -1)
     )
       events[index] = event;
   } else if (

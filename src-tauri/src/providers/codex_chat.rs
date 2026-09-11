@@ -1,19 +1,72 @@
 //! One ephemeral app-server thread per submitted reply, retaining the selected
 //! profile and process cwd. This stream includes sub-agent events exec omits.
 use super::RunRequest;
-use crate::protocol::{Decoder, RunEvent};
+use crate::protocol::Decoder;
+use crate::runner::EventSink;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tauri::ipc::Channel;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Child,
 };
 use tokio_util::sync::CancellationToken;
 
+fn plan_tool() -> Value {
+    json!({"type":"function","name":"studio_update_plan","deferLoading":false,
+        "description":"Update the plan and progress panel for this conversation. For multi-step work, report the complete ordered plan before starting and update statuses as work progresses. Mark only finished steps completed. This tool only displays progress; it does not execute work.",
+        "inputSchema":{"type":"object","properties":{
+            "explanation":{"type":"string","maxLength":2000},
+            "plan":{"type":"array","maxItems":64,"items":{"type":"object","properties":{
+                "step":{"type":"string","minLength":1,"maxLength":1000},
+                "status":{"type":"string","enum":["pending","inProgress","completed"]}
+            },"required":["step","status"],"additionalProperties":false}}
+        },"required":["plan"],"additionalProperties":false}})
+}
+fn plan_response(
+    value: &Value,
+    root: &str,
+    decoder: &mut Decoder,
+) -> Option<(Value, Vec<crate::protocol::RunEvent>)> {
+    let params = &value["params"];
+    if value["method"] != "item/tool/call" || params["tool"] != "studio_update_plan" {
+        return None;
+    }
+    let args = &params["arguments"];
+    let valid = !root.is_empty()
+        && params["threadId"] == root
+        && params["namespace"].is_null()
+        && args.to_string().len() <= 128_000
+        && args["plan"].as_array().is_some_and(|steps| {
+            steps.len() <= 64
+                && steps.iter().all(|s| {
+                    s["step"].as_str().is_some_and(|title| {
+                        !title.trim().is_empty() && title.chars().count() <= 1000
+                    }) && matches!(
+                        s["status"].as_str(),
+                        Some("pending" | "inProgress" | "completed")
+                    )
+                })
+        })
+        && (args.get("explanation").is_none()
+            || args["explanation"]
+                .as_str()
+                .is_some_and(|s| s.chars().count() <= 2000));
+    let events = if valid {
+        // Normalize the actual model tool call through the same revisioned plan decoder.
+        let mut update = args.clone();
+        update["threadId"] = json!(root);
+        decoder.decode_codex_server(&json!({"method":"turn/plan/updated","params":update}), root)
+    } else {
+        vec![]
+    };
+    Some((
+        json!({"id":value["id"],"result":{"success":valid,"contentItems":[{"type":"inputText","text":if valid {"Plan updated."} else {"Plan rejected. Report at most 64 named steps with pending, inProgress, or completed status in the parent conversation."}}]}}),
+        events,
+    ))
+}
+
 fn start_params(request: &RunRequest) -> Value {
-    let mut params =
-        json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true});
+    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool()]});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -36,7 +89,7 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
 pub async fn run(
     child: &mut Child,
     request: &RunRequest,
-    channel: Option<&Channel<RunEvent>>,
+    channel: Option<&EventSink>,
     cancel: CancellationToken,
     timeout: Duration,
 ) -> Result<(String, String), String> {
@@ -89,6 +142,11 @@ pub async fn run(
                     continue;
                 }
                 if value.get("id").is_some() && value["method"].is_string() {
+                    if let Some((response, events)) = plan_response(&value, &thread, &mut decoder) {
+                        for event in events { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                        input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex plan")?;
+                        continue;
+                    }
                     // Full-access runs do not need approvals. Unsupported interactions
                     // fail explicitly instead of hanging or handling account secrets.
                     let response = json!({"id":value["id"],"error":{"code":-32601,"message":"This interaction is unavailable in Agent Studio. Ask the user in your text reply."}});
@@ -140,11 +198,46 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model"})
+            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool()]})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");
         assert_eq!(turn["input"][0]["text"], request.prompt());
         assert!(start_params(&request).get("cwd").is_none()); // Inherit validated process cwd, including WSL.
+    }
+    #[test]
+    fn plan_tool_validates_parent_and_bounds_without_changing_work() {
+        let mut decoder = Decoder::default();
+        let mut value = json!({"id":"call","method":"item/tool/call","params":{"threadId":"root","tool":"studio_update_plan","arguments":{"plan":[{"step":"Check","status":"inProgress"}]}}});
+        let (response, events) = plan_response(&value, "root", &mut decoder).unwrap();
+        assert_eq!(response["result"]["success"], true);
+        assert!(
+            matches!(&events[0], crate::protocol::RunEvent::Plan{plan} if plan.revision == 1 && plan.steps[0].status == "running")
+        );
+        assert!(plan_response(&value, "root", &mut decoder)
+            .unwrap()
+            .1
+            .is_empty());
+        value["params"]["threadId"] = json!("child");
+        assert_eq!(
+            plan_response(&value, "root", &mut decoder).unwrap().0["result"]["success"],
+            false
+        );
+        value["params"]["threadId"] = json!("root");
+        value["params"]["arguments"]["plan"][0]["status"] = json!("invented");
+        assert_eq!(
+            plan_response(&value, "root", &mut decoder).unwrap().0["result"]["success"],
+            false
+        );
+        value["params"]["arguments"]["plan"] = json!([{"step":"Check","status":"completed"}]);
+        assert!(
+            matches!(&plan_response(&value, "root", &mut decoder).unwrap().1[0], crate::protocol::RunEvent::Plan{plan} if plan.revision == 2)
+        );
+        value["params"]["arguments"]["plan"] =
+            json!(vec![json!({"step":"Check","status":"pending"}); 65]);
+        assert_eq!(
+            plan_response(&value, "root", &mut decoder).unwrap().0["result"]["success"],
+            false
+        );
     }
 }
