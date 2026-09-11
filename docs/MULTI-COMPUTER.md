@@ -78,7 +78,7 @@ The default relay listens only on loopback. For another computer, use HTTPS or f
 
 Windows remembers the relay address and pairing key in the current user's Windows Credential Manager, scoped to this app and installation. It reconnects when Agent Studio opens and retries temporary outages, including while minimized. **Disconnect relay** removes that saved pairing; it is also available when reconnection fails. The restored key stays in native code and is excluded from workspace files, exports, browser storage, and logs. This uses a credential local to this Windows user and machine, following [Windows credential persistence](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw).
 
-Pair once after upgrading from the memory-only version. Other native platforms still require pairing after reopening until an OS-protected store is implemented. The saved sync checkpoint retains offline changes and deletions. Provider logins remain persisted by their CLIs, independently of relay pairing. A replaced relay database requires deliberate re-pairing rather than an automatic merge.
+Pair once after upgrading from the memory-only version. Other native platforms still require pairing after reopening until an OS-protected store is implemented. The saved sync checkpoint retains offline changes and deletions. Provider logins remain persisted by their CLIs, independently of relay pairing. A desktop installation retains its private workspace binding after disconnect and rejects a different workspace or replaced database. Restore the original relay identity or use a separate installation for a different person.
 
 ## VPS deployment
 
@@ -91,9 +91,9 @@ docker compose -f relay/compose.yml up -d --build
 
 Use an actual random key from your secret manager. Configure your domain and TLS using the Caddy example, then pair clients to `https://your-relay-domain`. Compose publishes only `127.0.0.1:4317`; the HTTPS reverse proxy is the public entry point. The container runs as the Node user and stores data in the `relay-data` volume. Run one relay process per data directory.
 
-To preserve relay identity during migration, stop the old relay and copy its `workspace.json` into the new data directory/volume before starting the new server. Pairing to a fresh relay can also merge local app data. Connected clients detect a replaced relay database and require re-pairing, preventing an empty replacement from silently deleting local chats.
+To preserve relay identity during migration, stop the old relay and restore its complete private data directory, including all workspace registries, workspace files, sessions, and push data, before starting the new server. Retain the original HTTPS origin and pairing configuration. Existing desktop installations reject changed workspace identities before sharing local chats.
 
-Back up `workspace.json` and protect the pairing key separately. Anyone with that key is a trusted member of this single-user workspace and can read synced chats and request conversational runs on paired hosts. Work labels are organizational, not access-control boundaries. Use a separate app-data identity and relay for a separate trust boundary. The VPS stores readable chat data; end-to-end encryption and per-device revocation are not implemented. Rotate the shared key to revoke access and re-pair retained devices.
+One VPS can host separate private workspaces, each with its own key, chats, computer/account registry, jobs, and notifications. See [private workspace setup](PRIVATE-WORKSPACES.md) for server-local provisioning, rotation, and disable commands. A key grants trusted access only to its workspace; account labels within that workspace remain organizational. Back up the entire private data directory and protect keys separately. The VPS administrator can read stored data; end-to-end encryption and per-device roles are not implemented.
 
 ## Behavior and limits
 

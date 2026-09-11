@@ -1,5 +1,17 @@
 # Verification — 2026-09-08
 
+## Private workspaces on a shared VPS — 2026-09-11
+
+The relay selects a private workspace from authenticated keys/sessions and keeps its data, fleet, jobs, presence, sessions, push subscriptions, and pending badges separate. The original owner retains the existing data and instance identity. Server-local administration creates, lists, rotates, and disables additional workspaces without restarting the relay. See [operations and device privacy](PRIVATE-WORKSPACES.md).
+
+Real HTTP regression cases cover cross-workspace reads/writes and guessed IDs; identical resource IDs in different workspaces; each job method, claiming, cancellation, and results; restart persistence; conflicting bearer/cookie credentials; stale tabs; CLI provisioning output; corrupt-registry failure; key/session revocation during stalled uploads; notification routing; and rotation during an in-flight push. Browser cache/transport tests cover authenticated migration, queued saves, and delayed responses. Real built-PWA browser tests compare independent users, switch a shared browser, replace its HttpOnly cookie with duplicated resource IDs, and revoke a session while a running-chat deletion awaits cancellation. Old unpaired-cache artifact/Markdown test fixtures now seed a relay workspace and pair before exercising the same rendering/download assertions.
+
+Native QA uses `scripts/native-private-workspaces.tauri.json`, a separate WebView2 profile, the separate `artifacts/mobile-native-target` Cargo directory, and CDP 9512. `scripts/private-workspaces-native-smoke.mjs` verifies actual Tauri pairing, rejection of another workspace before changing the saved connection, binding persistence after disconnect, re-pairing to the original workspace, and the visible rejection in Connections. Evidence is in `artifacts/private-workspaces-native/{result.json,connections.png}`; the image was inspected. No provider prompts were needed for this relay-authentication change. Existing user apps were preserved. macOS/Linux native runtime and physical phone execution remain untested for this change.
+
+The native CDP helper renders rejected string-valued Tauri promises as a generic `Uncaught (in promise)` exception. The smoke test catches the rejection inside the renderer and returns its safe error string for assertions; it never returns pairing keys.
+
+Final local gates passed: `npm run verify` (zero Svelte errors/warnings, 134 unit tests, production build, and 92 Playwright tests), Rust formatting, Clippy with warnings denied, and 86 Rust tests (four existing opt-in tests ignored). Logs use `artifacts/private-workspaces-{verify,fmt,clippy,rust}.log`. The full browser run includes real service-worker push delivery and the fixed cold-start notification link, while the new HTTP suite covers revoked uploads and push/key-rotation races. Damaged authenticated browser caches are preserved and reported instead of being silently overwritten.
+
 ## Smaller conversation badge — 2026-09-11
 
 The sidebar's pending-chat badge is reduced from 18px to 16px high, with 4px horizontal padding and an 8px radius. Its 10px numerals retain their readability. This is a CSS-only adjustment to the sidebar badge. Visual evidence and the full repository gate use `artifacts/smaller-badge-*`.

@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Bell } from '@lucide/svelte';
   import {
     pushSettings,
     savePushSubscription,
     disablePushNotifications,
     testPushNotification,
+    workspaceStorageScope,
     type PushStatus,
   } from '$lib/transport';
-  let { paired }: { paired: boolean } = $props();
+  let { paired, workspaceSession = 0 }: { paired: boolean; workspaceSession?: number } = $props();
   let status = $state<PushStatus>();
   let supported = $state(false);
   let permission = $state<NotificationPermission>('default');
@@ -20,30 +21,42 @@
   let refreshing = false;
   let revision = 0;
   const enabled = $derived(!!status?.enabled && permission === 'granted');
+  function sessionGuard() {
+    const generation = revision;
+    const scope = workspaceStorageScope();
+    return () =>
+      !disposed &&
+      paired &&
+      generation === revision &&
+      !!scope &&
+      scope === workspaceStorageScope();
+  }
   async function refresh() {
     if (!paired || !supported || refreshing || busy) return;
     refreshing = true;
-    const generation = revision;
+    const currentSession = sessionGuard();
     try {
       const current = await navigator.serviceWorker.getRegistration('/');
+      if (!currentSession()) return;
       const next = await pushSettings();
-      if (disposed || !paired || generation !== revision) return;
+      if (!currentSession()) return;
       registration = current;
       status = next;
       permission = Notification.permission;
       error = '';
       if (current && next.enabled && permission === 'granted') {
         const subscription = await current.pushManager.getSubscription();
-        if (disposed || !paired || generation !== revision) return;
+        if (!currentSession()) return;
         if (!subscription) {
           status = { ...next, enabled: false };
           error = 'Your browser subscription expired. Enable notifications again.';
         }
       }
     } catch {
-      if (!disposed) error = 'Could not check notification settings. Try again when connected.';
+      if (currentSession())
+        error = 'Could not check notification settings. Try again when connected.';
     } finally {
-      refreshing = false;
+      if (currentSession()) refreshing = false;
     }
   }
   onMount(() => {
@@ -68,17 +81,29 @@
     };
   });
   $effect(() => {
-    if (paired && supported) void refresh();
+    const available = paired && supported;
+    workspaceSession;
+    untrack(() => {
+      ++revision;
+      status = undefined;
+      registration = undefined;
+      error = feedback = '';
+      busy = refreshing = false;
+      if (available) void refresh();
+    });
   });
   async function enable() {
     if (busy) return;
     ++revision;
+    const currentSession = sessionGuard();
     busy = true;
     error = '';
     feedback = '';
     try {
       // Invoke permission before any await so Safari retains the button gesture.
-      permission = await Notification.requestPermission();
+      const result = await Notification.requestPermission();
+      if (!currentSession()) return;
+      permission = result;
       if (permission !== 'granted') {
         error =
           permission === 'denied'
@@ -87,7 +112,10 @@
         return;
       }
       const settings = await pushSettings();
-      registration = registration ?? (await navigator.serviceWorker.getRegistration('/'));
+      if (!currentSession()) return;
+      const current = registration ?? (await navigator.serviceWorker.getRegistration('/'));
+      if (!currentSession()) return;
+      registration = current;
       if (!registration?.active)
         throw new Error('Close and reopen the installed app to finish its update, then try again.');
       const bytes = Uint8Array.from(
@@ -95,54 +123,70 @@
         (c) => c.charCodeAt(0),
       );
       let subscription = await registration.pushManager.getSubscription();
+      if (!currentSession()) return;
       if (
         subscription?.options.applicationServerKey &&
         Array.from(new Uint8Array(subscription.options.applicationServerKey)).join() !==
           Array.from(bytes).join()
       ) {
         await subscription.unsubscribe();
+        if (!currentSession()) return;
         subscription = null;
       }
       subscription ??= await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: bytes,
       });
-      status = await savePushSubscription(subscription);
+      if (!currentSession()) return;
+      const next = await savePushSubscription(subscription);
+      if (!currentSession()) return;
+      status = next;
       feedback = 'Notifications enabled on this device.';
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Notifications could not be enabled. Try again.';
+      if (currentSession())
+        error = e instanceof Error ? e.message : 'Notifications could not be enabled. Try again.';
     } finally {
-      busy = false;
+      if (currentSession()) busy = false;
     }
   }
   async function disable() {
     ++revision;
+    const currentSession = sessionGuard();
     busy = true;
     error = '';
     feedback = '';
     try {
       // Revoke delivery on the server first; a browser unsubscribe can fail offline.
       await disablePushNotifications();
+      if (!currentSession()) return;
       if (status) status = { ...status, enabled: false };
-      await (await registration?.pushManager.getSubscription())?.unsubscribe();
+      const subscription = await registration?.pushManager.getSubscription();
+      if (!currentSession()) return;
+      await subscription?.unsubscribe();
+      if (!currentSession()) return;
       feedback = 'Notifications disabled on this device.';
     } catch {
-      error = 'Could not finish disabling notifications. Reconnect and try again.';
+      if (currentSession())
+        error = 'Could not finish disabling notifications. Reconnect and try again.';
     } finally {
-      busy = false;
+      if (currentSession()) busy = false;
     }
   }
   async function test() {
+    ++revision;
+    const currentSession = sessionGuard();
     busy = true;
     error = '';
     feedback = '';
     try {
       await testPushNotification();
+      if (!currentSession()) return;
       feedback = 'Test notification queued. Check this device’s notifications.';
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not send the test notification.';
+      if (currentSession())
+        error = e instanceof Error ? e.message : 'Could not send the test notification.';
     } finally {
-      busy = false;
+      if (currentSession()) busy = false;
     }
   }
 </script>

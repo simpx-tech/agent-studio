@@ -96,6 +96,7 @@ export function pushService({
   sessionActive,
   send = webpush.sendNotification,
   pendingCount,
+  active = () => true,
 }: {
   directory: string;
   token: string;
@@ -103,6 +104,7 @@ export function pushService({
   sessionActive: (session: string) => boolean;
   send?: PushSender;
   pendingCount?: () => number;
+  active?: () => boolean;
 }) {
   const file = join(directory, 'web-push.json');
   const keyId = createHmac('sha256', token).update('web-push-v1').digest('hex');
@@ -110,6 +112,9 @@ export function pushService({
   let saved = '';
   let unavailable = false;
   function save(next: State) {
+    // A rotated/disabled workspace can be replaced while a delivery is in
+    // flight. Its old instance must never overwrite the replacement's file.
+    if (!active()) throw new Error('Notification workspace is no longer active.');
     const bytes = JSON.stringify(next);
     if (bytes === saved) return;
     const temporary = `${file}.tmp`;
@@ -177,7 +182,7 @@ export function pushService({
   }
   let draining = false;
   async function drain() {
-    if (draining) return;
+    if (draining || !active()) return;
     draining = true;
     try {
       save(pruned());
@@ -213,6 +218,7 @@ export function pushService({
           failed = true;
           gone = [404, 410].includes((error as { statusCode?: number }).statusCode ?? 0);
         }
+        if (!active()) return;
         const next = pruned();
         const current = next.subscribers.find((s) => s.id === subscriber.id);
         if (

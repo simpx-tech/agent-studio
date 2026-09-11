@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "relay": "node relay/start.ts",
+    "relay:users": "node relay/manage.ts",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",

@@ -271,14 +271,14 @@ test('a delayed image read cannot attach to a newer conversation or send before 
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('New draft');
 });
 
-test('unpaired browser keeps per-chat choices without an agent library', async ({ page }) => {
+test('desktop keeps per-chat choices without an agent library', async ({ page }) => {
+  await mockDesktop(page);
   await page.goto('/');
-  await expect(page.getByText('Connect your computers', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Your agents' })).toHaveCount(0);
   await chooseTestFolder(page);
   await pick(page, 'Agent', 'Claude');
   await page.getByRole('combobox', { name: 'Model', exact: true }).click();
-  await page.getByRole('option', { name: 'Sonnet (latest)', exact: true }).click();
+  await page.getByRole('option', { name: 'Sonnet', exact: true }).click();
   await page.getByRole('combobox', { name: 'Reasoning', exact: true }).click();
   await page.getByRole('option', { name: 'High', exact: true }).click();
   await page.getByRole('button', { name: 'Chat instructions', exact: true }).click();
@@ -292,7 +292,7 @@ test('unpaired browser keeps per-chat choices without an agent library', async (
     'High',
   );
   await page.getByLabel('Message', { exact: true }).fill('Hello');
-  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
 });
 
 test('Gemini automatically exposes its existing CLI login', async ({ page }) => {
@@ -505,16 +505,13 @@ test('login errors never masquerade as a completed answer', async ({ page }) => 
   await expect(page.locator('[data-testid="message"]')).toHaveCount(2);
 });
 
-test('corrupted storage is preserved and editing is blocked', async ({ page }) => {
-  await page.addInitScript(() =>
-    localStorage.setItem('agent-studio.preview.v1', '{"version":999}'),
-  );
+test('corrupted desktop storage is preserved and editing is blocked', async ({ page }) => {
+  await mockDesktop(page);
+  await page.addInitScript(() => localStorage.setItem('test-workspace', '{"version":999}'));
   await page.goto('/');
   await expect(page.getByRole('alert')).toContainText('No saved data has been overwritten');
   await expect(page.getByRole('button', { name: 'New conversation', exact: true })).toBeDisabled();
-  expect(await page.evaluate(() => localStorage.getItem('agent-studio.preview.v1'))).toBe(
-    '{"version":999}',
-  );
+  expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).toBe('{"version":999}');
 });
 
 test('compact chat shell keeps navigation and the editor accessible', async ({ page }) => {

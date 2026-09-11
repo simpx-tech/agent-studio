@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
-import { sessionStore } from './sessions.ts';
+import type { sessionStore } from './sessions.ts';
+import type { RelayWorkspace, workspaceRegistry } from './workspaces.ts';
 import { artifactPreviewHtml, artifactPreviewHeaders } from './artifact-preview.ts';
 
 const cookieName = 'agent_studio_session';
@@ -69,20 +70,31 @@ export function servePublic(req: IncomingMessage, res: ServerResponse, files: Ma
   return true;
 }
 
-export function browserSessions(token: string, now: () => number, directory: string) {
-  const sessions = sessionStore(directory, token, now);
+export function browserSessions(
+  registry: ReturnType<typeof workspaceRegistry>,
+  store: (workspace: RelayWorkspace) => ReturnType<typeof sessionStore>,
+  now: () => number,
+) {
   const attempts = new Map<string, { count: number; expires: number }>();
-  const validKey = (key: string) => {
-    const supplied = Buffer.from(key),
-      expected = Buffer.from(token);
-    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
-  };
   const sessionId = (req: IncomingMessage) =>
     req.headers.cookie
       ?.split(';')
       .map((part) => part.trim())
       .find((part) => part.startsWith(cookieName + '='))
       ?.slice(cookieName.length + 1) ?? '';
+  function context(req: IncomingMessage) {
+    const id = sessionId(req);
+    if (!/^(?:[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\.)?[a-f0-9]{64}$/.test(id)) return;
+    // Legacy owner cookies keep their original format and durable session file.
+    const workspaceId = /^[a-f0-9]{64}$/.test(id) ? 'owner' : id.split('.')[0];
+    if (!/^(owner|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/.test(workspaceId)) return;
+    const workspace = registry.get(workspaceId);
+    if (!workspace) return;
+    const sessions = store(workspace);
+    const session = sessions.get(id);
+    if (!session || session.expires <= now()) return;
+    return { workspace, sessions, session, id };
+  }
   function sameOrigin(req: IncomingMessage) {
     try {
       const origin = new URL(req.headers.origin ?? '');
@@ -96,24 +108,48 @@ export function browserSessions(token: string, now: () => number, directory: str
       return false;
     }
   }
-  function actor(req: IncomingMessage) {
-    const session = sessions.get(sessionId(req));
-    if (!session || session.expires <= now()) return undefined;
+  function authenticated(req: IncomingMessage) {
+    const current = context(req);
+    if (!current) return;
     if (req.headers['sec-fetch-site'] === 'cross-site') return undefined;
     if (!['GET', 'HEAD'].includes(req.method ?? '') && !sameOrigin(req)) return undefined;
-    return session.actor;
+    return current;
+  }
+  function matches(req: IncomingMessage, workspace: RelayWorkspace, discovery = false) {
+    const supplied = req.headers['x-workspace-id'];
+    return (
+      supplied === workspace.id ||
+      (supplied === undefined && (discovery || workspace.id === 'owner'))
+    );
   }
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const send = (status: number, data: unknown) => {
       res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
     };
+    if (req.headers.authorization !== undefined) {
+      send(403, { error: 'Use the browser pairing form to manage this device session.' });
+      return;
+    }
     if (req.method === 'GET') {
-      const environmentId = actor(req);
-      const id = sessionId(req);
-      const session = sessions.get(id);
+      const current = authenticated(req);
+      if (current && !matches(req, current.workspace, true)) {
+        send(409, {
+          code: 'workspace_changed',
+          error: 'This browser is now paired with a different workspace. Reload to continue.',
+        });
+        return;
+      }
+      const environmentId = current?.session.actor;
+      const { id, session, sessions } = current ?? {};
       // Keep actively used devices paired, with at most one durable renewal per day.
-      if (environmentId && session && session.expires - now() <= lifetime - 24 * 60 * 60 * 1000) {
+      if (
+        environmentId &&
+        id &&
+        session &&
+        sessions &&
+        session.expires - now() <= lifetime - 24 * 60 * 60 * 1000
+      ) {
         sessions.replace(id, id, { ...session, expires: now() + lifetime });
         res.setHeader(
           'Set-Cookie',
@@ -122,7 +158,13 @@ export function browserSessions(token: string, now: () => number, directory: str
       }
       send(
         environmentId ? 200 : 401,
-        environmentId ? { environmentId } : { error: 'Pair this device to connect.' },
+        environmentId
+          ? {
+              environmentId,
+              workspaceId: current!.workspace.id,
+              workspaceName: current!.workspace.name,
+            }
+          : { error: 'Pair this device to connect.' },
       );
       return;
     }
@@ -132,7 +174,15 @@ export function browserSessions(token: string, now: () => number, directory: str
     }
     const secure = req.headers.origin?.startsWith('https:') ? '; Secure' : '';
     if (req.method === 'DELETE') {
-      sessions.replace(sessionId(req));
+      const current = authenticated(req);
+      if (current && !matches(req, current.workspace)) {
+        send(409, {
+          code: 'workspace_changed',
+          error: 'This browser is now paired with a different workspace. Reload to continue.',
+        });
+        return;
+      }
+      current?.sessions.replace(current.id);
       res.setHeader(
         'Set-Cookie',
         `${cookieName}=; Path=/v1; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,
@@ -147,7 +197,7 @@ export function browserSessions(token: string, now: () => number, directory: str
     for (const [id, value] of attempts) if (value.expires <= now()) attempts.delete(id);
     const address = req.socket.remoteAddress ?? 'unknown';
     const attempt = attempts.get(address) ?? { count: 0, expires: now() + 60_000 };
-    if (attempt.count >= 10 || attempts.size >= 10_000 || sessions.size() >= 1000) {
+    if (attempt.count >= 10 || attempts.size >= 10_000) {
       send(429, { error: 'Too many pairing attempts. Try again in a minute.' });
       return;
     }
@@ -162,7 +212,9 @@ export function browserSessions(token: string, now: () => number, directory: str
         chunks.push(chunk);
       }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (typeof value.token !== 'string' || !validKey(value.token)) {
+      const workspace =
+        typeof value.token === 'string' ? registry.authenticate(value.token) : undefined;
+      if (!workspace) {
         send(401, { error: 'Relay pairing key rejected.' });
         return;
       }
@@ -173,8 +225,19 @@ export function browserSessions(token: string, now: () => number, directory: str
         send(400, { error: 'A valid device identity is required.' });
         return;
       }
-      const id = randomBytes(32).toString('hex');
+      const sessions = store(workspace);
+      if (sessions.size() >= 1000) {
+        send(429, { error: 'Too many paired devices in this workspace.' });
+        return;
+      }
+      const id =
+        (workspace.id === 'owner' ? '' : workspace.id + '.') + randomBytes(32).toString('hex');
       try {
+        // Revoke first so a failed replacement never leaves two valid sessions.
+        // This includes a cookie belonging to a different private workspace.
+        const previous = context(req);
+        if (previous && previous.workspace.id !== workspace.id)
+          previous.sessions.replace(previous.id);
         sessions.replace(sessionId(req), id, {
           actor: value.environmentId,
           expires: now() + lifetime,
@@ -188,15 +251,22 @@ export function browserSessions(token: string, now: () => number, directory: str
         'Set-Cookie',
         `${cookieName}=${id}; Path=/v1; HttpOnly; SameSite=Strict; Max-Age=${lifetime / 1000}${secure}`,
       );
-      send(200, { environmentId: value.environmentId });
+      send(200, {
+        environmentId: value.environmentId,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+      });
     } catch {
       send(400, { error: 'Invalid pairing request.' });
     }
   }
   return {
-    actor,
+    authenticated,
+    matches,
     handle,
-    identity: (req: IncomingMessage) => sessions.identity(sessionId(req)),
-    active: sessions.active,
+    identity: (req: IncomingMessage) => {
+      const current = authenticated(req);
+      return current?.sessions.identity(current.id);
+    },
   };
 }

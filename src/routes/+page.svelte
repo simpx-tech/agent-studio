@@ -72,6 +72,9 @@
     resolveRelaySettings,
     listFolders,
     resumeRelay,
+    watchBrowserSession,
+    workspaceStorageScope,
+    BrowserWorkspaceStorageError,
     OfflineHostError,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
@@ -151,6 +154,7 @@
   const connectionChecks = new Map<string, Promise<void>>();
   let presence = $state<Presence[]>([]);
   let paired = $state(false);
+  let workspaceSession = $state(0);
   let syncStatus = $state(
     'Saved on this environment. Pair a relay to bring your workspace together.',
   );
@@ -542,6 +546,14 @@
       if (connected) await syncNow();
     } catch (error) {
       if (version !== relaySelectionVersion) return;
+      if (error instanceof BrowserWorkspaceStorageError) {
+        loaded = false;
+        paired = false;
+        relayRestorePending = false;
+        storageError = error.message;
+        syncError = error.message;
+        return;
+      }
       relayRestorePending = true;
       syncError =
         desktop() ||
@@ -555,6 +567,7 @@
 
   onMount(() => {
     let disposed = false;
+    const stopBrowserSession = watchBrowserSession();
     let stopNotifications = () => {};
     void watchDesktopNotifications((id) => {
       notificationTarget = notificationConversation(`#conversation=${id}`);
@@ -657,6 +670,45 @@
             workspace: () => $state.snapshot(workspace),
             statuses: () => $state.snapshot(connectionStatuses),
             localRuns: () => (run ? [run.id] : []),
+            replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
+              workspaceSession++;
+              const previousView = view;
+              workspace = value;
+              connectionStatuses = {};
+              cliInventories = {};
+              presence = [];
+              modelGeneration++;
+              modelCache.clear();
+              modelRequests.clear();
+              models = structuredClone(fallbackModels);
+              usageSnapshots = {};
+              usageLoading = {};
+              usageErrors = {};
+              draftComputerId = '';
+              selectingLocation = false;
+              preparingCommand = false;
+              run = null;
+              stopping = false;
+              selectedArtifact = null;
+              conversationMenu = null;
+              deletion = null;
+              deleting = false;
+              deletionError = '';
+              if (!preserveInitialNotification) notificationTarget = undefined;
+              collapsedGroups = {};
+              query = '';
+              notice = '';
+              newChat();
+              view = previousView;
+              if (reason !== undefined) {
+                ++relaySelectionVersion;
+                paired = false;
+                relayRestorePending = false;
+                syncError = reason;
+                syncStatus = 'Pair with your private workspace to see its chats and computers.';
+              }
+              await persist();
+            },
             checkpointRun: async (request, event, status, error) => {
               const conversation = workspace.conversations.find(
                 (c) => c.id === request.conversationId,
@@ -706,6 +758,7 @@
     return () => {
       disposed = true;
       stopNotifications();
+      stopBrowserSession();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
       cancelTouchMenu();
@@ -739,7 +792,18 @@
   async function pair(url: string, key: string) {
     ++relaySelectionVersion;
     await persist();
-    await connectRelay(url, key);
+    try {
+      await connectRelay(url, key);
+    } catch (error) {
+      syncError = String(error).replace(/^Error: /, '');
+      if (error instanceof BrowserWorkspaceStorageError) {
+        loaded = false;
+        paired = false;
+        relayRestorePending = false;
+        storageError = error.message;
+      }
+      throw error;
+    }
     paired = true;
     relayRestorePending = false;
     await syncNow();
@@ -752,12 +816,15 @@
     relayRestorePending = false;
     presence = [];
     syncError = '';
-    syncStatus = 'Disconnected. Changes continue to save on this environment.';
+    syncStatus = desktop()
+      ? 'Disconnected. Changes continue to save on this environment.'
+      : 'Disconnected. Pair with your private workspace to see its chats and computers.';
   }
   async function persist() {
     if (!loaded) return;
     const snapshot = $state.snapshot(workspace);
-    const next = saveQueue.catch(() => {}).then(() => saveWorkspace(snapshot));
+    const scope = workspaceStorageScope();
+    const next = saveQueue.catch(() => {}).then(() => saveWorkspace(snapshot, scope));
     saveQueue = next;
     try {
       await next;
@@ -1348,6 +1415,7 @@
   }
   async function remove() {
     if (!deletion || !deletingConversation || deleting) return;
+    const session = workspaceSession;
     const target = deletingConversation;
     const ownedRun = run?.conversationId === target.id ? run : null;
     const reply = target.messages.find((m) => m.status === 'running');
@@ -1358,18 +1426,22 @@
       if (ownedRun) stopping = true;
       if (runId)
         await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
+      if (session !== workspaceSession) return;
       await cancelTitle(target.id).catch(() => {});
+      if (session !== workspaceSession) return;
       workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
       await persist();
+      if (session !== workspaceSession) return;
       if (activeId === target.id) newChat();
       deletion = null;
     } catch (e) {
+      if (session !== workspaceSession) return;
       if (!workspace.conversations.some((c) => c.id === target.id))
         workspace.conversations.unshift(target);
       deletionError = `Could not delete this conversation: ${String(e)}`;
       if (ownedRun && run?.id === ownedRun.id) stopping = false;
     } finally {
-      deleting = false;
+      if (session === workspaceSession) deleting = false;
     }
   }
   function clearImages() {
@@ -1430,6 +1502,7 @@
   }
   async function send(retry = false) {
     if (preparingCommand) return;
+    const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
     if (!retry) {
       const draft = prompt,
@@ -1438,8 +1511,9 @@
       try {
         command = await composerCommands?.submission();
       } finally {
-        preparingCommand = false;
+        if (session === workspaceSession) preparingCommand = false;
       }
+      if (session !== workspaceSession) return;
       if (!command || command.handled || prompt !== draft || activeId !== selected) return;
     }
     if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
@@ -1523,6 +1597,7 @@
     const started = performance.now();
     try {
       await persist();
+      if (session !== workspaceSession) return;
       if (isNewConversation)
         void nameConversation(
           conversation.id,
@@ -1543,6 +1618,7 @@
               location: conversation.location?.path ? { ...conversation.location } : undefined,
             },
             (event) => {
+              if (session !== workspaceSession) return;
               if (stopping) void cancelRun(runId).catch(() => {});
               const m = message();
               const hadQuestion = requestsAttention(m);
@@ -1557,6 +1633,7 @@
               if (activeId === conversation.id) void scrollToEnd();
             },
           );
+      if (session !== workspaceSession) return;
       message().status = result;
       if (result === 'complete') {
         const s = responseSettings.connectionId
@@ -1568,6 +1645,7 @@
         }
       }
     } catch (e) {
+      if (session !== workspaceSession) return;
       message().status = 'error';
       message().error = String(e);
       if (String(e).includes('login needs attention')) {
@@ -1585,13 +1663,15 @@
         if (s) s.auth = 'unknown';
       }
     } finally {
-      message().durationMs = performance.now() - started;
-      conversation.updatedAt = new Date().toISOString();
-      run = null;
-      stopping = false;
-      saveSoon();
-      void scrollToEnd();
-      void refreshUsage(responseSettings, true);
+      if (session === workspaceSession) {
+        message().durationMs = performance.now() - started;
+        conversation.updatedAt = new Date().toISOString();
+        run = null;
+        stopping = false;
+        saveSoon();
+        void scrollToEnd();
+        void refreshUsage(responseSettings, true);
+      }
     }
   }
   async function nameConversation(
@@ -1601,8 +1681,10 @@
     fallback: string,
     connectionId?: string,
   ) {
+    const session = workspaceSession;
     try {
       const result = await generateTitle(id, provider, firstMessage, connectionId);
+      if (session !== workspaceSession) return;
       const conversation = workspace.conversations.find((c) => c.id === id);
       if (
         !conversation ||
@@ -1617,6 +1699,7 @@
       saveSoon();
       void refreshUsage(conversation.settings, true);
     } catch {
+      if (session !== workspaceSession) return;
       const conversation = workspace.conversations.find((c) => c.id === id);
       if (conversation?.titleStatus === 'pending') {
         conversation.titleStatus = 'fallback';
@@ -2433,37 +2516,40 @@
             />{/key}{/if}
       </div>
     {:else if view === 'connections'}
-      <FleetManager
-        bind:workspace
-        {installation}
-        {wslDiscovery}
-        {wslError}
-        {cliInventories}
-        {usageSnapshots}
-        {usageLoading}
-        {usageErrors}
-        bind:statuses={connectionStatuses}
-        {presence}
-        reconnecting={relayRestorePending && !!syncError}
-        {syncStatus}
-        {syncError}
-        {paired}
-        save={persist}
-        refresh={() => refresh(true)}
-        connect={pair}
-        disconnect={unpair}
-        resolveConflict={async () => {
-          const backup = await resolveRelaySettings();
-          notice = `Local workspace backed up to ${backup}. Using the relay’s computer and account settings.`;
-          await syncNow();
-        }}
-        chat={(provider, connectionId, computerId) =>
-          newChat(provider, connectionId, undefined, computerId)}
-        providerStatuses={statuses}
-        {login}
-        {exportWorkspace}
-        running={!!run}
-      />
+      {#key workspaceSession}
+        <FleetManager
+          bind:workspace
+          {workspaceSession}
+          {installation}
+          {wslDiscovery}
+          {wslError}
+          {cliInventories}
+          {usageSnapshots}
+          {usageLoading}
+          {usageErrors}
+          bind:statuses={connectionStatuses}
+          {presence}
+          reconnecting={relayRestorePending && !!syncError}
+          {syncStatus}
+          {syncError}
+          {paired}
+          save={persist}
+          refresh={() => refresh(true)}
+          connect={pair}
+          disconnect={unpair}
+          resolveConflict={async () => {
+            const backup = await resolveRelaySettings();
+            notice = `Local workspace backed up to ${backup}. Using the relay’s computer and account settings.`;
+            await syncNow();
+          }}
+          chat={(provider, connectionId, computerId) =>
+            newChat(provider, connectionId, undefined, computerId)}
+          providerStatuses={statuses}
+          {login}
+          {exportWorkspace}
+          running={!!run}
+        />
+      {/key}
     {/if}
   </main>
 </div>

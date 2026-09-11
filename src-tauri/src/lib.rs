@@ -155,6 +155,9 @@ async fn relay_connect(
         url,
         token,
         profiles::installation(&app)?.id,
+        &app.path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?,
     )
     .await
 }
@@ -167,6 +170,9 @@ async fn relay_resume(
         &state,
         &app.config().identifier,
         profiles::installation(&app)?.id,
+        &app.path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?,
     )
     .await
 }

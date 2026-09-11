@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRelay } from '../relay/server';
 import { initialWorkspace } from '../src/lib/domain';
+import { seedAndPairPwa } from './pwa-helper';
 import {
   explanationBefore,
   explanationAfter,
@@ -197,8 +198,9 @@ test('the production PWA restores multiple saved visuals and downloads their exa
   page,
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'studio-visual-web-'));
+  const token = 'synthetic-visualization-fixture-pairing-key';
   const server = createRelay({
-    token: 'synthetic-visualization-fixture-pairing-key',
+    token,
     directory,
     webDirectory: resolve('build'),
   });
@@ -235,11 +237,7 @@ test('the production PWA restores multiple saved visuals and downloads their exa
     ],
   });
   try {
-    await page.addInitScript((workspace) => {
-      if (window.top === window)
-        localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
-    }, workspace);
-    await page.goto(url);
+    await seedAndPairPwa(page, url, token, workspace);
     await page.getByRole('tab', { name: /History/ }).click();
     await page.getByRole('button', { name: /PWA visual history/ }).click();
     const frame = page.frameLocator('iframe[title="First visual visualization"]');

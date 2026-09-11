@@ -1,0 +1,391 @@
+import { test, expect, type Page } from '@playwright/test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { createRelay } from '../relay/server';
+import { createWorkspace } from '../relay/workspaces';
+import { emptyShared } from '../src/lib/sync';
+import { initialWorkspace } from '../src/lib/domain';
+
+async function hostedWorkspaces(duplicateIds = false) {
+  const directory = mkdtempSync(join(tmpdir(), 'studio-private-browser-'));
+  const ownerToken = 'synthetic-private-browser-owner-key';
+  const server = createRelay({ token: ownerToken, directory, webDirectory: resolve('build') });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const sharedIds = {
+    host: crypto.randomUUID(),
+    computer: crypto.randomUUID(),
+    account: crypto.randomUUID(),
+    connection: crypto.randomUUID(),
+    conversation: crypto.randomUUID(),
+  };
+  const users = ['Alice', 'Bob'].map((name) => ({
+    name,
+    ...createWorkspace({ directory, name: `${name} workspace` }),
+    host: crypto.randomUUID(),
+    computer: crypto.randomUUID(),
+    account: crypto.randomUUID(),
+    connection: crypto.randomUUID(),
+    conversation: crypto.randomUUID(),
+    ...(duplicateIds ? sharedIds : {}),
+  }));
+  async function call(token: string, method: string, path: string, body?: unknown) {
+    const response = await fetch(`${url}/v1/${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-environment-id': users[0].host,
+        'content-type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+  for (const user of users) {
+    const shared = emptyShared();
+    shared.fleet.computers.push({ id: user.computer, name: `${user.name} private computer` });
+    shared.fleet.environments.push({
+      id: user.host,
+      computerId: user.computer,
+      name: `${user.name} Linux environment`,
+      platform: 'linux',
+    });
+    shared.fleet.accounts.push({
+      id: user.account,
+      name: `${user.name} subscription`,
+      provider: 'codex',
+      purpose: 'personal',
+    });
+    shared.fleet.connections.push({
+      id: user.connection,
+      environmentId: user.host,
+      accountId: user.account,
+      profile: 'existing',
+    });
+    shared.conversations.push({
+      id: user.conversation,
+      title: `${user.name} confidential chat`,
+      archived: true,
+      settings: {
+        connectionId: user.connection,
+        provider: 'codex',
+        model: '',
+        reasoning: '',
+        instructions: `${user.name} private instructions`,
+      },
+      location: {
+        computerId: user.computer,
+        environmentId: user.host,
+        path: `/home/${user.name}/private`,
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          status: 'complete',
+          createdAt: new Date().toISOString(),
+          blocks: [{ type: 'markdown', text: `${user.name} private answer in this workspace.` }],
+        },
+      ],
+    });
+    await call(user.token, 'PUT', 'state', { revision: 0, workspace: shared });
+  }
+  return {
+    url,
+    users,
+    ownerToken,
+    call,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function pair(page: Page, token: string) {
+  await page.getByRole('button', { name: 'Set up', exact: true }).click();
+  await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
+  await page.getByLabel('Relay pairing key').fill(token);
+  await page.getByRole('button', { name: 'Pair & sync' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Set up', exact: true })).toHaveCount(0);
+}
+
+async function openPrivateChat(page: Page, name: string) {
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.getByRole('button', { name: `${name} confidential chat`, exact: true }).click();
+  await expect(
+    page.getByText(`${name} private answer in this workspace.`, { exact: true }),
+  ).toBeVisible();
+}
+
+test('two people use one PWA origin with independent chats and computer/account setups', async ({
+  browser,
+}, testInfo) => {
+  const f = await hostedWorkspaces();
+  const contexts = await Promise.all(
+    f.users.map(() => browser.newContext({ viewport: { width: 1380, height: 900 } })),
+  );
+  const pages = await Promise.all(contexts.map((context) => context.newPage()));
+  const errors: string[] = [];
+  try {
+    for (const [index, page] of pages.entries()) {
+      const user = f.users[index];
+      const other = f.users[1 - index];
+      page.on('pageerror', (error) => errors.push(error.message));
+      await page.goto(f.url);
+      await pair(page, user.token);
+      await openPrivateChat(page, user.name);
+      await expect(page.locator('body')).not.toContainText(other.name);
+      await page.getByRole('button', { name: 'Connections', exact: true }).click();
+      await expect(
+        page.getByRole('heading', { name: `${user.name} private computer`, exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText(`${user.name} subscription`, { exact: true })).toBeVisible();
+      await expect(page.locator('body')).not.toContainText(other.name);
+      await page.screenshot({
+        path: testInfo.outputPath(`${user.name.toLowerCase()}-private-connections.png`),
+      });
+      const storage = await page.evaluate(() =>
+        JSON.stringify({ ...localStorage, ...sessionStorage }),
+      );
+      expect(storage).not.toContain(user.token);
+      expect(storage).not.toContain(other.name);
+      await page.reload();
+      await openPrivateChat(page, user.name);
+      await expect(page.locator('body')).not.toContainText(other.name);
+      await page.screenshot({
+        path: testInfo.outputPath(`${user.name.toLowerCase()}-private-chat.png`),
+      });
+    }
+    expect((await f.call(f.ownerToken, 'GET', 'state')).workspace.conversations).toEqual([]);
+    for (const user of f.users) {
+      const saved = await f.call(user.token, 'GET', 'state');
+      expect(saved.workspace.conversations.map((chat: { title: string }) => chat.title)).toEqual([
+        `${user.name} confidential chat`,
+      ]);
+    }
+    expect(errors).toEqual([]);
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()));
+    await f.close();
+  }
+});
+
+test('a changed HttpOnly cookie cannot expose a new workspace to a stale tab even when resource IDs are identical', async ({
+  page,
+  context,
+}, testInfo) => {
+  const f = await hostedWorkspaces(true);
+  const [alice, bob] = f.users;
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  try {
+    expect(alice.connection).toBe(bob.connection);
+    expect(alice.conversation).toBe(bob.conversation);
+    await page.goto(f.url);
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    await page
+      .getByRole('textbox', { name: 'Message', exact: true })
+      .fill('Alice draft must not enter Bob workspace');
+    const installationId = await page.evaluate(
+      () => JSON.parse(localStorage.getItem('agent-studio.installation')!).id,
+    );
+    const mismatch = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/state') && response.status() === 409,
+    );
+    // APIRequestContext shares this browser's actual HttpOnly cookie jar. No
+    // localStorage event or app callback warns the old tab about this change.
+    const switched = await context.request.post(`${f.url}/v1/browser-session`, {
+      headers: { origin: f.url },
+      data: { token: bob.token, environmentId: installationId },
+    });
+    expect(switched.status()).toBe(200);
+    expect((await switched.json()).workspaceId).toBe(bob.workspace.id);
+    const rejected = await mismatch;
+    expect(rejected.request().headers()['x-workspace-id']).toBe(alice.workspace.id);
+    expect((await rejected.json()).code).toBe('workspace_changed');
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('Alice');
+    await expect(page.locator('body')).not.toContainText('Bob');
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+    await page.reload();
+    await openPrivateChat(page, bob.name);
+    await expect(page.locator('body')).not.toContainText('Alice');
+    expect(
+      await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain('Alice');
+    const saved = await f.call(bob.token, 'GET', 'state');
+    expect(saved.workspace.conversations).toHaveLength(1);
+    expect(saved.workspace.conversations[0].id).toBe(alice.conversation);
+    expect(JSON.stringify(saved)).not.toContain('Alice');
+    await page.screenshot({ path: testInfo.outputPath('stale-cookie-reloaded-bob.png') });
+    expect(errors).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a failed pending chat deletion cannot resurrect the old workspace after its cookie changes', async ({
+  page,
+  context,
+}, testInfo) => {
+  const f = await hostedWorkspaces(true);
+  const [alice, bob] = f.users;
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reached!: () => void;
+  const cancelling = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  try {
+    const initial = await f.call(alice.token, 'GET', 'state');
+    const runId = crypto.randomUUID();
+    initial.workspace.conversations[0].messages[0].status = 'running';
+    initial.workspace.conversations[0].messages[0].runId = runId;
+    await f.call(alice.token, 'PUT', 'state', {
+      revision: initial.revision,
+      workspace: initial.workspace,
+    });
+    await page.route(`**/v1/jobs/${runId}/cancel`, async (route) => {
+      reached();
+      await hold;
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Workspace access was revoked.' }),
+      });
+    });
+    await page.goto(f.url);
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    await page
+      .getByRole('button', { name: 'Alice confidential chat', exact: true })
+      .click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Delete conversation', exact: true }).click();
+    await page
+      .getByRole('alertdialog')
+      .getByRole('button', { name: 'Delete conversation', exact: true })
+      .click();
+    await cancelling;
+    const installationId = await page.evaluate(
+      () => JSON.parse(localStorage.getItem('agent-studio.installation')!).id,
+    );
+    const mismatch = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/state') && response.status() === 409,
+    );
+    const switched = await context.request.post(`${f.url}/v1/browser-session`, {
+      headers: { origin: f.url },
+      data: { token: bob.token, environmentId: installationId },
+    });
+    expect(switched.status()).toBe(200);
+    await mismatch;
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    const rejectedCancellation = page.waitForResponse((response) =>
+      response.url().endsWith(`/v1/jobs/${runId}/cancel`),
+    );
+    release();
+    await rejectedCancellation;
+    // A browser task boundary lets the rejected fetch's catch/finally finish.
+    await page.evaluate(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    await expect(page.locator('body')).not.toContainText('Alice');
+    await expect(page.getByRole('tab', { name: /^History/ })).toContainText('0');
+    await expect(page.getByRole('tab', { name: /^Active/ })).toContainText('0');
+    expect(
+      await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain('Alice');
+    await page.screenshot({
+      path: testInfo.outputPath('revoked-delete-keeps-old-workspace-empty.png'),
+    });
+    await page.reload();
+    await openPrivateChat(page, bob.name);
+    await expect(page.locator('body')).not.toContainText('Alice');
+    const saved = await f.call(bob.token, 'GET', 'state');
+    expect(saved.workspace.conversations).toHaveLength(1);
+    expect(saved.workspace.conversations[0].id).toBe(alice.conversation);
+    expect(saved.workspace.conversations[0].title).toBe('Bob confidential chat');
+    expect(JSON.stringify(saved)).not.toContain('Alice');
+    expect(errors).toEqual([]);
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: 'wait' });
+    await f.close();
+  }
+});
+
+test('switching the shared browser session clears stale tabs, drafts, and cached chats before another workspace can sync', async ({
+  page,
+  context,
+}, testInfo) => {
+  const f = await hostedWorkspaces();
+  const [alice, bob] = f.users;
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  let second: Page | undefined;
+  try {
+    // An unauthenticated page must not render an old unscoped browser cache.
+    const legacy = initialWorkspace();
+    legacy.conversations = (await f.call(alice.token, 'GET', 'state')).workspace.conversations;
+    await page.addInitScript(
+      ({ legacy, url }) => {
+        if (!sessionStorage.getItem('seeded-private-test')) {
+          localStorage.setItem('agent-studio.browser.v1', JSON.stringify(legacy));
+          localStorage.setItem(
+            'agent-studio.browser-sync',
+            JSON.stringify({ url, instanceId: 'old-owner-instance', base: legacy }),
+          );
+          sessionStorage.setItem('seeded-private-test', 'yes');
+        }
+      },
+      { legacy, url: f.url },
+    );
+    await page.goto(f.url);
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('Alice');
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    await page
+      .getByRole('textbox', { name: 'Message', exact: true })
+      .fill('Alice unsent private draft');
+    second = await context.newPage();
+    second.on('pageerror', (error) => errors.push(error.message));
+    await second.goto(f.url);
+    await openPrivateChat(second, alice.name);
+    await second.getByRole('button', { name: 'Connections', exact: true }).click();
+    await second.getByText('Sync settings', { exact: true }).click();
+    await second.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('Alice');
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+    await pair(second, bob.token);
+    await openPrivateChat(second, bob.name);
+    await expect(second.locator('body')).not.toContainText('Alice');
+    await expect(page.locator('body')).not.toContainText('Bob');
+    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    expect(
+      await second.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain('Alice');
+    await page.reload();
+    await openPrivateChat(page, bob.name);
+    await expect(page.locator('body')).not.toContainText('Alice');
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+    await page.screenshot({ path: testInfo.outputPath('shared-browser-switched-to-bob.png') });
+    const saved = await f.call(bob.token, 'GET', 'state');
+    expect(JSON.stringify(saved)).not.toContain('Alice');
+    expect(saved.workspace.conversations).toHaveLength(1);
+    expect(errors).toEqual([]);
+  } finally {
+    await second?.close();
+    await f.close();
+  }
+});

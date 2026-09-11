@@ -7,13 +7,15 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRelay } from '../relay/server';
 import { initialWorkspace } from '../src/lib/domain';
+import { seedAndPairPwa } from './pwa-helper';
 
 test('the production PWA renders and downloads artifacts through the real relay origin', async ({
   page,
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'studio-artifact-web-'));
+  const token = 'synthetic-artifact-fixture-pairing-key';
   const server = createRelay({
-    token: 'synthetic-artifact-fixture-pairing-key',
+    token,
     directory,
     webDirectory: resolve('build'),
   });
@@ -41,11 +43,7 @@ test('the production PWA renders and downloads artifacts through the real relay 
     ],
   });
   try {
-    await page.addInitScript((workspace) => {
-      if (window.top === window)
-        localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
-    }, workspace);
-    await page.goto(url);
+    await seedAndPairPwa(page, url, token, workspace);
     await page.getByRole('tab', { name: /History/ }).click();
     await page.getByRole('button', { name: /PWA artifact fixture/ }).click();
     await page.getByRole('button', { name: 'PWA Counter Open HTML' }).click();

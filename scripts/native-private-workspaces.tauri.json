@@ -1,0 +1,8 @@
+{
+  "identifier": "com.vinicius.agentstudio.private-workspaces-qa",
+  "productName": "Agent Studio Private Workspaces QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [{ "title": "Agent Studio Private Workspaces QA", "width": 1100, "height": 820 }]
+  }
+}

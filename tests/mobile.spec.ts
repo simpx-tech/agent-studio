@@ -297,7 +297,8 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
     await page.getByLabel('Relay pairing key').fill('wrong-key-with-enough-characters-to-submit');
     await page.getByRole('button', { name: 'Pair & sync' }).click();
-    await expect(page.getByRole('dialog').getByRole('alert')).toContainText('rejected');
+    await expect(page.getByRole('alert')).toContainText('rejected');
+    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
     await page.getByLabel('Relay pairing key').fill(token);
     const pairingResponse = page.waitForResponse(
       (response) =>

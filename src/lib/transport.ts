@@ -8,6 +8,15 @@ import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot } from './context';
+import {
+  browserScopeKey,
+  browserSessionSignal,
+  browserWorkspaceFromServer,
+  clearBrowserWorkspace,
+  discardOtherBrowserWorkspaces,
+  readBrowserWorkspace,
+  type BrowserWorkspaceScope,
+} from './browser-workspace';
 import { executionHost, type Installation, type WslDiscovery, type CliInstallation } from './fleet';
 import {
   emptyShared,
@@ -32,6 +41,7 @@ import {
 } from './domain';
 
 export const desktop = () => isTauri();
+export { BrowserWorkspaceStorageError } from './browser-workspace';
 
 export type DesktopNotificationSettings = {
   enabled: boolean;
@@ -128,6 +138,11 @@ type RuntimeContext = {
   statuses: () => Record<string, ProviderStatus>;
   localRuns: () => string[];
   apply: (value: SharedWorkspace) => Promise<void>;
+  replaceBrowserWorkspace?: (
+    value: Workspace,
+    reason?: string,
+    preserveInitialNotification?: boolean,
+  ) => Promise<void>;
   checkpointRun: (
     request: RunRequest,
     event?: RunEvent,
@@ -143,10 +158,53 @@ let relayBusy = false;
 let relayConnected = false;
 let relayGeneration = 0;
 let browserSessionCheckedAt = 0;
+let browserWorkspaceId = '';
+let browserScope: BrowserWorkspaceScope | undefined;
+let browserSessionBlocked = false;
 const remoteRuns = new Set<string>();
 const workerRuns = new Map<string, RelayJob>();
 export function configureRuntime(context: RuntimeContext) {
   runtime = context;
+}
+export const workspaceStorageScope = () =>
+  desktop() ? 'desktop' : browserScope ? browserScopeKey(browserScope) : null;
+
+function announceBrowserSession(workspaceId: string) {
+  localStorage.setItem(
+    browserSessionSignal,
+    JSON.stringify({ workspaceId, nonce: crypto.randomUUID() }),
+  );
+}
+async function endBrowserSession(reason: string) {
+  ++relayGeneration;
+  relayConnected = false;
+  browserSessionBlocked = true;
+  browserWorkspaceId = '';
+  const previousScope = browserScope;
+  browserScope = undefined;
+  baseline = emptyShared();
+  contextCache = createContextCache(readContext);
+  updatePendingBadge(0);
+  await runtime?.replaceBrowserWorkspace?.(initialWorkspace(), reason);
+  if (previousScope) clearBrowserWorkspace(localStorage, previousScope);
+}
+export function watchBrowserSession(): () => void {
+  if (desktop()) return () => {};
+  const changed = (event: StorageEvent) => {
+    if (event.key !== browserSessionSignal) return;
+    let workspaceId: unknown;
+    try {
+      workspaceId = JSON.parse(event.newValue ?? 'null')?.workspaceId;
+    } catch {
+      /* clear safely */
+    }
+    if (workspaceId === browserWorkspaceId) return;
+    void endBrowserSession(
+      'This browser’s workspace changed in another tab. Reload or pair again to continue.',
+    );
+  };
+  window.addEventListener('storage', changed);
+  return () => window.removeEventListener('storage', changed);
 }
 export async function getInstallation(): Promise<Installation> {
   if (desktop()) return invoke('get_installation');
@@ -195,21 +253,44 @@ async function relayRaw(
 ): Promise<{ status: number; body: any }> {
   if (desktop()) return invoke('relay_request', { method, path, body: body ?? null });
   if (!runtime) throw new Error('This device is still loading.');
+  const generation = relayGeneration;
+  const sessionRequest = path === 'v1/browser-session';
+  if (!sessionRequest && !browserWorkspaceId)
+    throw new Error('Pair this device with your private workspace first.');
   const response = await fetch(`/${path}`, {
     method,
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-Environment-Id': runtime.installation.id },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Environment-Id': runtime.installation.id,
+      ...(browserWorkspaceId && !(sessionRequest && method === 'POST')
+        ? { 'X-Workspace-Id': browserWorkspaceId }
+        : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: 'no-store',
     redirect: 'error',
     signal: AbortSignal.timeout(30_000),
   });
-  return {
+  const result = {
     status: response.status,
     body: response.headers.get('content-type')?.includes('application/json')
       ? await response.json()
       : { error: 'Open the PWA on your Agent Studio server.' },
   };
+  if (generation !== relayGeneration)
+    throw new Error('The private workspace connection changed. Try again after pairing.');
+  if (
+    (result.status === 401 && !(sessionRequest && method === 'POST')) ||
+    result.body?.code === 'workspace_changed'
+  ) {
+    const reason =
+      result.body?.code === 'workspace_changed'
+        ? 'This browser is paired with a different private workspace. Reload or pair again to continue.'
+        : 'Your private workspace session ended. Pair this device again to continue.';
+    await endBrowserSession(reason);
+  }
+  return result;
 }
 export class OfflineHostError extends Error {}
 export type PushStatus = {
@@ -242,29 +323,72 @@ export async function connectRelay(url: string, token: string) {
   if (!runtime) throw new Error('This device is still loading.');
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Wait for remote requests to finish before changing relays.');
-  const generation = ++relayGeneration;
+  let generation = ++relayGeneration;
   if (desktop()) await invoke('relay_connect', { url, token });
   else {
     if (url !== window.location.origin)
       throw new Error('Open the PWA on your relay server to pair this device.');
-    await relayApi('POST', 'v1/browser-session', { token, environmentId: runtime.installation.id });
+    await endBrowserSession('');
+    generation = relayGeneration;
+    const session = await relayApi<{ workspaceId: string }>('POST', 'v1/browser-session', {
+      token,
+      environmentId: runtime.installation.id,
+    });
+    if (!session.workspaceId) throw new Error('Update the relay to support private workspaces.');
+    browserSessionBlocked = false;
+    browserWorkspaceId = session.workspaceId;
+    browserSessionCheckedAt = Date.now();
+    announceBrowserSession(session.workspaceId);
   }
-  await acceptRelay(url, generation);
+  if (!(await acceptRelay(url, generation)))
+    throw new Error('The private workspace connection changed. Pair this device again.');
 }
 async function acceptRelay(url: string, generation: number, restoring = false) {
-  const state = await relayApi<{ instanceId: string }>('GET', 'v1/state');
+  const state = await relayApi<{
+    instanceId: string;
+    workspaceId?: string;
+    workspace: SharedWorkspace;
+  }>('GET', 'v1/state');
   if (!state.instanceId) throw new Error('Relay protocol version is not supported.');
-  const checkpoint = desktop()
-    ? await invoke<{
-        url: string;
-        instanceId: string;
-        base: SharedWorkspace;
-      } | null>('load_sync_state')
-    : JSON.parse(localStorage.getItem('agent-studio.browser-sync') ?? 'null');
+  if (!desktop()) {
+    if (generation !== relayGeneration) return false;
+    if (state.workspaceId !== browserWorkspaceId)
+      throw new Error('The relay returned a different private workspace.');
+    const preserveInitialNotification = restoring && !browserScope;
+    const scope = { url, workspaceId: browserWorkspaceId, instanceId: state.instanceId };
+    const saved = readBrowserWorkspace(localStorage, scope);
+    discardOtherBrowserWorkspaces(localStorage, scope);
+    const remote = sharedSchema.parse(state.workspace);
+    if (!saved) {
+      // Write the authenticated baseline first. If the page closes before its first
+      // poll, a saved snapshot can still be merged against a verified checkpoint.
+      localStorage.setItem(
+        `${browserScopeKey(scope)}:sync`,
+        JSON.stringify({
+          url,
+          instanceId: state.instanceId,
+          base: remote,
+        }),
+      );
+    }
+    browserScope = scope;
+    baseline = saved?.base ?? remote;
+    relayInstance = state.instanceId;
+    relayUrl = url;
+    relayConnected = true;
+    const restored = saved?.workspace ?? browserWorkspaceFromServer(remote);
+    await runtime?.replaceBrowserWorkspace?.(restored, undefined, preserveInitialNotification);
+    return generation === relayGeneration;
+  }
+  const checkpoint = await invoke<{
+    url: string;
+    instanceId: string;
+    base: SharedWorkspace;
+  } | null>('load_sync_state');
   if (generation !== relayGeneration) return false;
   if (restoring && checkpoint?.url === url && checkpoint.instanceId !== state.instanceId)
     throw new Error(
-      'Relay data was replaced. Disconnect and pair again to merge your local workspace safely.',
+      'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.',
     );
   const nextBaseline =
     checkpoint?.url === url && checkpoint.instanceId === state.instanceId
@@ -287,7 +411,7 @@ export async function resumeRelay(): Promise<boolean> {
   return relayConnected || acceptRelay(url.replace(/\/$/, ''), generation, true);
 }
 export async function resumeBrowserRelay(): Promise<boolean> {
-  if (desktop() || !runtime) return false;
+  if (desktop() || !runtime || browserSessionBlocked) return false;
   const generation = relayGeneration;
   const response = await relayRaw('GET', 'v1/browser-session');
   if (response.status === 401 || response.status === 404) return false;
@@ -295,6 +419,15 @@ export async function resumeBrowserRelay(): Promise<boolean> {
   if (response.body.environmentId !== runtime.installation.id)
     throw new Error('Pair this device again to restore its server connection.');
   if (generation !== relayGeneration) return false;
+  if (!response.body.workspaceId)
+    throw new Error('Update the relay to support private workspaces.');
+  if (browserWorkspaceId && browserWorkspaceId !== response.body.workspaceId) {
+    await endBrowserSession(
+      'This browser is paired with a different private workspace. Reload or pair again to continue.',
+    );
+    return false;
+  }
+  browserWorkspaceId = response.body.workspaceId;
   browserSessionCheckedAt = Date.now();
   return relayConnected || acceptRelay(window.location.origin, generation, true);
 }
@@ -304,11 +437,16 @@ export async function disconnectRelay() {
   ++relayGeneration;
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
   if (desktop()) await invoke('relay_disconnect');
-  else await relayApi('DELETE', 'v1/browser-session');
+  else {
+    await relayApi('DELETE', 'v1/browser-session');
+    announceBrowserSession('');
+    await endBrowserSession('Disconnected from your private workspace.');
+  }
   relayConnected = false;
 }
 export async function pollRelay(): Promise<Presence[] | null> {
   if (!relayConnected || !runtime || relayBusy) return null;
+  const generation = relayGeneration;
   relayBusy = true;
   try {
     if (!desktop() && Date.now() - browserSessionCheckedAt >= 60_000) {
@@ -323,7 +461,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
     }>('GET', 'v1/state');
     if (remote.instanceId !== relayInstance)
       throw new Error(
-        'Relay data was replaced. Disconnect and pair again to merge your local workspace safely.',
+        'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.',
       );
     let accepted: SharedWorkspace | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -336,7 +474,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
         revision: remote.revision,
         workspace: merged,
       });
-      if (response.status === 409) {
+      if (response.status === 409 && response.body?.code !== 'workspace_changed') {
         remote = response.body;
         continue;
       }
@@ -346,13 +484,16 @@ export async function pollRelay(): Promise<Presence[] | null> {
       break;
     }
     if (!accepted) throw new Error('Workspace is changing quickly. Sync will retry shortly.');
+    if (generation !== relayGeneration) return null;
     const current = sharedWorkspace(runtime.workspace());
     const combined = mergeShared(start, current, accepted);
     await runtime.apply(combined);
+    if (generation !== relayGeneration) return null;
     // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
     const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
     if (desktop()) await invoke('save_sync_state', { value: checkpoint });
-    else localStorage.setItem('agent-studio.browser-sync', JSON.stringify(checkpoint));
+    else if (browserScope)
+      localStorage.setItem(`${browserScopeKey(browserScope)}:sync`, JSON.stringify(checkpoint));
     baseline = accepted;
     const connections = Object.entries(runtime.statuses()).map(([connectionId, s]) => ({
       connectionId,
@@ -379,17 +520,29 @@ export async function pollRelay(): Promise<Presence[] | null> {
 }
 export async function resolveRelaySettings(): Promise<string> {
   if (!runtime || !relayConnected) throw new Error('Connect to the relay first.');
+  const generation = relayGeneration;
+  const currentSession = () => {
+    if (generation !== relayGeneration || !relayConnected)
+      throw new Error('The private workspace connection changed. Try again after pairing.');
+  };
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
+  currentSession();
   relayBusy = true;
   try {
     let backup: string;
     if (desktop())
       backup = await invoke<string>('export_workspace', { workspace: runtime.workspace() });
     else {
-      localStorage.setItem('agent-studio.browser-backup', JSON.stringify(runtime.workspace()));
+      if (!browserScope) throw new Error('Pair this device with your private workspace first.');
+      localStorage.setItem(
+        `${browserScopeKey(browserScope)}:backup`,
+        JSON.stringify(runtime.workspace()),
+      );
       backup = 'this browser’s local backup';
     }
+    currentSession();
     const remote = await relayApi<{ workspace: SharedWorkspace }>('GET', 'v1/state');
+    currentSession();
     await runtime.apply({
       ...sharedWorkspace(runtime.workspace()),
       fleet: sharedSchema.parse(remote.workspace).fleet,
@@ -434,6 +587,11 @@ async function routed<T>(
   if (!target) return localCall(method, args, onEvent);
   if (!relayConnected || !runtime)
     throw new Error('Connect this environment to the relay to use a remote account.');
+  const generation = relayGeneration;
+  const currentSession = () => {
+    if (generation !== relayGeneration || !relayConnected)
+      throw new Error('The private workspace connection changed. This request was not replayed.');
+  };
   remoteRuns.add(id);
   try {
     // Publish the conversation and its pinned connection before the target claims its work.
@@ -441,6 +599,7 @@ async function routed<T>(
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
       await pollRelay();
     }
+    currentSession();
     await relayApi('POST', 'v1/jobs', {
       id,
       source: runtime.installation.id,
@@ -457,7 +616,9 @@ async function routed<T>(
           ) + 10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
+      currentSession();
       const job = await relayApi<RelayJob>('GET', `v1/jobs/${id}`);
+      currentSession();
       job.events.forEach((event, index) => {
         const json = JSON.stringify(event);
         if (previous[index] !== json) onEvent?.(event as RunEvent);
@@ -579,7 +740,7 @@ export async function readContext(
     settings.connectionId,
   );
 }
-export const contextCache = createContextCache(readContext);
+export let contextCache = createContextCache(readContext);
 export type FolderListing = {
   path: string;
   parent: string | null;
@@ -621,16 +782,13 @@ export async function loadModels(
     : structuredClone(fallbackModels);
 }
 export async function loadWorkspace(): Promise<Workspace> {
-  const value = desktop()
-    ? await invoke<unknown>('load_workspace')
-    : JSON.parse(
-        localStorage.getItem('agent-studio.browser.v1') ??
-          localStorage.getItem('agent-studio.preview.v1') ??
-          'null',
-      );
+  const value = desktop() ? await invoke<unknown>('load_workspace') : null;
   return value ? restoreWorkspace(value) : initialWorkspace();
 }
-export async function saveWorkspace(workspace: Workspace): Promise<void> {
+export async function saveWorkspace(
+  workspace: Workspace,
+  scope = workspaceStorageScope(),
+): Promise<void> {
   if (desktop()) {
     await invoke('save_workspace', { workspace });
     for (const notice of desktopNotices(workspace)) {
@@ -640,7 +798,11 @@ export async function saveWorkspace(workspace: Workspace): Promise<void> {
       // Native delivery retains an actionable error in Connections.
       void invoke('desktop_notification', { notice }).catch(() => {});
     }
-  } else localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
+  } else {
+    // A queued save from a former session must never be written to the new user's cache.
+    if (!scope || scope !== workspaceStorageScope()) return;
+    localStorage.setItem(scope, JSON.stringify(workspace));
+  }
   updatePendingBadge(pendingChatCount(workspace.conversations));
 }
 export async function detectProviders(): Promise<ProviderStatus[]> {
@@ -667,11 +829,20 @@ export async function runAgent(
 }
 export async function cancelRun(runId: string, connectionId?: string, waitForCompletion = false) {
   if (remoteRuns.has(runId) || remoteTarget(connectionId)) {
+    const generation = relayGeneration;
+    const currentSession = () => {
+      if (generation !== relayGeneration || !relayConnected)
+        throw new Error('The private workspace connection changed. Cancellation was not replayed.');
+    };
+    currentSession();
     await relayApi('POST', `v1/jobs/${runId}/cancel`);
+    currentSession();
     if (waitForCompletion) {
       const deadline = Date.now() + 20_000;
       while (true) {
+        currentSession();
         const job = await relayApi<RelayJob>('GET', `v1/jobs/${runId}`);
+        currentSession();
         if (['complete', 'cancelled', 'error'].includes(job.status)) break;
         if (Date.now() >= deadline)
           throw new Error(
@@ -681,10 +852,13 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
       }
       // Merge the host's final checkpoint before publishing the deletion.
       while (relayBusy) {
+        currentSession();
         if (Date.now() >= deadline) throw new Error('Sync is still busy. Try deleting again.');
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
+      currentSession();
       await pollRelay();
+      currentSession();
     }
     return;
   }

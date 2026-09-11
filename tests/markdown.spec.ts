@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRelay } from '../relay/server';
 import { initialWorkspace } from '../src/lib/domain';
+import { seedAndPairPwa } from './pwa-helper';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
@@ -63,8 +64,9 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
   page,
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'studio-markdown-web-'));
+  const token = 'synthetic-markdown-fixture-pairing-key';
   const server = createRelay({
-    token: 'synthetic-markdown-fixture-pairing-key',
+    token,
     directory,
     webDirectory: resolve('build'),
   });
@@ -114,11 +116,7 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
     ],
   });
   try {
-    await page.addInitScript((workspace) => {
-      if (window.top === window)
-        localStorage.setItem('agent-studio.browser.v1', JSON.stringify(workspace));
-    }, workspace);
-    await page.goto(url);
+    await seedAndPairPwa(page, url, token, workspace);
     await page.getByRole('tab', { name: /History/ }).click();
     await page.getByRole('button', { name: /Syntax highlighting fixture/ }).click();
     const codes = page.locator('.prose pre code');

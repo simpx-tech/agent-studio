@@ -53,6 +53,7 @@
     syncStatus,
     syncError,
     paired,
+    workspaceSession = 0,
     save,
     refresh,
     connect,
@@ -78,6 +79,7 @@
     syncStatus: string;
     syncError: string;
     paired: boolean;
+    workspaceSession?: number;
     save: () => Promise<void>;
     refresh: () => Promise<void>;
     connect: (url: string, key: string) => Promise<void>;
@@ -675,7 +677,7 @@
       <p>
         {paired
           ? syncStatus
-          : 'Connect your computers and phone to share chats and control your agents.'}
+          : 'Connect your computers and phone to your private workspace. Each person uses their own workspace key.'}
       </p>
       {#if syncError}<p class="sync-error" role="alert">{syncError}</p>{/if}
       {#if syncError.includes('changed on both devices')}<button
@@ -703,16 +705,21 @@
           onclick={() => action(disconnect)}>Disconnect relay</button
         >{/if}
     </section>
-    {#if desktop()}<DesktopNotifications />{:else}<PushNotifications {paired} />{/if}
+    {#if desktop()}<DesktopNotifications />{:else}<PushNotifications
+        {paired}
+        {workspaceSession}
+      />{/if}
     <footer class="connections-footer">
       <div>
         <ShieldCheck size={16} /><span
           >Provider sign-ins stay on each computer. <details>
             <summary>Storage & privacy</summary>
             <p>
-              Conversations and settings are saved on this device. Pairing sync shares chat content
-              and account labels with the relay and your paired computers. Passwords and provider
-              tokens stay with their CLIs. Conversation files and exports are plain text.
+              Pairing sync shares chat content, computer setups, and account labels only within your
+              private workspace. Other workspace keys on the same server cannot access them. Anyone
+              with your workspace key can join it; the server administrator controls its storage.
+              Passwords and provider tokens stay with their CLIs. Conversation files and exports are
+              plain text.
             </p>
           </details></span
         >
@@ -990,8 +997,8 @@
     >
       <p>
         {desktop()
-          ? 'Enter the same relay address and pairing key on each computer. You can host the relay locally or on your VPS.'
-          : 'Enter your server’s pairing key to control agents on connected computers. Keep Agent Studio open on those computers.'}
+          ? 'Enter your relay address and private workspace key. Use the same key only on your own computers and phone. Each person sharing the VPS needs a separate workspace key.'
+          : 'Enter your private workspace key from the server owner. Each person has separate chats, computers, and agent connections. Keep Agent Studio open on your connected computers.'}
       </p>
       <label
         >Relay URL<input
@@ -1002,7 +1009,7 @@
           required
         /></label
       ><label
-        >Pairing key<input
+        >Private workspace key<input
           aria-label="Relay pairing key"
           type="password"
           bind:value={key}
@@ -1012,12 +1019,12 @@
         /></label
       >
       <p>
-        Pairing shares chat content and account labels with the relay and your paired computers.
+        Pairing shares chat content and account labels with devices in this private workspace.
         Provider credentials stay on each host. {desktop()
           ? installation?.platform === 'windows'
             ? 'Windows protects the saved pairing and reconnects when you open the app. Disconnect relay removes it from this computer.'
             : 'The pairing key stays in memory until the app closes.'
-          : 'This device stays paired across app updates and server restarts. Pairing renews while you use it and expires after seven days without renewal, or when you disconnect or change the server pairing key. The pairing key is not saved in your browser.'}
+          : 'This device stays paired across app updates and server restarts. Pairing renews while you use it and expires after seven days without renewal, or when you disconnect or change the workspace key. The key is not saved in your browser. Disconnecting clears chats from the screen; another workspace starts with its own data.'}
       </p>
       <div class="dialog-actions">
         <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button

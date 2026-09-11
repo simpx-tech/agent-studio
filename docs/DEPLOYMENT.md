@@ -14,6 +14,8 @@ Agent Studio was deployed on 2026-09-09 from application commit `12f2d6d`.
 
 ## Connect a desktop and phone
 
+To share this VPS with another person while keeping chats and computers separate, provision a private workspace key using [the server administration commands](PRIVATE-WORKSPACES.md). Keep the original owner key private. Preserve the complete `/var/lib/agent-studio` tree on upgrades and backups, including `workspaces.json` and each additional `workspaces/<id>/` directory. Provisioning, rotating, and disabling additional workspaces do not require a service restart.
+
 Open **Connections → Set up sync** in the desktop app, enter the HTTPS endpoint and pairing key, and keep the desktop app open. Open the same endpoint on the phone and pair with that key. Provider sign-in stays on the desktop. Deploying the server does not automatically upload or switch an existing desktop workspace.
 
 The IP-based hostname needs no user-managed DNS record. To use `studio.simpx.net`, point its A record at `72.61.63.95`, confirm public resolution, then add that hostname to the dedicated Caddy site, validate, and reload Caddy. Preserve the previous hostname during migration. Browser storage and sessions are scoped to the origin, so pair the new origin separately.
