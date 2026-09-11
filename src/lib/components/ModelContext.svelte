@@ -234,6 +234,9 @@
 <style>
   .context-modal {
     width: min(820px, 100%);
+    height: min(800px, 100%);
+    max-height: 100%;
+    scrollbar-gutter: stable;
     padding: 26px;
   }
   .context-modal header {
@@ -410,6 +413,14 @@
     }
     .context-categories button {
       padding: 10px 8px;
+    }
+  }
+  @media (max-width: 360px) {
+    .context-categories button {
+      flex: 1;
+      gap: 4px;
+      padding: 10px 4px;
+      font-size: 11px;
     }
   }
 </style>

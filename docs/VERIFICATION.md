@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Stable Model context height — 2026-09-11
+
+The content-sized inspector grew by 119 px and moved upward by 59.5 px when asynchronous profile details and the footer arrived. Its frame now uses a consistent height capped at 800 px and the available viewport, with a stable scrollbar gutter. Content scrolls inside the dialog. Compact category styling also prevents horizontal overflow at 320 px; the inventory cache and query behavior are unchanged.
+
+Rendered browser checks measured zero height/position shift across loading/results, cached refresh, empty filters, and refresh errors at 1380×900, 880×720, 390×844, and 320×460. The dialog remained inside the viewport, with no horizontal overflow or renderer errors; Done remained reachable by scrolling. Screenshots were visually reviewed, and the narrow-width finding was recorded in local QA notes. Evidence: `artifacts/model-context-layout.mjs`, `artifacts/model-context-layout-result.json`, and `artifacts/model-context-{loading,loaded,880x720,390x844,320x460}.png`.
+
+The full gate passed `npm run verify` (zero diagnostics, 80 unit/HTTP tests, production build, 71 browser scenarios), Rust formatting, Clippy with warnings denied, and 65 Rust tests with four existing opt-in integrations ignored. Logs: `artifacts/model-context-height-{verify,rust}.log`. No real provider or native process smoke was repeated for this CSS-only change.
+
 ## Active deletion and authentication before sending — 2026-09-11
 
 Active conversations can now be deleted during a response. Confirmation cancels the exact local or remote run and waits for completion before removal; cancellation failures retain the conversation and allow retry. Local storage failures also retain the chat. Remote deletion merges the latest checkpoint, and three-way sync lets deletion win over delayed reply/generated-title updates while preserving deliberate edits as conflict copies. This supersedes the earlier running-conversation restriction below.
