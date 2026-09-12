@@ -31,6 +31,7 @@
     Archive,
     BookOpen,
     Paperclip,
+    FileText,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -78,6 +79,12 @@
     OfflineHostError,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
+  import InputTemplates from '$lib/components/InputTemplates.svelte';
+  import {
+    appendTemplateInput,
+    inputTemplatesSchema,
+    type InputTemplate,
+  } from '$lib/input-templates';
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
@@ -201,6 +208,10 @@
   let usageLoading = $state<Record<string, boolean>>({});
   let usageErrors = $state<Record<string, string>>({});
   let prompt = $state('');
+  let templatesOpen = $state(false);
+  $effect(() => {
+    if (view !== 'chat') templatesOpen = false;
+  });
   let attachedImages = $state<ChatImage[]>([]);
   let attachmentError = $state('');
   let imagesLoading = $state(false);
@@ -695,6 +706,7 @@
               folderBrowserOpen = false;
               contextOpen = false;
               editorOpen = false;
+              templatesOpen = false;
               conversationMenu = null;
               deletion = null;
               deleting = false;
@@ -731,6 +743,7 @@
             apply: async (value) => {
               workspace.fleet = value.fleet;
               workspace.workflows = value.workflows;
+              workspace.inputTemplates = value.inputTemplates;
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
@@ -848,6 +861,40 @@
   }
   function saveSoon() {
     void persist().catch(() => {});
+  }
+  async function updateInputTemplate(
+    template: InputTemplate | undefined,
+    previous?: InputTemplate,
+  ) {
+    const session = workspaceSession;
+    const before = $state.snapshot(workspace.inputTemplates);
+    const current = before?.find((item) => item.id === (previous?.id ?? template?.id));
+    if (JSON.stringify(current) !== JSON.stringify(previous))
+      throw new Error(
+        'This template changed on another device. Reopen it from the library before editing.',
+      );
+    const next = inputTemplatesSchema.parse(
+      template
+        ? previous
+          ? (before ?? []).map((item) => (item.id === template.id ? template : item))
+          : [...(before ?? []), template]
+        : (before ?? []).filter((item) => item.id !== previous?.id),
+    );
+    workspace.inputTemplates = next;
+    try {
+      await persist();
+    } catch {
+      if (
+        session === workspaceSession &&
+        JSON.stringify(workspace.inputTemplates) === JSON.stringify(next)
+      )
+        workspace.inputTemplates = before;
+      throw new Error('The template could not be saved. Your changes are still here; try again.');
+    }
+  }
+  function closeTemplates() {
+    templatesOpen = false;
+    void tick().then(() => composerInput?.focus());
   }
   async function refresh(forceUsage = false) {
     if (refreshing) return;
@@ -1165,6 +1212,7 @@
     computerId?: string,
   ) {
     if (!loaded || selectingLocation) return;
+    templatesOpen = false;
     sidebarOpen = false;
     folderBrowserOpen = false;
     locationGeneration++;
@@ -1313,6 +1361,7 @@
     saveSoon();
   }
   function openConversation(c: Conversation) {
+    templatesOpen = false;
     sidebarOpen = false;
     locationGeneration++;
     folderBrowserOpen = false;
@@ -2495,18 +2544,27 @@
                   Choose Codex or Claude to send these images, or remove them to use Gemini.
                 </p>{/if}
               <div class="composer-bottom">
-                <button
-                  type="button"
-                  class="attach-button"
-                  aria-label="Attach images"
-                  title={imagesSupported
-                    ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
-                    : 'Image attachments are available with Codex and Claude'}
-                  disabled={!imagesSupported ||
-                    imagesLoading ||
-                    attachedImages.length >= maxImagesPerMessage}
-                  onclick={() => imageInput?.click()}><Paperclip size={17} /></button
-                >
+                <div class="composer-tools">
+                  <button
+                    type="button"
+                    class="attach-button"
+                    aria-label="Attach images"
+                    title={imagesSupported
+                      ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
+                      : 'Image attachments are available with Codex and Claude'}
+                    disabled={!imagesSupported ||
+                      imagesLoading ||
+                      attachedImages.length >= maxImagesPerMessage}
+                    onclick={() => imageInput?.click()}><Paperclip size={17} /></button
+                  >
+                  <button
+                    type="button"
+                    class="template-button"
+                    disabled={!loaded}
+                    title="Create and fill reusable input templates"
+                    onclick={() => (templatesOpen = true)}><FileText size={16} />Templates</button
+                  >
+                </div>
                 {#if activeRunning}<button
                     class="stop-button"
                     type="button"
@@ -2616,6 +2674,20 @@
       editorOpen = false;
     }}
   />{/if}
+{#if templatesOpen && view === 'chat'}
+  <InputTemplates
+    templates={workspace.inputTemplates ?? []}
+    draft={prompt}
+    close={closeTemplates}
+    save={(template, previous) => updateInputTemplate(template, previous)}
+    remove={(template) => updateInputTemplate(undefined, template)}
+    insert={(text) => {
+      prompt = appendTemplateInput(prompt, text);
+      closeTemplates();
+      void tick().then(() => composerInput?.setSelectionRange(prompt.length, prompt.length));
+    }}
+  />
+{/if}
 {#if conversationMenu && menuConversation}
   {#key conversationMenu}
     <ConversationContextMenu

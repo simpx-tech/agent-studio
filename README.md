@@ -24,6 +24,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Codex via your ChatGPT login, Claude via Claude Code, and Gemini via Google login in Antigravity CLI.
 - Rich Markdown messages, selectable code blocks, tables, copy actions, and structured activity.
 - Agent/provider, model, and reasoning controls directly in every chat, plus optional chat instructions.
+- Reusable [input templates](docs/CAPABILITIES.md#input-templates) with custom fields, a message preview, and insertion into the composer for review before sending.
 - Last model remembered per provider; last reasoning level remembered independently per provider and model.
 - Saved conversations with search, multi-turn context, retry, stop, and deletion.
 - Automatic conversation titles from the first message, generated once in the background with a small model.

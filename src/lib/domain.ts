@@ -4,6 +4,7 @@ import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
+import { inputTemplatesSchema } from './input-templates.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -186,6 +187,7 @@ export const workspaceSchema = z.object({
   legacyAgents: z.array(agentSchema).optional(),
   conversations: z.array(conversationSchema),
   workflows: z.array(workflowSchema).max(100).optional(),
+  inputTemplates: inputTemplatesSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

@@ -1284,6 +1284,26 @@ code {
   margin-top: 6px;
   gap: 10px;
 }
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.template-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: transparent;
+  color: #a4b995;
+  border: 0;
+  border-radius: 5px;
+  font-size: 11px;
+}
+.template-button:hover {
+  color: #e3ebda;
+  background: #293820;
+}
 .attach-button {
   margin-right: auto;
   width: 33px;

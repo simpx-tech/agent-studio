@@ -3,11 +3,15 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 
-export type SharedWorkspace = Pick<Workspace, 'fleet' | 'conversations' | 'workflows'>;
+export type SharedWorkspace = Pick<
+  Workspace,
+  'fleet' | 'conversations' | 'workflows' | 'inputTemplates'
+>;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
   conversations: true,
   workflows: true,
+  inputTemplates: true,
 });
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -138,7 +142,7 @@ export function mergeShared(
     old: T[],
     ours: T[],
     theirs: T[],
-    chats: boolean | 'workflow' = false,
+    chats: boolean | 'named' = false,
   ): T[] => {
     const b = new Map(old.map((v) => [v.id, v])),
       l = new Map(ours.map((v) => [v.id, v])),
@@ -153,7 +157,7 @@ export function mergeShared(
       } else if (equal(before, left)) {
         if (right) result.push(right);
       } else if (chats) {
-        if (chats === 'workflow') {
+        if (chats === 'named') {
           if (right) result.push(right);
           if (left)
             result.push({
@@ -216,7 +220,17 @@ export function mergeShared(
             base.workflows ?? [],
             local.workflows ?? [],
             remote.workflows ?? [],
-            'workflow',
+            'named',
+          ),
+        }
+      : {}),
+    ...(local.inputTemplates || remote.inputTemplates || base.inputTemplates
+      ? {
+          inputTemplates: merge(
+            base.inputTemplates ?? [],
+            local.inputTemplates ?? [],
+            remote.inputTemplates ?? [],
+            'named',
           ),
         }
       : {}),
