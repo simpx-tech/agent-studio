@@ -109,6 +109,27 @@ test('phones offer only Viewer with installation help and retain modal controls 
     await page.screenshot({ path: testInfo.outputPath('phone-install-options.png') });
     await page.getByRole('button', { name: 'Close install agent studio' }).click();
     await expect(dialog).toHaveCount(0);
+    await signInPwa(page, f.token);
+    await page
+      .getByRole('textbox', { name: 'Message', exact: true })
+      .fill('Keep this mobile draft');
+    await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
+    const install = page
+      .locator('.sidebar-tools')
+      .getByRole('button', { name: 'Install app', exact: true });
+    await expect(install).toBeInViewport();
+    await expect(page.locator('.main-area .install-button')).toHaveCount(0);
+    await install.focus();
+    await page.keyboard.press('Enter');
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator('.sidebar')).toHaveClass(/mobile-open/);
+    await expect(install).toBeFocused();
+    await page.getByRole('button', { name: 'Close conversations', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(
+      'Keep this mobile draft',
+    );
   } finally {
     await context.close();
     await f.close();

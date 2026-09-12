@@ -475,10 +475,11 @@ code {
   padding: 8px 4px;
   display: flex;
   align-items: center;
+  gap: 4px;
   flex-shrink: 0;
   margin-top: auto;
 }
-.connections-button {
+.sidebar-tools .icon-button {
   width: 32px;
   height: 32px;
 }

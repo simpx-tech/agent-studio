@@ -95,7 +95,9 @@ test('pairing survives a relay restart and worker update, and startup retries an
       unavailablePath = '';
       await expectSynced(page);
     }
+    await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Install app', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Close conversations', exact: true }).click();
     await page.evaluate(() => window.dispatchEvent(new Event('appinstalled')));
     await expect(page.locator('.browser-status')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('mobile-update-reconnected.png') });

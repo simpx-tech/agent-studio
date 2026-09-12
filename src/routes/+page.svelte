@@ -1820,6 +1820,8 @@
   bind:innerWidth={viewportWidth}
   onkeydown={(event) => {
     if (!desktop() && !paired) return;
+    // Native modal dialogs own their keyboard navigation, including inside the drawer.
+    if (event.target instanceof Element && event.target.closest('dialog[open]')) return;
     if (mobile && sidebarOpen && !deletion) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -2084,6 +2086,7 @@
           sidebarOpen = false;
         }}><Plug size={17} aria-hidden="true" /></button
       >
+      {#if !desktop()}<BrowserStatus showConnection={false} compactInstall />{/if}
     </div>
     <SidebarResize onresize={(width) => (sidebarWidth = width)} />
   </aside>
@@ -2108,6 +2111,7 @@
         {paired}
         error={syncError}
         connect={() => (view = 'connections')}
+        showInstallButton={false}
       />{/if}
 
     {#if view === 'chat'}

@@ -18,11 +18,15 @@
     error = '',
     connect = () => {},
     showConnection = true,
+    showInstallButton = true,
+    compactInstall = false,
   }: {
     paired?: boolean;
     error?: string;
     connect?: () => void;
     showConnection?: boolean;
+    showInstallButton?: boolean;
+    compactInstall?: boolean;
   } = $props();
   let installPrompt = $state<InstallPrompt>();
   let offline = $state(false);
@@ -44,9 +48,11 @@
     connectivity();
     window.addEventListener('online', connectivity);
     window.addEventListener('offline', connectivity);
-    window.addEventListener('beforeinstallprompt', capture);
-    window.addEventListener('appinstalled', complete);
-    if (!dev && 'serviceWorker' in navigator && window.isSecureContext)
+    if (showInstallButton) {
+      window.addEventListener('beforeinstallprompt', capture);
+      window.addEventListener('appinstalled', complete);
+    }
+    if (showInstallButton && !dev && 'serviceWorker' in navigator && window.isSecureContext)
       void navigator.serviceWorker.register('/service-worker.js').catch(() => {});
     return () => {
       window.removeEventListener('online', connectivity);
@@ -65,7 +71,17 @@
   }
 </script>
 
-{#if (showConnection && (offline || error || !paired)) || !installed}<div class="browser-status">
+{#if compactInstall}
+  {#if showInstallButton && !installed}<button
+      class="icon-button install-button"
+      aria-label="Install app"
+      title="Install app"
+      aria-haspopup="dialog"
+      onclick={() => (showInstall = true)}><Download size={17} aria-hidden="true" /></button
+    >{/if}
+{:else if (showConnection && (offline || error || !paired)) || (showInstallButton && !installed)}<div
+    class="browser-status"
+  >
     <div class="browser-status-row">
       {#if showConnection && (offline || error || !paired)}<span role="status"
           >{#if offline}<WifiOff size={15} />Offline · Reconnect to control agents.
@@ -75,7 +91,7 @@
       {#if showConnection && (!paired || error)}<button class="text-button" onclick={connect}
           >{paired ? 'Reconnect' : 'Set up'}</button
         >{/if}
-      {#if !installed}<button
+      {#if showInstallButton && !installed}<button
           class="text-button install-button"
           onclick={() => (showInstall = true)}
           aria-haspopup="dialog"><Download size={14} />Install app</button
