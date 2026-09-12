@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Questions disappearing during relay sync — 2026-09-12
+
+Reproduced in both `src/lib/transport.test.ts` and a rendered desktop case in `tests/questions.spec.ts`: a relay that strips the optional `questions` field from a successful save causes the form to disappear on the next sync while the provider remains running. The one-sided merge paths previously replaced the question history without the revision merge used for concurrent updates. Both regressions failed before the fix and passed afterward.
+
+The merge now retains questions only for matching conversation routing, assistant message identity, run identity, and captured settings. Unit checks cover both sync directions, newer cancellations, stale revisions, independent renames/archive changes, chat deletions, and rejection of mismatched messages/runs/accounts. The browser regression leaves the question unsubmitted across repeated stripping responses, preserves its selected option and composer draft, submits once, and retains the answer after later syncs. Evidence: `artifacts/questions-relay-retention.png`.
+
+Real Windows native checks passed for Claude Opus with the SDK question tool and native `AskUserQuestion`, plus Codex's dynamic question tool. Each form remained pending for ten seconds with repeated native HTTP syncs to a disposable relay that deliberately dropped questions; each explicit Blue answer resumed the original provider and persisted in native history. The completed runs observed 5, 5, and 6 stripping syncs respectively. Evidence: `artifacts/questions-native-sync-result.json` and `questions-native-{claude,claude-native,codex}.png`, visually inspected for the Claude SDK case.
+
+Repeat using the existing isolated question app/target/WebView2 profile and `QA_QUESTION_OLD_RELAY=1 QA_QUESTION_MODES=claude,claude-native,codex node scripts/questions-native-smoke.mjs` (set environment variables with PowerShell syntax on Windows). The disposable HTTP fixture uses loopback port 14997 with a stable test instance identity; it leaves the QA service running. The smoke now verifies that reload replaced the old document and the History tab mounted before interacting. Full validation logs are `artifacts/questions-sync-verify.log` and `artifacts/questions-sync-rust.log`. The user's app and pairing were preserved; no production relay, packaged installer, or WSL/macOS/Linux native update was made.
+
 ## Optional project folders — 2026-09-12
 
 `tests/standalone.spec.ts` verifies that Desktop and managed WSL expose Agent and Model with only the computer selected, query models for that environment without browsing, and send a standalone request without a project path while persisting its computer/environment identity. The narrow-screen case clears a selected folder while preserving the draft and model. Existing folder, unavailable-CLI, offline-host, and fixed-conversation tests retain their routing checks; their former required-folder expectations now allow standalone drafts. The paired Viewer test starts its remote reply without a folder and checks the owning host and connection.

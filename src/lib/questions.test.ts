@@ -144,4 +144,68 @@ describe('question lifecycle', () => {
     const reopened = createDesktopNotificationTracker();
     expect(reopened(w)).toEqual([]);
   });
+
+  it('retains question revisions on one-sided edits without undoing edits or deletions', () => {
+    const w = initialWorkspace(),
+      q = questionFixture();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      title: 'Original',
+      createdAt: '',
+      updatedAt: '',
+      settings: { provider: 'claude', model: 'opus', reasoning: '', instructions: '' },
+      messages: [{ ...message(), questions: [q] }],
+    });
+    const base = sharedWorkspace(w),
+      older = structuredClone(base);
+    delete older.conversations[0].messages[0].questions;
+    older.conversations[0].title = 'Renamed on the other device';
+    older.conversations[0].archived = true;
+    for (const [local, remote] of [
+      [base, older],
+      [older, base],
+    ]) {
+      const merged = mergeShared(base, local, remote);
+      expect(merged.conversations[0].title).toBe('Renamed on the other device');
+      expect(merged.conversations[0].archived).toBe(true);
+      expect(merged.conversations[0].messages[0].questions).toEqual([q]);
+    }
+    const cancelled = structuredClone(base);
+    cancelled.conversations[0].messages[0].questions = [{ ...q, revision: 3, status: 'cancelled' }];
+    expect(
+      mergeShared(base, base, cancelled).conversations[0].messages[0].questions?.[0].status,
+    ).toBe('cancelled');
+    expect(
+      mergeShared(cancelled, cancelled, base).conversations[0].messages[0].questions?.[0].status,
+    ).toBe('cancelled');
+    const deleted = structuredClone(base);
+    deleted.conversations = [];
+    expect(mergeShared(base, base, deleted).conversations).toEqual([]);
+    expect(mergeShared(base, deleted, base).conversations).toEqual([]);
+  });
+
+  it('does not attach retained questions to a replacement run, message, or account', () => {
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      title: 'Original',
+      createdAt: '',
+      updatedAt: '',
+      settings: { provider: 'claude', model: 'opus', reasoning: '', instructions: '' },
+      messages: [{ ...message(), questions: [questionFixture()] }],
+    });
+    const base = sharedWorkspace(w);
+    for (const mismatch of ['run', 'message', 'account']) {
+      const remote = structuredClone(base);
+      const reply = remote.conversations[0].messages[0];
+      delete reply.questions;
+      if (mismatch === 'run') reply.runId = crypto.randomUUID();
+      if (mismatch === 'message') reply.id = crypto.randomUUID();
+      if (mismatch === 'account')
+        remote.conversations[0].settings.connectionId = crypto.randomUUID();
+      expect(
+        mergeShared(base, base, remote).conversations[0].messages[0].questions,
+      ).toBeUndefined();
+    }
+  });
 });

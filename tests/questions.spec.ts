@@ -8,6 +8,89 @@ import { createRelay } from '../relay/server';
 import { initialWorkspace } from '../src/lib/domain';
 import { seedAndPairPwa } from './pwa-helper';
 
+test('desktop keeps an unanswered question and its draft across older relay syncs', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript(() => {
+    const w = window as any;
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    let remote = {
+      fleet: { computers: [], environments: [], accounts: [], connections: [] },
+      conversations: [],
+    };
+    w.questionSyncs = 0;
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'relay_resume') return 'https://old-relay.example.com';
+      if (command === 'load_sync_state') return null;
+      if (command === 'save_sync_state') return;
+      if (command === 'relay_request') {
+        if (args.path === 'v1/state') {
+          if (args.method === 'PUT') {
+            remote = structuredClone(args.body.workspace);
+            for (const chat of remote.conversations as any[])
+              for (const message of chat.messages) {
+                if (message.questions?.length) w.questionSyncs++;
+                delete message.questions;
+              }
+          }
+          return { status: 200, body: { instanceId: 'old-relay', revision: 0, workspace: remote } };
+        }
+        return { status: 200, body: [] };
+      }
+      return invoke(command, args);
+    };
+  });
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Ask a question');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.testQuestion = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'color',
+          header: 'Color',
+          question: 'Choose a color',
+          multiSelect: false,
+          options: [{ label: 'Blue', description: 'Blue color' }],
+        },
+      ],
+    };
+    w.emitCapability({ kind: 'question', question: w.testQuestion });
+  });
+  const form = page.getByRole('region', { name: 'Agent questions' });
+  await form.getByRole('radio', { name: 'Blue' }).check();
+  await page.getByLabel('Message', { exact: true }).fill('Keep my message draft');
+  await expect.poll(() => page.evaluate(() => (window as any).questionSyncs)).toBeGreaterThan(0);
+  await expect(form.getByRole('radio', { name: 'Blue' })).toBeChecked();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).questionSyncs), { timeout: 15000 })
+    .toBeGreaterThan(2);
+  expect(await page.evaluate(() => (window as any).answersSent ?? [])).toEqual([]);
+  await expect(page.getByText('Waiting for you', { exact: true })).toBeVisible();
+  await form.getByRole('button', { name: 'Send answers' }).click();
+  await expect(form.getByText('Your answers', { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const w = window as any;
+    w.emitCapability({ kind: 'text', text: 'Blue was explicitly selected.' });
+    w.finishCapabilities('complete');
+  });
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my message draft');
+  const count = await page.evaluate(() => (window as any).questionSyncs);
+  await expect
+    .poll(() => page.evaluate(() => (window as any).questionSyncs))
+    .toBeGreaterThan(count);
+  await expect(form.getByText('Your answers', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).answersSent)).toHaveLength(1);
+  await page.screenshot({ path: 'artifacts/questions-relay-retention.png', fullPage: true });
+});
+
 test('paired Viewer answers a desktop-started question through the owning host and restores its result', async ({
   page,
 }) => {

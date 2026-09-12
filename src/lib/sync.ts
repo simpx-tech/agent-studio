@@ -16,6 +16,35 @@ export const sharedSchema = workspaceSchema.pick({
 });
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+// Questions are revisioned run history, not deletable conversation settings.
+// Older relays/clients can omit them even from a successful save response.
+function retainQuestions(selected: Conversation, other?: Conversation): Conversation {
+  if (
+    !other ||
+    selected.settings.provider !== other.settings.provider ||
+    selected.settings.connectionId !== other.settings.connectionId ||
+    !equal(selected.location, other.location)
+  )
+    return selected;
+  return {
+    ...selected,
+    messages: selected.messages.map((message) => {
+      const previous = other.messages.find((m) => m.id === message.id);
+      if (
+        message.role !== 'assistant' ||
+        previous?.role !== 'assistant' ||
+        !message.runId ||
+        message.runId !== previous.runId ||
+        !equal(message.settings, previous.settings) ||
+        !previous.questions?.length
+      )
+        return message;
+      return { ...message, questions: mergeQuestions(message.questions, previous.questions) };
+    }),
+  };
+}
+
 function sameRun(
   left: Conversation,
   right: Conversation,
@@ -157,9 +186,25 @@ export function mergeShared(
         left = l.get(id),
         right = r.get(id);
       if (equal(left, right) || equal(before, right)) {
-        if (left) result.push(left);
+        if (left)
+          result.push(
+            chats === true
+              ? (retainQuestions(
+                  left as unknown as Conversation,
+                  right as unknown as Conversation,
+                ) as unknown as T)
+              : left,
+          );
       } else if (equal(before, left)) {
-        if (right) result.push(right);
+        if (right)
+          result.push(
+            chats === true
+              ? (retainQuestions(
+                  right as unknown as Conversation,
+                  left as unknown as Conversation,
+                ) as unknown as T)
+              : right,
+          );
       } else if (chats) {
         if (chats === 'named') {
           if (right) result.push(right);

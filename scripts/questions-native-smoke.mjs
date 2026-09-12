@@ -3,9 +3,11 @@ import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { nativePage } from './native-page.mjs';
+import { questionRelay } from './questions-old-relay.mjs';
 
 const page = await nativePage(9497, 'http://127.0.0.1:1430/');
 const report = { checkedAt: new Date().toISOString(), runs: [] };
+const syncRegression = process.env.QA_QUESTION_OLD_RELAY === '1';
 try {
   assert.equal(await page.invoke('plugin:app|identifier'), 'com.vinicius.agentstudio.questions-qa');
   await page.waitFor(
@@ -40,7 +42,7 @@ try {
       updatedAt: now,
       settings: {
         provider,
-        model: provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol',
+        model: provider === 'claude' ? (syncRegression ? 'opus' : 'sonnet') : 'gpt-5.6-sol',
         reasoning: 'low',
         instructions: '',
         connectionId: connection.id,
@@ -51,9 +53,15 @@ try {
     chats.push({ id, mode, title });
   }
   await page.invoke('save_workspace', { workspace });
+  const relay = syncRegression ? await questionRelay(workspace) : undefined;
+  if (relay) await page.invoke('relay_connect', { url: relay.url, token: relay.token });
+  await page.evaluate(() => (window.questionQaReloadPending = true));
   await page.cdp('Page.reload');
   await page.waitFor(
-    () => document.querySelector('[aria-label="New conversation"]')?.disabled === false,
+    () =>
+      !window.questionQaReloadPending &&
+      document.querySelector('[aria-label="New conversation"]')?.disabled === false &&
+      [...document.querySelectorAll('[role="tab"]')].some((e) => e.textContent.includes('History')),
   );
   for (const chat of chats) {
     await page.evaluate(() =>
@@ -112,6 +120,23 @@ try {
         'Claude substituted a different question tool',
       );
     await page.waitFor(() => document.querySelector('.question-card input'));
+    const requestId = reply.questions[0].id;
+    const heldUntil = Date.now() + 10000;
+    while (Date.now() < heldUntil) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const held = await page.invoke('load_workspace');
+      const current = held.conversations.find((c) => c.id === chat.id)?.messages.at(-1);
+      assert.equal(
+        current?.questions?.[0]?.id,
+        requestId,
+        'Question disappeared without an answer',
+      );
+      assert.equal(current.questions[0].status, 'pending');
+      assert.equal(current.status, 'running');
+      assert(await page.evaluate(() => !!document.querySelector('.question-card input')));
+    }
+    if (relay)
+      assert((relay.dropped.get(reply.runId) ?? 0) >= 3, 'No repeated relay stripping reproduced');
     await page.evaluate(() => {
       const options = [...document.querySelectorAll('.question-option')];
       const blue = options.find((e) => e.textContent.includes('Blue'));
@@ -153,20 +178,25 @@ try {
       status: reply.status,
       questions: reply.questions.length,
       answer: reply.questions[0].response.answers,
+      pendingHeldMs: 10000,
+      strippedSyncs: relay?.dropped.get(reply.runId),
     });
     console.log(
       `${chat.mode}: real question, UI answer, provider continuation and saved history passed`,
     );
   }
   assert.deepEqual(page.errors, []);
-  const previous = await readFile('artifacts/questions-native-result.json', 'utf8')
+  const resultFile = `artifacts/questions-native-${syncRegression ? 'sync-' : ''}result.json`;
+  const previous = await readFile(resultFile, 'utf8')
     .then(JSON.parse)
     .catch(() => ({ runs: [] }));
   report.runs = [
     ...previous.runs.filter((r) => !report.runs.some((n) => n.mode === r.mode)),
     ...report.runs,
   ];
-  await writeFile('artifacts/questions-native-result.json', JSON.stringify(report, null, 2));
+  await writeFile(resultFile, JSON.stringify(report, null, 2));
+  if (relay)
+    console.log('Native regression passed. Disposable relay remains running on port 14997.');
 } finally {
   page.close();
 }

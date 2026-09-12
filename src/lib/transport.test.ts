@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { initialWorkspace } from './domain';
+import { initialWorkspace, type Workspace } from './domain';
 import { emptyShared, sharedWorkspace } from './sync';
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -83,6 +83,73 @@ it('restores native pairing without sending its key through IPC and resumes hear
       ([command, args]) => command === 'relay_request' && args.path === 'v1/heartbeat',
     ),
   ).toBe(true);
+});
+
+it('keeps a pending question when an older relay drops it from a successful save', async () => {
+  const transport = await fixture();
+  const workspace = initialWorkspace();
+  const now = new Date().toISOString();
+  const question = {
+    id: crypto.randomUUID(),
+    revision: 1,
+    status: 'pending' as const,
+    questions: [
+      { id: 'color', header: 'Color', question: 'Choose a color', options: [], multiSelect: false },
+    ],
+  };
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Waiting for input',
+    createdAt: now,
+    updatedAt: now,
+    settings: { provider: 'claude', model: 'opus', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        createdAt: now,
+        runId: crypto.randomUUID(),
+        status: 'running',
+        blocks: [],
+        questions: [question],
+      },
+    ],
+  });
+  let current: Workspace = workspace;
+  transport.configureRuntime({
+    installation: {
+      id: crypto.randomUUID(),
+      computerId: crypto.randomUUID(),
+      name: 'QA',
+      platform: 'windows',
+    },
+    workspace: () => current,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply: async (value) => {
+      current = { ...current, ...value };
+    },
+    checkpointRun: async () => {},
+  });
+  const original = native.invoke.getMockImplementation()!;
+  let remote = emptyShared();
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path === 'v1/state') {
+      if (args.method === 'PUT') {
+        remote = structuredClone(args.body.workspace);
+        for (const chat of remote.conversations)
+          for (const message of chat.messages) delete message.questions;
+      }
+      return { status: 200, body: { instanceId: 'same-relay', revision: 0, workspace: remote } };
+    }
+    return original(command, args);
+  });
+  await transport.resumeRelay();
+  for (let i = 0; i < 3; i++) {
+    await transport.pollRelay();
+    expect(current.conversations[0].messages[0].questions).toEqual([question]);
+    expect(current.conversations[0].messages[0].status).toBe('running');
+  }
 });
 
 it('deletion waits for the remote response to stop and merges its final checkpoint', async () => {
