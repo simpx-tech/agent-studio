@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { answerQuestion } from '$lib/transport';
   import type { QuestionRequest, QuestionAnswer } from '$lib/questions';
@@ -19,6 +20,10 @@
   let busy = $state(false);
   let sent = $state(false);
   let error = $state('');
+  let step = $state(0);
+  let questionHeading: HTMLLegendElement | undefined = $state();
+  const current = $derived(request.questions[step]);
+  const lastStep = $derived(step === request.questions.length - 1);
   const active = $derived(running && request.status === 'pending' && !!runId && !sent);
   const answer = $derived<QuestionAnswer>({
     requestId: request.id,
@@ -33,6 +38,18 @@
       ],
     })),
   });
+  const stepValid = $derived(
+    validAnswer(
+      { id: request.id, questions: [current] },
+      { ...answer, answers: [answer.answers[step]] },
+    ),
+  );
+  async function goToStep(next: number) {
+    if (!active || busy || next < 0 || next >= request.questions.length) return;
+    step = next;
+    await tick();
+    questionHeading?.focus();
+  }
   function choose(id: string, label: string, multiple: boolean, checked: boolean) {
     selected.set(
       id,
@@ -45,7 +62,7 @@
     if (!multiple) custom.set(id, '');
   }
   async function submit(skipped = false) {
-    if (!active || busy || !runId) return;
+    if (!active || busy || !runId || (!skipped && !lastStep)) return;
     const response = skipped ? { requestId: request.id, skipped, answers: [] } : answer;
     if (!validAnswer(request, response)) return;
     busy = true;
@@ -66,13 +83,20 @@
     <form
       onsubmit={(e) => {
         e.preventDefault();
-        void submit();
+        if (lastStep) void submit();
+        else if (stepValid) void goToStep(step + 1);
       }}
     >
-      <p class="question-status" role="status">Your input is needed</p>
-      {#each request.questions as q (q.id)}
+      <p class="question-status" role="status">
+        <span>Your input is needed</span>
+        {#if request.questions.length > 1}
+          <span class="question-count">Question {step + 1} of {request.questions.length}</span>
+        {/if}
+      </p>
+      {#key current.id}
+        {@const q = current}
         <fieldset disabled={busy}>
-          <legend>{q.question}</legend>
+          <legend bind:this={questionHeading} tabindex="-1">{q.question}</legend>
           {#if q.multiSelect && q.options.length}<p class="muted small">
               Choose any that apply.
             </p>{/if}
@@ -105,11 +129,17 @@
               }}></textarea>
           </label>
         </fieldset>
-      {/each}
+      {/key}
       {#if error}<p class="question-error" role="alert">{error}</p>{/if}
       <div class="question-actions">
-        <button class="primary" type="submit" disabled={busy || !validAnswer(request, answer)}
-          >{busy ? 'Sending…' : 'Send answers'}</button
+        {#if step > 0}
+          <button type="button" disabled={busy} onclick={() => goToStep(step - 1)}>Back</button>
+        {/if}
+        <button
+          class="primary"
+          type="submit"
+          disabled={busy || (lastStep ? !validAnswer(request, answer) : !stepValid)}
+          >{busy ? 'Sending…' : lastStep ? 'Send answers' : 'Next'}</button
         >
         <button class="text-button" type="button" disabled={busy} onclick={() => submit(true)}
           >Skip questions</button
@@ -146,8 +176,18 @@
     min-width: 0;
   }
   .question-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     font-weight: 600;
     margin: 0 0 16px;
+  }
+  .question-count {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
   }
   fieldset {
     border: 0;

@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Multi-step agent questions — 2026-09-12
+
+Pending multi-question calls now show one fieldset with a question counter, Back/Next navigation, and final-only Send answers. The desktop and 390px mobile cases in `tests/questions.spec.ts` verify step validation, retained single/multiple choices and literal multiline text, keyboard focus, edits after going back, no submission during navigation, delivery retry, composer draft preservation, whole-request skipping, and cancellation on a later step. The older-relay regression now holds step two through repeated syncs and checks both answers afterward. The paired production Viewer case retains direct single-question submission and saved-answer restoration. Browser screenshots are `artifacts/question-steps-{desktop,mobile}.png`.
+
+Real Windows native round trips passed with two questions in one tool call for Claude Opus SDK `studio_ask_user`, Claude native `AskUserQuestion`, and Codex `studio_ask_user`. Each stayed pending for ten seconds, showed only one question, retained both selections through Back/Next, and continued with both answers only after Send answers. The original composer draft and saved complete answer set survived. Run `scripts/questions-native-smoke.mjs` with `QA_QUESTION_STEPS=1` and `QA_QUESTION_MODES=claude,claude-native,codex` in the isolated questions QA app on port 9497. Evidence: `artifacts/question-steps-native.log`, `questions-native-steps-result.json`, and `questions-native-steps-{claude,claude-native,codex}.png`; desktop, mobile, and native Claude screenshots were visually inspected.
+
+Work ran in an isolated source checkout with its own Vite port. `STUDIO_TEST_PORT=1426 npm run verify` selects that checkout's frontend instead of reusing the user's live app on 1420. Full-gate logs are `artifacts/question-steps-verify.log` and `question-steps-rust.log`. Native QA used the existing separate Cargo target, question app identifier, and WebView2 profile. Physical mobile devices, WSL/macOS/Linux native execution, hosted Viewer deployment, and installer packaging were not part of this UI change.
+
 ## Native reload releases an interrupted provider — 2026-09-12
 
 Reproduced the exact `Another response is still running. Stop it or wait for it to finish.` error with real Claude Opus: leave a native question unanswered, reload the main document, then send again. The old provider survived without its renderer callback and still occupied the native run registry, even though startup had marked its saved reply interrupted. `scripts/reload-native-smoke.mjs` failed before the fix and passed after it, confirming that the original Claude process exited and the replacement reply completed `RELOAD RECOVERY PASSED`.
