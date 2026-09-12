@@ -161,6 +161,7 @@ let browserSessionCheckedAt = 0;
 let browserWorkspaceId = '';
 let browserScope: BrowserWorkspaceScope | undefined;
 let browserSessionBlocked = false;
+const relayConnectionListeners = new Set<(ready: boolean) => void>();
 const remoteRuns = new Set<string>();
 const workerRuns = new Map<string, RelayJob>();
 export function configureRuntime(context: RuntimeContext) {
@@ -168,6 +169,16 @@ export function configureRuntime(context: RuntimeContext) {
 }
 export const workspaceStorageScope = () =>
   desktop() ? 'desktop' : browserScope ? browserScopeKey(browserScope) : null;
+export const relayConnectionGeneration = () => (relayConnected ? relayGeneration : null);
+export function watchRelayConnection(listener: (ready: boolean) => void): () => void {
+  relayConnectionListeners.add(listener);
+  return () => {
+    relayConnectionListeners.delete(listener);
+  };
+}
+function notifyRelayConnection(ready: boolean) {
+  for (const listener of relayConnectionListeners) listener(ready);
+}
 
 function announceBrowserSession(workspaceId: string) {
   localStorage.setItem(
@@ -182,6 +193,7 @@ async function endBrowserSession(reason: string) {
   browserWorkspaceId = '';
   const previousScope = browserScope;
   browserScope = undefined;
+  notifyRelayConnection(false);
   baseline = emptyShared();
   contextCache = createContextCache(readContext);
   updatePendingBadge(0);
@@ -312,6 +324,77 @@ export async function disablePushNotifications(): Promise<void> {
 export async function testPushNotification(): Promise<void> {
   await relayApi('POST', 'v1/push/test');
 }
+
+export type WorkspaceRole = 'admin' | 'member';
+export type ManagedWorkspace = {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  enabled: boolean;
+  createdAt: number | null;
+};
+export type WorkspaceAdministration = {
+  workspaceId: string;
+  role: WorkspaceRole;
+  workspaces?: ManagedWorkspace[];
+};
+export class WorkspaceAdministrationError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code?: string,
+  ) {
+    super(message);
+    this.name = 'WorkspaceAdministrationError';
+  }
+}
+async function workspaceAdministrationRequest<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T | null> {
+  const generation = relayGeneration;
+  if (!relayConnected)
+    throw new WorkspaceAdministrationError('Connect to your workspace first.', 401);
+  const response = await relayRaw(method, path, body);
+  // Native requests also need a generation check: an old response must never
+  // reveal an issued key after the renderer has changed relay connections.
+  if (generation !== relayGeneration || !relayConnected)
+    throw new WorkspaceAdministrationError('The private workspace connection changed.', 401);
+  if (method === 'GET' && response.status === 404) return null;
+  if (response.status >= 300)
+    throw new WorkspaceAdministrationError(
+      response.body?.error ?? 'Workspace administration failed.',
+      response.status,
+      response.body?.code,
+    );
+  return response.body as T;
+}
+export const readWorkspaceAdministration = () =>
+  workspaceAdministrationRequest<WorkspaceAdministration>('GET', 'v1/workspace-admin');
+export const createManagedWorkspace = (name: string, role: WorkspaceRole) =>
+  workspaceAdministrationRequest<{ workspace: ManagedWorkspace; token: string }>(
+    'POST',
+    'v1/workspace-admin/workspaces',
+    { name, role },
+  );
+export const updateManagedWorkspace = (id: string, name: string, role: WorkspaceRole) =>
+  workspaceAdministrationRequest<{ workspace: ManagedWorkspace }>(
+    'PUT',
+    `v1/workspace-admin/workspaces/${encodeURIComponent(id)}`,
+    { name, role },
+  );
+export const rotateManagedWorkspaceKey = (id: string) =>
+  workspaceAdministrationRequest<{ workspace: ManagedWorkspace; token: string }>(
+    'POST',
+    `v1/workspace-admin/workspaces/${encodeURIComponent(id)}/rotate`,
+  );
+export const disableManagedWorkspace = (id: string) =>
+  workspaceAdministrationRequest<{ workspace: ManagedWorkspace }>(
+    'POST',
+    `v1/workspace-admin/workspaces/${encodeURIComponent(id)}/disable`,
+  );
+
 async function relayApi<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await relayRaw(method, path, body);
   if (response.body?.code === 'host_offline') throw new OfflineHostError(response.body.error);
@@ -324,6 +407,7 @@ export async function connectRelay(url: string, token: string) {
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Wait for remote requests to finish before changing relays.');
   let generation = ++relayGeneration;
+  notifyRelayConnection(false);
   if (desktop()) await invoke('relay_connect', { url, token });
   else {
     if (url !== window.location.origin)
@@ -378,6 +462,7 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     relayConnected = true;
     const restored = saved?.workspace ?? browserWorkspaceFromServer(remote);
     await runtime?.replaceBrowserWorkspace?.(restored, undefined, preserveInitialNotification);
+    if (generation === relayGeneration) notifyRelayConnection(true);
     return generation === relayGeneration;
   }
   const checkpoint = await invoke<{
@@ -399,6 +484,7 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
   relayInstance = state.instanceId;
   relayUrl = url;
   relayConnected = true;
+  notifyRelayConnection(true);
   return true;
 }
 export async function resumeRelay(): Promise<boolean> {
@@ -435,6 +521,7 @@ export async function disconnectRelay() {
   if (workerRuns.size || remoteRuns.size)
     throw new Error('Stop remote responses and wait for requests to finish before disconnecting.');
   ++relayGeneration;
+  notifyRelayConnection(false);
   while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
   if (desktop()) await invoke('relay_disconnect');
   else {

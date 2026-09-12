@@ -1,0 +1,8 @@
+{
+  "identifier": "com.vinicius.agentstudio.workspace-admin-qa",
+  "productName": "Agent Studio Workspace Admin QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [{ "title": "Agent Studio Workspace Admin QA", "width": 1100, "height": 820 }]
+  }
+}

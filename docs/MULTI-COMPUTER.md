@@ -93,7 +93,7 @@ Use an actual random key from your secret manager. Configure your domain and TLS
 
 To preserve relay identity during migration, stop the old relay and restore its complete private data directory, including all workspace registries, workspace files, sessions, and push data, before starting the new server. Retain the original HTTPS origin and pairing configuration. Existing desktop installations reject changed workspace identities before sharing local chats.
 
-One VPS can host separate private workspaces, each with its own key, chats, computer/account registry, jobs, and notifications. See [private workspace setup](PRIVATE-WORKSPACES.md) for server-local provisioning, rotation, and disable commands. A key grants trusted access only to its workspace; account labels within that workspace remain organizational. Back up the entire private data directory and protect keys separately. The VPS administrator can read stored data; end-to-end encryption and per-device roles are not implemented.
+One VPS can host separate private workspaces, each with its own key, chats, computer/account registry, jobs, and notifications. See [private workspace setup](PRIVATE-WORKSPACES.md) for admin controls in Connections and local CLI recovery. Admin workspaces can manage names, roles, and access keys; ordinary chat and execution requests remain scoped to the authenticated workspace. Admins are highly trusted because issuing a new key grants access to its target workspace. Account labels within a workspace remain organizational. Back up the entire private data directory and protect keys separately. The VPS administrator can read stored data; end-to-end encryption and per-device roles are not implemented.
 
 ## Behavior and limits
 

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { sessionStore } from './sessions.ts';
-import { workspaceRegistry, type RelayWorkspace } from './workspaces.ts';
+import { workspaceRegistry, WorkspaceAdminError, type RelayWorkspace } from './workspaces.ts';
 import {
   mkdirSync,
   readFileSync,
@@ -163,7 +163,12 @@ export function createRelay({
       for (const [id, peer] of peers)
         if (now() - peer.seenAt > 24 * 60 * 60 * 1000) peers.delete(id);
     };
-    async function body(req: IncomingMessage, authorized: () => boolean, limit = 20_000_000) {
+    async function body(
+      req: IncomingMessage,
+      authorized: () => boolean,
+      limit = 20_000_000,
+      allowEmpty = false,
+    ) {
       let length = 0;
       const chunks: Buffer[] = [];
       for await (const chunk of req) {
@@ -172,6 +177,7 @@ export function createRelay({
         chunks.push(chunk);
       }
       if (!authorized()) throw new Error('Workspace access was revoked. Pair this device again.');
+      if (allowEmpty && length === 0) return {};
       return JSON.parse(Buffer.concat(chunks).toString('utf8'));
     }
     async function handle(
@@ -195,6 +201,82 @@ export function createRelay({
       expire();
       try {
         const url = new URL(req.url ?? '/', 'http://relay.local');
+        if (
+          url.pathname === '/v1/workspace-admin' ||
+          url.pathname.startsWith('/v1/workspace-admin/')
+        ) {
+          try {
+            if (url.search)
+              throw new WorkspaceAdminError(
+                400,
+                'invalid_admin_payload',
+                'Workspace administration does not accept query parameters.',
+              );
+            const capability = registry.administration(workspace);
+            if (url.pathname === '/v1/workspace-admin' && req.method === 'GET') {
+              send(200, capability);
+              return;
+            }
+            if (capability.role !== 'admin')
+              throw new WorkspaceAdminError(
+                403,
+                'admin_required',
+                'An administrator role is required to manage workspaces.',
+              );
+            if (url.pathname === '/v1/workspace-admin/workspaces' && req.method === 'POST') {
+              const input = await body(req, authorized, 4096);
+              send(201, registry.adminCreate(workspace, authorized, input, now));
+              return;
+            }
+            const match = url.pathname.match(
+              /^\/v1\/workspace-admin\/workspaces\/(owner|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})(?:\/(rotate|disable))?$/,
+            );
+            if (!match) {
+              send(404, { error: 'Unknown workspace administration operation.' });
+              return;
+            }
+            if (!match[2] && req.method === 'PUT') {
+              const input = await body(req, authorized, 4096);
+              send(200, registry.adminEdit(workspace, authorized, match[1], input));
+              return;
+            }
+            if (match[2] && req.method === 'POST') {
+              z.object({})
+                .strict()
+                .parse(await body(req, authorized, 4096, true));
+              send(
+                200,
+                match[2] === 'rotate'
+                  ? registry.adminRotate(workspace, authorized, match[1])
+                  : registry.adminDisable(workspace, authorized, match[1]),
+              );
+              return;
+            }
+            send(405, { error: 'Method not allowed.' });
+          } catch (error) {
+            if (!authorized())
+              send(401, {
+                code: 'workspace_revoked',
+                error: 'Workspace access was revoked. Pair this device again.',
+              });
+            else if (error instanceof WorkspaceAdminError)
+              send(error.status, { code: error.code, error: error.message });
+            else if (
+              error instanceof z.ZodError ||
+              error instanceof SyntaxError ||
+              (error instanceof Error && error.message === 'Request exceeds its size limit.')
+            )
+              send(400, {
+                code: 'invalid_admin_payload',
+                error: 'Invalid workspace administration request.',
+              });
+            else
+              send(503, {
+                error: 'Workspace administration storage is unavailable. Please try again shortly.',
+              });
+          }
+          return;
+        }
         if (url.pathname === '/v1/push' || url.pathname === '/v1/push/test') {
           if (!browserActor || actor !== browserActor) {
             send(403, { error: 'Manage notifications from the paired browser on this device.' });

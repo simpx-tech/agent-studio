@@ -1,11 +1,11 @@
 # Production VPS
 
-Agent Studio was deployed on 2026-09-09 from application commit `12f2d6d`.
+Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d6d`. Subsequent releases are selected by the `/opt/agent-studio/current` symlink; inspect it for the live revision.
 
 - Initial HTTPS endpoint: https://studio.72.61.63.95.sslip.io
 - VPS: `72.61.63.95` / `srv1169603`, Debian 13.
 - Windows SSH alias: `agent-studio-vps`. Use `ssh agent-studio-vps`; password authentication is not needed. The dedicated private key is in the local user's `.ssh` directory and must never be copied into this repository. Existing SSH identities were preserved.
-- Release: `/opt/agent-studio/releases/12f2d6d`, selected by `/opt/agent-studio/current`.
+- Initial release: `/opt/agent-studio/releases/12f2d6d`; release directories are selected by `/opt/agent-studio/current`.
 - Runtime: `/opt/agent-studio/runtimes/node-v24.20.0-linux-x64`, downloaded from the official Node distribution and SHA-256 checked. No global Node or Docker installation was changed.
 - Service: `/etc/systemd/system/agent-studio.service`, enabled on boot and running as the dedicated `agent-studio` system user. It listens on `127.0.0.1:4317`; memory is capped at 512 MiB and CPU at one core.
 - Persistent workspace: `/var/lib/agent-studio`, owned by the service user with mode 0700.
@@ -14,7 +14,7 @@ Agent Studio was deployed on 2026-09-09 from application commit `12f2d6d`.
 
 ## Connect a desktop and phone
 
-To share this VPS with another person while keeping chats and computers separate, provision a private workspace key using [the server administration commands](PRIVATE-WORKSPACES.md). Keep the original owner key private. Preserve the complete `/var/lib/agent-studio` tree on upgrades and backups, including `workspaces.json` and each additional `workspaces/<id>/` directory. Provisioning, rotating, and disabling additional workspaces do not require a service restart.
+To share this VPS with another person while keeping chats and computers separate, create a workspace from **Connections → Workspace administration** in an admin workspace. The existing owner workspace starts as admin; it can grant another workspace admin access and transfer administration. [Workspace administration and CLI recovery](PRIVATE-WORKSPACES.md) cover roles and key management. Keep the original owner key private. Preserve the complete `/var/lib/agent-studio` tree on upgrades and backups, including `workspaces.json` and each additional `workspaces/<id>/` directory. Creating, changing roles, rotating keys, and disabling additional workspaces do not require a service restart.
 
 Open **Connections → Set up sync** in the desktop app, enter the HTTPS endpoint and pairing key, and keep the desktop app open. Open the same endpoint on the phone and pair with that key. Provider sign-in stays on the desktop. Deploying the server does not automatically upload or switch an existing desktop workspace.
 
@@ -32,7 +32,7 @@ Transient relay jobs still do not survive a restart; check for active replies an
 
 Validate a Caddy change before reloading with `caddy validate --config /etc/caddy/Caddyfile`. Use `systemctl reload caddy` rather than stopping it: the VPS also serves `deck.simpx.net`. The `deck-server`, `minecraft`, and `atm10sky` services belong to other workloads and must remain untouched.
 
-## Verification
+## Initial deployment verification
 
 The VPS built the committed frontend and passed all 66 unit tests. Public HTTPS returned the app, manifest, icons, and service worker; HTTP redirected to HTTPS. Unauthenticated API calls returned 401 and private/source paths returned 404. A separate 390×844 browser verified login, Secure/HttpOnly/SameSite cookies, session restoration, logout, offline shell loading, and no renderer errors. Chromium reported no PWA installation errors. Existing service PIDs were unchanged and `deck.simpx.net` still returned HTTP 200.
 

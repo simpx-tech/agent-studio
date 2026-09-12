@@ -34,6 +34,7 @@
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
   import PushNotifications from './PushNotifications.svelte';
+  import WorkspaceAdministration from './WorkspaceAdministration.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
@@ -705,6 +706,7 @@
           onclick={() => action(disconnect)}>Disconnect relay</button
         >{/if}
     </section>
+    <WorkspaceAdministration {paired} {workspaceSession} />
     {#if desktop()}<DesktopNotifications />{:else}<PushNotifications
         {paired}
         {workspaceSession}

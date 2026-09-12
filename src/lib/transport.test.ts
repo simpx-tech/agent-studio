@@ -165,3 +165,82 @@ it('failed forgetting keeps the existing connection available for a retry', asyn
   await expect(transport.disconnectRelay()).rejects.toBe('Cannot remove saved pairing');
   expect(await transport.pollRelay()).toEqual([]);
 });
+
+it('hides administration for older relays without hiding mutation errors', async () => {
+  const transport = await fixture();
+  await transport.resumeRelay();
+  native.invoke.mockResolvedValueOnce({ status: 404, body: { error: 'Not found' } });
+  expect(await transport.readWorkspaceAdministration()).toBeNull();
+  native.invoke.mockResolvedValueOnce({
+    status: 404,
+    body: { error: 'Workspace not found', code: 'workspace_not_found' },
+  });
+  await expect(transport.updateManagedWorkspace('missing', 'Name', 'member')).rejects.toMatchObject(
+    { status: 404, code: 'workspace_not_found' },
+  );
+});
+
+it('uses typed private administration requests without persisting newly issued keys', async () => {
+  const transport = await fixture();
+  await transport.resumeRelay();
+  const workspace = {
+    id: crypto.randomUUID(),
+    name: 'Member workspace',
+    role: 'member' as const,
+    enabled: true,
+    createdAt: Date.now(),
+  };
+  native.invoke.mockResolvedValueOnce({
+    status: 201,
+    body: { workspace, token: 'synthetic-issued-private-workspace-key' },
+  });
+  const result = await transport.createManagedWorkspace(workspace.name, workspace.role);
+  expect(result?.workspace).toEqual(workspace);
+  expect(result?.token).toBe('synthetic-issued-private-workspace-key');
+  expect(native.invoke).toHaveBeenLastCalledWith('relay_request', {
+    method: 'POST',
+    path: 'v1/workspace-admin/workspaces',
+    body: { name: workspace.name, role: 'member' },
+  });
+  expect(
+    native.invoke.mock.calls.some(([command]) =>
+      ['save_workspace', 'save_sync_state'].includes(command),
+    ),
+  ).toBe(false);
+  native.invoke.mockResolvedValueOnce({
+    status: 403,
+    body: { error: 'An administrator role is required.', code: 'admin_required' },
+  });
+  await expect(transport.disableManagedWorkspace(workspace.id)).rejects.toMatchObject({
+    status: 403,
+    code: 'admin_required',
+  });
+});
+
+it('discards a late native administration key after the connection changes', async () => {
+  const transport = await fixture();
+  const connectionChanges: boolean[] = [];
+  const stopWatching = transport.watchRelayConnection((ready) => connectionChanges.push(ready));
+  await transport.resumeRelay();
+  let finish!: (response: unknown) => void;
+  native.invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = transport.rotateManagedWorkspaceKey(crypto.randomUUID());
+  const rejected = expect(pending).rejects.toMatchObject({
+    message: 'The private workspace connection changed.',
+    status: 401,
+  });
+  await transport.disconnectRelay();
+  finish({ status: 200, body: { token: 'synthetic-secret-must-not-reach-the-old-view' } });
+  await rejected;
+  expect(transport.relayConnectionGeneration()).toBeNull();
+  await expect(transport.readWorkspaceAdministration()).rejects.toMatchObject({ status: 401 });
+  expect(connectionChanges).toEqual([true, false]);
+  stopWatching();
+  await transport.resumeRelay();
+  expect(connectionChanges).toEqual([true, false]);
+});
