@@ -423,6 +423,9 @@
   .progress-message {
     font-size: 13px;
   }
+  .progress-message > :global(:last-child) {
+    margin-bottom: 0;
+  }
   .metadata-label,
   .tool-facts dt {
     font-size: 10px;

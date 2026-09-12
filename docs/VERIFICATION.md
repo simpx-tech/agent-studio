@@ -1,5 +1,9 @@
 # Verification — 2026-09-08
 
+## Activity spacing — 2026-09-12
+
+The native grouped-history fixture measured 25px from a progress paragraph to its next action and 12px from that action to the next paragraph. The global Markdown paragraph rule contributed a trailing 13px margin in addition to the timeline's 12px grid gap. Resetting only the last Markdown block's bottom margin within `.progress-message` lets the shared timeline gap control both sides while preserving spacing between paragraphs inside a comment. Live and completed activity now measure 12px on both sides on desktop/mobile and in the saved Windows fixture; internal paragraph spacing remains 13px. Measured evidence and visually reviewed screenshots are in `artifacts/activity-spacing-*` in the isolated worktree. Full validation logs are `artifacts/activity-spacing-{verify,rust}.log`.
+
 ## Grouped live activity and work history — 2026-09-12
 
 Consecutive tool calls now share a collapsed, generic action row in both running replies and saved Work history. Progress comments preserve the boundaries between batches. Calls retain their targets, facts, sources, and child results behind a second disclosure. Group identity survives revisions and appended calls without resetting the reader's expansion. Failed, stopped, and unconfirmed work remains visible on collapsed groups, including child outcomes. The first browser regression reproduced the missing grouping before implementation.
