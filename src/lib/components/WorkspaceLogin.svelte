@@ -44,6 +44,7 @@
     <div class="login-brand">
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <span>Agent <span class="brand-light">Studio</span></span>
+      <span class="viewer-label">Viewer</span>
     </div>
     <div class="login-heading">
       <h1 id="workspace-login-title">Sign in to your workspace</h1>

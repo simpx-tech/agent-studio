@@ -196,6 +196,7 @@ test('workspace login gates startup, authentication, restoration, and expired se
     await openPrivateChat(page, alice.name);
 
     await page.getByRole('button', { name: 'Install app', exact: true }).click();
+    await page.getByRole('button', { name: 'Install Viewer', exact: true }).click();
     await expect(page.locator('html')).toHaveAttribute('data-install-prompted', 'true');
 
     blockedPath = '/v1/browser-session';

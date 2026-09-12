@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Viewer branding and desktop downloads — 2026-09-12
+
+The browser/PWA login and sidebar logos, page title, and installed app name identify Agent Studio Viewer. Native desktop keeps Agent Studio and chat-first startup. Install app opens a shared dialog with Viewer installation and, in desktop browsers, a Windows 64-bit installer download when available. Phones and iPads only show Viewer. Keyboard/Escape behavior, draft retention, pre-login installation prompts reused after login, unavailable-download retry, and narrow-screen controls are checked against a real temporary relay.
+
+Validation passed with zero Svelte/TypeScript diagnostics, 159 unit/HTTP cases, 100 Chromium browser scenarios, Rust formatting, Clippy with warnings denied, and 86 Rust tests (four existing opt-in integrations ignored). All three install scenarios also passed Windows WebKit. Its initial focus-restoration assertion incorrectly assumed clicking the opener focused it; opening via keyboard now establishes the focus being restored. The downloader checks byte-for-byte payloads, attachment/no-store headers, unauthenticated availability, absent/empty/non-file packages, and rejected non-allowlisted paths. Browser checks confirm installers never enter shell caches.
+
+The Windows NSIS package was rebuilt using `npm run tauri build -- --bundles nsis`. It is unsigned; no macOS or Linux installer was built. Native smoke used `npm run tauri dev -- --config artifacts/viewer/native.tauri.json --no-watch`, the isolated `com.vinicius.agentstudio.viewer-install-qa` identifier and WebView profile, and CDP 9532. It verified native IPC identity, the original app title, absent Viewer/install controls, and chat-first startup with no renderer errors. The standard installer was not run over the user's existing installation. No provider prompt was sent and physical phone installation was not exercised. Native and desktop/phone chooser screenshots were visually reviewed; logs, package hash, and deployment/browser evidence use the `artifacts/viewer` prefix. The native QA app remains running.
+
 ## Web workspace sign-in — 2026-09-12
 
 The web/PWA now starts on a dedicated workspace-key login page. The chat shell and dialogs stay unmounted while the browser verifies its session and workspace; valid sessions restore automatically. Invalid keys stay on login, and sign-out, expiry/revocation, or cross-tab workspace changes return there. A fresh offline launch stays on login and retries when the server returns. An already authenticated tab retains its workspace during temporary outages. Install app remains available on both sides of sign-in, including a browser install prompt captured before authentication. Desktop continues to start directly in chat.

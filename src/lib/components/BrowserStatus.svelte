@@ -12,6 +12,7 @@
   import { onMount } from 'svelte';
   import { Download, WifiOff, Link } from '@lucide/svelte';
   import { dev } from '$app/environment';
+  import InstallOptions from './InstallOptions.svelte';
   let {
     paired = false,
     error = '',
@@ -26,7 +27,7 @@
   let installPrompt = $state<InstallPrompt>();
   let offline = $state(false);
   let installed = $state(false);
-  let help = $state(false);
+  let showInstall = $state(false);
   onMount(() => {
     const connectivity = () => (offline = !navigator.onLine);
     const capture = (event: Event) => {
@@ -35,6 +36,7 @@
     };
     const complete = () => {
       installed = true;
+      showInstall = false;
       installPrompt = pendingInstallPrompt = undefined;
     };
     installed = window.matchMedia('(display-mode: standalone)').matches;
@@ -54,13 +56,12 @@
     };
   });
   async function install() {
-    if (!installPrompt) {
-      help = !help;
-      return;
-    }
-    await installPrompt.prompt();
-    await installPrompt.userChoice;
+    if (!installPrompt) return false;
+    const prompt = installPrompt;
     installPrompt = pendingInstallPrompt = undefined;
+    await prompt.prompt();
+    await prompt.userChoice;
+    return true;
   }
 </script>
 
@@ -76,12 +77,9 @@
         >{/if}
       {#if !installed}<button
           class="text-button install-button"
-          onclick={install}
-          aria-expanded={help}><Download size={14} />Install app</button
+          onclick={() => (showInstall = true)}
+          aria-haspopup="dialog"><Download size={14} />Install app</button
         >{/if}
     </div>
-    {#if help}<p>
-        On iPhone, open this page in Safari, tap Share, then Add to Home Screen. On Android, choose
-        Install app or Add to Home screen in your browser menu.
-      </p>{/if}
   </div>{/if}
+{#if showInstall}<InstallOptions installViewer={install} close={() => (showInstall = false)} />{/if}

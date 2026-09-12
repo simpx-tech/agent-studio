@@ -2,7 +2,7 @@
 
 The initial VPS deployment is live at [studio.72.61.63.95.sslip.io](https://studio.72.61.63.95.sslip.io). See [production operations and pairing](DEPLOYMENT.md) for service paths, SSH access, updates, and verification boundaries.
 
-The same Agent Studio frontend runs as an installable web app. Its server serves both the public app build and the authenticated relay API on one origin. Your phone can select a computer and folder, start chats, change the next reply’s model/reasoning, send image attachments, read progress and history, inspect context/usage, and stop remote replies. The computer running each CLI must keep Agent Studio open and paired.
+The same Agent Studio frontend runs as **Agent Studio Viewer**, an installable web app. The login and sidebar logos include Viewer, and the installed PWA uses that name. Its server serves both the public app build and the authenticated relay API on one origin. Your phone can select a computer and folder, start chats, change the next reply’s model/reasoning, send image attachments, read progress and history, inspect context/usage, and stop remote replies. The computer running each CLI must keep Agent Studio open and paired. The native desktop app retains the Agent Studio name.
 
 A healthy connection has no persistent status message. Installed apps reclaim the entire status row; browser tabs retain the Install app action. Connection setup, offline, and server-error notices appear when needed, and detailed sync status remains in Connections.
 
@@ -30,9 +30,13 @@ For local development, use Node 24+, `npm ci`, `npm run build`, then `npm run re
 ## Phone setup
 
 1. Pair each desktop host with the server in **Connections → Set up sync**. Sign in to its provider CLIs there.
-2. Open the server’s HTTPS address on the phone. Choose **Set up → Set up sync** and enter its pairing key. The browser uses the current server address.
+2. Open the server’s HTTPS address on the phone. Enter your workspace key and choose **Sign in**. The browser uses the current server address.
 3. Use the conversation menu to start a chat. Choose the execution computer, browse its folders, and select its agent account. Swipe the settings row to reach Model and Reasoning. The ellipsis opens additional conversation actions.
-4. Use **Install app** when offered. In Safari on iPhone, use **Share → Add to Home Screen**. Android browsers offer **Install app** or **Add to Home screen**. Enter inserts a newline on phone layouts; tap the send arrow to submit.
+4. Choose **Install app → Install Viewer**. In Safari on iPhone, use **Share → Add to Home Screen**. Android browsers offer **Install app** or **Add to Home screen**. Enter inserts a newline on phone layouts; tap the send arrow to submit.
+
+In a desktop browser, **Install app** offers two options: **Viewer (PWA)** to manage connected computers, and **Desktop app** to run agents on a Windows computer. The latter downloads the Windows 64-bit installer when published by this server; it is explicitly labelled Windows on other desktop operating systems. Phones and tablets only show Viewer. Browser installation prompts captured before login remain usable after login; unsupported browsers receive installation guidance. Download checks and files are public and do not contain workspace keys or data. Installed PWAs continue to omit the persistent installation row.
+
+To publish the desktop download, build `npm run tauri build -- --bundles nsis`, copy the tested installer to a dedicated public package directory as `agent-studio-windows-x64-setup.exe`, and set `AGENT_STUDIO_DOWNLOADS_DIR` to that directory before starting the relay. Keep it outside the frontend build and private relay data. Only that fixed filename is downloadable, through `/downloads/agent-studio-windows-x64-setup.exe`; `/downloads/manifest.json` reports availability. Missing/empty/non-file packages have no download link. Packages stream with attachment and no-store headers and never enter the PWA shell cache. For Docker, mount this directory read-only and set the same environment variable; do not place installers in `static/` or `build/`.
 
 Installability requires HTTPS (loopback is allowed for development). See [MDN’s installation guide](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable). The shell cache uses [SvelteKit’s service worker support](https://svelte.dev/docs/kit/service-workers); desktop Tauri windows never register it.
 

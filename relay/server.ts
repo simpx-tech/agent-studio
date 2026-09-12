@@ -13,6 +13,7 @@ import {
 import { join } from 'node:path';
 import { z } from 'zod';
 import { browserSessions, publicFiles, servePublic } from './web.ts';
+import { serveDownloads } from './downloads.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
@@ -52,12 +53,14 @@ export function createRelay({
   token,
   directory,
   webDirectory,
+  downloadsDirectory,
   now = Date.now,
   pushSender,
 }: {
   token: string;
   directory: string;
   webDirectory?: string;
+  downloadsDirectory?: string;
   now?: () => number;
   pushSender?: PushSender;
 }) {
@@ -534,7 +537,7 @@ export function createRelay({
         await sessions.handle(req, res);
         return;
       }
-      if (servePublic(req, res, files)) return;
+      if (serveDownloads(req, res, downloadsDirectory) || servePublic(req, res, files)) return;
       // A supplied bearer must authenticate on its own; an invalid key never
       // borrows the browser cookie's authority. Conflicting credentials reject.
       const authorization = req.headers.authorization;

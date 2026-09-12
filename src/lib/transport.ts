@@ -1,6 +1,7 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
+
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
@@ -41,6 +42,24 @@ import {
 } from './domain';
 
 export const desktop = () => isTauri();
+
+export async function desktopInstallerAvailable(): Promise<boolean> {
+  const response = await fetch('/downloads/manifest.json', {
+    credentials: 'omit',
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) throw new Error('Unable to check desktop downloads.');
+  const value: unknown = await response.json();
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !('windows' in value) ||
+    typeof value.windows !== 'boolean'
+  )
+    throw new Error('Unable to check desktop downloads.');
+  return value.windows;
+}
 export { BrowserWorkspaceStorageError } from './browser-workspace';
 
 export type DesktopNotificationSettings = {

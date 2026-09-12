@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Agent Studio",
-  "short_name": "Agent Studio",
+  "name": "Agent Studio Viewer",
+  "short_name": "Studio Viewer",
   "description": "Control your AI agents on connected computers.",
   "start_url": "/",
   "scope": "/",

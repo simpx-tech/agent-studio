@@ -1811,7 +1811,7 @@
 </script>
 
 <svelte:head
-  ><title>Agent Studio</title><meta
+  ><title>{desktop() ? 'Agent Studio' : 'Agent Studio Viewer'}</title><meta
     name="description"
     content="Your AI agents, together in one local workspace."
   /></svelte:head
@@ -1904,6 +1904,7 @@
     >
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <span>agent<span class="brand-light">studio</span></span>
+      {#if !desktop()}<span class="viewer-label">Viewer</span>{/if}
     </button>
     <div class="sidebar-section">
       <span class="sidebar-section-label"

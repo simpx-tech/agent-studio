@@ -7,6 +7,9 @@ const server = createRelay({
   token,
   directory: resolve(process.env.AGENT_STUDIO_RELAY_DATA ?? '.relay-data'),
   webDirectory: resolve(process.env.AGENT_STUDIO_WEB_DIR ?? 'build'),
+  downloadsDirectory: process.env.AGENT_STUDIO_DOWNLOADS_DIR
+    ? resolve(process.env.AGENT_STUDIO_DOWNLOADS_DIR)
+    : undefined,
 });
 server.listen(port, host, () =>
   process.stdout.write(

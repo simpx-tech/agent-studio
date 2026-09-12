@@ -194,6 +194,13 @@ code {
   font-weight: 400;
   color: #c4ccc0;
 }
+.viewer-label {
+  align-self: center;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
 .draggable-brand {
   cursor: default;
   user-select: none;

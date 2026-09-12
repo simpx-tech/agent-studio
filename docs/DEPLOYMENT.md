@@ -10,6 +10,7 @@ Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d
 - Service: `/etc/systemd/system/agent-studio.service`, enabled on boot and running as the dedicated `agent-studio` system user. It listens on `127.0.0.1:4317`; memory is capped at 512 MiB and CPU at one core.
 - Persistent workspace: `/var/lib/agent-studio`, owned by the service user with mode 0700.
 - Pairing configuration: `/etc/agent-studio/relay.env`, root-only mode 0600. A copy of the pairing key is in the Windows user's protected `.ssh/agent-studio-vps-pairing-key.txt`. Neither secret is committed. Do not print secrets in command logs.
+- Desktop downloads: `/opt/agent-studio/downloads/agent-studio-windows-x64-setup.exe`, selected by `AGENT_STUDIO_DOWNLOADS_DIR` in the service's `downloads.conf` drop-in. Build and test the Windows NSIS installer from the release source, checksum it after upload, and publish it atomically. Retain the previous package for rollback. This directory contains only public installers; the relay streams its fixed allowlisted package separately from the public shell and private workspace files. No macOS or Linux installer is currently published.
 - HTTPS: the existing Caddy service imports `/etc/caddy/sites-enabled/agent-studio.caddy`. Caddy obtained a trusted Let's Encrypt certificate and manages renewal. The original Caddyfile backup path is recorded in `/etc/agent-studio/caddy-backup-path`.
 
 ## Connect a desktop and phone

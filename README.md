@@ -13,7 +13,7 @@ Choose **Codex**, **Claude**, or **Gemini**, then send a message. The app uses t
 
 The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The installer is `src-tauri/target/release/bundle/nsis/Agent Studio_0.1.0_x64-setup.exe`.
 
-`npm run dev` opens the frontend for development. For phone access, build the frontend and run the relay server; it hosts the PWA and API together. Open its HTTPS address on your phone, pair in **Connections**, and install it from your browser. Agents execute on your paired computers. See [mobile setup](docs/MOBILE.md). No mock AI responses are shipped in the app.
+`npm run dev` opens the frontend for development. For phone access, build the frontend and run the relay server; it hosts Agent Studio Viewer and the API together. Open its HTTPS address, sign in with your workspace key, and choose **Install app → Install Viewer**. Desktop browsers also offer the Windows desktop installer when published by the server. Agents execute on your paired computers. See [mobile setup and publishing installers](docs/MOBILE.md). No mock AI responses are shipped in the app.
 
 ## Included
 
