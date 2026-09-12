@@ -429,7 +429,9 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     flex: 1;
-    padding: 2px 4px 12px;
+    /* The shared focus ring extends 6px beyond controls; keep it inside the scrollport. */
+    padding: 8px 8px 12px;
+    scroll-padding: 8px;
     scrollbar-gutter: stable;
   }
   .template-modal footer {
