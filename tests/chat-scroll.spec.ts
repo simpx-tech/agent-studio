@@ -86,7 +86,7 @@ for (const mobile of [false, true])
       })
       .toBeLessThan(2);
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
-    await page.getByLabel('Activity summary', { exact: true }).click();
+    await page.getByLabel('Work history', { exact: true }).click();
     await scroll.hover();
     await page.mouse.wheel(0, 50000);
     await expect

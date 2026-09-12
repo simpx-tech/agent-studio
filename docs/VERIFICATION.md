@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Expandable reply work history — 2026-09-12
+
+Completed replies now show a collapsed **Work history** item directly below the model title and above the final answer. It includes the saved progress comments and tool calls in their recorded order, progress-update counts, and the existing tool counts, filters, details, and child results. Progress-only replies also have a disclosure. Live replies retain their inline activity, while token/time and Retry remain below the answer and artifact/progress cards.
+
+The placement regression failed before the change. Browser checks compare the live sequence with completed and reloaded history, verify final-answer deduplication, and exercise filtering, stopped/failed activity, keyboard expansion, draft preservation, scrolling, and 390px mobile layout. Full gates passed: `npm run verify` (zero Svelte/TypeScript errors or warnings, 170 unit tests, production build, 118 browser tests), Rust formatting, Clippy with warnings denied, and 96 Rust tests with four existing opt-in tests ignored.
+
+An isolated Windows WebView2 app (`com.vinicius.agentstudio.work-history-qa`, port 9513, Vite port 1436) verified a saved fixture's collapsed placement, interleaved comments/tools, and collapsed state after reload, with no runtime exceptions. Screenshots were visually inspected. Evidence lives in the `agent-studio-work-history` worktree under `artifacts/work-history-{verify,rust}.log`, `work-history-native-result.json`, `work-history-native-{collapsed,expanded}.png`, and `work-history-{collapsed,expanded}-{desktop,mobile}.png`. Native QA used `npm run tauri dev` with its own identifier, Cargo target, and WebView2 profile. This presentation change did not run new provider requests or test macOS/Linux native apps, public deployment, or installers.
+
+Keep QA dependencies local to the isolated worktree: a junction to another checkout's `node_modules` made Vite reject resolved font paths outside its allowed directory. Installing with `npm ci --ignore-scripts` removed those asset errors without changing the app's filesystem allowlist or the user's running app.
+
 ## Free question navigation and hidden submitted forms — 2026-09-12
 
 The question form now permits Back/Next and direct numbered navigation before answering. Checkmarks identify answered steps, and returning to a step retains its choices and text for editing. Only final submission requires complete answers. `tests/questions.spec.ts` covers desktop and 390px mobile previews of unanswered steps, direct keyboard navigation, revisiting and clearing answers, exclusive radio selection, multiple checked values, failed-send retry, relay retention, and cancellation. Submitted and skipped forms disappear without a Your answers card; assertions verify that the answer data still survives storage and authenticated Viewer reloads. Screenshots: `artifacts/question-navigation-{desktop,mobile}.png` and `questions-no-answer-card-{desktop,mobile}.png`.

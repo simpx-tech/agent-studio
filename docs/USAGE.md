@@ -8,7 +8,7 @@ Usage refreshes automatically without generating a model response. While a chat 
 
 ## Reply usage and cost
 
-Each completed reply has a collapsed token/time row above its tool activity summary. Expand it with a click, Enter, or Space to see token counts, cached input, reasoning tokens when reported, elapsed time, and estimated cost in USD. Cached input is included in input; the summary never adds it again. Cost is stored with the reply and travels through relay checkpoints and saved history.
+Each completed reply has a collapsed token/time row below its final answer and artifact/progress cards; Work history is separately expandable below the model title. Expand it with a click, Enter, or Space to see token counts, cached input, reasoning tokens when reported, elapsed time, and estimated cost in USD. Cached input is included in input; the summary never adds it again. Cost is stored with the reply and travels through relay checkpoints and saved history.
 
 The same row also shows **total AI time** through that reply: the sum of its duration and all earlier saved assistant reply durations in the conversation. It includes recorded stopped and failed replies across model changes, and excludes user messages, idle time between messages, running replies, and separate conversations. Tool and child-agent times are already within the reply duration and are not added again. Totals are derived from saved durations, so history and relay updates retain them without another stored counter. Missing historical timing is marked with **≥** and explained in the expansion; if all timing is missing, the total says **Not recorded**. Long totals display minutes and hours.
 

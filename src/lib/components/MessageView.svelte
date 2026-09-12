@@ -98,12 +98,7 @@
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
-      {#if message.status === 'running'}<ToolActivity
-          {tools}
-          replyStatus={message.status}
-          blocks={message.blocks}
-          finalText={text}
-        />{/if}
+      <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
       {#each content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
@@ -153,12 +148,7 @@
                 </div>{/each}
             </div>{/if}
         </div>{/if}
-      {#if message.status !== 'running'}<ReplyUsage {message} {timeTotal} /><ToolActivity
-          {tools}
-          replyStatus={message.status}
-          blocks={message.blocks}
-          finalText={text}
-        />{/if}
+      {#if message.status !== 'running'}<ReplyUsage {message} {timeTotal} />{/if}
       {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
         >

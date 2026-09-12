@@ -139,16 +139,16 @@ try {
       expanded: usage.open,
       fontSize: getComputedStyle(usage).fontSize,
       text: usage.textContent,
-      beforeActivity: !!(
+      afterActivity: !!(
         usage.compareDocumentPosition(document.querySelector('.activity-summary')) &
-        Node.DOCUMENT_POSITION_FOLLOWING
+        Node.DOCUMENT_POSITION_PRECEDING
       ),
       copyButtons: document.querySelectorAll('[aria-label="Copy response"]').length,
     };
   });
   assert.equal(report.render.expanded, true);
   assert.equal(report.render.fontSize, '11px');
-  assert.equal(report.render.beforeActivity, true);
+  assert.equal(report.render.afterActivity, true);
   assert.equal(report.render.copyButtons, 0);
   for (const [label, width] of [
     ['wide', 1380],

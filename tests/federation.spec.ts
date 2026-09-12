@@ -1161,7 +1161,7 @@ test('two app environments pair, share accounts, route chats, retain progress an
     await expect(desktop.getByLabel('Reply usage and cost')).toContainText(
       '$0.012345 estimated cost',
     );
-    await desktop.getByLabel('Activity summary', { exact: true }).click();
+    await desktop.getByLabel('Work history', { exact: true }).click();
     await expect(desktop.getByText('Checked both remote sources.', { exact: true })).toBeVisible();
     await expect(desktop.getByText('Checking the remote sources.', { exact: true })).toHaveCount(0);
     await expect(desktop.locator('[data-category="search"]')).toHaveCount(2);

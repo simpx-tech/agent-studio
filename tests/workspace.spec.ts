@@ -2419,7 +2419,7 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await emit({ kind: 'text', text: 'The fixture was checked.' });
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
-  await page.getByLabel('Activity summary', { exact: true }).click();
+  await page.getByLabel('Work history', { exact: true }).click();
   const searches = page.locator('[data-category="search"]');
   await expect(searches.first()).toContainText('Completed');
   await searches.first().locator(':scope > summary').click();
@@ -2452,14 +2452,14 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('.conversation-item').first().click();
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
-  await page.getByLabel('Activity summary', { exact: true }).click();
+  await page.getByLabel('Work history', { exact: true }).click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
   await expect(page.getByRole('region', { name: 'Sub-agent: Source checker' })).toContainText(
     'Failed',
   );
 });
 
-test('tool targets stream inline and finish as an expandable filtered summary', async ({
+test('tool targets stream inline and finish as expandable work history below the model title', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
@@ -2550,6 +2550,13 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
   expect(ordered[0]).toContain('I will inspect');
   expect(ordered[1]).toContain('/fixture/src/app.ts');
   expect(ordered[2]).toContain('The file is readable');
+  const historySequence = () =>
+    page
+      .locator('.activity-timeline > .progress-message, .activity-timeline > .tool-card')
+      .evaluateAll((elements) =>
+        elements.map((el) => (el.querySelector('.tool-title') ?? el).textContent?.trim()),
+      );
+  const liveSequence = await historySequence();
   await page.screenshot({ path: 'artifacts/activity-inline-browser.png' });
   for (const tool of tools)
     await emit({
@@ -2569,6 +2576,12 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
   await expect(usageSummary).toContainText('$0.012345 estimated cost');
   await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
   await expect(page.locator('.reply-usage')).toHaveCSS('font-size', '11px');
+  await page.screenshot({ path: 'artifacts/work-history-placement.png' });
+  await expect(
+    page.locator(
+      '.message[data-status="complete"] .message-heading + .tool-activity > .activity-summary',
+    ),
+  ).toHaveCount(1);
   expect(
     await page
       .locator('.reply-usage')
@@ -2576,7 +2589,7 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
         (el) =>
           !!(
             el.compareDocumentPosition(document.querySelector('.activity-summary')!) &
-            Node.DOCUMENT_POSITION_FOLLOWING
+            Node.DOCUMENT_POSITION_PRECEDING
           ),
       ),
   ).toBe(true);
@@ -2587,7 +2600,8 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
   await expect(page.getByRole('button', { name: 'Copy response', exact: true })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/reply-usage-expanded-browser.png' });
   await usageSummary.click();
-  const summary = page.getByLabel('Activity summary', { exact: true });
+  const summary = page.getByLabel('Work history', { exact: true });
+  await expect(summary).toContainText('2 progress updates');
   await expect(summary).toContainText('5 tool calls');
   await expect(summary).toContainText('0 web searches');
   await expect(summary).toContainText('0 sub-agents');
@@ -2603,6 +2617,7 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
   await summary.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByText('I will inspect the source files.', { exact: true })).toBeVisible();
+  expect(await historySequence()).toEqual(liveSequence);
   await page.getByRole('button', { name: 'Command runs (1)', exact: true }).click();
   await expect(page.locator('.tool-card')).toHaveCount(1);
   await page.locator('.tool-card > summary').click();
@@ -2640,6 +2655,7 @@ test('tool targets stream inline and finish as an expandable filtered summary', 
   await expect(usageSummary).toContainText('$0.012345 estimated cost');
   await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
   await summary.click();
+  expect(await historySequence()).toEqual(liveSequence);
   await expect(
     page.getByText('The file is readable. I will find the components next.', { exact: true }),
   ).toBeVisible();

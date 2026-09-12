@@ -70,6 +70,7 @@
           ),
       ),
   );
+  const progressCount = $derived(entries.filter((entry) => entry.progress).length);
   function shown(tool: ToolActivity) {
     if (replyStatus === 'running' || filter === 'all')
       return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
@@ -230,23 +231,29 @@
     {#if replyStatus === 'running'}{@render timeline()}
     {:else}
       <details class="activity-summary">
-        <summary aria-label="Activity summary">
+        <summary aria-label="Work history">
           <ChevronDown size={14} class="disclosure" />
-          {#if tools.length}
+          <span class="history-summary">
+            <span class="history-title">Work history</span>
             <span
               class="summary-counts"
               title="Tool calls include web searches and command runs, including calls made by sub-agents. Sub-agents are counted separately."
             >
-              <span
-                >{counts.calls}{counts.limited ? '+' : ''} tool {counts.calls === 1
-                  ? 'call'
-                  : 'calls'}</span
-              >
-              <span>{counts.searches} web {counts.searches === 1 ? 'search' : 'searches'}</span>
-              <span>{counts.agents} {counts.agents === 1 ? 'sub-agent' : 'sub-agents'}</span>
-              <span>{counts.runs} command {counts.runs === 1 ? 'run' : 'runs'}</span>
+              {#if progressCount}<span
+                  >{progressCount} progress {progressCount === 1 ? 'update' : 'updates'}</span
+                >{/if}
+              {#if tools.length}
+                <span
+                  >{counts.calls}{counts.limited ? '+' : ''} tool {counts.calls === 1
+                    ? 'call'
+                    : 'calls'}</span
+                >
+                <span>{counts.searches} web {counts.searches === 1 ? 'search' : 'searches'}</span>
+                <span>{counts.agents} {counts.agents === 1 ? 'sub-agent' : 'sub-agents'}</span>
+                <span>{counts.runs} command {counts.runs === 1 ? 'run' : 'runs'}</span>
+              {/if}
             </span>
-          {:else}<span class="summary-counts">Activity</span>{/if}
+          </span>
           {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
             >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
         </summary>
@@ -291,9 +298,24 @@
   }
   .summary-counts {
     display: flex;
-    flex: 1;
     flex-wrap: wrap;
     gap: 4px 12px;
+    font-size: 11px;
+  }
+  .history-summary {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    min-width: 0;
+  }
+  .history-title {
+    color: #d3dfca;
+    white-space: nowrap;
+  }
+  .activity-summary > summary > :global(svg) {
+    flex-shrink: 0;
   }
   .summary-counts span {
     white-space: nowrap;
