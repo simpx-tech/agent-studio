@@ -4,7 +4,10 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tauri::{ipc::Channel, Manager};
@@ -12,7 +15,48 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-pub struct Runs(pub Mutex<HashMap<String, CancellationToken>>);
+pub struct Runs(pub Mutex<HashMap<String, CancellationToken>>, AtomicU64);
+impl Runs {
+    // A reloaded document cannot receive the old run's IPC or answer its questions.
+    // Leave entries registered until the owned process tree has actually stopped.
+    pub fn interrupt_for_reload(&self) {
+        if let Ok(active) = self.0.lock() {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            for cancel in active.values() {
+                cancel.cancel();
+            }
+        }
+    }
+
+    pub async fn begin(&self, id: &str, cancel: CancellationToken) -> Result<(), String> {
+        let generation = self.1.load(Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            {
+                let mut active = self.0.lock().map_err(|_| "Run registry lock failed")?;
+                if generation != self.1.load(Ordering::SeqCst) {
+                    return Err("This response was interrupted when the app reloaded. Retry from the current window.".into());
+                }
+                if active.is_empty() {
+                    active.insert(id.into(), cancel);
+                    return Ok(());
+                }
+                if active.values().any(|token| !token.is_cancelled()) {
+                    return Err(
+                        "Another response is still running. Stop it or wait for it to finish."
+                            .into(),
+                    );
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(
+                    "The previous response is still stopping. Try again in a moment.".into(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
 #[derive(Clone)]
 pub struct EventSink(Arc<dyn Fn(RunEvent) -> Result<(), String> + Send + Sync>);
 impl EventSink {
@@ -317,6 +361,63 @@ fn provider_error(diagnostic: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn live_runs_are_never_replaced_and_reload_is_scoped_to_this_app() {
+        let runs = Runs::default();
+        let other_app = Runs::default();
+        let current = CancellationToken::new();
+        let unrelated = CancellationToken::new();
+        runs.begin("current", current.clone()).await.unwrap();
+        other_app.begin("other", unrelated.clone()).await.unwrap();
+        assert!(runs
+            .begin("next", CancellationToken::new())
+            .await
+            .unwrap_err()
+            .contains("Another response"));
+        assert!(!current.is_cancelled());
+        runs.interrupt_for_reload();
+        assert!(current.is_cancelled());
+        assert!(!unrelated.is_cancelled());
+        assert!(runs.0.lock().unwrap().contains_key("current"));
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_owned_process_cleanup_after_reload() {
+        let runs = Runs::default();
+        runs.begin("old", CancellationToken::new()).await.unwrap();
+        runs.interrupt_for_reload();
+        let replacement = CancellationToken::new();
+        let next = runs.begin("new", replacement.clone());
+        tokio::pin!(next);
+        assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
+            .await
+            .is_err());
+        assert!(!runs.0.lock().unwrap().contains_key("new"));
+        runs.0.lock().unwrap().remove("old");
+        next.await.unwrap();
+        assert!(runs.0.lock().unwrap().contains_key("new"));
+        assert!(!replacement.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn another_reload_invalidates_a_request_waiting_in_the_previous_document() {
+        let runs = Runs::default();
+        runs.begin("old", CancellationToken::new()).await.unwrap();
+        runs.interrupt_for_reload();
+        let next = runs.begin("stale", CancellationToken::new());
+        tokio::pin!(next);
+        assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
+            .await
+            .is_err());
+        runs.interrupt_for_reload();
+        runs.0.lock().unwrap().remove("old");
+        assert!(next.await.unwrap_err().contains("app reloaded"));
+        assert!(runs.0.lock().unwrap().is_empty());
+        runs.begin("current", CancellationToken::new())
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn retired_clients_and_quota_do_not_restart_authentication() {
         let error = provider_error("Authentication succeeded. Failed to sign in: This client is no longer supported for Gemini Code Assist for individuals.");

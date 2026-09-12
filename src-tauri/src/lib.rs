@@ -320,15 +320,7 @@ async fn run_agent(
         .transpose()?
         .flatten();
     let cancel = CancellationToken::new();
-    {
-        let mut active = runs.0.lock().map_err(|_| "Run registry lock failed")?;
-        if !active.is_empty() {
-            return Err(
-                "Another response is still running. Stop it or wait for it to finish.".into(),
-            );
-        }
-        active.insert(request.run_id.clone(), cancel.clone());
-    }
+    runs.begin(&request.run_id, cancel.clone()).await?;
     let id = request.run_id.clone();
     let _ = on_event.send(protocol::RunEvent::Activity {
         text: "Starting the provider CLI".into(),
@@ -427,6 +419,13 @@ pub fn run() {
         .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                webview.state::<runner::Runs>().interrupt_for_reload();
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let mut tokens = window

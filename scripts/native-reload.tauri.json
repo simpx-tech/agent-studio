@@ -1,0 +1,6 @@
+{
+  "identifier": "com.vinicius.agentstudio.reload-qa",
+  "productName": "Agent Studio Reload QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": { "windows": [{ "title": "Agent Studio Reload QA", "width": 1200, "height": 900 }] }
+}

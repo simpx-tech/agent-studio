@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Native reload releases an interrupted provider — 2026-09-12
+
+Reproduced the exact `Another response is still running. Stop it or wait for it to finish.` error with real Claude Opus: leave a native question unanswered, reload the main document, then send again. The old provider survived without its renderer callback and still occupied the native run registry, even though startup had marked its saved reply interrupted. `scripts/reload-native-smoke.mjs` failed before the fix and passed after it, confirming that the original Claude process exited and the replacement reply completed `RELOAD RECOVERY PASSED`.
+
+The main webview's native page-load start event now cancels the app's owned reply. Its registry entry remains until normal owned-process cleanup finishes. Admission waits for already-cancelled work to release the slot, continues rejecting concurrent live replies, and rejects queued requests from a document that reloaded again. Rust regressions cover cleanup ordering, isolation between app registries, live-run protection, and successive reloads. The native check also opens Connections and returns to chat while Claude waits, verifying that ordinary app navigation does not cancel it.
+
+Native QA uses `scripts/native-reload.tauri.json`, the `com.vinicius.agentstudio.reload-qa` identity, a separate WebView2 profile and Cargo target, and debugging port 9501. Set `QA_NATIVE_PID` to the verified QA process and run `node scripts/reload-native-smoke.mjs`. Evidence in the isolated source checkout: `artifacts/reload-before.log`, `reload-after.log`, `reload-native-before.png`, `reload-native.png`, and `reload-native-result.json`. Full pipeline logs are `artifacts/reload-verify.log` and `reload-rust.log`. Windows native Claude was exercised; native WSL/macOS/Linux and Codex reloads were not exercised. Builds ran from an isolated checkout so they could not reload the user's active Vite document.
+
 ## Questions disappearing during relay sync — 2026-09-12
 
 Reproduced in both `src/lib/transport.test.ts` and a rendered desktop case in `tests/questions.spec.ts`: a relay that strips the optional `questions` field from a successful save causes the form to disappear on the next sync while the provider remains running. The one-sided merge paths previously replaced the question history without the revision merge used for concurrent updates. Both regressions failed before the fix and passed afterward.
