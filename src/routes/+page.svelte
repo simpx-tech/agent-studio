@@ -2368,10 +2368,14 @@
           <div
             class="chat-scroll"
             bind:this={chatScroll}
+            onwheel={(event) => {
+              if (event.deltaY < 0 && !event.ctrlKey) nearBottom = false;
+            }}
             onscroll={() => {
               if (chatScroll)
+                // Only follow at the end. A reading position just above it is still deliberate.
                 nearBottom =
-                  chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 100;
+                  chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 2;
             }}
           >
             <div class="message-column" class:empty={!active?.messages.length}>

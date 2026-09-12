@@ -1203,7 +1203,6 @@ code {
   flex: 1;
   overflow: auto;
   min-height: 0;
-  scroll-behavior: smooth;
 }
 .message-column {
   max-width: 900px;

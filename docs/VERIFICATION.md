@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Chat scrolling during replies — 2026-09-12
+
+Reproduced a scroll-position reset with 30 expanded command cards: after a 60px upward wheel movement, the next activity event moved desktop scrollTop from 2726 to 2820 and mobile from 2792 to 2886. The 100px following threshold treated that deliberate reading position as the bottom, and automatic scrolling inherited smooth animation on every event.
+
+`tests/chat-scroll.spec.ts` now checks desktop and narrow mobile layouts against the same live event sequence. It verifies that small upward scrolls survive later updates, both ends of a long running conversation are reachable, following resumes at the bottom, completed expanded activity remains reachable, and the composer draft stays intact. Both cases failed before the fix and pass after it.
+
+An isolated Windows WebView2 app (`com.vinicius.agentstudio.scroll-qa`) also reached scrollTop 0 and the full 4404px bottom with native mouse-wheel input, using a saved fixture with 80 answer paragraphs and 30 tool cards. The composer stayed inside the viewport and no runtime exceptions were reported. Streaming events are controlled browser fixtures; the native check covers rendered history and input behavior, not a new provider integration. Evidence is in `artifacts/chat-scroll-before-*.png`, `chat-scroll-{desktop,mobile}.png`, `chat-scroll-native*.png`, and `chat-scroll-native-result.json`.
+
 ## Interactive agent questions — 2026-09-12
 
 Final local gates passed: `npm run verify` (zero Svelte/TypeScript errors or warnings, 167 unit tests, production build, and 110 browser tests); Rust formatting; Clippy with warnings denied; and 93 Rust tests, with four existing opt-in tests ignored. Logs are `artifacts/questions-verify.log` and `artifacts/questions-rust.log`.
