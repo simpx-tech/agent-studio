@@ -9,6 +9,11 @@
     CircleAlert,
     ChevronDown,
     ExternalLink,
+    FileText,
+    Pencil,
+    Search,
+    Terminal,
+    Images,
   } from '@lucide/svelte';
   import {
     activityCounts,
@@ -16,6 +21,7 @@
     visibleActivityStatus,
     type ToolActivity,
   } from '$lib/activity';
+  import { activityGroupSummary, groupActivityEntries } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
   import { openLink } from '$lib/transport';
@@ -48,6 +54,18 @@
     unknown: 'Outcome unconfirmed',
   };
   const icons = { skill: Sparkles, search: Globe, agent: GitBranch, tool: Wrench };
+  const groupIcons = {
+    read: FileText,
+    edit: Pencil,
+    files: Search,
+    command: Terminal,
+    search: Globe,
+    browse: Globe,
+    agent: GitBranch,
+    skill: Sparkles,
+    image: Images,
+    tool: Wrench,
+  };
   const entries = $derived(
     (blocks.length
       ? blocks
@@ -77,6 +95,7 @@
       ),
   );
   const progressCount = $derived(entries.filter((entry) => entry.progress).length);
+  const groups = $derived(groupActivityEntries(entries));
   function shown(tool: ToolActivity) {
     if (replyStatus === 'running' || filter === 'all')
       return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
@@ -112,12 +131,7 @@
 
 {#snippet toolCard(tool: ToolActivity, nested = false)}
   {@const Icon = icons[tool.category]}
-  <details
-    class="tool-card"
-    class:nested
-    open={replyStatus === 'running' || tool.category === 'agent'}
-    data-category={tool.category}
-  >
+  <details class="tool-card" class:nested data-category={tool.category}>
     <summary>
       <Icon size={15} aria-hidden="true" />
       <span class="tool-title"
@@ -203,10 +217,27 @@
 
 {#snippet timeline()}
   <div class="activity-timeline">
-    {#each entries as entry}
-      {#if entry.tool}
-        {#if shown(entry.tool)}{@render toolCard(entry.tool)}{/if}
+    {#each groups as group (group.key)}
+      {#if group.kind === 'tools'}
+        {@const visible = group.tools.filter(shown)}
+        {#if visible.length}
+          {@const summary = activityGroupSummary(visible, replyStatus, tools)}
+          {@const Icon = groupIcons[summary.icon]}
+          <details class="activity-group">
+            <summary title="Expand for tool details">
+              {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
+              {:else}<Icon size={16} aria-hidden="true" />{/if}
+              <span class="group-label">{summary.label}</span>
+              {#if summary.issue}{@render statusMark(summary.issue)}{/if}
+              <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+            </summary>
+            <div class="group-tools">
+              {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
+            </div>
+          </details>
+        {/if}
       {:else if replyStatus === 'running' || filter === 'all'}
+        {@const entry = group.entry}
         {#if entry.progress}
           <!-- Sanitized markdown; nested links provide keyboard interaction. -->
           <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
@@ -289,7 +320,39 @@
   }
   .activity-timeline {
     display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+  .activity-group {
+    min-width: 0;
+  }
+  .activity-group > summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 7px;
+    padding: 7px 0;
+    list-style: none;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .activity-group > summary:hover {
+    color: var(--text);
+  }
+  .activity-group > summary > :global(svg) {
+    flex-shrink: 0;
+  }
+  .group-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .group-tools {
+    display: grid;
+    gap: 3px;
+    margin: 5px 0 7px 7px;
+    padding-left: 12px;
+    border-left: 1px solid var(--line);
     min-width: 0;
   }
   .activity-summary[open] {
@@ -375,24 +438,18 @@
     overflow-wrap: anywhere;
     line-height: 1.6;
   }
-  .live-activity .tool-card {
-    background: transparent;
-    border-color: #ffffff0d;
-  }
   .tool-card {
-    border: 1px solid #ffffff13;
-    border-radius: 9px;
-    background: #ffffff02;
+    min-width: 0;
     overflow: hidden;
   }
   .tool-card > summary {
     display: flex;
     gap: 8px;
     align-items: center;
-    padding: 10px 12px;
+    padding: 7px 0;
     cursor: pointer;
     list-style: none;
-    color: #bed2b2;
+    color: #a8b69f;
   }
   summary::-webkit-details-marker {
     display: none;
@@ -422,7 +479,7 @@
     color: #efa19b;
   }
   .tool-body {
-    padding: 0 12px 11px 35px;
+    padding: 0 8px 11px 23px;
     font-size: 12px;
     color: #a8b69f;
   }

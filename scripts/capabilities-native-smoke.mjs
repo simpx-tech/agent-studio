@@ -220,7 +220,7 @@ try {
     );
     await page.evaluate(() => {
       document
-        .querySelectorAll('.activity-summary, .tool-card, .agent-result')
+        .querySelectorAll('.activity-summary, .activity-group, .tool-card, .agent-result')
         .forEach((el) => (el.open = true));
       document.querySelector('.tool-activity')?.scrollIntoView({ block: 'start' });
     });

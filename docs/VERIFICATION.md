@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Grouped live activity and work history — 2026-09-12
+
+Consecutive tool calls now share a collapsed, generic action row in both running replies and saved Work history. Progress comments preserve the boundaries between batches. Calls retain their targets, facts, sources, and child results behind a second disclosure. Group identity survives revisions and appended calls without resetting the reader's expansion. Failed, stopped, and unconfirmed work remains visible on collapsed groups, including child outcomes. The first browser regression reproduced the missing grouping before implementation.
+
+Focused desktop and 390px mobile checks cover compact defaults, keyboard expansion, revisions, appended calls, chronological history after completion/reload, failures, command filtering, and draft preservation. Existing metadata, child-result, safe-link, and long-chat scrolling checks also pass with user-expanded groups. Unit coverage checks action classification, skill-file reads versus invocations, unknown tools, mixed outcomes, and stable keys. Authenticated relay coverage checks grouped restored searches. Full validation uses `npm run verify` and the required Rust formatting, Clippy, and test commands; logs are `artifacts/grouped-activity-{verify,rust}.log` in the isolated `agent-studio-work-history` worktree.
+
+The running isolated Windows app (`com.vinicius.agentstudio.work-history-qa`, Vite 1436, WebView2 CDP 9513) passed a real native storage/reload check using a controlled saved reply with two file reads followed by an edit and command. Both groups start collapsed; comments, expandable file facts, and the answer divider remain in order. Evidence: `artifacts/grouped-activity-native-result.json`, `grouped-activity-native-{collapsed,history,details}.png`, and browser `grouped-activity-{running,history}-{desktop,mobile}.png`. Native and browser screenshots were visually reviewed. This change does not run new provider requests; native WSL/macOS/Linux, physical phones, hosted deployment, and installer packaging were not exercised.
+
 ## Work history startup notes and divider — 2026-09-12
 
 The plain startup notes `Starting the provider CLI` and `Connected to Claude` are hidden in live and saved activity. Tool details and provider-authored progress remain intact. Expanded history has a theme-colored divider before the final answer; collapsing it removes the divider. The desktop/mobile regression injects both notes, verifies their absence during the reply and after reopening, and checks the divider in both disclosure states. Both cases failed before the change and now pass.

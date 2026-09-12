@@ -28,6 +28,8 @@ for (const mobile of [false, true])
           },
         });
     });
+    await page.locator('.activity-group > summary').click();
+    for (const summary of await page.locator('.tool-card > summary').all()) await summary.click();
     const scroll = page.locator('.chat-scroll');
     const position = () =>
       scroll.evaluate((el) => ({
@@ -87,6 +89,7 @@ for (const mobile of [false, true])
       .toBeLessThan(2);
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
     await page.getByLabel('Work history', { exact: true }).click();
+    await page.locator('.activity-group > summary').click();
     await scroll.hover();
     await page.mouse.wheel(0, 50000);
     await expect

@@ -2372,6 +2372,8 @@ test('skills, web searches, and child agents keep progress, results, and saved h
     }),
   );
   await emit(tool('read', 'tool', 'Read', { parentId: 'child1' }));
+  await page.locator('.activity-group > summary').click();
+  await page.locator('[data-category="agent"] > summary').click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
   await expect(page.getByRole('region', { name: 'Sub-agent: Fixture reader' })).toContainText(
     'Read',
@@ -2420,6 +2422,8 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
   await page.getByLabel('Work history', { exact: true }).click();
+  await page.locator('.activity-group > summary').click();
+  await page.locator('[data-category="agent"] > summary').click();
   const searches = page.locator('[data-category="search"]');
   await expect(searches.first()).toContainText('Completed');
   await searches.first().locator(':scope > summary').click();
@@ -2454,6 +2458,8 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
   await page.getByLabel('Work history', { exact: true }).click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
+  await page.locator('.activity-group > summary').click();
+  await page.locator('[data-category="agent"] > summary').click();
   await expect(page.getByRole('region', { name: 'Sub-agent: Source checker' })).toContainText(
     'Failed',
   );
@@ -2529,6 +2535,9 @@ test('tool targets stream inline and finish as expandable work history below the
   }
   await expect(page.locator('.activity-summary')).toHaveCount(0);
   await expect(page.locator('.live-activity')).toContainText('/fixture/src/app.ts');
+  await expect(page.getByText('Lines read', { exact: true })).not.toBeVisible();
+  await page.locator('.activity-group > summary').first().click();
+  await page.locator('.tool-card > summary').first().click();
   await expect(page.getByText('Lines read', { exact: true })).toBeVisible();
   expect(
     await page
@@ -2552,7 +2561,9 @@ test('tool targets stream inline and finish as expandable work history below the
   expect(ordered[2]).toContain('The file is readable');
   const historySequence = () =>
     page
-      .locator('.activity-timeline > .progress-message, .activity-timeline > .tool-card')
+      .locator(
+        '.activity-timeline > .progress-message, .activity-timeline > .activity-group .tool-title',
+      )
       .evaluateAll((elements) =>
         elements.map((el) => (el.querySelector('.tool-title') ?? el).textContent?.trim()),
       );
@@ -2620,6 +2631,7 @@ test('tool targets stream inline and finish as expandable work history below the
   expect(await historySequence()).toEqual(liveSequence);
   await page.getByRole('button', { name: 'Command runs (1)', exact: true }).click();
   await expect(page.locator('.tool-card')).toHaveCount(1);
+  await page.locator('.activity-group > summary').click();
   await page.locator('.tool-card > summary').click();
   await expect(page.getByText('Exit code', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Tool calls (5)', exact: true }).click();
