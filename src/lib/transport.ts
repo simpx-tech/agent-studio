@@ -7,6 +7,7 @@ import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
+import { answerSchema, type QuestionAnswer } from './questions';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot } from './context';
 import {
@@ -678,6 +679,7 @@ async function localCall(
     title: 'generate_title',
     folders: 'list_folders',
     context: 'read_context',
+    answer: 'answer_question',
   };
   return invoke(commands[method], args);
 }
@@ -971,6 +973,13 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
     return;
   }
   await invoke('cancel_run', { runId, waitForCompletion });
+}
+export async function answerQuestion(runId: string, answer: QuestionAnswer, connectionId?: string) {
+  return routed<void>(
+    'answer',
+    { runId, answer: answerSchema.parse(answer), connectionId },
+    connectionId,
+  );
 }
 export async function signIn(provider: string, connectionId?: string) {
   if (remoteTarget(connectionId))

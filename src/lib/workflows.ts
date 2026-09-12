@@ -31,7 +31,7 @@ export type WorkflowProgress = z.infer<typeof workflowProgressSchema>;
 // Legacy definitions above remain readable/exportable, but are never executed.
 // Claude owns native orchestration, including background completion.
 export function runTimeoutMs(provider?: unknown) {
-  return provider === 'claude' ? 3_660_000 : 360_000;
+  return provider === 'claude' || provider === 'codex' ? 3_660_000 : 360_000;
 }
 
 const nativeStatus = z.enum([

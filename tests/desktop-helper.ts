@@ -344,6 +344,22 @@ export async function mockDesktop(page: Page, mode = 'success') {
             pending?.();
             return;
           }
+          if (command === 'answer_question' && mode === 'capabilities') {
+            const w = window as any;
+            if (w.answerFailure)
+              throw new Error('The computer is offline. Try again after it reconnects.');
+            (w.answersSent ??= []).push(args);
+            w.emitCapability({
+              kind: 'question',
+              question: {
+                ...w.testQuestion,
+                revision: 2,
+                status: 'answered',
+                response: args.answer,
+              },
+            });
+            return;
+          }
           if (command === 'run_agent') {
             localStorage.setItem('test-last-request', JSON.stringify(args.request));
             const turnCount = Number(localStorage.getItem('test-run-count') ?? 0) + 1;

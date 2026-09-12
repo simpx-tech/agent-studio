@@ -13,7 +13,8 @@ import webpush from 'web-push';
 import { z } from 'zod';
 import type { SharedWorkspace, RelayJob } from '../src/lib/sync.ts';
 import { toolActivitySchema } from '../src/lib/activity.ts';
-import { requestsAttention, type PushNotice } from '../src/lib/notifications.ts';
+import { attentionKeys, requestsAttention, type PushNotice } from '../src/lib/notifications.ts';
+import { questionRequestSchema } from '../src/lib/questions.ts';
 
 const day = 24 * 60 * 60 * 1000;
 // Browser-supplied endpoints must never turn the relay into an HTTP proxy.
@@ -280,12 +281,11 @@ export function pushService({
         const base = { conversationId: conversation.id, tag: `studio-${message.runId}` };
         if (message.status !== 'running' && (!old || old.status === 'running'))
           enqueue(next, { ...base, kind: message.status }, `${message.runId}:terminal`);
-        else if (
-          message.status === 'running' &&
-          requestsAttention(message) &&
-          (!old || !requestsAttention(old))
-        )
-          enqueue(next, { ...base, kind: 'attention' }, `${message.runId}:attention`);
+        else if (message.status === 'running')
+          for (const key of attentionKeys(message).filter(
+            (key) => !old || !attentionKeys(old).includes(key),
+          ))
+            enqueue(next, { ...base, kind: 'attention' }, `${message.runId}:${key}`);
       }
       save(next);
       void drain();
@@ -302,15 +302,22 @@ export function pushService({
         .object({ runId: z.string().uuid(), conversationId: z.string().uuid() })
         .safeParse(job.args.request);
       if (!request.success || request.data.runId !== job.id) return;
-      const attention = job.events.some((event) => {
-        const value = event as { kind?: string; tool?: unknown };
-        const tool = toolActivitySchema.safeParse(value?.tool);
-        return (
-          value?.kind === 'tool' &&
-          tool.success &&
-          requestsAttention({ blocks: [{ type: 'activity', text: '', tool: tool.data }] })
-        );
+      const questions = job.events.flatMap((event) => {
+        const value = event as { kind?: string; question?: unknown };
+        const parsed = questionRequestSchema.safeParse(value?.question);
+        return value?.kind === 'question' && parsed.success ? [parsed.data] : [];
       });
+      const attention = questions.length
+        ? attentionKeys({ blocks: [], questions }).length > 0
+        : job.events.some((event) => {
+            const value = event as { kind?: string; tool?: unknown };
+            const tool = toolActivitySchema.safeParse(value?.tool);
+            return (
+              value?.kind === 'tool' &&
+              tool.success &&
+              requestsAttention({ blocks: [{ type: 'activity', text: '', tool: tool.data }] })
+            );
+          });
       const kind = ['complete', 'error', 'cancelled'].includes(job.status)
         ? (job.status as 'complete' | 'error' | 'cancelled')
         : attention
@@ -319,11 +326,16 @@ export function pushService({
       if (!kind) return;
       try {
         const next = pruned();
-        enqueue(
-          next,
-          { kind, conversationId: request.data.conversationId, tag: `studio-${job.id}` },
-          `${job.id}:${kind === 'attention' ? 'attention' : 'terminal'}`,
-        );
+        for (const key of kind === 'attention'
+          ? questions.length
+            ? attentionKeys({ blocks: [], questions })
+            : ['attention']
+          : ['terminal'])
+          enqueue(
+            next,
+            { kind, conversationId: request.data.conversationId, tag: `studio-${job.id}` },
+            `${job.id}:${key}`,
+          );
         save(next);
         void drain();
       } catch {

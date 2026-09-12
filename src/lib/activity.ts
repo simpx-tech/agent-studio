@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { ContentBlock, Message, RunEvent } from './domain';
 import { planSchema } from './plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
+import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 
 export const activityStatusSchema = z.enum([
@@ -87,7 +88,11 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
-  if (event.kind === 'visualization') {
+  if (event.kind === 'question') {
+    const parsed = questionRequestSchema.safeParse(event.question);
+    if (message.role === 'assistant' && parsed.success)
+      message.questions = mergeQuestions(message.questions, [parsed.data]);
+  } else if (event.kind === 'visualization') {
     const parsed = visualizationSchema.safeParse(event.visualization);
     if (message.role === 'assistant' && parsed.success)
       message.visualizations = mergeVisualizations(message.visualizations, [parsed.data]);
@@ -182,6 +187,17 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'question') {
+    const parsed = questionRequestSchema.safeParse(event.question);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'question' && e.question?.id === parsed.data.id,
+    );
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].question?.revision ?? -1)) events[index] = event;
+    } else if (events.filter((e) => e.kind === 'question').length < 16) events.push(event);
+    return;
+  }
   if (event.kind === 'visualization') {
     const parsed = visualizationSchema.safeParse(event.visualization);
     if (!parsed.success) return;

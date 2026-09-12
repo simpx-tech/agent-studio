@@ -10,6 +10,7 @@ use tokio::process::Command;
 pub mod codex_chat;
 #[cfg(windows)]
 mod login_console;
+pub mod questions;
 pub mod visualize;
 
 #[derive(Clone, Debug)]
@@ -579,7 +580,12 @@ impl RunRequest {
         } else {
             ""
         };
-        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
+        let questions = if self.uses_codex_server() || self.uses_claude_visualizer() {
+            questions::GUIDANCE
+        } else {
+            ""
+        };
+        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
     }
     pub fn stdin_payload(&self) -> String {
         if self.agent.provider == "claude" {
@@ -774,6 +780,8 @@ pub async fn chat_command(
                     "--tools",
                     "default",
                     "--dangerously-skip-permissions",
+                    "--permission-prompt-tool",
+                    "stdio",
                     "--settings",
                     r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#,
                     "--mcp-config",

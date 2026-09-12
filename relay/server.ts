@@ -18,15 +18,27 @@ import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/
 import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
+import { answerSchema } from '../src/lib/questions.ts';
 
 const uuid = z.string().uuid();
-const jobInput = z.object({
-  id: uuid,
-  source: uuid,
-  target: uuid,
-  method: z.enum(['run', 'usage', 'models', 'title', 'folders', 'context']),
-  args: z.record(z.string(), z.unknown()),
-});
+const jobInput = z
+  .object({
+    id: uuid,
+    source: uuid,
+    target: uuid,
+    method: z.enum(['run', 'usage', 'models', 'title', 'folders', 'context', 'answer']),
+    args: z.record(z.string(), z.unknown()),
+  })
+  .superRefine((job, ctx) => {
+    if (
+      job.method === 'answer' &&
+      !z
+        .object({ runId: uuid, connectionId: uuid, answer: answerSchema })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid question response' });
+  });
 const presenceInput = z.object({
   environmentId: uuid,
   connections: z

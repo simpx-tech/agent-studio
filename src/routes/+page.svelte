@@ -1688,6 +1688,7 @@
                 event.kind === 'nativeworkflow' ||
                 event.kind === 'plan' ||
                 event.kind === 'visualization' ||
+                event.kind === 'question' ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               )
                 saveSoon();

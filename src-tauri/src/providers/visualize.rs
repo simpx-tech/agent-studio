@@ -175,7 +175,9 @@ impl Visualizer {
                 response["result"] = json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"agent_studio","version":"1.0.0"}})
             }
             "notifications/initialized" | "ping" => response["result"] = json!({}),
-            "tools/list" => response["result"] = json!({"tools":[tool()]}),
+            "tools/list" => {
+                response["result"] = json!({"tools":[tool(), super::questions::tool()]})
+            }
             "tools/call" if m["params"]["name"] == "visualize" => {
                 let args = &m["params"]["arguments"];
                 let parent = self

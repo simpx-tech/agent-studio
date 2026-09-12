@@ -66,7 +66,7 @@ fn plan_response(
 }
 
 fn start_params(request: &RunRequest) -> Value {
-    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool()]});
+    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool()]});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -109,6 +109,7 @@ pub async fn run(
     channel: Option<&EventSink>,
     cancel: CancellationToken,
     timeout: Duration,
+    questions: &mut super::questions::Session,
 ) -> Result<(String, String), String> {
     let mut input = child.stdin.take().ok_or("Codex input is unavailable")?;
     let mut output =
@@ -128,6 +129,8 @@ pub async fn run(
         .map_err(|_| "Could not initialize Codex")?;
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
+    let interaction_deadline = tokio::time::sleep(Duration::from_secs(3600));
+    tokio::pin!(interaction_deadline);
     let mut thread = String::new();
     let mut decoder = Decoder::default();
     let mut visualizer = super::visualize::Visualizer::default();
@@ -136,7 +139,15 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
-            _ = &mut deadline => return Err("The provider did not finish within 5 minutes. Try again or check its CLI login.".into()),
+            _ = &mut interaction_deadline => return Err("The conversation reached its one-hour limit. Pending questions were closed.".into()),
+            _ = &mut deadline, if !questions.pending() => return Err("The provider did not finish within 5 minutes. Try again or check its CLI login.".into()),
+            Some(delivery) = questions.rx.recv() => {
+                let result = input.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
+                let failed = result.is_err();
+                questions.delivered(delivery, result);
+                deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
+                if failed { return Err("Could not send answers to Codex.".into()); }
+            },
             line = stderr.next_line(), if !stderr_done => { if !matches!(line, Ok(Some(_))) { stderr_done = true; } },
             line = output.next_line() => {
                 let Some(line) = line.map_err(|_| "Could not read the Codex response")? else { return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
@@ -160,6 +171,10 @@ pub async fn run(
                     continue;
                 }
                 if value.get("id").is_some() && value["method"].is_string() {
+                    if let Some(response) = questions.codex(&value, &thread) {
+                        if let Some(response) = response { input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
+                        continue;
+                    }
                     if let Some((response, event)) = visualizer.codex_response(&value, &thread) {
                         if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
                         input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
@@ -177,6 +192,7 @@ pub async fn run(
                     continue;
                 }
                 if thread.is_empty() { continue; }
+                questions.resolved_codex(&value, &thread);
                 for event in decoder.decode_codex_server(&value, &thread) {
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
@@ -250,7 +266,7 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool()]})
+            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool()]})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");

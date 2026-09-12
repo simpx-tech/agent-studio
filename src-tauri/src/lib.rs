@@ -333,7 +333,11 @@ async fn run_agent(
     let _ = on_event.send(protocol::RunEvent::Activity {
         text: "Starting the provider CLI".into(),
     });
-    let result = profiles::scope(profile, runner::run(app, request, on_event, cancel)).await;
+    let result = profiles::scope(
+        profile,
+        runner::run(app, request, on_event, cancel, connection_id),
+    )
+    .await;
     if let Ok(mut active) = runs.0.lock() {
         active.remove(&id);
     }
@@ -366,6 +370,17 @@ async fn cancel_run(
         }
     }
     Ok(())
+}
+#[tauri::command]
+async fn answer_question(
+    questions: State<'_, providers::questions::Questions>,
+    run_id: String,
+    connection_id: Option<String>,
+    answer: providers::questions::Answer,
+) -> Result<(), String> {
+    questions
+        .answer(&run_id, connection_id.as_deref(), answer)
+        .await
 }
 #[tauri::command]
 async fn sign_in(
@@ -406,6 +421,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .manage(runner::Runs::default())
+        .manage(providers::questions::Questions::default())
         .manage(titles::Titles::default())
         .manage(Storage::default())
         .manage(notifications::Notifications::default())
@@ -500,6 +516,7 @@ pub fn run() {
             generate_title,
             cancel_title,
             cancel_run,
+            answer_question,
             sign_in,
             export_workspace
         ])

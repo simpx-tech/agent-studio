@@ -45,8 +45,14 @@ pub async fn run(
     request: RunRequest,
     channel: Channel<RunEvent>,
     cancel: CancellationToken,
+    connection_id: Option<String>,
 ) -> Result<String, String> {
     let output = EventSink::new(move |event| channel.send(event).map_err(|e| e.to_string()));
+    let questions = app.state::<crate::providers::questions::Questions>().open(
+        &request.run_id,
+        connection_id,
+        output.clone(),
+    )?;
     let timeout = if request.agent.provider == "claude" {
         3600
     } else {
@@ -59,6 +65,7 @@ pub async fn run(
         cancel,
         Duration::from_secs(timeout),
         "chat-runtime",
+        Some(questions),
     )
     .await
     .map(|(status, _)| status)
@@ -75,6 +82,7 @@ pub async fn title_text(
         cancel,
         Duration::from_secs(30),
         "title-runtime",
+        None,
     )
     .await?;
     if status == "complete" {
@@ -90,6 +98,7 @@ pub(crate) async fn execute(
     cancel: CancellationToken,
     timeout: Duration,
     directory: &str,
+    mut questions: Option<crate::providers::questions::Session>,
 ) -> Result<(String, String), String> {
     let root = app
         .path()
@@ -122,6 +131,9 @@ pub(crate) async fn execute(
             channel.as_ref(),
             cancel,
             timeout,
+            questions
+                .as_mut()
+                .ok_or("Question channel is unavailable")?,
         )
         .await;
         exe.kill(&mut child).await;
@@ -129,7 +141,11 @@ pub(crate) async fn execute(
     }
     let mut stdin = child.stdin.take().ok_or("CLI stdin is unavailable")?;
     let prompt = request.stdin_payload();
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(16);
+    type Input = (
+        String,
+        Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    );
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Input>(16);
     let mut input_tx = Some(input_tx);
     let claude_visualizer = request.uses_claude_visualizer();
     let first = if claude_visualizer {
@@ -140,15 +156,24 @@ pub(crate) async fn execute(
     input_tx
         .as_ref()
         .unwrap()
-        .send(first)
+        .send((first, None))
         .await
         .map_err(|_| "CLI input is unavailable")?;
     if !claude_visualizer {
         input_tx.take();
     }
     let mut writer = tokio::spawn(async move {
-        while let Some(payload) = input_rx.recv().await {
-            stdin.write_all(payload.as_bytes()).await?;
+        while let Some((payload, ack)) = input_rx.recv().await {
+            let result = stdin.write_all(payload.as_bytes()).await;
+            if let Some(ack) = ack {
+                let _ = ack.send(
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|_| "Could not send answers to Claude.".into()),
+                );
+            }
+            result?;
         }
         stdin.shutdown().await
     });
@@ -169,16 +194,33 @@ pub(crate) async fn execute(
     let mut diagnostics = String::new();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
+    let interaction_deadline = tokio::time::sleep(Duration::from_secs(3600));
+    tokio::pin!(interaction_deadline);
     let outcome = loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => { exe.kill(&mut child).await; break Ok(("cancelled".to_string(), String::new())); }
+            _ = &mut interaction_deadline => { exe.kill(&mut child).await; break Err("The conversation reached its one-hour limit. Pending questions were closed.".into()); }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { exe.kill(&mut child).await; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             result = &mut writer, if !writer_done => {
                 writer_done = true;
                 if !matches!(result, Ok(Ok(()))) { exe.kill(&mut child).await; break Err("Could not send input to the provider CLI.".into()); }
             }
-            _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.as_secs() / 60) } else { "Title generation timed out".into() }); }
+            _ = &mut deadline, if !questions.as_ref().is_some_and(|q| q.pending()) => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.as_secs() / 60) } else { "Title generation timed out".into() }); }
+            Some(delivery) = async { match questions.as_mut() { Some(q) => q.rx.recv().await, None => std::future::pending().await } } => {
+                let result = match &input_tx {
+                    Some(tx) => {
+                        let (ack, received) = tokio::sync::oneshot::channel();
+                        match tx.send((format!("{}\n", delivery.payload), Some(ack))).await {
+                            Ok(()) => received.await.unwrap_or_else(|_| Err("Could not send answers to Claude.".into())),
+                            Err(_) => Err("Could not send answers to Claude.".into()),
+                        }
+                    },
+                    None => Err("Claude is no longer waiting for answers.".into()),
+                };
+                questions.as_ref().unwrap().delivered(delivery, result);
+                deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
+            },
             line = stdout.next_line(), if !stdout_done => match line {
                 Ok(Some(line)) => {
                     if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
@@ -187,13 +229,18 @@ pub(crate) async fn execute(
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
                                 if value["response"]["subtype"] != "success" { exe.kill(&mut child).await; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
                                 initialized = true;
-                                if let Some(tx) = &input_tx { let _ = tx.send(prompt.clone()).await; }
+                                if let Some(tx) = &input_tx { let _ = tx.send((prompt.clone(), None)).await; }
                                 continue;
                             }
+                            if let Some(questions) = &mut questions { questions.observe_claude(&value); }
                             for event in visualizer.observe_claude(&value) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if value["type"] == "control_request" {
+                                if let Some(response) = questions.as_mut().and_then(|q| q.claude(&value)) {
+                                    if let (Some(response), Some(tx)) = (response, &input_tx) { let _ = tx.send((format!("{response}\n"), None)).await; }
+                                    continue;
+                                }
                                 let response = visualizer.claude_response(&value);
-                                if let Some(tx) = &input_tx { let _ = tx.send(format!("{response}\n")).await; }
+                                if let Some(tx) = &input_tx { let _ = tx.send((format!("{response}\n"), None)).await; }
                                 continue;
                             }
                             if input_lifetime.ended(&value) { input_tx.take(); }

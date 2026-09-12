@@ -1,14 +1,16 @@
 // Page-scoped CDP avoids WebView2 shared-worker attachment errors in browser-wide clients.
 import assert from 'node:assert/strict';
 
-export async function nativePage(port) {
+export async function nativePage(port, expectedUrl) {
   const inventory = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const target = [inventory]
     .flat()
     .find(
       (target) =>
         target.type === 'page' &&
-        (target.url.includes('1420') || target.url.startsWith('http://tauri.localhost/')),
+        (expectedUrl
+          ? target.url === expectedUrl
+          : target.url.includes('1420') || target.url.startsWith('http://tauri.localhost/')),
     );
   assert(target, 'Native app page is not ready.');
   const socket = new WebSocket(target.webSocketDebuggerUrl);

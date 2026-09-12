@@ -4,6 +4,7 @@ import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
+import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import {
   workflowSchema,
@@ -162,6 +163,7 @@ export const messageSchema = z.object({
   runId: z.string().uuid().optional(),
   plan: planSchema.optional(),
   visualizations: visualizationsSchema.optional(),
+  questions: questionsSchema.optional(),
   workflow: workflowProgressSchema.optional(),
   workflowDefinition: workflowSchema.optional(),
   nativeWorkflows: nativeWorkflowsSchema.optional(),
@@ -208,6 +210,7 @@ export type RunEvent = TokenUsage & {
     | 'progress'
     | 'plan'
     | 'visualization'
+    | 'question'
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
@@ -216,6 +219,7 @@ export type RunEvent = TokenUsage & {
   tool?: ToolActivity;
   plan?: Plan;
   visualization?: Visualization;
+  question?: QuestionRequest;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
 };
@@ -250,13 +254,15 @@ export const messageText = (message: Message) =>
 export function historyFor(conversation: Conversation): RunRequest['messages'] {
   // Interrupted and failed responses never become fabricated assistant history.
   return conversation.messages
-    .filter((m) => m.role === 'user' || m.status === 'complete')
+    .filter((m) => m.role === 'user' || m.status === 'complete' || questionHistory(m.questions))
     .map((m) => ({
-      role: m.role,
-      text: messageText(m),
+      role: m.role === 'assistant' && m.status !== 'complete' ? ('user' as const) : m.role,
+      text:
+        (m.role === 'assistant' && m.status !== 'complete' ? '' : messageText(m)) +
+        (m.role === 'assistant' ? questionHistory(m.questions) : ''),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
-      ...(m.role === 'assistant' && m.visualizations?.length
+      ...(m.role === 'assistant' && m.status === 'complete' && m.visualizations?.length
         ? { visualizations: m.visualizations }
         : {}),
     }))

@@ -1,12 +1,12 @@
 import type { Workspace } from './domain';
-import { requestsAttention, type PushNotice } from './notifications';
+import { attentionKeys, type PushNotice } from './notifications';
 
 // Snapshots contain only run identities and lifecycle flags, never message text.
 // The first snapshot is a baseline so opening saved history cannot ring the bell.
 export function createDesktopNotificationTracker(now = Date.now) {
   let ready = false;
   const started = now();
-  const runs = new Map<string, { terminal: boolean; attention: boolean }>();
+  const runs = new Map<string, { terminal: boolean; attention: Set<string> }>();
   return (workspace: Pick<Workspace, 'conversations'>): PushNotice[] => {
     const notices: PushNotice[] = [];
     for (const conversation of workspace.conversations) {
@@ -14,7 +14,7 @@ export function createDesktopNotificationTracker(now = Date.now) {
       if (!message?.runId) continue;
       const old = runs.get(message.runId);
       const terminal = message.status !== 'running';
-      const attention = requestsAttention(message);
+      const attention = attentionKeys(message);
       const created = Date.parse(message.createdAt);
       const fresh = created >= started && created <= now() && now() - created < 300_000;
       if (ready && (old || fresh)) {
@@ -24,16 +24,17 @@ export function createDesktopNotificationTracker(now = Date.now) {
             conversationId: conversation.id,
             tag: `${message.runId}:terminal`,
           });
-        else if (!terminal && attention && !old?.attention && !old?.terminal)
-          notices.push({
-            kind: 'attention',
-            conversationId: conversation.id,
-            tag: `${message.runId}:attention`,
-          });
+        else if (!terminal && !old?.terminal)
+          for (const key of attention.filter((key) => !old?.attention.has(key)))
+            notices.push({
+              kind: 'attention',
+              conversationId: conversation.id,
+              tag: `${message.runId}:${key}`,
+            });
       }
       runs.set(message.runId, {
         terminal: terminal || !!old?.terminal,
-        attention: attention || !!old?.attention,
+        attention: new Set([...(old?.attention ?? []), ...attention]),
       });
     }
     ready = true;

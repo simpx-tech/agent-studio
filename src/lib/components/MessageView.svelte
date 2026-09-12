@@ -15,6 +15,7 @@
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
   import VisualizationView from './VisualizationView.svelte';
+  import QuestionForm from './QuestionForm.svelte';
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
@@ -87,7 +88,10 @@
           minute: '2-digit',
         })}</span
       >{#if message.status === 'running'}<span class="live-label"
-          ><i class="pulse-dot"></i> Responding</span
+          ><i class="pulse-dot"></i>
+          {message.questions?.some((q) => q.status === 'pending')
+            ? 'Waiting for you'
+            : 'Responding'}</span
         >{/if}
     </div>
     {#if message.role === 'user'}
@@ -109,6 +113,14 @@
           <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <div class="prose" onclick={linkClick}>{@html part.html}</div>
         {/if}
+      {/each}
+      {#each message.questions ?? [] as request (request.id)}
+        <QuestionForm
+          {request}
+          runId={message.runId}
+          connectionId={author.connectionId}
+          running={message.status === 'running'}
+        />
       {/each}
       {#if !content.length && message.status === 'running' && !message.blocks.length}<div
           class="thinking"

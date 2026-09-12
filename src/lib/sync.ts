@@ -2,6 +2,7 @@ import { workspaceSchema, messageText, type Conversation, type Workspace } from 
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
+import { mergeQuestions } from './questions.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
@@ -70,6 +71,9 @@ function sameRun(
     messages.push({
       ...selected,
       blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
+      ...(a.questions || b.questions
+        ? { questions: mergeQuestions(a.questions, b.questions) }
+        : {}),
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
       ...(a.visualizations || b.visualizations
         ? { visualizations: mergeVisualizations(a.visualizations, b.visualizations) }
@@ -253,7 +257,7 @@ export type RelayJob = {
   id: string;
   source: string;
   target: string;
-  method: 'run' | 'usage' | 'models' | 'title' | 'folders' | 'context';
+  method: 'run' | 'usage' | 'models' | 'title' | 'folders' | 'context' | 'answer';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

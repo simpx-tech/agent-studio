@@ -39,7 +39,8 @@ export async function applyAppBadge(
 
 // Only explicit parent tool identities indicate an in-progress question. Prose
 // questions are covered by the finished-reply notification, in every language.
-export function requestsAttention(message: Pick<Message, 'blocks'>): boolean {
+export function requestsAttention(message: Pick<Message, 'blocks' | 'questions'>): boolean {
+  if (message.questions?.length) return message.questions.some((q) => q.status === 'pending');
   return message.blocks.some((block) => {
     if (block.type !== 'activity' || !block.tool || block.tool.parentId) return false;
     const name = block.tool.name.split(/[.:/]/).at(-1)?.toLowerCase();
@@ -47,6 +48,14 @@ export function requestsAttention(message: Pick<Message, 'blocks'>): boolean {
       name ?? '',
     );
   });
+}
+
+export function attentionKeys(message: Pick<Message, 'blocks' | 'questions'>): string[] {
+  if (message.questions?.length)
+    return message.questions.flatMap((q, index) =>
+      q.status === 'pending' ? [index === 0 ? 'attention' : `attention:${q.id}`] : [],
+    );
+  return requestsAttention(message) ? ['attention'] : [];
 }
 
 export function notificationContent(notice: PushNotice) {
