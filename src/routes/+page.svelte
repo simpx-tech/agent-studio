@@ -83,6 +83,7 @@
   import { applyRunEvent } from '$lib/activity';
   import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
   import BrowserStatus from '$lib/components/BrowserStatus.svelte';
+  import WorkspaceLogin from '$lib/components/WorkspaceLogin.svelte';
   import ToolbarActions from '$lib/components/ToolbarActions.svelte';
   import SidebarResize from '$lib/components/SidebarResize.svelte';
   import FleetManager from '$lib/components/FleetManager.svelte';
@@ -165,7 +166,7 @@
   let sidebarOpen = $state(false);
   let online = $state(true);
   const mobile = $derived(viewportWidth <= 650);
-  let sidebarElement: HTMLElement;
+  let sidebarElement = $state<HTMLElement>();
   async function toggleSidebar(open: boolean) {
     sidebarOpen = open;
     await tick();
@@ -690,6 +691,10 @@
               run = null;
               stopping = false;
               selectedArtifact = null;
+              sidebarOpen = false;
+              folderBrowserOpen = false;
+              contextOpen = false;
+              editorOpen = false;
               conversationMenu = null;
               deletion = null;
               deleting = false;
@@ -776,6 +781,7 @@
     };
   });
   async function syncNow() {
+    const version = relaySelectionVersion;
     try {
       const peers = await pollRelay();
       if (peers) {
@@ -785,6 +791,7 @@
         syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · Environments report every few seconds`;
       }
     } catch (e) {
+      if (version !== relaySelectionVersion) return;
       syncError = String(e);
       presence = presence.map((p) => ({ ...p, online: false }));
     }
@@ -807,6 +814,11 @@
     paired = true;
     relayRestorePending = false;
     await syncNow();
+    if (!desktop() && paired) {
+      view = 'chat';
+      notificationTarget = notificationConversation(window.location.hash);
+      followNotification();
+    }
     if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
   }
   async function unpair() {
@@ -1406,7 +1418,7 @@
             trigger.focus({ preventScroll: true });
           else if (mobile && sidebarOpen)
             sidebarElement
-              .querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+              ?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
               ?.focus();
           else composerInput?.focus();
         });
@@ -1807,6 +1819,7 @@
 <svelte:window
   bind:innerWidth={viewportWidth}
   onkeydown={(event) => {
+    if (!desktop() && !paired) return;
     if (mobile && sidebarOpen && !deletion) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -1815,9 +1828,9 @@
       }
       if (event.key === 'Tab') {
         const elements = [
-          ...sidebarElement.querySelectorAll<HTMLElement>(
+          ...(sidebarElement?.querySelectorAll<HTMLElement>(
             'button:not(:disabled), input, [tabindex="0"]',
-          ),
+          ) ?? []),
         ].filter((element) => element.getClientRects().length);
         const first = elements[0],
           last = elements.at(-1);
@@ -1844,6 +1857,19 @@
   onblur={() => (imageDragDepth = 0)}
 />
 
+{#if !desktop() && !paired}
+  <WorkspaceLogin
+    checking={(!loaded || relayRestorePending) && !storageError && !syncError}
+    ready={loaded}
+    {online}
+    error={storageError || syncError}
+    retry={() => {
+      if (storageError) window.location.reload();
+      else void restoreRelayConnection();
+    }}
+    login={(key) => pair(window.location.origin, key)}
+  />
+{:else}
 <div class="app-shell" style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}>
   {#if mobile && sidebarOpen}<button
       class="sidebar-backdrop"
@@ -2627,3 +2653,4 @@
       </footer>
     </div>
   </div>{/if}
+{/if}

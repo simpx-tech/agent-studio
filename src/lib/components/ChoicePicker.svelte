@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, type Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { Check, ChevronDown } from '@lucide/svelte';
   import { anchorPopover } from '$lib/anchorPopover';
   type Option = {
@@ -127,9 +127,12 @@
     if (open && options[highlighted])
       anchor.setAttribute('aria-activedescendant', `${id}-option-${highlighted}`);
     else anchor.removeAttribute('aria-activedescendant');
-    const blur = () => {
-      open = false;
-    };
+    // Removing a focused composer during sign-out fires blur inside Svelte's
+    // render effect. Close the bound picker outside that tracking context.
+    const blur = () =>
+      untrack(() => {
+        open = false;
+      });
     anchor.addEventListener('blur', blur);
     return () => {
       anchor?.removeEventListener('blur', blur);

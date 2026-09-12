@@ -1,3 +1,4 @@
+import { signInPwa } from './pwa-helper';
 import { test, expect, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,12 +46,10 @@ async function hostedAdministration() {
 }
 
 async function pair(page: Page, token: string) {
-  await page.getByRole('button', { name: 'Set up', exact: true }).click();
-  await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-  await page.getByLabel('Relay pairing key').fill(token);
-  await page.getByRole('button', { name: 'Pair & sync' }).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Set up', exact: true })).toHaveCount(0);
+  await signInPwa(page, token);
+  if (await page.getByRole('button', { name: 'Open conversations' }).isVisible())
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
 }
 
 async function expectNoStoredKeys(page: Page, ...keys: string[]) {
@@ -139,7 +138,9 @@ test('the sole administrator creates members and transfers administration atomic
     await expect(
       owner.getByRole('heading', { name: 'Workspace administration', exact: true }),
     ).toHaveCount(0);
-    await expect(owner.getByRole('status').filter({ hasText: 'Administration transferred' })).toBeVisible();
+    await expect(
+      owner.getByRole('status').filter({ hasText: 'Administration transferred' }),
+    ).toBeVisible();
     expect((await f.api(guestToken)).body.role).toBe('admin');
     expect((await f.api(f.ownerToken)).body.role).toBe('member');
     expect(
@@ -302,7 +303,7 @@ test('a delayed administrator response cannot reveal its key after this browser 
     });
     expect(switched.status()).toBe(200);
     await mismatch;
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     const delivered = page.waitForResponse(
       (response) =>
         response.url().endsWith('/v1/workspace-admin/workspaces') && response.status() === 201,

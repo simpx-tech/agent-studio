@@ -690,7 +690,7 @@
           <summary>Sync settings</summary>
           <p>Keep Agent Studio open on each computer you want to use. WSL uses its Windows host.</p>
           <button class="text-button" disabled={busy} onclick={() => action(disconnect)}
-            >Disconnect relay</button
+            >{desktop() ? 'Disconnect relay' : 'Sign out'}</button
           >
         </details>{:else}<button
           class="secondary"
@@ -703,7 +703,7 @@
       {#if syncError && (paired || reconnecting)}<button
           class="text-button"
           disabled={busy}
-          onclick={() => action(disconnect)}>Disconnect relay</button
+          onclick={() => action(disconnect)}>{desktop() ? 'Disconnect relay' : 'Sign out'}</button
         >{/if}
     </section>
     <WorkspaceAdministration {paired} {workspaceSession} />

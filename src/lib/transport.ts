@@ -299,7 +299,9 @@ async function relayRaw(
     const reason =
       result.body?.code === 'workspace_changed'
         ? 'This browser is paired with a different private workspace. Reload or pair again to continue.'
-        : 'Your private workspace session ended. Pair this device again to continue.';
+        : sessionRequest && method === 'GET' && !browserWorkspaceId
+          ? ''
+          : 'Your workspace session ended. Sign in again to continue.';
     await endBrowserSession(reason);
   }
   return result;

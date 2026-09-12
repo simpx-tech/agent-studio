@@ -1,4 +1,52 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { createRelay } from '../relay/server';
+import { initialWorkspace } from '../src/lib/domain';
+import { seedAndPairPwa } from './pwa-helper';
+
+// Layout coverage exercises the authenticated PWA, including real browser
+// transport and session restoration, rather than relying on a signed-out shell.
+const test = base.extend<{ openPwa: () => Promise<void> }>({
+  openPwa: async ({ page }, use) => {
+    const directory = mkdtempSync(join(tmpdir(), 'studio-mobile-layout-'));
+    const token = 'synthetic-mobile-layout-workspace-key';
+    const server = createRelay({ token, directory, webDirectory: resolve('build') });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const workspace = initialWorkspace();
+    const computerId = crypto.randomUUID(),
+      environmentId = crypto.randomUUID(),
+      accountId = crypto.randomUUID();
+    workspace.fleet.computers.push({ id: computerId, name: 'Layout computer' });
+    workspace.fleet.environments.push({
+      id: environmentId,
+      computerId,
+      name: 'Windows',
+      platform: 'windows',
+    });
+    workspace.fleet.accounts.push({
+      id: accountId,
+      name: 'Layout account',
+      provider: 'codex',
+      purpose: 'personal',
+    });
+    workspace.fleet.connections.push({
+      id: crypto.randomUUID(),
+      environmentId,
+      accountId,
+      profile: 'existing',
+    });
+    try {
+      await use(() => seedAndPairPwa(page, url, token, workspace));
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+});
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
@@ -14,6 +62,7 @@ async function visualViewport(page: Page, height: number, offsetTop = 0, event =
 
 test('composer follows keyboard resize and pan, then fills the standalone screen again', async ({
   page,
+  openPwa,
 }, testInfo) => {
   // Desktop browser viewport resizing cannot reproduce iOS keyboard panning.
   // Supply the separate visual viewport signals while keeping the layout 844px high.
@@ -27,7 +76,7 @@ test('composer follows keyboard resize and pan, then fills the standalone screen
     });
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport });
   });
-  await page.goto('/');
+  await openPwa();
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
   const composer = page.locator('.composer-area');
   await expect(input).toBeVisible();
@@ -70,8 +119,9 @@ test('composer follows keyboard resize and pan, then fills the standalone screen
 
 test('mobile dropdowns stay beside their trigger and remain usable in a scrolled toolbar', async ({
   page,
+  openPwa,
 }, testInfo) => {
-  await page.goto('/');
+  await openPwa();
   const computer = page.getByRole('combobox', { name: 'Computer', exact: true });
   await expect(computer).toBeEnabled();
   await computer.click();
@@ -109,6 +159,7 @@ test('mobile dropdowns stay beside their trigger and remain usable in a scrolled
 
 test('installed app keeps full usage tracks inside the page when fullscreen metrics exceed its visible height', async ({
   page,
+  openPwa,
 }, testInfo) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'standalone', {
@@ -133,7 +184,7 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
       }),
     });
   });
-  await page.goto('/');
+  await openPwa();
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
   await expect(input).toBeVisible();
   // Check the tracks themselves, including hit testing at both vertical edges.
@@ -202,6 +253,7 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
 
 test('the phone reserves its safe area once, without adding a second navigation inset', async ({
   page,
+  openPwa,
   browserName,
 }, testInfo) => {
   await page.setViewportSize({ width: 430, height: 932 });
@@ -213,7 +265,7 @@ test('the phone reserves its safe area once, without adding a second navigation 
       insets: { top: 59, bottom: 93, left: 0, right: 0 },
     });
   }
-  await page.goto('/');
+  await openPwa();
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
   const bottomGap = async () =>
     page

@@ -1,13 +1,28 @@
-<script lang="ts">
-  import { onMount } from 'svelte';
-  import { Download, WifiOff, Link } from '@lucide/svelte';
-  import { dev } from '$app/environment';
-  let { paired, error, connect }: { paired: boolean; error: string; connect: () => void } =
-    $props();
+<script module lang="ts">
   type InstallPrompt = Event & {
     prompt: () => Promise<void>;
     userChoice: Promise<{ outcome: string }>;
   };
+  // Login and the authenticated shell mount separate status controls. Retain
+  // the browser's one-shot install event across that transition, in memory only.
+  let pendingInstallPrompt: InstallPrompt | undefined;
+</script>
+
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { Download, WifiOff, Link } from '@lucide/svelte';
+  import { dev } from '$app/environment';
+  let {
+    paired = false,
+    error = '',
+    connect = () => {},
+    showConnection = true,
+  }: {
+    paired?: boolean;
+    error?: string;
+    connect?: () => void;
+    showConnection?: boolean;
+  } = $props();
   let installPrompt = $state<InstallPrompt>();
   let offline = $state(false);
   let installed = $state(false);
@@ -16,13 +31,14 @@
     const connectivity = () => (offline = !navigator.onLine);
     const capture = (event: Event) => {
       event.preventDefault();
-      installPrompt = event as InstallPrompt;
+      installPrompt = pendingInstallPrompt = event as InstallPrompt;
     };
     const complete = () => {
       installed = true;
-      installPrompt = undefined;
+      installPrompt = pendingInstallPrompt = undefined;
     };
     installed = window.matchMedia('(display-mode: standalone)').matches;
+    installPrompt = pendingInstallPrompt;
     connectivity();
     window.addEventListener('online', connectivity);
     window.addEventListener('offline', connectivity);
@@ -44,18 +60,18 @@
     }
     await installPrompt.prompt();
     await installPrompt.userChoice;
-    installPrompt = undefined;
+    installPrompt = pendingInstallPrompt = undefined;
   }
 </script>
 
-{#if offline || error || !paired || !installed}<div class="browser-status">
+{#if (showConnection && (offline || error || !paired)) || !installed}<div class="browser-status">
     <div class="browser-status-row">
-      {#if offline || error || !paired}<span role="status"
+      {#if showConnection && (offline || error || !paired)}<span role="status"
           >{#if offline}<WifiOff size={15} />Offline · Reconnect to control agents.
           {:else if error}<WifiOff size={15} />Server unavailable · Reconnect to control agents.
           {:else}<Link size={15} />Connect your computers{/if}</span
         >{/if}
-      {#if !paired || error}<button class="text-button" onclick={connect}
+      {#if showConnection && (!paired || error)}<button class="text-button" onclick={connect}
           >{paired ? 'Reconnect' : 'Set up'}</button
         >{/if}
       {#if !installed}<button

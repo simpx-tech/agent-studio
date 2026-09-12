@@ -1,3 +1,4 @@
+import { signInPwa } from './pwa-helper';
 import { test, expect, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,6 +97,7 @@ async function hostedWorkspaces(duplicateIds = false) {
   }
   return {
     url,
+    server,
     users,
     ownerToken,
     call,
@@ -107,14 +109,121 @@ async function hostedWorkspaces(duplicateIds = false) {
   };
 }
 
-async function pair(page: Page, token: string) {
-  await page.getByRole('button', { name: 'Set up', exact: true }).click();
-  await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-  await page.getByLabel('Relay pairing key').fill(token);
-  await page.getByRole('button', { name: 'Pair & sync' }).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Set up', exact: true })).toHaveCount(0);
-}
+const pair = signInPwa;
+
+test('workspace login gates startup, authentication, restoration, and expired sessions', async ({
+  page,
+  context,
+}, testInfo) => {
+  const f = await hostedWorkspaces();
+  const [alice] = f.users;
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  let release!: () => void;
+  let reached!: () => void;
+  let hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let pending = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let blockedPath = '/v1/browser-session';
+  // Pause at the real server: WebKit service-worker fetches can bypass
+  // Playwright routing after the first authenticated navigation.
+  const handleRequest = f.server.listeners('request')[0];
+  f.server.removeAllListeners('request');
+  f.server.on('request', (request, response) => {
+    if (request.url === blockedPath && request.method === 'GET') {
+      reached();
+      void hold.then(() => handleRequest.call(f.server, request, response));
+    } else handleRequest.call(f.server, request, response);
+  });
+  const locked = async () => {
+    await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toBeVisible();
+    await expect(page.locator('.app-shell')).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Connections', exact: true })).toHaveCount(0);
+    await expect(page.locator('body')).not.toContainText('Alice');
+  };
+  try {
+    await page.goto(f.url);
+    await pending;
+    await locked();
+    await expect(page.getByRole('status')).toContainText('Checking your workspace session');
+    await page.keyboard.press('Control+n');
+    await locked();
+    blockedPath = '';
+    release();
+    await expect(page.getByLabel('Workspace key', { exact: true })).toBeEnabled();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        Object.assign(new Event('beforeinstallprompt', { cancelable: true }), {
+          prompt: async () => {
+            document.documentElement.dataset.installPrompted = 'true';
+          },
+          userChoice: Promise.resolve({ outcome: 'accepted' }),
+        }),
+      );
+    });
+    for (const viewport of [
+      { width: 1380, height: 900 },
+      { width: 390, height: 844 },
+      { width: 320, height: 480 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeInViewport();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await page.screenshot({ path: testInfo.outputPath(`workspace-login-${viewport.width}.png`) });
+    }
+    await page.setViewportSize({ width: 1380, height: 900 });
+    blockedPath = '/v1/state';
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    pending = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    await page.getByLabel('Workspace key', { exact: true }).fill(alice.token);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await pending;
+    await locked();
+    await expect(page.getByRole('button', { name: 'Signing in…' })).toBeDisabled();
+    blockedPath = '';
+    release();
+    await openPrivateChat(page, alice.name);
+
+    await page.getByRole('button', { name: 'Install app', exact: true }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-install-prompted', 'true');
+
+    blockedPath = '/v1/browser-session';
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    pending = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    await page.reload();
+    await pending;
+    await locked();
+    blockedPath = '';
+    release();
+    await openPrivateChat(page, alice.name);
+    await context.clearCookies();
+    await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toBeVisible({
+      timeout: 10000,
+    });
+    await locked();
+    await expect(page.getByRole('alert')).toContainText('session ended');
+    expect(errors).toEqual([]);
+  } finally {
+    blockedPath = '';
+    release();
+    await f.close();
+  }
+});
 
 async function openPrivateChat(page: Page, name: string) {
   await page.getByRole('tab', { name: /^History/ }).click();
@@ -211,10 +320,10 @@ test('a changed HttpOnly cookie cannot expose a new workspace to a stale tab eve
     const rejected = await mismatch;
     expect(rejected.request().headers()['x-workspace-id']).toBe(alice.workspace.id);
     expect((await rejected.json()).code).toBe('workspace_changed');
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     await expect(page.locator('body')).not.toContainText('Alice');
     await expect(page.locator('body')).not.toContainText('Bob');
-    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);
     await page.reload();
     await openPrivateChat(page, bob.name);
     await expect(page.locator('body')).not.toContainText('Alice');
@@ -257,14 +366,19 @@ test('a failed pending chat deletion cannot resurrect the old workspace after it
       revision: initial.revision,
       workspace: initial.workspace,
     });
-    await page.route(`**/v1/jobs/${runId}/cancel`, async (route) => {
-      reached();
-      await hold;
-      await route.fulfill({
-        status: 401,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: 'Workspace access was revoked.' }),
-      });
+    const handleRequest = f.server.listeners('request')[0];
+    f.server.removeAllListeners('request');
+    f.server.on('request', (request, response) => {
+      if (request.url === `/v1/jobs/${runId}/cancel`) {
+        reached();
+        void hold.then(() => {
+          response.writeHead(401, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          });
+          response.end(JSON.stringify({ error: 'Workspace access was revoked.' }));
+        });
+      } else handleRequest.call(f.server, request, response);
     });
     await page.goto(f.url);
     await pair(page, alice.token);
@@ -290,7 +404,7 @@ test('a failed pending chat deletion cannot resurrect the old workspace after it
     });
     expect(switched.status()).toBe(200);
     await mismatch;
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     const rejectedCancellation = page.waitForResponse((response) =>
       response.url().endsWith(`/v1/jobs/${runId}/cancel`),
     );
@@ -299,8 +413,8 @@ test('a failed pending chat deletion cannot resurrect the old workspace after it
     // A browser task boundary lets the rejected fetch's catch/finally finish.
     await page.evaluate(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
     await expect(page.locator('body')).not.toContainText('Alice');
-    await expect(page.getByRole('tab', { name: /^History/ })).toContainText('0');
-    await expect(page.getByRole('tab', { name: /^Active/ })).toContainText('0');
+    await expect(page.getByRole('tab', { name: /^History/ })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: /^Active/ })).toHaveCount(0);
     expect(
       await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
     ).not.toContain('Alice');
@@ -318,7 +432,6 @@ test('a failed pending chat deletion cannot resurrect the old workspace after it
     expect(errors).toEqual([]);
   } finally {
     release();
-    await page.unrouteAll({ behavior: 'wait' });
     await f.close();
   }
 });
@@ -350,7 +463,7 @@ test('switching the shared browser session clears stale tabs, drafts, and cached
       { legacy, url: f.url },
     );
     await page.goto(f.url);
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     await expect(page.locator('body')).not.toContainText('Alice');
     await pair(page, alice.token);
     await openPrivateChat(page, alice.name);
@@ -363,15 +476,15 @@ test('switching the shared browser session clears stale tabs, drafts, and cached
     await openPrivateChat(second, alice.name);
     await second.getByRole('button', { name: 'Connections', exact: true }).click();
     await second.getByText('Sync settings', { exact: true }).click();
-    await second.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await second.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     await expect(page.locator('body')).not.toContainText('Alice');
-    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);
     await pair(second, bob.token);
     await openPrivateChat(second, bob.name);
     await expect(second.locator('body')).not.toContainText('Alice');
     await expect(page.locator('body')).not.toContainText('Bob');
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     expect(
       await second.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
     ).not.toContain('Alice');

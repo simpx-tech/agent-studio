@@ -48,7 +48,11 @@ VAPID signing keys are generated automatically on the relay. `web-push.json` in 
 
 Disconnecting or expiring a browser session revokes its notifications; workspace-key rotation revokes devices in that workspace. An already accepted push cannot be recalled. Reopen the PWA at least once per seven days to retain its existing session, or pair/enable again after expiry. Browser permission denial, missing support, delivery failures, and expired subscriptions have visible recovery guidance in Connections. Updating an existing installation may require closing all its windows and reopening to activate the new service worker.
 
-## Pairing, storage, and reconnecting
+## Workspace sign-in, storage, and reconnecting
+
+Web and PWA launches show **Sign in to your workspace**, with a password-masked **Workspace key** field. Use the private key from your workspace administrator and choose **Sign in**. The server origin is fixed to the page you opened. Chats, the sidebar, composer, and Connections stay unmounted until the server verifies the session and returns that workspace. A returning session opens chats automatically after verification; an unavailable server keeps the login page visible and retries without requiring another key. Install app remains available before sign-in.
+
+Choose **Connections → Sync settings → Sign out** to revoke this browser session and return to login. Expiry, revoked access, and workspace changes in another tab also close the chat interface and its dialogs. An already authenticated tab keeps its workspace visible during a temporary network outage. Desktop installations continue to open directly in chat and use **Set up sync** for relay pairing.
 
 The browser exchanges the pairing key for an HttpOnly, SameSite=Strict session cookie, Secure on HTTPS. Paired devices survive PWA updates and server restarts: the server keeps keyed session-ID digests in `browser-sessions.json` inside its persistent data directory, separate from the public build and workspace exports. Neither raw cookie values nor the pairing key are stored there. Sessions renew at most once daily while the app is syncing and expire seven days after the last renewal. Disconnecting persistently revokes that session; changing a workspace pairing key invalidates sessions in that workspace. Keep the data directory and pairing key stable across releases. Unreadable session data stops startup and is preserved rather than silently discarding pairings.
 

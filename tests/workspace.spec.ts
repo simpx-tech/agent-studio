@@ -515,6 +515,7 @@ test('corrupted desktop storage is preserved and editing is blocked', async ({ p
 });
 
 test('compact chat shell keeps navigation and the editor accessible', async ({ page }) => {
+  await mockDesktop(page);
   await page.goto('/');
   await expect(page.locator('.page-title')).toHaveText('New conversation');
   await expect(page.locator('.chat-layout')).toBeVisible();

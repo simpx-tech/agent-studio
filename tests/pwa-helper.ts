@@ -11,11 +11,14 @@ export async function seedAndPairPwa(page: Page, url: string, token: string, wor
   });
   expect(seeded.status()).toBe(200);
   await page.goto(url);
-  await expect(page.getByRole('tab', { name: /^History/ })).toContainText('0');
-  await page.getByRole('button', { name: 'Set up', exact: true }).click();
-  await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-  await page.getByLabel('Relay pairing key').fill(token);
-  await page.getByRole('button', { name: 'Pair & sync' }).click();
-  await expect(page.getByRole('button', { name: 'Set up', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await signInPwa(page, token);
+}
+
+export async function signInPwa(page: Page, token: string) {
+  await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: /^History/ })).toHaveCount(0);
+  await page.getByLabel('Workspace key', { exact: true }).fill(token);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toHaveCount(0);
 }

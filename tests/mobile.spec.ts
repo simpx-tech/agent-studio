@@ -1,3 +1,4 @@
+import { signInPwa } from './pwa-helper';
 import { test, expect, type Page } from '@playwright/test';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,10 +33,7 @@ test('pairing survives a relay restart and worker update, and startup retries an
   page.on('pageerror', (error) => errors.push(error.message));
   try {
     await page.goto(url);
-    await page.getByRole('button', { name: 'Set up', exact: true }).click();
-    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-    await page.getByLabel('Relay pairing key').fill(token);
-    await page.getByRole('button', { name: 'Pair & sync' }).click();
+    await signInPwa(page, token);
     await expectSynced(page);
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     const installation = await page.evaluate(() =>
@@ -109,10 +107,10 @@ test('pairing survives a relay restart and worker update, and startup retries an
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: 'Connections', exact: true }).click();
     await page.getByText('Sync settings', { exact: true }).click();
-    await page.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Set up', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     expect(
       (await context.cookies(url + '/v1/state')).some(
         (value) => value.name === 'agent_studio_session',
@@ -292,19 +290,18 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
   page.on('pageerror', (error) => errors.push(error.message));
   try {
     await page.goto(url);
-    await expect(page.getByRole('button', { name: 'Open conversations' })).toBeVisible();
-    await page.getByRole('button', { name: 'Set up', exact: true }).click();
-    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-    await page.getByLabel('Relay pairing key').fill('wrong-key-with-enough-characters-to-submit');
-    await page.getByRole('button', { name: 'Pair & sync' }).click();
+    await expect(page.getByRole('button', { name: 'Open conversations' })).toHaveCount(0);
+    await page
+      .getByLabel('Workspace key', { exact: true })
+      .fill('wrong-key-with-enough-characters-to-submit');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('alert')).toContainText('rejected');
-    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-    await page.getByLabel('Relay pairing key').fill(token);
+    await page.getByLabel('Workspace key', { exact: true }).fill(token);
     const pairingResponse = page.waitForResponse(
       (response) =>
         response.url().endsWith('/v1/browser-session') && response.request().method() === 'POST',
     );
-    await page.getByRole('button', { name: 'Pair & sync' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     expect(await (await pairingResponse).headerValue('set-cookie')).toContain(
       'HttpOnly; SameSite=Strict',
     );
@@ -476,9 +473,11 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await expect(
       page
         .getByRole('status')
-        .filter({ hasText: /(?:Offline|Server unavailable) · Reconnect to control agents/ }),
+        .filter({ hasText: /(?:You’re offline|Server unavailable)/ })
+        .first(),
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Send message' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toBeVisible();
     expect(jobs.length).toBe(before);
     const cached = await page.evaluate(async () =>
       (

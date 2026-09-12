@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { signInPwa } from './pwa-helper';
 import { test, expect } from '@playwright/test';
 import { createECDH, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -72,10 +73,9 @@ test('mobile opts in, receives a real worker push without an app page, opens its
     });
     await cdp.send('ServiceWorker.enable');
     await page.goto(url);
-    await page.getByRole('button', { name: 'Set up', exact: true }).click();
-    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
-    await page.getByLabel('Relay pairing key').fill(token);
-    await page.getByRole('button', { name: 'Pair & sync' }).click();
+    await signInPwa(page, token);
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Connections', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
     await expect.poll(() => registrationId).not.toBe('');
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
