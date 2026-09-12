@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight, KeyRound, LoaderCircle, WifiOff } from '@lucide/svelte';
+  import { ArrowRight, Eye, EyeOff, KeyRound, LoaderCircle, WifiOff } from '@lucide/svelte';
   import BrowserStatus from './BrowserStatus.svelte';
 
   let {
@@ -18,6 +18,7 @@
     login: (key: string) => Promise<void>;
   } = $props();
   let key = $state('');
+  let keyVisible = $state(false);
   let busy = $state(false);
   let failure = $state('');
 
@@ -25,6 +26,7 @@
     event.preventDefault();
     if (busy || checking || !ready || !online || !key.trim()) return;
     busy = true;
+    keyVisible = false;
     failure = '';
     try {
       await login(key.trim());
@@ -73,7 +75,7 @@
         <input
           id="workspace-key"
           name="workspace-key"
-          type="password"
+          type={keyVisible ? 'text' : 'password'}
           bind:value={key}
           placeholder="Enter your private workspace key"
           autocomplete="off"
@@ -84,6 +86,20 @@
           disabled={busy || checking || !ready}
           aria-describedby="workspace-key-help"
         />
+        <button
+          class="key-visibility"
+          type="button"
+          aria-label={keyVisible ? 'Hide workspace key' : 'Show workspace key'}
+          title={keyVisible ? 'Hide workspace key' : 'Show workspace key'}
+          aria-controls="workspace-key"
+          disabled={busy || checking || !ready}
+          onclick={() => (keyVisible = !keyVisible)}
+        >
+          {#if keyVisible}<EyeOff size={18} aria-hidden="true" />{:else}<Eye
+              size={18}
+              aria-hidden="true"
+            />{/if}
+        </button>
       </div>
       <p id="workspace-key-help">Use the key provided by your workspace administrator.</p>
       <button class="primary" disabled={busy || checking || !ready || !online || !key.trim()}>
@@ -141,7 +157,7 @@
   .key-field {
     position: relative;
   }
-  .key-field :global(svg) {
+  .key-field > :global(svg) {
     position: absolute;
     left: 14px;
     top: 16px;
@@ -151,7 +167,25 @@
   input {
     min-height: 48px;
     padding-left: 41px;
+    padding-right: 48px;
     font-size: 16px;
+  }
+  input::-ms-reveal {
+    display: none;
+  }
+  .key-visibility {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+  }
+  .key-visibility:hover:not(:disabled) {
+    color: var(--text);
   }
   #workspace-key-help,
   .login-note {

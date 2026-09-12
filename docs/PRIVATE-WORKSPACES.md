@@ -63,7 +63,7 @@ node relay/manage.ts role owner admin
 
 ## Device privacy
 
-The web/PWA starts on **Sign in to your workspace**. Enter the private workspace key issued by the administrator; no workspace list or separate username is needed. The chat and management interface appears only after the server verifies the session and workspace. Returning sessions restore automatically. **Connections → Sync settings → Sign out** returns to the login page, as do expired or revoked sessions and workspace changes in another tab.
+The web/PWA starts on **Sign in to your workspace**. Enter the private workspace key issued by the administrator; no workspace list or separate username is needed. The key is hidden by default; use the eye button to show or hide it while entering it. Submitting hides the key again. The chat and management interface appears only after the server verifies the session and workspace. Returning sessions restore automatically. **Connections → Sync settings → Sign out** returns to the login page, as do expired or revoked sessions and workspace changes in another tab.
 
 The PWA verifies its session before showing saved server conversations. Browser caches and sync checkpoints belong to the authenticated workspace. Disconnecting or switching accounts clears the visible conversation and draft, and stale tabs cannot sync using another workspace's cookie. A fresh unauthenticated launch does not show cached chats; an already authenticated open tab can retain its current workspace during a temporary network outage. Use separate browser profiles when different people share a computer: local browser caches are not encrypted against someone with access to that browser profile.
 
