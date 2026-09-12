@@ -90,7 +90,7 @@ test('desktop keeps an unanswered question and its draft across older relay sync
   expect(await page.evaluate(() => (window as any).answersSent ?? [])).toEqual([]);
   await expect(page.getByText('Waiting for you', { exact: true })).toBeVisible();
   await form.getByRole('button', { name: 'Send answers' }).click();
-  await expect(form.getByText('Your answers', { exact: true })).toBeVisible();
+  await expect(form).toHaveCount(0);
   await page.evaluate(() => {
     const w = window as any;
     w.emitCapability({ kind: 'text', text: 'Blue was explicitly selected.' });
@@ -101,7 +101,15 @@ test('desktop keeps an unanswered question and its draft across older relay sync
   await expect
     .poll(() => page.evaluate(() => (window as any).questionSyncs))
     .toBeGreaterThan(count);
-  await expect(form.getByText('Your answers', { exact: true })).toBeVisible();
+  await expect(form).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const workspace = JSON.parse(localStorage.getItem('test-workspace')!);
+        return workspace.conversations.at(-1).messages.at(-1).questions[0].status;
+      }),
+    )
+    .toBe('answered');
   expect(await page.evaluate(() => (window as any).answersSent)).toHaveLength(1);
   await page.screenshot({ path: 'artifacts/questions-relay-retention.png', fullPage: true });
 });
@@ -230,7 +238,8 @@ test('paired Viewer answers a desktop-started question through the owning host a
     await page.getByRole('button', { name: /Remote question/ }).click();
     await page.getByRole('radio', { name: 'Blue' }).check();
     await page.getByRole('button', { name: 'Send answers' }).click();
-    await expect(page.getByText('Your answers', { exact: true })).toBeVisible();
+    await expect(page.getByText('Your answer reached the host.', { exact: true })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Agent questions' })).toHaveCount(0);
     const response = received.find((job) => job.method === 'answer');
     expect(response.target).toBe(host);
     expect(response.args).toEqual({
@@ -242,8 +251,14 @@ test('paired Viewer answers a desktop-started question through the owning host a
     await page.reload();
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: /Remote question/ }).click();
-    await page.getByText('Your answers', { exact: true }).click();
-    await expect(page.getByText('Blue', { exact: true })).toBeVisible();
+    await expect(page.getByText('Your answer reached the host.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Your answers', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Agent questions' })).toHaveCount(0);
+    const saved = await call('GET', 'state');
+    expect(
+      saved.workspace.conversations.find((c: any) => c.id === conversationId).messages[0]
+        .questions[0].response.answers,
+    ).toEqual([{ id: 'color', values: ['Blue'] }]);
     await expect(page.getByRole('button', { name: 'Send answers' })).toHaveCount(0);
     expect(workerError).toBeUndefined();
   } finally {
@@ -317,24 +332,42 @@ for (const mobile of [false, true])
     const back = form.getByRole('button', { name: 'Back', exact: true });
     await expect(form.getByText('Question 1 of 3')).toBeVisible();
     await expect(form.getByRole('group')).toHaveCount(1);
-    await expect(next).toBeDisabled();
+    await expect(next).toBeEnabled();
     await expect(back).toHaveCount(0);
     await expect(form.getByRole('button', { name: 'Send answers' })).toHaveCount(0);
     await expect(form.getByRole('checkbox')).toHaveCount(0);
     await expect(page.getByText('Waiting for you', { exact: true })).toBeVisible();
+    const navigation = form.getByRole('navigation', { name: 'Question navigation' });
+    await expect(navigation.getByRole('button')).toHaveCount(3);
+    await next.click();
+    await expect(form.getByText('Question 2 of 3')).toBeVisible();
+    await expect(next).toBeEnabled();
+    await navigation.getByRole('button', { name: 'Question 3: Notes', exact: true }).click();
+    await expect(form.getByText('Question 3 of 3')).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Send answers' })).toBeDisabled();
+    await navigation.getByRole('button', { name: 'Question 1: Format', exact: true }).click();
+    await expect(form.getByRole('radio')).toHaveCount(2);
+    await expect(form.getByText('Choose one.', { exact: true })).toBeVisible();
+    await form.getByRole('radio', { name: 'Detailed' }).check();
     await form.getByRole('radio', { name: 'Brief' }).check();
+    await expect(form.getByRole('radio', { name: 'Detailed' })).not.toBeChecked();
+    await expect(
+      navigation.getByRole('button', { name: 'Question 1: Format, answered', exact: true }),
+    ).toHaveAttribute('aria-current', 'step');
     await expect(form.getByText('Question 1 of 3')).toBeVisible();
     await next.press('Enter');
     await expect(form.getByText('Question 2 of 3')).toBeVisible();
     await expect(form.locator('legend')).toBeFocused();
-    await expect(next).toBeDisabled();
+    await expect(next).toBeEnabled();
     await expect(form.getByRole('radio')).toHaveCount(0);
+    await expect(form.getByRole('checkbox')).toHaveCount(2);
+    await expect(form.getByText('Choose any that apply.', { exact: true })).toBeVisible();
     await form.getByRole('checkbox', { name: 'Intro' }).check();
     await form.getByRole('checkbox', { name: 'Examples' }).check();
     await form.getByLabel('Your answer: Which sections?').fill('Closing thoughts');
     await form.scrollIntoViewIfNeeded();
     await page.screenshot({
-      path: `artifacts/question-steps-${mobile ? 'mobile' : 'desktop'}.png`,
+      path: `artifacts/question-navigation-${mobile ? 'mobile' : 'desktop'}.png`,
       fullPage: true,
     });
     await next.click();
@@ -356,7 +389,17 @@ for (const mobile of [false, true])
     await form.getByLabel('Your answer: Choose a format').fill('Custom format');
     await expect(form.getByRole('radio', { name: 'Brief' })).not.toBeChecked();
     await form.getByLabel('Your answer: Choose a format').fill('');
-    await expect(next).toBeDisabled();
+    await expect(next).toBeEnabled();
+    await expect(
+      navigation.getByRole('button', { name: 'Question 1: Format', exact: true }),
+    ).toBeVisible();
+    await navigation
+      .getByRole('button', { name: 'Question 3: Notes, answered', exact: true })
+      .click();
+    await expect(form.getByRole('button', { name: 'Send answers' })).toBeDisabled();
+    await navigation
+      .getByRole('button', { name: 'Question 1: Format', exact: true })
+      .press('Enter');
     await form.getByRole('radio', { name: 'Detailed' }).check();
     await next.click();
     await next.click();
@@ -372,8 +415,12 @@ for (const mobile of [false, true])
       'Keep literal <script> and $(text)\nSecond line\n',
     );
     await page.evaluate(() => ((window as any).answerFailure = false));
+    const box = await form.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.width).toBeLessThanOrEqual(mobile ? 390 : 1380);
     await form.getByRole('button', { name: 'Send answers' }).click();
-    await expect(form.getByText('Your answers', { exact: true })).toBeVisible();
+    await expect(form).toHaveCount(0);
+    await expect(page.getByText('Your answers', { exact: true })).toHaveCount(0);
     await page.evaluate(() => {
       const w = window as any;
       w.emitCapability({ kind: 'text', text: 'I will use those preferences.' });
@@ -387,16 +434,16 @@ for (const mobile of [false, true])
       { id: 'sections', values: ['Intro', 'Examples', 'Closing thoughts'] },
       { id: '__proto__', values: ['Keep literal <script> and $(text)\nSecond line'] },
     ]);
-    await form.getByText('Your answers', { exact: true }).click();
-    await expect(
-      form.getByText('Keep literal <script> and $(text)\nSecond line', { exact: true }),
-    ).toBeVisible();
-    await form.scrollIntoViewIfNeeded();
-    const box = await form.boundingBox();
-    expect(box!.x).toBeGreaterThanOrEqual(0);
-    expect(box!.width).toBeLessThanOrEqual(mobile ? 390 : 1380);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const workspace = JSON.parse(localStorage.getItem('test-workspace')!);
+          return workspace.conversations.at(-1).messages.at(-1).questions[0].response.answers;
+        }),
+      )
+      .toEqual(answers[0].answer.answers);
     await page.screenshot({
-      path: `artifacts/questions-${mobile ? 'mobile' : 'desktop'}.png`,
+      path: `artifacts/questions-no-answer-card-${mobile ? 'mobile' : 'desktop'}.png`,
       fullPage: true,
     });
   });
@@ -426,7 +473,7 @@ test('explicit skip resumes the tool and cancelled runs cannot accept old answer
   await page.getByLabel('Your answer: What next?').fill('Partial answer');
   await page.getByRole('button', { name: 'Next', exact: true }).click();
   await page.getByRole('button', { name: 'Skip questions' }).click();
-  await expect(page.getByText('Questions skipped', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Agent questions' })).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).answersSent[0].answer)).toMatchObject({
     answers: [],
     skipped: true,

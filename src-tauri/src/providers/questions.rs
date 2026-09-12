@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask one to four concise questions with stable ids, optional choices and multiSelect. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
+pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask one to four concise questions with stable ids and optional choices. Set multiSelect=false for one answer (radio buttons), or true only when multiple answers are allowed (checkboxes), independently for each question. Multiple questions do not imply multiple answers per question. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
 pub fn tool() -> Value {
     json!({"name":"studio_ask_user","description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{"questions":{"type":"array","minItems":1,"maxItems":4,"items":{
@@ -17,7 +17,7 @@ pub fn tool() -> Value {
                 "id":{"type":"string","minLength":1,"maxLength":100},
                 "header":{"type":"string","maxLength":100},
                 "question":{"type":"string","minLength":1,"maxLength":2000},
-                "multiSelect":{"type":"boolean"},
+                "multiSelect":{"type":"boolean","description":"false: choose one answer using radio buttons. true: choose multiple answers using checkboxes. Set per question, regardless of how many questions are in this call."},
                 "options":{"type":"array","maxItems":12,"items":{"type":"object","properties":{
                     "label":{"type":"string","minLength":1,"maxLength":200},"description":{"type":"string","maxLength":1000}
                 },"required":["label","description"],"additionalProperties":false}}

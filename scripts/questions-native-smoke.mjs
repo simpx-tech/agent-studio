@@ -95,7 +95,7 @@ try {
               ? 'mcp__agent_studio__studio_ask_user'
               : 'studio_ask_user';
         const questions = multiStep
-          ? 'ask exactly two questions IN ONE TOOL CALL: first which color I prefer, with Red and Blue options; second which format I prefer, with Brief and Detailed options'
+          ? 'ask exactly two questions IN ONE TOOL CALL: first which color I prefer, with Red and Blue options and multiSelect=false (choose ONE); second which sections I want, with Intro and Examples options and multiSelect=true (choose MULTIPLE)'
           : 'ask which color I prefer, with Red and Blue options';
         el.value = `This is an interactive question test. Call the actual ${tool} tool exactly once now to ${questions}. Then wait for my submitted answer and reply with all chosen answers and the words QUESTION ROUNDTRIP PASSED. Do not infer my answer. Do not use files, shell commands, web, or subagents. Use only the specified question tool.${mode === 'claude-native' ? ' Do NOT substitute studio_ask_user or mcp__agent_studio__studio_ask_user. If AskUserQuestion is deferred, use ToolSearch to select:AskUserQuestion first. If it is unavailable, report that explicitly.' : ''}`;
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -123,6 +123,11 @@ try {
     assert.equal(reply?.status, 'running', reply?.error ?? 'Provider did not wait for a question');
     assert.equal(reply.questions?.length, 1, 'No actual question event');
     assert.equal(reply.questions[0].questions.length, multiStep ? 2 : 1);
+    if (multiStep)
+      assert.deepEqual(
+        reply.questions[0].questions.map((q) => q.multiSelect),
+        [false, true],
+      );
     if (chat.mode === 'claude-native')
       assert.equal(
         reply.questions[0].questions[0].id,
@@ -147,11 +152,41 @@ try {
     }
     if (relay)
       assert((relay.dropped.get(reply.runId) ?? 0) >= 3, 'No repeated relay stripping reproduced');
+    if (multiStep) {
+      // Browse before answering anything, then return to the first question.
+      await page.button('Next');
+      await page.waitFor(() =>
+        document.querySelector('.question-count')?.textContent.includes('2 of 2'),
+      );
+      assert(
+        await page.evaluate(
+          () =>
+            [...document.querySelectorAll('.question-card button')].find(
+              (e) => e.textContent === 'Send answers',
+            )?.disabled,
+        ),
+      );
+      assert.equal(
+        await page.evaluate(
+          () => document.querySelectorAll('.question-card input[type="checkbox"]').length,
+        ),
+        2,
+      );
+      await page.click('.question-steps button:first-child');
+      await page.waitFor(() =>
+        document.querySelector('.question-count')?.textContent.includes('1 of 2'),
+      );
+    }
     await page.evaluate(() => {
       const options = [...document.querySelectorAll('.question-option')];
+      const red = options.find((e) => e.textContent.includes('Red'));
+      if (!red || red.querySelector('input').type !== 'radio')
+        throw new Error('Single-choice radio missing');
+      red.querySelector('input').click();
       const blue = options.find((e) => e.textContent.includes('Blue'));
       if (!blue) throw new Error('Blue option missing');
       blue.querySelector('input').click();
+      if (red.querySelector('input').checked) throw new Error('Radio choices were not exclusive');
       const draft = document.querySelector('[aria-label="Message"]');
       draft.value = 'Preserved native draft';
       draft.dispatchEvent(new Event('input', { bubbles: true }));
@@ -167,11 +202,14 @@ try {
         document.querySelector('.question-count')?.textContent.includes('2 of 2'),
       );
       await page.evaluate(() => {
-        const brief = [...document.querySelectorAll('.question-option')].find(
-          (e) => e.querySelector('strong').textContent === 'Brief',
-        );
-        if (!brief) throw new Error('Brief option missing');
-        brief.querySelector('input').click();
+        for (const label of ['Intro', 'Examples']) {
+          const option = [...document.querySelectorAll('.question-option')].find(
+            (e) => e.querySelector('strong').textContent === label,
+          );
+          if (!option || option.querySelector('input').type !== 'checkbox')
+            throw new Error('Multiple-choice checkbox missing');
+          option.querySelector('input').click();
+        }
       });
       await page.button('Back');
       await page.waitFor(() =>
@@ -184,16 +222,13 @@ try {
           ),
         ),
       );
-      await page.button('Next');
+      await page.click('.question-steps button:nth-child(2)');
       await page.waitFor(() =>
         document.querySelector('.question-count')?.textContent.includes('2 of 2'),
       );
-      assert(
-        await page.evaluate(() =>
-          [...document.querySelectorAll('.question-option')].some(
-            (e) => e.textContent.includes('Brief') && e.querySelector('input').checked,
-          ),
-        ),
+      assert.equal(
+        await page.evaluate(() => document.querySelectorAll('.question-card input:checked').length),
+        2,
       );
       const held = await page.invoke('load_workspace');
       const waiting = held.conversations.find((c) => c.id === chat.id).messages.at(-1);
@@ -203,7 +238,7 @@ try {
     }
     const shot = await page.cdp('Page.captureScreenshot', { format: 'png' });
     await writeFile(
-      `artifacts/questions-native-${multiStep ? 'steps-' : ''}${chat.mode}.png`,
+      `artifacts/questions-native-${multiStep ? 'navigation-' : ''}${chat.mode}.png`,
       Buffer.from(shot.data, 'base64'),
     );
     await page.button('Send answers');
@@ -222,13 +257,15 @@ try {
       .join('');
     assert.match(text, /Blue/i);
     if (multiStep) {
-      assert.match(text, /Brief/i);
+      assert.match(text, /Intro/i);
+      assert.match(text, /Examples/i);
       assert.deepEqual(
         reply.questions[0].response.answers.map((a) => a.values),
-        [['Blue'], ['Brief']],
+        [['Blue'], ['Intro', 'Examples']],
       );
     }
     assert.match(text, /QUESTION ROUNDTRIP PASSED/);
+    await page.waitFor(() => !document.querySelector('.question-card'));
     assert.equal(
       await page.evaluate(() => document.querySelector('[aria-label="Message"]').value),
       'Preserved native draft',
@@ -239,6 +276,9 @@ try {
       status: reply.status,
       questions: reply.questions.length,
       steps: reply.questions[0].questions.length,
+      selectionModes: reply.questions[0].questions.map((q) =>
+        q.multiSelect ? 'checkbox' : 'radio',
+      ),
       answer: reply.questions[0].response.answers,
       pendingHeldMs: 10000,
       strippedSyncs: relay?.dropped.get(reply.runId),
@@ -248,7 +288,7 @@ try {
     );
   }
   assert.deepEqual(page.errors, []);
-  const resultFile = `artifacts/questions-native-${multiStep ? 'steps-' : ''}${syncRegression ? 'sync-' : ''}result.json`;
+  const resultFile = `artifacts/questions-native-${multiStep ? 'navigation-' : ''}${syncRegression ? 'sync-' : ''}result.json`;
   const previous = await readFile(resultFile, 'utf8')
     .then(JSON.parse)
     .catch(() => ({ runs: [] }));
