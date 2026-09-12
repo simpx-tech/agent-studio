@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Work history startup notes and divider — 2026-09-12
+
+The plain startup notes `Starting the provider CLI` and `Connected to Claude` are hidden in live and saved activity. Tool details and provider-authored progress remain intact. Expanded history has a theme-colored divider before the final answer; collapsing it removes the divider. The desktop/mobile regression injects both notes, verifies their absence during the reply and after reopening, and checks the divider in both disclosure states. Both cases failed before the change and now pass.
+
+Full validation passed again: `npm run verify` (170 unit tests, 118 browser tests, clean check/build), Rust formatting, Clippy, and 96 Rust tests with four existing opt-in tests ignored. Logs are `artifacts/work-history-refinement-{verify,rust}.log` in the isolated `agent-studio-work-history` worktree. The native saved-fixture check and visually reviewed `work-history-native-expanded.png` also confirm the hidden notes and divider without new provider requests. At Windows scale 1.5, WebView2 reports the authored 1px divider as `0.666667px` after pixel snapping; native assertions verify a positive width no greater than 1px and solid style instead of requiring exact computed equality.
+
 ## Expandable reply work history — 2026-09-12
 
 Completed replies now show a collapsed **Work history** item directly below the model title and above the final answer. It includes the saved progress comments and tool calls in their recorded order, progress-update counts, and the existing tool counts, filters, details, and child results. Progress-only replies also have a disclosure. Live replies retain their inline activity, while token/time and Retry remain below the answer and artifact/progress cards.

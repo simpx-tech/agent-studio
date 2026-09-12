@@ -59,6 +59,12 @@
         }))
     )
       .filter((b) => b.type === 'activity')
+      .filter(
+        (b) =>
+          b.tool ||
+          b.progress ||
+          !['Starting the provider CLI', 'Connected to Claude'].includes(b.text.trim()),
+      )
       .filter((b) => !b.progress || b.text.trim() !== finalText.trim())
       .filter(
         (b) =>
@@ -285,6 +291,10 @@
     display: grid;
     gap: 7px;
     min-width: 0;
+  }
+  .activity-summary[open] {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px;
   }
   .activity-summary > summary {
     display: flex;
