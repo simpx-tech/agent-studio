@@ -8,7 +8,7 @@ type ActivityGroup =
   | { kind: 'tools'; key: string; tools: ToolActivity[] }
   | { kind: 'comment'; key: string; entry: ActivityEntry };
 
-/** Group before applying display filters so comments remain chronological boundaries. */
+/** Consecutive tool calls share a group; comments remain chronological boundaries. */
 export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] {
   const groups: ActivityGroup[] = [];
   for (const [index, entry] of entries.entries()) {

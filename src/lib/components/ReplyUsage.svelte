@@ -28,13 +28,14 @@
   <summary aria-label="Reply usage and cost">
     <ChevronDown size={13} class="disclosure" aria-hidden="true" />
     <span class="usage-summary">
-      {#if usage?.input != null}<span>{usage.input.toLocaleString()} input</span>{/if}
-      {#if usage?.output != null}<span>{usage.output.toLocaleString()} output tokens</span>{/if}
-      {#if message.durationMs != null}<span>{(message.durationMs / 1000).toFixed(1)}s</span>{/if}
+      <span
+        >{message.durationMs == null
+          ? 'Time not recorded'
+          : `${(message.durationMs / 1000).toFixed(1)}s`}</span
+      >
       {#if timeTotal}<span title="Recorded AI time in this conversation through this reply"
           >{timeTotal.durationMs == null ? 'Total time not recorded' : `${totalTime} total`}</span
         >{/if}
-      <span>{cost == null ? 'Cost not reported' : `${cost} estimated cost`}</span>
     </span>
   </summary>
   <div class="usage-breakdown">

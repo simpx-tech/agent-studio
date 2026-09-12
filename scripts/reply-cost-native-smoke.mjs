@@ -180,10 +180,15 @@ try {
   await openHistory(conversation.title);
   await page.waitFor(() => !!document.querySelector('.reply-usage'));
   assert.equal(await page.evaluate(() => document.querySelector('.reply-usage').open), false);
+  const collapsed = await page.evaluate(
+    () => document.querySelector('.reply-usage > summary').textContent,
+  );
+  assert(collapsed.includes('total') && !/input|output|tokens|cost|\$/i.test(collapsed));
+  await page.click('[aria-label="Reply usage and cost"]');
   assert(
-    (
-      await page.evaluate(() => document.querySelector('.reply-usage > summary').textContent)
-    ).includes('estimated cost'),
+    (await page.evaluate(() => document.querySelector('.usage-breakdown').textContent)).includes(
+      'Estimated cost (USD)',
+    ),
   );
   report.restored = true;
   assert.deepEqual(page.errors, []);

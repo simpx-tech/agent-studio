@@ -15,12 +15,7 @@
     Terminal,
     Images,
   } from '@lucide/svelte';
-  import {
-    activityCounts,
-    safeSourceUrl,
-    visibleActivityStatus,
-    type ToolActivity,
-  } from '$lib/activity';
+  import { safeSourceUrl, visibleActivityStatus, type ToolActivity } from '$lib/activity';
   import { activityGroupSummary, groupActivityEntries } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
@@ -37,15 +32,6 @@
     finalText?: string;
   } = $props();
   let linkError = $state('');
-  let filter = $state('all');
-  const counts = $derived(activityCounts(tools));
-  const filters = $derived([
-    { id: 'all', label: 'All activity' },
-    { id: 'calls', label: `Tool calls (${counts.calls})` },
-    { id: 'searches', label: `Web searches (${counts.searches})` },
-    { id: 'agents', label: `Sub-agents (${counts.agents})` },
-    { id: 'runs', label: `Command runs (${counts.runs})` },
-  ]);
   const labels = {
     running: 'Running',
     complete: 'Completed',
@@ -94,15 +80,9 @@
           ),
       ),
   );
-  const progressCount = $derived(entries.filter((entry) => entry.progress).length);
   const groups = $derived(groupActivityEntries(entries));
-  function shown(tool: ToolActivity) {
-    if (replyStatus === 'running' || filter === 'all')
-      return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
-    if (filter === 'calls') return tool.category !== 'agent' && tool.id !== 'activity-limit';
-    if (filter === 'searches') return tool.category === 'search' && tool.name !== 'Open web page';
-    if (filter === 'agents') return tool.category === 'agent';
-    return !!tool.commandRun || ['Run command', 'Bash'].includes(tool.name);
+  function topLevel(tool: ToolActivity) {
+    return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
   }
   function progressLink(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
@@ -219,7 +199,7 @@
   <div class="activity-timeline">
     {#each groups as group (group.key)}
       {#if group.kind === 'tools'}
-        {@const visible = group.tools.filter(shown)}
+        {@const visible = group.tools.filter(topLevel)}
         {#if visible.length}
           {@const summary = activityGroupSummary(visible, replyStatus, tools)}
           {@const Icon = groupIcons[summary.icon]}
@@ -236,7 +216,7 @@
             </div>
           </details>
         {/if}
-      {:else if replyStatus === 'running' || filter === 'all'}
+      {:else}
         {@const entry = group.entry}
         {#if entry.progress}
           <!-- Sanitized markdown; nested links provide keyboard interaction. -->
@@ -247,15 +227,6 @@
         {:else}<p class="timeline-note">{entry.text}</p>{/if}
       {/if}
     {/each}
-    {#if replyStatus !== 'running' && filter !== 'all' && !tools.some(shown)}<p class="tool-note">
-        No {filter === 'runs'
-          ? 'command runs'
-          : filter === 'agents'
-            ? 'sub-agents'
-            : filter === 'searches'
-              ? 'web searches'
-              : 'tool calls'} were recorded.
-      </p>{/if}
   </div>
 {/snippet}
 
@@ -270,37 +241,10 @@
       <details class="activity-summary">
         <summary aria-label="Work history">
           <ChevronDown size={14} class="disclosure" />
-          <span class="history-summary">
-            <span class="history-title">Work history</span>
-            <span
-              class="summary-counts"
-              title="Tool calls include web searches and command runs, including calls made by sub-agents. Sub-agents are counted separately."
-            >
-              {#if progressCount}<span
-                  >{progressCount} progress {progressCount === 1 ? 'update' : 'updates'}</span
-                >{/if}
-              {#if tools.length}
-                <span
-                  >{counts.calls}{counts.limited ? '+' : ''} tool {counts.calls === 1
-                    ? 'call'
-                    : 'calls'}</span
-                >
-                <span>{counts.searches} web {counts.searches === 1 ? 'search' : 'searches'}</span>
-                <span>{counts.agents} {counts.agents === 1 ? 'sub-agent' : 'sub-agents'}</span>
-                <span>{counts.runs} command {counts.runs === 1 ? 'run' : 'runs'}</span>
-              {/if}
-            </span>
-          </span>
+          <span class="history-title">Work history</span>
           {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
             >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
         </summary>
-        {#if tools.length}<div class="activity-filters" aria-label="Filter activity">
-            {#each filters as choice}<button
-                class:chosen={filter === choice.id}
-                aria-pressed={filter === choice.id}
-                onclick={() => (filter = choice.id)}>{choice.label}</button
-              >{/each}
-          </div>{/if}
         {@render timeline()}
       </details>
     {/if}
@@ -369,51 +313,12 @@
     color: #a8b69f;
     font-size: 12px;
   }
-  .summary-counts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 12px;
-    font-size: 11px;
-  }
-  .history-summary {
-    display: flex;
-    flex: 1;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 4px 12px;
-    min-width: 0;
-  }
   .history-title {
     color: #d3dfca;
     white-space: nowrap;
   }
   .activity-summary > summary > :global(svg) {
     flex-shrink: 0;
-  }
-  .summary-counts span {
-    white-space: nowrap;
-  }
-  .activity-filters {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin: 8px 0 12px;
-  }
-  .activity-filters button {
-    border: 1px solid #ffffff18;
-    border-radius: 6px;
-    background: transparent;
-    color: #a8b69f;
-    font-size: 11px;
-    padding: 6px 9px;
-    cursor: pointer;
-  }
-  .activity-filters button.chosen {
-    color: #d3dfca;
-    background: #ffffff0c;
-  }
-  .activity-filters button:focus-visible {
-    outline: 2px solid #b9ddcc;
   }
   .timeline-note {
     font-size: 11px;

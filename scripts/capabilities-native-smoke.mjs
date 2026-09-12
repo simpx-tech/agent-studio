@@ -208,8 +208,11 @@ try {
     const summaryText = await page.evaluate(
       () => [...document.querySelectorAll('.activity-summary > summary')].at(-1).textContent,
     );
-    const calls = tools.filter((t) => t.category !== 'agent' && t.id !== 'activity-limit').length;
-    assert(summaryText.includes(`${calls} tool call`), 'Incorrect tool-call count.');
+    assert.equal(summaryText.trim(), 'Work history');
+    assert.equal(
+      await page.evaluate(() => document.querySelectorAll('.activity-filters').length),
+      0,
+    );
     await page.evaluate(() =>
       document.querySelector('.activity-summary')?.scrollIntoView({ block: 'center' }),
     );

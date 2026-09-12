@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Simplified history and timing summary — 2026-09-12
+
+Work history now omits activity counts and category filters while retaining the ordered comments, grouped tools, child results, and individual details. The bottom collapsed row shows only elapsed reply time and cumulative AI time; token counts and reported costs remain in its expansion. Unknown reply timing is explicit. Existing browser checks now verify the concise labels, complete activity after reload, preserved zero/tiny/unknown cost values, cumulative timing, and expanded metadata. Focused desktop/mobile checks passed; the full frontend and Rust validation logs are `artifacts/reply-simplified-{verify,rust}.log` in the isolated worktree.
+
+The native Windows saved-fixture check reproduced the former counts, five filter buttons, and collapsed cost label, then verified their removal after a real reload. Both disclosures start collapsed, and the history retains two comments and two tool groups. Timing expands to show tokens and cost details. Evidence: `artifacts/reply-simplified-native-result.json` and visually reviewed `reply-simplified-native-{collapsed,history,timing}.png`. This UI change used the existing isolated app on Vite 1436/CDP 9513 and made no new provider requests; hosted deployment and installer packaging were not exercised.
+
 ## Activity spacing — 2026-09-12
 
 The native grouped-history fixture measured 25px from a progress paragraph to its next action and 12px from that action to the next paragraph. The global Markdown paragraph rule contributed a trailing 13px margin in addition to the timeline's 12px grid gap. Resetting only the last Markdown block's bottom margin within `.progress-message` lets the shared timeline gap control both sides while preserving spacing between paragraphs inside a comment. Live and completed activity now measure 12px on both sides on desktop/mobile and in the saved Windows fixture; internal paragraph spacing remains 13px. Measured evidence and visually reviewed screenshots are in `artifacts/activity-spacing-*` in the isolated worktree. Full validation logs are `artifacts/activity-spacing-{verify,rust}.log`.

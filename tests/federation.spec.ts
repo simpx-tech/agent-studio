@@ -1158,10 +1158,15 @@ test('two app environments pair, share accounts, route chats, retain progress an
       ),
     ).toBe(imageData);
     await expect(desktop.locator('.activity-summary')).not.toHaveAttribute('open', '');
-    await expect(desktop.getByLabel('Reply usage and cost')).toContainText(
-      '$0.012345 estimated cost',
+    await expect(desktop.getByLabel('Reply usage and cost')).not.toContainText(
+      /input|output|tokens|cost|\$/i,
     );
+    await desktop.getByLabel('Reply usage and cost').click();
+    await expect(desktop.getByText('$0.012345', { exact: true })).toBeVisible();
+    await desktop.getByLabel('Reply usage and cost').click();
+    await expect(desktop.getByLabel('Work history', { exact: true })).toHaveText('Work history');
     await desktop.getByLabel('Work history', { exact: true }).click();
+    await expect(desktop.getByLabel('Filter activity')).toHaveCount(0);
     await expect(desktop.getByText('Checked both remote sources.', { exact: true })).toBeVisible();
     await expect(desktop.getByText('Checking the remote sources.', { exact: true })).toHaveCount(0);
     await expect(desktop.locator('[data-category="search"]')).toHaveCount(2);

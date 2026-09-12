@@ -2584,7 +2584,8 @@ test('tool targets stream inline and finish as expandable work history below the
   await emit({ kind: 'usage', input: 2400, output: 50, cachedInput: 1900, costUsd: 0.012345 });
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
   const usageSummary = page.getByLabel('Reply usage and cost', { exact: true });
-  await expect(usageSummary).toContainText('$0.012345 estimated cost');
+  await expect(usageSummary.locator('.usage-summary > span')).toHaveCount(2);
+  await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
   await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
   await expect(page.locator('.reply-usage')).toHaveCSS('font-size', '11px');
   await page.screenshot({ path: 'artifacts/work-history-placement.png' });
@@ -2608,15 +2609,12 @@ test('tool targets stream inline and finish as expandable work history below the
   await page.keyboard.press('Enter');
   await expect(page.getByText('Cached input tokens', { exact: true })).toBeVisible();
   await expect(page.getByText('Estimated cost (USD)', { exact: true })).toBeVisible();
+  await expect(page.getByText('$0.012345', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Copy response', exact: true })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/reply-usage-expanded-browser.png' });
   await usageSummary.click();
   const summary = page.getByLabel('Work history', { exact: true });
-  await expect(summary).toContainText('2 progress updates');
-  await expect(summary).toContainText('5 tool calls');
-  await expect(summary).toContainText('0 web searches');
-  await expect(summary).toContainText('0 sub-agents');
-  await expect(summary).toContainText('1 command run');
+  await expect(summary).toHaveText('Work history');
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
   await expect(
     page.getByText('The source files passed verification.', { exact: true }),
@@ -2629,12 +2627,15 @@ test('tool targets stream inline and finish as expandable work history below the
   await page.keyboard.press('Enter');
   await expect(page.getByText('I will inspect the source files.', { exact: true })).toBeVisible();
   expect(await historySequence()).toEqual(liveSequence);
-  await page.getByRole('button', { name: 'Command runs (1)', exact: true }).click();
-  await expect(page.locator('.tool-card')).toHaveCount(1);
-  await page.locator('.activity-group > summary').click();
-  await page.locator('.tool-card > summary').click();
+  await expect(page.getByLabel('Filter activity')).toHaveCount(0);
+  await expect(page.locator('.tool-card')).toHaveCount(5);
+  await page.locator('.activity-group > summary').last().click();
+  await page
+    .locator('.tool-card')
+    .filter({ hasText: 'Run the fixture tests' })
+    .locator(':scope > summary')
+    .click();
   await expect(page.getByText('Exit code', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Tool calls (5)', exact: true }).click();
   await page
     .locator('.tool-card')
     .filter({ hasText: 'Legacy tool' })
@@ -2663,14 +2664,17 @@ test('tool targets stream inline and finish as expandable work history below the
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('.conversation-item').first().click();
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
-  await expect(summary).toContainText('5 tool calls');
-  await expect(usageSummary).toContainText('$0.012345 estimated cost');
+  await expect(summary).toHaveText('Work history');
+  await expect(usageSummary.locator('.usage-summary > span')).toHaveCount(2);
+  await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
   await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
   await summary.click();
   expect(await historySequence()).toEqual(liveSequence);
   await expect(
     page.getByText('The file is readable. I will find the components next.', { exact: true }),
   ).toBeVisible();
+  await usageSummary.click();
+  await expect(page.getByText('$0.012345', { exact: true })).toBeVisible();
 });
 
 test('total AI time accumulates saved replies in this conversation and survives reload', async ({
@@ -2726,6 +2730,7 @@ test('total AI time accumulates saved replies in this conversation and survives 
   await expect(totals.nth(0)).toContainText('1.3s total');
   await expect(totals.nth(1)).toContainText('1m 2.5s total');
   await expect(totals.nth(2)).toContainText('≥ 1m 2.5s total');
+  await expect(totals.nth(2)).toContainText('Time not recorded');
   await expect(totals.nth(3)).toContainText('≥ 1m 2.5s total');
   await totals.last().click();
   await expect(page.getByText('Total AI time', { exact: true }).last()).toBeVisible();
@@ -2778,9 +2783,9 @@ test('reply cost distinguishes unreported, zero, and tiny values', async ({ page
   await page.goto('/');
   await chooseTestFolder(page);
   for (const [costUsd, expected] of [
-    [undefined, 'Cost not reported'],
-    [0, '$0.00 estimated cost'],
-    [0.0000001, '<$0.000001 estimated cost'],
+    [undefined, 'Not reported'],
+    [0, '$0.00'],
+    [0.0000001, '<$0.000001'],
   ] as const) {
     await page.evaluate(() => {
       (window as any).emitCapability = null;
@@ -2796,9 +2801,20 @@ test('reply cost distinguishes unreported, zero, and tiny values', async ({ page
     }, costUsd);
     const reply = page.getByTestId('message').last();
     await expect(reply).toHaveAttribute('data-status', 'complete');
-    await expect(reply.getByLabel('Reply usage and cost')).toContainText(expected);
+    await expect(
+      reply.getByLabel('Reply usage and cost').locator('.usage-summary > span'),
+    ).toHaveCount(2);
+    await expect(reply.getByLabel('Reply usage and cost')).not.toContainText(
+      /input|output|tokens|cost|\$/i,
+    );
     await reply.getByLabel('Reply usage and cost').click();
     await expect(reply.getByText('Estimated cost (USD)', { exact: true })).toBeVisible();
+    await expect(
+      reply
+        .locator('.usage-breakdown dl > div')
+        .filter({ hasText: 'Estimated cost (USD)' })
+        .locator('dd'),
+    ).toHaveText(expected);
     if (costUsd == null)
       await expect(reply.locator('.usage-breakdown')).toContainText('No cost was reported');
   }

@@ -95,7 +95,9 @@ for (const mobile of [false, true])
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
     const history = page.locator('.activity-summary');
     await expect(history).not.toHaveAttribute('open', '');
+    await expect(page.getByLabel('Work history', { exact: true })).toHaveText('Work history');
     await page.getByLabel('Work history', { exact: true }).click();
+    await expect(history.getByLabel('Filter activity')).toHaveCount(0);
     await expect(groups).toHaveCount(2);
     await expect(groups.locator(':scope > summary')).toHaveText([
       'Read files',
@@ -145,11 +147,11 @@ for (const mobile of [false, true])
     await page.getByLabel('Work history', { exact: true }).click();
     expect(await sequence()).toEqual(savedSequence);
     await expect(page.locator('.activity-group[open], .tool-card[open]')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Command runs (1)', exact: true }).click();
-    await expect(groups).toHaveCount(1);
-    await expect(groups.locator(':scope > summary')).toHaveText('Commands Failed');
-    await groups.locator(':scope > summary').click();
-    await groups.locator('.tool-card > summary').click();
+    await expect(page.getByLabel('Work history', { exact: true })).toHaveText('Work history');
+    await expect(history.getByLabel('Filter activity')).toHaveCount(0);
+    await expect(groups).toHaveCount(2);
+    await groups.last().locator(':scope > summary').click();
+    await groups.last().locator('.tool-card > summary').last().click();
     await expect(page.getByText('Exit code', { exact: true })).toBeVisible();
   });
 
@@ -187,8 +189,7 @@ for (const mobile of [false, true])
     const toggle = reply.getByLabel('Work history', { exact: true });
     const draft = page.getByLabel('Message', { exact: true });
     await draft.fill('Keep this next message');
-    await expect(toggle).toContainText('2 progress updates');
-    await expect(toggle).not.toContainText('tool calls');
+    await expect(toggle).toHaveText('Work history');
     await expect(history).not.toHaveAttribute('open', '');
     await expect(history).toHaveCSS('border-bottom-width', '0px');
     await expect(reply.locator('.message-heading + .tool-activity + .prose')).toHaveText(
