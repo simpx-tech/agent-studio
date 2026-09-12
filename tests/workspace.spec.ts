@@ -1677,12 +1677,12 @@ test('computer and Standalone plus buttons start fresh scoped drafts from collap
     .press('Enter');
   await expect(page.getByRole('tab', { name: /^Active/ })).toHaveAttribute('aria-selected', 'true');
   await expect(picker('Computer')).toHaveText('Desktop');
-  await expect(picker('Folder')).toHaveText('Browse folders…');
+  await expect(picker('Folder')).toHaveText('Standalone');
   await expect(page.locator('.page-title')).toHaveText('New conversation');
   await expect(page.getByTestId('message')).toHaveCount(0);
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
   await page.getByLabel('Message', { exact: true }).fill('Discard this draft for the next action');
-  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   await historyTab.click();
   await history.locator('.computer-group-toggle').click();
   await history.getByRole('button', { name: 'Standalone', exact: true }).click();
@@ -1736,9 +1736,9 @@ test('computer then folder scopes CLI choices and groups active and history with
   await page.goto('/');
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
-  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled();
   await page.getByLabel('Message', { exact: true }).fill('Windows folder conversation');
-  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   await chooseTestFolder(page);
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   await expect(page.getByRole('option')).toHaveCount(3);
@@ -2245,7 +2245,7 @@ test('WSL uses only its Linux CLI and keeps Desktop accounts out of the agent pi
   await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Claude');
   await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveText(
-    'Browse folders…',
+    'Standalone',
   );
 });
 
@@ -2315,7 +2315,7 @@ test('switching computer clears the folder and an offline host never falls back 
   await page.getByRole('combobox', { name: 'Computer', exact: true }).click();
   await page.getByRole('option', { name: 'Travel laptop', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveText(
-    'Browse folders…',
+    'Standalone',
   );
   await page.getByLabel('Message', { exact: true }).fill('Do not run locally');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();

@@ -314,14 +314,14 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await page.getByRole('combobox', { name: 'Computer', exact: true }).click();
     await page.getByRole('option', { name: 'Desktop QA', exact: true }).click();
-    await page.getByRole('combobox', { name: 'Folder', exact: true }).click();
-    await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Use this folder' })).toBeEnabled();
-    await page.getByRole('button', { name: 'Use this folder' }).click();
-    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveText(
+      'Standalone',
+    );
+    await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled();
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeEnabled();
     await page
       .getByRole('textbox', { name: 'Message', exact: true })
-      .fill('Check the selected folder');
+      .fill('Use the selected computer without a project folder');
     await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
     await page.getByRole('button', { name: 'Send message' }).click();
     await expect(
@@ -329,6 +329,8 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     ).toBeVisible();
     expect(jobs.find((job) => job.method === 'run')?.target).toBe(host);
     expect(jobs.find((job) => job.method === 'run')?.args.connectionId).toBe(connection);
+    expect(jobs.find((job) => job.method === 'run')?.args.request.location).toBeUndefined();
+    expect(jobs.filter((job) => job.method === 'folders')).toHaveLength(0);
     await page.screenshot({ path: testInfo.outputPath('mobile-chat.png') });
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     expect(
@@ -375,7 +377,7 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     hostOpen = false;
     while (busy) await new Promise((resolve) => setTimeout(resolve, 20));
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    // A computer-scoped draft clears the folder and resets automatic query readiness.
+    // A computer-scoped draft is ready without a folder. Reload to request a fresh catalog.
     await page.getByRole('button', { name: 'New conversation on Desktop QA', exact: true }).click();
     // Expire the real heartbeat when the next query reaches the server, before the
     // PWA can poll it. This also covers the online-to-offline request race (409).
@@ -383,6 +385,8 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     const offlineResponse = page.waitForResponse(
       (response) => response.url().endsWith('/v1/jobs') && response.status() === 409,
     );
+    await page.reload();
+    await expectSynced(page);
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: 'Phone control QA', exact: true }).click();
     expect((await (await offlineResponse).json()).code).toBe('host_offline');

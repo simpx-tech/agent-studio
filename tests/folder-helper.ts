@@ -3,8 +3,8 @@ import { expect, type Page } from '@playwright/test';
 export async function chooseTestFolder(page: Page) {
   if (!(await page.evaluate(() => (window as any).isTauri))) return;
   if (
-    !(await page.getByRole('combobox', { name: 'Folder', exact: true }).textContent())?.includes(
-      'Browse folders',
+    !/Browse folders|Standalone/.test(
+      (await page.getByRole('combobox', { name: 'Folder', exact: true }).textContent()) ?? '',
     )
   )
     return;

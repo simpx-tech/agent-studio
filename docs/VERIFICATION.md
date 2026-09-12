@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## Optional project folders — 2026-09-12
+
+`tests/standalone.spec.ts` verifies that Desktop and managed WSL expose Agent and Model with only the computer selected, query models for that environment without browsing, and send a standalone request without a project path while persisting its computer/environment identity. The narrow-screen case clears a selected folder while preserving the draft and model. Existing folder, unavailable-CLI, offline-host, and fixed-conversation tests retain their routing checks; their former required-folder expectations now allow standalone drafts. The paired Viewer test starts its remote reply without a folder and checks the owning host and connection.
+
+The remote WSL regression also verifies that automatically choosing another computer's default connection does not overwrite an explicitly remembered account. Folder changes on the same computer preserve the current reply settings. The Viewer offline-race check reloads to request a fresh catalog: starting a standalone draft no longer disables and re-enables catalog readiness.
+
+A real Windows Codex reply in the isolated `com.vinicius.agentstudio.scroll-qa` app completed `STANDALONE_QA_PASSED`. Its successful shell call reported that app's `chat-runtime` as the working directory, and native storage retained `path: ''` with the correct computer/environment and existing-login connection. Evidence: `artifacts/standalone-native.png`, `standalone-native-result.json`, and `standalone-mobile.png`. Managed WSL routing uses the browser fixture for this change; a new live WSL-provider reply was not run.
+
 ## Chat scrolling during replies — 2026-09-12
 
 Reproduced a scroll-position reset with 30 expanded command cards: after a 60px upward wheel movement, the next activity event moved desktop scrollTop from 2726 to 2820 and mobile from 2792 to 2886. The 100px following threshold treated that deliberate reading position as the bottom, and automatic scrolling inherited smooth animation on every event.

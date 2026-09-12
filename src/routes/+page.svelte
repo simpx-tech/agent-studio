@@ -304,6 +304,7 @@
     ) ?? selectedComputer?.environments[0],
   );
   const savedLocations = $derived(knownLocations(workspace, selectedComputerId));
+  const standaloneChoice = $derived(standaloneLocation(selectedComputerId));
   const scopedConnections = $derived(
     selectedLocation
       ? locationConnections(workspace.fleet, selectedLocation)
@@ -1140,7 +1141,7 @@
   async function refreshAccountUsage(force = false) {
     await Promise.all(accountUsageTargets.map((settings) => refreshUsage(settings, force)));
   }
-  function changeSettings(settings: ChatSettings) {
+  function changeSettings(settings: ChatSettings, remember = true) {
     if (!loaded) return;
     // Only the next request's model/reasoning may change while a reply is running.
     if (
@@ -1161,7 +1162,7 @@
       active.settings = settings;
       active.updatedAt = new Date().toISOString();
     } else draftSettings = settings;
-    rememberSettings(workspace.preferences, settings);
+    if (remember) rememberSettings(workspace.preferences, settings);
     saveSoon();
   }
   function chooseProvider(value: string) {
@@ -1227,36 +1228,38 @@
             (l) => locationConnections(workspace.fleet, l).length,
           );
     if (computerId) draftComputerId = computerId;
-    if (
-      location &&
-      !location.path &&
-      workspace.fleet.environments.some(
-        (e) => e.id === location.environmentId && e.computerId === location.computerId,
-      )
-    ) {
-      ensureLocationConnections(workspace.fleet, location);
-      saveSoon();
-      void saveQueue
-        .then(() => refreshConnections(location, true))
-        .catch((e) => {
-          notice = String(e);
-        });
-    }
     const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
     if (connection) {
       const environment = workspace.fleet.environments.find(
         (e) => e.id === connection.environmentId,
       );
       draftComputerId = environment ? computerViewId(environment) : '';
-      draftLocation = workspace.preferences.recentLocations?.find(
-        (l) => locationExecutionId(l) === connection.environmentId,
-      );
+      draftLocation =
+        workspace.preferences.recentLocations?.find(
+          (l) => locationExecutionId(l) === connection.environmentId,
+        ) ??
+        (environment
+          ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
+          : undefined);
       draftSettings.connectionId = connection.id;
-    } else if (draftLocation) {
-      draftComputerId = locationComputerId(draftLocation);
-      if (location) draftSettings = settingsAtLocation(draftSettings, location);
-      else draftSettings.connectionId = preferredConnection(draftSettings.provider, draftLocation);
-    } else delete draftSettings.connectionId;
+    } else {
+      draftLocation ??= standaloneLocation(draftComputerId);
+      if (draftLocation) {
+        ensureLocationConnections(workspace.fleet, draftLocation);
+        draftComputerId = locationComputerId(draftLocation);
+        draftSettings = settingsAtLocation(draftSettings, draftLocation);
+      } else delete draftSettings.connectionId;
+    }
+    if (draftLocation && !draftLocation.path) {
+      const scope = { ...draftLocation };
+      ensureLocationConnections(workspace.fleet, scope);
+      saveSoon();
+      void saveQueue
+        .then(() => refreshConnections(scope, true))
+        .catch((e) => {
+          notice = String(e);
+        });
+    }
     activeId = null;
     prompt = '';
     clearImages();
@@ -1286,9 +1289,23 @@
   }
   function chooseComputer(id: string) {
     if (active || run || activeRunning || selectingLocation || id === selectedComputerId) return;
+    const location = standaloneLocation(id);
+    folderBrowserOpen = false;
+    if (location) {
+      void chooseLocation(location, true).catch((e) => (notice = String(e)));
+      return;
+    }
     locationGeneration++;
     draftComputerId = id;
+    draftLocation = undefined;
+    draftSettings = { ...draftSettings, connectionId: undefined };
     locationPending = true;
+  }
+  function standaloneLocation(computerId: string): ChatLocation | undefined {
+    const environment = computerViews(workspace.fleet).find((c) => c.id === computerId)?.environments[0];
+    return environment
+      ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
+      : undefined;
   }
   function settingsAtLocation(settings: ChatSettings, location: ChatLocation): ChatSettings {
     const installed = providerIds.filter((p) =>
@@ -1317,18 +1334,22 @@
     const conversationId = activeId;
     selectingLocation = true;
     try {
-      if (!verified) {
+      if (!verified && location.path) {
         const listing = await listFolders(location.environmentId, location.path);
         location = { ...location, path: listing.path };
       }
       if (generation !== locationGeneration || conversationId !== activeId) return;
       ensureLocationConnections(workspace.fleet, location);
-      const settings = settingsAtLocation(selectedSettings, location);
+      const sameComputer = selectedComputerId === locationComputerId(location);
+      const settings = sameComputer
+        ? { ...selectedSettings }
+        : settingsAtLocation(selectedSettings, location);
       draftLocation = { ...location };
       locationPending = false;
       draftComputerId = locationComputerId(location);
       rememberLocation(workspace, location);
-      changeSettings(settings);
+      // Automatic computer defaults must not replace the user's remembered account elsewhere.
+      changeSettings(settings, sameComputer);
       const revision = settingsRevision;
       await persist();
       // CLI availability belongs to the environment, not each folder. Reuse known results.
@@ -1344,8 +1365,11 @@
           JSON.stringify(selectedSettings) !== JSON.stringify(settings)
         )
           return;
-        const resolved = settingsAtLocation(selectedSettings, location);
-        if (JSON.stringify(resolved) !== JSON.stringify(selectedSettings)) changeSettings(resolved);
+        const resolved = sameComputer
+          ? selectedSettings
+          : settingsAtLocation(selectedSettings, location);
+        if (JSON.stringify(resolved) !== JSON.stringify(selectedSettings))
+          changeSettings(resolved, sameComputer);
       })().catch((e) => {
         notice = String(e);
       });
@@ -2238,9 +2262,20 @@
                   title={selectedLocation
                     ? selectedLocation.path || 'Standalone chat without a project folder'
                     : undefined}
-                  value={selectedLocation ? locationKey(selectedLocation) : 'browse'}
+                  value={selectedLocation
+                    ? selectedLocation.path
+                      ? locationKey(selectedLocation)
+                      : 'standalone'
+                    : 'browse'}
                   options={[
-                    ...savedLocations.map((l) => ({
+                    ...(standaloneChoice
+                      ? [{
+                          id: 'standalone',
+                          name: 'Standalone',
+                          title: 'Standalone chat without a project folder',
+                        }]
+                      : []),
+                    ...savedLocations.filter((l) => l.path).map((l) => ({
                       id: locationKey(l),
                       name: folderName(l.path),
                       detail:
@@ -2248,7 +2283,7 @@
                         'Environment',
                       title: l.path,
                     })),
-                    ...(selectedLocation &&
+                    ...(selectedLocation?.path &&
                     !savedLocations.some((l) => locationKey(l) === locationKey(selectedLocation))
                       ? [
                           {
@@ -2271,6 +2306,10 @@
                     !!active}
                   onchange={(id) => {
                     if (active) return;
+                    if (id === 'standalone' && standaloneChoice) {
+                      void chooseLocation(standaloneChoice, true).catch((e) => (notice = String(e)));
+                      return;
+                    }
                     const location = savedLocations.find((l) => locationKey(l) === id);
                     if (location) void chooseLocation(location).catch((e) => (notice = String(e)));
                     else folderBrowserOpen = true;
@@ -2413,19 +2452,16 @@
                   : selectedComputer?.name} and connect it to sync.
               </div>
             {:else if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
-                <Folder size={15} />Choose a computer and folder to see its available CLIs.<button
-                  class="text-button"
-                  disabled={!selectedComputer}
-                  onclick={() => (folderBrowserOpen = true)}
-                  >Choose folder<ArrowRight size={13} /></button
-                >
+                <Laptop size={15} />{selectedComputer
+                  ? 'This computer has no available execution environment.'
+                  : 'Choose a computer to select an agent and start chatting.'}
               </div>
             {:else if !selectedStatus && desktop()}<div class="setup-hint">
                 {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.
                 {:else if selectedSettings.connectionId && !selectedConnection}<Plug
                     size={15}
                   />This CLI connection is no longer available. Choose another connection.
-                {:else}<RefreshCw size={15} class="spinning" />Checking this folder’s CLIs…{/if}
+                {:else}<RefreshCw size={15} class="spinning" />Checking this computer’s CLIs…{/if}
               </div>
             {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
                 <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button

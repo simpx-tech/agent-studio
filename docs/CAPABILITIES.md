@@ -1,5 +1,11 @@
 # Workflows, visualizations, artifacts, plans, and tools
 
+## Optional project folder
+
+Choose a computer to select its agent, account, model, and reasoning and start chatting. A project folder is optional: computer-scoped new chats start as **Standalone**, and the Folder picker always offers **Standalone** to clear a draft's project folder. Clearing the folder preserves the draft, attachments, and model settings. Choosing a recent folder or browsing still adds project context; existing conversations keep their fixed computer, folder, and account.
+
+Standalone replies use the selected computer and connection's isolated CLI runtime. The saved conversation retains its computer and environment even though no project path is sent to the provider. Desktop, managed WSL, and paired Viewer use the same selection and routing rules; unavailable or signed-out connections still cannot send, and another computer is never used as a fallback.
+
 ## Agent questions
 
 Codex and Claude can ask questions during a running reply. A **Your input is needed** form appears in the conversation. Choose an option, select several when allowed, or type your own answer. **Send answers** returns all answers to the same running agent. No option is preselected or submitted automatically. **Skip questions** explicitly tells the agent you declined to answer. The normal message draft stays intact, and a delivery error leaves the form available to retry.
