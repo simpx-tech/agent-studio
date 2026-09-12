@@ -19,7 +19,7 @@
   } from '$lib/transport';
 
   let { paired, workspaceSession = 0 }: { paired: boolean; workspaceSession?: number } = $props();
-  type Dialog = 'create' | 'manage' | 'grant' | 'role' | 'rotate' | 'disable' | 'key' | null;
+  type Dialog = 'create' | 'manage' | 'role' | 'rotate' | 'disable' | 'key' | null;
   let administration = $state<WorkspaceAdministration | null>(null);
   let dialog = $state<Dialog>(null);
   let selectedId = $state('');
@@ -49,7 +49,7 @@
     {
       id: 'admin',
       name: 'Administrator',
-      detail: 'Also manages workspaces and issues access keys.',
+      detail: 'Transfers the only administrator role to this workspace.',
     },
   ];
 
@@ -178,6 +178,11 @@
           (a, b) => a.name.localeCompare(b.name),
         ),
       };
+      if (next.role === 'admin' && next.id !== administration.workspaceId) {
+        clearAccess();
+        feedback = 'Administration transferred. This workspace is now a member.';
+        return;
+      }
       if (next.id === administration.workspaceId && next.role !== 'admin') {
         clearAccess();
         return;
@@ -204,8 +209,7 @@
   function save() {
     if (!name.trim() || busy || !accessVerified) return;
     if (dialog === 'create') {
-      if (role === 'admin') dialog = 'grant';
-      else void mutate(() => createManagedWorkspace(name.trim(), role));
+      void mutate(() => createManagedWorkspace(name.trim(), 'member'));
     } else if (selected) {
       if (role !== selected.role) dialog = 'role';
       else void mutate(() => updateManagedWorkspace(selectedId, name.trim(), role));
@@ -239,8 +243,9 @@
       >
     </div>
     <p>
-      Administrators manage workspace access and issue keys that grant access to a workspace. Chats
-      and computer setups stay in their own workspaces.
+      Only one workspace can be the administrator. It manages workspace access and issues keys.
+      Transferring administration makes this workspace a member. Chats and computer setups stay
+      separate.
     </p>
     <ul class="workspace-admin-list">
       {#each workspaces as workspace (workspace.id)}
@@ -295,26 +300,29 @@
             disabled={busy}
           /></label
         >
-        <div class="fleet-field">
-          <span>Role</span><ChoicePicker
-            label="Workspace role"
-            options={roleOptions}
-            value={role}
-            field
-            disabled={busy}
-            onchange={(value) => (role = value as WorkspaceRole)}
-          />
-        </div>
+        {#if dialog === 'manage'}<div class="fleet-field">
+            <span>Role</span><ChoicePicker
+              label="Workspace role"
+              options={roleOptions}
+              value={role}
+              field
+              disabled={busy || !selected?.enabled || selectedId === administration?.workspaceId}
+              onchange={(value) => (role = value as WorkspaceRole)}
+            />
+          </div>{/if}
         <p>
-          Members use their own chats, computers, and agent connections. Administrators can also
-          manage other workspaces and issue keys.
+          {dialog === 'create'
+            ? 'New workspaces start as members. Save the new key before transferring administration from Manage.'
+            : selectedId === administration?.workspaceId
+              ? 'This is the only administrator workspace. To transfer administration, manage another enabled workspace and choose Administrator.'
+              : 'Choosing Administrator transfers the only admin role here. Your current workspace becomes a member.'}
         </p>
         {#if dialog === 'manage' && selected}
           <div class="workspace-key-actions">
             {#if protectedKey}<p>
                 {selectedId === 'owner'
                   ? 'The owner workspace key is managed in the server configuration.'
-                  : 'Ask another administrator to rotate the key or disable this workspace.'}
+                  : 'Transfer administration before rotating or disabling this workspace. The server CLI can rotate its key.'}
               </p>{/if}
             <button
               class="secondary"
@@ -378,33 +386,29 @@
     </ConnectionDialog>
   {:else if dialog}
     <ConnectionDialog
-      title={dialog === 'grant'
-        ? 'Grant administrator access'
-        : dialog === 'role'
-          ? 'Change workspace role'
-          : dialog === 'rotate'
-            ? 'Rotate workspace key'
-            : 'Disable workspace'}
+      title={dialog === 'role'
+        ? 'Transfer administration'
+        : dialog === 'rotate'
+          ? 'Rotate workspace key'
+          : 'Disable workspace'}
       {busy}
       close={() => {
         error = '';
-        dialog = dialog === 'grant' ? 'create' : 'manage';
+        dialog = 'manage';
       }}
     >
       <div class="workspace-confirmation">
         {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
         {@render accessWarning()}
-        {#if dialog === 'grant' || (dialog === 'role' && role === 'admin')}
+        {#if dialog === 'role'}
           <p>
-            Make <strong>{name}</strong> an administrator? Anyone using this workspace can manage other
-            workspaces and issue keys that grant access to them.
+            Transfer administration to <strong>{name}</strong>? It will become the only
+            administrator workspace and can manage other workspaces and issue keys that grant access
+            to them.
           </p>
-        {:else if dialog === 'role'}
           <p>
-            Change <strong>{name}</strong> to a member? It will lose workspace administration
-            access. {selectedId === administration?.workspaceId
-              ? 'Your administration controls will close after this change.'
-              : ''} At least one enabled administrator must remain.
+            Make sure you can open that workspace using its key. Your current workspace will become
+            a member and these administration controls will close immediately.
           </p>
         {:else if dialog === 'rotate'}
           <p>
@@ -425,15 +429,14 @@
             disabled={busy}
             onclick={() => {
               error = '';
-              dialog = dialog === 'grant' ? 'create' : 'manage';
+              dialog = 'manage';
             }}>Back</button
           >
           <button
             class="primary"
             disabled={busy || !accessVerified}
             onclick={() => {
-              if (dialog === 'grant') void mutate(() => createManagedWorkspace(name.trim(), role));
-              else if (dialog === 'role')
+              if (dialog === 'role')
                 void mutate(() => updateManagedWorkspace(selectedId, name.trim(), role));
               else if (dialog === 'rotate' && !protectedKey)
                 void mutate(() => rotateManagedWorkspaceKey(selectedId));
@@ -442,19 +445,19 @@
             }}
             >{busy
               ? 'Saving…'
-              : dialog === 'grant'
-                ? 'Create administrator workspace'
-                : dialog === 'role'
-                  ? 'Change role'
-                  : dialog === 'rotate'
-                    ? 'Rotate key'
-                    : 'Disable workspace'}</button
+              : dialog === 'role'
+                ? 'Transfer administration'
+                : dialog === 'rotate'
+                  ? 'Rotate key'
+                  : 'Disable workspace'}</button
           >
         </div>
       </div>
     </ConnectionDialog>
   {/if}
 {/if}
+
+{#if paired && !isAdmin && feedback}<p role="status">{feedback}</p>{/if}
 
 {#snippet accessWarning()}
   {#if refreshError}

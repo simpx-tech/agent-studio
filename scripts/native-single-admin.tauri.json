@@ -1,0 +1,8 @@
+{
+  "identifier": "com.vinicius.agentstudio.single-admin-qa",
+  "productName": "Agent Studio Single Admin QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [{ "title": "Agent Studio Single Admin QA", "width": 1100, "height": 820 }]
+  }
+}

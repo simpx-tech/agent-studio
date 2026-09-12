@@ -60,19 +60,16 @@ async function expectNoStoredKeys(page: Page, ...keys: string[]) {
   for (const key of keys) expect(clientStorage).not.toContain(key);
 }
 
-async function createForm(page: Page, name: string, administrator = false) {
+async function createForm(page: Page, name: string) {
   await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
   const form = page.getByRole('dialog', { name: 'Create workspace', exact: true });
   await form.getByLabel('Workspace name', { exact: true }).fill(name);
-  if (administrator) {
-    await form.getByRole('combobox', { name: 'Workspace role' }).click();
-    await page.getByRole('option', { name: /^Administrator/ }).click();
-  } else
-    await expect(form.getByRole('combobox', { name: 'Workspace role' })).toContainText('Member');
+  await expect(form.getByRole('combobox', { name: 'Workspace role' })).toHaveCount(0);
+  await expect(form).toContainText('New workspaces start as members');
   return form;
 }
 
-test('administrators create and rename workspaces, grant roles, and disclose keys only once', async ({
+test('the sole administrator creates members and transfers administration atomically', async ({
   browser,
 }, testInfo) => {
   const f = await hostedAdministration();
@@ -134,14 +131,20 @@ test('administrators create and rename workspaces, grant roles, and disclose key
     await owner.getByRole('combobox', { name: 'Workspace role' }).click();
     await owner.getByRole('option', { name: /^Administrator/ }).click();
     await owner.getByRole('button', { name: 'Save changes', exact: true }).click();
-    const confirm = owner.getByRole('dialog', { name: 'Change workspace role', exact: true });
+    const confirm = owner.getByRole('dialog', { name: 'Transfer administration', exact: true });
     await expect(confirm).toContainText('manage other workspaces and issue keys');
-    await confirm.getByRole('button', { name: 'Change role', exact: true }).click();
+    await expect(confirm).toContainText('Your current workspace will become a member');
+    await confirm.getByRole('button', { name: 'Transfer administration', exact: true }).click();
     await expect(owner.getByRole('dialog')).toHaveCount(0);
-    await expect(owner.locator(`[data-workspace-id="${guestId}"]`)).toContainText(
-      'Guest administrator',
-    );
+    await expect(
+      owner.getByRole('heading', { name: 'Workspace administration', exact: true }),
+    ).toHaveCount(0);
+    await expect(owner.getByRole('status').filter({ hasText: 'Administration transferred' })).toBeVisible();
     expect((await f.api(guestToken)).body.role).toBe('admin');
+    expect((await f.api(f.ownerToken)).body.role).toBe('member');
+    expect(
+      (await f.api(guestToken)).body.workspaces.filter((entry: any) => entry.role === 'admin'),
+    ).toHaveLength(1);
     await guest.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(
       guest.getByRole('heading', { name: 'Workspace administration', exact: true }),
@@ -154,32 +157,41 @@ test('administrators create and rename workspaces, grant roles, and disclose key
     expect((await f.api(f.ownerToken, 'GET', 'state')).body.workspace).toEqual(emptyShared());
     await expectNoStoredKeys(owner, f.ownerToken, guestToken);
     await expectNoStoredKeys(guest, f.ownerToken, guestToken);
-    await owner.screenshot({
+    await guest.screenshot({
       path: testInfo.outputPath('workspace-administration-desktop.png'),
       fullPage: true,
     });
-    // Transfer administration using the actual role controls. The former owner
-    // loses its panel immediately; the remaining administrator cannot demote itself.
-    await owner.getByRole('button', { name: 'Manage workspace Owner', exact: true }).click();
-    await owner.getByRole('combobox', { name: 'Workspace role' }).click();
-    await owner.getByRole('option', { name: /^Member/ }).click();
-    await owner.getByRole('button', { name: 'Save changes', exact: true }).click();
-    await owner.getByRole('button', { name: 'Change role', exact: true }).click();
-    await expect(
-      owner.getByRole('heading', { name: 'Workspace administration', exact: true }),
-    ).toHaveCount(0);
-    await expect(owner.getByRole('dialog')).toHaveCount(0);
-    expect((await f.api(f.ownerToken)).body.role).toBe('member');
     await guest
       .getByRole('button', { name: 'Manage workspace Guest administrator', exact: true })
       .click();
-    await guest.getByRole('combobox', { name: 'Workspace role' }).click();
-    await guest.getByRole('option', { name: /^Member/ }).click();
-    await guest.getByRole('button', { name: 'Save changes', exact: true }).click();
-    const finalAdmin = guest.getByRole('dialog', { name: 'Change workspace role', exact: true });
-    await finalAdmin.getByRole('button', { name: 'Change role', exact: true }).click();
-    await expect(finalAdmin.getByRole('alert')).toContainText('at least one enabled administrator');
+    await expect(guest.getByRole('combobox', { name: 'Workspace role' })).toBeDisabled();
+    expect(
+      (
+        await f.api(guestToken, 'PUT', `workspace-admin/workspaces/${guestId}`, {
+          name: 'Guest administrator',
+          role: 'member',
+        })
+      ).status,
+    ).toBe(409);
     expect((await f.api(guestToken)).body.role).toBe('admin');
+    await guest.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await guest.getByRole('button', { name: 'Manage workspace Owner', exact: true }).click();
+    await guest.getByRole('combobox', { name: 'Workspace role' }).click();
+    await guest.getByRole('option', { name: /^Administrator/ }).click();
+    await guest.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await guest.getByRole('button', { name: 'Transfer administration', exact: true }).click();
+    await expect(
+      guest.getByRole('heading', { name: 'Workspace administration', exact: true }),
+    ).toHaveCount(0);
+    await owner.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(
+      owner.getByRole('heading', { name: 'Workspace administration', exact: true }),
+    ).toBeVisible();
+    expect(
+      (await f.api(f.ownerToken)).body.workspaces
+        .filter((entry: any) => entry.role === 'admin')
+        .map((entry: any) => entry.id),
+    ).toEqual(['owner']);
     expect(errors).toEqual([]);
   } finally {
     await Promise.all([ownerContext.close(), guestContext.close()]);
@@ -187,7 +199,7 @@ test('administrators create and rename workspaces, grant roles, and disclose key
   }
 });
 
-test('phone administrators confirm elevated access, rotate keys, and disable a workspace', async ({
+test('phone administrators create members, rotate keys, and disable a workspace', async ({
   browser,
 }, testInfo) => {
   const f = await hostedAdministration();
@@ -202,22 +214,15 @@ test('phone administrators confirm elevated access, rotate keys, and disable a w
   try {
     await page.goto(f.url);
     await pair(page, f.ownerToken);
-    const form = await createForm(page, 'Phone administrator', true);
+    const form = await createForm(page, 'Phone member');
     await form.getByRole('button', { name: 'Create workspace', exact: true }).click();
-    const grant = page.getByRole('dialog', { name: 'Grant administrator access', exact: true });
-    await expect(grant).toContainText('manage other workspaces and issue keys');
-    await grant
-      .getByRole('button', { name: 'Create administrator workspace', exact: true })
-      .click();
     await expect(page.getByRole('dialog', { name: 'Workspace key', exact: true })).toBeVisible();
     const originalKey = await page.getByLabel('New workspace key', { exact: true }).inputValue();
-    expect((await f.api(originalKey)).body.role).toBe('admin');
+    expect((await f.api(originalKey)).body.role).toBe('member');
     await expectNoStoredKeys(page, originalKey, f.ownerToken);
     await page.getByRole('button', { name: 'Done', exact: true }).click();
 
-    await page
-      .getByRole('button', { name: 'Manage workspace Phone administrator', exact: true })
-      .click();
+    await page.getByRole('button', { name: 'Manage workspace Phone member', exact: true }).click();
     await page.getByRole('button', { name: 'Rotate key', exact: true }).click();
     const rotation = page.getByRole('dialog', { name: 'Rotate workspace key', exact: true });
     await expect(rotation).toContainText('browser sessions will stop working');
@@ -230,16 +235,14 @@ test('phone administrators confirm elevated access, rotate keys, and disable a w
     await expectNoStoredKeys(page, originalKey, nextKey, f.ownerToken);
     await page.getByRole('button', { name: 'Done', exact: true }).click();
 
-    await page
-      .getByRole('button', { name: 'Manage workspace Phone administrator', exact: true })
-      .click();
+    await page.getByRole('button', { name: 'Manage workspace Phone member', exact: true }).click();
     await page.getByRole('button', { name: 'Disable workspace', exact: true }).click();
     const disabling = page.getByRole('dialog', { name: 'Disable workspace', exact: true });
     await expect(disabling).toContainText('Saved chats and settings are kept');
     await disabling.getByRole('button', { name: 'Disable workspace', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(
-      page.locator('.workspace-admin-row').filter({ hasText: 'Phone administrator' }),
+      page.locator('.workspace-admin-row').filter({ hasText: 'Phone member' }),
     ).toContainText('Disabled');
     expect((await f.api(nextKey)).status).toBe(401);
     expect(

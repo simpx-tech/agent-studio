@@ -35,7 +35,7 @@ const entrySchema = z.object({
   tokenHash: hex,
   sessionSecret: hex,
 });
-const registrySchema = z
+const legacyRegistrySchema = z
   .object({
     version: z.literal(1),
     owner: ownerSchema.default({ name: 'Owner', role: 'admin' }),
@@ -49,6 +49,22 @@ const registrySchema = z
       value.owner.role === 'admin' ||
       value.workspaces.some((entry) => entry.enabled && entry.role === 'admin'),
   );
+const registrySchema = z
+  .object({
+    version: z.literal(2),
+    owner: ownerSchema,
+    workspaces: z.array(entrySchema.extend({ role: workspaceRoleSchema })).max(100),
+  })
+  .refine(
+    (value) => new Set(value.workspaces.map((entry) => entry.id)).size === value.workspaces.length,
+  )
+  .refine((value) => {
+    const admins = value.workspaces.filter((entry) => entry.role === 'admin');
+    return (
+      Number(value.owner.role === 'admin') + admins.length === 1 &&
+      admins.every((entry) => entry.enabled)
+    );
+  });
 type Entry = z.infer<typeof entrySchema>;
 type Registry = z.infer<typeof registrySchema>;
 export type RelayWorkspace = {
@@ -88,15 +104,22 @@ export class WorkspaceAdminError extends Error {
   }
 }
 function retainAdministrator(registry: Registry) {
-  if (
-    registry.owner.role !== 'admin' &&
-    !registry.workspaces.some((entry) => entry.enabled && entry.role === 'admin')
-  )
+  if (!registrySchema.safeParse(registry).success)
     throw new WorkspaceAdminError(
       409,
       'final_admin',
-      'Keep at least one enabled administrator workspace.',
+      'Keep exactly one enabled administrator workspace. Transfer administration to another workspace first.',
     );
+}
+function assignAdministrator(registry: Registry, id: string) {
+  if (id !== 'owner' && !findEntry(registry, id).enabled)
+    throw new WorkspaceAdminError(
+      409,
+      'workspace_disabled',
+      'Enable this workspace before transferring administration to it.',
+    );
+  registry.owner.role = id === 'owner' ? 'admin' : 'member';
+  for (const entry of registry.workspaces) entry.role = entry.id === id ? 'admin' : 'member';
 }
 function findEntry(registry: Registry, id: string) {
   const entry = registry.workspaces.find((item) => item.id === id);
@@ -122,6 +145,12 @@ function uniqueName(registry: Registry, name: string, id?: string) {
     );
 }
 function createEntry(registry: Registry, name: string, role: WorkspaceRole, now: () => number) {
+  if (role === 'admin')
+    throw new WorkspaceAdminError(
+      409,
+      'create_member_first',
+      'Create a member workspace and save its key before transferring administration to it.',
+    );
   if (registry.workspaces.length >= 100)
     throw new WorkspaceAdminError(
       409,
@@ -149,7 +178,11 @@ function editEntry(registry: Registry, id: string, name?: string, role?: Workspa
     if (nextName !== entry.name) uniqueName(registry, nextName, id);
     entry.name = nextName;
   }
-  if (role !== undefined) entry.role = workspaceRoleSchema.parse(role);
+  if (role !== undefined) {
+    const nextRole = workspaceRoleSchema.parse(role);
+    if (nextRole === 'admin') assignAdministrator(registry, id);
+    else entry.role = nextRole;
+  }
   retainAdministrator(registry);
   return id === 'owner' ? publicOwner(registry) : publicEntry(findEntry(registry, id));
 }
@@ -183,10 +216,23 @@ function readRegistry(directory: string): Registry {
   const file = join(directory, 'workspaces.json');
   try {
     if (statSync(file).size > 128_000) throw new Error();
-    return registrySchema.parse(JSON.parse(readFileSync(file, 'utf8')));
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    if (value.version !== 1) return registrySchema.parse(value);
+    const legacy = legacyRegistrySchema.parse(value);
+    // Preserve the owner's authority when present; otherwise retain the oldest
+    // enabled admin (ID breaks timestamp ties), and demote every other workspace.
+    const adminId =
+      legacy.owner.role === 'admin'
+        ? 'owner'
+        : legacy.workspaces
+            .filter((entry) => entry.enabled && entry.role === 'admin')
+            .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0].id;
+    const registry: Registry = { ...legacy, version: 2 };
+    assignAdministrator(registry, adminId);
+    return registrySchema.parse(registry);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-      return { version: 1, owner: { name: 'Owner', role: 'admin' }, workspaces: [] };
+      return { version: 2, owner: { name: 'Owner', role: 'admin' }, workspaces: [] };
     throw new Error('Workspace registry is unreadable; preserved without overwriting.');
   }
 }
@@ -280,6 +326,8 @@ export function disableWorkspace({
 }
 
 export function workspaceRegistry(directory: string, ownerToken: string) {
+  // Persist legacy role consolidation before serving any authenticated request.
+  updateRegistry(directory, () => {});
   const owner = (registry: Registry): RelayWorkspace => ({
     id: 'owner',
     name: registry.owner.name,
@@ -336,7 +384,7 @@ export function workspaceRegistry(directory: string, ownerToken: string) {
       throw new WorkspaceAdminError(
         409,
         'self_workspace',
-        'Ask another administrator to rotate or disable your current workspace.',
+        'Transfer administration before rotating or disabling this workspace, or use the server CLI for key rotation.',
       );
   }
   return {

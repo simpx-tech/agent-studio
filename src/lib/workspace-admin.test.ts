@@ -5,7 +5,12 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../../relay/server.ts';
-import { createWorkspace, listWorkspaces } from '../../relay/workspaces.ts';
+import {
+  createWorkspace,
+  listWorkspaces,
+  rotateWorkspace,
+  disableWorkspace,
+} from '../../relay/workspaces.ts';
 import { emptyShared } from './sync';
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -117,10 +122,90 @@ async function fixture() {
 }
 
 describe('workspace administration over real HTTP', () => {
+  it('creates members first, rejects disabled transfer targets, and never disables the only admin', async () => {
+    const f = await fixture();
+    const before = readFileSync(join(f.directory, 'workspaces.json'), 'utf8');
+    const refused = await f.call(f.ownerKey, 'POST', 'workspace-admin/workspaces', {
+      name: 'Second admin',
+      role: 'admin',
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('create_member_first');
+    expect(() =>
+      createWorkspace({ directory: f.directory, name: 'CLI admin', role: 'admin' }),
+    ).toThrow('Create a member');
+    expect(readFileSync(join(f.directory, 'workspaces.json'), 'utf8')).toBe(before);
+    disableWorkspace({ directory: f.directory, id: f.bob.workspace.id });
+    const disabled = await f.edit(f.ownerKey, f.bob.workspace.id, 'Disabled admin', 'admin');
+    expect(disabled.status).toBe(409);
+    expect(disabled.body.code).toBe('workspace_disabled');
+    expect(
+      (await f.call(f.ownerKey)).body.workspaces.filter((entry: any) => entry.role === 'admin'),
+    ).toHaveLength(1);
+    expect((await f.edit(f.ownerKey, f.alice.workspace.id, 'Only admin', 'admin')).status).toBe(
+      200,
+    );
+    expect(() => disableWorkspace({ directory: f.directory, id: f.alice.workspace.id })).toThrow(
+      'exactly one',
+    );
+    const reenabled = rotateWorkspace({ directory: f.directory, id: f.bob.workspace.id });
+    expect((await f.call(reenabled.token)).body.role).toBe('member');
+    expect(
+      (await f.call(f.alice.token)).body.workspaces.filter((entry: any) => entry.role === 'admin'),
+    ).toHaveLength(1);
+  });
+
+  it.each([true, false])(
+    'consolidates legacy multiple admins durably while preserving keys and sessions (owner admin: %s)',
+    async (ownerAdmin) => {
+      const f = await fixture();
+      const aliceSession = await f.pair(f.alice.token);
+      const file = join(f.directory, 'workspaces.json');
+      const legacy = JSON.parse(readFileSync(file, 'utf8'));
+      legacy.version = 1;
+      legacy.owner.role = ownerAdmin ? 'admin' : 'member';
+      for (const entry of legacy.workspaces) entry.role = 'admin';
+      legacy.workspaces[0].createdAt = 1;
+      legacy.workspaces[1].createdAt = 2;
+      writeFileSync(file, JSON.stringify(legacy));
+      await f.restart();
+      const migrated = JSON.parse(readFileSync(file, 'utf8'));
+      expect(migrated.version).toBe(2);
+      const adminKey = ownerAdmin ? f.ownerKey : f.alice.token;
+      const status = await f.call(adminKey);
+      expect(
+        status.body.workspaces
+          .filter((entry: any) => entry.role === 'admin')
+          .map((entry: any) => entry.id),
+      ).toEqual([ownerAdmin ? 'owner' : f.alice.workspace.id]);
+      for (let i = 0; i < legacy.workspaces.length; i++) {
+        expect(migrated.workspaces[i].tokenHash).toBe(legacy.workspaces[i].tokenHash);
+        expect(migrated.workspaces[i].sessionSecret).toBe(legacy.workspaces[i].sessionSecret);
+      }
+      expect((await f.request('GET', 'state', undefined, aliceSession)).status).toBe(200);
+      expect((await f.call(f.bob.token)).body.role).toBe('member');
+      await f.restart();
+      expect((await f.call(adminKey)).body.role).toBe('admin');
+    },
+  );
+
+  it('fails closed on a version2 registry containing multiple admins instead of granting extra authority', async () => {
+    const f = await fixture();
+    const file = join(f.directory, 'workspaces.json');
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    stored.workspaces[0].role = 'admin';
+    const corrupted = JSON.stringify(stored);
+    writeFileSync(file, corrupted);
+    expect((await f.call(f.ownerKey)).status).toBe(503);
+    expect((await f.call(f.alice.token)).status).toBe(503);
+    expect(readFileSync(file, 'utf8')).toBe(corrupted);
+  });
+
   it('migrates legacy roles to owner admin and members without disclosing their chats or setup', async () => {
     const f = await fixture();
     const file = join(f.directory, 'workspaces.json');
     const legacy = JSON.parse(readFileSync(file, 'utf8'));
+    legacy.version = 1;
     delete legacy.owner;
     for (const entry of legacy.workspaces) delete entry.role;
     writeFileSync(file, JSON.stringify(legacy));
@@ -169,11 +254,11 @@ describe('workspace administration over real HTTP', () => {
     expect((await f.call(created.body.token, 'GET', 'state')).body.workspace).toEqual(
       emptyShared(),
     );
-    const updated = await f.edit(f.ownerKey, created.body.workspace.id, 'Renamed person', 'admin');
+    const updated = await f.edit(f.ownerKey, created.body.workspace.id, 'Renamed person', 'member');
     expect(updated.status).toBe(200);
-    expect(updated.body.workspace).toMatchObject({ name: 'Renamed person', role: 'admin' });
+    expect(updated.body.workspace).toMatchObject({ name: 'Renamed person', role: 'member' });
     expect(updated.body).not.toHaveProperty('token');
-    expect((await f.call(created.body.token)).body.role).toBe('admin');
+    expect((await f.call(created.body.token)).body.role).toBe('member');
     const rotated = await f.call(
       f.ownerKey,
       'POST',
@@ -183,9 +268,13 @@ describe('workspace administration over real HTTP', () => {
     expect(rotated.status).toBe(200);
     expect(rotated.body.token).not.toBe(created.body.token);
     expect((await f.call(created.body.token)).status).toBe(401);
+    expect(
+      (await f.edit(f.ownerKey, created.body.workspace.id, 'Renamed person', 'admin')).status,
+    ).toBe(200);
     expect((await f.call(rotated.body.token)).body.role).toBe('admin');
+    expect((await f.call(f.ownerKey)).body.role).toBe('member');
     for (const response of [
-      await f.call(f.ownerKey),
+      await f.call(rotated.body.token),
       await f.call(rotated.body.token, 'GET', 'state'),
     ]) {
       const text = JSON.stringify(response.body);
@@ -261,18 +350,19 @@ describe('workspace administration over real HTTP', () => {
     expect((await f.edit(f.alice.token, 'owner', 'Owner restored', 'admin')).status).toBe(200);
   });
 
-  it('serializes concurrent role changes so at least one enabled admin always remains', async () => {
+  it('serializes competing transfers so exactly one enabled admin remains and the former admin loses authority', async () => {
     const f = await fixture();
-    expect((await f.edit(f.ownerKey, f.alice.workspace.id, 'Alice admin', 'admin')).status).toBe(
-      200,
-    );
     const results = await Promise.all([
-      f.edit(f.ownerKey, 'owner', 'Owner', 'member'),
-      f.edit(f.alice.token, f.alice.workspace.id, 'Alice admin', 'member'),
+      f.edit(f.ownerKey, f.alice.workspace.id, 'Alice admin', 'admin'),
+      f.edit(f.ownerKey, f.bob.workspace.id, 'Bob admin', 'admin'),
     ]);
-    expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
-    expect(results.find((result) => result.status === 409)?.body.code).toBe('final_admin');
-    const roles = await Promise.all([f.call(f.ownerKey), f.call(f.alice.token)]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 403]);
+    expect(results.find((result) => result.status === 403)?.body.code).toBe('admin_required');
+    const roles = await Promise.all([
+      f.call(f.ownerKey),
+      f.call(f.alice.token),
+      f.call(f.bob.token),
+    ]);
     expect(roles.filter((result) => result.body.role === 'admin')).toHaveLength(1);
   });
 
@@ -331,9 +421,7 @@ describe('workspace administration over real HTTP', () => {
         { name: 'Delayed unauthorized creation', role: 'admin' },
         headers,
       );
-      expect(
-        (await f.edit(f.ownerKey, f.alice.workspace.id, 'Alice member', 'member')).status,
-      ).toBe(200);
+      expect((await f.edit(f.alice.token, 'owner', 'Owner', 'admin')).status).toBe(200);
       pending.release();
       const denied = await pending.completed;
       expect(denied.status).toBe(403);
@@ -370,16 +458,7 @@ describe('workspace administration over real HTTP', () => {
       {},
       { authorization: `Bearer ${f.alice.token}`, 'x-environment-id': f.actor },
     );
-    expect(
-      (
-        await f.call(
-          f.ownerKey,
-          'POST',
-          `workspace-admin/workspaces/${f.alice.workspace.id}/rotate`,
-          {},
-        )
-      ).status,
-    ).toBe(200);
+    rotateWorkspace({ directory: f.directory, id: f.alice.workspace.id });
     pending.release();
     expect((await pending.completed).status).toBe(401);
     expect((await f.call(f.bob.token)).status).toBe(200);
@@ -501,7 +580,7 @@ describe('workspace administration over real HTTP', () => {
     expect(JSON.parse(demote.stdout)).toMatchObject({ id: 'owner', role: 'member' });
     const denied = run('role', f.alice.workspace.id, 'member');
     expect(denied.status).toBe(1);
-    expect(denied.stderr).toContain('at least one enabled administrator');
+    expect(denied.stderr).toContain('exactly one enabled administrator');
     const list = run('list');
     expect(list.status).toBe(0);
     expect(JSON.parse(list.stdout)).toHaveLength(3);

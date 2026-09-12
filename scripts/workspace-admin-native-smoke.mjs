@@ -6,7 +6,9 @@ import { createRelay } from '../relay/server.ts';
 import { editWorkspace } from '../relay/workspaces.ts';
 import { nativePage } from './native-page.mjs';
 
-const output = resolve('artifacts/workspace-admin-native');
+const output = resolve(
+  process.env.AGENT_STUDIO_ADMIN_QA_OUTPUT ?? 'artifacts/workspace-admin-native',
+);
 const directory = join(output, 'relay');
 await mkdir(directory, { recursive: true });
 // Fixed synthetic loopback fixture permits reruns without replacing the native binding.
@@ -18,10 +20,10 @@ await new Promise((done, reject) => {
   server.listen(4349, '127.0.0.1', done);
 });
 const url = 'http://127.0.0.1:4349';
-const page = await nativePage(9520);
+const page = await nativePage(Number(process.env.AGENT_STUDIO_ADMIN_QA_PORT ?? 9520));
 assert.equal(
   await page.invoke('plugin:app|identifier'),
-  'com.vinicius.agentstudio.workspace-admin-qa',
+  process.env.AGENT_STUDIO_ADMIN_QA_IDENTIFIER ?? 'com.vinicius.agentstudio.workspace-admin-qa',
 );
 const original = await page.invoke('load_workspace');
 assert.equal(original?.conversations?.length ?? 0, 0, 'Use the isolated QA installation.');
@@ -94,31 +96,41 @@ try {
     0,
   );
 
-  const grant = await request('PUT', `v1/workspace-admin/workspaces/${createdId}`, {
-    name,
-    role: 'admin',
-  });
-  assert.equal(grant.status, 200);
-  assert.equal(grant.body.workspace.role, 'admin');
-  await page.button('Refresh workspaces');
-  await page.waitFor(
-    (id) =>
-      document.querySelector(`[data-workspace-id="${id}"]`)?.innerText.includes('Administrator'),
-    createdId,
-  );
   await page.evaluate(() =>
     document.querySelector('.workspace-administration').scrollIntoView({ block: 'center' }),
   );
   const screenshot = await page.cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(join(output, 'connections.png'), Buffer.from(screenshot.data, 'base64'));
 
-  assert.equal(
-    (await request('PUT', 'v1/workspace-admin/workspaces/owner', { name: 'Owner', role: 'member' }))
-      .status,
-    200,
+  await page.button(`Manage workspace ${name}`);
+  await page.click('dialog [role="combobox"]');
+  await page.evaluate(() => {
+    const option = [...document.querySelectorAll('[role="option"]')].find((option) =>
+      option.innerText.startsWith('Administrator'),
+    );
+    if (!option) throw new Error('Administrator choice unavailable.');
+    option.click();
+  });
+  await page.button('Save changes');
+  await page.waitFor(() =>
+    document
+      .querySelector('dialog')
+      ?.innerText.includes('Your current workspace will become a member'),
   );
-  await page.button('Refresh workspaces');
+  await page.button('Transfer administration');
   await page.waitFor(() => !document.querySelector('.workspace-administration'));
+  const transferred = await fetch(`${url}/v1/workspace-admin`, {
+    headers: { authorization: `Bearer ${issued}`, 'x-environment-id': crypto.randomUUID() },
+  });
+  assert.equal(transferred.status, 200);
+  const administration = await transferred.json();
+  assert.deepEqual(
+    administration.workspaces
+      .filter((workspace) => workspace.role === 'admin')
+      .map((workspace) => workspace.id),
+    [createdId],
+  );
+  assert.equal((await request('GET', 'v1/workspace-admin')).body.role, 'member');
   assert.equal(
     (await request('POST', 'v1/workspace-admin/workspaces', { name: 'Forbidden', role: 'admin' }))
       .status,
@@ -139,6 +151,7 @@ try {
         nativeCreateFromUi: true,
         memberIsolation: true,
         nativeRoleAssignment: true,
+        exactlyOneAdmin: true,
         oneTimeKeyNotPersisted: true,
         demotionHidesControls: true,
         demotedMutationRejected: true,

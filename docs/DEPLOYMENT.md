@@ -14,7 +14,7 @@ Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d
 
 ## Connect a desktop and phone
 
-To share this VPS with another person while keeping chats and computers separate, create a workspace from **Connections → Workspace administration** in an admin workspace. The existing owner workspace starts as admin; it can grant another workspace admin access and transfer administration. [Workspace administration and CLI recovery](PRIVATE-WORKSPACES.md) cover roles and key management. Keep the original owner key private. Preserve the complete `/var/lib/agent-studio` tree on upgrades and backups, including `workspaces.json` and each additional `workspaces/<id>/` directory. Creating, changing roles, rotating keys, and disabling additional workspaces do not require a service restart.
+To share this VPS with another person while keeping chats and computers separate, create a member workspace from **Connections → Workspace administration** in the sole admin workspace. The existing owner starts as admin. Transferring administration makes the target the only admin and the previous admin a member atomically. [Workspace administration and CLI recovery](PRIVATE-WORKSPACES.md) cover roles and key management. Keep the original owner key private. Preserve the complete `/var/lib/agent-studio` tree on upgrades and backups, including `workspaces.json` and each additional `workspaces/<id>/` directory. Creating, transferring administration, rotating keys, and disabling member workspaces do not require a service restart.
 
 Open **Connections → Set up sync** in the desktop app, enter the HTTPS endpoint and pairing key, and keep the desktop app open. Open the same endpoint on the phone and pair with that key. Provider sign-in stays on the desktop. Deploying the server does not automatically upload or switch an existing desktop workspace.
 
@@ -25,6 +25,8 @@ The IP-based hostname needs no user-managed DNS record. To use `studio.simpx.net
 Read status with `systemctl status agent-studio` and logs with `journalctl -u agent-studio`. Do not print `relay.env`. The server only hosts the PWA and relay; it does not contain provider CLI credentials.
 
 Build and test the final candidate before deployment. Create a new release directory, install dependencies using its lockfile, build the frontend, and run tests as an unprivileged user. Keep release files root-owned after building. Checksum source archives after transfer. Point `current` at the new release and restart only `agent-studio`. Keep the previous release for rollback. Never overwrite persistent data or generate a replacement pairing key as part of an ordinary update.
+
+The single-admin upgrade writes version 2 of the private workspace registry at startup. Keep the pre-upgrade registry backup: older relay releases cannot read version 2. If startup fails and a rollback is needed, stop the service, restore only the registry from that private backup (or remove the new registry if none existed), then restart the previous release. Preserve the current chat and session files.
 
 A restart preserves browser sessions when `/var/lib/agent-studio` and the pairing key are retained. Sessions are saved separately in `browser-sessions.json` with mode 0600 and keyed ID digests; keep it outside release directories and public assets. Pairing-key rotation invalidates these sessions. The first upgrade from the older memory-only implementation requires devices to pair once again; subsequent releases retain them. Unreadable session files fail startup without overwriting the file.
 
