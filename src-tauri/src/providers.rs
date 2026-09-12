@@ -468,7 +468,8 @@ impl RunRequest {
         for message in &self.messages {
             if !visualize::valid_history(&message.visualizations)
                 || (!message.visualizations.is_empty()
-                    && (message.role != "assistant" || !self.tools_enabled()))
+                    && (message.role != "assistant"
+                        || !(self.uses_codex_server() || self.uses_claude_visualizer())))
             {
                 return Err("Invalid visualization history".into());
             }
@@ -493,7 +494,10 @@ impl RunRequest {
             if message.images.is_empty() {
                 continue;
             }
-            if !self.tools_enabled() || message.role != "user" {
+            if !self.tools_enabled()
+                || !matches!(self.agent.provider.as_str(), "codex" | "claude")
+                || message.role != "user"
+            {
                 return Err(
                     "Image attachments are available only in Codex and Claude user messages".into(),
                 );
@@ -518,7 +522,7 @@ impl RunRequest {
         Ok(())
     }
     fn tools_enabled(&self) -> bool {
-        !self.conversation_only && matches!(self.agent.provider.as_str(), "codex" | "claude")
+        !self.conversation_only && valid_provider(&self.agent.provider)
     }
     pub fn uses_codex_server(&self) -> bool {
         self.agent.provider == "codex" && self.tools_enabled()
@@ -570,7 +574,7 @@ impl RunRequest {
         } else {
             "Do not use tools, inspect files, execute commands, or delegate."
         };
-        let visuals = if self.tools_enabled() {
+        let visuals = if self.uses_codex_server() || self.uses_claude_visualizer() {
             visualize::GUIDANCE
         } else {
             ""
@@ -649,6 +653,28 @@ pub fn gemini_hooks() -> serde_json::Value {
     #[cfg(not(windows))]
     let command = format!("printf '%s\\n' '{response}'");
     serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":command,"timeout":10}]}]}})
+}
+fn clear_legacy_gemini_chat_hook(runtime: &Path) -> Result<(), String> {
+    // Older releases generated a deny-all hook here for Gemini chats. Remove
+    // only that exact app-owned hook; project/profile hooks belong to the CLI.
+    let path = runtime.join(".agents/hooks.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("Cannot update the Gemini chat runtime".into()),
+    };
+    if serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .as_ref()
+        == Some(&gemini_hooks())
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot remove the old Gemini chat restriction".into()),
+        }
+    }
+    Ok(())
 }
 pub async fn chat_command(
     request: &RunRequest,
@@ -747,8 +773,7 @@ pub async fn chat_command(
                 c.args([
                     "--tools",
                     "default",
-                    "--permission-mode",
-                    "bypassPermissions",
+                    "--dangerously-skip-permissions",
                     "--settings",
                     r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#,
                     "--mcp-config",
@@ -767,26 +792,33 @@ pub async fn chat_command(
             }
         }
         "gemini" => {
-            prepare_gemini_agent(runtime)?;
             // Antigravity print mode advertises registered workspace roots, not
             // just process cwd. Register the user's folder first as well.
             if let Some(path) = selected {
                 c.arg("--add-dir").arg(path);
             }
-            // Keep the enforced agent/hooks in app data, even when cwd is a project.
-            // Print mode loads them only when the runtime is an explicit workspace.
-            c.arg("--add-dir").arg(runtime);
             c.args([
                 "--input-format",
                 "stream-json",
                 "--output-format",
                 "stream-json",
-                "--agent",
-                "agent-studio-chat",
-                "--disable-slash-commands",
-                "--mode",
-                "plan",
             ]);
+            if request.tools_enabled() {
+                clear_legacy_gemini_chat_hook(runtime)?;
+                c.args(["--dangerously-skip-permissions", "--mode", "accept-edits"]);
+            } else {
+                prepare_gemini_agent(runtime)?;
+                // Background titles have their own runtime and retain deny-all
+                // hooks. Never install these in a selected project directory.
+                c.arg("--add-dir").arg(runtime);
+                c.args([
+                    "--agent",
+                    "agent-studio-chat",
+                    "--disable-slash-commands",
+                    "--mode",
+                    "plan",
+                ]);
+            }
         }
         _ => return Err("Unknown provider".into()),
     }
@@ -1073,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn background_requests_keep_tools_disabled() {
         let runtime = tempfile::tempdir().unwrap();
-        for provider in ["codex", "claude"] {
+        for provider in ["codex", "claude", "gemini"] {
             let mut r = request();
             r.agent.provider = provider.into();
             assert!(r.prompt().contains("Tools are enabled"));
@@ -1104,7 +1136,7 @@ mod tests {
                 assert!(!args
                     .iter()
                     .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
-            } else {
+            } else if provider == "claude" {
                 assert!(args
                     .windows(2)
                     .any(|a| a[0] == "--tools" && a[1].is_empty()));
@@ -1113,11 +1145,22 @@ mod tests {
                     .any(|a| a[0] == "--permission-mode" && a[1] == "dontAsk"));
                 assert!(args.iter().any(|a| a == "--safe-mode"));
                 assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+            } else {
+                assert!(args.windows(2).any(|a| a[0] == "--mode" && a[1] == "plan"));
+                assert!(args
+                    .windows(2)
+                    .any(|a| a[0] == "--agent" && a[1] == "agent-studio-chat"));
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        &std::fs::read_to_string(runtime.path().join(".agents/hooks.json"))
+                            .unwrap()
+                    )
+                    .unwrap(),
+                    gemini_hooks()
+                );
             }
+            assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
         }
-        let mut r = request();
-        r.agent.provider = "gemini".into();
-        assert!(r.prompt().contains("Do not use tools"));
     }
     #[tokio::test]
     async fn selected_folder_is_cli_cwd_and_runtime_files_stay_in_app_data() {
@@ -1163,7 +1206,7 @@ mod tests {
                         "--settings",
                         r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#
                     ));
-                    assert!(args_contain("--permission-mode", "bypassPermissions"));
+                    assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| matches!(
                         a.as_ref(),
                         "--safe-mode" | "--strict-mcp-config" | "--disable-slash-commands"
@@ -1171,8 +1214,13 @@ mod tests {
                 }
                 _ => {
                     assert!(args_contain("--add-dir", project.to_str().unwrap()));
-                    assert!(args_contain("--add-dir", runtime.to_str().unwrap()));
-                    assert!(runtime.join(".agents/hooks.json").is_file());
+                    assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+                    assert!(args_contain("--mode", "accept-edits"));
+                    assert!(!args.iter().any(|a| matches!(
+                        a.as_ref(),
+                        "--agent" | "--disable-slash-commands" | "--sandbox"
+                    )));
+                    assert!(!runtime.join(".agents/hooks.json").exists());
                 }
             }
             assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
@@ -1197,6 +1245,35 @@ mod tests {
                 assert!(!project.join("missing").exists());
             }
         }
+    }
+    #[tokio::test]
+    async fn gemini_chat_removes_only_its_legacy_hook_and_preserves_background_restrictions() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("chat-runtime");
+        let title_runtime = root.path().join("title-runtime");
+        prepare_gemini_agent(&runtime).unwrap();
+        prepare_gemini_agent(&title_runtime).unwrap();
+        let mut r = request();
+        r.agent.provider = "gemini".into();
+        let exe = Executable {
+            provider: "gemini".into(),
+            program: "synthetic-cli".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let command = chat_command(&r, &runtime, &exe).await.unwrap();
+        assert_eq!(command.as_std().get_current_dir(), Some(runtime.as_path()));
+        assert!(!runtime.join(".agents/hooks.json").exists());
+        assert!(title_runtime.join(".agents/hooks.json").is_file());
+        assert!(r.prompt().contains("Tools are enabled"));
+        assert!(!r.prompt().contains(visualize::GUIDANCE));
+        let custom = r#"{"hooks":{"PreToolUse":[]},"custom":true}"#;
+        std::fs::write(runtime.join(".agents/hooks.json"), custom).unwrap();
+        chat_command(&r, &runtime, &exe).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".agents/hooks.json")).unwrap(),
+            custom
+        );
     }
     #[tokio::test]
     async fn wsl_folder_is_passed_as_data_to_the_linux_launcher() {

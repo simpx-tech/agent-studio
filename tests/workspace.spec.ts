@@ -1026,7 +1026,7 @@ test('composer shows three usage bars below the input and keeps tool access in t
     await page.getByRole('option', { name: provider, exact: true }).click();
     await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveAttribute(
       'title',
-      provider === 'Gemini' ? /cannot use tools/ : /Full access/,
+      /Full access.*without approval prompts/,
     );
     await expect(strip.getByRole('progressbar')).toHaveCount(3);
   }

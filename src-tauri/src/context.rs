@@ -573,8 +573,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             false,
             0,
         );
-        scan.note("Antigravity does not expose a verified context inventory here. Listed files are candidates only; memory availability is unknown. Agent Studio runs Gemini in conversation-only mode with skill commands disabled.");
-        scan.note("MCP servers are unavailable in Agent Studio's Gemini conversation-only mode.");
+        scan.note("Antigravity does not expose a verified context inventory here. Listed files are candidates only; memory availability and actual skill loading are unknown. Gemini chats use the CLI's configured tools with full access and no approval prompts.");
+        scan.note("Antigravity MCP status is not inspected here. Configured servers may be available to the chat; their connection state is unknown.");
     }
     scan
 }

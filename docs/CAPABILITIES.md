@@ -76,7 +76,7 @@ Tauri's native file-drop interception is disabled to let the WebView deliver fil
 
 ## Tools and activity
 
-Claude and Codex chats can load the selected CLI profile's skills, search the web, and delegate work to sub-agents. Ask for these actions in the composer. Codex chat explicitly enables live web search and multi-agent tools. Claude loads its default built-in tools and configured project/profile resources. Gemini remains conversation-only.
+All chat providers run their tools with full access and without permission prompts. Claude and Codex chats can load the selected CLI profile's skills, search the web, and delegate work to sub-agents. Ask for these actions in the composer. Codex chat explicitly enables live web search and multi-agent tools. Claude loads its default built-in tools and configured project/profile resources. Gemini/Antigravity uses its default agent, configured resources, and `--dangerously-skip-permissions` in `accept-edits` mode; available tools depend on that CLI. Gemini's native skill catalog and MCP connection status are not inspected by Agent Studio.
 
 Open **Model context → Skills** to inspect available resources. **Use in next message** inserts a skill request into the current draft and returns focus to the composer. Disabled skills cannot be selected. This action does not send a message or claim that a skill has loaded.
 

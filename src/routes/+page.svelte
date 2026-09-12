@@ -2236,11 +2236,7 @@
               <div class="chat-setting agent-setting">
                 <span>Agent</span><ChoicePicker
                   label="Agent"
-                  title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}${
-                    selectedSettings.provider === 'gemini'
-                      ? 'Gemini conversations cannot use tools.'
-                      : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.'
-                  }`}
+                  title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.`}
                   value={selectedAgentOption}
                   options={agentOptions}
                   fallbackToFirst={false}
