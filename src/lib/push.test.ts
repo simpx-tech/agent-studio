@@ -69,6 +69,86 @@ it('sends the exact current pending count and refreshes it on retries instead of
   await f.service.drain();
   expect(JSON.parse(f.send.mock.calls[1][1]).pendingCount).toBe(0);
 });
+it('suppresses viewed chat events across devices without replay, while other chats and tests still notify', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  const id = done.conversations[0].id;
+  f.service.view('desktop:tab', 1, id);
+  f.service.changed(emptyShared(), done);
+  await f.service.drain();
+  expect(f.send).not.toHaveBeenCalled();
+  f.service.view('desktop:tab', 2, null);
+  f.service.changed(emptyShared(), done);
+  await f.service.drain();
+  expect(f.send).not.toHaveBeenCalled();
+  f.service.view('desktop:tab', 3, id);
+  f.service.changed(emptyShared(), workspace('error'));
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  f.service.test('session');
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(f.send.mock.calls[1][1]).kind).toBe('test');
+  expect(readFileSync(join(f.directory, 'web-push.json'), 'utf8')).not.toContain('desktop:tab');
+});
+it('uses ordered per-tab leases, expires crashed clients, and ignores signed-out viewers', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  const id = done.conversations[0].id;
+  f.service.view('tab-a', 2, null, 'session');
+  f.service.view('tab-a', 1, id, 'session'); // An older focus request arrives after blur.
+  f.service.changed(emptyShared(), done);
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  const next = workspace('cancelled');
+  f.service.view('tab-a', 3, next.conversations[0].id, 'session');
+  f.service.view('tab-b', 1, null, 'session'); // Another tab cannot erase it.
+  f.service.changed(emptyShared(), next);
+  await f.service.drain();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  const expired = workspace('complete');
+  f.service.view('tab-a', 4, expired.conversations[0].id, 'session');
+  f.advance(15_000);
+  f.service.changed(emptyShared(), expired);
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  const signedOut = workspace('complete');
+  f.active.add('viewer');
+  f.service.view('signed-out', 1, signedOut.conversations[0].id, 'viewer');
+  f.active.delete('viewer');
+  f.service.changed(emptyShared(), signedOut);
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+});
+it('drops queued retries when their chat is viewed and deduplicates job/checkpoint paths', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  const conversationId = done.conversations[0].id;
+  const runId = done.conversations[0].messages[0].runId!;
+  f.send.mockRejectedValueOnce({ statusCode: 503 });
+  f.service.changed(emptyShared(), done);
+  await vi.waitFor(() => expect(f.service.status('session').deliveryFailed).toBe(true));
+  f.service.view('desktop', 1, conversationId);
+  f.advance(10_001);
+  await f.service.drain();
+  f.service.view('desktop', 2, null);
+  f.advance(30_000);
+  await f.service.drain();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  const questionRun = crypto.randomUUID();
+  f.service.view('desktop', 3, conversationId);
+  f.service.jobUpdated({
+    id: questionRun,
+    source: crypto.randomUUID(),
+    target: crypto.randomUUID(),
+    method: 'run',
+    status: 'complete',
+    cancel: false,
+    events: [],
+    args: { request: { runId: questionRun, conversationId } },
+  });
+  f.service.view('desktop', 4, null);
+  done.conversations[0].messages[0].runId = questionRun;
+  f.service.changed(emptyShared(), done);
+  await f.service.drain();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  expect(runId).not.toBe(questionRun);
+});
 function workspace(status: Message['status'] = 'running') {
   const value = emptyShared();
   value.conversations.push({
@@ -236,6 +316,7 @@ it('authenticates real HTTP subscription management per browser session and disc
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const actor = crypto.randomUUID();
   expect((await fetch(url + '/v1/push')).status).toBe(401);
+  expect((await fetch(url + '/v1/notification-view', { method: 'POST' })).status).toBe(401);
   const pair = await fetch(url + '/v1/browser-session', {
     method: 'POST',
     headers: { origin: url },
@@ -248,6 +329,23 @@ it('authenticates real HTTP subscription management per browser session and disc
   };
   const call = (method: string, path: string, body?: unknown) =>
     fetch(url + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const view = { viewId: crypto.randomUUID(), revision: 1, conversationId: crypto.randomUUID() };
+  expect((await call('POST', '/v1/notification-view', view)).status).toBe(200);
+  expect(
+    (await call('POST', '/v1/notification-view', { ...view, workspaceId: 'another' })).status,
+  ).toBe(400);
+  expect(
+    (await call('POST', '/v1/notification-view', { ...view, conversationId: 'invalid' })).status,
+  ).toBe(400);
+  expect(
+    (
+      await fetch(url + '/v1/notification-view', {
+        method: 'POST',
+        headers: { ...headers, 'x-environment-id': crypto.randomUUID() },
+        body: JSON.stringify(view),
+      })
+    ).status,
+  ).toBe(403);
   expect((await call('PUT', '/v1/push', subscription())).status).toBe(200);
   expect((await (await call('GET', '/v1/push')).json()).enabled).toBe(true);
   expect(

@@ -10,6 +10,124 @@ import { emptyShared } from '../src/lib/sync';
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
+test('the foreground PWA chat stays quiet, other chats notify, and leaving the app restores alerts', async ({
+  page,
+  context,
+}, testInfo) => {
+  const directory = mkdtempSync(join(tmpdir(), 'studio-foreground-push-'));
+  const token = 'synthetic-foreground-notification-key';
+  const deliveries: { kind: string; conversationId?: string }[] = [];
+  const server = createRelay({
+    directory,
+    token,
+    webDirectory: resolve('build'),
+    pushSender: async (_subscription, payload) => {
+      deliveries.push(JSON.parse(payload));
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const headers = { authorization: `Bearer ${token}`, 'x-environment-id': crypto.randomUUID() };
+  const id = crypto.randomUUID(),
+    otherId = crypto.randomUUID();
+  const workspace = emptyShared();
+  workspace.conversations = [id, otherId].map((id, index) => ({
+    id,
+    title: index ? 'Other chat' : 'Viewed chat',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    settings: { provider: 'claude', model: 'test', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        runId: crypto.randomUUID(),
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        blocks: [{ type: 'markdown', text: 'Working' }],
+      },
+    ],
+  }));
+  const update = async (mutate: (value: typeof workspace) => void) => {
+    const state = await (await fetch(url + '/v1/state', { headers })).json();
+    mutate(state.workspace);
+    const result = await fetch(url + '/v1/state', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ revision: state.revision, workspace: state.workspace }),
+    });
+    expect(result.status).toBe(200);
+  };
+  let viewed: string | null | undefined;
+  let browserHeaders: Record<string, string> = {};
+  page.on('response', async (response) => {
+    if (response.url() === url + '/v1/notification-view' && response.status() === 200) {
+      viewed = response.request().postDataJSON().conversationId;
+      const requestHeaders = response.request().headers();
+      browserHeaders = {
+        origin: url,
+        'x-environment-id': requestHeaders['x-environment-id'],
+        'x-workspace-id': requestHeaders['x-workspace-id'],
+      };
+    }
+  });
+  try {
+    await update((state) => {
+      state.conversations = workspace.conversations;
+    });
+    await page.goto(url + '/#conversation=' + id);
+    await signInPwa(page, token);
+    const key = createECDH('prime256v1');
+    key.generateKeys();
+    const subscription = {
+      endpoint: 'https://fcm.googleapis.com/fcm/send/foreground-fixture',
+      keys: {
+        p256dh: key.getPublicKey().toString('base64url'),
+        auth: randomBytes(16).toString('base64url'),
+      },
+    };
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true });
+    await expect(composer).toBeVisible();
+    await page.bringToFront();
+    await composer.fill('Preserve my draft');
+    await expect.poll(() => viewed).toBe(id);
+    expect(
+      (
+        await context.request.put(url + '/v1/push', { headers: browserHeaders, data: subscription })
+      ).status(),
+    ).toBe(200);
+    await update((state) => {
+      state.conversations[0].messages[0].status = 'complete';
+    });
+    await expect(page.getByRole('button', { name: 'Stop response', exact: true })).toHaveCount(0);
+    await expect(page.locator('.pending-chat-count')).toHaveText('1');
+    expect(deliveries).toEqual([]);
+    await update((state) => {
+      state.conversations[1].messages[0].status = 'complete';
+    });
+    await expect.poll(() => deliveries.length).toBe(1);
+    expect(deliveries[0]).toMatchObject({ kind: 'complete', conversationId: otherId });
+    await expect(composer).toHaveValue('Preserve my draft');
+
+    await page.screenshot({ path: testInfo.outputPath('foreground-chat.png') });
+    // Leave the actual page; pagehide must clear its lease without waiting for expiry.
+    await page.goto('about:blank');
+    await update((state) => {
+      const message = state.conversations[0].messages[0];
+      message.id = crypto.randomUUID();
+      message.runId = crypto.randomUUID();
+      message.status = 'error';
+    });
+    await expect.poll(() => deliveries.length).toBe(2);
+    expect(deliveries[1]).toMatchObject({ kind: 'error', conversationId: id });
+    expect(deliveries).toHaveLength(2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('mobile opts in, receives a real worker push without an app page, opens its chat, and disables delivery', async ({
   page,
   context,

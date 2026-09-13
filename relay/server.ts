@@ -314,6 +314,24 @@ export function createRelay({
           }
           return;
         }
+        if (url.pathname === '/v1/notification-view' && req.method === 'POST') {
+          const value = z
+            .object({
+              viewId: uuid,
+              revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+              conversationId: uuid.nullable(),
+            })
+            .strict()
+            .parse(await body(req, authorized, 1024));
+          push.view(
+            `${sessionIdentity ?? actor}:${value.viewId}`,
+            value.revision,
+            value.conversationId,
+            sessionIdentity,
+          );
+          send(200, { ok: true });
+          return;
+        }
         if (url.pathname === '/v1/push' || url.pathname === '/v1/push/test') {
           if (!browserActor || actor !== browserActor) {
             send(403, { error: 'Manage notifications from the paired browser on this device.' });

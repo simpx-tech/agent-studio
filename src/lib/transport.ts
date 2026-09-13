@@ -84,6 +84,59 @@ export async function watchDesktopNotifications(
   return listen<string>('studio-notification-open', ({ payload }) => open(payload));
 }
 const desktopNotices = createDesktopNotificationTracker();
+let notificationConversationId: () => string | undefined = () => undefined;
+let notificationViewId = '';
+let notificationViewRevision = 0;
+function foregroundConversation(): string | undefined {
+  return typeof document !== 'undefined' &&
+    document.visibilityState === 'visible' &&
+    document.hasFocus()
+    ? notificationConversationId()
+    : undefined;
+}
+// A short, transient lease lets the relay suppress a push before it reaches a
+// userVisibleOnly service worker. Each tab has its own revisioned identity.
+export async function publishNotificationView(hidden = false): Promise<void> {
+  if (!relayConnected) return;
+  const conversationId = hidden ? null : (foregroundConversation() ?? null);
+  notificationViewId ||= crypto.randomUUID();
+  try {
+    await relayApi('POST', 'v1/notification-view', {
+      viewId: notificationViewId,
+      revision: ++notificationViewRevision,
+      conversationId,
+    });
+  } catch {
+    // Older/offline relays keep delivering normally; never block chat or saving.
+  }
+}
+export function watchNotificationView(current: () => string | undefined): () => void {
+  notificationConversationId = current;
+  const refresh = () => {
+    void publishNotificationView();
+  };
+  const hide = () => {
+    void publishNotificationView(true);
+  };
+  window.addEventListener('focus', refresh);
+  window.addEventListener('blur', hide);
+  window.addEventListener('pagehide', hide);
+  document.addEventListener('visibilitychange', refresh);
+  const heartbeat = setInterval(refresh, 5000);
+  const stopRelay = watchRelayConnection((ready) => {
+    if (ready) refresh();
+  });
+  return () => {
+    notificationConversationId = () => undefined;
+    hide();
+    stopRelay();
+    clearInterval(heartbeat);
+    window.removeEventListener('focus', refresh);
+    window.removeEventListener('blur', hide);
+    window.removeEventListener('pagehide', hide);
+    document.removeEventListener('visibilitychange', refresh);
+  };
+}
 let badgeQueue = Promise.resolve();
 let lastBadgeCount: number | undefined;
 function updatePendingBadge(count: number) {
@@ -301,6 +354,7 @@ async function relayRaw(
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: 'no-store',
+    keepalive: path === 'v1/notification-view',
     redirect: 'error',
     signal: AbortSignal.timeout(30_000),
   });
@@ -572,6 +626,10 @@ export async function pollRelay(): Promise<Presence[] | null> {
       throw new Error(
         'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.',
       );
+    // Verify the workspace first, then publish the viewed chat before a
+    // completion checkpoint can enqueue push.
+    await publishNotificationView();
+    if (generation !== relayGeneration) return null;
     let accepted: SharedWorkspace | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace));
@@ -922,8 +980,9 @@ export async function saveWorkspace(
   if (desktop()) {
     await invoke('save_workspace', { workspace });
     for (const notice of desktopNotices(workspace)) {
-      // Observe every chat, including while another chat has focus. Never gate
-      // lifecycle notifications on activeId, document focus, or visibility.
+      // Consume all lifecycle events, including suppressed ones, so switching
+      // chats later cannot replay an alert the reader already saw.
+      if (notice.conversationId === foregroundConversation()) continue;
       // Notification/audio failure must never fail saving or interrupt a CLI run.
       // Native delivery retains an actionable error in Connections.
       void invoke('desktop_notification', { notice }).catch(() => {});

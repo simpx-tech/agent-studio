@@ -6,7 +6,11 @@
     requestsAttention,
     pendingChatCount,
   } from '$lib/notifications';
-  import { watchDesktopNotifications } from '$lib/transport';
+  import {
+    watchDesktopNotifications,
+    watchNotificationView,
+    publishNotificationView,
+  } from '$lib/transport';
   import {
     ArrowUp,
     ArrowUpRight,
@@ -578,8 +582,20 @@
     }
   }
 
+  $effect(() => {
+    // Track only the visible chat selection, never streamed workspace content.
+    loaded;
+    view;
+    activeId;
+    untrack(() => {
+      void publishNotificationView();
+    });
+  });
   onMount(() => {
     let disposed = false;
+    const stopNotificationView = watchNotificationView(
+      () => (loaded && view === 'chat' ? activeId || undefined : undefined),
+    );
     const stopBrowserSession = watchBrowserSession();
     let stopNotifications = () => {};
     void watchDesktopNotifications((id) => {
@@ -776,6 +792,7 @@
     })();
     return () => {
       disposed = true;
+      stopNotificationView();
       stopNotifications();
       stopBrowserSession();
       window.removeEventListener('hashchange', notificationHash);

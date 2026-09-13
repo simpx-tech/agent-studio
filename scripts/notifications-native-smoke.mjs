@@ -153,6 +153,7 @@ for (const chat of chats) {
     () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
   );
   await page.button('Send message');
+  if (desktopQa) await page.button('Connections');
   console.log(`${chat.settings.provider}: checking real reply completion and relay notification`);
   let reply;
   const deadline = Date.now() + 180_000;

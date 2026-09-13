@@ -112,6 +112,27 @@ export function pushService({
   let state: State;
   let saved = '';
   let unavailable = false;
+  const views = new Map<
+    string,
+    {
+      revision: number;
+      conversationId: string | null;
+      seenAt: number;
+      session?: string;
+    }
+  >();
+  function viewing(notice: PushNotice): boolean {
+    return (
+      notice.kind !== 'test' &&
+      !!notice.conversationId &&
+      [...views.values()].some(
+        (view) =>
+          view.conversationId === notice.conversationId &&
+          now() - view.seenAt < 15_000 &&
+          (!view.session || sessionActive(view.session)),
+      )
+    );
+  }
   function save(next: State) {
     // A rotated/disabled workspace can be replaced while a delivery is in
     // flight. Its old instance must never overwrite the replacement's file.
@@ -167,6 +188,8 @@ export function pushService({
   function enqueue(next: State, notice: PushNotice, receipt: string, only?: string) {
     if (next.seen.some(([key]) => key === receipt)) return;
     next.seen = [...next.seen.slice(-3999), [receipt, now() + day]];
+    // Record the receipt even when read in foreground; never replay it on blur.
+    if (viewing(notice)) return;
     for (const subscriber of next.subscribers) {
       if (only && subscriber.id !== only) continue;
       next.pending.push({
@@ -194,6 +217,11 @@ export function pushService({
         const subscriber = state.subscribers.find((s) => s.id === item.subscriber);
         if (!subscriber || !sessionActive(subscriber.session)) {
           save(pruned());
+          continue;
+        }
+        // A reader may open the chat while a failed delivery waits to retry.
+        if (viewing(item.notice)) {
+          save({ ...state, pending: state.pending.filter((p) => p.id !== item.id) });
           continue;
         }
         let failed = false,
@@ -296,6 +324,15 @@ export function pushService({
   return {
     changed,
     drain,
+    view(source: string, revision: number, conversationId: string | null, session?: string) {
+      for (const [id, view] of views)
+        if (now() - view.seenAt >= day || (view.session && !sessionActive(view.session)))
+          views.delete(id);
+      const old = views.get(source);
+      if (old && revision <= old.revision) return;
+      if (!old && views.size >= 1000) throw new Error('Notification view limit reached.');
+      views.set(source, { revision, conversationId, seenAt: now(), session });
+    },
     jobUpdated(job: RelayJob) {
       if (job.method !== 'run') return;
       const request = z
