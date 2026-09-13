@@ -16,7 +16,11 @@ The portable request limits still apply: 200 messages and 400 KB of text, plus t
 
 This closes the verified cross-reply tool-context gap. It does not promise identical output to a desktop app: Agent Studio still supplies its own guidance and tools, and desktop-specific integrations, prompts, and runtime behavior can differ. Model generation also varies between runs.
 
+Claude and Codex chat runs have no Agent Studio elapsed-time cutoff, including while waiting for a question answer or delegated work. Stop still cancels the owned run; Codex retains its five-second interruption grace period. Startup remains bounded to two minutes for Claude tool initialization and Codex turn initialization. Background title/usage queries, Antigravity's five-minute reply timeout, relay heartbeat expiry, and the process-per-reply lifecycle are unchanged. Provider-side limits and individual tool timeouts still apply.
+
 ## Validation
+
+Deadline regressions use Tokio's virtual clock: the response deadline stays pending through 24 simulated hours for Claude and Codex while bounded background deadlines still expire. A controlled native Windows child exercises the actual Codex protocol loop through two simulated hours, both completing afterward and cancelling with a pending question. The same test reproduces the old one-hour error before the fix; it does not represent an hours-long live model benchmark.
 
 `scripts/native-sessions.tauri.json` supplies an isolated native identity. Build the frontend, start it with `npm run tauri dev -- --no-watch --no-dev-server --config scripts/native-sessions.tauri.json`, a separate Cargo target, an isolated WebView profile, and CDP port 9513. Run `node scripts/sessions-native-smoke.mjs first`, restart only that QA app, then run the script with `second`. The real model reads random facts from a disposable file and replies only READY. The test removes the file before restart and requires exact recall on the next turn. No fact is present in portable assistant text.
 

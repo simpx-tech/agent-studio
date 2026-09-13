@@ -32,6 +32,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 notify-rust = { version = "4.18.0", features = ["preview-macos-un"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "wav"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

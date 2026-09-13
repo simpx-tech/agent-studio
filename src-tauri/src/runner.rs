@@ -84,6 +84,20 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
     }
     let _ = child.wait().await;
 }
+fn chat_timeout(provider: &str) -> Option<Duration> {
+    match provider {
+        "claude" | "codex" => None,
+        _ => Some(Duration::from_secs(300)),
+    }
+}
+
+async fn response_deadline(timeout: Option<Duration>) {
+    match timeout {
+        Some(timeout) => tokio::time::sleep(timeout).await,
+        None => std::future::pending().await,
+    }
+}
+
 pub async fn run(
     app: tauri::AppHandle,
     request: RunRequest,
@@ -97,17 +111,13 @@ pub async fn run(
         connection_id,
         output.clone(),
     )?;
-    let timeout = if matches!(request.agent.provider.as_str(), "claude" | "codex") {
-        3600
-    } else {
-        300
-    };
+    let timeout = chat_timeout(&request.agent.provider);
     execute(
         app,
         request,
         Some(output),
         cancel,
-        Duration::from_secs(timeout),
+        timeout,
         "chat-runtime",
         Some(questions),
     )
@@ -124,7 +134,7 @@ pub async fn title_text(
         request,
         None,
         cancel,
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
         "title-runtime",
         None,
     )
@@ -140,7 +150,7 @@ pub(crate) async fn execute(
     mut request: RunRequest,
     channel: Option<EventSink>,
     cancel: CancellationToken,
-    timeout: Duration,
+    timeout: Option<Duration>,
     directory: &str,
     mut questions: Option<crate::providers::questions::Session>,
 ) -> Result<(String, String), String> {
@@ -208,7 +218,6 @@ pub(crate) async fn execute(
             &request,
             channel.as_ref(),
             cancel,
-            timeout,
             questions
                 .as_mut()
                 .ok_or("Question channel is unavailable")?,
@@ -272,21 +281,18 @@ pub(crate) async fn execute(
     let mut stdout_done = false;
     let mut stderr_done = false;
     let mut diagnostics = String::new();
-    let deadline = tokio::time::sleep(timeout);
+    let deadline = response_deadline(timeout);
     tokio::pin!(deadline);
-    let interaction_deadline = tokio::time::sleep(Duration::from_secs(3600));
-    tokio::pin!(interaction_deadline);
     let outcome = loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => { exe.kill(&mut child).await; break Ok(("cancelled".to_string(), String::new())); }
-            _ = &mut interaction_deadline => { exe.kill(&mut child).await; break Err("The conversation reached its one-hour limit. Pending questions were closed.".into()); }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { exe.kill(&mut child).await; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             result = &mut writer, if !writer_done => {
                 writer_done = true;
                 if !matches!(result, Ok(Ok(()))) { exe.kill(&mut child).await; break Err("Could not send input to the provider CLI.".into()); }
             }
-            _ = &mut deadline, if !questions.as_ref().is_some_and(|q| q.pending()) => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.as_secs() / 60) } else { "Title generation timed out".into() }); }
+            _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
             Some(delivery) = async { match questions.as_mut() { Some(q) => q.rx.recv().await, None => std::future::pending().await } } => {
                 let result = match &input_tx {
                     Some(tx) => {
@@ -299,7 +305,6 @@ pub(crate) async fn execute(
                     None => Err("Claude is no longer waiting for answers.".into()),
                 };
                 questions.as_ref().unwrap().delivered(delivery, result);
-                deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
             },
             line = stdout.next_line(), if !stdout_done => match line {
                 Ok(Some(line)) => {
@@ -411,6 +416,33 @@ fn provider_error(diagnostic: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn chat_deadlines_allow_long_work_and_background_deadlines_still_expire() {
+        for provider in ["claude", "codex"] {
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(24 * 60 * 60),
+                    response_deadline(chat_timeout(provider)),
+                )
+                .await
+                .is_err(),
+                "{provider} chat must not expire, including while awaiting input"
+            );
+        }
+        assert!(tokio::time::timeout(
+            Duration::from_secs(301),
+            response_deadline(chat_timeout("gemini")),
+        )
+        .await
+        .is_ok());
+        assert!(tokio::time::timeout(
+            Duration::from_secs(31),
+            response_deadline(Some(Duration::from_secs(30))),
+        )
+        .await
+        .is_ok());
+    }
+
     #[tokio::test]
     async fn live_runs_are_never_replaced_and_reload_is_scoped_to_this_app() {
         let runs = Runs::default();

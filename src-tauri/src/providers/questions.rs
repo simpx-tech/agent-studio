@@ -356,6 +356,7 @@ impl Questions {
     }
 }
 impl Session {
+    #[cfg(test)]
     pub fn pending(&self) -> bool {
         self.hub
             .0

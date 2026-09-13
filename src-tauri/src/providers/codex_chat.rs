@@ -131,7 +131,6 @@ pub async fn run(
     request: &RunRequest,
     channel: Option<&EventSink>,
     cancel: CancellationToken,
-    timeout: Duration,
     questions: &mut super::questions::Session,
     config_cwd: Option<&str>,
 ) -> Result<(String, String), String> {
@@ -156,10 +155,12 @@ pub async fn run(
         .write_all(format!("{init}\n").as_bytes())
         .await
         .map_err(|_| "Could not initialize Codex")?;
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    let interaction_deadline = tokio::time::sleep(Duration::from_secs(3600));
-    tokio::pin!(interaction_deadline);
+    // Bound startup and cancellation only; an active turn may run or wait for
+    // the user for as long as needed.
+    let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
+    tokio::pin!(initialization_deadline);
+    let cancellation_deadline = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(cancellation_deadline);
     let mut thread = String::new();
     let mut turn = String::new();
     let mut cancelling = false;
@@ -173,18 +174,14 @@ pub async fn run(
                 if thread.is_empty() || turn.is_empty() { return Ok(("cancelled".into(), decoder.text)); }
                 cancelling = true;
                 input.write_all(format!("{}\n", json!({"id":4,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}})).as_bytes()).await.map_err(|_| "Could not interrupt Codex")?;
-                deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+                cancellation_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
             },
-            _ = &mut interaction_deadline => return Err("The conversation reached its one-hour limit. Pending questions were closed.".into()),
-            _ = &mut deadline, if cancelling || !questions.pending() => {
-                if cancelling { return Ok(("cancelled".into(), decoder.text)); }
-                return Err("The provider reached its response deadline. Continue the conversation to resume its saved work.".into());
-            },
+            _ = &mut initialization_deadline, if !cancelling && turn.is_empty() => return Err("Codex did not initialize the conversation within two minutes. Check its CLI and configured integrations.".into()),
+            _ = &mut cancellation_deadline, if cancelling => return Ok(("cancelled".into(), decoder.text)),
             Some(delivery) = questions.rx.recv(), if !cancelling => {
                 let result = input.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
                 let failed = result.is_err();
                 questions.delivered(delivery, result);
-                deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
                 if failed { return Err("Could not send answers to Codex.".into()); }
             },
             line = stderr.next_line(), if !stderr_done => { if !matches!(line, Ok(Some(_))) { stderr_done = true; } },
@@ -279,6 +276,10 @@ pub async fn run(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "codex_deadline_tests.rs"]
+mod deadline_tests;
 
 #[cfg(test)]
 mod tests {
