@@ -97,7 +97,7 @@ pub async fn run(
         connection_id,
         output.clone(),
     )?;
-    let timeout = if request.agent.provider == "claude" {
+    let timeout = if matches!(request.agent.provider.as_str(), "claude" | "codex") {
         3600
     } else {
         300
@@ -137,7 +137,7 @@ pub async fn title_text(
 }
 pub(crate) async fn execute(
     app: tauri::AppHandle,
-    request: RunRequest,
+    mut request: RunRequest,
     channel: Option<EventSink>,
     cancel: CancellationToken,
     timeout: Duration,
@@ -152,6 +152,8 @@ pub(crate) async fn execute(
     std::fs::create_dir_all(&root)
         .map_err(|_| "Cannot create the conversation runtime directory")?;
     let exe = crate::providers::resolve(&request.agent.provider).await?;
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.parent().unwrap(), &request)?;
     if request.agent.provider == "gemini" {
         let login = crate::providers::require_gemini_login(&exe, &cancel).await;
         if !cancel.is_cancelled() {
@@ -164,6 +166,38 @@ pub(crate) async fn execute(
     let mut command = tokio::select! {
         command = chat_command(&request, &root, &exe) => command?,
         _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
+    };
+    if request.agent.provider == "claude"
+        && request.agent.model.is_empty()
+        && request.native_session.as_ref().is_some_and(|s| s.resumed)
+    {
+        let model = crate::providers::defaults::claude_model(
+            &exe,
+            &request,
+            command.as_std().get_current_dir().unwrap_or(&root),
+            &cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            return Ok(("cancelled".into(), String::new()));
+        }
+        command.args(["--model", &model?]);
+    }
+    if request.native_session.as_ref().is_some_and(|s| !s.resumed) && request.messages.len() > 1 {
+        if let Some(channel) = &channel {
+            let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
+        }
+    }
+    let config_cwd = if exe.wsl.is_some() {
+        request
+            .location
+            .as_ref()
+            .map(|location| location.path.clone())
+    } else {
+        command
+            .as_std()
+            .get_current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
     };
     let mut child = command
         .spawn()
@@ -178,6 +212,7 @@ pub(crate) async fn execute(
             questions
                 .as_mut()
                 .ok_or("Question channel is unavailable")?,
+            config_cwd.as_deref(),
         )
         .await;
         exe.kill(&mut child).await;
@@ -229,6 +264,7 @@ pub(crate) async fn execute(
     let mut visualizer = crate::providers::visualize::Visualizer::default();
     let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::default();
     let mut initialized = false;
+    let mut session_received = false;
     let mut writer_done = false;
     let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(initialization_deadline);
@@ -270,6 +306,18 @@ pub(crate) async fn execute(
                     if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if value["type"] == "system" && value["subtype"] == "init" && value["parent_tool_use_id"].is_null() {
+                                if let Some(session) = &request.native_session {
+                                    let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, false));
+                                    if let Err(error) = result { exe.kill(&mut child).await; break Err(error); }
+                                }
+                            }
+                            if !session_received && value["type"] == "assistant" && value["parent_tool_use_id"].is_null() {
+                                if let Some(session) = &request.native_session {
+                                    if let Err(error) = session.bind(session.id(), true) { exe.kill(&mut child).await; break Err(error); }
+                                    session_received = true;
+                                }
+                            }
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
                                 if value["response"]["subtype"] != "success" { exe.kill(&mut child).await; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
                                 initialized = true;
@@ -324,7 +372,9 @@ pub(crate) async fn execute(
 }
 fn provider_error(diagnostic: &str) -> &'static str {
     let diagnostic = diagnostic.to_lowercase();
-    if diagnostic.contains("selected folder is unavailable") {
+    if diagnostic.contains("no conversation found") || diagnostic.contains("session not found") {
+        "Claude could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
+    } else if diagnostic.contains("selected folder is unavailable") {
         "The selected folder is unavailable. Choose an existing folder before sending."
     } else if diagnostic.contains("unsupported_client")
         || diagnostic.contains("client is no longer supported")

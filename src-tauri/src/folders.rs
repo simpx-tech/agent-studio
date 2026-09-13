@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatLocation {
     computer_id: String,

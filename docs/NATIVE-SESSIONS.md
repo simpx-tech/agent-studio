@@ -1,0 +1,38 @@
+# Native session continuity
+
+Claude and Codex conversations now resume the installed CLI's own saved transcript. A new process still handles each submitted reply, but that process resumes the same session. The provider retains its tool results, intermediate messages, and compaction state according to its native persistence behavior. Agent Studio's bounded display history is no longer used to reconstruct every follow-up.
+
+- Claude creates a UUID session with `--session-id` and uses that exact `--resume` ID thereafter. Initial app guidance and legacy context use non-query input; only the current submitted message has human provenance. Changed conversation instructions are supplied as new context. Background title generation retains `--no-session-persistence`.
+- Codex creates a non-ephemeral app-server thread and subsequently calls `thread/resume` with `excludeTurns: true`. The original dynamic tool definitions remain with the thread; the new process handles their callbacks. Each reply applies the selected model and reasoning. Cancellation first requests `turn/interrupt` and allows up to five seconds for confirmation before terminating the owned process tree.
+- Only current images and skill invocations are submitted on normal follow-ups. Earlier images remain in the native transcript. A retry sends an explicit continuation request instead of treating the original instruction as a new independent task. Unacknowledged delivery is identified as uncertain earlier context, with attachments retained for recovery.
+
+The backend stores only a versioned binding, provider session ID, and history/instruction/scope fingerprints under the execution host's app-data `native-sessions` directory. It never accepts a native session ID or transcript path from the renderer or relay. The binding covers provider, account connection/profile, environment, app installation namespace, and folder. An OS file lock excludes concurrent runs of the same conversation across app processes. Atomic writes preserve the binding through normal restarts. Actual transcripts remain in the selected CLI profile; credentials are neither read nor copied.
+
+Choosing CLI default on a resumed conversation resolves the current CLI configuration explicitly: Claude uses a bounded, non-query context report with tools/hooks disabled, and Codex uses its configuration/model catalog. This avoids retaining the previous explicit model from the transcript. Unavailable default metadata produces an actionable error instead of silently selecting a different model. [Claude documents its saved-model precedence](https://code.claude.com/docs/en/model-config); Codex fields are checked against the installed CLI's generated app-server schema.
+
+Existing chats bootstrap once from their portable saved messages. Imported chats and conflict copies with a new conversation ID also bootstrap independently. Tool details omitted before this upgrade cannot be reconstructed. Native transcripts and bindings are not in workspace exports or relay sync; a Viewer resumes through the same execution host. Moving to another host/profile or deleting a CLI transcript does not transfer that native history. Missing, corrupt, mismatched, or diverged existing bindings fail explicitly without silently replaying work. Start a new conversation to establish a new session. Deleting an app conversation does not delete the CLI's own transcript.
+
+The portable request limits still apply: 200 messages and 400 KB of text, plus the existing image/visual limits. Native compaction can summarize older provider context as it does in the CLI. Stopping terminates owned processes; it does not preserve live shells or background workers. Claude workflow progress can remain in the transcript without making killed workflow processes resumable. Antigravity retains display-history replay, and terminal session commands remain unavailable in the composer.
+
+This closes the verified cross-reply tool-context gap. It does not promise identical output to a desktop app: Agent Studio still supplies its own guidance and tools, and desktop-specific integrations, prompts, and runtime behavior can differ. Model generation also varies between runs.
+
+## Validation
+
+`scripts/native-sessions.tauri.json` supplies an isolated native identity. Build the frontend, start it with `npm run tauri dev -- --no-watch --no-dev-server --config scripts/native-sessions.tauri.json`, a separate Cargo target, an isolated WebView profile, and CDP port 9513. Run `node scripts/sessions-native-smoke.mjs first`, restart only that QA app, then run the script with `second`. The real model reads random facts from a disposable file and replies only READY. The test removes the file before restart and requires exact recall on the next turn. No fact is present in portable assistant text.
+
+`node scripts/sessions-cli-comparison.mjs` runs the same prompts/model/effort through the installed CLI directly, then runs a fresh-session display-only replay control. This is a targeted continuity regression, not a general coding-quality or speed benchmark. Rust tests additionally exercise exact session identities, concurrent writer exclusion, scope/history rejection, input acknowledgment, retry behavior, instruction updates, and non-replay of prior messages.
+
+Windows checks on 2026-09-13 used Claude Code 2.1.267 and Codex CLI 0.153.4 with the existing local profiles. The recall comparison used Sonnet and GPT-5.6-Sol, both at low effort.
+
+| Check                                                                                     | Claude            | Codex             |
+| ----------------------------------------------------------------------------------------- | ----------------- | ----------------- |
+| Agent Studio: exact tool-only facts after process/app restart and file removal            | Pass              | Pass              |
+| Direct CLI: same recall through native resume                                             | Pass              | Pass              |
+| Fresh-session display-only replay control                                                 | Facts unavailable | Facts unavailable |
+| Question tool on resumed session; cancellation then Retry after removing a unique fixture | Pass              | Pass              |
+| Switch to current CLI defaults and update instructions                                    | Fable 5.1, pass   | GPT-6-Astra, pass |
+| Missing native session fails without creating a replacement; restored binding can retry   | Pass              | Pass              |
+
+The `cancel`, `defaults`, and `missing` smoke-script phases exercise the additional rows. Use a unique fixture filename for each interruption test: reusing the instruction to read the same file once can correctly make a resumed agent rely on the previous read, contaminating the test. The missing-session test temporarily changes only a disposable QA binding to a nonexistent UUID and restores its exact bytes in `finally`; it never deletes a native transcript.
+
+These are targeted live regression checks, not a broad quality benchmark. Native persistence through WSL, macOS/Linux, separate login profiles, and a paired Viewer was not live-tested in this run; scope/isolation and shared routing receive automated coverage. No desktop-app output parity is claimed.

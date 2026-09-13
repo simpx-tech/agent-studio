@@ -1,5 +1,5 @@
-//! One ephemeral app-server thread per submitted reply, retaining the selected
-//! profile and process cwd. This stream includes sub-agent events exec omits.
+//! CLI-owned persistent threads, resumed by host-local conversation bindings.
+//! Legacy callers without a conversation identity retain ephemeral execution.
 use super::RunRequest;
 use crate::protocol::Decoder;
 use crate::runner::EventSink;
@@ -70,6 +70,15 @@ fn start_params(request: &RunRequest) -> Value {
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
+    if let Some(session) = &request.native_session {
+        params["ephemeral"] = json!(false);
+        if session.resumed {
+            params.as_object_mut().unwrap().remove("ephemeral");
+            params.as_object_mut().unwrap().remove("dynamicTools");
+            params["threadId"] = json!(session.id());
+            params["excludeTurns"] = json!(true);
+        }
+    }
     params
 }
 fn turn_params(request: &RunRequest, thread: &str) -> Value {
@@ -87,12 +96,26 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
             message.text = format!("${}{}", skill.name, rest);
         }
     }
-    let mut params = json!({"threadId":thread,"input":[{"type":"text","text":current.prompt(),"text_elements":[]}]});
+    let mut params = json!({"threadId":thread,"input":[]});
     let input = params["input"].as_array_mut().expect("input is an array");
+    if current.native_session.is_some() {
+        if let Some(context) = current.native_context() {
+            input.push(json!({"type":"text","text":context,"text_elements":[]}));
+        }
+        input.push(json!({"type":"text","text":current.native_user_text(),"text_elements":[]}));
+    } else {
+        input.push(json!({"type":"text","text":current.prompt(),"text_elements":[]}));
+    }
     for skill in skills {
+        if current.native_session.as_ref().is_some_and(|s| s.retry) {
+            break;
+        }
         input.push(json!({"type":"skill","name":skill.name,"path":skill.path}));
     }
     for (message_index, message) in request.messages.iter().enumerate() {
+        if !request.native_image_message(message_index) {
+            continue;
+        }
         for (image_index, image) in message.images.iter().enumerate() {
             input.push(json!({"type":"text","text":image.label(message_index, image_index),"text_elements":[]}));
             input.push(json!({"type":"image","url":image.data_url()}));
@@ -110,7 +133,13 @@ pub async fn run(
     cancel: CancellationToken,
     timeout: Duration,
     questions: &mut super::questions::Session,
+    config_cwd: Option<&str>,
 ) -> Result<(String, String), String> {
+    let mut effective = request.clone();
+    let resolve_defaults = effective.native_session.as_ref().is_some_and(|s| s.resumed)
+        && (effective.agent.model.is_empty() || effective.agent.reasoning.is_empty());
+    let request = &mut effective;
+    let mut model_pages = 0;
     let mut input = child.stdin.take().ok_or("Codex input is unavailable")?;
     let mut output =
         BufReader::new(child.stdout.take().ok_or("Codex output is unavailable")?).lines();
@@ -132,16 +161,26 @@ pub async fn run(
     let interaction_deadline = tokio::time::sleep(Duration::from_secs(3600));
     tokio::pin!(interaction_deadline);
     let mut thread = String::new();
+    let mut turn = String::new();
+    let mut cancelling = false;
     let mut decoder = Decoder::default();
     let mut visualizer = super::visualize::Visualizer::default();
     let output_limit = request.output_line_limit();
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
+            _ = cancel.cancelled(), if !cancelling => {
+                if thread.is_empty() || turn.is_empty() { return Ok(("cancelled".into(), decoder.text)); }
+                cancelling = true;
+                input.write_all(format!("{}\n", json!({"id":4,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}})).as_bytes()).await.map_err(|_| "Could not interrupt Codex")?;
+                deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+            },
             _ = &mut interaction_deadline => return Err("The conversation reached its one-hour limit. Pending questions were closed.".into()),
-            _ = &mut deadline, if !questions.pending() => return Err("The provider did not finish within 5 minutes. Try again or check its CLI login.".into()),
-            Some(delivery) = questions.rx.recv() => {
+            _ = &mut deadline, if cancelling || !questions.pending() => {
+                if cancelling { return Ok(("cancelled".into(), decoder.text)); }
+                return Err("The provider reached its response deadline. Continue the conversation to resume its saved work.".into());
+            },
+            Some(delivery) = questions.rx.recv(), if !cancelling => {
                 let result = input.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
                 let failed = result.is_err();
                 questions.delivered(delivery, result);
@@ -153,17 +192,47 @@ pub async fn run(
                 let Some(line) = line.map_err(|_| "Could not read the Codex response")? else { return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
                 if line.len() > output_limit { return Err("Provider output exceeded the message limit".into()); }
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
-                if value["id"].as_u64().is_some_and(|id| (1..=3).contains(&id)) && value.get("method").is_none() {
-                    if value["error"].is_object() { return Err("Codex could not start this reply. Check its login, model access, and CLI version.".into()); }
+                if value["id"].as_u64().is_some_and(|id| matches!(id, 1..=3 | 5 | 6)) && value.get("method").is_none() {
+                    if value["error"].is_object() {
+                        return Err(if value["id"] == 2 && request.native_session.as_ref().is_some_and(|s| s.resumed) {
+                            "Codex could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
+                        } else { "Codex could not start this reply. Check its login, model access, and CLI version." }.into());
+                    }
                     let next = match value["id"].as_u64() {
                         Some(1) => {
                             input.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Codex initialization failed")?;
-                            Some(json!({"id":2,"method":"thread/start","params":start_params(request)}))
+                            if resolve_defaults {
+                                Some(json!({"id":5,"method":"config/read","params":{"includeLayers":false,"cwd":config_cwd}}))
+                            } else {
+                                Some(json!({"id":2,"method":if request.native_session.as_ref().is_some_and(|s| s.resumed) { "thread/resume" } else { "thread/start" },"params":start_params(request)}))
+                            }
+                        }
+                        Some(5) => {
+                            super::defaults::codex_config(request, &value["result"]["config"]);
+                            if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
+                                Some(json!({"id":6,"method":"model/list","params":{"limit":100,"includeHidden":true}}))
+                            } else {
+                                Some(json!({"id":2,"method":"thread/resume","params":start_params(request)}))
+                            }
+                        }
+                        Some(6) => {
+                            model_pages += 1;
+                            if super::defaults::codex_models(request, value["result"]["data"].as_array().ok_or("Codex did not report model defaults")?) {
+                                Some(json!({"id":2,"method":"thread/resume","params":start_params(request)}))
+                            } else if let Some(cursor) = value["result"]["nextCursor"].as_str().filter(|_| model_pages < 10) {
+                                Some(json!({"id":6,"method":"model/list","params":{"limit":100,"includeHidden":true,"cursor":cursor}}))
+                            } else { return Err("Codex could not resolve current model defaults. Select an explicit model and reasoning level to continue.".into()); }
                         }
                         Some(2) => {
                             decoder.reported_model(value["result"]["model"].as_str());
                             thread = value["result"]["thread"]["id"].as_str().ok_or("Codex did not return a thread identity")?.into();
+                            if let Some(session) = &request.native_session { session.bind(&thread, false)?; }
                             Some(json!({"id":3,"method":"turn/start","params":turn_params(request, &thread)}))
+                        }
+                        Some(3) => {
+                            if let Some(id) = value["result"]["turn"]["id"].as_str() { turn = id.into(); }
+                            if let Some(session) = &request.native_session { session.bind(&thread, true)?; }
+                            None
                         }
                         _ => None,
                     };
@@ -192,6 +261,9 @@ pub async fn run(
                     continue;
                 }
                 if thread.is_empty() { continue; }
+                if value["method"] == "turn/started" && value["params"]["threadId"] == thread {
+                    turn = value["params"]["turn"]["id"].as_str().unwrap_or_default().into();
+                }
                 questions.resolved_codex(&value, &thread);
                 for event in decoder.decode_codex_server(&value, &thread) {
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
@@ -211,6 +283,39 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persistent_turns_resume_exact_thread_and_only_send_new_input() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Earlier request"}]})).unwrap();
+        request.native_session =
+            super::super::sessions::Session::prepare(root.path(), &request).unwrap();
+        assert_eq!(start_params(&request)["ephemeral"], false);
+        assert!(start_params(&request)["dynamicTools"].is_array());
+        let session = request.native_session.take().unwrap();
+        let id = session.id().to_string();
+        session.bind(&id, true).unwrap();
+        drop(session);
+        request
+            .messages
+            .push(serde_json::from_value(json!({"role":"assistant","text":"Final only"})).unwrap());
+        request
+            .messages
+            .push(serde_json::from_value(json!({"role":"user","text":"Continue"})).unwrap());
+        request.agent.model = "new-model".into();
+        request.agent.reasoning = "high".into();
+        request.native_session =
+            super::super::sessions::Session::prepare(root.path(), &request).unwrap();
+        let params = start_params(&request);
+        assert_eq!(params["threadId"], id);
+        assert_eq!(params["excludeTurns"], true);
+        assert_eq!(params["model"], "new-model");
+        assert!(params.get("dynamicTools").is_none());
+        assert!(params.get("ephemeral").is_none());
+        let turn = turn_params(&request, &id);
+        assert_eq!(turn["input"].as_array().unwrap().len(), 1);
+        assert_eq!(turn["input"][0]["text"], "Continue");
+        assert_eq!(turn["effort"], "high");
+    }
     #[test]
     fn only_current_skills_are_native_inputs_and_arguments_remain_literal() {
         let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[

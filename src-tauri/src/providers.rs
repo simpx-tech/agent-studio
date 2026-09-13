@@ -8,9 +8,11 @@ use std::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 pub mod codex_chat;
+pub mod defaults;
 #[cfg(windows)]
 mod login_console;
 pub mod questions;
+pub mod sessions;
 pub mod visualize;
 
 #[derive(Clone, Debug)]
@@ -375,6 +377,10 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(skip)]
+    pub native_session: Option<sessions::Session>,
+    #[serde(default)]
     pub workflow: Option<serde_json::Value>,
     pub run_id: String,
     // Internal background requests must never inherit interactive chat permissions.
@@ -412,6 +418,9 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(id) = &self.conversation_id {
+            uuid::Uuid::parse_str(id).map_err(|_| "Invalid conversation id")?;
+        }
         if self.workflow.is_some() {
             return Err("The app-owned step sequencer was removed. Ask Claude to run a native Workflow or a saved /workflow-name command.".into());
         }
@@ -587,6 +596,44 @@ impl RunRequest {
         };
         format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
     }
+    pub fn native_context(&self) -> Option<String> {
+        let session = self.native_session.as_ref()?;
+        if !session.resumed {
+            let mut history = self.clone();
+            history.messages.pop();
+            Some(format!("{}\nThis is earlier context only. Answer the NEXT user message, not the history above.", history.prompt()))
+        } else {
+            let mut context = Vec::new();
+            if session.instructions_changed {
+                context.push(format!("Current user instructions for this conversation (replace earlier conversation instructions): {}", serde_json::to_string(&self.agent.instructions).unwrap()));
+            }
+            if let Some(index) = session.unconfirmed_message.filter(|_| !session.retry) {
+                context.push(format!("Delivery of this earlier user message was interrupted before acknowledgment. Treat it as earlier context only; do not repeat side effects without inspecting existing results. Answer the NEXT user message: {}", serde_json::to_string(&self.messages[index].text).unwrap()));
+            }
+            if context.is_empty() {
+                None
+            } else {
+                Some(context.join("\n"))
+            }
+        }
+    }
+    pub fn native_image_message(&self, index: usize) -> bool {
+        self.native_session.as_ref().is_none_or(|s| {
+            !s.resumed
+                || s.unconfirmed_message == Some(index)
+                || (!s.retry && index + 1 == self.messages.len())
+        })
+    }
+    pub fn native_user_text(&self) -> String {
+        if self.native_session.as_ref().is_some_and(|s| s.retry) {
+            format!("Continue the previous request after an interrupted or failed attempt. Inspect existing changes and results before taking further actions; do not blindly repeat completed side effects. The user's request was: {}", self.messages.last().map(|m| m.text.as_str()).unwrap_or_default())
+        } else {
+            self.messages
+                .last()
+                .map(|m| m.text.clone())
+                .unwrap_or_default()
+        }
+    }
     pub fn stdin_payload(&self) -> String {
         if self.agent.provider == "claude" {
             if !self.tools_enabled() {
@@ -594,6 +641,36 @@ impl RunRequest {
                     "{}\n",
                     serde_json::json!({"type":"user","message":{"role":"user","content":self.prompt()}})
                 );
+            }
+            if self.native_session.is_some() {
+                let mut payload = String::new();
+                if let Some(context) = self.native_context() {
+                    let mut content = vec![serde_json::json!({"type":"text","text":context})];
+                    {
+                        for (index, message) in self
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .take(self.messages.len() - 1)
+                            .filter(|(i, _)| self.native_image_message(*i))
+                        {
+                            for (image_index, image) in message.images.iter().enumerate() {
+                                content.push(serde_json::json!({"type":"text","text":image.label(index, image_index)}));
+                                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                            }
+                        }
+                    }
+                    payload.push_str(&format!("{}\n", serde_json::json!({"type":"user","shouldQuery":false,"message":{"role":"user","content":content}})));
+                }
+                let mut content =
+                    vec![serde_json::json!({"type":"text","text":self.native_user_text()})];
+                if self.native_image_message(self.messages.len() - 1) {
+                    for image in &self.messages.last().expect("validated conversation").images {
+                        content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                    }
+                }
+                payload.push_str(&format!("{}\n", serde_json::json!({"type":"user","uuid":self.run_id,"origin":{"kind":"human"},"message":{"role":"user","content":content}})));
+                return payload;
             }
             // Only the current user submission is human input. History and app
             // instructions must not opt a new turn into ultracode accidentally.
@@ -772,8 +849,19 @@ pub async fn chat_command(
                 "stream-json",
                 "--verbose",
                 "--include-partial-messages",
-                "--no-session-persistence",
             ]);
+            if let Some(session) = &request.native_session {
+                c.args([
+                    if session.resumed {
+                        "--resume"
+                    } else {
+                        "--session-id"
+                    },
+                    session.id(),
+                ]);
+            } else {
+                c.arg("--no-session-persistence");
+            }
             c.args(["--input-format", "stream-json"]);
             if request.tools_enabled() {
                 c.args([
@@ -1079,6 +1167,8 @@ mod tests {
     }
     fn request() -> RunRequest {
         RunRequest {
+            conversation_id: None,
+            native_session: None,
             workflow: None,
             conversation_only: false,
             location: None,
