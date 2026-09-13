@@ -23,7 +23,7 @@
   aria-label="Current reply elapsed time"
   aria-live="off"
 >
-  <Clock3 size={14} aria-hidden="true" />
+  <Clock3 size={13} aria-hidden="true" />
   <span>
     {#if Number.isFinite(started)}
       {hours ? `${hours}h ` : ''}{hours || minutes ? `${minutes}m ` : ''}{seconds}s elapsed
@@ -37,9 +37,10 @@
   .running-reply-time {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 10px;
-    color: var(--muted);
+    gap: 8px;
+    margin-top: 10px;
+    padding: 6px 0;
+    color: #8eaa76;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
   }

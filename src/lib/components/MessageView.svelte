@@ -12,6 +12,7 @@
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import ToolActivity from './ToolActivity.svelte';
   import ReplyUsage from './ReplyUsage.svelte';
+  import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
   import VisualizationView from './VisualizationView.svelte';
@@ -148,7 +149,11 @@
                 </div>{/each}
             </div>{/if}
         </div>{/if}
-      {#if message.status !== 'running'}<ReplyUsage {message} {timeTotal} />{/if}
+      {#if message.status === 'running'}
+        <RunningReplyTime createdAt={message.createdAt} />
+      {:else}
+        <ReplyUsage {message} {timeTotal} />
+      {/if}
       {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
         >
