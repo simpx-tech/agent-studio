@@ -4,7 +4,11 @@
 
 Choose a computer to select its agent, account, model, and reasoning and start chatting. A project folder is optional: computer-scoped new chats start as **Standalone**, and the Folder picker always offers **Standalone** to clear a draft's project folder. Clearing the folder preserves the draft, attachments, and model settings. Choosing a recent folder or browsing still adds project context; existing conversations keep their fixed computer, folder, and account.
 
-Standalone replies use the selected computer and connection's isolated CLI runtime. The saved conversation retains its computer and environment even though no project path is sent to the provider. Desktop, managed WSL, and paired Viewer use the same selection and routing rules; unavailable or signed-out connections still cannot send, and another computer is never used as a fallback.
+New Standalone chats get a persistent working folder of their own on the selected execution computer. Native hosts use app-data `standalone/<conversation UUID>`; managed WSL uses `~/.local/share/<app identifier>/standalone/<conversation UUID>` in the selected distribution. Replies, retries, and app restarts reuse the same folder. Context and skill inspection use that chat's folder and keep separate caches for Standalone chats. Tool access and the selected CLI profile's global instructions, hooks, skills, and integrations remain enabled.
+
+Existing chats retain their previous shared runtime to preserve file references and native session continuity. Host-local versioned bindings record the choice; imported saved history without a binding also retains the legacy runtime. New chats do not copy files or instructions from it. Chat deletion retains generated files and native transcripts. Working folders are not sandboxes: chat agents retain their configured full filesystem access.
+
+The saved conversation retains its computer and environment even though no project path is sent to the provider. Desktop, managed WSL, and paired Viewer use the same selection and routing rules; unavailable or signed-out connections still cannot send, and another computer is never used as a fallback. Working-folder contents and bindings stay on the execution host, outside workspace exports and relay sync. Background title generation continues to use its separate restricted runtime.
 
 ## Agent questions
 

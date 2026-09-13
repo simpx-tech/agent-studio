@@ -6,9 +6,18 @@ provider=$4
 binary=$5
 shift 5
 working_directory=''
+standalone=''
 if [ "${1-}" = --agent-studio-cwd ]; then
   working_directory=$2
-  shift 2
+    shift 2
+elif [ "${1-}" = --agent-studio-standalone ]; then
+    standalone=$2
+    # Host-generated canonical UUID only; never interpret a caller's path.
+    if ! printf '%s\n' "$standalone" | LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+        printf '%s\n' 'Invalid standalone conversation id' >&2
+        exit 1
+    fi
+    shift 2
 fi
 umask 077
 root="$HOME/.local/share/$namespace"
@@ -16,6 +25,9 @@ mkdir -p "$root/runtime" "$root/runs"
 if [ -n "$working_directory" ]; then
   case "$working_directory" in /*) ;; *) printf '%s\n' 'Selected folder is unavailable: absolute Linux path required' >&2; exit 1;; esac
   cd -- "$working_directory" || { printf '%s\n' 'Selected folder is unavailable' >&2; exit 1; }
+elif [ -n "$standalone" ]; then
+    mkdir -p "$root/standalone/$standalone"
+    cd "$root/standalone/$standalone"
 else
   cd "$root/runtime"
 fi

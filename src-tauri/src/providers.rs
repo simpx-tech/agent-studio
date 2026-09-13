@@ -767,6 +767,24 @@ pub async fn chat_command(
     runtime: &Path,
     exe: &Executable,
 ) -> Result<Command, String> {
+    let standalone = crate::standalone::prepare(
+        runtime.parent().ok_or("Cannot locate conversation data")?,
+        request,
+    )?;
+    let dedicated = standalone.map(|id| {
+        runtime
+            .parent()
+            .unwrap()
+            .join("standalone")
+            .join(id.to_string())
+    });
+    let runtime = dedicated
+        .as_deref()
+        .filter(|_| exe.wsl.is_none())
+        .unwrap_or(runtime);
+    if dedicated.is_some() && exe.wsl.is_none() {
+        std::fs::create_dir_all(runtime).map_err(|_| "Cannot create this chat's working folder")?;
+    }
     let selected = request
         .location
         .as_ref()
@@ -798,6 +816,8 @@ pub async fn chat_command(
         c.current_dir(runtime);
         if let Some(path) = selected {
             c.args(["--agent-studio-cwd", path]);
+        } else if let Some(id) = standalone {
+            c.args(["--agent-studio-standalone", &id.to_string()]);
         }
     } else {
         c.current_dir(
@@ -1202,6 +1222,41 @@ mod tests {
             .unwrap(),
         );
         r
+    }
+
+    #[tokio::test]
+    async fn standalone_chats_keep_separate_persistent_working_directories() {
+        let data = tempfile::tempdir().unwrap();
+        let runtime = data.path().join("chat-runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let exe = Executable {
+            provider: "codex".into(),
+            program: "codex".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let mut a = request();
+        a.agent.provider = "codex".into();
+        a.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        let mut b = a.clone();
+        b.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        let first = chat_command(&a, &runtime, &exe).await.unwrap();
+        let second = chat_command(&b, &runtime, &exe).await.unwrap();
+        let cwd = first.as_std().get_current_dir().unwrap();
+        let other = second.as_std().get_current_dir().unwrap();
+        assert_ne!(
+            cwd, other,
+            "Separate Standalone chats must not share their working folder"
+        );
+        std::fs::write(cwd.join("only-a.txt"), "retained").unwrap();
+        assert!(!other.join("only-a.txt").exists());
+        a.messages.push(a.messages[0].clone());
+        let resumed = chat_command(&a, &runtime, &exe).await.unwrap();
+        assert_eq!(resumed.as_std().get_current_dir(), Some(cwd));
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("only-a.txt")).unwrap(),
+            "retained"
+        );
     }
     #[tokio::test]
     async fn background_requests_keep_tools_disabled() {

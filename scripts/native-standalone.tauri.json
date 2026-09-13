@@ -1,0 +1,6 @@
+{
+  "identifier": "com.vinicius.agentstudio.standalone-folders-20260913-qa",
+  "productName": "Agent Studio Standalone QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": { "windows": [{ "title": "Agent Studio Standalone QA", "width": 1200, "height": 900 }] }
+}

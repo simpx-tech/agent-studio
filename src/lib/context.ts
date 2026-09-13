@@ -61,7 +61,9 @@ export const contextStatuses: Record<ContextEntry['status'], string> = {
   unknown: 'Unknown',
 };
 
-export type ContextSelection = Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>;
+export type ContextSelection = Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> & {
+  conversationId?: string;
+};
 export function contextKey(settings: ContextSelection, location?: ChatLocation): string {
   return JSON.stringify([
     settings.provider,
@@ -71,6 +73,7 @@ export function contextKey(settings: ContextSelection, location?: ChatLocation):
     location?.environmentId ?? null,
     location?.executionEnvironmentId ?? location?.environmentId ?? null,
     location?.path ?? null,
+    location?.path ? null : (settings.conversationId ?? null),
   ]);
 }
 

@@ -37,7 +37,7 @@ fn fingerprint(value: &impl Serialize) -> Result<String, String> {
     Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).to_string())
 }
 
-fn scope(
+pub(crate) fn scope(
     provider: &str,
     location: Option<&crate::folders::ChatLocation>,
 ) -> Result<String, String> {

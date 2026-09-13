@@ -17,6 +17,7 @@
     input,
     prompt = $bindable(),
     settings,
+    conversationId,
     location,
     available,
     busy,
@@ -26,6 +27,7 @@
     input?: HTMLTextAreaElement;
     prompt: string;
     settings: ChatSettings;
+    conversationId?: string;
     location?: ChatLocation;
     available: boolean;
     busy: boolean;
@@ -41,7 +43,7 @@
   let queryError = $state('');
   let chosen = $state<ComposerCommand>();
   let pending: Promise<ContextSnapshot> | undefined;
-  const key = $derived(contextKey(settings, location));
+  const key = $derived(contextKey({ ...settings, conversationId }, location));
   const token = $derived(commandToken(prompt));
   const query = $derived(commandQuery(prompt, caret));
   const choices = $derived(
@@ -77,6 +79,7 @@
         provider: settings.provider,
         model: settings.model,
         connectionId: settings.connectionId,
+        conversationId,
       };
       snapshot = contextCache.peek(selected, location);
       loading = true;

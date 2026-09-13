@@ -2561,6 +2561,7 @@
                   }
                 }}></textarea>
               <ComposerCommands
+                conversationId={active?.id}
                 bind:this={composerCommands}
                 input={composerInput}
                 bind:prompt

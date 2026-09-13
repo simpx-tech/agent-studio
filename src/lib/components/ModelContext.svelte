@@ -48,7 +48,7 @@
   let refresh = $state(0);
   let copied = $state('');
   let closeButton: HTMLButtonElement;
-  const selectionKey = $derived(contextKey(settings, location));
+  const selectionKey = $derived(contextKey({ ...settings, conversationId }, location));
   const categories = [
     { id: 'instructions', name: 'Instructions', icon: FileText },
     { id: 'native', name: 'Native prompt', icon: FileText },
@@ -78,6 +78,7 @@
         provider: settings.provider,
         model: settings.model,
         connectionId: settings.connectionId,
+        conversationId,
       };
       const folder = location;
       snapshot = contextCache.peek(selected, folder);

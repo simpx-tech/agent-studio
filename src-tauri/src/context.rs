@@ -944,20 +944,50 @@ pub async fn read(
     provider: String,
     model: String,
     location: Option<ChatLocation>,
+    conversation_id: Option<String>,
 ) -> Result<ContextSnapshot, String> {
     if !crate::providers::valid_provider(&provider) || model.len() > 200 {
         return Err("Invalid context selection".into());
     }
     let exe = crate::providers::resolve(&provider).await?;
     let profile = crate::profiles::current();
-    let runtime = app
+    let data = app
         .path()
         .app_local_data_dir()
-        .map_err(|_| "Cannot locate app data")?
-        .join("chat-runtime");
+        .map_err(|_| "Cannot locate app data")?;
+    let standalone = if location.is_none() {
+        conversation_id
+            .as_deref()
+            .map(|id| crate::standalone::lookup(&data, id, &provider, None))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let relative = match standalone {
+        Some(crate::standalone::Directory::Dedicated) => std::path::PathBuf::from("standalone")
+            .join(
+                uuid::Uuid::parse_str(conversation_id.as_deref().unwrap())
+                    .map_err(|_| "Invalid conversation id")?
+                    .to_string(),
+            ),
+        _ => std::path::PathBuf::from("chat-runtime"),
+    };
+    let runtime = data.join(&relative);
     std::fs::create_dir_all(&runtime).map_err(|_| "Cannot prepare context query")?;
     let (home, config, bridge, fallback) = if let Some(wsl) = &exe.wsl {
-        wsl_paths(wsl, &profile, &provider).await?
+        let (home, config, bridge, fallback) = wsl_paths(wsl, &profile, &provider).await?;
+        let fallback = if standalone == Some(crate::standalone::Directory::Dedicated) {
+            Path::new(&fallback)
+                .parent()
+                .ok_or("Cannot locate the chat environment")?
+                .join(&relative)
+                .to_string_lossy()
+                .replace('\\', "/")
+        } else {
+            fallback
+        };
+        (home, config, bridge, fallback)
     } else {
         let home = PathBuf::from(
             std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })

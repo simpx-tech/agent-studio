@@ -37,7 +37,8 @@ impl Launch {
                 "{}\n{}",
                 include_str!("wsl-env.sh"),
                 include_str!("wsl-launch.sh")
-            ),
+            )
+            .replace("\r\n", "\n"),
             "agent-studio".into(),
             self.namespace.clone(),
             profile.into(),
@@ -50,7 +51,7 @@ impl Launch {
         #[cfg(windows)]
         {
             // Only our generated job marker is read. Never stop an entire WSL distribution.
-            let script = include_str!("wsl-cancel.sh");
+            let script = include_str!("wsl-cancel.sh").replace("\r\n", "\n");
             let mut command = tokio::process::Command::new("wsl.exe");
             command
                 .args([
@@ -59,7 +60,7 @@ impl Launch {
                     "--exec",
                     "bash",
                     "-c",
-                    script,
+                    &script,
                     "agent-studio",
                     &self.namespace,
                     &self.job,
@@ -422,6 +423,57 @@ mod tests {
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.starts_with(payload));
         assert!(text.contains(&format!("/{namespace}/profiles/claude/{profile}")));
+        // Per-chat Linux cwd is selected by a validated ID, independently of the login profile.
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let mut first_cwd = String::new();
+        for (id, script) in [
+            (
+                &a,
+                "printf '%s' retained > only-a.txt; printf '%s' \"$PWD\"",
+            ),
+            (&b, "test ! -e only-a.txt; printf '%s' \"$PWD\""),
+            (
+                &a,
+                "test \"$(cat only-a.txt)\" = retained; printf '%s' \"$PWD\"",
+            ),
+        ] {
+            let output = make("existing")
+                .command()
+                .args(["--agent-studio-standalone", id, "-c", script])
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cwd = String::from_utf8(output.stdout).unwrap();
+            assert!(cwd.ends_with(&format!("/{namespace}/standalone/{id}")));
+            if id == &a {
+                if first_cwd.is_empty() {
+                    first_cwd = cwd;
+                } else {
+                    assert_eq!(cwd, first_cwd);
+                }
+            } else {
+                assert_ne!(cwd, first_cwd);
+            }
+        }
+        let rejected = make("existing")
+            .command()
+            .args([
+                "--agent-studio-standalone",
+                "../escape",
+                "-c",
+                "echo should-not-run",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert!(rejected.stdout.is_empty());
         // Exercise the real directory change with literal shell characters and
         // prove an unavailable folder fails before the provider is started.
         let project = format!("/tmp/{namespace}/Project 'quoted' $(literal) 日本語");
