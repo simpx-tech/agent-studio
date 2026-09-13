@@ -1047,6 +1047,39 @@ pub async fn read(
 }
 
 type ContextPaths = (PathBuf, PathBuf, Option<PathBuf>, String);
+/// Resolve the selected profile's storage without starting a model or querying its tools.
+pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
+    let profile = crate::profiles::current();
+    if profile.distribution.is_some() {
+        let exe = crate::providers::resolve(provider).await?;
+        let wsl = exe
+            .wsl
+            .as_ref()
+            .ok_or("The selected WSL CLI is unavailable")?;
+        let (_, config, bridge, _) = wsl_paths(wsl, &profile, provider).await?;
+        return Ok(bridge
+            .ok_or("The selected WSL profile is unavailable")?
+            .join(config.to_string_lossy().trim_start_matches('/')));
+    }
+    if let Some(root) = profile.root {
+        return Ok(root);
+    }
+    if let Some(root) = std::env::var_os(if provider == "codex" {
+        "CODEX_HOME"
+    } else {
+        "CLAUDE_CONFIG_DIR"
+    }) {
+        return Ok(PathBuf::from(root));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .ok_or("Cannot locate the selected CLI profile")?;
+    Ok(PathBuf::from(home).join(if provider == "codex" {
+        ".codex"
+    } else {
+        ".claude"
+    }))
+}
+
 async fn wsl_paths(
     wsl: &crate::wsl::Launch,
     profile: &crate::profiles::Profile,

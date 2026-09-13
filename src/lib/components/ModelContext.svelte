@@ -13,6 +13,7 @@
   } from '@lucide/svelte';
   import { providers, type ChatSettings, type ChatLocation } from '$lib/domain';
   import { contextCache } from '$lib/transport';
+  import NativeInstructions from './NativeInstructions.svelte';
   import {
     contextKey,
     contextStatuses,
@@ -21,6 +22,7 @@
   } from '$lib/context';
 
   let {
+    conversationId,
     settings,
     location,
     modelName,
@@ -29,6 +31,7 @@
     close,
     useSkill,
   }: {
+    conversationId?: string;
     settings: ChatSettings;
     location?: ChatLocation;
     modelName: string;
@@ -40,7 +43,7 @@
   let snapshot = $state<ContextSnapshot>();
   let error = $state('');
   let loading = $state(false);
-  let category = $state<ContextKind>('instructions');
+  let category = $state<ContextKind | 'native'>('instructions');
   let search = $state('');
   let refresh = $state(0);
   let copied = $state('');
@@ -48,6 +51,7 @@
   const selectionKey = $derived(contextKey(settings, location));
   const categories = [
     { id: 'instructions', name: 'Instructions', icon: FileText },
+    { id: 'native', name: 'Native prompt', icon: FileText },
     { id: 'skills', name: 'Skills', icon: Sparkles },
     { id: 'memories', name: 'Memories', icon: Brain },
     { id: 'mcps', name: 'MCPs', icon: Plug },
@@ -127,8 +131,12 @@
     </header>
     <div class="context-body">
       <p class="context-intro">
-        Instructions and resources for this model’s selected account and folder. Models using the
-        same CLI profile and folder share these sources.
+        {#if category === 'native'}
+          Recorded CLI instructions for this conversation’s selected account and computer.
+        {:else}
+          Instructions and resources for this model’s selected account and folder. Models using the
+          same CLI profile and folder share these sources.
+        {/if}
       </p>
       <div class="context-location">
         <strong>{computerName} · {accountName}</strong>
@@ -153,88 +161,93 @@
               search = '';
             }}
           >
-            <tab.icon size={15} />{tab.name}<span
-              >{snapshot ? snapshot.entries.filter((e) => e.kind === tab.id).length : '—'}</span
-            >
+            <tab.icon size={15} />{tab.name}{#if tab.id !== 'native'}<span
+                >{snapshot ? snapshot.entries.filter((e) => e.kind === tab.id).length : '—'}</span
+              >{/if}
           </button>
         {/each}
       </div>
-      <div class="context-search">
-        <Search size={15} aria-hidden="true" /><input
-          aria-label="Filter context sources"
-          placeholder="Filter by name, path, or scope…"
-          bind:value={search}
-        />
-        <button
-          class="icon-button"
-          disabled={loading}
-          onclick={() => refresh++}
-          aria-label="Refresh model context"
-          title="Refresh model context"
-          ><RefreshCw size={15} class={loading ? 'spinning' : ''} /></button
-        >
-      </div>
-      {#if error}<p class="error-banner" role="alert">{error}</p>{/if}
-      <div class="context-entries" aria-busy={loading}>
-        {#if category === 'memories'}
-          <p class="context-category-help">
-            Global memory entrypoints and sources for this project or folder. Topic files are read
-            when relevant to the task.
-          </p>
-        {:else if category === 'mcps'}
-          <p class="context-category-help">
-            MCP servers for the selected CLI profile and folder. Configured servers may still need
-            to connect.
-          </p>
-        {/if}
-        {#if loading && !snapshot}<p class="context-empty" role="status">
-            Inspecting the selected CLI profile…
-          </p>
-        {:else if snapshot && !filtered.length}<p class="context-empty">
-            {search
-              ? 'No sources match this filter.'
-              : category === 'mcps'
-                ? 'No MCP servers were reported. Check the inspection notes for availability.'
-                : `No ${category} were reported or found in the inspected locations.`}
-          </p>
+      {#if category !== 'native'}<div class="context-search">
+          <Search size={15} aria-hidden="true" /><input
+            aria-label="Filter context sources"
+            placeholder="Filter by name, path, or scope…"
+            bind:value={search}
+          />
+          <button
+            class="icon-button"
+            disabled={loading}
+            onclick={() => refresh++}
+            aria-label="Refresh model context"
+            title="Refresh model context"
+            ><RefreshCw size={15} class={loading ? 'spinning' : ''} /></button
+          >
+        </div>{/if}
+      {#if error && category !== 'native'}<p class="error-banner" role="alert">{error}</p>{/if}
+      <div class="context-entries" aria-busy={category !== 'native' && loading}>
+        {#if category === 'native'}
+          <NativeInstructions {conversationId} {settings} />
         {:else}
-          {#each filtered as entry (entry.kind + entry.path)}
-            <article class="context-entry">
-              <div class="context-entry-title">
-                <strong>{entry.name}</strong><span class="context-scope">{entry.scope}</span><span
-                  class="context-status"
-                  class:reported={entry.status === 'reported'}>{contextStatuses[entry.status]}</span
-                >
-              </div>
-              {#if entry.kind !== 'mcps'}<div class="context-path">
-                  <code>{entry.path}</code><button
-                    class="icon-button"
-                    aria-label={`Copy path for ${entry.name}`}
-                    title="Copy path"
-                    onclick={() => copyPath(entry.path)}
-                    >{#if copied === entry.path}<Check size={14} />{:else}<Copy
-                        size={14}
-                      />{/if}</button
+          {#if category === 'memories'}
+            <p class="context-category-help">
+              Global memory entrypoints and sources for this project or folder. Topic files are read
+              when relevant to the task.
+            </p>
+          {:else if category === 'mcps'}
+            <p class="context-category-help">
+              MCP servers for the selected CLI profile and folder. Configured servers may still need
+              to connect.
+            </p>
+          {/if}
+          {#if loading && !snapshot}<p class="context-empty" role="status">
+              Inspecting the selected CLI profile…
+            </p>
+          {:else if snapshot && !filtered.length}<p class="context-empty">
+              {search
+                ? 'No sources match this filter.'
+                : category === 'mcps'
+                  ? 'No MCP servers were reported. Check the inspection notes for availability.'
+                  : `No ${category} were reported or found in the inspected locations.`}
+            </p>
+          {:else}
+            {#each filtered as entry (entry.kind + entry.path)}
+              <article class="context-entry">
+                <div class="context-entry-title">
+                  <strong>{entry.name}</strong><span class="context-scope">{entry.scope}</span><span
+                    class="context-status"
+                    class:reported={entry.status === 'reported'}
+                    >{contextStatuses[entry.status]}</span
                   >
-                </div>{/if}
-              <p>{entry.detail}</p>
-              {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
-                <button
-                  class="text-button"
-                  disabled={entry.status === 'disabled'}
-                  aria-label={`Use skill ${entry.name}`}
-                  title={entry.status === 'disabled'
-                    ? 'Disabled in the selected CLI profile'
-                    : 'Add this skill to your next message'}
-                  onclick={() => useSkill(entry.name, entry.path)}
-                  ><Sparkles size={13} />Use in next message</button
-                >
-              {/if}
-            </article>
-          {/each}
+                </div>
+                {#if entry.kind !== 'mcps'}<div class="context-path">
+                    <code>{entry.path}</code><button
+                      class="icon-button"
+                      aria-label={`Copy path for ${entry.name}`}
+                      title="Copy path"
+                      onclick={() => copyPath(entry.path)}
+                      >{#if copied === entry.path}<Check size={14} />{:else}<Copy
+                          size={14}
+                        />{/if}</button
+                    >
+                  </div>{/if}
+                <p>{entry.detail}</p>
+                {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
+                  <button
+                    class="text-button"
+                    disabled={entry.status === 'disabled'}
+                    aria-label={`Use skill ${entry.name}`}
+                    title={entry.status === 'disabled'
+                      ? 'Disabled in the selected CLI profile'
+                      : 'Add this skill to your next message'}
+                    onclick={() => useSkill(entry.name, entry.path)}
+                    ><Sparkles size={13} />Use in next message</button
+                  >
+                {/if}
+              </article>
+            {/each}
+          {/if}
         {/if}
       </div>
-      {#if snapshot}
+      {#if snapshot && category !== 'native'}
         <div class="context-notes">
           {#if snapshot.truncated}<p role="status">
               The inventory reached its size limit. Additional sources may exist.
@@ -243,17 +256,18 @@
         </div>
       {/if}
     </div>
-    {#if snapshot}
+    {#if snapshot || category === 'native'}
       <footer>
-        <span
-          >Checked {new Date(snapshot.checkedAt).toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          })} · Context inventory
-          <span role="status"
-            >{loading ? '· Updating…' : error ? '· Showing last saved result' : ''}</span
-          ></span
-        ><button class="secondary" onclick={close}>Done</button>
+        {#if category === 'native'}<span>Native session inspection</span>{:else if snapshot}
+          <span
+            >Checked {new Date(snapshot.checkedAt).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })} · Context inventory
+            <span role="status"
+              >{loading ? '· Updating…' : error ? '· Showing last saved result' : ''}</span
+            ></span
+          >{/if}<button class="secondary" onclick={close}>Done</button>
       </footer>
     {/if}
   </div>

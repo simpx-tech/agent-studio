@@ -9,7 +9,7 @@ import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { runTimeoutMs } from './workflows';
-import { createContextCache, type ContextSnapshot } from './context';
+import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import {
   browserScopeKey,
   browserSessionSignal,
@@ -679,6 +679,7 @@ async function localCall(
     title: 'generate_title',
     folders: 'list_folders',
     context: 'read_context',
+    nativeInstructions: 'read_native_instructions',
     answer: 'answer_question',
   };
   return invoke(commands[method], args);
@@ -705,7 +706,12 @@ async function routed<T>(
   remoteRuns.add(id);
   try {
     // Publish the conversation and its pinned connection before the target claims its work.
-    if (method === 'run' || method === 'folders' || method === 'context') {
+    if (
+      method === 'run' ||
+      method === 'folders' ||
+      method === 'context' ||
+      method === 'nativeInstructions'
+    ) {
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
       await pollRelay();
     }
@@ -851,6 +857,20 @@ export async function readContext(
   );
 }
 export let contextCache = createContextCache(readContext);
+export async function readNativeInstructions(
+  conversationId: string,
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
+): Promise<NativeInstructions> {
+  return routed(
+    'nativeInstructions',
+    {
+      conversationId,
+      provider: settings.provider,
+      connectionId: settings.connectionId,
+    },
+    settings.connectionId,
+  );
+}
 export type FolderListing = {
   path: string;
   parent: string | null;

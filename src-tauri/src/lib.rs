@@ -4,6 +4,7 @@ mod cli_queries;
 mod context;
 mod folders;
 mod models;
+mod native_instructions;
 mod notifications;
 mod profiles;
 mod protocol;
@@ -19,6 +20,16 @@ use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Storage(Mutex<()>);
+
+#[tauri::command]
+async fn read_native_instructions(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    provider: String,
+    connection_id: Option<String>,
+) -> Result<native_instructions::NativeInstructions, String> {
+    native_instructions::read(app, conversation_id, provider, connection_id).await
+}
 
 #[tauri::command]
 async fn read_context(
@@ -509,6 +520,7 @@ pub fn run() {
             list_models,
             read_usage,
             read_context,
+            read_native_instructions,
             load_workspace,
             save_workspace,
             run_agent,

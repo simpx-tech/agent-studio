@@ -2692,6 +2692,7 @@
   />
 {/if}
 {#if contextOpen}<ModelContext
+    conversationId={active?.id}
     settings={selectedSettings}
     location={selectedLocation?.path ? selectedLocation : undefined}
     modelName={selectedModelName(selectedSettings.model, availableModels)}

@@ -32,6 +32,21 @@ export type ContextSnapshot = {
   truncated: boolean;
   commands?: { name: string; description: string; argumentHint: string }[];
 };
+
+// Deliberately kept out of the shared source/skill catalog cache and workspace schema.
+export type NativeInstructions = {
+  provider: string;
+  checkedAt: number;
+  blocks: {
+    label: string;
+    text: string;
+    capturedAt: string | null;
+    version: string | null;
+    model: string | null;
+  }[];
+  notice: string;
+  studioGuidance: string;
+};
 export const contextStatuses: Record<ContextEntry['status'], string> = {
   discovered: 'Discovered',
   reported: 'Reported',

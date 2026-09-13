@@ -53,6 +53,62 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('routes bounded native instruction requests as transient jobs and rejects caller-supplied paths', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const args = {
+      conversationId: crypto.randomUUID(),
+      provider: 'claude',
+      connectionId: crypto.randomUUID(),
+    };
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'nativeInstructions',
+      args,
+    };
+    expect(
+      (
+        await f.call('POST', 'jobs', {
+          ...job,
+          args: { ...args, path: '/another-profile/session.jsonl' },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    await f.call('GET', 'jobs', undefined, f.target);
+    const result = {
+      provider: 'claude',
+      checkedAt: Date.now(),
+      notice: 'Recorded',
+      studioGuidance: 'App guidance',
+      blocks: [
+        {
+          label: 'System prompt',
+          text: 'Synthetic native prompt',
+          capturedAt: null,
+          version: 'fixture',
+          model: null,
+        },
+      ],
+    };
+    expect(
+      (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result }, f.target))
+        .status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${job.id}`)).body.result).toEqual(result);
+    expect(JSON.stringify((await f.call('GET', 'workspace')).body)).not.toContain(
+      'Synthetic native prompt',
+    );
+    f.advance(600_001);
+    expect((await f.call('GET', `jobs/${job.id}`)).status).toBe(404);
+  });
   it('keeps healthy native workflows past one reply deadline while expiring abandoned work', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();

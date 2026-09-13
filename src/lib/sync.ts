@@ -302,7 +302,8 @@ export type RelayJob = {
   id: string;
   source: string;
   target: string;
-  method: 'run' | 'usage' | 'models' | 'title' | 'folders' | 'context' | 'answer';
+  method:
+    'run' | 'usage' | 'models' | 'title' | 'folders' | 'context' | 'nativeInstructions' | 'answer';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

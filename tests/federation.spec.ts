@@ -44,6 +44,24 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           if (command === 'plugin:event|listen') return 0;
           if (command === 'plugin:event|unlisten') return;
           if (command === 'get_installation') return identity;
+          if (command === 'read_native_instructions') {
+            localStorage.setItem('fixture-native-instructions', JSON.stringify(args));
+            return {
+              provider: args.provider,
+              checkedAt: Date.now(),
+              notice: 'Recorded on the owning host.',
+              studioGuidance: '',
+              blocks: [
+                {
+                  label: 'System prompt',
+                  text: `Native instruction from ${identity.name}`,
+                  capturedAt: '2026-09-13T10:00:00Z',
+                  version: 'fixture',
+                  model: null,
+                },
+              ],
+            };
+          }
           if (command === 'read_context') {
             localStorage.setItem('fixture-context', JSON.stringify(args));
             return {
@@ -1028,6 +1046,25 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
     expect(contextRequest.connectionId).toBe(connection.id);
     expect(contextRequest.location).toEqual(firstRequest.location);
     expect(await mac.evaluate(() => localStorage.getItem('fixture-context'))).toBeNull();
+    await mac.getByRole('button', { name: 'Native prompt', exact: true }).click();
+    await expect(mac.getByRole('dialog')).toContainText('Recorded on the owning host.', {
+      timeout: 20_000,
+    });
+    await mac.getByRole('dialog').getByText('System prompt', { exact: true }).click();
+    await expect(mac.getByRole('dialog').locator('pre:visible')).toHaveText(
+      'Native instruction from Desktop',
+    );
+    const nativeRequest = await windows.evaluate(() =>
+      JSON.parse(localStorage.getItem('fixture-native-instructions')!),
+    );
+    expect(nativeRequest).toEqual({
+      conversationId: firstRequest.conversationId,
+      provider: 'claude',
+      connectionId: connection.id,
+    });
+    expect(
+      await mac.evaluate(() => localStorage.getItem('fixture-native-instructions')),
+    ).toBeNull();
     await mac.getByRole('button', { name: 'Close model context' }).click();
     await mac.getByRole('button', { name: 'New conversation', exact: true }).click();
     await mac.getByRole('combobox', { name: 'Computer', exact: true }).click();

@@ -26,10 +26,32 @@ const jobInput = z
     id: uuid,
     source: uuid,
     target: uuid,
-    method: z.enum(['run', 'usage', 'models', 'title', 'folders', 'context', 'answer']),
+    method: z.enum([
+      'run',
+      'usage',
+      'models',
+      'title',
+      'folders',
+      'context',
+      'nativeInstructions',
+      'answer',
+    ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'nativeInstructions' &&
+      !z
+        .object({
+          conversationId: uuid,
+          provider: z.enum(['claude', 'codex', 'gemini']),
+          connectionId: uuid,
+        })
+        .strict()
+        .safeParse(job.args).success
+    ) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid native instruction request' });
+    }
     if (
       job.method === 'answer' &&
       !z

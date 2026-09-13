@@ -179,6 +179,35 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-sign-in-provider', args.provider);
             return;
           }
+          if (command === 'read_native_instructions') {
+            const state = window as any;
+            (state.nativeInstructionCalls ??= []).push(args);
+            const text =
+              state.nativeInstructionText ??
+              'Exact native instruction <script>window.promptExecuted = true</script> & text\nPreserve every line.';
+            if (state.holdNativeInstructions)
+              await new Promise<void>((resolve) => (state.releaseNativeInstructions = resolve));
+            if (state.failNativeInstructions) throw new Error('Native session record unavailable');
+            return {
+              provider: args.provider,
+              checkedAt: Date.now(),
+              notice: state.noNativeInstructions
+                ? 'No native session has been recorded for this conversation.'
+                : 'Latest recorded instructions. Tool definitions and conversation history are separate.',
+              studioGuidance: 'Current Agent Studio guidance supplied as user context.',
+              blocks: state.noNativeInstructions
+                ? []
+                : [
+                    {
+                      label: 'Base instructions at session start',
+                      text,
+                      capturedAt: '2026-09-13T10:00:00Z',
+                      version: '0.153.4',
+                      model: 'fixture-model',
+                    },
+                  ],
+            };
+          }
           if (command === 'read_context') {
             const state = window as any;
             (state.contextCalls ??= []).push(args);

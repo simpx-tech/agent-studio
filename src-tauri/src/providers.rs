@@ -579,6 +579,9 @@ impl RunRequest {
             })
             .collect();
         let context = serde_json::json!({ "agent_instructions": self.agent.instructions, "conversation": messages });
+        format!("{}\n{context}", self.guidance())
+    }
+    pub fn guidance(&self) -> String {
         let tools = if self.tools_enabled() {
             "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. When delivering an HTML or SVG artifact, include its complete self-contained source in a fenced html or svg code block, optionally followed by a short title on the opening fence. Artifact previews support inline CSS and JavaScript, SVG and data images; they cannot load external scripts, styles, or network resources. Do not generate an artifact unless it serves the user's request. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
         } else {
@@ -594,7 +597,7 @@ impl RunRequest {
         } else {
             ""
         };
-        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:\n{context}")
+        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:")
     }
     pub fn native_context(&self) -> Option<String> {
         let session = self.native_session.as_ref()?;

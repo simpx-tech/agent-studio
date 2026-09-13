@@ -37,6 +37,60 @@ fn fingerprint(value: &impl Serialize) -> Result<String, String> {
     Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).to_string())
 }
 
+fn scope(
+    provider: &str,
+    location: Option<&crate::folders::ChatLocation>,
+) -> Result<String, String> {
+    let profile = crate::profiles::current();
+    fingerprint(&serde_json::json!({
+        "provider": provider, "connection": profile.id,
+        "profile": profile.root, "isolated": profile.isolated,
+        "distribution": profile.distribution, "folderDistribution": profile.folder_distribution,
+        "namespace": profile.namespace, "location": location,
+        "inheritedProfile": std::env::var_os(if provider == "codex" { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" }).map(|p| p.to_string_lossy().into_owned()),
+    }))
+}
+
+/// Read an existing binding without creating a session, taking its run lock, or changing history.
+pub fn bound_id(
+    root: &Path,
+    conversation: &str,
+    provider: &str,
+    location: Option<&crate::folders::ChatLocation>,
+) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let conversation =
+        uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
+    let file = match File::open(
+        root.join("native-sessions")
+            .join(format!("{conversation}.json")),
+    ) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read the native session binding".into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(32_001)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read the native session binding")?;
+    if bytes.len() > 32_000 {
+        return Err("The native session binding exceeds its size limit".into());
+    }
+    let record: Record =
+        serde_json::from_slice(&bytes).map_err(|_| "The native session binding is unreadable")?;
+    if record.version != 1
+        || record.history.is_empty()
+        || uuid::Uuid::parse_str(&record.id).is_err()
+        || record.scope != scope(provider, location)?
+    {
+        return Err(
+            "The native session does not match this conversation's account, computer, and folder"
+                .into(),
+        );
+    }
+    Ok(Some(record.id))
+}
+
 impl Session {
     pub fn prepare(root: &Path, request: &RunRequest) -> Result<Option<Self>, String> {
         let Some(conversation) = &request.conversation_id else {
@@ -49,14 +103,7 @@ impl Session {
         }
         let conversation =
             uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
-        let profile = crate::profiles::current();
-        let scope = fingerprint(&serde_json::json!({
-            "provider": request.agent.provider, "connection": profile.id,
-            "profile": profile.root, "isolated": profile.isolated,
-            "distribution": profile.distribution, "folderDistribution": profile.folder_distribution,
-            "namespace": profile.namespace, "location": request.location,
-            "inheritedProfile": std::env::var_os(if request.agent.provider == "codex" { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" }).map(|p| p.to_string_lossy().into_owned()),
-        }))?;
+        let scope = scope(&request.agent.provider, request.location.as_ref())?;
         let history = request
             .messages
             .iter()
@@ -179,6 +226,58 @@ mod tests {
     }
     fn message(role: &str, text: &str) -> super::super::ChatMessage {
         serde_json::from_value(json!({"role":role,"text":text})).unwrap()
+    }
+    #[tokio::test]
+    async fn inspection_is_read_only_and_checks_the_same_profile_scope_as_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let r = request();
+        assert_eq!(
+            bound_id(
+                root.path(),
+                r.conversation_id.as_deref().unwrap(),
+                "claude",
+                None
+            )
+            .unwrap(),
+            None
+        );
+        assert!(!root.path().join("native-sessions").exists());
+        let session = Session::prepare(root.path(), &r).unwrap().unwrap();
+        session.bind(session.id(), true).unwrap();
+        let before = std::fs::read(&session.path).unwrap();
+        assert_eq!(
+            bound_id(
+                root.path(),
+                r.conversation_id.as_deref().unwrap(),
+                "claude",
+                None
+            )
+            .unwrap()
+            .as_deref(),
+            Some(session.id())
+        );
+        assert!(bound_id(
+            root.path(),
+            r.conversation_id.as_deref().unwrap(),
+            "codex",
+            None
+        )
+        .is_err());
+        let other = crate::profiles::Profile {
+            id: "other-profile".into(),
+            ..Default::default()
+        };
+        assert!(crate::profiles::scope(other, async {
+            bound_id(
+                root.path(),
+                r.conversation_id.as_deref().unwrap(),
+                "claude",
+                None,
+            )
+        })
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(&session.path).unwrap(), before);
     }
     #[test]
     fn disk_resume_reuses_id_without_storing_conversation_content() {
