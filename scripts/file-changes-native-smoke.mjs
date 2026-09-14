@@ -164,9 +164,32 @@ try {
       const input = document.querySelector('[aria-label="Message"]');
       input.value = 'Preserve this draft';
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelectorAll('.file-changes > summary').item(1).click();
     });
     await page.waitFor(() => document.querySelectorAll('.file-changes').item(1)?.open);
+    assert.equal(
+      await page.evaluate(
+        () =>
+          document.querySelectorAll('.file-changes').item(1).querySelector('.file-kind')
+            .textContent,
+      ),
+      'Edited',
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        document
+          .querySelectorAll('.file-changes')
+          .item(1)
+          .querySelector('.file-path')
+          .textContent.trim(),
+      ),
+      'example.txt',
+    );
+    assert(
+      await page.evaluate(
+        () =>
+          parseFloat(getComputedStyle(document.querySelector('.changed-file')).borderLeftWidth) > 0,
+      ),
+    );
     await page.evaluate(() =>
       document
         .querySelectorAll('.file-changes')

@@ -1,6 +1,11 @@
 <script lang="ts">
   import { FileCode2, ChevronRight } from '@lucide/svelte';
-  import { diffRows, type ChangeSummary } from '$lib/file-changes';
+  import {
+    diffRows,
+    fileChangeBase,
+    relativeFilePath,
+    type ChangeSummary,
+  } from '$lib/file-changes';
   let {
     response,
     chat,
@@ -16,18 +21,17 @@
   const selected = $derived(mode === 'response' ? response : chat);
   const added = $derived(selected.files.reduce((n, f) => n + (f.added ?? 0), 0));
   const removed = $derived(selected.files.reduce((n, f) => n + (f.removed ?? 0), 0));
+  const base = $derived(
+    fileChangeBase(
+      chat.files.flatMap((file) =>
+        file.previousPath ? [file.previousPath, file.path] : [file.path],
+      ),
+      folder,
+    ),
+  );
+  const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
   function displayPath(path: string) {
-    const normalized = path.replaceAll('\\', '/');
-    const base = folder?.replaceAll('\\', '/').replace(/\/$/, '');
-    const windows = /^[a-z]:/i.test(base ?? '') || base?.startsWith('//');
-    if (
-      base &&
-      (windows
-        ? normalized.toLowerCase().startsWith(base.toLowerCase() + '/')
-        : normalized.startsWith(base + '/'))
-    )
-      return normalized.slice(base.length + 1);
-    return path;
+    return relativeFilePath(path, base);
   }
   function tabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -45,7 +49,7 @@
   }
 </script>
 
-<details class="file-changes">
+<details class="file-changes" open>
   <summary aria-label="Files edited"
     ><ChevronRight size={14} class="disclosure" /><FileCode2 size={14} />
     <span>Files edited</span><small
@@ -108,7 +112,12 @@
                   >{displayPath(file.previousPath)} →
                 </span>{/if}{displayPath(file.path)}</span
             >
-            <span class="file-kind">{file.kind}</span>
+            <span
+              class="file-kind"
+              class:new-file={file.kind === 'added'}
+              title={file.kind === 'added' ? 'New file created in this scope' : undefined}
+              >{kindLabels[file.kind]}</span
+            >
             {#if file.added !== undefined}<span class="add">+{file.added}</span><span class="remove"
                 >−{file.removed}</span
               >{:else}<span class="muted">Diff unavailable</span>{/if}
@@ -200,7 +209,7 @@
   }
   .changes-body {
     margin-top: 6px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--line);
     border-radius: 6px;
     overflow: hidden;
   }
@@ -211,7 +220,7 @@
     justify-content: space-between;
     gap: 8px;
     padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--line);
   }
   .change-tabs {
     display: flex;
@@ -226,8 +235,8 @@
     padding: 5px 7px;
   }
   .change-tabs button[aria-selected='true'] {
-    background: var(--surface-raised, #282e28);
-    color: var(--text, #d5dfce);
+    background: var(--panel);
+    color: var(--text);
   }
   .change-totals {
     display: flex;
@@ -246,10 +255,13 @@
     line-height: 1.6;
   }
   .coverage {
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--line);
   }
   .changed-file {
-    border-top: 1px solid var(--border);
+    margin: 0 10px 8px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    overflow: hidden;
   }
   .changed-file > summary {
     padding: 9px 10px;
@@ -268,7 +280,10 @@
   }
   .file-kind {
     font-size: 10px;
-    text-transform: capitalize;
+    font-weight: 600;
+  }
+  .file-kind.new-file {
+    color: #a9ce88;
   }
   .add {
     color: #a9ce88;
@@ -281,7 +296,7 @@
   .diff-scroll {
     overflow: auto;
     max-height: 420px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--line);
   }
   .diff-table {
     border-collapse: collapse;

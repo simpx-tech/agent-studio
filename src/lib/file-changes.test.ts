@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   fileChangesSchema,
+  fileChangeBase,
+  relativeFilePath,
   summarizeFileChanges,
   type FilePatch,
   type DiffHunk,
@@ -38,6 +40,29 @@ const reply = (files: FilePatch[]): Message => ({
 });
 
 describe('recorded file changes', () => {
+  it('shortens paths only within a known project or a shared absolute directory', () => {
+    const paths = ['C:\\Projects\\studio\\src\\a.ts', 'c:/Projects/studio/docs/new.md'];
+    const base = fileChangeBase(paths);
+    expect(paths.map((path) => relativeFilePath(path, base))).toEqual(['src/a.ts', 'docs/new.md']);
+    expect(fileChangeBase(paths, 'C:\\Projects\\')).toBe('C:/Projects');
+    expect(relativeFilePath(paths[0], fileChangeBase(paths, 'c:/projects/studio/'))).toBe(
+      'src/a.ts',
+    );
+    expect(relativeFilePath('C:/Projects/studio-other/a.ts', base)).toBe(
+      'C:/Projects/studio-other/a.ts',
+    );
+    expect(relativeFilePath('/home/test/Studio/a.ts', '/home/test/studio')).toBe(
+      '/home/test/Studio/a.ts',
+    );
+    expect(relativeFilePath('./src/a.ts', base)).toBe('src/a.ts');
+    expect(fileChangeBase([paths[0]])).toBeUndefined();
+    expect(fileChangeBase(['C:/a.ts', 'D:/b.ts'])).toBeUndefined();
+    expect(fileChangeBase(['/home/a.ts', '/tmp/b.ts'])).toBeUndefined();
+    expect(fileChangeBase(['src/a.ts', '/home/test/b.ts'])).toBeUndefined();
+    const share = ['\\\\server\\share\\project\\a.ts', '//server/share/project/src/b.ts'];
+    expect(relativeFilePath(share[1], fileChangeBase(share))).toBe('src/b.ts');
+    expect(fileChangeBase(['//server/share/a.ts', '//server/share/b.ts'])).toBeUndefined();
+  });
   it('retains confirmed legacy filenames without inventing diffs or hiding an earlier gap', () => {
     const old = reply([]);
     delete old.fileChanges;
@@ -166,6 +191,14 @@ describe('recorded file changes', () => {
       kind: 'renamed',
       hunks: [],
     };
+    const edited = reply([patch('created', 'updated', 'new.ts')]);
+    expect(summarizeFileChanges([edited]).files[0].kind).toBe('modified');
+    expect(summarizeFileChanges([reply([create]), edited]).files[0]).toMatchObject({
+      kind: 'added',
+      added: 1,
+      removed: 0,
+      hunks: [{ lines: ['+updated'] }],
+    });
     expect(summarizeFileChanges([reply([create, rename])]).files[0]).toMatchObject({
       path: 'renamed.ts',
       kind: 'added',

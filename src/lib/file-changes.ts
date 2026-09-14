@@ -58,6 +58,49 @@ export function latestFileChanges(a?: FileChanges, b?: FileChanges) {
 
 export type FileSummary = FilePatch & { added?: number; removed?: number; unavailable?: string };
 export type ChangeSummary = { files: FileSummary[]; limited: boolean; recorded: boolean };
+
+const displaySlashes = (path: string) => path.replaceAll('\\', '/').replace(/^\.\//, '');
+const absolutePath = (path: string) => path.startsWith('/') || /^[a-z]:\//i.test(path);
+const windowsPath = (path: string) => /^[a-z]:\//i.test(path) || path.startsWith('//');
+
+/** Prefer the selected project; otherwise use a shared directory only when
+ * multiple absolute file paths establish it. Never guess a lone file's root. */
+export function fileChangeBase(paths: string[], folder?: string): string | undefined {
+  if (folder) return displaySlashes(folder).replace(/\/+$/, '');
+  const unique = [...new Set(paths.map(displaySlashes))];
+  if (unique.length < 2 || !unique.every(absolutePath)) return;
+  const windows = windowsPath(unique[0]);
+  if (unique.some((path) => windowsPath(path) !== windows)) return;
+  const parts = unique[0].split('/').slice(0, -1);
+  for (const path of unique.slice(1)) {
+    const other = path.split('/').slice(0, -1);
+    let i = 0;
+    while (
+      i < parts.length &&
+      i < other.length &&
+      (windows ? parts[i].toLowerCase() === other[i].toLowerCase() : parts[i] === other[i])
+    )
+      i++;
+    parts.length = i;
+  }
+  // A filesystem root, drive, or UNC share alone does not establish useful context.
+  if (parts.length < (unique[0].startsWith('//') ? 5 : 2)) return;
+  return parts.join('/');
+}
+
+export function relativeFilePath(path: string, base?: string): string {
+  const normalized = displaySlashes(path);
+  const prefix = base === undefined ? undefined : displaySlashes(base).replace(/\/+$/, '') + '/';
+  if (
+    prefix &&
+    (windowsPath(normalized)
+      ? normalized.toLowerCase().startsWith(prefix.toLowerCase())
+      : normalized.startsWith(prefix))
+  )
+    return normalized.slice(prefix.length);
+  return normalized;
+}
+
 type Token = number | string;
 const maxSpan = 100_000;
 const key = (path: string) => {

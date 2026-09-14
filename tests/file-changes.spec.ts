@@ -74,12 +74,12 @@ test('authenticated production Viewer restores final diffs and distinguishes mis
       await page.getByRole('tab', { name: /^History/ }).click();
       await page.getByRole('button', { name: /Viewer file changes/ }).click();
       const last = page.locator('.file-changes').last();
-      await last.locator(':scope > summary').click();
+      await expect(last).toHaveAttribute('open', '');
       await last.getByRole('tab', { name: 'All chat changes', exact: true }).click();
       await last.locator('.changed-file > summary').click();
       await expect(last.locator('.diff-code')).toHaveText(['-original', '+final']);
       const old = page.locator('.file-changes').first();
-      await old.locator(':scope > summary').click();
+      await expect(old).toHaveAttribute('open', '');
       await expect(
         old.getByText('File changes were not recorded for this response.', { exact: true }),
       ).toBeVisible();
@@ -118,7 +118,7 @@ for (const mobile of [false, true])
                   id: 'edit-1',
                   files: [
                     {
-                      path: 'src/components/Example.svelte',
+                      path: 'C:\\Projects\\studio\\src\\components\\Example.svelte',
                       kind: 'modified',
                       hunks: [
                         {
@@ -127,6 +127,22 @@ for (const mobile of [false, true])
                           newStart: 1,
                           newLines: 1,
                           lines: ['-' + before, '+' + after],
+                        },
+                      ],
+                    },
+                    {
+                      path: 'C:\\Projects\\studio\\docs\\new.txt',
+                      kind: before === 'original' ? 'added' : 'modified',
+                      hunks: [
+                        {
+                          oldStart: before === 'original' ? 0 : 1,
+                          oldLines: before === 'original' ? 0 : 1,
+                          newStart: 1,
+                          newLines: 1,
+                          lines:
+                            before === 'original'
+                              ? ['+new document']
+                              : ['-new document', '+final document'],
                         },
                       ],
                     },
@@ -144,14 +160,28 @@ for (const mobile of [false, true])
     }
     await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
     const summary = page.locator('.file-changes').last();
-    await expect(summary).not.toHaveAttribute('open', '');
+    await expect(summary).toHaveAttribute('open', '');
     await summary.locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
-    const file = summary.locator('.changed-file');
+    await expect(summary).not.toHaveAttribute('open', '');
+    await page.keyboard.press('Enter');
+    await expect(summary).toHaveAttribute('open', '');
+    const file = summary
+      .locator('.changed-file')
+      .filter({ hasText: 'src/components/Example.svelte' });
     await expect(file).toHaveCount(1);
+    await expect(file.locator('.file-path')).toHaveText('src/components/Example.svelte');
+    await expect(file.locator('summary')).toHaveAttribute(
+      'title',
+      'C:\\Projects\\studio\\src\\components\\Example.svelte',
+    );
+    await expect(file.locator('.file-kind')).toHaveText('Edited');
+    expect(
+      await file.evaluate((el) => parseFloat(getComputedStyle(el).borderLeftWidth)),
+    ).toBeGreaterThan(0);
     await expect(file).not.toHaveAttribute('open', '');
     await file.locator('summary').click();
-    await expect(summary.locator('.diff-code')).toHaveText([
+    await expect(summary.locator('.changed-file[open] .diff-code')).toHaveText([
       '-intermediate',
       '+<script>final</script>',
     ]);
@@ -159,12 +189,15 @@ for (const mobile of [false, true])
     await summary.getByRole('tab', { name: 'This response', exact: true }).focus();
     await page.keyboard.press('ArrowRight');
     await expect(summary.getByRole('tab', { name: 'All chat changes', exact: true })).toBeFocused();
-    await summary.locator('.changed-file > summary').click();
-    await expect(summary.locator('.diff-code')).toHaveText([
+    await expect(
+      summary.locator('.changed-file').filter({ hasText: 'docs/new.txt' }).locator('.file-kind'),
+    ).toHaveText('Added');
+    await file.locator('summary').click();
+    await expect(summary.locator('.changed-file[open] .diff-code')).toHaveText([
       '-original',
       '+<script>final</script>',
     ]);
-    await expect(summary.locator('.change-totals')).toContainText('+1');
+    await expect(summary.locator('.change-totals')).toContainText('+2');
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
     expect(await summary.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await summary.scrollIntoViewIfNeeded();
@@ -185,8 +218,15 @@ for (const mobile of [false, true])
     await page.locator('.conversation-item').first().click();
     await expect(page.locator('.file-changes')).toHaveCount(2);
     const first = page.locator('.file-changes').first();
-    await first.locator(':scope > summary').click();
+    await expect(first).toHaveAttribute('open', '');
     await first.getByRole('tab', { name: 'All chat changes', exact: true }).click();
-    await first.locator('.changed-file > summary').click();
-    await expect(first.locator('.diff-code')).toHaveText(['-original', '+<script>final</script>']);
+    await first
+      .locator('.changed-file')
+      .filter({ hasText: 'src/components/Example.svelte' })
+      .locator('summary')
+      .click();
+    await expect(first.locator('.changed-file[open] .diff-code')).toHaveText([
+      '-original',
+      '+<script>final</script>',
+    ]);
   });
