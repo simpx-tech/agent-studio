@@ -19,8 +19,9 @@
   } = $props();
   let mode = $state<'response' | 'chat'>('response');
   const selected = $derived(mode === 'response' ? response : chat);
-  const added = $derived(selected.files.reduce((n, f) => n + (f.added ?? 0), 0));
-  const removed = $derived(selected.files.reduce((n, f) => n + (f.removed ?? 0), 0));
+  const existingFiles = $derived(selected.files.filter((file) => file.kind !== 'added'));
+  const added = $derived(existingFiles.reduce((n, f) => n + (f.added ?? 0), 0));
+  const removed = $derived(existingFiles.reduce((n, f) => n + (f.removed ?? 0), 0));
   const base = $derived(
     fileChangeBase(
       chat.files.flatMap((file) =>
@@ -83,8 +84,8 @@
       <span class="change-totals"
         >{selected.files.length}
         {selected.files.length === 1 ? 'file' : 'files'}
-        {#if added || removed}<span class="add">+{added}</span><span class="remove">−{removed}</span
-          >{/if}
+        {#if added || removed}<span class="add" title="Lines added to existing files">+{added}</span
+          ><span class="remove" title="Lines removed from existing files">−{removed}</span>{/if}
       </span>
     </div>
     <div
@@ -118,9 +119,11 @@
               title={file.kind === 'added' ? 'New file created in this scope' : undefined}
               >{kindLabels[file.kind]}</span
             >
-            {#if file.added !== undefined}<span class="add">+{file.added}</span><span class="remove"
-                >−{file.removed}</span
-              >{:else}<span class="muted">Diff unavailable</span>{/if}
+            {#if file.kind !== 'added' && file.added !== undefined}<span class="add"
+                >+{file.added}</span
+              ><span class="remove">−{file.removed}</span>{:else if file.added === undefined}<span
+                class="muted">Diff unavailable</span
+              >{/if}
           </summary>
           {#if file.unavailable}<p class="diff-unavailable">{file.unavailable}</p>
           {:else if !file.hunks?.length}<p class="diff-unavailable">
@@ -143,11 +146,11 @@
                 >
                 <tbody
                   >{#each file.hunks as hunk}
-                    <tr class="hunk"
-                      ><td colspan="3"
-                        >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
-                      ></tr
-                    >
+                    {#if file.kind !== 'added'}<tr class="hunk"
+                        ><td colspan="3"
+                          >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
+                        ></tr
+                      >{/if}
                     {#each diffRows(hunk) as row}<tr
                         class:added={row.text.startsWith('+')}
                         class:removed={row.text.startsWith('-')}

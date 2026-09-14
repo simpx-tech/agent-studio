@@ -197,7 +197,13 @@ for (const mobile of [false, true])
       '-original',
       '+<script>final</script>',
     ]);
-    await expect(summary.locator('.change-totals')).toContainText('+2');
+    await expect(summary.locator('.change-totals')).toContainText('+1');
+    const newFile = summary.locator('.changed-file').filter({ hasText: 'docs/new.txt' });
+    await expect(newFile.locator('summary .add, summary .remove')).toHaveCount(0);
+    await newFile.locator('summary').click();
+    await expect(newFile.locator('.hunk')).toHaveCount(0);
+    await expect(newFile.locator('.diff-code')).toHaveText('+final document');
+    await expect(file.locator('.hunk')).toHaveCount(1);
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
     expect(await summary.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await summary.scrollIntoViewIfNeeded();
