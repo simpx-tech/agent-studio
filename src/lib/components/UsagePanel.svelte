@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { X } from '@lucide/svelte';
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
@@ -37,6 +37,14 @@
     expanded?: boolean;
   } = $props();
   let now = $state(Date.now());
+  let creditCard: HTMLDivElement | undefined;
+  async function toggleCredits() {
+    expanded = !expanded;
+    if (expanded) {
+      await tick();
+      creditCard?.scrollIntoView({ block: 'nearest' });
+    }
+  }
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 15000);
     return () => clearInterval(timer);
@@ -182,7 +190,7 @@
     {#if credits}
       <button
         class="usage-chip credit-chip"
-        onclick={() => (expanded = !expanded)}
+        onclick={toggleCredits}
         aria-expanded={expanded}
         aria-controls="usage-details"
         aria-label="Show credits details"
@@ -318,7 +326,7 @@
           </div>
         {/each}
       </div>
-      {#if credits}<div class="usage-card credit-card">
+      {#if credits}<div class="usage-card credit-card" bind:this={creditCard}>
           <CreditUsage provider={settings.provider} {snapshot} {loading} {stale} />
         </div>{/if}
     </div>

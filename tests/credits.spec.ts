@@ -74,6 +74,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
   await page.getByRole('button', { name: 'Show credits details', exact: true }).click();
   await expect(card).toBeVisible();
+  await expect(card).toBeInViewport({ ratio: 1 });
   await page.screenshot({ path: 'artifacts/credits-chat-mobile.png' });
   await page.setViewportSize({ width: 1380, height: 900 });
   await page.screenshot({ path: 'artifacts/credits-chat-desktop.png' });
