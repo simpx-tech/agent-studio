@@ -18,7 +18,13 @@
     folder?: string;
   } = $props();
   let mode = $state<'response' | 'chat'>('response');
+  const initialFileLimit = 5;
+  let expandedFiles = $state({ response: false, chat: false });
   const selected = $derived(mode === 'response' ? response : chat);
+  const showAll = $derived(expandedFiles[mode]);
+  const visibleFiles = $derived(
+    showAll ? selected.files : selected.files.slice(0, initialFileLimit),
+  );
   const existingFiles = $derived(selected.files.filter((file) => file.kind !== 'added'));
   const added = $derived(existingFiles.reduce((n, f) => n + (f.added ?? 0), 0));
   const removed = $derived(existingFiles.reduce((n, f) => n + (f.removed ?? 0), 0));
@@ -50,13 +56,13 @@
   }
 </script>
 
-<details class="file-changes" open>
-  <summary aria-label="Files edited"
-    ><ChevronRight size={14} class="disclosure" /><FileCode2 size={14} />
+<section class="file-changes" aria-labelledby={`${id}-files-title`}>
+  <div class="files-heading" id={`${id}-files-title`}>
+    <FileCode2 size={14} />
     <span>Files edited</span><small
       >{response.files.length || (response.recorded ? '0' : '—')}</small
     >
-  </summary>
+  </div>
   <div class="changes-body">
     <div class="changes-toolbar">
       <div class="change-tabs" role="tablist" aria-label="File change scope">
@@ -94,88 +100,94 @@
       aria-labelledby={`${id}-${mode === 'response' ? 'response' : 'chat'}-tab`}
       tabindex="0"
     >
-      <p class="scope-note">
-        {mode === 'response'
-          ? 'Recorded edits from this response.'
-          : 'Combined recorded edits across this chat, including later responses. Reverted changes are omitted.'}
-      </p>
-      {#if !selected.files.length}<p class="empty-changes">
-          {selected.recorded
-            ? 'No net file changes recorded.'
-            : 'File changes were not recorded for this response.'}
+      {#if mode === 'chat'}<p class="scope-note">
+          Combined recorded edits across this chat, including later responses. Reverted changes are
+          omitted.
         </p>{/if}
-      {#each selected.files as file (`${mode}:${file.previousPath ?? ''}:${file.path}`)}
-        <details class="changed-file">
-          <summary title={file.path}>
-            <ChevronRight size={13} class="disclosure" />
-            <span class="file-path"
-              >{#if file.previousPath}<span class="previous-path"
-                  >{displayPath(file.previousPath)} →
-                </span>{/if}{displayPath(file.path)}</span
-            >
-            <span
-              class="file-kind"
-              class:new-file={file.kind === 'added'}
-              title={file.kind === 'added' ? 'New file created in this scope' : undefined}
-              >{kindLabels[file.kind]}</span
-            >
-            {#if file.kind !== 'added' && file.added !== undefined}<span class="add"
-                >+{file.added}</span
-              ><span class="remove">−{file.removed}</span>{:else if file.added === undefined}<span
-                class="muted">Diff unavailable</span
-              >{/if}
-          </summary>
-          {#if file.unavailable}<p class="diff-unavailable">{file.unavailable}</p>
-          {:else if !file.hunks?.length}<p class="diff-unavailable">
-              {file.kind === 'renamed'
-                ? 'File renamed without recorded text changes.'
-                : 'Empty file; no text diff.'}
-            </p>
-          {:else}
-            <!-- The scrollable diff needs keyboard access on narrow screens. -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-            <div
-              class="diff-scroll"
-              role="region"
-              aria-label={`Diff for ${file.path}`}
-              tabindex="0"
-            >
-              <table class="diff-table" aria-label={`Changes in ${file.path}`}>
-                <thead class="sr-only"
-                  ><tr><th>Original line</th><th>Updated line</th><th>Change</th></tr></thead
-                >
-                <tbody
-                  >{#each file.hunks as hunk}
-                    {#if file.kind !== 'added'}<tr class="hunk"
-                        ><td colspan="3"
-                          >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
-                        ></tr
-                      >{/if}
-                    {#each diffRows(hunk) as row}<tr
-                        class:added={row.text.startsWith('+')}
-                        class:removed={row.text.startsWith('-')}
-                      >
-                        <td class="line-number">{row.old ?? ''}</td><td class="line-number"
-                          >{row.next ?? ''}</td
-                        ><td class="diff-code"><code>{row.text}</code></td>
-                      </tr>{/each}
-                  {/each}</tbody
-                >
-              </table>
-            </div>
-          {/if}
-        </details>
-      {/each}
+      <div class="file-list" id={`${id}-file-list`}>
+        {#if !selected.files.length}<p class="empty-changes">
+            {selected.recorded
+              ? 'No net file changes recorded.'
+              : 'File changes were not recorded for this response.'}
+          </p>{/if}
+        {#each visibleFiles as file (`${mode}:${file.previousPath ?? ''}:${file.path}`)}
+          <details class="changed-file">
+            <summary title={file.path}>
+              <ChevronRight size={13} class="disclosure" />
+              <span class="file-path"
+                >{#if file.previousPath}<span class="previous-path"
+                    >{displayPath(file.previousPath)} →
+                  </span>{/if}{displayPath(file.path)}</span
+              >
+              <span
+                class="file-kind"
+                class:new-file={file.kind === 'added'}
+                title={file.kind === 'added' ? 'New file created in this scope' : undefined}
+                >{kindLabels[file.kind]}</span
+              >
+              {#if file.kind !== 'added' && file.added !== undefined}<span class="add"
+                  >+{file.added}</span
+                ><span class="remove">−{file.removed}</span>{:else if file.added === undefined}<span
+                  class="muted">Diff unavailable</span
+                >{/if}
+            </summary>
+            {#if file.unavailable}<p class="diff-unavailable">{file.unavailable}</p>
+            {:else if !file.hunks?.length}<p class="diff-unavailable">
+                {file.kind === 'renamed'
+                  ? 'File renamed without recorded text changes.'
+                  : 'Empty file; no text diff.'}
+              </p>
+            {:else}
+              <!-- The scrollable diff needs keyboard access on narrow screens. -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div
+                class="diff-scroll"
+                role="region"
+                aria-label={`Diff for ${file.path}`}
+                tabindex="0"
+              >
+                <table class="diff-table" aria-label={`Changes in ${file.path}`}>
+                  <thead class="sr-only"
+                    ><tr><th>Original line</th><th>Updated line</th><th>Change</th></tr></thead
+                  >
+                  <tbody
+                    >{#each file.hunks as hunk}
+                      {#if file.kind !== 'added'}<tr class="hunk"
+                          ><td colspan="3"
+                            >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
+                          ></tr
+                        >{/if}
+                      {#each diffRows(hunk) as row}<tr
+                          class:added={row.text.startsWith('+')}
+                          class:removed={row.text.startsWith('-')}
+                        >
+                          <td class="line-number">{row.old ?? ''}</td><td class="line-number"
+                            >{row.next ?? ''}</td
+                          ><td class="diff-code"><code>{row.text}</code></td>
+                        </tr>{/each}
+                    {/each}</tbody
+                  >
+                </table>
+              </div>
+            {/if}
+          </details>
+        {/each}
+      </div>
+      {#if selected.files.length > initialFileLimit}
+        <button
+          class="show-files"
+          aria-expanded={showAll}
+          aria-controls={`${id}-file-list`}
+          onclick={() => (expandedFiles[mode] = !showAll)}
+          >{showAll ? 'Show fewer files' : `Show all ${selected.files.length} files`}</button
+        >
+      {/if}
       {#if selected.limited}<p class="scope-note">
           The recording limit was reached. Some file changes are unavailable.
         </p>{/if}
-      <p class="scope-note coverage">
-        Only file edits reported by the agent are included. Shell commands and external edits may be
-        absent.
-      </p>
     </div>
   </div>
-</details>
+</section>
 
 <style>
   .file-changes {
@@ -194,7 +206,10 @@
   summary::-webkit-details-marker {
     display: none;
   }
-  .file-changes > summary {
+  .files-heading {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     color: var(--muted);
     padding: 6px 0;
     width: fit-content;
@@ -206,7 +221,7 @@
   details[open] > summary :global(.disclosure) {
     transform: rotate(90deg);
   }
-  summary small {
+  .files-heading small {
     color: var(--muted);
     font-size: 11px;
   }
@@ -257,11 +272,20 @@
     font-size: 11px;
     line-height: 1.6;
   }
-  .coverage {
-    border-top: 1px solid var(--line);
+  .file-list {
+    padding: 10px 10px 2px;
+  }
+  .show-files {
+    margin: 0 10px 10px;
+    padding: 5px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
   }
   .changed-file {
-    margin: 0 10px 8px;
+    margin: 0 0 8px;
     border: 1px solid var(--line);
     border-radius: 5px;
     overflow: hidden;

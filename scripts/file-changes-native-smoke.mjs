@@ -165,7 +165,14 @@ try {
       input.value = 'Preserve this draft';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitFor(() => document.querySelectorAll('.file-changes').item(1)?.open);
+    await page.waitFor(
+      () =>
+        document
+          .querySelectorAll('.file-changes')
+          .item(1)
+          ?.querySelector('.changes-toolbar')
+          ?.getBoundingClientRect().height > 0,
+    );
     assert.equal(
       await page.evaluate(
         () =>

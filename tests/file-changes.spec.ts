@@ -74,12 +74,12 @@ test('authenticated production Viewer restores final diffs and distinguishes mis
       await page.getByRole('tab', { name: /^History/ }).click();
       await page.getByRole('button', { name: /Viewer file changes/ }).click();
       const last = page.locator('.file-changes').last();
-      await expect(last).toHaveAttribute('open', '');
+      await expect(last.locator('.changes-toolbar')).toBeVisible();
       await last.getByRole('tab', { name: 'All chat changes', exact: true }).click();
       await last.locator('.changed-file > summary').click();
       await expect(last.locator('.diff-code')).toHaveText(['-original', '+final']);
       const old = page.locator('.file-changes').first();
-      await expect(old).toHaveAttribute('open', '');
+      await expect(old.locator('.changes-toolbar')).toBeVisible();
       await expect(
         old.getByText('File changes were not recorded for this response.', { exact: true }),
       ).toBeVisible();
@@ -146,6 +146,21 @@ for (const mobile of [false, true])
                         },
                       ],
                     },
+                    ...(before === 'original'
+                      ? Array.from({ length: 6 }, (_, i) => ({
+                          path: `C:/Projects/studio/zz-extra-${i + 1}.txt`,
+                          kind: 'added',
+                          hunks: [
+                            {
+                              oldStart: 0,
+                              oldLines: 0,
+                              newStart: 1,
+                              newLines: 1,
+                              lines: ['+extra file'],
+                            },
+                          ],
+                        }))
+                      : []),
                   ],
                 },
               ],
@@ -160,12 +175,14 @@ for (const mobile of [false, true])
     }
     await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
     const summary = page.locator('.file-changes').last();
-    await expect(summary).toHaveAttribute('open', '');
-    await summary.locator(':scope > summary').focus();
-    await page.keyboard.press('Enter');
-    await expect(summary).not.toHaveAttribute('open', '');
-    await page.keyboard.press('Enter');
-    await expect(summary).toHaveAttribute('open', '');
+    await expect(summary.locator('.changes-toolbar')).toBeVisible();
+    await expect(summary.locator(':scope > summary')).toHaveCount(0);
+    await expect(
+      summary.getByText('Recorded edits from this response.', { exact: true }),
+    ).toHaveCount(0);
+    await expect(summary.getByText(/Only file edits reported by the agent/)).toHaveCount(0);
+    await expect(summary.locator('.changed-file')).toHaveCount(2);
+    await expect(summary.getByRole('button', { name: /Show all/ })).toHaveCount(0);
     const file = summary
       .locator('.changed-file')
       .filter({ hasText: 'src/components/Example.svelte' });
@@ -189,6 +206,19 @@ for (const mobile of [false, true])
     await summary.getByRole('tab', { name: 'This response', exact: true }).focus();
     await page.keyboard.press('ArrowRight');
     await expect(summary.getByRole('tab', { name: 'All chat changes', exact: true })).toBeFocused();
+    await expect(summary.locator('.changed-file')).toHaveCount(5);
+    await expect(summary.locator('.change-totals')).toContainText('8 files');
+    const showAll = summary.getByRole('button', { name: 'Show all 8 files', exact: true });
+    await showAll.focus();
+    await page.keyboard.press('Enter');
+    await expect(summary.locator('.changed-file')).toHaveCount(8);
+    await summary.getByRole('tab', { name: 'This response', exact: true }).click();
+    await expect(summary.locator('.changed-file')).toHaveCount(2);
+    await expect(summary.getByRole('button', { name: /Show fewer/ })).toHaveCount(0);
+    await summary.getByRole('tab', { name: 'All chat changes', exact: true }).click();
+    await expect(summary.locator('.changed-file')).toHaveCount(8);
+    await summary.getByRole('button', { name: 'Show fewer files', exact: true }).click();
+    await expect(summary.locator('.changed-file')).toHaveCount(5);
     await expect(
       summary.locator('.changed-file').filter({ hasText: 'docs/new.txt' }).locator('.file-kind'),
     ).toHaveText('Added');
@@ -224,8 +254,12 @@ for (const mobile of [false, true])
     await page.locator('.conversation-item').first().click();
     await expect(page.locator('.file-changes')).toHaveCount(2);
     const first = page.locator('.file-changes').first();
-    await expect(first).toHaveAttribute('open', '');
+    await expect(first.locator('.changes-toolbar')).toBeVisible();
     await first.getByRole('tab', { name: 'All chat changes', exact: true }).click();
+    await expect(first.locator('.changed-file')).toHaveCount(5);
+    await expect(
+      first.getByRole('button', { name: 'Show all 8 files', exact: true }),
+    ).toBeVisible();
     await first
       .locator('.changed-file')
       .filter({ hasText: 'src/components/Example.svelte' })

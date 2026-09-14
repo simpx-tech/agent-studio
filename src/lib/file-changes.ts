@@ -305,7 +305,7 @@ export function summarizeFileChanges(
       .slice(0, 200)
       .map((patches) => combine(patches, budget))
       .filter((f): f is FileSummary => !!f)
-      .sort((a, b) => a.path.localeCompare(b.path)),
+      .sort((a, b) => key(a.path).localeCompare(key(b.path))),
     limited,
     recorded,
   };
