@@ -967,8 +967,8 @@ test('missing and failed quota readings never show fabricated zero usage', async
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-5-hour')).toHaveCount(0);
   await expect(page.getByRole('progressbar', { name: '5-hour limit used' })).toHaveCount(0);
-  await expect(page.locator('.usage-strip .usage-chip')).toHaveCount(3);
-  await expect(page.getByRole('button', { name: 'Show credits details' })).toContainText(
+  await expect(page.locator('.usage-strip .usage-chip')).toHaveCount(2);
+  await expect(page.locator('#usage-details .credit-usage')).toContainText(
     'Not reported',
   );
   await expect(page.getByTestId('limit-weekly')).toContainText('26%');
@@ -1011,7 +1011,7 @@ test('composer shows three usage bars below the input and keeps tool access in t
   await expect(strip.getByRole('progressbar')).toHaveCount(3);
   await expect(page.getByRole('button', { name: 'Refresh usage', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Usage and context', exact: true })).toHaveCount(0);
-  await expect(strip.getByRole('button')).toHaveCount(4);
+  await expect(strip.getByRole('button')).toHaveCount(3);
   await expect(page.locator('.composer-caption')).toHaveCount(0);
   expect(
     await strip.evaluate(
@@ -1032,9 +1032,7 @@ test('composer shows three usage bars below the input and keeps tool access in t
       /Full access.*without approval prompts/,
     );
     await expect(strip.getByRole('progressbar')).toHaveCount(3);
-    await expect(strip.getByRole('button', { name: 'Show credits details' })).toHaveCount(
-      provider === 'Gemini' ? 0 : 1,
-    );
+    await expect(strip.getByRole('button', { name: 'Show credits details' })).toHaveCount(0);
   }
   await expect(strip.getByRole('progressbar', { name: 'Context used' })).not.toHaveAttribute(
     'aria-valuenow',

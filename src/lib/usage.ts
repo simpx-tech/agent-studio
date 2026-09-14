@@ -58,7 +58,11 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
       credits.unlimited === true
         ? 'Unlimited'
         : numeric(credits.balance)
-          ? `${new Intl.NumberFormat('en', { maximumFractionDigits: 4 }).format(credits.balance)} credits`
+          ? `${new Intl.NumberFormat('en', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+              roundingMode: 'trunc',
+            }).format(credits.balance)} credits`
           : credits.hasCredits === true
             ? 'Available'
             : credits.hasCredits === false

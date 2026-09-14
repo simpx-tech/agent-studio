@@ -25,7 +25,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
             : args.provider === 'codex'
               ? {
                   kind: 'codex',
-                  balance: 42.125,
+                  balance: 4322.4487,
                   hasCredits: true,
                   unlimited: false,
                   resetCredits: 2,
@@ -39,7 +39,8 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   await page.getByRole('option', { name: 'Claude', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
-  await page.getByRole('button', { name: 'Show credits details', exact: true }).click();
+  await expect(page.locator('.usage-strip')).not.toContainText('Credits');
+  await page.locator('.context-chip').click();
   const card = page.locator('#usage-details').getByRole('region', { name: 'Credits', exact: true });
   await expect(card).toContainText(/USD\s12.50 spent/);
   await expect(card).toContainText(/USD\s87.50/);
@@ -53,7 +54,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
     /USD\s12.50 spent/,
   );
   await expect(codex.getByRole('region', { name: 'Credits', exact: true })).toContainText(
-    '42.125 credits',
+    '4,322.44 credits',
   );
   await expect(codex).toContainText('Usage resets available');
   await page.evaluate(() => localStorage.setItem('test-usage-error', 'yes'));
@@ -62,7 +63,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await expect(codex.getByRole('region', { name: 'Credits', exact: true })).toContainText(
     'Last reported',
   );
-  await expect(codex).toContainText('42.125 credits');
+  await expect(codex).toContainText('4,322.44 credits');
   await page.setViewportSize({ width: 390, height: 844 });
   await claude.getByRole('region', { name: 'Credits', exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: 'artifacts/credits-connections-mobile.png' });
@@ -72,8 +73,9 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
-  await page.getByRole('button', { name: 'Show credits details', exact: true }).click();
+  await page.getByRole('button', { name: /Show Weekly usage details/ }).click();
   await expect(card).toBeVisible();
+  await card.scrollIntoViewIfNeeded();
   await expect(card).toBeInViewport({ ratio: 1 });
   await page.screenshot({ path: 'artifacts/credits-chat-mobile.png' });
   await page.setViewportSize({ width: 1380, height: 900 });

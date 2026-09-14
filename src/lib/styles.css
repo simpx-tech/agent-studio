@@ -1008,14 +1008,6 @@ code {
 .usage-bar-heading strong {
   margin-left: auto;
 }
-.credit-chip .usage-bar-heading {
-  overflow-wrap: anywhere;
-}
-@media (max-width: 540px) {
-  .usage-strip:has(.credit-chip) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
 .usage-meter.compact-meter {
   display: block;
   width: 100%;

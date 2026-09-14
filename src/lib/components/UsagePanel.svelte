@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
@@ -38,14 +38,6 @@
     expanded?: boolean;
   } = $props();
   let now = $state(Date.now());
-  let creditCard = $state<HTMLDivElement>();
-  async function toggleCredits() {
-    expanded = !expanded;
-    if (expanded) {
-      await tick();
-      creditCard?.scrollIntoView({ block: 'nearest' });
-    }
-  }
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 15000);
     return () => clearInterval(timer);
@@ -128,7 +120,7 @@
 />
 
 <section class="usage-panel" aria-label="Usage and context">
-  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1 + (credits ? 1 : 0)}>
+  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1}>
     <button
       class="usage-chip context-chip"
       class:usage-warning={(context.percent ?? 0) >= 80}
@@ -188,21 +180,6 @@
         {@render quotaBar(window, true)}
       </button>
     {/each}
-    {#if credits}
-      <button
-        class="usage-chip credit-chip"
-        onclick={toggleCredits}
-        aria-expanded={expanded}
-        aria-controls="usage-details"
-        aria-label="Show credits details"
-        title={`${stale ? 'Last reported. ' : ''}${credits.detail}`}
-      >
-        <span class="usage-bar-heading"
-          ><span>Credits</span><strong>{loading && !snapshot ? 'Checking…' : credits.value}</strong
-          ></span
-        >
-      </button>
-    {/if}
   </div>
   {#if stale}<span class="usage-stale">Last reported</span>{/if}
   {#if expanded}
@@ -330,7 +307,7 @@
       {#if conversation && ['claude', 'codex'].includes(settings.provider)}<ChatSpend
           {conversation}
         />{/if}
-      {#if credits}<div class="usage-card credit-card" bind:this={creditCard}>
+      {#if credits}<div class="usage-card credit-card">
           <CreditUsage provider={settings.provider} {snapshot} {loading} {stale} />
         </div>{/if}
     </div>

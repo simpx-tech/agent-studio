@@ -59,7 +59,7 @@ describe('usage and context semantics', () => {
       connectionId: 'one',
       credits: { kind: 'codex', balance: 0, hasCredits: false, unlimited: false, resetCredits: 2 },
     };
-    expect(creditReading('codex', codex)?.value).toBe('0 credits');
+    expect(creditReading('codex', codex)?.value).toBe('0.00 credits');
     expect(creditReading('codex', codex)?.rows[0].value).toBe('2');
     expect(creditReading('claude', codex)?.value).toBe('Not reported');
     expect(creditReading('gemini', codex)).toBeNull();
