@@ -2586,7 +2586,7 @@ test('tool targets stream inline and finish as expandable work history below the
   const usageSummary = page.getByLabel('Reply usage and cost', { exact: true });
   await expect(usageSummary.locator('.usage-summary > span')).toHaveCount(2);
   await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
-  await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
+  await expect(usageSummary).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.reply-usage')).toHaveCSS('font-size', '11px');
   await page.screenshot({ path: 'artifacts/work-history-placement.png' });
   await expect(
@@ -2667,7 +2667,7 @@ test('tool targets stream inline and finish as expandable work history below the
   await expect(summary).toHaveText('Work history');
   await expect(usageSummary.locator('.usage-summary > span')).toHaveCount(2);
   await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
-  await expect(page.locator('.reply-usage')).not.toHaveAttribute('open', '');
+  await expect(usageSummary).toHaveAttribute('aria-expanded', 'false');
   await summary.click();
   expect(await historySequence()).toEqual(liveSequence);
   await expect(
@@ -2726,7 +2726,7 @@ test('total AI time accumulates saved replies in this conversation and survives 
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.getByRole('button', { name: 'Cumulative time fixture', exact: true }).click();
-  const totals = page.locator('.reply-usage > summary');
+  const totals = page.locator('.usage-toggle');
   await expect(totals.nth(0)).toContainText('1.3s total');
   await expect(totals.nth(1)).toContainText('1m 2.5s total');
   await expect(totals.nth(2)).toContainText('≥ 1m 2.5s total');

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FileCode2, ChevronRight } from '@lucide/svelte';
+  import { ChevronRight } from '@lucide/svelte';
   import {
     diffRows,
     fileChangeBase,
@@ -56,13 +56,7 @@
   }
 </script>
 
-<section class="file-changes" aria-labelledby={`${id}-files-title`}>
-  <div class="files-heading" id={`${id}-files-title`}>
-    <FileCode2 size={14} />
-    <span>Files edited</span><small
-      >{response.files.length || (response.recorded ? '0' : '—')}</small
-    >
-  </div>
+<div class="file-changes">
   <div class="changes-body">
     <div class="changes-toolbar">
       <div class="change-tabs" role="tablist" aria-label="File change scope">
@@ -100,10 +94,6 @@
       aria-labelledby={`${id}-${mode === 'response' ? 'response' : 'chat'}-tab`}
       tabindex="0"
     >
-      {#if mode === 'chat'}<p class="scope-note">
-          Combined recorded edits across this chat, including later responses. Reverted changes are
-          omitted.
-        </p>{/if}
       <div class="file-list" id={`${id}-file-list`}>
         {#if !selected.files.length}<p class="empty-changes">
             {selected.recorded
@@ -187,11 +177,10 @@
         </p>{/if}
     </div>
   </div>
-</section>
+</div>
 
 <style>
   .file-changes {
-    margin-top: 14px;
     font-size: 12px;
     min-width: 0;
   }
@@ -206,24 +195,12 @@
   summary::-webkit-details-marker {
     display: none;
   }
-  .files-heading {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    color: var(--muted);
-    padding: 6px 0;
-    width: fit-content;
-  }
   summary :global(.disclosure) {
     flex: 0 0 auto;
     transition: transform 120ms;
   }
   details[open] > summary :global(.disclosure) {
     transform: rotate(90deg);
-  }
-  .files-heading small {
-    color: var(--muted);
-    font-size: 11px;
   }
   .changes-body {
     margin-top: 6px;

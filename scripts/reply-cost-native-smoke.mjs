@@ -131,12 +131,17 @@ try {
   assert.equal(typeof reply.usage?.costUsd, 'number');
   assert(reply.usage.costUsd >= 0);
   await page.waitFor(() => !!document.querySelector('.reply-usage'));
-  assert.equal(await page.evaluate(() => document.querySelector('.reply-usage').open), false);
+  assert.equal(
+    await page.evaluate(
+      () => document.querySelector('.usage-toggle').getAttribute('aria-expanded') === 'true',
+    ),
+    false,
+  );
   await page.click('[aria-label="Reply usage and cost"]');
   report.render = await page.evaluate(() => {
     const usage = document.querySelector('.reply-usage');
     return {
-      expanded: usage.open,
+      expanded: document.querySelector('.usage-toggle').getAttribute('aria-expanded') === 'true',
       fontSize: getComputedStyle(usage).fontSize,
       text: usage.textContent,
       afterActivity: !!(
@@ -179,10 +184,13 @@ try {
   await reloadReady();
   await openHistory(conversation.title);
   await page.waitFor(() => !!document.querySelector('.reply-usage'));
-  assert.equal(await page.evaluate(() => document.querySelector('.reply-usage').open), false);
-  const collapsed = await page.evaluate(
-    () => document.querySelector('.reply-usage > summary').textContent,
+  assert.equal(
+    await page.evaluate(
+      () => document.querySelector('.usage-toggle').getAttribute('aria-expanded') === 'true',
+    ),
+    false,
   );
+  const collapsed = await page.evaluate(() => document.querySelector('.usage-toggle').textContent);
   assert(collapsed.includes('total') && !/input|output|tokens|cost|\$/i.test(collapsed));
   await page.click('[aria-label="Reply usage and cost"]');
   assert(

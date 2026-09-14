@@ -74,11 +74,20 @@ test('authenticated production Viewer restores final diffs and distinguishes mis
       await page.getByRole('tab', { name: /^History/ }).click();
       await page.getByRole('button', { name: /Viewer file changes/ }).click();
       const last = page.locator('.file-changes').last();
+      await expect(last.locator('.changes-toolbar')).not.toBeVisible();
+      await page
+        .getByRole('button', { name: /Files edited/ })
+        .last()
+        .click();
       await expect(last.locator('.changes-toolbar')).toBeVisible();
       await last.getByRole('tab', { name: 'All chat changes', exact: true }).click();
       await last.locator('.changed-file > summary').click();
       await expect(last.locator('.diff-code')).toHaveText(['-original', '+final']);
       const old = page.locator('.file-changes').first();
+      await page
+        .getByRole('button', { name: /Files edited/ })
+        .first()
+        .click();
       await expect(old.locator('.changes-toolbar')).toBeVisible();
       await expect(
         old.getByText('File changes were not recorded for this response.', { exact: true }),
@@ -175,8 +184,22 @@ for (const mobile of [false, true])
     }
     await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
     const summary = page.locator('.file-changes').last();
+    const footer = page.locator('.reply-footer').last();
+    const filesToggle = footer.getByRole('button', { name: /Files edited/ });
+    const usageToggle = footer.getByRole('button', { name: 'Reply usage and cost', exact: true });
+    await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(usageToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(summary.locator('.changes-toolbar')).not.toBeVisible();
+    const [filesBounds, usageBounds] = await Promise.all([
+      filesToggle.boundingBox(),
+      usageToggle.boundingBox(),
+    ]);
+    expect(Math.abs(filesBounds!.y - usageBounds!.y)).toBeLessThan(2);
+    await filesToggle.focus();
+    await page.keyboard.press('Enter');
+    await expect(filesToggle).toHaveAttribute('aria-expanded', 'true');
     await expect(summary.locator('.changes-toolbar')).toBeVisible();
-    await expect(summary.locator(':scope > summary')).toHaveCount(0);
+    await expect(footer.locator('.usage-breakdown')).not.toBeVisible();
     await expect(
       summary.getByText('Recorded edits from this response.', { exact: true }),
     ).toHaveCount(0);
@@ -217,6 +240,22 @@ for (const mobile of [false, true])
     await expect(summary.getByRole('button', { name: /Show fewer/ })).toHaveCount(0);
     await summary.getByRole('tab', { name: 'All chat changes', exact: true }).click();
     await expect(summary.locator('.changed-file')).toHaveCount(8);
+    await expect(summary.getByText(/Combined recorded edits across this chat/)).toHaveCount(0);
+    await usageToggle.click();
+    await expect(usageToggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(summary.locator('.changes-toolbar')).not.toBeVisible();
+    await expect(footer.locator('.usage-breakdown')).toBeVisible();
+    await filesToggle.click();
+    await expect(usageToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(footer.locator('.usage-breakdown')).not.toBeVisible();
+    await expect(summary.locator('.changed-file')).toHaveCount(8);
+    await filesToggle.focus();
+    await page.keyboard.press('Space');
+    await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(summary.locator('.changes-toolbar')).not.toBeVisible();
+    await page.keyboard.press('Space');
+    await expect(summary.locator('.changed-file')).toHaveCount(8);
     await summary.getByRole('button', { name: 'Show fewer files', exact: true }).click();
     await expect(summary.locator('.changed-file')).toHaveCount(5);
     await expect(
@@ -254,6 +293,11 @@ for (const mobile of [false, true])
     await page.locator('.conversation-item').first().click();
     await expect(page.locator('.file-changes')).toHaveCount(2);
     const first = page.locator('.file-changes').first();
+    await expect(first.locator('.changes-toolbar')).not.toBeVisible();
+    await page
+      .getByRole('button', { name: /Files edited/ })
+      .first()
+      .click();
     await expect(first.locator('.changes-toolbar')).toBeVisible();
     await first.getByRole('tab', { name: 'All chat changes', exact: true }).click();
     await expect(first.locator('.changed-file')).toHaveCount(5);

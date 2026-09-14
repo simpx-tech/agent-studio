@@ -10,10 +10,9 @@
   import { replyContent } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
-  import FileChanges from './FileChanges.svelte';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
-  import ReplyUsage from './ReplyUsage.svelte';
+  import ReplyFooter from './ReplyFooter.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
@@ -159,7 +158,13 @@
       {#if message.status === 'running'}
         <RunningReplyTime createdAt={message.createdAt} />
       {:else}
-        <ReplyUsage {message} {timeTotal} />
+        <ReplyFooter
+          {message}
+          {timeTotal}
+          {responseChanges}
+          chatChanges={chatChanges ?? responseChanges}
+          {folder}
+        />
       {/if}
       {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
@@ -171,14 +176,6 @@
               disabled={retryDisabled}><RotateCcw size={13} />Retry</button
             >{/if}
         </div>{/if}
-      {#if message.status !== 'running'}
-        <FileChanges
-          response={responseChanges}
-          chat={chatChanges ?? responseChanges}
-          id={message.id}
-          {folder}
-        />
-      {/if}
     {/if}
   </div>
 </article>

@@ -165,6 +165,22 @@ try {
       input.value = 'Preserve this draft';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    await page.waitFor(() => document.querySelectorAll('.files-toggle').length === 2);
+    assert.equal(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.files-toggle')].at(-1).getAttribute('aria-expanded'),
+      ),
+      'false',
+    );
+    const alignment = await page.evaluate(() => {
+      const footer = [...document.querySelectorAll('.reply-footer')].at(-1);
+      return Math.abs(
+        footer.querySelector('.files-toggle').getBoundingClientRect().top -
+          footer.querySelector('.usage-toggle').getBoundingClientRect().top,
+      );
+    });
+    assert(alignment < 2, 'Files and timing must share the footer row');
+    await page.evaluate(() => [...document.querySelectorAll('.files-toggle')].at(-1).click());
     await page.waitFor(
       () =>
         document
@@ -231,6 +247,45 @@ try {
     );
     assert(all.includes('-original') && all.includes('+final') && !all.includes('intermediate'));
     assert.equal(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.file-changes')]
+          .at(-1)
+          .textContent.includes('Combined recorded edits'),
+      ),
+      false,
+    );
+    await page.evaluate(() => [...document.querySelectorAll('.usage-toggle')].at(-1).click());
+    await page.waitFor(
+      () =>
+        [...document.querySelectorAll('.usage-toggle')].at(-1).getAttribute('aria-expanded') ===
+        'true',
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.files-toggle')].at(-1).getAttribute('aria-expanded'),
+      ),
+      'false',
+    );
+    await page.evaluate(() => [...document.querySelectorAll('.files-toggle')].at(-1).click());
+    await page.waitFor(
+      () =>
+        [...document.querySelectorAll('.files-toggle')].at(-1).getAttribute('aria-expanded') ===
+        'true',
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.usage-toggle')].at(-1).getAttribute('aria-expanded'),
+      ),
+      'false',
+    );
+    await page.evaluate(() => [...document.querySelectorAll('.files-toggle')].at(-1).click());
+    await page.waitFor(
+      () =>
+        [...document.querySelectorAll('.files-toggle')].at(-1).getAttribute('aria-expanded') ===
+        'false',
+    );
+    await page.evaluate(() => [...document.querySelectorAll('.files-toggle')].at(-1).click());
+    assert.equal(
       await page.evaluate(() => document.querySelector('[aria-label="Message"]').value),
       'Preserve this draft',
     );
@@ -251,11 +306,19 @@ try {
     await reloadReady();
     await select(chat.title);
     await page.waitFor(() => document.querySelectorAll('.file-changes').length === 2);
+    assert.equal(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.files-toggle')].at(-1).getAttribute('aria-expanded'),
+      ),
+      'false',
+    );
     report.push({
       provider,
       chatId: chat.id,
       rounds: 2,
       savedDiffs: true,
+      sharedFooter: true,
+      exclusivePanels: true,
       cumulativeDiff: true,
       draftPreserved: true,
       reloadPassed: true,
