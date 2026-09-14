@@ -60,7 +60,10 @@ describe('usage and context semantics', () => {
       credits: { kind: 'codex', balance: 0, hasCredits: false, unlimited: false, resetCredits: 2 },
     };
     expect(creditReading('codex', codex)?.value).toBe('0.00 credits');
-    expect(creditReading('codex', codex)?.rows[0].value).toBe('2');
+    expect(creditReading('codex', codex)?.rows).toEqual([
+      { label: 'Estimated value (USD)', value: '$0.00' },
+      { label: 'Usage resets available', value: '2' },
+    ]);
     expect(creditReading('claude', codex)?.value).toBe('Not reported');
     expect(creditReading('gemini', codex)).toBeNull();
     expect(creditReading('codex')?.value).toBe('Not reported');
@@ -116,6 +119,37 @@ describe('usage and context semantics', () => {
     expect(
       creditReading('claude', claude)?.rows.find((r) => r.label === 'Remaining under cap'),
     ).toBeUndefined();
+  });
+  it('estimates credit value from pack prices without inventing unknown or unlimited balances', () => {
+    const valueFor = (balance: number | null, unlimited = false) =>
+      creditReading('codex', {
+        ...snapshot,
+        provider: 'codex',
+        credits: { kind: 'codex', balance, hasCredits: true, unlimited, resetCredits: 2 },
+      });
+    for (const [balance, dollars] of [
+      [2500, '$100.00'],
+      [5000, '$200.00'],
+      [25000, '$1,000.00'],
+      [4322.4487, '$172.90'],
+      [0.01, '<$0.01'],
+    ] as const) {
+      expect(valueFor(balance)?.rows).toContainEqual({
+        label: 'Estimated value (USD)',
+        value: dollars,
+      });
+    }
+    expect(valueFor(4322.4487)?.detail).toContain('US$0.04 per credit');
+    expect(valueFor(4322.4487)?.detail).toContain('checkout discounts and taxes');
+    for (const balance of [null, -1, NaN, Infinity]) {
+      expect(valueFor(balance)?.rows).not.toContainEqual(
+        expect.objectContaining({ label: 'Estimated value (USD)' }),
+      );
+    }
+    expect(valueFor(5000, true)?.rows).not.toContainEqual(
+      expect.objectContaining({ label: 'Estimated value (USD)' }),
+    );
+    expect(creditReading('codex', snapshot)?.rows).toEqual([]);
   });
   it('keeps account windows and model scopes separate, with missing limits distinct from zero', () => {
     const windows = accountLimits(snapshot, 'claude');

@@ -8,6 +8,10 @@ import {
 } from './domain';
 import type { ModelInfo } from './models';
 
+// User-provided pack prices (2026-09-14): USD 100/2,500, 200/5,000, 1,000/25,000.
+// This is a displayed-price estimate; the screenshot does not establish checkout discounts.
+const CODEX_CREDIT_USD_RATE = 0.04;
+
 export type LimitWindow = {
   id: string;
   label: string;
@@ -53,6 +57,7 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
     typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const rows: { label: string; value: string }[] = [];
   let value = 'Not reported';
+  let conversionDetail = '';
   if (credits?.kind === 'codex') {
     value =
       credits.unlimited === true
@@ -68,6 +73,22 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
             : credits.hasCredits === false
               ? 'No credits'
               : 'Not reported';
+    if (credits.unlimited !== true && numeric(credits.balance)) {
+      const usd = credits.balance * CODEX_CREDIT_USD_RATE;
+      rows.push({
+        label: 'Estimated value (USD)',
+        value:
+          credits.balance > 0 && usd < 0.01
+            ? '<$0.01'
+            : new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              }).format(usd),
+      });
+      conversionDetail = ` Estimated at US$${CODEX_CREDIT_USD_RATE.toFixed(2)} per credit from displayed pack prices; checkout discounts and taxes may change the actual cost.`;
+    }
     if (numeric(credits.resetCredits))
       rows.push({ label: 'Usage resets available', value: String(credits.resetCredits) });
   } else if (credits?.kind === 'claude') {
@@ -115,7 +136,7 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
     detail:
       provider === 'claude'
         ? 'Prepaid balance is not reported by this CLI. Remaining under cap is spending room, not a credit balance.'
-        : 'Account credits are separate from subscription limits. Usage resets are separate from the credit balance.',
+        : `Account credits are separate from subscription limits. Usage resets are separate from the credit balance.${conversionDetail}`,
   };
 }
 export const usageKey = (settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>) =>

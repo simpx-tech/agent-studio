@@ -57,6 +57,9 @@ test('credits appear in chat and Connections and retain readings on refresh fail
     '4,322.44 credits',
   );
   await expect(codex).toContainText('Usage resets available');
+  await expect(codex).toContainText('Estimated value (USD)');
+  await expect(codex).toContainText('$172.90');
+  await expect(codex).toContainText('US$0.04 per credit');
   await page.evaluate(() => localStorage.setItem('test-usage-error', 'yes'));
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
   await expect(codex).toContainText('Usage refresh failed');
@@ -64,6 +67,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
     'Last reported',
   );
   await expect(codex).toContainText('4,322.44 credits');
+  await expect(codex).toContainText('$172.90');
   await page.setViewportSize({ width: 390, height: 844 });
   await claude.getByRole('region', { name: 'Credits', exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: 'artifacts/credits-connections-mobile.png' });
@@ -80,4 +84,19 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await page.screenshot({ path: 'artifacts/credits-chat-mobile.png' });
   await page.setViewportSize({ width: 1380, height: 900 });
   await page.screenshot({ path: 'artifacts/credits-chat-desktop.png' });
+  await page.keyboard.press('Escape');
+  await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
+  await page.getByRole('option', { name: 'Codex', exact: true }).click();
+  await expect(page.locator('.usage-strip')).not.toContainText('Credits');
+  await page.locator('.context-chip').click();
+  await expect(card).toContainText('$172.90');
+  await expect(card).toContainText('checkout discounts and taxes');
+  await page.screenshot({ path: 'artifacts/credits-dollar-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await card.scrollIntoViewIfNeeded();
+  await expect(card).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  await page.screenshot({ path: 'artifacts/credits-dollar-mobile.png' });
 });
