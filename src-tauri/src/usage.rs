@@ -28,12 +28,34 @@ pub struct ContextCapacity {
     pub source: String,
 }
 #[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CreditUsage {
+    Codex {
+        balance: Option<f64>,
+        has_credits: Option<bool>,
+        unlimited: Option<bool>,
+        reset_credits: Option<u64>,
+    },
+    Claude {
+        enabled: Option<bool>,
+        used: Option<f64>,
+        limit: Option<f64>,
+        currency: Option<String>,
+        used_percent: Option<f64>,
+    },
+}
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
     pub provider: String,
     pub checked_at: u64,
     pub windows: Vec<LimitWindow>,
     pub context: Option<ContextCapacity>,
+    pub credits: Option<CreditUsage>,
     pub detail: String,
 }
 pub struct UsageState {
@@ -60,6 +82,61 @@ fn percent(v: &Value) -> Option<f64> {
     v.as_f64()
         .filter(|n| n.is_finite() && *n >= 0.)
         .map(|n| n.min(100.))
+}
+fn amount(v: &Value) -> Option<f64> {
+    let n = v.as_f64().or_else(|| {
+        let s = v.as_str()?;
+        // Only bounded decimal balances, never arbitrary provider text.
+        if s.is_empty() || s.len() > 32 || !s.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
+            return None;
+        }
+        s.parse().ok()
+    })?;
+    (n.is_finite() && (0. ..=9_007_199_254_740_991.).contains(&n)).then_some(n)
+}
+pub fn codex_credits(v: &Value) -> Option<CreditUsage> {
+    // Credits belong to the main account bucket; never borrow a model's credits.
+    let buckets = v.get("rateLimitsByLimitId").and_then(Value::as_object);
+    let bucket = if buckets.is_some_and(|b| !b.is_empty()) {
+        &v["rateLimitsByLimitId"]["codex"]
+    } else {
+        &v["rateLimits"]
+    };
+    let credits = &bucket["credits"];
+    let reset_credits = v["rateLimitResetCredits"]["availableCount"].as_u64();
+    (credits.is_object() || reset_credits.is_some()).then(|| CreditUsage::Codex {
+        balance: amount(&credits["balance"]),
+        has_credits: credits["hasCredits"].as_bool(),
+        unlimited: credits["unlimited"].as_bool(),
+        reset_credits,
+    })
+}
+pub fn claude_credits(v: &Value) -> Option<CreditUsage> {
+    let credits = &v["rate_limits"]["extra_usage"];
+    if !credits.is_object() {
+        return None;
+    }
+    // Current CLI reports minor currency units and their decimal scale. Without
+    // that scale, preserve the percentage/status but do not guess money amounts.
+    let scale = credits["decimal_places"]
+        .as_u64()
+        .filter(|n| *n <= 6)
+        .map(|n| 10_f64.powi(n as i32));
+    let currency = credits["currency"]
+        .as_str()
+        .filter(|s| s.len() == 3 && s.bytes().all(|c| c.is_ascii_alphabetic()))
+        .map(str::to_ascii_uppercase);
+    let money = |key: &str| {
+        currency.as_ref()?;
+        Some(amount(&credits[key])? / scale?)
+    };
+    Some(CreditUsage::Claude {
+        enabled: credits["is_enabled"].as_bool(),
+        used: money("used_credits"),
+        limit: money("monthly_limit"),
+        currency,
+        used_percent: percent(&credits["utilization"]),
+    })
 }
 fn reset(v: &Value) -> Value {
     if v.is_string() || v.is_number() {
@@ -251,8 +328,11 @@ pub async fn read(
         .map_err(|_| "Usage registry failed")?
         .insert(query_id.clone(), cancel.clone());
     let result = async {
-    let (windows,context,detail) = match provider {
-        "codex" => (parse_codex(&cli_queries::codex("account/rateLimits/read", Value::Null, cancel.clone()).await?), None, "Reported by Codex. Limits apply across your account."),
+    let (windows,context,credits,detail) = match provider {
+        "codex" => {
+            let v = cli_queries::codex("account/rateLimits/read", Value::Null, cancel.clone()).await?;
+            (parse_codex(&v), None, codex_credits(&v), "Reported by Codex. Limits apply across your account.")
+        },
         "claude" => {
             let (v,c) = cli_queries::claude_usage(model,&directory,cancel.clone()).await?;
             if v["rate_limits_available"] == true && !v["rate_limits"].is_object() {
@@ -260,9 +340,9 @@ pub async fn read(
             }
             let capacity = c.and_then(|c| Some(ContextCapacity { model:c["model"].as_str()?.into(), tokens:c["rawMaxTokens"].as_u64().filter(|n| *n>0)?, source:"Claude CLI context summary".into() }));
             let detail = if v["rate_limits_available"] == true { "Reported by Claude. Limits are shared with other Claude sessions." } else { "Subscription limits are not available for this Claude login." };
-            (parse_claude(&v),capacity,detail)
+            (parse_claude(&v),capacity,claude_credits(&v),detail)
         }
-        "gemini" => (parse_gemini(&cli_queries::gemini_usage(&directory,cancel.clone()).await?), None, "Reported by Antigravity for Gemini models. Only windows returned by your account are shown."),
+        "gemini" => (parse_gemini(&cli_queries::gemini_usage(&directory,cancel.clone()).await?), None, None, "Reported by Antigravity for Gemini models. Only windows returned by your account are shown."),
         _ => unreachable!(),
     };
     let snapshot = UsageSnapshot {
@@ -270,6 +350,7 @@ pub async fn read(
         checked_at: now(),
         windows,
         context,
+        credits,
         detail: detail.into(),
     };
     let mut cache = state.cache.lock().map_err(|_| "Usage cache failed")?;
@@ -288,6 +369,59 @@ pub async fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credits_keep_main_bucket_unknowns_and_reset_counts_separate() {
+        let data = json!({"rateLimitsByLimitId":{"codex":{"credits":{"balance":"42.125","hasCredits":true,"unlimited":false}},"spark":{"credits":{"balance":"999"}}},"rateLimitResetCredits":{"availableCount":2}});
+        let parsed = serde_json::to_value(codex_credits(&data)).unwrap();
+        assert_eq!(parsed["balance"], 42.125);
+        assert_eq!(parsed["resetCredits"], 2);
+        assert_eq!(parsed["kind"], "codex");
+        assert_eq!(parsed["hasCredits"], true);
+        assert!(codex_credits(&json!({"rateLimitsByLimitId":{"spark":{"credits":{"balance":"9"}}},"rateLimits":{"credits":{"balance":"22"}}})).is_none());
+        for balance in [
+            json!(null),
+            json!("NaN"),
+            json!(""),
+            json!("-1"),
+            json!("<script>"),
+            json!(-1),
+            json!(1e50),
+        ] {
+            let result = serde_json::to_value(codex_credits(
+                &json!({"rateLimits":{"credits":{"balance":balance}}}),
+            ))
+            .unwrap();
+            assert!(result["balance"].is_null());
+            assert!(result["hasCredits"].is_null());
+        }
+        let zero = serde_json::to_value(codex_credits(
+            &json!({"rateLimits":{"credits":{"balance":"0","hasCredits":false}}}),
+        ))
+        .unwrap();
+        assert_eq!(zero["balance"], 0.);
+        assert_eq!(zero["hasCredits"], false);
+    }
+    #[test]
+    fn claude_credit_money_requires_reported_currency_and_scale() {
+        let mut data = json!({"rate_limits":{"extra_usage":{"is_enabled":false,"monthly_limit":10000,"used_credits":1250,"utilization":12.5,"currency":"usd","decimal_places":2}}});
+        let parsed = serde_json::to_value(claude_credits(&data)).unwrap();
+        assert_eq!(parsed["used"], 12.5);
+        assert_eq!(parsed["limit"], 100.);
+        assert_eq!(parsed["currency"], "USD");
+        assert_eq!(parsed["enabled"], false);
+        data["rate_limits"]["extra_usage"]["decimal_places"] = json!(0);
+        assert_eq!(
+            serde_json::to_value(claude_credits(&data)).unwrap()["limit"],
+            10000.
+        );
+        data["rate_limits"]["extra_usage"]["decimal_places"] = Value::Null;
+        let unknown = serde_json::to_value(claude_credits(&data)).unwrap();
+        assert!(unknown["used"].is_null());
+        assert!(unknown["limit"].is_null());
+        assert_eq!(unknown["usedPercent"], 12.5);
+        assert!(claude_credits(&json!({"rate_limits":null})).is_none());
+        assert!(claude_credits(&json!({"rate_limits":{"extra_usage":null}})).is_none());
+    }
     #[test]
     fn codex_uses_durations_and_keeps_separate_buckets() {
         let result = parse_codex(

@@ -23,8 +23,97 @@ export type UsageSnapshot = {
   checkedAt: number;
   windows: LimitWindow[];
   context: { model: string; tokens: number; source: string } | null;
+  credits?: CreditUsage | null;
   detail: string;
 };
+export type CreditUsage =
+  | {
+      kind: 'codex';
+      balance: number | null;
+      hasCredits: boolean | null;
+      unlimited: boolean | null;
+      resetCredits: number | null;
+    }
+  | {
+      kind: 'claude';
+      enabled: boolean | null;
+      used: number | null;
+      limit: number | null;
+      currency: string | null;
+      usedPercent: number | null;
+    };
+
+export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
+  if (provider !== 'claude' && provider !== 'codex') return null;
+  const credits =
+    snapshot?.provider === provider && snapshot.credits?.kind === provider
+      ? snapshot.credits
+      : null;
+  const numeric = (value: number | null | undefined): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const rows: { label: string; value: string }[] = [];
+  let value = 'Not reported';
+  if (credits?.kind === 'codex') {
+    value =
+      credits.unlimited === true
+        ? 'Unlimited'
+        : numeric(credits.balance)
+          ? `${new Intl.NumberFormat('en', { maximumFractionDigits: 4 }).format(credits.balance)} credits`
+          : credits.hasCredits === true
+            ? 'Available'
+            : credits.hasCredits === false
+              ? 'No credits'
+              : 'Not reported';
+    if (numeric(credits.resetCredits))
+      rows.push({ label: 'Usage resets available', value: String(credits.resetCredits) });
+  } else if (credits?.kind === 'claude') {
+    const money = (n: number | null) => {
+      if (!numeric(n) || !credits.currency || !/^[A-Z]{3}$/.test(credits.currency))
+        return 'Not reported';
+      return new Intl.NumberFormat('en', {
+        style: 'currency',
+        currency: credits.currency,
+        currencyDisplay: 'code',
+        maximumFractionDigits: 6,
+      }).format(n);
+    };
+    const spent = money(credits.used);
+    value =
+      credits.enabled === false
+        ? 'Disabled'
+        : spent !== 'Not reported'
+          ? `${spent} spent`
+          : credits.enabled === true
+            ? 'Enabled'
+            : 'Not reported';
+    rows.push({
+      label: 'Extra usage',
+      value:
+        credits.enabled === true
+          ? 'Enabled'
+          : credits.enabled === false
+            ? 'Disabled'
+            : 'Not reported',
+    });
+    rows.push({ label: 'Spent this month', value: spent });
+    rows.push({ label: 'Monthly spending cap', value: money(credits.limit) });
+    if (numeric(credits.used) && numeric(credits.limit))
+      rows.push({
+        label: 'Remaining under cap',
+        value: money(Math.max(0, credits.limit - credits.used)),
+      });
+    if (numeric(credits.usedPercent))
+      rows.push({ label: 'Spending cap used', value: percentage(credits.usedPercent) });
+  }
+  return {
+    value,
+    rows,
+    detail:
+      provider === 'claude'
+        ? 'Prepaid balance is not reported by this CLI. Remaining under cap is spending room, not a credit balance.'
+        : 'Account credits are separate from subscription limits. Usage resets are separate from the credit balance.',
+  };
+}
 export const usageKey = (settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>) =>
   `${settings.provider}:${settings.model}${settings.connectionId ? `:${settings.connectionId}` : ''}`;
 export function snapshotFor(

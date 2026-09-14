@@ -1008,6 +1008,14 @@ code {
 .usage-bar-heading strong {
   margin-left: auto;
 }
+.credit-chip .usage-bar-heading {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 540px) {
+  .usage-strip:has(.credit-chip) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .usage-meter.compact-meter {
   display: block;
   width: 100%;
@@ -1057,6 +1065,9 @@ code {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
   gap: 9px;
+}
+.credit-card {
+  margin-top: 9px;
 }
 .usage-card {
   padding: 13px 14px;

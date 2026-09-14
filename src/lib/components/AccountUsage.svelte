@@ -12,6 +12,7 @@
     type UsageSnapshot,
   } from '$lib/usage';
   import PaceIndicator from './PaceIndicator.svelte';
+  import CreditUsage from './CreditUsage.svelte';
 
   let {
     provider,
@@ -133,6 +134,7 @@
             </p>{/if}
         </div>
       {/each}
+      <CreditUsage {provider} {snapshot} {loading} {stale} />
     </div>
   {/if}
   {#if unavailable || error}<p class="usage-note" role="status">

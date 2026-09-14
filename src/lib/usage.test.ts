@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { initialWorkspace, settingsFor, restoreWorkspace, type Conversation } from './domain';
 import {
   contextFor,
+  creditReading,
   accountLimits,
   estimatePromptTokens,
   isStale,
@@ -51,6 +52,71 @@ const snapshot: UsageSnapshot = {
   ],
 };
 describe('usage and context semantics', () => {
+  it('keeps credits separate from quotas, resets, money and other accounts', () => {
+    const codex: UsageSnapshot = {
+      ...snapshot,
+      provider: 'codex',
+      connectionId: 'one',
+      credits: { kind: 'codex', balance: 0, hasCredits: false, unlimited: false, resetCredits: 2 },
+    };
+    expect(creditReading('codex', codex)?.value).toBe('0 credits');
+    expect(creditReading('codex', codex)?.rows[0].value).toBe('2');
+    expect(creditReading('claude', codex)?.value).toBe('Not reported');
+    expect(creditReading('gemini', codex)).toBeNull();
+    expect(creditReading('codex')?.value).toBe('Not reported');
+    expect(
+      snapshotFor({ 'codex::one': codex }, { provider: 'codex', model: '', connectionId: 'two' }),
+    ).toBeUndefined();
+    expect(
+      creditReading('codex', {
+        ...codex,
+        credits: {
+          kind: 'codex',
+          balance: null,
+          hasCredits: true,
+          unlimited: false,
+          resetCredits: null,
+        },
+      })?.value,
+    ).toBe('Available');
+    expect(
+      creditReading('codex', {
+        ...codex,
+        credits: {
+          kind: 'codex',
+          balance: null,
+          hasCredits: true,
+          unlimited: true,
+          resetCredits: null,
+        },
+      })?.value,
+    ).toBe('Unlimited');
+    const claude: UsageSnapshot = {
+      ...snapshot,
+      credits: {
+        kind: 'claude',
+        used: 12.5,
+        limit: 100,
+        currency: 'USD',
+        usedPercent: 12.5,
+        enabled: true,
+      },
+    };
+    const reading = creditReading('claude', claude)!;
+    expect(reading.value).toMatch(/USD\s12.50 spent/);
+    expect(reading.rows.find((r) => r.label === 'Remaining under cap')?.value).toMatch(
+      /USD\s87.50/,
+    );
+    expect(reading.detail).toContain('not a credit balance');
+    if (claude.credits?.kind === 'claude') {
+      claude.credits.enabled = false;
+      claude.credits.limit = null;
+    }
+    expect(creditReading('claude', claude)?.value).toBe('Disabled');
+    expect(
+      creditReading('claude', claude)?.rows.find((r) => r.label === 'Remaining under cap'),
+    ).toBeUndefined();
+  });
   it('keeps account windows and model scopes separate, with missing limits distinct from zero', () => {
     const windows = accountLimits(snapshot, 'claude');
     expect(windows.map((w) => [w.label, w.usedPercent])).toEqual([

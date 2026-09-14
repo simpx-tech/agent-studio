@@ -2,11 +2,13 @@
   import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import PaceIndicator from './PaceIndicator.svelte';
+  import CreditUsage from './CreditUsage.svelte';
   import { providers, type ChatSettings, type Conversation } from '$lib/domain';
   import type { ModelInfo } from '$lib/models';
   import { contextPace, quotaPace } from '$lib/pace';
   import {
     compactTokens,
+    creditReading,
     contextFor,
     isStale,
     percentage,
@@ -40,6 +42,7 @@
     return () => clearInterval(timer);
   });
   const context = $derived(contextFor(conversation, settings, '', model, snapshot));
+  const credits = $derived(creditReading(settings.provider, snapshot));
   const limits = $derived(
     visibleLimits(snapshot, settings).map((window) => ({
       ...window,
@@ -116,7 +119,7 @@
 />
 
 <section class="usage-panel" aria-label="Usage and context">
-  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1}>
+  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1 + (credits ? 1 : 0)}>
     <button
       class="usage-chip context-chip"
       class:usage-warning={(context.percent ?? 0) >= 80}
@@ -176,6 +179,21 @@
         {@render quotaBar(window, true)}
       </button>
     {/each}
+    {#if credits}
+      <button
+        class="usage-chip credit-chip"
+        onclick={() => (expanded = !expanded)}
+        aria-expanded={expanded}
+        aria-controls="usage-details"
+        aria-label="Show credits details"
+        title={`${stale ? 'Last reported. ' : ''}${credits.detail}`}
+      >
+        <span class="usage-bar-heading"
+          ><span>Credits</span><strong>{loading && !snapshot ? 'Checking…' : credits.value}</strong
+          ></span
+        >
+      </button>
+    {/if}
   </div>
   {#if stale}<span class="usage-stale">Last reported</span>{/if}
   {#if expanded}
@@ -300,6 +318,9 @@
           </div>
         {/each}
       </div>
+      {#if credits}<div class="usage-card credit-card">
+          <CreditUsage provider={settings.provider} {snapshot} {loading} {stale} />
+        </div>{/if}
     </div>
   {/if}
 </section>

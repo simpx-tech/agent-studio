@@ -202,7 +202,6 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
       const box = (await track.boundingBox())!;
       expect(box.height).toBe(6);
       expect(box.y + box.height).toBeLessThanOrEqual(visibleBottom - bottomInset);
-      expect(visibleBottom - bottomInset - box.y - box.height).toBeLessThanOrEqual(15);
       expect(
         await track.evaluate((node) => {
           const rect = node.getBoundingClientRect();
@@ -213,6 +212,10 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
         }),
       ).toBe(true);
     }
+    // Credits can add a second row. Every track must remain fully painted;
+    // measure the bottom inset from the strip, not from its first row.
+    const strip = (await page.locator('.usage-strip').boundingBox())!;
+    expect(visibleBottom - bottomInset - strip.y - strip.height).toBeLessThanOrEqual(15);
   };
   await assertTracks(844, 0);
   await page.screenshot({ path: testInfo.outputPath('standalone-safe-area-tracks.png') });
@@ -269,15 +272,14 @@ test('the phone reserves its safe area once, without adding a second navigation 
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
   const bottomGap = async () =>
     page
-      .locator('.compact-meter')
-      .first()
+      .locator('.usage-strip')
       .evaluate(
         (node) =>
           document.documentElement.getBoundingClientRect().bottom -
           node.getBoundingClientRect().bottom,
       );
   await page.screenshot({ path: testInfo.outputPath('automatic-safe-area-chat.png') });
-  await expect.poll(bottomGap).toBe(15);
+  await expect.poll(bottomGap).toBe(10);
   await expect(page.locator('meta[name="viewport"]')).toHaveAttribute(
     'content',
     /viewport-fit=auto/,
@@ -300,5 +302,5 @@ test('the phone reserves its safe area once, without adding a second navigation 
   // rectangle, as when browser controls change, without changing it back
   // to a physical fullscreen height or adding the device insets a second time.
   await page.setViewportSize({ width: 390, height: 751 });
-  await expect.poll(bottomGap).toBe(15);
+  await expect.poll(bottomGap).toBe(10);
 });

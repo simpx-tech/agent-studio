@@ -1,0 +1,13 @@
+{
+  "identifier": "com.vinicius.agentstudio.credits-qa",
+  "productName": "Agent Studio Credits QA",
+  "build": { "beforeDevCommand": "", "devUrl": "http://127.0.0.1:1438" },
+  "app": {
+    "windows": [
+      { "title": "Agent Studio Credits QA", "width": 1380, "height": 900, "visible": false }
+    ],
+    "security": {
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:1438 ws://127.0.0.1:1438; object-src 'none'; frame-src studio-artifact: http://studio-artifact.localhost"
+    }
+  }
+}
