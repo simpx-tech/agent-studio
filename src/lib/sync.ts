@@ -3,6 +3,7 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeQuestions } from './questions.ts';
+import { latestFileChanges } from './file-changes.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
@@ -37,10 +38,18 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !message.runId ||
         message.runId !== previous.runId ||
         !equal(message.settings, previous.settings) ||
-        !previous.questions?.length
+        (!previous.questions?.length && !previous.fileChanges)
       )
         return message;
-      return { ...message, questions: mergeQuestions(message.questions, previous.questions) };
+      return {
+        ...message,
+        ...(message.questions || previous.questions
+          ? { questions: mergeQuestions(message.questions, previous.questions) }
+          : {}),
+        ...(message.fileChanges || previous.fileChanges
+          ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
+          : {}),
+      };
     }),
   };
 }
@@ -100,6 +109,9 @@ function sameRun(
     messages.push({
       ...selected,
       blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
+      ...(a.fileChanges || b.fileChanges
+        ? { fileChanges: latestFileChanges(a.fileChanges, b.fileChanges) }
+        : {}),
       ...(a.questions || b.questions
         ? { questions: mergeQuestions(a.questions, b.questions) }
         : {}),

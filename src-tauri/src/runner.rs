@@ -212,6 +212,13 @@ pub(crate) async fn execute(
     let mut child = command
         .spawn()
         .map_err(|_| "Could not launch the provider CLI. Check Connections.")?;
+    if matches!(request.agent.provider.as_str(), "codex" | "claude") {
+        if let Some(channel) = &channel {
+            let _ = channel.send(RunEvent::FileChanges {
+                file_changes: crate::protocol::file_changes::Snapshot::empty(),
+            });
+        }
+    }
     if request.uses_codex_server() {
         let result = crate::providers::codex_chat::run(
             &mut child,

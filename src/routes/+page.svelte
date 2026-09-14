@@ -133,6 +133,7 @@
   let reasoningPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
   let preparingCommand = false;
+  import { summarizeFileChanges } from '$lib/file-changes';
   import MessageView from '$lib/components/MessageView.svelte';
   import PlanPanel from '$lib/components/PlanPanel.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
@@ -481,6 +482,7 @@
   const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
   const switchNotices = $derived(replySwitches(active?.messages ?? []));
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
+  const chatChanges = $derived(summarizeFileChanges(active?.messages ?? []));
   const nextReplyChanged = $derived(
     !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),
   );
@@ -1729,6 +1731,7 @@
                 event.kind === 'nativeworkflow' ||
                 event.kind === 'plan' ||
                 event.kind === 'visualization' ||
+                event.kind === 'filechanges' ||
                 event.kind === 'question' ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               )
@@ -2438,6 +2441,8 @@
               {#if active?.messages.length}
                 {#each active.messages as m, i (m.id)}<MessageView
                     message={m}
+                    {chatChanges}
+                    folder={active.location?.path}
                     timeTotal={timeTotals.get(m.id)}
                     switchNotice={switchNotices.get(m.id)}
                     agent={active.settings}

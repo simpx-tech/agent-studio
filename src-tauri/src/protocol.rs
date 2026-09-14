@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 mod activity;
+pub mod file_changes;
 pub mod plan;
 mod workflow;
 
@@ -26,6 +27,10 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    FileChanges {
+        #[serde(rename = "fileChanges")]
+        file_changes: file_changes::Snapshot,
+    },
     Question {
         question: crate::providers::questions::Request,
     },
@@ -67,6 +72,7 @@ pub struct Decoder {
     context_input: Option<u64>,
     model: Option<String>,
     tools: activity::ToolDecoder,
+    file_changes: file_changes::FileChangeDecoder,
     plan: plan::PlanDecoder,
     workflows: workflow::WorkflowDecoder,
     progress: Vec<(String, String, u64)>,
@@ -120,6 +126,14 @@ impl Decoder {
             .map(|tool| RunEvent::Tool { tool })
             .collect();
         let params = &value["params"];
+        if self
+            .tools
+            .owns_codex_thread(params["threadId"].as_str().unwrap_or_default(), root)
+        {
+            if let Some(file_changes) = self.file_changes.codex_server(value) {
+                events.push(RunEvent::FileChanges { file_changes });
+            }
+        }
         if params["threadId"] != root {
             return events;
         }
@@ -188,6 +202,9 @@ impl Decoder {
             .into_iter()
             .map(|tool| RunEvent::Tool { tool })
             .collect();
+        if let Some(file_changes) = self.file_changes.decode(provider, &v) {
+            events.push(RunEvent::FileChanges { file_changes });
+        }
         // Child-agent text and usage belong to its activity, never the main reply.
         if provider == "claude" && v["parent_tool_use_id"].as_str().is_some() {
             return events;

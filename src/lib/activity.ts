@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ContentBlock, Message, RunEvent } from './domain';
+import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
@@ -88,7 +89,11 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
-  if (event.kind === 'question') {
+  if (event.kind === 'filechanges') {
+    const parsed = fileChangesSchema.safeParse(event.fileChanges);
+    if (message.role === 'assistant' && parsed.success)
+      message.fileChanges = latestFileChanges(message.fileChanges, parsed.data);
+  } else if (event.kind === 'question') {
     const parsed = questionRequestSchema.safeParse(event.question);
     if (message.role === 'assistant' && parsed.success)
       message.questions = mergeQuestions(message.questions, [parsed.data]);
@@ -187,6 +192,15 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'filechanges') {
+    const parsed = fileChangesSchema.safeParse(event.fileChanges);
+    if (!parsed.success) return;
+    const index = events.findIndex((e) => e.kind === 'filechanges');
+    if (index < 0) events.push({ kind: 'filechanges', fileChanges: parsed.data });
+    else if (parsed.data.revision > (events[index].fileChanges?.revision ?? -1))
+      events[index] = { kind: 'filechanges', fileChanges: parsed.data };
+    return;
+  }
   if (event.kind === 'question') {
     const parsed = questionRequestSchema.safeParse(event.question);
     if (!parsed.success) return;

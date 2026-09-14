@@ -10,6 +10,8 @@
   import { replyContent } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
+  import FileChanges from './FileChanges.svelte';
+  import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import ReplyUsage from './ReplyUsage.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
@@ -26,6 +28,8 @@
     retryDisabled = false,
     switchNotice = '',
     timeTotal,
+    chatChanges,
+    folder,
     openArtifact,
   }: {
     message: Message;
@@ -35,8 +39,11 @@
     retryDisabled?: boolean;
     switchNotice?: string;
     timeTotal?: ReplyTimeTotal;
+    chatChanges?: ChangeSummary;
+    folder?: string;
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
   } = $props();
+  const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
   const author = $derived(message.settings ?? agent);
   const text = $derived(
@@ -164,6 +171,14 @@
               disabled={retryDisabled}><RotateCcw size={13} />Retry</button
             >{/if}
         </div>{/if}
+      {#if message.status !== 'running'}
+        <FileChanges
+          response={responseChanges}
+          chat={chatChanges ?? responseChanges}
+          id={message.id}
+          {folder}
+        />
+      {/if}
     {/if}
   </div>
 </article>

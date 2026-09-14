@@ -1,0 +1,20 @@
+{
+  "identifier": "com.vinicius.agentstudio.file-changes-qa",
+  "productName": "Agent Studio File Changes QA",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": null
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio File Changes QA",
+        "width": 1380,
+        "height": 900
+      }
+    ],
+    "security": {
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost http://localhost:1442 ws://localhost:1442 http://127.0.0.1:1442 ws://127.0.0.1:1442; object-src 'none'; base-uri 'none'; frame-src studio-artifact: http://studio-artifact.localhost"
+    }
+  }
+}

@@ -4,6 +4,7 @@ import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
+import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import {
@@ -164,6 +165,7 @@ export const messageSchema = z.object({
   plan: planSchema.optional(),
   visualizations: visualizationsSchema.optional(),
   questions: questionsSchema.optional(),
+  fileChanges: fileChangesSchema.optional(),
   workflow: workflowProgressSchema.optional(),
   workflowDefinition: workflowSchema.optional(),
   nativeWorkflows: nativeWorkflowsSchema.optional(),
@@ -209,6 +211,7 @@ export type RunEvent = TokenUsage & {
     | 'tool'
     | 'progress'
     | 'plan'
+    | 'filechanges'
     | 'visualization'
     | 'question'
     | 'workflow'
@@ -220,6 +223,7 @@ export type RunEvent = TokenUsage & {
   plan?: Plan;
   visualization?: Visualization;
   question?: QuestionRequest;
+  fileChanges?: FileChanges;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
 };
