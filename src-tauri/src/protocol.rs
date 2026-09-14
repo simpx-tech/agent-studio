@@ -5,7 +5,7 @@ pub mod file_changes;
 pub mod plan;
 mod workflow;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input: Option<u64>,
@@ -16,6 +16,14 @@ pub struct TokenUsage {
     pub context_window: Option<u64>,
     pub cost_usd: Option<f64>,
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_credits: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 fn input_with_cache(v: &Value) -> Option<u64> {
     Some(
@@ -27,6 +35,10 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    AccountUsage {
+        #[serde(rename = "accountUsage")]
+        account_usage: crate::spend::Observation,
+    },
     FileChanges {
         #[serde(rename = "fileChanges")]
         file_changes: file_changes::Snapshot,
@@ -181,6 +193,11 @@ impl Decoder {
                         context_window: usage["modelContextWindow"].as_u64(),
                         cost_usd: None,
                         model: self.model.clone(),
+                        // Agent Studio starts one app-server process per reply.
+                        // Installed Codex resets these counters when resuming in
+                        // that new process, unlike its native billing estimate.
+                        scope: Some("reply".into()),
+                        ..Default::default()
                     },
                 });
             }
@@ -278,6 +295,7 @@ impl Decoder {
                         context_window: None,
                         cost_usd: None,
                         model: None,
+                        ..Default::default()
                     },
                 }),
                 "turn.failed" => self.failure = Some(string(&v, "/error/message")),
@@ -360,6 +378,7 @@ impl Decoder {
                                 .as_f64()
                                 .filter(|cost| cost.is_finite() && *cost >= 0.0),
                             model: self.model.clone(),
+                            ..Default::default()
                         },
                     });
                 }
@@ -407,6 +426,7 @@ impl Decoder {
                             context_window: None,
                             cost_usd: None,
                             model: None,
+                            ..Default::default()
                         },
                     });
                 }
@@ -493,6 +513,7 @@ mod tests {
         let usage = serde_json::to_value(usage).unwrap();
         assert_eq!(usage[0]["contextInput"], 600);
         assert_eq!(usage[0]["input"], 1000);
+        assert_eq!(usage[0]["scope"], "reply");
         assert_eq!(usage[0]["model"], "fixture-model");
         let finished = decode(
             &mut d,

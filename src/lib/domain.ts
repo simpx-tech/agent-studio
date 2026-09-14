@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { accountUsageSchema, type AccountUsage } from './spend.ts';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
@@ -122,6 +123,7 @@ const blockSchema = z.discriminatedUnion('type', [
 export type ContentBlock = z.infer<typeof blockSchema>;
 const tokenCount = z.number().nonnegative().nullable().optional();
 export const tokenUsageSchema = z.object({
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   input: tokenCount,
   output: tokenCount,
   cachedInput: tokenCount,
@@ -129,6 +131,21 @@ export const tokenUsageSchema = z.object({
   contextInput: tokenCount,
   contextWindow: tokenCount,
   costUsd: z.number().nonnegative().nullable().optional(),
+  scope: z.enum(['session', 'reply']).optional(),
+  sessionCredits: z
+    .number()
+    .finite()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable()
+    .optional(),
+  sessionCostUsd: z
+    .number()
+    .finite()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable()
+    .optional(),
   model: z.string().nullable().optional(),
 });
 export type TokenUsage = z.infer<typeof tokenUsageSchema>;
@@ -145,31 +162,39 @@ export const skillReferenceSchema = z.object({
     .refine((path) => !/[\u0000-\u001f]/.test(path)),
 });
 export type SkillReference = z.infer<typeof skillReferenceSchema>;
-export const messageSchema = z.object({
-  id: z.string().uuid(),
-  role: z.enum(['user', 'assistant']),
-  blocks: z.array(blockSchema),
-  images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
-  skills: z.array(skillReferenceSchema).max(4).optional(),
-  status: z.enum(['complete', 'running', 'error', 'cancelled']),
-  createdAt: z.string(),
-  error: z.string().optional(),
-  usage: tokenUsageSchema.optional(),
-  promptTokensEstimate: z.number().nonnegative().optional(),
-  durationMs: z.number().optional(),
-  settings: chatSettingsSchema.optional(),
-  modelName: z.string().max(200).optional(),
-  authorName: z.string().optional(),
-  executionLabel: z.string().optional(),
-  runId: z.string().uuid().optional(),
-  plan: planSchema.optional(),
-  visualizations: visualizationsSchema.optional(),
-  questions: questionsSchema.optional(),
-  fileChanges: fileChangesSchema.optional(),
-  workflow: workflowProgressSchema.optional(),
-  workflowDefinition: workflowSchema.optional(),
-  nativeWorkflows: nativeWorkflowsSchema.optional(),
-});
+export const messageSchema = z
+  .object({
+    id: z.string().uuid(),
+    role: z.enum(['user', 'assistant']),
+    blocks: z.array(blockSchema),
+    images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
+    skills: z.array(skillReferenceSchema).max(4).optional(),
+    status: z.enum(['complete', 'running', 'error', 'cancelled']),
+    createdAt: z.string(),
+    error: z.string().optional(),
+    usage: tokenUsageSchema.optional(),
+    accountUsage: accountUsageSchema.optional(),
+    promptTokensEstimate: z.number().nonnegative().optional(),
+    durationMs: z.number().optional(),
+    settings: chatSettingsSchema.optional(),
+    modelName: z.string().max(200).optional(),
+    authorName: z.string().optional(),
+    executionLabel: z.string().optional(),
+    runId: z.string().uuid().optional(),
+    plan: planSchema.optional(),
+    visualizations: visualizationsSchema.optional(),
+    questions: questionsSchema.optional(),
+    fileChanges: fileChangesSchema.optional(),
+    workflow: workflowProgressSchema.optional(),
+    workflowDefinition: workflowSchema.optional(),
+    nativeWorkflows: nativeWorkflowsSchema.optional(),
+  })
+  .refine(
+    (message) =>
+      !message.accountUsage ||
+      (message.role === 'assistant' && message.accountUsage.runId === message.runId),
+    { message: 'Account observation does not match its response run' },
+  );
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
   id: z.string().uuid(),
@@ -207,6 +232,7 @@ export type RunEvent = TokenUsage & {
     | 'text'
     | 'activity'
     | 'usage'
+    | 'accountusage'
     | 'error'
     | 'tool'
     | 'progress'
@@ -217,6 +243,7 @@ export type RunEvent = TokenUsage & {
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
+  accountUsage?: AccountUsage;
   revision?: number;
   text?: string;
   tool?: ToolActivity;

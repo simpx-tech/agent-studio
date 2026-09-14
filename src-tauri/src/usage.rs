@@ -284,6 +284,16 @@ pub async fn read(
     model: &str,
     force: bool,
 ) -> Result<UsageSnapshot, String> {
+    read_cancellable(app, state, provider, model, force, CancellationToken::new()).await
+}
+pub async fn read_cancellable(
+    app: tauri::AppHandle,
+    state: &UsageState,
+    provider: &str,
+    model: &str,
+    force: bool,
+    cancel: CancellationToken,
+) -> Result<UsageSnapshot, String> {
     if !crate::providers::valid_provider(provider)
         || model.len() > 100
         || !model
@@ -309,11 +319,10 @@ pub async fn read(
             return Ok(cached);
         }
     }
-    let _slot = state
-        .slots
-        .acquire()
-        .await
-        .map_err(|_| "Usage refresh is unavailable")?;
+    let _slot = tokio::select! {
+        _ = cancel.cancelled() => return Err("Usage query cancelled".into()),
+        slot = state.slots.acquire() => slot.map_err(|_| "Usage refresh is unavailable")?,
+    };
     let directory = app
         .path()
         .app_local_data_dir()
@@ -321,7 +330,6 @@ pub async fn read(
         .join("usage-runtime");
     std::fs::create_dir_all(&directory).map_err(|_| "Cannot prepare usage query")?;
     let query_id = uuid::Uuid::new_v4().to_string();
-    let cancel = CancellationToken::new();
     state
         .active
         .lock()

@@ -1770,7 +1770,7 @@
       }
     } finally {
       if (session === workspaceSession) {
-        message().durationMs = performance.now() - started;
+        message().durationMs = message().accountUsage?.runDurationMs ?? performance.now() - started;
         conversation.updatedAt = new Date().toISOString();
         run = null;
         stopping = false;

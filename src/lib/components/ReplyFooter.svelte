@@ -4,6 +4,8 @@
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
   import type { ChangeSummary } from '$lib/file-changes';
   import FileChanges from './FileChanges.svelte';
+  import AccountChanges from './AccountChanges.svelte';
+  import { money } from '$lib/spend';
   let {
     message,
     timeTotal,
@@ -90,11 +92,11 @@
     <div class="usage-breakdown">
       <dl>
         <div>
-          <dt>Input tokens</dt>
+          <dt>{usage?.scope === 'session' ? 'Chat input tokens' : 'Input tokens'}</dt>
           <dd>{usage?.input?.toLocaleString() ?? 'Not reported'}</dd>
         </div>
         <div>
-          <dt>Output tokens</dt>
+          <dt>{usage?.scope === 'session' ? 'Chat output tokens' : 'Output tokens'}</dt>
           <dd>{usage?.output?.toLocaleString() ?? 'Not reported'}</dd>
         </div>
         {#if usage?.cachedInput != null}
@@ -120,9 +122,22 @@
             <dd>{totalTime}</dd>
           </div>{/if}
         <div>
-          <dt>Estimated cost (USD)</dt>
+          <dt>
+            {usage?.scope === 'session' ? 'Estimated chat cost (USD)' : 'Estimated cost (USD)'}
+          </dt>
           <dd>{cost ?? 'Not reported'}</dd>
         </div>
+        {#if message.settings?.provider === 'codex'}<div>
+            <dt>Estimated chat credits</dt>
+            <dd>
+              {usage?.sessionCredits?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ??
+                'Not reported'}
+            </dd>
+          </div>{/if}
+        {#if usage?.sessionCostUsd != null}<div>
+            <dt>Estimated native chat cost (USD)</dt>
+            <dd>{money(usage.sessionCostUsd)}</dd>
+          </div>{/if}
       </dl>
       {#if timeTotal}<p>
           Total AI time sums this and earlier saved AI replies in this conversation, including
@@ -134,10 +149,17 @@
         </p>{/if}
       {#if usage?.cachedInput != null}<p>Cached tokens are already included in input.</p>{/if}
       <p>
-        {cost == null
-          ? 'No cost was reported for this reply. Older replies may not have a saved cost.'
-          : 'Estimate reported by the provider for this reply. Your plan determines actual billing.'}
+        {usage?.scope === 'session'
+          ? 'Cumulative native chat reading through this reply, not an additional per-reply charge. Estimates may differ from billing.'
+          : cost == null
+            ? 'No cost was reported for this reply. Older replies may not have a saved cost.'
+            : 'Estimate reported by the provider for this reply. Your plan determines actual billing.'}
       </p>
+      <AccountChanges {message} />
+      {#if message.settings?.provider === 'codex'}<p>
+          Native chat estimates cover the session through this reply. They are not additional
+          per-reply charges.
+        </p>{/if}
     </div>
   </div>
   <div

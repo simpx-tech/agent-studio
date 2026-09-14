@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { accountUsageSchema, latestAccountUsage } from './spend.ts';
 import type { ContentBlock, Message, RunEvent } from './domain';
 import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
@@ -89,7 +90,11 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
-  if (event.kind === 'filechanges') {
+  if (event.kind === 'accountusage') {
+    const parsed = accountUsageSchema.safeParse(event.accountUsage);
+    if (message.role === 'assistant' && parsed.success && message.runId === parsed.data.runId)
+      message.accountUsage = latestAccountUsage(message.accountUsage, parsed.data);
+  } else if (event.kind === 'filechanges') {
     const parsed = fileChangesSchema.safeParse(event.fileChanges);
     if (message.role === 'assistant' && parsed.success)
       message.fileChanges = latestFileChanges(message.fileChanges, parsed.data);
@@ -173,8 +178,9 @@ export function applyRunEvent(message: Message, event: RunEvent) {
         order: message.blocks.length,
       });
   } else if (event.kind === 'usage') {
+    if (message.usage?.revision != null && (event.revision ?? -1) <= message.usage.revision) return;
     const { kind: _kind, text: _text, tool: _tool, id: _id, revision: _revision, ...usage } = event;
-    message.usage = usage;
+    message.usage = { ...usage, ...(event.revision != null ? { revision: event.revision } : {}) };
   } else if (event.kind === 'error') message.error = event.text;
 }
 
@@ -192,6 +198,22 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'usage') {
+    const previous = events.find((e) => e.kind === 'usage');
+    if (previous?.revision != null && (event.revision ?? -1) <= previous.revision) return;
+  }
+  if (event.kind === 'accountusage') {
+    const parsed = accountUsageSchema.safeParse(event.accountUsage);
+    if (!parsed.success) return;
+    const index = events.findIndex((e) => e.kind === 'accountusage');
+    if (index < 0) events.push({ kind: 'accountusage', accountUsage: parsed.data });
+    else
+      events[index] = {
+        kind: 'accountusage',
+        accountUsage: latestAccountUsage(events[index].accountUsage, parsed.data),
+      };
+    return;
+  }
   if (event.kind === 'filechanges') {
     const parsed = fileChangesSchema.safeParse(event.fileChanges);
     if (!parsed.success) return;

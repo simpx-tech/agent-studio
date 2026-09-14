@@ -165,6 +165,10 @@ pub async fn run(
     let mut turn = String::new();
     let mut cancelling = false;
     let mut decoder = Decoder::default();
+    let mut last_usage = crate::protocol::TokenUsage {
+        scope: Some("reply".into()),
+        ..Default::default()
+    };
     let mut visualizer = super::visualize::Visualizer::default();
     let output_limit = request.output_line_limit();
     loop {
@@ -262,7 +266,9 @@ pub async fn run(
                     turn = value["params"]["turn"]["id"].as_str().unwrap_or_default().into();
                 }
                 questions.resolved_codex(&value, &thread);
+                if value["method"] == "thread/tokenUsage/updated" && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 for event in decoder.decode_codex_server(&value, &thread) {
+                    if let crate::protocol::RunEvent::Usage { usage } = &event { last_usage = usage.clone(); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
@@ -270,6 +276,29 @@ pub async fn run(
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }
                     if status != "completed" { return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
                     if decoder.text.trim().is_empty() && !visualizer.has_visuals() { return Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    // The billing route may only be available while this exact thread is loaded.
+                    // Optional read failure must never turn a successful reply into an error.
+                    let estimate = async {
+                        input.write_all(format!("{}\n", json!({"id":7,"method":"account/usage/read","params":{"threadId":thread}})).as_bytes()).await.ok()?;
+                        while let Ok(Some(line)) = output.next_line().await {
+                            if line.len() > 2_000_000 { return None; }
+                            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue; };
+                            if v["id"] == 7 {
+                                let usage = &v["result"]["threadUsage"];
+                                return (usage["threadId"] == thread).then(|| usage.clone());
+                            }
+                        }
+                        None
+                    };
+                    let reading = tokio::select! {
+                        _ = cancel.cancelled() => None,
+                        result = tokio::time::timeout(Duration::from_secs(5), estimate) => result.ok().flatten(),
+                    };
+                    if let Some(reading) = reading {
+                        last_usage.session_credits = crate::spend::micros(&reading["estimatedUsageCreditsMicros"]);
+                        last_usage.session_cost_usd = crate::spend::micros(&reading["estimatedUsageUsdMicros"]);
+                        if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Usage { usage: last_usage }); }
+                    }
                     return Ok(("complete".into(), decoder.text));
                 }
             }

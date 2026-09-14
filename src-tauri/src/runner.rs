@@ -105,24 +105,81 @@ pub async fn run(
     cancel: CancellationToken,
     connection_id: Option<String>,
 ) -> Result<String, String> {
-    let output = EventSink::new(move |event| channel.send(event).map_err(|e| e.to_string()));
+    let usage_revision = AtomicU64::new(0);
+    let output = EventSink::new(move |mut event| {
+        if let RunEvent::Usage { usage } = &mut event {
+            usage.revision = Some(usage_revision.fetch_add(1, Ordering::Relaxed) + 1);
+        }
+        channel.send(event).map_err(|e| e.to_string())
+    });
     let questions = app.state::<crate::providers::questions::Questions>().open(
         &request.run_id,
         connection_id,
         output.clone(),
     )?;
     let timeout = chat_timeout(&request.agent.provider);
-    execute(
-        app,
+    let tracking = matches!(request.agent.provider.as_str(), "claude" | "codex")
+        && request.conversation_id.is_some();
+    let mut observation = crate::spend::Observation {
+        version: 1,
+        revision: 1,
+        run_id: request.run_id.clone(),
+        before: None,
+        after: None,
+        run_duration_ms: None,
+    };
+    let provider = request.agent.provider.clone();
+    let model = request.agent.model.clone();
+    if tracking {
+        observation.before = crate::usage::read_cancellable(
+            app.clone(),
+            &app.state::<crate::usage::UsageState>(),
+            &provider,
+            &model,
+            true,
+            cancel.clone(),
+        )
+        .await
+        .ok()
+        .map(Into::into);
+        let _ = output.send(RunEvent::AccountUsage {
+            account_usage: observation.clone(),
+        });
+    }
+    let run_started = std::time::Instant::now();
+    let result = execute(
+        app.clone(),
         request,
-        Some(output),
-        cancel,
+        Some(output.clone()),
+        cancel.clone(),
         timeout,
         "chat-runtime",
         Some(questions),
     )
     .await
-    .map(|(status, _)| status)
+    .map(|(status, _)| status);
+    if tracking {
+        observation.run_duration_ms =
+            Some(run_started.elapsed().as_millis().min(9_007_199_254_740_991) as u64);
+        if !cancel.is_cancelled() {
+            observation.after = crate::usage::read_cancellable(
+                app.clone(),
+                &app.state::<crate::usage::UsageState>(),
+                &provider,
+                &model,
+                true,
+                cancel,
+            )
+            .await
+            .ok()
+            .map(Into::into);
+        }
+        observation.revision = 2;
+        let _ = output.send(RunEvent::AccountUsage {
+            account_usage: observation,
+        });
+    }
+    result
 }
 pub async fn title_text(
     app: tauri::AppHandle,

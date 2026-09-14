@@ -3,6 +3,7 @@
   import { X } from '@lucide/svelte';
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
+  import ChatSpend from './ChatSpend.svelte';
   import { providers, type ChatSettings, type Conversation } from '$lib/domain';
   import type { ModelInfo } from '$lib/models';
   import { contextPace, quotaPace } from '$lib/pace';
@@ -37,7 +38,7 @@
     expanded?: boolean;
   } = $props();
   let now = $state(Date.now());
-  let creditCard: HTMLDivElement | undefined;
+  let creditCard = $state<HTMLDivElement>();
   async function toggleCredits() {
     expanded = !expanded;
     if (expanded) {
@@ -326,6 +327,9 @@
           </div>
         {/each}
       </div>
+      {#if conversation && ['claude', 'codex'].includes(settings.provider)}<ChatSpend
+          {conversation}
+        />{/if}
       {#if credits}<div class="usage-card credit-card" bind:this={creditCard}>
           <CreditUsage provider={settings.provider} {snapshot} {loading} {stale} />
         </div>{/if}

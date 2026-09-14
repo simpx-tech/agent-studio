@@ -11,6 +11,7 @@ mod protocol;
 mod providers;
 mod relay;
 mod runner;
+mod spend;
 mod standalone;
 mod titles;
 mod usage;

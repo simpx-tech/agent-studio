@@ -17,6 +17,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     $request = $line | ConvertFrom-Json
     switch ($request.method) {
         'initialize' { [Console]::WriteLine('{"id":1,"result":{}}') }
+        'account/usage/read' { [Console]::WriteLine('{"id":7,"result":{"threadUsage":{"threadId":"fixture","estimatedUsageCreditsMicros":1250000,"estimatedUsageUsdMicros":250000}}}') }
         'thread/start' { [Console]::WriteLine('{"id":2,"result":{"thread":{"id":"fixture"}}}') }
         'turn/start' {
             [Console]::WriteLine('{"id":3,"result":{"turn":{"id":"turn"}}}')
@@ -109,5 +110,17 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             }
         );
         assert_eq!(result.1, "READY");
+        if !waiting_for_answer {
+            let mut usage = None;
+            while let Ok(event) = received.try_recv() {
+                if let RunEvent::Usage { usage: reading } = event {
+                    usage = Some(reading);
+                }
+            }
+            let usage = usage.expect("Billing estimate must survive the native protocol loop");
+            assert_eq!(usage.session_credits, Some(1.25));
+            assert_eq!(usage.session_cost_usd, Some(0.25));
+            assert_eq!(usage.cost_usd, None);
+        }
     }
 }

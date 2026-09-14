@@ -4,6 +4,7 @@ import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeQuestions } from './questions.ts';
 import { latestFileChanges } from './file-changes.ts';
+import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
@@ -38,11 +39,20 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !message.runId ||
         message.runId !== previous.runId ||
         !equal(message.settings, previous.settings) ||
-        (!previous.questions?.length && !previous.fileChanges)
+        (!previous.questions?.length &&
+          !previous.fileChanges &&
+          !previous.accountUsage &&
+          previous.usage?.revision == null)
       )
         return message;
       return {
         ...message,
+        ...(message.usage || previous.usage
+          ? { usage: latestTokenUsage(message.usage, previous.usage) }
+          : {}),
+        ...(message.accountUsage || previous.accountUsage
+          ? { accountUsage: latestAccountUsage(message.accountUsage, previous.accountUsage) }
+          : {}),
         ...(message.questions || previous.questions
           ? { questions: mergeQuestions(message.questions, previous.questions) }
           : {}),
@@ -108,6 +118,12 @@ function sameRun(
       score(a) > score(b) ? a : score(b) > score(a) ? b : at.length >= bt.length ? a : b;
     messages.push({
       ...selected,
+      ...(a.usage || b.usage
+        ? { usage: latestTokenUsage(selected.usage, selected === a ? b.usage : a.usage) }
+        : {}),
+      ...(a.accountUsage || b.accountUsage
+        ? { accountUsage: latestAccountUsage(a.accountUsage, b.accountUsage) }
+        : {}),
       blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
       ...(a.fileChanges || b.fileChanges
         ? { fileChanges: latestFileChanges(a.fileChanges, b.fileChanges) }
