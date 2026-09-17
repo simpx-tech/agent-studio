@@ -5,8 +5,6 @@
     Plus,
     Link,
     RefreshCw,
-    ShieldCheck,
-    Download,
     Settings2,
     ArrowUpRight,
     LoaderCircle,
@@ -33,9 +31,6 @@
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
-  import PushNotifications from './PushNotifications.svelte';
-  import WorkspaceAdministration from './WorkspaceAdministration.svelte';
-  import DesktopNotifications from './DesktopNotifications.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
   import { desktop } from '$lib/transport';
@@ -54,7 +49,6 @@
     syncStatus,
     syncError,
     paired,
-    workspaceSession = 0,
     save,
     refresh,
     connect,
@@ -63,7 +57,6 @@
     chat,
     providerStatuses,
     login,
-    exportWorkspace,
     running,
   }: {
     workspace: Workspace;
@@ -80,7 +73,6 @@
     syncStatus: string;
     syncError: string;
     paired: boolean;
-    workspaceSession?: number;
     save: () => Promise<void>;
     refresh: () => Promise<void>;
     connect: (url: string, key: string) => Promise<void>;
@@ -89,7 +81,6 @@
     chat: (provider: ProviderId, connectionId?: string, computerId?: string) => void;
     providerStatuses: ProviderStatus[];
     login: (provider: ProviderId, connectionId?: string) => Promise<void>;
-    exportWorkspace: () => Promise<void>;
     running: boolean;
   } = $props();
   let provider = $state<ProviderId>('claude');
@@ -706,30 +697,6 @@
           onclick={() => action(disconnect)}>{desktop() ? 'Disconnect relay' : 'Sign out'}</button
         >{/if}
     </section>
-    <WorkspaceAdministration {paired} {workspaceSession} />
-    {#if desktop()}<DesktopNotifications />{:else}<PushNotifications
-        {paired}
-        {workspaceSession}
-      />{/if}
-    <footer class="connections-footer">
-      <div>
-        <ShieldCheck size={16} /><span
-          >Provider sign-ins stay on each computer. <details>
-            <summary>Storage & privacy</summary>
-            <p>
-              Pairing sync shares chat content, computer setups, and account labels only within your
-              private workspace. Other workspace keys on the same server cannot access them. Anyone
-              with your workspace key can join it; the server administrator controls its storage.
-              Passwords and provider tokens stay with their CLIs. Conversation files and exports are
-              plain text.
-            </p>
-          </details></span
-        >
-      </div>
-      <button class="text-button" onclick={() => action(exportWorkspace)} disabled={busy}
-        ><Download size={14} />Export workspace</button
-      >
-    </footer>
   </div>
 </div>
 
@@ -1377,36 +1344,6 @@
     overflow-wrap: anywhere;
     line-height: 1.7;
   }
-  .connections-footer {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 24px;
-    border-top: 1px solid var(--line);
-    padding-top: 22px;
-    margin-top: 28px;
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.6;
-  }
-  .connections-footer > div {
-    display: flex;
-    gap: 10px;
-    max-width: 560px;
-  }
-  .connections-footer :global(svg) {
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
-  .connections-footer summary {
-    cursor: pointer;
-    font-size: 10px;
-    margin-top: 4px;
-  }
-  .connections-footer > button {
-    flex-shrink: 0;
-    font-size: 11px;
-  }
   .account-progress {
     display: flex;
     align-items: center;
@@ -1457,9 +1394,6 @@
     }
     .fleet-fields {
       grid-template-columns: 1fr;
-    }
-    .connections-footer {
-      flex-wrap: wrap;
     }
   }
 </style>

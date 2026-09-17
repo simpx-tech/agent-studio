@@ -193,7 +193,7 @@ test('mobile opts in, receives a real worker push without an app page, opens its
     await page.goto(url);
     await signInPwa(page, token);
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
     await expect.poll(() => registrationId).not.toBe('');
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
@@ -313,7 +313,7 @@ test('mobile opts in, receives a real worker push without an app page, opens its
     await composer.fill('');
     await expect(page.getByText('Another notification chat', { exact: true }).last()).toBeVisible();
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByText('Enabled on this device', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Disable notifications', exact: true }).click();
     await expect(
@@ -321,7 +321,7 @@ test('mobile opts in, receives a real worker push without an app page, opens its
     ).toBeVisible();
     await page.reload();
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByText('Off on this device', { exact: true })).toBeVisible();
     expect(errors).toEqual([]);
     await worker.evaluate(async () => {

@@ -8,13 +8,13 @@ Your existing `AGENT_STUDIO_RELAY_TOKEN`, root workspace files, and relay instan
 
 There is exactly one enabled **Admin** workspace. Your existing owner workspace starts as Admin; new workspaces start as **Member**. Roles live in the private server registry and cannot be changed by editing a chat export or browser cache.
 
-Open **Connections → Workspace administration** in the paired admin workspace. You can create member workspaces, rename them, transfer administration, issue replacement keys, and disable member access. The admin list contains names, roles, IDs, and access status; it does not load other people's chats or computers. Members do not get these controls or the workspace list.
+Open **Settings → Workspace administration** in the paired admin workspace. You can create member workspaces, rename them, transfer administration, issue replacement keys, and disable member access. The admin list contains names, roles, IDs, and access status; it does not load other people's chats or computers. Members do not get these controls or the workspace list.
 
 To use a specific workspace as your administration workspace, first create it as a member and save its key. Verify that you can open it using a separate browser profile or desktop installation. From the current admin workspace, choose **Manage → Role → Administrator**, then confirm **Transfer administration**. The target becomes the only admin and the previous admin becomes a member in the same server operation. The previous admin's management controls close immediately. You cannot demote or disable the only admin without transferring its role, or transfer administration to a disabled workspace. Creating an admin directly is rejected so the new key can be saved before access is transferred.
 
 All devices paired with an admin workspace share its authority. Only grant this role to people you trust to control access: an admin can issue another workspace a replacement key and use that key to access it. Ordinary chat, computer, job, and notification requests still operate only within the currently authenticated workspace.
 
-## Create access in Connections
+## Create access in Settings
 
 Choose **Create workspace** and enter a name. The new workspace starts empty as a member. Copy the displayed private key and save it in your password manager before closing the dialog; it is shown only once and cannot be recovered from the list. Send it privately to its intended user with the server's HTTPS address.
 
@@ -26,7 +26,7 @@ Use a workspace's management dialog to rename it or change its role. Key rotatio
 
 The current admin workspace cannot rotate or disable itself from the app. Transfer administration first, or use the local CLI to rotate its key; the CLI also rejects disabling the only admin. The original owner key remains managed through `AGENT_STUDIO_RELAY_TOKEN` and the service maintenance process, and its access cannot be disabled in the app. Its name can be changed and its admin role can be transferred. Already delivered notifications and work executing on a disconnected computer cannot be recalled; the host retains its local results.
 
-Admin controls refresh while Connections is visible and on focus. If access changes during a request, the server checks the current role and session before applying it. Switching or disconnecting the workspace clears the admin list and any newly issued key from the UI. Keys are never saved in workspace exports, browser storage, or conversation history.
+Admin controls refresh while Settings is visible and on focus. If access changes during a request, the server checks the current role and session before applying it. Switching or disconnecting the workspace clears the admin list and any newly issued key from the UI. Keys are never saved in workspace exports, browser storage, or conversation history.
 
 ## Server commands and recovery
 

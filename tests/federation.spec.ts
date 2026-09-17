@@ -865,6 +865,9 @@ test('one Windows app signs in, runs, and stops a WSL account without pairing a 
   await expect(
     page.locator('.sidebar-tools').getByRole('button', { name: 'Connections', exact: true }),
   ).toHaveCount(1);
+  await expect(
+    page.locator('.sidebar-tools').getByRole('button', { name: 'Settings', exact: true }),
+  ).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Computers & accounts', exact: true })).toHaveCount(
     0,
   );

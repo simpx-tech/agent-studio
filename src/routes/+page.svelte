@@ -20,6 +20,7 @@
     Cpu,
     Brain,
     Plug,
+    Settings,
     Search,
     ChevronRight,
     SlidersHorizontal,
@@ -154,10 +155,11 @@
     replyTimeTotals,
   } from '$lib/replies';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
+  import SettingsPage from '$lib/components/SettingsPage.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
   import '$lib/styles.css';
 
-  type View = 'chat' | 'connections';
+  type View = 'chat' | 'connections' | 'settings';
   let installation = $state<Installation>();
   let wslDiscovery = $state<WslDiscovery>();
   let wslError = $state('');
@@ -527,6 +529,7 @@
     {
       chat: active?.title ?? 'New conversation',
       connections: 'Connections',
+      settings: 'Settings',
     }[view],
   );
 
@@ -2180,6 +2183,17 @@
           sidebarOpen = false;
         }}><Plug size={17} aria-hidden="true" /></button
       >
+      <button
+        class="icon-button settings-button"
+        class:active={view === 'settings'}
+        aria-label="Settings"
+        aria-pressed={view === 'settings'}
+        title={view === 'settings' ? 'Back to conversation' : 'Settings'}
+        onclick={() => {
+          view = view === 'settings' ? 'chat' : 'settings';
+          sidebarOpen = false;
+        }}><Settings size={17} aria-hidden="true" /></button
+      >
       {#if !desktop()}<BrowserStatus showConnection={false} compactInstall />{/if}
     </div>
     <SidebarResize onresize={(width) => (sidebarWidth = width)} />
@@ -2585,6 +2599,7 @@
                   else if (name === 'context') contextOpen = true;
                   else if (name === 'usage') usageExpanded = true;
                   else if (name === 'connections') view = 'connections';
+                  else if (name === 'settings') view = 'settings';
                   else if (name === 'new') {
                     const remaining = prompt,
                       images = attachedImages;
@@ -2668,7 +2683,6 @@
       {#key workspaceSession}
         <FleetManager
           bind:workspace
-          {workspaceSession}
           {installation}
           {wslDiscovery}
           {wslError}
@@ -2695,9 +2709,12 @@
             newChat(provider, connectionId, undefined, computerId)}
           providerStatuses={statuses}
           {login}
-          {exportWorkspace}
           running={!!run}
         />
+      {/key}
+    {:else if view === 'settings'}
+      {#key workspaceSession}
+        <SettingsPage {paired} {workspaceSession} {exportWorkspace} />
       {/key}
     {/if}
   </main>

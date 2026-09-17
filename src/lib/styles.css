@@ -483,7 +483,8 @@ code {
   width: 32px;
   height: 32px;
 }
-.connections-button.active {
+.connections-button.active,
+.settings-button.active {
   background: var(--green-dark);
   color: var(--green);
 }

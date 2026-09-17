@@ -49,7 +49,7 @@ async function pair(page: Page, token: string) {
   await signInPwa(page, token);
   if (await page.getByRole('button', { name: 'Open conversations' }).isVisible())
     await page.getByRole('button', { name: 'Open conversations' }).click();
-  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
 }
 
 async function expectNoStoredKeys(page: Page, ...keys: string[]) {
@@ -317,7 +317,7 @@ test('a delayed administrator response cannot reveal its key after this browser 
     await expect(page.locator('body')).not.toContainText('Delayed private key');
     await expectNoStoredKeys(page, issuedKey, f.ownerToken, f.member.token);
     await page.reload();
-    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(
       page.getByRole('heading', { name: 'Workspace administration', exact: true }),
     ).toHaveCount(0);

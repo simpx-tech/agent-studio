@@ -17,9 +17,9 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 
 ## Included
 
-- One **Connections** page for agent setup, computers, account profiles, and the relay. Each WSL distribution appears as a separate computer managed by Windows. The selected computer supplies the CLI and account, with no fallback; Desktop agents can also work in WSL folders.
+- One **Connections** page for agent setup, computers, account profiles, and the relay, with a separate **Settings** page for notifications, workspace administration, and workspace export. Each WSL distribution appears as a separate computer managed by Windows. The selected computer supplies the CLI and account, with no fallback; Desktop agents can also work in WSL folders.
 - Separate Claude/Codex CLI login profiles and a self-hosted relay for app chat synchronization, presence, remote progress, and cancellation. See the [setup and VPS deployment guide](docs/MULTI-COMPUTER.md).
-- Share one VPS with separate users through private workspace keys. Each workspace has its own chats, computers, environments, and notifications. One designated admin workspace creates and manages access from Connections; administration can be transferred to another workspace. See [private workspace setup](docs/PRIVATE-WORKSPACES.md).
+- Share one VPS with separate users through private workspace keys. Each workspace has its own chats, computers, environments, and notifications. One designated admin workspace creates and manages access from Settings; administration can be transferred to another workspace. See [private workspace setup](docs/PRIVATE-WORKSPACES.md).
 
 - Codex via your ChatGPT login, Claude via Claude Code, and Gemini via Google login in Antigravity CLI.
 - Rich Markdown messages, selectable code blocks, tables, copy actions, and structured activity.

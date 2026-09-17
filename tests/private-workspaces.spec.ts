@@ -143,6 +143,7 @@ test('workspace login gates startup, authentication, restoration, and expired se
     await expect(page.locator('.app-shell')).toHaveCount(0);
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Connections', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Settings', exact: true })).toHaveCount(0);
     await expect(page.locator('body')).not.toContainText('Alice');
   };
   try {
