@@ -250,9 +250,13 @@ pub(crate) async fn execute(
         }
         command.args(["--model", &model?]);
     }
-    if request.native_session.as_ref().is_some_and(|s| !s.resumed) && request.messages.len() > 1 {
+    if let Some(session) = request.native_session.as_ref().filter(|s| !s.resumed) {
         if let Some(channel) = &channel {
-            let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
+            if session.switched_account {
+                let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Switched to another account. This reply starts a new native session for the selected account from this chat's saved messages; the previous account's native tool history is not transferred.".into() });
+            } else if request.messages.len() > 1 {
+                let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
+            }
         }
     }
     let config_cwd = if exe.wsl.is_some() {

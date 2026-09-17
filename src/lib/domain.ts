@@ -259,6 +259,9 @@ export type RunRequest = {
   conversationId?: string;
   assistantId?: string;
   runId: string;
+  // An earlier reply in this conversation used another account of the same agent. The
+  // host starts a fresh native session for the selected account from the saved messages.
+  accountSwitch?: boolean;
   agent: ChatSettings;
   messages: {
     role: 'user' | 'assistant';

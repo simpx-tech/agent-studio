@@ -14,6 +14,13 @@ use std::{
 struct Record {
     version: u32,
     scope: String,
+    // Version 2 also records the account and location parts of the scope separately, so a
+    // deliberate account switch (same computer and folder, another profile) can be told
+    // apart from a chat that was moved. Version 1 bindings carry only the combined scope.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    account: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    location: String,
     id: String,
     history: Vec<String>,
     instructions: String,
@@ -28,8 +35,17 @@ pub struct Session {
     record: Record,
     pub resumed: bool,
     pub retry: bool,
+    /// The selected account differs from the bound one: this reply starts a fresh native
+    /// session for it from the saved messages instead of resuming the old transcript.
+    pub switched_account: bool,
     pub instructions_changed: bool,
     pub unconfirmed_message: Option<usize>,
+}
+
+struct Identity {
+    scope: String,
+    account: String,
+    location: String,
 }
 
 fn fingerprint(value: &impl Serialize) -> Result<String, String> {
@@ -37,6 +53,16 @@ fn fingerprint(value: &impl Serialize) -> Result<String, String> {
     Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).to_string())
 }
 
+fn inherited_profile(provider: &str) -> Option<String> {
+    std::env::var_os(if provider == "codex" {
+        "CODEX_HOME"
+    } else {
+        "CLAUDE_CONFIG_DIR"
+    })
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The combined scope. Its encoding must stay stable: version 1 bindings compare against it.
 pub(crate) fn scope(
     provider: &str,
     location: Option<&crate::folders::ChatLocation>,
@@ -47,8 +73,52 @@ pub(crate) fn scope(
         "profile": profile.root, "isolated": profile.isolated,
         "distribution": profile.distribution, "folderDistribution": profile.folder_distribution,
         "namespace": profile.namespace, "location": location,
-        "inheritedProfile": std::env::var_os(if provider == "codex" { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" }).map(|p| p.to_string_lossy().into_owned()),
+        "inheritedProfile": inherited_profile(provider),
     }))
+}
+
+/// The part of the scope that must not change for a conversation: provider, execution
+/// environment, app installation namespace, and folder. Accounts are excluded on purpose.
+pub(crate) fn location_scope(
+    provider: &str,
+    location: Option<&crate::folders::ChatLocation>,
+) -> Result<String, String> {
+    let profile = crate::profiles::current();
+    fingerprint(&serde_json::json!({
+        "provider": provider, "distribution": profile.distribution,
+        "folderDistribution": profile.folder_distribution,
+        "namespace": profile.namespace, "location": location,
+    }))
+}
+
+fn identity(
+    provider: &str,
+    location: Option<&crate::folders::ChatLocation>,
+) -> Result<Identity, String> {
+    let profile = crate::profiles::current();
+    Ok(Identity {
+        scope: scope(provider, location)?,
+        account: fingerprint(&serde_json::json!({
+            "connection": profile.id, "profile": profile.root, "isolated": profile.isolated,
+            "inheritedProfile": inherited_profile(provider),
+        }))?,
+        location: location_scope(provider, location)?,
+    })
+}
+
+fn valid(record: &Record) -> bool {
+    matches!(record.version, 1 | 2)
+        && uuid::Uuid::parse_str(&record.id).is_ok()
+        && !record.history.is_empty()
+        && (record.version == 1 || (!record.account.is_empty() && !record.location.is_empty()))
+}
+
+/// A version 2 binding for the same computer and folder under another account.
+fn other_account(record: &Record, identity: &Identity) -> bool {
+    record.version >= 2
+        && record.scope != identity.scope
+        && record.location == identity.location
+        && record.account != identity.account
 }
 
 /// Read an existing binding without creating a session, taking its run lock, or changing history.
@@ -78,11 +148,14 @@ pub fn bound_id(
     }
     let record: Record =
         serde_json::from_slice(&bytes).map_err(|_| "The native session binding is unreadable")?;
-    if record.version != 1
-        || record.history.is_empty()
-        || uuid::Uuid::parse_str(&record.id).is_err()
-        || record.scope != scope(provider, location)?
-    {
+    let identity = identity(provider, location)?;
+    if !valid(&record) {
+        return Err("The native session binding is unreadable".into());
+    }
+    if other_account(&record, &identity) {
+        return Err("This conversation's native session belongs to its previously selected account. Send a message to start a session for the selected account.".into());
+    }
+    if record.scope != identity.scope {
         return Err(
             "The native session does not match this conversation's account, computer, and folder"
                 .into(),
@@ -103,7 +176,7 @@ impl Session {
         }
         let conversation =
             uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
-        let scope = scope(&request.agent.provider, request.location.as_ref())?;
+        let identity = identity(&request.agent.provider, request.location.as_ref())?;
         let history = request
             .messages
             .iter()
@@ -130,39 +203,53 @@ impl Session {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("Cannot read native session binding".into()),
         };
+        let mut switched_account = false;
         if let Some(previous) = &previous {
-            if previous.version != 1
-                || uuid::Uuid::parse_str(&previous.id).is_err()
-                || previous.history.is_empty()
-            {
+            if !valid(previous) {
                 return Err("Native session binding is invalid. It was preserved; start a new conversation.".into());
             }
-            if previous.scope != scope {
-                return Err("This conversation's native session belongs to a different account, computer, or folder. Start a new conversation there.".into());
-            }
-            if !history.starts_with(&previous.history) {
-                return Err("This conversation's history differs from its native session. Start a new conversation to keep the histories separate.".into());
-            }
-            // Ordinary follow-ups add the previous final answer (or answered
-            // question context after interruption), followed by one human input.
-            if history.len() > previous.history.len()
-                && request.messages[previous.history.len()..request.messages.len() - 1]
-                    .iter()
-                    .any(|m| {
-                        m.role != "assistant"
-                            && !m
-                                .text
-                                .starts_with("\n\nUser question responses (earlier context):\n")
-                    })
-            {
-                return Err("This conversation has messages the native session has not received. Start a new conversation to include the saved history.".into());
+            if previous.scope != identity.scope {
+                // A version 2 binding proves only the account changed. Version 1 bindings
+                // cannot tell an account switch from a moved chat, so they require the
+                // renderer's explicit account-switch request instead of guessing.
+                if !(other_account(previous, &identity)
+                    || (previous.version == 1 && request.account_switch))
+                {
+                    return Err("This conversation's native session belongs to a different account, computer, or folder. Start a new conversation there.".into());
+                }
+                switched_account = true;
+            } else {
+                if !history.starts_with(&previous.history) {
+                    return Err("This conversation's history differs from its native session. Start a new conversation to keep the histories separate.".into());
+                }
+                // Ordinary follow-ups add the previous final answer (or answered
+                // question context after interruption), followed by one human input.
+                if history.len() > previous.history.len()
+                    && request.messages[previous.history.len()..request.messages.len() - 1]
+                        .iter()
+                        .any(|m| {
+                            m.role != "assistant"
+                                && !m
+                                    .text
+                                    .starts_with("\n\nUser question responses (earlier context):\n")
+                        })
+                {
+                    return Err("This conversation has messages the native session has not received. Start a new conversation to include the saved history.".into());
+                }
             }
         }
+        // Retrying the same request under another account still continues the earlier
+        // attempt's work instead of treating it as a new independent task.
+        let retry = previous.as_ref().is_some_and(|p| p.history == history);
+        // The old account's transcript is not resumed; a fresh session receives the saved
+        // messages as earlier context, like an older chat's first native reply.
+        let previous = previous.filter(|_| !switched_account);
         Ok(Some(Self {
             path,
             _lock: Arc::new(lock),
             resumed: previous.is_some(),
-            retry: previous.as_ref().is_some_and(|p| p.history == history),
+            retry,
+            switched_account,
             instructions_changed: previous
                 .as_ref()
                 .is_some_and(|p| !p.received || p.instructions != instructions),
@@ -171,8 +258,10 @@ impl Session {
                 .filter(|p| !p.received)
                 .map(|p| p.history.len() - 1),
             record: Record {
-                version: 1,
-                scope,
+                version: 2,
+                scope: identity.scope,
+                account: identity.account,
+                location: identity.location,
                 id: previous
                     .map(|p| p.id)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -227,6 +316,17 @@ mod tests {
     fn message(role: &str, text: &str) -> super::super::ChatMessage {
         serde_json::from_value(json!({"role":role,"text":text})).unwrap()
     }
+    fn profile(provider: &str) -> crate::profiles::Profile {
+        crate::profiles::Profile {
+            id: uuid::Uuid::new_v4().to_string(),
+            provider: provider.into(),
+            namespace: "sessions-test".into(),
+            ..Default::default()
+        }
+    }
+    fn saved(session: &Session) -> Record {
+        serde_json::from_slice(&std::fs::read(&session.path).unwrap()).unwrap()
+    }
     #[tokio::test]
     async fn inspection_is_read_only_and_checks_the_same_profile_scope_as_execution() {
         let root = tempfile::tempdir().unwrap();
@@ -267,7 +367,7 @@ mod tests {
             id: "other-profile".into(),
             ..Default::default()
         };
-        assert!(crate::profiles::scope(other, async {
+        let error = crate::profiles::scope(other, async {
             bound_id(
                 root.path(),
                 r.conversation_id.as_deref().unwrap(),
@@ -276,7 +376,8 @@ mod tests {
             )
         })
         .await
-        .is_err());
+        .unwrap_err();
+        assert!(error.contains("previously selected account"), "{error}");
         assert_eq!(std::fs::read(&session.path).unwrap(), before);
     }
     #[test]
@@ -285,6 +386,7 @@ mod tests {
         let mut r = request();
         let session = Session::prepare(root.path(), &r).unwrap().unwrap();
         assert!(!session.resumed);
+        assert!(!session.switched_account);
         let id = session.id().to_string();
         session.bind(&id, true).unwrap();
         let saved = std::fs::read_to_string(&session.path).unwrap();
@@ -356,6 +458,11 @@ mod tests {
         drop(session);
         r.agent.provider = "codex".into();
         assert!(Session::prepare(root.path(), &r).is_err());
+        r.account_switch = true;
+        assert!(
+            Session::prepare(root.path(), &r).is_err(),
+            "The agent itself never changes within a conversation"
+        );
         r.conversation_id = Some(uuid::Uuid::new_v4().to_string());
         let other = Session::prepare(root.path(), &r).unwrap().unwrap();
         assert!(!other.resumed);
@@ -369,32 +476,30 @@ mod tests {
         std::fs::write(&session.path, "{}").unwrap();
         drop(session);
         assert!(Session::prepare(root.path(), &r).is_err());
+        r.account_switch = true;
+        assert!(Session::prepare(root.path(), &r).is_err());
         r.conversation_id = None;
         assert!(Session::prepare(root.path(), &r).unwrap().is_none());
     }
     #[tokio::test]
-    async fn account_environment_and_folder_changes_cannot_resume_each_other() {
+    async fn environment_and_folder_changes_cannot_resume_or_switch_each_other() {
         let root = tempfile::tempdir().unwrap();
-        let r = request();
-        let profile = crate::profiles::Profile {
-            id: uuid::Uuid::new_v4().to_string(),
-            provider: "claude".into(),
-            namespace: "sessions-test".into(),
-            ..Default::default()
-        };
+        let mut r = request();
+        r.account_switch = true;
+        let profile = profile("claude");
         crate::profiles::scope(profile.clone(), async {
             let s = Session::prepare(root.path(), &r).unwrap().unwrap();
             s.bind(s.id(), true).unwrap();
         })
         .await;
         let mut other = profile.clone();
-        other.id = uuid::Uuid::new_v4().to_string();
+        other.distribution = Some("Different Ubuntu".into());
         assert!(
             crate::profiles::scope(other, async { Session::prepare(root.path(), &r).is_err() })
                 .await
         );
         let mut other = profile.clone();
-        other.distribution = Some("Different Ubuntu".into());
+        other.namespace = "another-installation".into();
         assert!(
             crate::profiles::scope(other, async { Session::prepare(root.path(), &r).is_err() })
                 .await
@@ -402,11 +507,179 @@ mod tests {
         let mut moved = r.clone();
         moved.location = Some(serde_json::from_value(json!({"computerId":uuid::Uuid::new_v4(),"environmentId":uuid::Uuid::new_v4(),"path":"C:/other"})).unwrap());
         assert!(
-            crate::profiles::scope(profile, async {
+            crate::profiles::scope(profile.clone(), async {
                 Session::prepare(root.path(), &moved).is_err()
             })
             .await
         );
+        let mut elsewhere = profile.clone();
+        elsewhere.id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            crate::profiles::scope(elsewhere, async {
+                Session::prepare(root.path(), &moved).is_err()
+            })
+            .await,
+            "Another account at another folder is a moved chat, not an account switch"
+        );
+    }
+    #[tokio::test]
+    async fn account_switches_start_a_fresh_session_from_saved_history_at_the_same_location() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let first = profile("claude");
+        let mut second = first.clone();
+        second.id = uuid::Uuid::new_v4().to_string();
+        let first_id = crate::profiles::scope(first.clone(), async {
+            let s = Session::prepare(root.path(), &r).unwrap().unwrap();
+            s.bind(s.id(), true).unwrap();
+            s.id().to_string()
+        })
+        .await;
+        r.messages
+            .extend([message("assistant", "Done"), message("user", "Continue")]);
+        // A version 2 binding recognizes the same location under another account by itself.
+        assert!(!r.account_switch);
+        let switched = crate::profiles::scope(second.clone(), async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(switched.switched_account);
+        assert!(!switched.resumed && !switched.retry && !switched.instructions_changed);
+        assert_eq!(switched.unconfirmed_message, None);
+        let second_id = switched.id().to_string();
+        assert_ne!(second_id, first_id);
+        r.native_session = Some(switched);
+        let context = r.native_context().unwrap();
+        assert!(context.contains("Private request") && context.contains("Done"));
+        assert!(context.contains("earlier context only"));
+        assert_eq!(r.native_user_text(), "Continue");
+        assert!(r.native_image_message(0));
+        assert_eq!(r.stdin_payload().lines().count(), 2);
+        let switched = r.native_session.take().unwrap();
+        switched.bind(&second_id, true).unwrap();
+        let record = saved(&switched);
+        assert_eq!(record.version, 2);
+        assert!(!record.account.is_empty() && !record.location.is_empty());
+        drop(switched);
+        // The old account's binding is gone: inspection under it reports the switch.
+        let conversation = r.conversation_id.clone().unwrap();
+        let error = crate::profiles::scope(first.clone(), async {
+            bound_id(root.path(), &conversation, "claude", None).unwrap_err()
+        })
+        .await;
+        assert!(error.contains("previously selected account"), "{error}");
+        assert_eq!(
+            crate::profiles::scope(second.clone(), async {
+                bound_id(root.path(), &conversation, "claude", None).unwrap()
+            })
+            .await
+            .as_deref(),
+            Some(second_id.as_str())
+        );
+        // Later replies resume the new account's own session.
+        r.messages
+            .extend([message("assistant", "Again"), message("user", "More")]);
+        let resumed = crate::profiles::scope(second.clone(), async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(resumed.resumed && !resumed.switched_account);
+        assert_eq!(resumed.id(), second_id);
+        drop(resumed);
+        // Switching back never resumes the first account's stale transcript.
+        let back = crate::profiles::scope(first, async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(back.switched_account && !back.resumed);
+        assert_ne!(back.id(), first_id);
+        assert_ne!(back.id(), second_id);
+    }
+    #[tokio::test]
+    async fn retrying_under_another_account_continues_the_interrupted_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let first = profile("codex");
+        let mut second = first.clone();
+        second.id = uuid::Uuid::new_v4().to_string();
+        crate::profiles::scope(first, async {
+            let s = Session::prepare(root.path(), &r).unwrap().unwrap();
+            s.bind(s.id(), false).unwrap();
+        })
+        .await;
+        r.native_session =
+            crate::profiles::scope(second, async { Session::prepare(root.path(), &r).unwrap() })
+                .await;
+        let session = r.native_session.as_ref().unwrap();
+        assert!(session.switched_account && session.retry && !session.resumed);
+        assert!(r
+            .native_user_text()
+            .contains("do not blindly repeat completed side effects"));
+        assert!(
+            r.native_context().unwrap().contains("earlier context only"),
+            "A fresh session still receives the (empty) saved history framing"
+        );
+    }
+    #[tokio::test]
+    async fn legacy_bindings_switch_accounts_only_on_an_explicit_request() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let first = profile("claude");
+        let mut second = first.clone();
+        second.id = uuid::Uuid::new_v4().to_string();
+        let legacy_scope =
+            crate::profiles::scope(first.clone(), async { scope("claude", None).unwrap() }).await;
+        let directory = root.path().join("native-sessions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{}.json", r.conversation_id.as_ref().unwrap()));
+        let legacy_id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            &path,
+            json!({"version":1,"scope":legacy_scope,"id":legacy_id,"history":[fingerprint(&r.messages[0]).unwrap()],"instructions":fingerprint(&r.agent.instructions).unwrap(),"received":true}).to_string(),
+        )
+        .unwrap();
+        let conversation = r.conversation_id.clone().unwrap();
+        // The legacy binding still resumes under its own account and cannot name the other one.
+        let resumed = crate::profiles::scope(first.clone(), async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(resumed.resumed && !resumed.switched_account);
+        assert_eq!(resumed.id(), legacy_id);
+        drop(resumed);
+        let error = crate::profiles::scope(second.clone(), async {
+            bound_id(root.path(), &conversation, "claude", None).unwrap_err()
+        })
+        .await;
+        assert!(error.contains("does not match"), "{error}");
+        assert!(
+            crate::profiles::scope(second.clone(), async {
+                Session::prepare(root.path(), &r).is_err()
+            })
+            .await,
+            "A mismatch without an explicit switch still fails closed"
+        );
+        r.account_switch = true;
+        let switched = crate::profiles::scope(second.clone(), async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(switched.switched_account && !switched.resumed);
+        assert_ne!(switched.id(), legacy_id);
+        switched.bind(switched.id(), true).unwrap();
+        assert_eq!(saved(&switched).version, 2);
+        let switched_id = switched.id().to_string();
+        drop(switched);
+        // Once upgraded, the explicit request is no longer needed to detect the account.
+        r.account_switch = false;
+        r.messages
+            .extend([message("assistant", "Done"), message("user", "Continue")]);
+        let back = crate::profiles::scope(first, async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(back.switched_account);
+        assert_ne!(back.id(), switched_id);
     }
     #[test]
     fn claude_bootstraps_once_and_changes_instructions_without_replaying_history() {

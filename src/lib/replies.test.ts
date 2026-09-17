@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { initialWorkspace, restoreWorkspace, settingsFor, type Message } from './domain';
 import {
+  replyAccountChanged,
   replyModelName,
+  replySettingsChanged,
   replySwitches,
   selectedModelName,
   replyTimeTotals,
@@ -103,5 +105,33 @@ describe('reply identities and model switches', () => {
     const second = reply('gpt-6-astra');
     second.settings!.instructions = 'Changed instructions';
     expect(replySwitches([old, first, second]).size).toBe(0);
+  });
+  it('announces account switches by the current name, then the recorded label', () => {
+    const first = reply('sonnet');
+    first.settings!.connectionId = crypto.randomUUID();
+    const second = reply('sonnet');
+    second.settings!.connectionId = crypto.randomUUID();
+    second.executionLabel = 'Work Claude · Desktop / Windows';
+    const third = reply('opus', 'high');
+    third.settings!.connectionId = second.settings!.connectionId;
+    const legacy = reply('opus', 'high');
+    const notices = replySwitches([first, second, third, legacy], (id) =>
+      id === second.settings!.connectionId ? 'Renamed Claude' : undefined,
+    );
+    expect([...notices]).toEqual([
+      [second.id, 'Switched to Renamed Claude account'],
+      [third.id, 'Switched to Opus · High reasoning'],
+    ]);
+    expect(replySwitches([first, second]).get(second.id)).toBe('Switched to Work Claude account');
+    delete second.executionLabel;
+    expect(replySwitches([first, second]).get(second.id)).toBe('Switched to another account');
+    const both = reply('opus');
+    both.settings!.connectionId = crypto.randomUUID();
+    expect(replySwitches([second, both]).get(both.id)).toBe(
+      'Switched to another account · Opus',
+    );
+    expect(replyAccountChanged(first.settings!, second.settings!)).toBe(true);
+    expect(replyAccountChanged(third.settings!, legacy.settings!)).toBe(false);
+    expect(replySettingsChanged(third.settings!, legacy.settings!)).toBe(false);
   });
 });

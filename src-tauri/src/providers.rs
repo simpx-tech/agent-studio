@@ -383,6 +383,11 @@ pub struct RunRequest {
     #[serde(default)]
     pub workflow: Option<serde_json::Value>,
     pub run_id: String,
+    // The renderer switched this conversation to another account of the same agent.
+    // Version 2 native bindings detect that themselves; legacy bindings need this
+    // explicit request before a mismatched account may start a fresh session.
+    #[serde(default)]
+    pub account_switch: bool,
     // Internal background requests must never inherit interactive chat permissions.
     #[serde(skip)]
     pub conversation_only: bool,
@@ -1194,6 +1199,7 @@ mod tests {
             native_session: None,
             workflow: None,
             conversation_only: false,
+            account_switch: false,
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             agent: Agent {

@@ -117,6 +117,7 @@
   import {
     registerInstallation,
     registerWslEnvironments,
+    accountName,
     connectionLabel,
     executionHost,
     computerViewId,
@@ -331,6 +332,8 @@
   const agentOptions = $derived.by(() => {
     const preview = !desktop() && !paired && !selectedComputer;
     return providerIds.flatMap((provider) => {
+      // A saved chat keeps its agent; only that agent's accounts on its computer are offered.
+      if (active && provider !== selectedSettings.provider) return [];
       const candidates = scopedConnections.filter(
         (c) =>
           workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider &&
@@ -482,7 +485,33 @@
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
   );
   const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
-  const switchNotices = $derived(replySwitches(active?.messages ?? []));
+  const switchNotices = $derived(
+    replySwitches(active?.messages ?? [], (id) => accountName(workspace.fleet, id)),
+  );
+  // Other accounts of this chat's agent on its computer that may take the next reply.
+  // Claude and Codex conversations start a fresh native session for the new account.
+  const switchableConnections = $derived(
+    active && (selectedSettings.provider === 'claude' || selectedSettings.provider === 'codex')
+      ? scopedConnections.filter(
+          (c) =>
+            c.id !== selectedSettings.connectionId &&
+            workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider ===
+              selectedSettings.provider &&
+            canChooseConnection(c.id),
+        )
+      : [],
+  );
+  const lastReplyConnection = $derived(
+    active?.messages.findLast((m) => m.role === 'assistant' && !!m.settings?.connectionId)
+      ?.settings?.connectionId,
+  );
+  const accountSwitchPending = $derived(
+    !!active &&
+      !activeRunning &&
+      !!lastReplyConnection &&
+      !!selectedSettings.connectionId &&
+      lastReplyConnection !== selectedSettings.connectionId,
+  );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
   const chatChanges = $derived(summarizeFileChanges(active?.messages ?? []));
   const nextReplyChanged = $derived(
@@ -1173,10 +1202,12 @@
         settings.instructions !== selectedSettings.instructions)
     )
       return;
+    // The agent stays fixed; its account may change between replies to an offered one.
     if (
       active &&
       (settings.provider !== active.settings.provider ||
-        settings.connectionId !== active.settings.connectionId)
+        (settings.connectionId !== active.settings.connectionId &&
+          !switchableConnections.some((c) => c.id === settings.connectionId)))
     )
       return;
     settingsRevision++;
@@ -1203,9 +1234,20 @@
     changeSettings({ ...settings, instructions: selectedSettings.instructions });
   }
   function chooseAgent(value: string) {
-    if (active) return;
     const option = agentOptions.find((option) => option.id === value);
     if (!option) return;
+    if (active) {
+      // Only another account of the same agent may take over an existing conversation.
+      if (
+        run ||
+        activeRunning ||
+        !option.connectionId ||
+        !switchableConnections.some((c) => c.id === option.connectionId)
+      )
+        return;
+      changeSettings({ ...selectedSettings, connectionId: option.connectionId });
+      return;
+    }
     if (!value.startsWith('connection:')) {
       chooseProvider(option.provider);
       return;
@@ -1683,6 +1725,15 @@
     const assistantId = crypto.randomUUID();
     const responseSettings = structuredClone($state.snapshot(conversation.settings));
     const runId = crypto.randomUUID();
+    // Legacy host bindings cannot tell an account switch from a moved chat by themselves.
+    const accountSwitch =
+      !!responseSettings.connectionId &&
+      conversation.messages.some(
+        (m) =>
+          m.role === 'assistant' &&
+          !!m.settings?.connectionId &&
+          m.settings.connectionId !== responseSettings.connectionId,
+      );
     rememberSettings(workspace.preferences, responseSettings);
     conversation.messages.push({
       id: assistantId,
@@ -1723,6 +1774,7 @@
               conversationId: conversation.id,
               assistantId,
               location: conversation.location?.path ? { ...conversation.location } : undefined,
+              ...(accountSwitch ? { accountSwitch: true } : {}),
             },
             (event) => {
               if (session !== workspaceSession) return;
@@ -2359,7 +2411,13 @@
               <div class="chat-setting agent-setting">
                 <span>Agent</span><ChoicePicker
                   label="Agent"
-                  title={`${active ? 'Fixed for this conversation. Start a new conversation to change it. ' : ''}Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.`}
+                  title={`${
+                    active
+                      ? switchableConnections.length
+                        ? 'The agent, computer, and folder are fixed for this conversation. Choosing another account applies to the next message and starts a new native session for it from the saved messages. '
+                        : 'Fixed for this conversation. Start a new conversation to change it, or connect another account of this agent to switch accounts between replies. '
+                      : ''
+                  }Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.`}
                   value={selectedAgentOption}
                   options={agentOptions}
                   fallbackToFirst={false}
@@ -2369,7 +2427,7 @@
                     activeRunning ||
                     selectingLocation ||
                     (desktop() && !selectedLocation && !active) ||
-                    !!active}
+                    (!!active && !switchableConnections.length)}
                   onchange={chooseAgent}
                 >
                   {#snippet icon()}<Bot size={16} />{/snippet}
@@ -2436,6 +2494,11 @@
               Next message: {selectedModelName(selectedSettings.model, availableModels)} · {reasoningName(
                 selectedSettings.reasoning,
               )} reasoning
+            </p>
+          {:else if accountSwitchPending}
+            <p class="next-reply-settings" role="status">
+              Next message: {accountName(workspace.fleet, selectedSettings.connectionId) ??
+                'Another'} account · starts a new native session from this chat's saved messages
             </p>
           {/if}
           <div

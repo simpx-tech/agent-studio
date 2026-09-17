@@ -46,15 +46,35 @@ export function replyModelName(message: Message): string {
   return message.modelName || formatModelName(reported || message.settings?.model || '');
 }
 
+// Older snapshots may lack a connection; only two recorded connections can differ.
+export function replyAccountChanged(previous: ChatSettings, next: ChatSettings): boolean {
+  return !!previous.connectionId && !!next.connectionId && previous.connectionId !== next.connectionId;
+}
+
 export function replySettingsChanged(previous: ChatSettings, next: ChatSettings): boolean {
   return (
     previous.provider !== next.provider ||
     previous.model !== next.model ||
-    previous.reasoning !== next.reasoning
+    previous.reasoning !== next.reasoning ||
+    replyAccountChanged(previous, next)
   );
 }
 
-export function replySwitches(messages: Message[]): Map<string, string> {
+// The account label recorded with the reply keeps history readable if the account is
+// later renamed or removed; a resolver supplies the current name when available.
+export function replyAccountName(
+  message: Message,
+  accountName?: (connectionId: string) => string | undefined,
+): string {
+  const connectionId = message.settings?.connectionId;
+  const current = connectionId ? accountName?.(connectionId) : undefined;
+  return current || message.executionLabel?.split(' · ')[0] || 'another';
+}
+
+export function replySwitches(
+  messages: Message[],
+  accountName?: (connectionId: string) => string | undefined,
+): Map<string, string> {
   const notices = new Map<string, string>();
   let previous: Message | undefined;
   for (const message of messages) {
@@ -63,6 +83,8 @@ export function replySwitches(messages: Message[]): Map<string, string> {
     const after = message.settings;
     if (before && after && replySettingsChanged(before, after)) {
       const changes = [];
+      if (replyAccountChanged(before, after))
+        changes.push(`${replyAccountName(message, accountName)} account`);
       if (before.provider !== after.provider || before.model !== after.model)
         changes.push(replyModelName(message));
       if (before.reasoning !== after.reasoning)

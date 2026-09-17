@@ -3024,3 +3024,76 @@ test('reopening model context shows cached data while one shared refresh complet
   await page.evaluate(() => (window as any).releaseContext());
   await expect(dialog).toContainText('Revision 1.');
 });
+
+test('an existing chat can switch to another account of the same agent between replies', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Add account', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+  await page.getByRole('option', { name: 'Claude', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill('Second Claude');
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude · Claude CLI login');
+  await page.getByLabel('Message', { exact: true }).fill('First account reply');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
+  const first = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(first.accountSwitch).toBeUndefined();
+  for (const name of ['Computer', 'Folder'])
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await expect(agent).toBeEnabled();
+  await expect(agent).toHaveAttribute('title', /Choosing another account.*Full access/);
+  await page.getByLabel('Message', { exact: true }).fill('Draft kept across the switch');
+  await agent.click();
+  await expect(page.getByRole('option')).toHaveText([
+    /Claude · Claude CLI login/,
+    /Claude · Second Claude/,
+  ]);
+  await page.getByRole('option', { name: 'Claude · Second Claude', exact: true }).click();
+  await expect(agent).toContainText('Second Claude');
+  await expect(page.locator('.next-reply-settings')).toHaveText(
+    /Next message: Second Claude account · starts a new native session/,
+  );
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Draft kept across the switch',
+  );
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(4);
+  const second = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('test-last-request')!),
+  );
+  expect(second.accountSwitch).toBe(true);
+  expect(second.agent.provider).toBe('claude');
+  expect(second.agent.connectionId).not.toBe(first.agent.connectionId);
+  expect(second.location).toEqual(first.location);
+  expect(second.messages).toHaveLength(3);
+  await expect(page.locator('.reply-switch')).toHaveText(['Switched to Second Claude account']);
+  await expect(page.locator('.next-reply-settings')).toHaveCount(0);
+  await page.reload();
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.getByRole('button', { name: 'First account reply', exact: true }).click();
+  await expect(page.locator('.reply-switch')).toHaveText(['Switched to Second Claude account']);
+  await expect(agent).toContainText('Second Claude');
+  for (const name of ['Computer', 'Folder'])
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
+  await pick(page, 'Agent', 'Claude · Claude CLI login');
+  await expect(page.locator('.next-reply-settings')).toHaveText(
+    /Next message: Claude CLI login account/,
+  );
+  const saved = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('test-workspace')!).conversations.find(
+      (c: any) => c.title === 'First account reply',
+    ),
+  );
+  expect(saved.messages[1].settings.connectionId).toBe(first.agent.connectionId);
+  expect(saved.messages[3].settings.connectionId).toBe(second.agent.connectionId);
+  expect(saved.settings.connectionId).toBe(first.agent.connectionId);
+});

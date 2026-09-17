@@ -161,6 +161,10 @@ export function registerWslEnvironments(
   }
   reconcileDiscoveredWsl(fleet);
 }
+export function accountName(fleet: Fleet, connectionId?: string): string | undefined {
+  const connection = fleet.connections.find((c) => c.id === connectionId);
+  return fleet.accounts.find((a) => a.id === connection?.accountId)?.name;
+}
 export function connectionLabel(fleet: Fleet, connectionId?: string) {
   const connection = fleet.connections.find((c) => c.id === connectionId);
   const account = fleet.accounts.find((a) => a.id === connection?.accountId);
