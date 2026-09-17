@@ -107,7 +107,7 @@ test('desktop defaults on, retains mute and disable, notifies for questions and 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByText('Enabled on this computer', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Play the Agent Studio chime')).toBeChecked();
-  await expect(page.getByRole('switch', { name: 'Play the Agent Studio chime' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Play the Agent Studio chime' })).toBeChecked();
   expect(await page.evaluate(() => localStorage.getItem('test-notifications'))).toBeNull();
   await page.getByRole('button', { name: 'Send test notification' }).click();
   const notices = () =>

@@ -71,10 +71,9 @@
   <p>Get notified on this computer when a reply finishes, stops, or needs your attention.</p>
   {#if settings}
     <p class="state">{settings.enabled ? 'Enabled on this computer' : 'Off on this computer'}</p>
-    <label class="switch"
+    <label class="checkbox"
       ><input
         type="checkbox"
-        role="switch"
         checked={settings.sound}
         disabled={busy}
         onchange={(event) => update(settings!.enabled, event.currentTarget.checked)}
@@ -123,7 +122,7 @@
   .state {
     color: var(--text);
   }
-  .switch {
+  .checkbox {
     margin: 12px 0 8px;
   }
   .actions {

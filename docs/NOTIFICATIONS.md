@@ -1,6 +1,6 @@
 # Notifications
 
-On Windows, Linux, and macOS, native notification cards and the Agent Studio chime are **enabled by default**. Open **Settings → Notifications** to send a test, disable alerts, or switch off **Play the Agent Studio chime** to keep banners without sound. Preferences apply to this installation and survive app restarts, independently of relay pairing and workspace exports. Updating the app preserves an existing Disable or Mute choice; installations without saved preferences start enabled.
+On Windows, Linux, and macOS, native notification cards and the Agent Studio chime are **enabled by default**. Open **Settings → Notifications** to send a test, disable alerts, or uncheck **Play the Agent Studio chime** to keep banners without sound. Preferences apply to this installation and survive app restarts, independently of relay pairing and workspace exports. Updating the app preserves an existing Disable or Mute choice; installations without saved preferences start enabled.
 
 Alerts cover finished replies, stopped/failed runs, and explicit parent question-tool events. Questions in ordinary text are covered when the reply finishes. Local and synchronized conversations use the same lifecycle tracking. Startup history, replayed checkpoints, title changes, and child-agent questions do not generate extra alerts. Notification content is generic and contains no chat text, titles, account labels, or CLI data.
 

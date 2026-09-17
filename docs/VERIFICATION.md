@@ -1,10 +1,10 @@
 # Verification — 2026-09-08
 
-## Custom chime switch — 2026-09-17
+## Custom chime checkbox — 2026-09-17
 
-The Play the Agent Studio chime control in Settings no longer uses the browser's native checkbox rendering. It is still a checkbox input, now with `role="switch"`, drawn by the shared `.switch` style in `styles.css` as a 36×20 pill track with a sliding knob: muted knob on a dark track when off, green knob on the green-dark track when on, a lighter border on hover, the standard green focus ring following the pill shape, reduced opacity when disabled, and no motion under reduced-motion preferences. The label text, checked state, keyboard toggling, and saved Mute behaviour are unchanged.
+The Play the Agent Studio chime control in Settings stays a checkbox but no longer uses the browser's native rendering. The shared `.checkbox` style in `styles.css` draws the input as an 18px rounded box and centers a 12px check mark with grid placement instead of absolute offsets, with the global input padding and width reset so nothing skews the mark. Off shows an empty dark box with a subtle border; on fills the box with the app green and a dark check; hover lightens the border, keyboard focus draws the standard green ring, disabled dims the control, and reduced-motion preferences remove the fill/check transitions. The label text, checked state, keyboard toggling, and saved Mute behaviour are unchanged.
 
-All required checks passed: `npm run verify` (zero Svelte/TypeScript diagnostics, 198 frontend/HTTP unit tests, production build, 131 browser scenarios), Rust formatting, Clippy with warnings denied, and 127 Rust tests with four existing opt-in integrations ignored. The desktop notification scenario additionally asserts the control is exposed as a checked switch by its label. Visual review used the Playwright desktop mock at 2× to capture the on, off, hover, and keyboard-focus states.
+All required checks passed: `npm run verify` (zero Svelte/TypeScript diagnostics, 198 frontend/HTTP unit tests, production build, 131 browser scenarios), Rust formatting, Clippy with warnings denied, and 127 Rust tests with four existing opt-in integrations ignored. The desktop notification scenario additionally asserts the control is exposed as a checked checkbox by its label. A temporary 4× Playwright measurement read the rendered pixels: the check mark's ink sits 17 device pixels from both the left and right edges of the green fill and 22 from both the top and bottom, and the box's vertical center equals the label text's center. On, off, hover, and keyboard-focus renders were reviewed at 4×.
 
 ## Separate Settings page — 2026-09-17
 
