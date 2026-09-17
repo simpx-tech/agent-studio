@@ -71,13 +71,14 @@
   <p>Get notified on this computer when a reply finishes, stops, or needs your attention.</p>
   {#if settings}
     <p class="state">{settings.enabled ? 'Enabled on this computer' : 'Off on this computer'}</p>
-    <label
+    <label class="switch"
       ><input
         type="checkbox"
+        role="switch"
         checked={settings.sound}
         disabled={busy}
         onchange={(event) => update(settings!.enabled, event.currentTarget.checked)}
-      />Play the Agent Studio chime</label
+      /><span>Play the Agent Studio chime</span></label
     >
     <p>A short, distinctive chime replaces the system notification sound.</p>
     <div class="actions">
@@ -119,23 +120,11 @@
     line-height: 1.6;
     margin: 8px 0;
   }
-  .state,
-  label {
+  .state {
     color: var(--text);
   }
-  label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-  }
-  input {
-    flex: 0 0 auto;
-    width: 16px;
-    height: 16px;
-    margin: 0;
-    padding: 0;
-    accent-color: var(--text);
+  .switch {
+    margin: 12px 0 8px;
   }
   .actions {
     display: flex;

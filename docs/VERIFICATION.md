@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Custom chime switch — 2026-09-17
+
+The Play the Agent Studio chime control in Settings no longer uses the browser's native checkbox rendering. It is still a checkbox input, now with `role="switch"`, drawn by the shared `.switch` style in `styles.css` as a 36×20 pill track with a sliding knob: muted knob on a dark track when off, green knob on the green-dark track when on, a lighter border on hover, the standard green focus ring following the pill shape, reduced opacity when disabled, and no motion under reduced-motion preferences. The label text, checked state, keyboard toggling, and saved Mute behaviour are unchanged.
+
+All required checks passed: `npm run verify` (zero Svelte/TypeScript diagnostics, 198 frontend/HTTP unit tests, production build, 131 browser scenarios), Rust formatting, Clippy with warnings denied, and 127 Rust tests with four existing opt-in integrations ignored. The desktop notification scenario additionally asserts the control is exposed as a checked switch by its label. Visual review used the Playwright desktop mock at 2× to capture the on, off, hover, and keyboard-focus states.
+
 ## Separate Settings page — 2026-09-17
 
 Connections now holds only the computer cards, provider CLIs, account connections, and workspace sync. Notifications (desktop cards/chime or mobile push), Workspace administration, and a Workspace data section with the storage/privacy explanation and Export workspace moved to a new Settings page in `SettingsPage.svelte`. The sidebar footer shows the Plug button for Connections beside a gear button for Settings; each toggles back to the conversation, keeps the open chat and draft, and closes the mobile drawer. The composer offers `/settings` beside `/connections`. Settings is remounted with Connections on workspace changes so administration and push state reset the same way, and the account usage and WSL polls remain limited to the Connections view.
