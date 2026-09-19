@@ -154,6 +154,33 @@ async fn send(
         .map_err(|_| "Could not send the Codex request".into())
 }
 
+async fn start_turn(
+    process: &mut Process,
+    pending: &mut HashMap<u64, Kind>,
+    request: &RunRequest,
+    thread: &str,
+) -> Result<(), String> {
+    if request.compact {
+        send(
+            process,
+            pending,
+            Kind::Turn,
+            "thread/compact/start",
+            json!({"threadId":thread}),
+        )
+        .await
+    } else {
+        send(
+            process,
+            pending,
+            Kind::Turn,
+            "turn/start",
+            turn_params(request, thread),
+        )
+        .await
+    }
+}
+
 pub async fn run(
     process: &mut Process,
     request: &RunRequest,
@@ -172,6 +199,7 @@ pub async fn run(
     let mut pending: HashMap<u64, Kind> = HashMap::new();
     let mut steering = HashMap::new();
     let mut decoder = Decoder::default();
+    decoder.compactions.manual = request.compact;
     let mut thread = String::new();
     let mut turn = String::new();
     if reused {
@@ -181,14 +209,7 @@ pub async fn run(
         if let Some(session) = &request.native_session {
             session.bind(&thread, false)?;
         }
-        send(
-            process,
-            &mut pending,
-            Kind::Turn,
-            "turn/start",
-            turn_params(request, &thread),
-        )
-        .await?;
+        start_turn(process, &mut pending, request, &thread).await?;
     } else {
         send(process, &mut pending, Kind::Init, "initialize", json!({"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await.map_err(|_| "Could not initialize Codex")?;
     }
@@ -304,12 +325,12 @@ pub async fn run(
                             // The binding records the CLI-named thread; reuse must match it.
                             process.session_id = thread.clone();
                             if let Some(session) = &request.native_session { session.bind(&thread, false)?; }
-                            send(process, &mut pending, Kind::Turn, "turn/start", turn_params(request, &thread)).await?;
+                            start_turn(process, &mut pending, request, &thread).await?;
                         }
                         Kind::Turn => {
                             if let Some(id) = value["result"]["turn"]["id"].as_str() { turn = id.into(); }
                             if let Some(session) = &request.native_session { session.bind(&thread, true)?; }
-                            questions.steering.ready(!turn.is_empty() && !cancelling);
+                            questions.steering.ready(!request.compact && !turn.is_empty() && !cancelling);
                         }
                         Kind::Interrupt | Kind::Steer => {}
                     }
@@ -341,10 +362,18 @@ pub async fn run(
                     turn = value["params"]["turn"]["id"].as_str().unwrap_or_default().into();
                 }
                 questions.resolved_codex(&value, &thread);
+                let compaction = value["method"] == "thread/compacted" || value["params"]["item"]["type"] == "contextCompaction";
+                if compaction && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 if value["method"] == "thread/tokenUsage/updated" && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 let reasoning = value["method"].as_str().is_some_and(|method| method.starts_with("item/reasoning/")) || value["params"]["item"]["type"] == "reasoning";
                 if reasoning && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
-                for event in decoder.decode_codex_server(&value, &thread) {
+                for mut event in decoder.decode_codex_server(&value, &thread) {
+                    if let crate::protocol::RunEvent::Compaction { compaction } = &event {
+                        if compaction.status == "complete" { last_usage.context_input = None; }
+                    }
+                    if request.compact {
+                        if let crate::protocol::RunEvent::Usage { usage } = &mut event { usage.context_input = None; }
+                    }
                     if let crate::protocol::RunEvent::Usage { usage } = &event { last_usage = usage.clone(); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
@@ -357,6 +386,11 @@ pub async fn run(
                     // An interrupted turn leaves the thread loaded for the next reply.
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }
                     if status != "completed" { process.healthy = false; return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
+                    if request.compact {
+                        if !decoder.compactions.completed() { process.healthy = false; return Err("Codex ended without confirming compaction. The conversation was preserved.".into()); }
+                        if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }
+                        return Ok(("complete".into(), "Context compacted.".into()));
+                    }
                     if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     // The billing route may only be available while this exact thread is loaded.
                     // Optional read failure must never turn a successful reply into an error.

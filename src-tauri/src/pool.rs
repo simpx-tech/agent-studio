@@ -147,6 +147,7 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "provider": request.agent.provider,
         "model": request.agent.model,
         "reasoning": request.agent.reasoning,
+        "autoCompactTokens": request.agent.auto_compact_tokens,
         "program": exe.program,
         "prefix": exe.prefix,
     })

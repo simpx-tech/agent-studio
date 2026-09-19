@@ -80,7 +80,8 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await page.getByRole('button', { name: /Show Weekly usage details/ }).click();
   await expect(card).toBeVisible();
   await card.scrollIntoViewIfNeeded();
-  await expect(card).toBeInViewport({ ratio: 1 });
+  // Allow subpixel rounding at the scroll viewport edge, but require the whole card.
+  await expect(card).toBeInViewport({ ratio: 0.999 });
   await page.screenshot({ path: 'artifacts/credits-chat-mobile.png' });
   await page.setViewportSize({ width: 1380, height: 900 });
   await page.screenshot({ path: 'artifacts/credits-chat-desktop.png' });
@@ -94,7 +95,7 @@ test('credits appear in chat and Connections and retain readings on refresh fail
   await page.screenshot({ path: 'artifacts/credits-dollar-desktop.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   await card.scrollIntoViewIfNeeded();
-  await expect(card).toBeInViewport({ ratio: 1 });
+  await expect(card).toBeInViewport({ ratio: 0.999 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );

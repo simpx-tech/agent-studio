@@ -13,6 +13,7 @@
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import Reasoning from './Reasoning.svelte';
+  import { compactionLabel } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
@@ -99,7 +100,9 @@
           ><i class="pulse-dot"></i>
           {message.questions?.some((q) => q.status === 'pending')
             ? 'Waiting for you'
-            : 'Responding'}</span
+            : message.compact || message.compactions?.at(-1)?.status === 'running'
+              ? 'Compacting context'
+              : 'Responding'}</span
         >{/if}
     </div>
     {#if message.role === 'user'}
@@ -108,6 +111,17 @@
     {:else}
       <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
       <Reasoning blocks={message.blocks} />
+      {#if message.compactions?.length}
+        <div class="compaction-history" aria-label="Context compaction">
+          {#each message.compactions as item (item.id)}
+            <p role="status">
+              {compactionLabel(item, message.status)}{#if item.preTokens != null}
+                <span>{` · ${item.preTokens.toLocaleString()} tokens before${item.postTokens != null ? ` → ${item.postTokens.toLocaleString()} after` : ''}`}</span>
+              {/if}
+            </p>
+          {/each}
+        </div>
+      {/if}
       {#if message.steering?.length}
         <div class="steering-history" aria-label="Steering messages">
           {#each message.steering as input (input.id)}
@@ -193,6 +207,14 @@
 </article>
 
 <style>
+  .compaction-history {
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .compaction-history p {
+    margin: 4px 0;
+  }
   .steering-history {
     margin-block: 10px;
   }

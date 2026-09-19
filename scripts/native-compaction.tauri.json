@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.compaction-qa",
+  "productName": "Agent Studio Compaction QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Compaction QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

@@ -107,6 +107,9 @@ pub async fn run(
 ) -> Result<String, String> {
     let usage_revision = AtomicU64::new(0);
     let output = EventSink::new(move |mut event| {
+        if let RunEvent::Compaction { compaction } = &mut event {
+            compaction.usage_revision = usage_revision.load(Ordering::Relaxed);
+        }
         if let RunEvent::Usage { usage } = &mut event {
             usage.revision = Some(usage_revision.fetch_add(1, Ordering::Relaxed) + 1);
         }
@@ -396,8 +399,11 @@ async fn stream_turn(
         process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
     }
     let mut decoder = Decoder::default();
+    decoder.compactions.manual = request.compact;
     let mut visualizer = crate::providers::visualize::Visualizer::default();
-    let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::default();
+    let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::with_context(
+        request.native_session.is_none() || request.native_context().is_some(),
+    );
     let mut session_received = false;
     let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(initialization_deadline);
@@ -478,12 +484,12 @@ async fn stream_turn(
                                     match result { Ok(id) => process.session_id = id, Err(error) => { process.healthy = false; break Err(error); } }
                                 }
                             }
-                            if !session_received && value["type"] == "assistant" && value["parent_tool_use_id"].is_null() {
+                            if !session_received && (value["type"] == "assistant" || (request.compact && value["type"] == "system" && value["subtype"] == "compact_boundary")) && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
                                     if let Err(error) = session.bind(session.id(), true) { process.healthy = false; break Err(error); }
                                     session_received = true;
                                 }
-                                if let Some(q) = &questions { q.steering.ready(!interrupting); }
+                                if let Some(q) = &questions { q.steering.ready(!request.compact && !interrupting); }
                             }
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
                                 if value["response"]["subtype"] != "success" { process.healthy = false; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
@@ -524,6 +530,11 @@ async fn stream_turn(
                             if let Some(failure) = decoder.failure.take() {
                                 process.healthy = false;
                                 break Err(provider_error(&format!("{diagnostics} {failure}")).into());
+                            }
+                            if request.compact {
+                                if !decoder.compactions.completed() { process.healthy = false; break Err("Claude ended without confirming compaction. The conversation was preserved.".into()); }
+                                if let Some(channel) = channel { let _ = channel.send(RunEvent::Text { text: "Context compacted.".into() }); }
+                                break Ok(("complete".into(), "Context compacted.".into()));
                             }
                             if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; break Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                             break Ok(("complete".to_string(), decoder.text));

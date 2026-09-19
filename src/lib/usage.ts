@@ -290,10 +290,19 @@ export function contextFor(
   // A pending reply keeps the last reading until it supplies a new one. A later
   // finished reply with missing usage must not silently revive an older reading.
   const latest = conversation?.messages.findLast(
-    (m) => m.role === 'assistant' && (m.status !== 'running' || m.usage?.contextInput != null),
+    (m) =>
+      m.role === 'assistant' &&
+      (m.status !== 'running' ||
+        m.usage?.contextInput != null ||
+        m.compact ||
+        m.compactions?.some((c) => c.status === 'complete')),
   );
   const compatible = sameSettings(latest?.settings);
-  const reported = compatible ? (latest?.usage?.contextInput ?? null) : null;
+  const compacted = latest?.compactions?.some(
+    (c) => c.status === 'complete' && (c.usageRevision ?? 0) >= (latest.usage?.revision ?? 0),
+  );
+  const reported =
+    compatible && !compacted && !latest?.compact ? (latest?.usage?.contextInput ?? null) : null;
   const measuredCapacity = reported != null ? latest?.usage?.contextWindow : null;
   const previous = conversation?.messages.findLast(
     (m) =>

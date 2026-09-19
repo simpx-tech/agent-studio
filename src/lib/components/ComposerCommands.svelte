@@ -158,12 +158,26 @@
     return picker?.handleKeydown(event) ?? false;
   }
   export async function submission(): Promise<
-    { handled: boolean; skills?: SkillReference[] } | undefined
+    { handled: boolean; skills?: SkillReference[]; compact?: boolean } | undefined
   > {
     error = '';
     const match = commandToken(prompt);
     if (!match) return { handled: false };
     const name = `/${match[1]}`;
+    if (name === '/compact') {
+      if (!conversationId || busy || !available || settings.provider === 'gemini') {
+        error =
+          'Compaction is available in an idle Claude or Codex conversation on a connected computer.';
+        return;
+      }
+      if (settings.provider === 'codex' && prompt.trim() !== '/compact') {
+        error =
+          'Codex compaction does not accept additional instructions. Use /compact on its own.';
+        return;
+      }
+      open = false;
+      return { handled: false, compact: true };
+    }
     if (busy && name === '/instructions') {
       error = 'Wait for the reply to finish before editing instructions.';
       return;

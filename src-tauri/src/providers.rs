@@ -378,6 +378,8 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     #[serde(default)]
+    pub compact: bool,
+    #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(skip)]
     pub native_session: Option<sessions::Session>,
@@ -399,6 +401,8 @@ pub struct RunRequest {
 }
 #[derive(Clone, Deserialize)]
 pub struct Agent {
+    #[serde(default, rename = "autoCompactTokens")]
+    pub auto_compact_tokens: Option<u64>,
     pub provider: String,
     pub model: String,
     pub instructions: String,
@@ -424,6 +428,33 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if self
+            .agent
+            .auto_compact_tokens
+            .is_some_and(|n| !(100_000..=1_000_000).contains(&n))
+        {
+            return Err(
+                "Claude auto-compaction size must be between 100,000 and 1,000,000 tokens.".into(),
+            );
+        }
+        if self.compact
+            && (self.conversation_only
+                || self.conversation_id.is_none()
+                || !matches!(self.agent.provider.as_str(), "claude" | "codex")
+                || !self.messages.last().is_some_and(|m| {
+                    m.role == "user"
+                        && m.text.chars().count() <= 30_000
+                        && m.images.is_empty()
+                        && m.skills.is_empty()
+                        && (m.text.trim() == "/compact"
+                            || (self.agent.provider == "claude"
+                                && m.text
+                                    .strip_prefix("/compact")
+                                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))))
+                }))
+        {
+            return Err("Compaction requires an existing Claude or Codex conversation and a plain /compact request.".into());
+        }
         if let Some(id) = &self.conversation_id {
             uuid::Uuid::parse_str(id).map_err(|_| "Invalid conversation id")?;
         }
@@ -634,6 +665,13 @@ impl RunRequest {
         })
     }
     pub fn native_user_text(&self) -> String {
+        if self.compact {
+            return self
+                .messages
+                .last()
+                .map(|m| m.text.clone())
+                .unwrap_or_default();
+        }
         if self.native_session.as_ref().is_some_and(|s| s.retry) {
             format!("Continue the previous request after an interrupted or failed attempt. Inspect existing changes and results before taking further actions; do not blindly repeat completed side effects. The user's request was: {}", self.messages.last().map(|m| m.text.as_str()).unwrap_or_default())
         } else {
@@ -894,6 +932,9 @@ pub async fn chat_command(
             c.args(["--input-format", "stream-json"]);
             if request.tools_enabled() {
                 c.arg("--replay-user-messages");
+                if let Some(tokens) = request.agent.auto_compact_tokens {
+                    c.arg("--autocompact").arg(tokens.to_string());
+                }
             }
             if request.tools_enabled() {
                 c.args([
@@ -1199,6 +1240,7 @@ mod tests {
     }
     fn request() -> RunRequest {
         RunRequest {
+            compact: false,
             conversation_id: None,
             native_session: None,
             workflow: None,
@@ -1207,6 +1249,7 @@ mod tests {
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             agent: Agent {
+                auto_compact_tokens: None,
                 provider: "claude".into(),
                 model: String::new(),
                 instructions: "Be concise".into(),
@@ -1220,6 +1263,47 @@ mod tests {
                 visualizations: vec![],
             }],
         }
+    }
+    #[tokio::test]
+    async fn compaction_sizes_are_validated_and_only_change_claude_chat_launches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        r.agent.auto_compact_tokens = Some(150_000);
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "fixture".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let command = chat_command(&r, root.path(), &exe).await.unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|a| a[0] == "--autocompact" && a[1] == "150000"));
+        r.conversation_only = true;
+        assert!(!chat_command(&r, root.path(), &exe)
+            .await
+            .unwrap()
+            .as_std()
+            .get_args()
+            .any(|a| a == "--autocompact"));
+        r.agent.auto_compact_tokens = Some(99_999);
+        assert!(r.validate().is_err());
+        r.agent.auto_compact_tokens = Some(1_000_001);
+        assert!(r.validate().is_err());
+        r.conversation_only = false;
+        r.agent.auto_compact_tokens = None;
+        r.compact = true;
+        assert!(r.validate().is_err());
+        r.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        r.messages[0].text = "/compact".into();
+        assert!(r.validate().is_ok());
+        r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
     }
     fn at_folder(path: &str) -> RunRequest {
         let mut r = request();

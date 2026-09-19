@@ -14,6 +14,15 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         'initialize' { [Console]::WriteLine('{"id":' + $id + ',"result":{}}') }
         'account/usage/read' { [Console]::WriteLine('{"id":' + $id + ',"result":{"threadUsage":{"threadId":"fixture","estimatedUsageCreditsMicros":1250000,"estimatedUsageUsdMicros":250000}}}') }
         'thread/start' { [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}') }
+        'thread/compact/start' {
+            if ($request.params.threadId -ne 'fixture' -or $request.params.input) { exit 9 }
+            [Console]::WriteLine('{"id":' + $id + ',"result":{}}')
+            [Console]::WriteLine('{"method":"turn/started","params":{"threadId":"fixture","turn":{"id":"compact"}}}')
+            if ($env:STUDIO_TEST_QUESTION -ne 'true') {
+                [Console]::WriteLine('{"method":"item/completed","params":{"threadId":"fixture","turnId":"compact","item":{"type":"contextCompaction","id":"boundary"}}}')
+            }
+            [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"compact","status":"completed"}}}')
+        }
         'turn/start' {
             $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
             [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
@@ -42,6 +51,45 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 "#;
+
+#[tokio::test]
+async fn manual_compaction_waits_for_native_completion_not_the_empty_acknowledgement() {
+    for missing in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut process = fixture(root.path(), &root.path().join("unused"), missing);
+        let request: RunRequest = serde_json::from_value(json!({"compact":true,"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"/compact"}]})).unwrap();
+        let channel = EventSink::new(|_| Ok(()));
+        let mut questions = Questions::default()
+            .open(&request.run_id, None, channel.clone())
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            run(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                &mut questions,
+                None,
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+        if missing {
+            assert!(result
+                .unwrap_err()
+                .contains("without confirming compaction"));
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                ("complete".into(), "Context compacted.".into())
+            );
+            assert!(process.alive() && process.healthy);
+        }
+        process.kill().await;
+    }
+}
 
 #[tokio::test]
 async fn steering_ack_rejection_and_stop_use_the_same_native_turn() {

@@ -568,6 +568,9 @@
       selectedStatus.auth === 'ready',
   );
   const activeQueue = $derived(activeId ? (queued[activeId] ?? []) : []);
+  const canCompact = $derived(canSend && !!active?.messages.some(m => m.role === 'assistant') &&
+    ['claude', 'codex'].includes(selectedSettings.provider) &&
+    active?.messages.findLast(m => m.role === 'assistant')?.settings?.connectionId === selectedSettings.connectionId);
   const steeringSupported = $derived(
     observedReply?.settings?.provider === 'codex' || observedReply?.settings?.provider === 'claude',
   );
@@ -575,6 +578,7 @@
     loaded &&
       activeRunning &&
       steeringSupported &&
+      !observedReply?.compact &&
       !!observedReply?.runId &&
       !stopping &&
       !steeringPending &&
@@ -1761,12 +1765,12 @@
       if (steeringPending === runId) steeringPending = null;
     }
   }
-  async function send(retry = false, queuedMessage?: QueuedMessage) {
+  async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
     if (steeringPending) return;
     if (preparingCommand) return;
     const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
-    if (!retry && !queuedMessage) {
+    if (!retry && !queuedMessage && !compactRequest) {
       const draft = prompt,
         selected = activeId;
       preparingCommand = true;
@@ -1778,8 +1782,13 @@
       if (session !== workspaceSession) return;
       if (!command || command.handled || prompt !== draft || activeId !== selected) return;
     }
-    const text = queuedMessage ? queuedMessage.text : prompt.trim();
-    const images = queuedMessage ? queuedMessage.images : attachedImages;
+    const compact = !!compactRequest || !!command?.compact || (retry && !!active?.messages.at(-1)?.compact);
+    if (compact && (!canCompact || (!compactRequest && attachedImages.length))) {
+      notice = 'Compact an idle conversation with its current account and no attachments. Send a message first after switching accounts.';
+      return;
+    }
+    const text = compactRequest ?? (queuedMessage ? queuedMessage.text : prompt.trim());
+    const images = compactRequest ? [] : queuedMessage ? queuedMessage.images : attachedImages;
     const skills = queuedMessage ? queuedMessage.skills : command?.skills;
     if (!retry && !queuedMessage && activeId && activeRunning) {
       // The reply is still running: hold this message and send it once the reply completes.
@@ -1864,7 +1873,7 @@
         status: 'complete',
         createdAt: now,
       });
-      if (!queuedMessage) {
+      if (!queuedMessage && !compactRequest) {
         prompt = '';
         clearImages();
       }
@@ -1892,6 +1901,7 @@
         ? connectionLabel(workspace.fleet, responseSettings.connectionId)
         : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
       runId,
+      ...(compact ? { compact: true } : {}),
       promptTokensEstimate: estimatePromptTokens(responseSettings, history),
       blocks: [],
       status: 'running',
@@ -1918,6 +1928,7 @@
         : await runAgent(
             {
               runId,
+              ...(compact ? { compact: true } : {}),
               agent: responseSettings,
               messages: history,
               conversationId: conversation.id,
@@ -1938,6 +1949,7 @@
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
                 event.kind === 'steering' ||
+                event.kind === 'compaction' ||
                 (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               ) {
@@ -2908,6 +2920,10 @@
               </div>
             </form>
             <UsagePanel
+              {canCompact}
+              compact={() => void send(false, undefined, '/compact')}
+              changeAutoCompact={(autoCompactTokens) => changeSettings({ ...selectedSettings, autoCompactTokens })}
+              compactionSettingsDisabled={activeRunning || !!run}
               bind:expanded={usageExpanded}
               conversation={active}
               settings={selectedSettings}

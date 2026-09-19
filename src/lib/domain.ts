@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
@@ -87,6 +88,7 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),
   connectionId: z.string().uuid().optional(),
   provider: z.enum(providerIds),
   model: z.string().max(100),
@@ -193,6 +195,8 @@ export const messageSchema = z
     visualizations: visualizationsSchema.optional(),
     questions: questionsSchema.optional(),
     steering: steeringSchema.optional(),
+    compact: z.boolean().optional(),
+    compactions: compactionsSchema.optional(),
     fileChanges: fileChangesSchema.optional(),
     workflow: workflowProgressSchema.optional(),
     workflowDefinition: workflowSchema.optional(),
@@ -257,6 +261,7 @@ export type RunEvent = TokenUsage & {
     | 'visualization'
     | 'question'
     | 'steering'
+    | 'compaction'
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
@@ -269,11 +274,13 @@ export type RunEvent = TokenUsage & {
   visualization?: Visualization;
   question?: QuestionRequest;
   steering?: SteeringReceipt;
+  compaction?: Compaction;
   fileChanges?: FileChanges;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
 };
 export type RunRequest = {
+  compact?: boolean;
   location?: ChatLocation;
   conversationId?: string;
   assistantId?: string;
