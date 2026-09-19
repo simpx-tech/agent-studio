@@ -26,8 +26,8 @@ export const appCommands: ComposerCommand[] = [
   kind: 'app',
 }));
 
-// These terminal/session operations cannot carry their state across the app's
-// ephemeral reply processes. Do not present them as working native commands.
+// These terminal/session operations need a live interactive session. A conversation's
+// CLI process may restart between replies, so do not present them as working commands.
 export const sessionCommands = new Set([
   'clear',
   'compact',

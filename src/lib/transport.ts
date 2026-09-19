@@ -1054,6 +1054,14 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
   }
   await invoke('cancel_run', { runId, waitForCompletion });
 }
+/**
+ * Release the parked CLI process of a deleted conversation. Remote hosts keep no per-job
+ * release route; their parked processes expire on the host's idle limit instead.
+ */
+export async function releaseConversation(conversationId: string, connectionId?: string) {
+  if (!desktop() || remoteTarget(connectionId)) return;
+  await invoke('release_conversation', { conversationId });
+}
 export async function answerQuestion(runId: string, answer: QuestionAnswer, connectionId?: string) {
   return routed<void>(
     'answer',

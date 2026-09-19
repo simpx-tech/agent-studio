@@ -6,6 +6,7 @@ mod folders;
 mod models;
 mod native_instructions;
 mod notifications;
+mod pool;
 mod profiles;
 mod protocol;
 mod providers;
@@ -382,6 +383,15 @@ async fn cancel_run(
     Ok(())
 }
 #[tauri::command]
+async fn release_conversation(
+    pool: State<'_, pool::Pool>,
+    conversation_id: String,
+) -> Result<(), String> {
+    uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
+    pool.release(&conversation_id).await;
+    Ok(())
+}
+#[tauri::command]
 async fn answer_question(
     questions: State<'_, providers::questions::Questions>,
     run_id: String,
@@ -431,12 +441,24 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .manage(runner::Runs::default())
+        .manage(pool::Pool::default())
         .manage(providers::questions::Questions::default())
         .manage(titles::Titles::default())
         .manage(Storage::default())
         .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
+        .setup(|app| {
+            // Release parked CLI processes that stayed idle past their limit.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    handle.state::<pool::Pool>().sweep().await;
+                }
+            });
+            Ok(())
+        })
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Started
@@ -468,14 +490,16 @@ pub fn run() {
                         .map(|a| a.values().cloned().collect::<Vec<_>>())
                         .unwrap_or_default(),
                 );
-                if !tokens.is_empty() {
-                    // Cancel all owned work before closing the window.
+                let parked = window.state::<pool::Pool>().len() > 0;
+                if !tokens.is_empty() || parked {
+                    // Cancel all owned work and release parked CLIs before closing the window.
                     for token in tokens {
                         token.cancel();
                     }
                     api.prevent_close();
                     let window = window.clone();
                     tauri::async_runtime::spawn(async move {
+                        window.state::<pool::Pool>().shutdown().await;
                         loop {
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                             if window
@@ -534,6 +558,7 @@ pub fn run() {
             generate_title,
             cancel_title,
             cancel_run,
+            release_conversation,
             answer_question,
             sign_in,
             export_workspace

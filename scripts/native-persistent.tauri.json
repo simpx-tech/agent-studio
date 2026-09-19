@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.persistent-qa",
+  "productName": "Agent Studio Persistent QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Persistent QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

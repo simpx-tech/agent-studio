@@ -1489,6 +1489,54 @@ code {
   padding: 8px 11px;
   color: #d1e2bb;
 }
+.queued-messages {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.queued-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 6px 3px 9px;
+  border-left: 2px solid #788e5e;
+  border-radius: 4px;
+  background: #24301c;
+  font-size: 11px;
+  color: #d1e2bb;
+}
+.queued-badge {
+  flex: none;
+  color: #a4b995;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+.queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queued-remove {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #a4b995;
+}
+.queued-remove:hover {
+  background: #2f3f24;
+  color: #def5b1;
+}
 .setup-hint {
   display: flex;
   gap: 10px;

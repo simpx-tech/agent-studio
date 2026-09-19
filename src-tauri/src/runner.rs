@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tauri::{ipc::Channel, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -230,49 +230,83 @@ pub(crate) async fn execute(
     if cancel.is_cancelled() {
         return Ok(("cancelled".into(), String::new()));
     }
-    let mut command = tokio::select! {
-        command = chat_command(&request, &root, &exe) => command?,
-        _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
+    let pool = app.state::<crate::pool::Pool>();
+    // Only conversation-bound Claude/Codex chats keep their process between replies.
+    let parkable = request.native_session.is_some();
+    let fingerprint = if parkable {
+        crate::pool::fingerprint(&request, &exe)?
+    } else {
+        String::new()
     };
-    if request.agent.provider == "claude"
-        && request.agent.model.is_empty()
-        && request.native_session.as_ref().is_some_and(|s| s.resumed)
-    {
-        let model = crate::providers::defaults::claude_model(
-            &exe,
-            &request,
-            command.as_std().get_current_dir().unwrap_or(&root),
-            &cancel,
-        )
-        .await;
-        if cancel.is_cancelled() {
-            return Ok(("cancelled".into(), String::new()));
-        }
-        command.args(["--model", &model?]);
-    }
-    if let Some(session) = request.native_session.as_ref().filter(|s| !s.resumed) {
-        if let Some(channel) = &channel {
-            if session.switched_account {
-                let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Switched to another account. This reply starts a new native session for the selected account from this chat's saved messages; the previous account's native tool history is not transferred.".into() });
-            } else if request.messages.len() > 1 {
-                let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
+    let mut reused = None;
+    if let Some(conversation) = request.conversation_id.as_deref().filter(|_| parkable) {
+        if let Some(mut parked) = pool.take(conversation) {
+            let session = request.native_session.as_ref().expect("parkable session");
+            if parked.serves(&fingerprint, session) {
+                parked.claim();
+                reused = Some(parked);
+            } else {
+                // Changed account, model, reasoning, folder, or session: start over.
+                parked.kill().await;
             }
         }
     }
-    let config_cwd = if exe.wsl.is_some() {
-        request
-            .location
-            .as_ref()
-            .map(|location| location.path.clone())
-    } else {
-        command
-            .as_std()
-            .get_current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
+    let mut config_cwd = None;
+    let mut process = match reused {
+        Some(process) => process,
+        None => {
+            let mut command = tokio::select! {
+                command = chat_command(&request, &root, &exe) => command?,
+                _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
+            };
+            if request.agent.provider == "claude"
+                && request.agent.model.is_empty()
+                && request.native_session.as_ref().is_some_and(|s| s.resumed)
+            {
+                let model = crate::providers::defaults::claude_model(
+                    &exe,
+                    &request,
+                    command.as_std().get_current_dir().unwrap_or(&root),
+                    &cancel,
+                )
+                .await;
+                if cancel.is_cancelled() {
+                    return Ok(("cancelled".into(), String::new()));
+                }
+                command.args(["--model", &model?]);
+            }
+            if let Some(session) = request.native_session.as_ref().filter(|s| !s.resumed) {
+                if let Some(channel) = &channel {
+                    if session.switched_account {
+                        let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Switched to another account. This reply starts a new native session for the selected account from this chat's saved messages; the previous account's native tool history is not transferred.".into() });
+                    } else if request.messages.len() > 1 {
+                        let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
+                    }
+                }
+            }
+            config_cwd = if exe.wsl.is_some() {
+                request
+                    .location
+                    .as_ref()
+                    .map(|location| location.path.clone())
+            } else {
+                command
+                    .as_std()
+                    .get_current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+            };
+            let child = command
+                .spawn()
+                .map_err(|_| "Could not launch the provider CLI. Check Connections.")?;
+            let session_id = request
+                .native_session
+                .as_ref()
+                .map(|s| s.id().to_string())
+                .unwrap_or_default();
+            crate::pool::Process::new(exe.clone(), child, fingerprint, session_id)?
+        }
     };
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Could not launch the provider CLI. Check Connections.")?;
+    let reused = process.turns > 0;
     if matches!(request.agent.provider.as_str(), "codex" | "claude") {
         if let Some(channel) = &channel {
             let _ = channel.send(RunEvent::FileChanges {
@@ -280,9 +314,9 @@ pub(crate) async fn execute(
             });
         }
     }
-    if request.uses_codex_server() {
-        let result = crate::providers::codex_chat::run(
-            &mut child,
+    let result = if request.uses_codex_server() {
+        crate::providers::codex_chat::run(
+            &mut process,
             &request,
             channel.as_ref(),
             cancel,
@@ -290,158 +324,203 @@ pub(crate) async fn execute(
                 .as_mut()
                 .ok_or("Question channel is unavailable")?,
             config_cwd.as_deref(),
+            reused,
         )
-        .await;
-        exe.kill(&mut child).await;
-        return result;
-    }
-    let mut stdin = child.stdin.take().ok_or("CLI stdin is unavailable")?;
-    let prompt = request.stdin_payload();
-    type Input = (
-        String,
-        Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    );
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Input>(16);
-    let mut input_tx = Some(input_tx);
-    let claude_visualizer = request.uses_claude_visualizer();
-    let first = if claude_visualizer {
-        "{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n".into()
-    } else {
-        prompt.clone()
-    };
-    input_tx
-        .as_ref()
-        .unwrap()
-        .send((first, None))
         .await
-        .map_err(|_| "CLI input is unavailable")?;
-    if !claude_visualizer {
-        input_tx.take();
+    } else {
+        stream_turn(
+            &mut process,
+            &request,
+            channel.as_ref(),
+            cancel,
+            timeout,
+            questions.as_mut(),
+            reused,
+        )
+        .await
+    };
+    process.turns += 1;
+    // A finished or cleanly interrupted turn leaves the CLI waiting for the next reply.
+    let park = parkable
+        && process.healthy
+        && matches!(&result, Ok((status, _)) if status == "complete" || status == "cancelled")
+        && process.alive();
+    if park {
+        pool.park(request.conversation_id.as_deref().unwrap(), process)
+            .await;
+    } else {
+        process.kill().await;
     }
-    let mut writer = tokio::spawn(async move {
-        while let Some((payload, ack)) = input_rx.recv().await {
-            let result = stdin.write_all(payload.as_bytes()).await;
-            if let Some(ack) = ack {
-                let _ = ack.send(
-                    result
-                        .as_ref()
-                        .map(|_| ())
-                        .map_err(|_| "Could not send answers to Claude.".into()),
-                );
-            }
-            result?;
+    result
+}
+/// One reply over a stream-json process: Claude chats (persistent), Claude background
+/// queries, and Antigravity (one prompt, then input closes).
+async fn stream_turn(
+    process: &mut crate::pool::Process,
+    request: &RunRequest,
+    channel: Option<&EventSink>,
+    cancel: CancellationToken,
+    timeout: Option<Duration>,
+    mut questions: Option<&mut crate::providers::questions::Session>,
+    reused: bool,
+) -> Result<(String, String), String> {
+    use crate::pool::Line;
+    let claude_visualizer = request.uses_claude_visualizer();
+    let persistent = claude_visualizer && request.native_session.is_some();
+    let prompt = request.stdin_payload();
+    let mut stdin_open = true;
+    let mut initialized = reused;
+    let mut prompt_sent = false;
+    let send_failed = "Could not send input to the provider CLI.";
+    if !claude_visualizer {
+        // Background and text-only runs send one prompt and close their input.
+        process
+            .stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|_| send_failed)?;
+        prompt_sent = true;
+        stdin_open = false;
+        process.stdin.shutdown().await.map_err(|_| send_failed)?;
+    } else if reused {
+        if let Some(session) = &request.native_session {
+            session.bind(session.id(), false)?;
         }
-        stdin.shutdown().await
-    });
-    let mut stdout =
-        BufReader::new(child.stdout.take().ok_or("CLI stdout is unavailable")?).lines();
-    let mut stderr =
-        BufReader::new(child.stderr.take().ok_or("CLI stderr is unavailable")?).lines();
+        process
+            .stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|_| send_failed)?;
+        prompt_sent = true;
+    } else {
+        process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
+    }
     let mut decoder = Decoder::default();
     let mut visualizer = crate::providers::visualize::Visualizer::default();
     let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::default();
-    let mut initialized = false;
     let mut session_received = false;
-    let mut writer_done = false;
     let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(initialization_deadline);
+    let interrupt_deadline = tokio::time::sleep(crate::pool::INTERRUPT_GRACE);
+    tokio::pin!(interrupt_deadline);
+    let mut interrupting = false;
     let output_limit = request.output_line_limit();
-    let mut stdout_done = false;
-    let mut stderr_done = false;
     let mut diagnostics = String::new();
     let deadline = response_deadline(timeout);
     tokio::pin!(deadline);
-    let outcome = loop {
+    loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => { exe.kill(&mut child).await; break Ok(("cancelled".to_string(), String::new())); }
-            _ = &mut initialization_deadline, if claude_visualizer && !initialized => { exe.kill(&mut child).await; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
-            result = &mut writer, if !writer_done => {
-                writer_done = true;
-                if !matches!(result, Ok(Ok(()))) { exe.kill(&mut child).await; break Err("Could not send input to the provider CLI.".into()); }
+            _ = cancel.cancelled(), if !interrupting => {
+                if persistent && prompt_sent && stdin_open {
+                    // Ask the CLI to end this turn in-band so it stays usable for the next reply.
+                    let interrupt = format!("{{\"type\":\"control_request\",\"request_id\":\"studio-interrupt-{}\",\"request\":{{\"subtype\":\"interrupt\"}}}}\n", process.turns + 1);
+                    if process.stdin.write_all(interrupt.as_bytes()).await.is_ok() {
+                        interrupting = true;
+                        interrupt_deadline.as_mut().reset(tokio::time::Instant::now() + crate::pool::INTERRUPT_GRACE);
+                        continue;
+                    }
+                }
+                process.healthy = false;
+                process.kill().await;
+                break Ok(("cancelled".to_string(), decoder.text));
             }
-            _ = &mut deadline => { exe.kill(&mut child).await; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
+            _ = &mut interrupt_deadline, if interrupting => {
+                process.healthy = false;
+                process.kill().await;
+                break Ok(("cancelled".to_string(), decoder.text));
+            }
+            _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
+            _ = &mut deadline => { process.healthy = false; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
             Some(delivery) = async { match questions.as_mut() { Some(q) => q.rx.recv().await, None => std::future::pending().await } } => {
-                let result = match &input_tx {
-                    Some(tx) => {
-                        let (ack, received) = tokio::sync::oneshot::channel();
-                        match tx.send((format!("{}\n", delivery.payload), Some(ack))).await {
-                            Ok(()) => received.await.unwrap_or_else(|_| Err("Could not send answers to Claude.".into())),
-                            Err(_) => Err("Could not send answers to Claude.".into()),
-                        }
-                    },
-                    None => Err("Claude is no longer waiting for answers.".into()),
+                let result = if stdin_open {
+                    process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Claude.".to_string())
+                } else {
+                    Err("Claude is no longer waiting for answers.".into())
                 };
                 questions.as_ref().unwrap().delivered(delivery, result);
             },
-            line = stdout.next_line(), if !stdout_done => match line {
-                Ok(Some(line)) => {
-                    if line.len() > output_limit { exe.kill(&mut child).await; break Err("Provider output exceeded the message limit".into()); }
+            line = process.lines.recv() => match line {
+                Some(Line::Err(line)) => {
+                    if request.agent.provider == "gemini" && line.trim().to_lowercase().starts_with("authentication required") {
+                        process.healthy = false;
+                        break Err(provider_error(&line).into());
+                    }
+                    if diagnostics.len() < 16000 { diagnostics.push_str(&line.chars().take(1000).collect::<String>()); diagnostics.push('\n'); }
+                }
+                Some(Line::Out(line)) => {
+                    if line.len() > output_limit { process.healthy = false; break Err("Provider output exceeded the message limit".into()); }
+                    let mut turn_ended = false;
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                             if value["type"] == "system" && value["subtype"] == "init" && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
-                                    let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, false));
-                                    if let Err(error) = result { exe.kill(&mut child).await; break Err(error); }
+                                    let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, false).map(|()| id.to_string()));
+                                    match result { Ok(id) => process.session_id = id, Err(error) => { process.healthy = false; break Err(error); } }
                                 }
                             }
                             if !session_received && value["type"] == "assistant" && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
-                                    if let Err(error) = session.bind(session.id(), true) { exe.kill(&mut child).await; break Err(error); }
+                                    if let Err(error) = session.bind(session.id(), true) { process.healthy = false; break Err(error); }
                                     session_received = true;
                                 }
                             }
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
-                                if value["response"]["subtype"] != "success" { exe.kill(&mut child).await; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
+                                if value["response"]["subtype"] != "success" { process.healthy = false; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
                                 initialized = true;
-                                if let Some(tx) = &input_tx { let _ = tx.send((prompt.clone(), None)).await; }
+                                if process.stdin.write_all(prompt.as_bytes()).await.is_err() { process.healthy = false; break Err(send_failed.into()); }
+                                prompt_sent = true;
                                 continue;
                             }
                             if let Some(questions) = &mut questions { questions.observe_claude(&value); }
-                            for event in visualizer.observe_claude(&value) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                            for event in visualizer.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if value["type"] == "control_request" {
                                 if let Some(response) = questions.as_mut().and_then(|q| q.claude(&value)) {
-                                    if let (Some(response), Some(tx)) = (response, &input_tx) { let _ = tx.send((format!("{response}\n"), None)).await; }
+                                    if let Some(response) = response { let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await; }
                                     continue;
                                 }
                                 let response = visualizer.claude_response(&value);
-                                if let Some(tx) = &input_tx { let _ = tx.send((format!("{response}\n"), None)).await; }
+                                let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await;
                                 continue;
                             }
-                            if input_lifetime.ended(&value) { input_tx.take(); }
+                            turn_ended = input_lifetime.ended(&value);
                         }
                     }
-                    for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = &channel { if channel.send(event).is_err() { cancel.cancel(); } } }
-                    if channel.is_none() && decoder.text.len() > 4000 { exe.kill(&mut child).await; break Err("Title response exceeded the limit".into()); }
-                }
-                Ok(None) => stdout_done = true,
-                Err(_) => { exe.kill(&mut child).await; break Err("Could not read the provider response".into()); }
-            },
-            line = stderr.next_line(), if !stderr_done => match line {
-                Ok(Some(line)) => {
-                    if request.agent.provider == "gemini" && line.trim().to_lowercase().starts_with("authentication required") {
-                        exe.kill(&mut child).await;
-                        break Err(provider_error(&line).into());
+                    for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                    if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
+                    if turn_ended {
+                        if persistent {
+                            if interrupting {
+                                // An interrupted turn reports an execution error; the CLI stays usable.
+                                break Ok((if decoder.failure.is_some() { "cancelled" } else { "complete" }.to_string(), decoder.text));
+                            }
+                            if let Some(failure) = decoder.failure.take() {
+                                process.healthy = false;
+                                break Err(provider_error(&format!("{diagnostics} {failure}")).into());
+                            }
+                            if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; break Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                            break Ok(("complete".to_string(), decoder.text));
+                        }
+                        // Chats without a conversation identity still end with their process.
+                        stdin_open = false;
+                        let _ = process.stdin.shutdown().await;
                     }
-                    if diagnostics.len() < 16000 { diagnostics.push_str(&line.chars().take(1000).collect::<String>()); diagnostics.push('\n'); }
-                },
-                _ => stderr_done = true,
-            },
-            status = child.wait(), if stdout_done && stderr_done => {
-                let success = status.map_err(|_| "Could not collect the provider process result")?.success();
-                if !success || decoder.failure.is_some() {
-                    let diagnostic = format!("{} {}", diagnostics, decoder.failure.unwrap_or_default()).to_lowercase();
-                    break Err(provider_error(&diagnostic).into());
                 }
-                if request.agent.provider == "gemini" && !decoder.completed { break Err("Antigravity ended before confirming the response. Try again.".into()); }
-                if claude_visualizer && input_tx.is_some() { break Err("Claude exited before confirming the final reply. Partial output has been kept.".into()); }
-                if decoder.text.trim().is_empty() && !visualizer.has_visuals() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
-                break Ok(("complete".to_string(), decoder.text));
+                None => {
+                    process.healthy = false;
+                    let success = process.child.wait().await.map_err(|_| "Could not collect the provider process result")?.success();
+                    if !success || decoder.failure.is_some() {
+                        let diagnostic = format!("{} {}", diagnostics, decoder.failure.unwrap_or_default()).to_lowercase();
+                        break Err(provider_error(&diagnostic).into());
+                    }
+                    if request.agent.provider == "gemini" && !decoder.completed { break Err("Antigravity ended before confirming the response. Try again.".into()); }
+                    if claude_visualizer && stdin_open { break Err("Claude exited before confirming the final reply. Partial output has been kept.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    break Ok(("complete".to_string(), decoder.text));
+                }
             }
         }
-    };
-    writer.abort();
-    outcome
+    }
 }
 fn provider_error(diagnostic: &str) -> &'static str {
     let diagnostic = diagnostic.to_lowercase();
@@ -481,6 +560,10 @@ fn provider_error(diagnostic: &str) -> &'static str {
         "The provider CLI could not complete the request. Check its login, model access, and connection, then try again."
     }
 }
+#[cfg(test)]
+#[path = "runner_claude_tests.rs"]
+mod claude_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

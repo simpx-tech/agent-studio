@@ -1,14 +1,13 @@
 //! CLI-owned persistent threads, resumed by host-local conversation bindings.
 //! Legacy callers without a conversation identity retain ephemeral execution.
+//! One app-server process serves a conversation's replies in turn until it is released.
 use super::RunRequest;
+use crate::pool::{Line, Process, INTERRUPT_GRACE};
 use crate::protocol::Decoder;
 use crate::runner::EventSink;
 use serde_json::{json, Value};
-use std::time::Duration;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Child,
-};
+use std::{collections::HashMap, time::Duration};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 fn plan_tool() -> Value {
@@ -126,45 +125,78 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
     }
     params
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Init,
+    Config,
+    Models,
+    Thread,
+    Turn,
+    Interrupt,
+}
+
+async fn send(
+    process: &mut Process,
+    pending: &mut HashMap<u64, Kind>,
+    kind: Kind,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    let id = process.next_id;
+    process.next_id += 1;
+    pending.insert(id, kind);
+    process
+        .stdin
+        .write_all(format!("{}\n", json!({"id":id,"method":method,"params":params})).as_bytes())
+        .await
+        .map_err(|_| "Could not send the Codex request".into())
+}
+
 pub async fn run(
-    child: &mut Child,
+    process: &mut Process,
     request: &RunRequest,
     channel: Option<&EventSink>,
     cancel: CancellationToken,
     questions: &mut super::questions::Session,
     config_cwd: Option<&str>,
+    reused: bool,
 ) -> Result<(String, String), String> {
     let mut effective = request.clone();
-    let resolve_defaults = effective.native_session.as_ref().is_some_and(|s| s.resumed)
+    let resolve_defaults = !reused
+        && effective.native_session.as_ref().is_some_and(|s| s.resumed)
         && (effective.agent.model.is_empty() || effective.agent.reasoning.is_empty());
     let request = &mut effective;
     let mut model_pages = 0;
-    let mut input = child.stdin.take().ok_or("Codex input is unavailable")?;
-    let mut output =
-        BufReader::new(child.stdout.take().ok_or("Codex output is unavailable")?).lines();
-    let mut stderr = BufReader::new(
-        child
-            .stderr
-            .take()
-            .ok_or("Codex diagnostics are unavailable")?,
-    )
-    .lines();
-    let mut stderr_done = false;
-    let init = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true}}});
-    input
-        .write_all(format!("{init}\n").as_bytes())
-        .await
-        .map_err(|_| "Could not initialize Codex")?;
+    let mut pending: HashMap<u64, Kind> = HashMap::new();
+    let mut decoder = Decoder::default();
+    let mut thread = String::new();
+    let mut turn = String::new();
+    if reused {
+        // The thread is already loaded; only this reply's turn is new.
+        thread = process.thread.clone();
+        decoder.reported_model(process.reported_model.as_deref());
+        if let Some(session) = &request.native_session {
+            session.bind(&thread, false)?;
+        }
+        send(
+            process,
+            &mut pending,
+            Kind::Turn,
+            "turn/start",
+            turn_params(request, &thread),
+        )
+        .await?;
+    } else {
+        send(process, &mut pending, Kind::Init, "initialize", json!({"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await.map_err(|_| "Could not initialize Codex")?;
+    }
     // Bound startup and cancellation only; an active turn may run or wait for
     // the user for as long as needed.
     let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(initialization_deadline);
-    let cancellation_deadline = tokio::time::sleep(Duration::from_secs(5));
+    let cancellation_deadline = tokio::time::sleep(INTERRUPT_GRACE);
     tokio::pin!(cancellation_deadline);
-    let mut thread = String::new();
-    let mut turn = String::new();
     let mut cancelling = false;
-    let mut decoder = Decoder::default();
     let mut last_usage = crate::protocol::TokenUsage {
         scope: Some("reply".into()),
         ..Default::default()
@@ -175,90 +207,112 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !cancelling => {
-                if thread.is_empty() || turn.is_empty() { return Ok(("cancelled".into(), decoder.text)); }
+                if thread.is_empty() || turn.is_empty() {
+                    process.healthy = false;
+                    return Ok(("cancelled".into(), decoder.text));
+                }
                 cancelling = true;
-                input.write_all(format!("{}\n", json!({"id":4,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}})).as_bytes()).await.map_err(|_| "Could not interrupt Codex")?;
-                cancellation_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+                if send(process, &mut pending, Kind::Interrupt, "turn/interrupt", json!({"threadId":thread,"turnId":turn})).await.is_err() {
+                    process.healthy = false;
+                    return Ok(("cancelled".into(), decoder.text));
+                }
+                cancellation_deadline.as_mut().reset(tokio::time::Instant::now() + INTERRUPT_GRACE);
             },
-            _ = &mut initialization_deadline, if !cancelling && turn.is_empty() => return Err("Codex did not initialize the conversation within two minutes. Check its CLI and configured integrations.".into()),
-            _ = &mut cancellation_deadline, if cancelling => return Ok(("cancelled".into(), decoder.text)),
+            _ = &mut initialization_deadline, if !cancelling && turn.is_empty() => {
+                process.healthy = false;
+                return Err("Codex did not initialize the conversation within two minutes. Check its CLI and configured integrations.".into());
+            }
+            _ = &mut cancellation_deadline, if cancelling => {
+                // The interrupt was never confirmed; the process state is unknown.
+                process.healthy = false;
+                return Ok(("cancelled".into(), decoder.text));
+            }
             Some(delivery) = questions.rx.recv(), if !cancelling => {
-                let result = input.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
+                let result = process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
                 let failed = result.is_err();
                 questions.delivered(delivery, result);
-                if failed { return Err("Could not send answers to Codex.".into()); }
+                if failed { process.healthy = false; return Err("Could not send answers to Codex.".into()); }
             },
-            line = stderr.next_line(), if !stderr_done => { if !matches!(line, Ok(Some(_))) { stderr_done = true; } },
-            line = output.next_line() => {
-                let Some(line) = line.map_err(|_| "Could not read the Codex response")? else { return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
-                if line.len() > output_limit { return Err("Provider output exceeded the message limit".into()); }
+            line = process.lines.recv() => {
+                let Some(line) = line else { process.healthy = false; return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
+                let Line::Out(line) = line else { continue; };
+                if line.len() > output_limit { process.healthy = false; return Err("Provider output exceeded the message limit".into()); }
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
-                if value["id"].as_u64().is_some_and(|id| matches!(id, 1..=3 | 5 | 6)) && value.get("method").is_none() {
+                if let Some(id) = value["id"].as_u64().filter(|_| value.get("method").is_none()) {
+                    let Some(kind) = pending.remove(&id) else { continue; };
+                    if kind == Kind::Interrupt { continue; }
                     if value["error"].is_object() {
-                        return Err(if value["id"] == 2 && request.native_session.as_ref().is_some_and(|s| s.resumed) {
+                        process.healthy = false;
+                        return Err(if kind == Kind::Thread && request.native_session.as_ref().is_some_and(|s| s.resumed) {
                             "Codex could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
                         } else { "Codex could not start this reply. Check its login, model access, and CLI version." }.into());
                     }
-                    let next = match value["id"].as_u64() {
-                        Some(1) => {
-                            input.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Codex initialization failed")?;
+                    match kind {
+                        Kind::Init => {
+                            process.stdin.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Codex initialization failed")?;
                             if resolve_defaults {
-                                Some(json!({"id":5,"method":"config/read","params":{"includeLayers":false,"cwd":config_cwd}}))
+                                send(process, &mut pending, Kind::Config, "config/read", json!({"includeLayers":false,"cwd":config_cwd})).await?;
                             } else {
-                                Some(json!({"id":2,"method":if request.native_session.as_ref().is_some_and(|s| s.resumed) { "thread/resume" } else { "thread/start" },"params":start_params(request)}))
+                                let method = if request.native_session.as_ref().is_some_and(|s| s.resumed) { "thread/resume" } else { "thread/start" };
+                                send(process, &mut pending, Kind::Thread, method, start_params(request)).await?;
                             }
                         }
-                        Some(5) => {
+                        Kind::Config => {
                             super::defaults::codex_config(request, &value["result"]["config"]);
                             if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
-                                Some(json!({"id":6,"method":"model/list","params":{"limit":100,"includeHidden":true}}))
+                                send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true})).await?;
                             } else {
-                                Some(json!({"id":2,"method":"thread/resume","params":start_params(request)}))
+                                send(process, &mut pending, Kind::Thread, "thread/resume", start_params(request)).await?;
                             }
                         }
-                        Some(6) => {
+                        Kind::Models => {
                             model_pages += 1;
                             if super::defaults::codex_models(request, value["result"]["data"].as_array().ok_or("Codex did not report model defaults")?) {
-                                Some(json!({"id":2,"method":"thread/resume","params":start_params(request)}))
+                                send(process, &mut pending, Kind::Thread, "thread/resume", start_params(request)).await?;
                             } else if let Some(cursor) = value["result"]["nextCursor"].as_str().filter(|_| model_pages < 10) {
-                                Some(json!({"id":6,"method":"model/list","params":{"limit":100,"includeHidden":true,"cursor":cursor}}))
-                            } else { return Err("Codex could not resolve current model defaults. Select an explicit model and reasoning level to continue.".into()); }
+                                send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true,"cursor":cursor})).await?;
+                            } else {
+                                process.healthy = false;
+                                return Err("Codex could not resolve current model defaults. Select an explicit model and reasoning level to continue.".into());
+                            }
                         }
-                        Some(2) => {
+                        Kind::Thread => {
                             decoder.reported_model(value["result"]["model"].as_str());
+                            process.reported_model = value["result"]["model"].as_str().map(String::from);
                             thread = value["result"]["thread"]["id"].as_str().ok_or("Codex did not return a thread identity")?.into();
+                            process.thread = thread.clone();
+                            // The binding records the CLI-named thread; reuse must match it.
+                            process.session_id = thread.clone();
                             if let Some(session) = &request.native_session { session.bind(&thread, false)?; }
-                            Some(json!({"id":3,"method":"turn/start","params":turn_params(request, &thread)}))
+                            send(process, &mut pending, Kind::Turn, "turn/start", turn_params(request, &thread)).await?;
                         }
-                        Some(3) => {
+                        Kind::Turn => {
                             if let Some(id) = value["result"]["turn"]["id"].as_str() { turn = id.into(); }
                             if let Some(session) = &request.native_session { session.bind(&thread, true)?; }
-                            None
                         }
-                        _ => None,
-                    };
-                    if let Some(next) = next { input.write_all(format!("{next}\n").as_bytes()).await.map_err(|_| "Could not send the Codex request")?; }
+                        Kind::Interrupt => {}
+                    }
                     continue;
                 }
                 if value.get("id").is_some() && value["method"].is_string() {
                     if let Some(response) = questions.codex(&value, &thread) {
-                        if let Some(response) = response { input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
+                        if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
                         continue;
                     }
                     if let Some((response, event)) = visualizer.codex_response(&value, &thread) {
                         if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
-                        input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
                         continue;
                     }
                     if let Some((response, events)) = plan_response(&value, &thread, &mut decoder) {
                         for event in events { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
-                        input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex plan")?;
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex plan")?;
                         continue;
                     }
                     // Full-access runs do not need approvals. Unsupported interactions
                     // fail explicitly instead of hanging or handling account secrets.
                     let response = json!({"id":value["id"],"error":{"code":-32601,"message":"This interaction is unavailable in Agent Studio. Ask the user in your text reply."}});
-                    input.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex tool")?;
+                    process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex tool")?;
                     continue;
                 }
                 if thread.is_empty() { continue; }
@@ -273,17 +327,21 @@ pub async fn run(
                 }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
                     let status = value["params"]["turn"]["status"].as_str().unwrap_or_default();
+                    // An interrupted turn leaves the thread loaded for the next reply.
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }
-                    if status != "completed" { return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { return Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    if status != "completed" { process.healthy = false; return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     // The billing route may only be available while this exact thread is loaded.
                     // Optional read failure must never turn a successful reply into an error.
+                    let usage_id = process.next_id;
+                    process.next_id += 1;
                     let estimate = async {
-                        input.write_all(format!("{}\n", json!({"id":7,"method":"account/usage/read","params":{"threadId":thread}})).as_bytes()).await.ok()?;
-                        while let Ok(Some(line)) = output.next_line().await {
+                        process.stdin.write_all(format!("{}\n", json!({"id":usage_id,"method":"account/usage/read","params":{"threadId":thread}})).as_bytes()).await.ok()?;
+                        while let Some(line) = process.lines.recv().await {
+                            let Line::Out(line) = line else { continue; };
                             if line.len() > 2_000_000 { return None; }
                             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue; };
-                            if v["id"] == 7 {
+                            if v["id"] == usage_id {
                                 let usage = &v["result"]["threadUsage"];
                                 return (usage["threadId"] == thread).then(|| usage.clone());
                             }

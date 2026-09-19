@@ -65,6 +65,7 @@
     detectProviders,
     runAgent,
     cancelRun,
+    releaseConversation,
     signIn,
     openLink,
     getInstallation,
@@ -150,6 +151,13 @@
     type ChatImage,
   } from '$lib/images';
   import {
+    enqueueMessage,
+    maxQueuedMessages,
+    queuedPreview,
+    restoreToDraft,
+    type QueuedMessage,
+  } from '$lib/queue';
+  import {
     replySettingsChanged,
     replySwitches,
     selectedModelName,
@@ -228,6 +236,8 @@
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
   let run = $state<{ id: string; conversationId: string } | null>(null);
+  // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
+  let queued = $state<Record<string, QueuedMessage[]>>({});
   let selectedArtifact = $state<Artifact | null>(null);
   let artifactMode = $state<'modal' | 'panel'>('modal');
   let artifactConversationId = $state<string | null>(null);
@@ -554,6 +564,21 @@
       !!selectedStatus?.installed &&
       selectedStatus.auth === 'ready',
   );
+  const activeQueue = $derived(activeId ? (queued[activeId] ?? []) : []);
+  // A message may wait for the running reply of the open conversation.
+  const canQueue = $derived(
+    loaded &&
+      !!active &&
+      activeRunning &&
+      !stopping &&
+      !imagesLoading &&
+      (!attachedImages.length || imagesSupported) &&
+      !selectingLocation &&
+      !locationPending &&
+      (desktop() || paired) &&
+      (desktop() || online) &&
+      activeQueue.length < maxQueuedMessages,
+  );
   const viewTitle = $derived(
     {
       chat: active?.title ?? 'New conversation',
@@ -735,6 +760,7 @@
             localRuns: () => (run ? [run.id] : []),
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
+              queued = {};
               const previousView = view;
               workspace = value;
               connectionStatuses = {};
@@ -1576,6 +1602,9 @@
       if (runId)
         await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
       if (session !== workspaceSession) return;
+      delete queued[target.id];
+      await releaseConversation(target.id, target.settings.connectionId).catch(() => {});
+      if (session !== workspaceSession) return;
       await cancelTitle(target.id).catch(() => {});
       if (session !== workspaceSession) return;
       workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
@@ -1649,11 +1678,48 @@
     composerInput?.focus();
     void attachImages(files);
   }
-  async function send(retry = false) {
+  function returnQueuedToDraft(id: string, only?: string) {
+    const items = queued[id] ?? [];
+    const returning = only ? items.filter((m) => m.id === only) : items;
+    if (!returning.length) return;
+    const remaining = only ? items.filter((m) => m.id !== only) : [];
+    if (remaining.length) queued[id] = remaining;
+    else delete queued[id];
+    if (activeId !== id) return;
+    const restored = restoreToDraft(returning, prompt, attachedImages, maxImagesPerMessage);
+    prompt = restored.draft;
+    attachedImages = restored.images;
+    attachmentError = restored.droppedImages
+      ? `${restored.droppedImages} queued image${restored.droppedImages === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`
+      : '';
+    void tick().then(() => composerInput?.focus());
+  }
+  // Send the next queued message once the running reply completes. A stopped or failed
+  // reply returns queued messages to the composer instead of sending into a broken state.
+  $effect(() => {
+    const id = activeId;
+    const items = id ? queued[id] : undefined;
+    const busy = activeRunning || !!run || stopping;
+    if (!id || !items?.length || busy) return;
+    const last = active?.messages.at(-1);
+    const ready = last?.role === 'assistant' && last.status === 'complete';
+    const failed =
+      !last || last.role !== 'assistant' || ['cancelled', 'error'].includes(last.status);
+    const sendable = canSend;
+    untrack(() => {
+      if (ready && sendable) {
+        const [next, ...rest] = items;
+        if (rest.length) queued[id] = rest;
+        else delete queued[id];
+        void send(false, next);
+      } else if (failed) returnQueuedToDraft(id);
+    });
+  });
+  async function send(retry = false, queuedMessage?: QueuedMessage) {
     if (preparingCommand) return;
     const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
-    if (!retry) {
+    if (!retry && !queuedMessage) {
       const draft = prompt,
         selected = activeId;
       preparingCommand = true;
@@ -1665,14 +1731,33 @@
       if (session !== workspaceSession) return;
       if (!command || command.handled || prompt !== draft || activeId !== selected) return;
     }
-    if (!canSend || (!retry && !prompt.trim() && !attachedImages.length)) return;
-    if (!retry && attachedImages.length) {
+    const text = queuedMessage ? queuedMessage.text : prompt.trim();
+    const images = queuedMessage ? queuedMessage.images : attachedImages;
+    const skills = queuedMessage ? queuedMessage.skills : command?.skills;
+    if (!retry && !queuedMessage && activeId && activeRunning) {
+      // The reply is still running: hold this message and send it once the reply completes.
+      if (!canQueue) return;
+      const next = enqueueMessage(activeQueue, {
+        text,
+        images: structuredClone($state.snapshot(attachedImages)),
+        skills,
+      });
+      if (next.error) {
+        attachmentError = next.error;
+        return;
+      }
+      queued[activeId] = next.queue;
+      prompt = '';
+      clearImages();
+      void tick().then(() => composerInput?.focus());
+      return;
+    }
+    if (!canSend || (!retry && !text && !images.length)) return;
+    if (!retry && images.length) {
       // Keep the draft intact when the portable workspace cannot fit the images.
       const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
-      const addition = new TextEncoder().encode(
-        JSON.stringify($state.snapshot(attachedImages)),
-      ).length;
-      if (bytes + addition + prompt.length * 4 + 64000 > 20_000_000) {
+      const addition = new TextEncoder().encode(JSON.stringify($state.snapshot(images))).length;
+      if (bytes + addition + text.length * 4 + 64000 > 20_000_000) {
         attachmentError =
           'The saved workspace is nearly full (20 MB). Export and delete older chats, or remove an attachment before sending.';
         return;
@@ -1686,7 +1771,7 @@
         id: crypto.randomUUID(),
         settings: structuredClone($state.snapshot(selectedSettings)),
         location: selectedLocation ? { ...selectedLocation } : undefined,
-        title: prompt.trim().slice(0, 80) || 'Image conversation',
+        title: text.slice(0, 80) || 'Image conversation',
         titleStatus: 'pending',
         createdAt: now,
         updatedAt: now,
@@ -1705,21 +1790,21 @@
       conversation.messages.push({
         id: crypto.randomUUID(),
         role: 'user',
-        ...(command?.skills?.length ? { skills: command.skills } : {}),
+        ...(skills?.length ? { skills } : {}),
         blocks: [
           {
             type: 'markdown',
-            text: prompt.trim(),
+            text,
           },
         ],
-        ...(attachedImages.length
-          ? { images: structuredClone($state.snapshot(attachedImages)) }
-          : {}),
+        ...(images.length ? { images: structuredClone($state.snapshot(images)) } : {}),
         status: 'complete',
         createdAt: now,
       });
-      prompt = '';
-      clearImages();
+      if (!queuedMessage) {
+        prompt = '';
+        clearImages();
+      }
     }
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
@@ -2600,6 +2685,25 @@
                 void send();
               }}
             >
+              {#if activeQueue.length}<ul
+                  class="queued-messages"
+                  role="list"
+                  aria-label="Queued messages"
+                >
+                  {#each activeQueue as item (item.id)}<li class="queued-message" role="listitem">
+                      <span class="queued-badge">{activeRunning ? 'After this reply' : 'Queued'}</span>
+                      <span class="queued-text" title={item.text}>{queuedPreview(item)}</span>
+                      <button
+                        type="button"
+                        class="queued-remove"
+                        aria-label="Return queued message to the composer"
+                        title="Return to the composer"
+                        onclick={() => {
+                          if (activeId) returnQueuedToDraft(activeId, item.id);
+                        }}><X size={13} /></button
+                      >
+                    </li>{/each}
+                </ul>{/if}
               {#if attachedImages.length}<ImageAttachments
                   images={attachedImages}
                   remove={(id) => {
@@ -2624,7 +2728,9 @@
                 bind:this={composerInput}
                 aria-label="Message"
                 title="Enter to send · Shift + Enter for a new line · / for commands and skills"
-                placeholder={`Message ${selectedAgent.name}… Type / for commands`}
+                placeholder={activeRunning
+                  ? `Message ${selectedAgent.name} after this reply… Type / for commands`
+                  : `Message ${selectedAgent.name}… Type / for commands`}
                 bind:value={prompt}
                 rows="3"
                 maxlength="30000"
@@ -2715,6 +2821,12 @@
                     ><Square size={12} fill="currentColor" />{stopping
                       ? 'Stopping…'
                       : 'Stop response'}</button
+                  ><button
+                    class="send-button"
+                    type="submit"
+                    disabled={!canQueue || (!prompt.trim() && !attachedImages.length)}
+                    aria-label="Queue message"
+                    title="Send after the current reply"><ArrowUp size={19} /></button
                   >{:else}<button
                     class="send-button"
                     type="submit"

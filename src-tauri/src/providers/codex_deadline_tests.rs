@@ -5,49 +5,65 @@ use super::*;
 use crate::{protocol::RunEvent, providers::questions::Questions};
 use std::process::Stdio;
 
+const FIXTURE: &str = r#"
+$ErrorActionPreference = 'Stop'
+while ($null -ne ($line = [Console]::ReadLine())) {
+    $request = $line | ConvertFrom-Json
+    $id = $request.id
+    switch ($request.method) {
+        'initialize' { [Console]::WriteLine('{"id":' + $id + ',"result":{}}') }
+        'account/usage/read' { [Console]::WriteLine('{"id":' + $id + ',"result":{"threadUsage":{"threadId":"fixture","estimatedUsageCreditsMicros":1250000,"estimatedUsageUsdMicros":250000}}}') }
+        'thread/start' { [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}') }
+        'turn/start' {
+            $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
+            [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
+            if ($env:STUDIO_TEST_QUESTION -eq 'true') {
+                [Console]::WriteLine('{"id":10,"method":"item/tool/call","params":{"threadId":"fixture","tool":"studio_ask_user","arguments":{"questions":[{"id":"choice","question":"Continue?"}]}}}')
+            }
+            [Console]::WriteLine('{"method":"item/agentMessage/delta","params":{"threadId":"fixture","itemId":"reply' + $env:STUDIO_TEST_TURNS + '","delta":"READY' + $env:STUDIO_TEST_TURNS + '"}}')
+            if ($env:STUDIO_TEST_QUESTION -ne 'true') {
+                while (-not (Test-Path -LiteralPath $env:STUDIO_TEST_GATE)) { Start-Sleep -Milliseconds 10 }
+                [Console]::WriteLine('{"method":"thread/tokenUsage/updated","params":{"threadId":"fixture","turnId":"turn' + $env:STUDIO_TEST_TURNS + '","tokenUsage":{"total":{"inputTokens":10,"outputTokens":2},"last":{"inputTokens":10}}}}')
+                [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '","status":"completed"}}}')
+            }
+        }
+        'turn/interrupt' {
+            [Console]::WriteLine('{"id":' + $id + ',"result":{}}')
+            [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '","status":"interrupted"}}}')
+        }
+    }
+}
+"#;
+
+fn fixture(folder: &std::path::Path, gate: &std::path::Path, question: bool) -> Process {
+    let script = folder.join("provider.ps1");
+    std::fs::write(&script, FIXTURE).unwrap();
+    let exe = crate::providers::Executable {
+        provider: "codex".into(),
+        program: "powershell.exe".into(),
+        prefix: vec![],
+        wsl: None,
+    };
+    let mut command = exe.command();
+    command
+        .args(["-NoProfile", "-NonInteractive", "-File"])
+        .arg(script)
+        .env("STUDIO_TEST_GATE", gate)
+        .env("STUDIO_TEST_TURNS", "0")
+        .env("STUDIO_TEST_QUESTION", question.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().unwrap();
+    Process::new(exe, child, "fixture".into(), String::new()).unwrap()
+}
+
 #[tokio::test]
 async fn native_run_survives_two_hours_and_still_completes_or_cancels() {
     for waiting_for_answer in [false, true] {
         let folder = tempfile::tempdir().unwrap();
-        let script = folder.path().join("provider.ps1");
         let gate = folder.path().join("finish");
-        std::fs::write(&script, r#"
-$ErrorActionPreference = 'Stop'
-while ($null -ne ($line = [Console]::ReadLine())) {
-    $request = $line | ConvertFrom-Json
-    switch ($request.method) {
-        'initialize' { [Console]::WriteLine('{"id":1,"result":{}}') }
-        'account/usage/read' { [Console]::WriteLine('{"id":7,"result":{"threadUsage":{"threadId":"fixture","estimatedUsageCreditsMicros":1250000,"estimatedUsageUsdMicros":250000}}}') }
-        'thread/start' { [Console]::WriteLine('{"id":2,"result":{"thread":{"id":"fixture"}}}') }
-        'turn/start' {
-            [Console]::WriteLine('{"id":3,"result":{"turn":{"id":"turn"}}}')
-            if ($env:STUDIO_TEST_QUESTION -eq 'true') {
-                [Console]::WriteLine('{"id":10,"method":"item/tool/call","params":{"threadId":"fixture","tool":"studio_ask_user","arguments":{"questions":[{"id":"choice","question":"Continue?"}]}}}')
-            }
-            [Console]::WriteLine('{"method":"item/agentMessage/delta","params":{"threadId":"fixture","itemId":"reply","delta":"READY"}}')
-            if ($env:STUDIO_TEST_QUESTION -ne 'true') {
-                while (-not (Test-Path -LiteralPath $env:STUDIO_TEST_GATE)) { Start-Sleep -Milliseconds 10 }
-                [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn","status":"completed"}}}')
-            }
-        }
-        'turn/interrupt' {
-            [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn","status":"interrupted"}}}')
-        }
-    }
-}
-"#).unwrap();
-        let mut command = tokio::process::Command::new("powershell.exe");
-        command
-            .args(["-NoProfile", "-NonInteractive", "-File"])
-            .arg(script)
-            .env("STUDIO_TEST_GATE", &gate)
-            .env("STUDIO_TEST_QUESTION", waiting_for_answer.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .creation_flags(0x08000000);
-        let mut child = command.spawn().unwrap();
+        let mut process = fixture(folder.path(), &gate, waiting_for_answer);
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         let channel = EventSink::new(move |event| events.send(event).map_err(|e| e.to_string()));
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Controlled timer test"}]})).unwrap();
@@ -58,16 +74,18 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 .open(&request.run_id, None, channel.clone())
                 .unwrap();
             let result = run(
-                &mut child,
+                &mut process,
                 &request,
                 Some(&channel),
                 cancel,
                 &mut questions,
                 None,
+                false,
             )
             .await;
-            crate::runner::kill_tree(&mut child).await;
-            result
+            let alive = process.alive() && process.healthy;
+            process.kill().await;
+            (result, alive)
         });
         let mut question_pending = false;
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -76,7 +94,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                     RunEvent::Question { question } => {
                         question_pending = question.status == "pending"
                     }
-                    RunEvent::Progress { text, .. } if text == "READY" => break,
+                    RunEvent::Progress { text, .. } if text == "READY1" => break,
                     _ => {}
                 }
             }
@@ -96,11 +114,11 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         } else {
             std::fs::write(gate, "complete").unwrap();
         }
-        let result = tokio::time::timeout(Duration::from_secs(10), task)
+        let (result, alive) = tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .unwrap()
-            .unwrap()
             .unwrap();
+        let result = result.unwrap();
         assert_eq!(
             result.0,
             if waiting_for_answer {
@@ -109,7 +127,11 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 "complete"
             }
         );
-        assert_eq!(result.1, "READY");
+        assert_eq!(result.1, "READY1");
+        assert!(
+            alive,
+            "a confirmed interrupt or completion leaves the process usable for the next reply"
+        );
         if !waiting_for_answer {
             let mut usage = None;
             while let Ok(event) = received.try_recv() {
@@ -123,4 +145,64 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             assert_eq!(usage.cost_usd, None);
         }
     }
+}
+
+#[tokio::test]
+async fn a_parked_process_serves_the_next_reply_without_restarting_the_thread() {
+    let folder = tempfile::tempdir().unwrap();
+    let gate = folder.path().join("finish");
+    std::fs::write(&gate, "open").unwrap();
+    let mut process = fixture(folder.path(), &gate, false);
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| events.send(event).map_err(|e| e.to_string()));
+    let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"First"}]})).unwrap();
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let first = run(
+        &mut process,
+        &request,
+        Some(&channel),
+        CancellationToken::new(),
+        &mut questions,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, ("complete".into(), "READY1".into()));
+    assert_eq!(process.thread, "fixture");
+    assert_eq!(process.reported_model.as_deref(), Some("fixture-model"));
+    process.turns += 1;
+    process.park();
+    process.claim();
+    let mut second_request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"First"},{"role":"assistant","text":"READY1"},{"role":"user","text":"Second"}]})).unwrap();
+    second_request.native_session = None;
+    let mut questions = Questions::default()
+        .open(&second_request.run_id, None, channel.clone())
+        .unwrap();
+    let second = run(
+        &mut process,
+        &second_request,
+        Some(&channel),
+        CancellationToken::new(),
+        &mut questions,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second, ("complete".into(), "READY2".into()));
+    assert!(process.alive() && process.healthy);
+    let mut models = vec![];
+    while let Ok(event) = received.try_recv() {
+        if let RunEvent::Usage { usage } = event {
+            models.push(usage.model);
+        }
+    }
+    assert!(
+        models.iter().all(|m| m.as_deref() == Some("fixture-model")),
+        "the reused thread keeps reporting its model: {models:?}"
+    );
+    process.kill().await;
 }
