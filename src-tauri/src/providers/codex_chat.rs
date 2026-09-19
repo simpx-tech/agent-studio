@@ -134,6 +134,7 @@ enum Kind {
     Thread,
     Turn,
     Interrupt,
+    Steer,
 }
 
 async fn send(
@@ -169,6 +170,7 @@ pub async fn run(
     let request = &mut effective;
     let mut model_pages = 0;
     let mut pending: HashMap<u64, Kind> = HashMap::new();
+    let mut steering = HashMap::new();
     let mut decoder = Decoder::default();
     let mut thread = String::new();
     let mut turn = String::new();
@@ -207,6 +209,7 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !cancelling => {
+                questions.steering.ready(false);
                 if thread.is_empty() || turn.is_empty() {
                     process.healthy = false;
                     return Ok(("cancelled".into(), decoder.text));
@@ -233,6 +236,15 @@ pub async fn run(
                 questions.delivered(delivery, result);
                 if failed { process.healthy = false; return Err("Could not send answers to Codex.".into()); }
             },
+            Some(delivery) = questions.steering.rx.recv(), if !cancelling => {
+                let id = process.next_id;
+                let result = send(process, &mut pending, Kind::Steer, "turn/steer", json!({
+                    "threadId":thread, "expectedTurnId":turn,
+                    "input":[{"type":"text","text":delivery.input.text,"text_elements":[]}]
+                })).await;
+                if result.is_ok() { steering.insert(id, delivery); }
+                else { questions.steering.delivered(delivery, result); process.healthy = false; return Err("Could not send steering to Codex.".into()); }
+            },
             line = process.lines.recv() => {
                 let Some(line) = line else { process.healthy = false; return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
                 let Line::Out(line) = line else { continue; };
@@ -240,6 +252,14 @@ pub async fn run(
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
                 if let Some(id) = value["id"].as_u64().filter(|_| value.get("method").is_none()) {
                     let Some(kind) = pending.remove(&id) else { continue; };
+                    if kind == Kind::Steer {
+                        if let Some(delivery) = steering.remove(&id) {
+                            let result = if value["result"]["turnId"] == turn && value.get("error").is_none() { Ok(()) }
+                            else { Err("Codex did not accept steering for this reply. It may have ended, or this CLI version may not support steering.".into()) };
+                            questions.steering.delivered(delivery, result);
+                        }
+                        continue;
+                    }
                     if kind == Kind::Interrupt { continue; }
                     if value["error"].is_object() {
                         process.healthy = false;
@@ -289,8 +309,9 @@ pub async fn run(
                         Kind::Turn => {
                             if let Some(id) = value["result"]["turn"]["id"].as_str() { turn = id.into(); }
                             if let Some(session) = &request.native_session { session.bind(&thread, true)?; }
+                            questions.steering.ready(!turn.is_empty() && !cancelling);
                         }
-                        Kind::Interrupt => {}
+                        Kind::Interrupt | Kind::Steer => {}
                     }
                     continue;
                 }
@@ -328,6 +349,10 @@ pub async fn run(
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
+                    if value["params"]["turn"]["id"] != turn { continue; }
+                    questions.steering.ready(false);
+                    // Never leave unacknowledged input running invisibly in a parked process.
+                    if !steering.is_empty() { process.healthy = false; }
                     let status = value["params"]["turn"]["status"].as_str().unwrap_or_default();
                     // An interrupted turn leaves the thread loaded for the next reply.
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }

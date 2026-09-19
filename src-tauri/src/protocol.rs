@@ -38,6 +38,9 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    Steering {
+        steering: crate::providers::steering::Receipt,
+    },
     AccountUsage {
         #[serde(rename = "accountUsage")]
         account_usage: crate::spend::Observation,

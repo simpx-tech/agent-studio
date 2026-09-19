@@ -404,14 +404,20 @@ async fn stream_turn(
     let interrupt_deadline = tokio::time::sleep(crate::pool::INTERRUPT_GRACE);
     tokio::pin!(interrupt_deadline);
     let mut interrupting = false;
+    let mut steering: HashMap<String, crate::providers::steering::Delivery> = HashMap::new();
     let output_limit = request.output_line_limit();
     let mut diagnostics = String::new();
     let deadline = response_deadline(timeout);
     tokio::pin!(deadline);
     loop {
+        let (answer_rx, steering_rx) = questions
+            .as_mut()
+            .map(|q| (&mut q.rx, &mut q.steering.rx))
+            .unzip();
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !interrupting => {
+                if let Some(q) = &questions { q.steering.ready(false); }
                 if persistent && prompt_sent && stdin_open {
                     // Ask the CLI to end this turn in-band so it stays usable for the next reply.
                     let interrupt = format!("{{\"type\":\"control_request\",\"request_id\":\"studio-interrupt-{}\",\"request\":{{\"subtype\":\"interrupt\"}}}}\n", process.turns + 1);
@@ -432,13 +438,21 @@ async fn stream_turn(
             }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             _ = &mut deadline => { process.healthy = false; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
-            Some(delivery) = async { match questions.as_mut() { Some(q) => q.rx.recv().await, None => std::future::pending().await } } => {
+            Some(delivery) = async { match answer_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
                 let result = if stdin_open {
                     process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Claude.".to_string())
                 } else {
                     Err("Claude is no longer waiting for answers.".into())
                 };
                 questions.as_ref().unwrap().delivered(delivery, result);
+            },
+            Some(delivery) = async { match steering_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                let payload = serde_json::json!({"type":"user","uuid":delivery.input.id,"origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":delivery.input.text}]}});
+                if process.stdin.write_all(format!("{payload}\n").as_bytes()).await.is_err() {
+                    questions.as_ref().unwrap().steering.delivered(delivery, Err("Could not send steering to Claude.".into()));
+                    process.healthy = false; break Err(send_failed.into());
+                }
+                steering.insert(delivery.input.id.clone(), delivery);
             },
             line = process.lines.recv() => match line {
                 Some(Line::Err(line)) => {
@@ -453,6 +467,11 @@ async fn stream_turn(
                     let mut turn_ended = false;
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if value["type"] == "user" && value["parent_tool_use_id"].is_null() {
+                                if let Some(delivery) = value["uuid"].as_str().and_then(|id| steering.remove(id)) {
+                                    questions.as_ref().unwrap().steering.delivered(delivery, Ok(()));
+                                }
+                            }
                             if value["type"] == "system" && value["subtype"] == "init" && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
                                     let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, false).map(|()| id.to_string()));
@@ -464,6 +483,7 @@ async fn stream_turn(
                                     if let Err(error) = session.bind(session.id(), true) { process.healthy = false; break Err(error); }
                                     session_received = true;
                                 }
+                                if let Some(q) = &questions { q.steering.ready(!interrupting); }
                             }
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
                                 if value["response"]["subtype"] != "success" { process.healthy = false; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
@@ -489,6 +509,13 @@ async fn stream_turn(
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
                     if turn_ended {
+                        if let Some(q) = &questions { q.steering.ready(false); }
+                        if !steering.is_empty() {
+                            // A late input can become Claude's next turn. Stop the owned process
+                            // before parking to avoid an unobserved follow-up and uncertain billing.
+                            process.healthy = false;
+                            process.kill().await;
+                        }
                         if persistent {
                             if interrupting {
                                 // An interrupted turn reports an execution error; the CLI stays usable.

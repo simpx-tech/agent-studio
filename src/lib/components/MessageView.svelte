@@ -108,6 +108,16 @@
     {:else}
       <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
       <Reasoning blocks={message.blocks} />
+      {#if message.steering?.length}
+        <div class="steering-history" aria-label="Steering messages">
+          {#each message.steering as input (input.id)}
+            <div class="steering-message">
+              <small>You · Steered this reply</small>
+              <p>{input.text}</p>
+            </div>
+          {/each}
+        </div>
+      {/if}
       {#each content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
@@ -183,6 +193,20 @@
 </article>
 
 <style>
+  .steering-history {
+    margin-block: 10px;
+  }
+  .steering-message {
+    border-left: 2px solid var(--line);
+    padding: 4px 12px;
+    margin-block: 8px;
+  }
+  .steering-message p {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 3px 0;
+    font-size: 13px;
+  }
   .response-extras {
     display: flex;
     flex-wrap: wrap;

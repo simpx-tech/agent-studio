@@ -31,9 +31,69 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"id":' + $id + ',"result":{}}')
             [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '","status":"interrupted"}}}')
         }
+        'turn/steer' {
+            if ($request.params.threadId -ne 'fixture' -or $request.params.expectedTurnId -ne ('turn' + $env:STUDIO_TEST_TURNS)) { exit 9 }
+            if ($request.params.input[0].text -eq 'Reject this') {
+                [Console]::WriteLine('{"id":' + $id + ',"error":{"code":-32600,"message":"No active turn"}}')
+            } else {
+                [Console]::WriteLine('{"id":' + $id + ',"result":{"turnId":"turn' + $env:STUDIO_TEST_TURNS + '"}}')
+            }
+        }
     }
 }
 "#;
+
+#[tokio::test]
+async fn steering_ack_rejection_and_stop_use_the_same_native_turn() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut process = fixture(folder.path(), &folder.path().join("unused"), true);
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Wait"}]})).unwrap();
+    let hub = Questions::default();
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    let run_id = request.run_id.clone();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let task = tokio::spawn(async move {
+        let result = run(
+            &mut process,
+            &request,
+            Some(&channel),
+            cancel,
+            &mut questions,
+            None,
+            false,
+        )
+        .await;
+        let healthy = process.healthy;
+        process.kill().await;
+        (result, healthy)
+    });
+    while let Some(e) = events.recv().await {
+        if matches!(e, RunEvent::Progress { .. }) {
+            break;
+        }
+    }
+    for text in ["Correction", "Reject this"] {
+        let result = hub
+            .1
+            .send(
+                &run_id,
+                None,
+                crate::providers::steering::Input {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    text: text.into(),
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), text == "Correction");
+    }
+    stop.cancel();
+    let (result, healthy) = task.await.unwrap();
+    assert_eq!(result.unwrap().0, "cancelled");
+    assert!(healthy);
+}
 
 fn fixture(folder: &std::path::Path, gate: &std::path::Path, question: bool) -> Process {
     let script = folder.join("provider.ps1");

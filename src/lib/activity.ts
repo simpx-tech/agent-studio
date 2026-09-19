@@ -5,6 +5,7 @@ import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
+import { steeringReceiptSchema, mergeSteering } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, maxReasoningBlocks, mergeReasoningBlocks } from './reasoning.ts';
 
@@ -100,6 +101,12 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
+  if (event.kind === 'steering') {
+    const parsed = steeringReceiptSchema.safeParse(event.steering);
+    if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
+      message.steering = mergeSteering(message.steering, [parsed.data]);
+    return;
+  }
   if (event.kind === 'reasoning') {
     const parsed = reasoningBlockSchema.safeParse({ ...event, type: 'reasoning' });
     if (message.role !== 'assistant' || !parsed.success) return;
@@ -212,6 +219,16 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'steering') {
+    const parsed = steeringReceiptSchema.safeParse(event.steering);
+    if (
+      parsed.success &&
+      !events.some((e) => e.kind === 'steering' && e.steering?.id === parsed.data.id) &&
+      events.filter((e) => e.kind === 'steering').length < 8
+    )
+      events.push({ kind: 'steering', steering: parsed.data });
+    return;
+  }
   if (event.kind === 'reasoning') {
     const parsed = reasoningBlockSchema.safeParse({ ...event, type: 'reasoning' });
     if (!parsed.success) return;

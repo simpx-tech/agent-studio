@@ -232,6 +232,7 @@ impl Session {
                                 && !m
                                     .text
                                     .starts_with("\n\nUser question responses (earlier context):\n")
+                                && !m.text.starts_with("\n\nUser steering accepted during this reply (earlier context):\n")
                         })
                 {
                     return Err("This conversation has messages the native session has not received. Start a new conversation to include the saved history.".into());

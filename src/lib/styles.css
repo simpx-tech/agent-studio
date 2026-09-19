@@ -1356,6 +1356,7 @@ code {
 }
 .composer-bottom {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   margin-top: 6px;
@@ -1482,12 +1483,16 @@ code {
   background: #def5b1;
   color: #162709;
 }
-.stop-button {
+.stop-button,
+.steer-button {
   font-size: 10px;
   border: 1px solid #788e5e;
   border-radius: 5px;
   padding: 8px 11px;
   color: #d1e2bb;
+}
+.steer-button {
+  font-size: 11px;
 }
 .queued-messages {
   list-style: none;

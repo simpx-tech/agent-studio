@@ -19,6 +19,7 @@ import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
 import { answerSchema } from '../src/lib/questions.ts';
+import { steeringInputSchema } from '../src/lib/steering.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z
@@ -35,10 +36,19 @@ const jobInput = z
       'context',
       'nativeInstructions',
       'answer',
+      'steer',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'steer' &&
+      !z
+        .object({ runId: uuid, connectionId: uuid, input: steeringInputSchema })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid steering request' });
     if (
       job.method === 'nativeInstructions' &&
       !z

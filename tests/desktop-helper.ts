@@ -389,6 +389,18 @@ export async function mockDesktop(page: Page, mode = 'success') {
             });
             return;
           }
+          if (command === 'steer_run' && mode === 'capabilities') {
+            const w = window as any;
+            (w.steeringSent ??= []).push(args);
+            if (w.holdSteering) await new Promise<void>((resolve) => (w.releaseSteering = resolve));
+            if (w.steeringFailure)
+              throw new Error('This reply has ended. Your steering was not sent.');
+            w.emitCapability({
+              kind: 'steering',
+              steering: { ...args.input, runId: args.runId, sequence: w.steeringSent.length },
+            });
+            return;
+          }
           if (command === 'run_agent') {
             localStorage.setItem('test-last-request', JSON.stringify(args.request));
             const turnCount = Number(localStorage.getItem('test-run-count') ?? 0) + 1;

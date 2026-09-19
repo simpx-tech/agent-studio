@@ -403,6 +403,18 @@ async fn answer_question(
         .await
 }
 #[tauri::command]
+async fn steer_run(
+    questions: State<'_, providers::questions::Questions>,
+    run_id: String,
+    connection_id: Option<String>,
+    input: providers::steering::Input,
+) -> Result<(), String> {
+    questions
+        .1
+        .send(&run_id, connection_id.as_deref(), input)
+        .await
+}
+#[tauri::command]
 async fn sign_in(
     app: tauri::AppHandle,
     provider: String,
@@ -560,6 +572,7 @@ pub fn run() {
             cancel_run,
             release_conversation,
             answer_question,
+            steer_run,
             sign_in,
             export_workspace
         ])

@@ -242,13 +242,14 @@ struct Run {
     tx: mpsc::UnboundedSender<Delivery>,
 }
 #[derive(Default, Clone)]
-pub struct Questions(Arc<Mutex<HashMap<String, Run>>>);
+pub struct Questions(Arc<Mutex<HashMap<String, Run>>>, pub super::steering::Hub);
 pub struct Delivery {
     pub payload: Value,
     request: Request,
     ack: oneshot::Sender<Result<(), String>>,
 }
 pub struct Session {
+    pub steering: super::steering::Session,
     hub: Questions,
     run_id: String,
     channel: EventSink,
@@ -274,12 +275,13 @@ impl Questions {
         runs.insert(
             run_id.into(),
             Run {
-                connection,
+                connection: connection.clone(),
                 entries: HashMap::new(),
                 tx,
             },
         );
         Ok(Session {
+            steering: self.1.open(run_id, connection, channel.clone()),
             hub: self.clone(),
             run_id: run_id.into(),
             channel,

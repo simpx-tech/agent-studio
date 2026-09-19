@@ -85,6 +85,29 @@ it('restores native pairing without sending its key through IPC and resumes hear
   ).toBe(true);
 });
 
+it('routes steering to the original remote connection without starting or falling back to a local run', async () => {
+  const connection = crypto.randomUUID(),
+    runId = crypto.randomUUID();
+  const transport = await fixture(connection);
+  await transport.resumeRelay();
+  const input = { id: crypto.randomUUID(), text: 'Check the tests first' };
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path.startsWith('v1/jobs/'))
+      return { status: 200, body: { status: 'complete', events: [] } };
+    return original(command, args);
+  });
+  await transport.steerRun(runId, input, connection);
+  const call = native.invoke.mock.calls.find(([, args]) => args?.path === 'v1/jobs');
+  expect(call?.[1].body.args).toEqual({ runId, input, connectionId: connection });
+  expect(call?.[1].body.method).toBe('steer');
+  expect(
+    native.invoke.mock.calls.some(
+      ([command]) => command === 'steer_run' || command === 'run_agent',
+    ),
+  ).toBe(false);
+});
+
 it('keeps a pending question when an older relay drops it from a successful save', async () => {
   const transport = await fixture();
   const workspace = initialWorkspace();

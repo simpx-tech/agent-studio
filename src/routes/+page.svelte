@@ -61,6 +61,7 @@
     readUsage,
     generateTitle,
     cancelTitle,
+    steerRun,
     saveWorkspace,
     detectProviders,
     runAgent,
@@ -238,6 +239,8 @@
   let run = $state<{ id: string; conversationId: string } | null>(null);
   // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
   let queued = $state<Record<string, QueuedMessage[]>>({});
+  let steeringPending = $state<string | null>(null);
+  let steeringAttempt: { runId: string; text: string; id: string } | undefined;
   let selectedArtifact = $state<Artifact | null>(null);
   let artifactMode = $state<'modal' | 'panel'>('modal');
   let artifactConversationId = $state<string | null>(null);
@@ -565,11 +568,29 @@
       selectedStatus.auth === 'ready',
   );
   const activeQueue = $derived(activeId ? (queued[activeId] ?? []) : []);
+  const steeringSupported = $derived(
+    observedReply?.settings?.provider === 'codex' || observedReply?.settings?.provider === 'claude',
+  );
+  const canSteer = $derived(
+    loaded &&
+      activeRunning &&
+      steeringSupported &&
+      !!observedReply?.runId &&
+      !stopping &&
+      !steeringPending &&
+      !imagesLoading &&
+      !attachedImages.length &&
+      !!prompt.trim() &&
+      !prompt.trimStart().startsWith('/') &&
+      (desktop() || (paired && online)) &&
+      (!selectedRemote || (paired && !syncError)),
+  );
   // A message may wait for the running reply of the open conversation.
   const canQueue = $derived(
     loaded &&
       !!active &&
       activeRunning &&
+      !steeringPending &&
       !stopping &&
       !imagesLoading &&
       (!attachedImages.length || imagesSupported) &&
@@ -1699,7 +1720,7 @@
   $effect(() => {
     const id = activeId;
     const items = id ? queued[id] : undefined;
-    const busy = activeRunning || !!run || stopping;
+    const busy = activeRunning || !!run || stopping || !!steeringPending;
     if (!id || !items?.length || busy) return;
     const last = active?.messages.at(-1);
     const ready = last?.role === 'assistant' && last.status === 'complete';
@@ -1715,7 +1736,33 @@
       } else if (failed) returnQueuedToDraft(id);
     });
   });
+  async function steer() {
+    if (!canSteer || !observedReply?.runId) return;
+    const reply = observedReply,
+      runId = reply.runId!,
+      draft = prompt,
+      selected = activeId,
+      session = workspaceSession;
+    const text = draft.trim();
+    if (steeringAttempt?.runId !== runId || steeringAttempt.text !== text)
+      steeringAttempt = { runId, text, id: crypto.randomUUID() };
+    const input = { id: steeringAttempt.id, text };
+    steeringPending = runId;
+    attachmentError = '';
+    try {
+      await steerRun(runId, input, reply.settings?.connectionId);
+      if (session !== workspaceSession) return;
+      if (activeId === selected && prompt === draft) prompt = '';
+      steeringAttempt = undefined;
+      saveSoon();
+    } catch (error) {
+      if (session === workspaceSession && activeId === selected) attachmentError = String(error);
+    } finally {
+      if (steeringPending === runId) steeringPending = null;
+    }
+  }
   async function send(retry = false, queuedMessage?: QueuedMessage) {
+    if (steeringPending) return;
     if (preparingCommand) return;
     const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
@@ -1785,7 +1832,23 @@
       conversation.archived = false;
       revealConversation(conversation);
     }
-    if (retry && conversation.messages.at(-1)?.role === 'assistant') conversation.messages.pop();
+    if (retry && conversation.messages.at(-1)?.role === 'assistant') {
+      if (conversation.messages.at(-1)?.steering?.length) {
+        // Preserve the steered attempt and its accepted inputs for portable history.
+        conversation.messages.push({
+          id: crypto.randomUUID(),
+          role: 'user',
+          status: 'complete',
+          createdAt: now,
+          blocks: [
+            {
+              type: 'markdown',
+              text: 'Continue the previous request, including my steering. Check existing results before repeating any work.',
+            },
+          ],
+        });
+      } else conversation.messages.pop();
+    }
     if (!retry) {
       conversation.messages.push({
         id: crypto.randomUUID(),
@@ -1874,6 +1937,7 @@
                 event.kind === 'visualization' ||
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
+                event.kind === 'steering' ||
                 (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               ) {
@@ -2817,7 +2881,11 @@
                     onclick={() => (templatesOpen = true)}><FileText size={16} />Templates</button
                   >
                 </div>
-                {#if activeRunning}<button
+                {#if activeRunning}
+                  {#if steeringSupported}<button type="button" class="steer-button" disabled={!canSteer} onclick={steer}
+                    title={attachedImages.length || prompt.trimStart().startsWith('/') ? 'Queue images, commands, and skills for the next reply' : 'Send text to the active reply'}
+                    >{steeringPending === observedReply?.runId ? 'Sending…' : 'Steer now'}</button>{/if}
+                  <button
                     class="stop-button"
                     type="button"
                     onclick={stop}

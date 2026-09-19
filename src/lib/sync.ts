@@ -3,6 +3,7 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeQuestions } from './questions.ts';
+import { mergeSteering } from './steering.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 
@@ -41,6 +42,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !equal(message.settings, previous.settings) ||
         (!previous.blocks.some((b) => b.type === 'reasoning') &&
           !previous.questions?.length &&
+          !previous.steering?.length &&
           !previous.fileChanges &&
           !previous.accountUsage &&
           previous.usage?.revision == null)
@@ -60,6 +62,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           : {}),
         ...(message.questions || previous.questions
           ? { questions: mergeQuestions(message.questions, previous.questions) }
+          : {}),
+        ...(message.steering || previous.steering
+          ? { steering: mergeSteering(message.steering, previous.steering) }
           : {}),
         ...(message.fileChanges || previous.fileChanges
           ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
@@ -136,6 +141,7 @@ function sameRun(
       ...(a.questions || b.questions
         ? { questions: mergeQuestions(a.questions, b.questions) }
         : {}),
+      ...(a.steering || b.steering ? { steering: mergeSteering(a.steering, b.steering) } : {}),
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
       ...(a.visualizations || b.visualizations
         ? { visualizations: mergeVisualizations(a.visualizations, b.visualizations) }
@@ -336,7 +342,15 @@ export type RelayJob = {
   source: string;
   target: string;
   method:
-    'run' | 'usage' | 'models' | 'title' | 'folders' | 'context' | 'nativeInstructions' | 'answer';
+    | 'run'
+    | 'usage'
+    | 'models'
+    | 'title'
+    | 'folders'
+    | 'context'
+    | 'nativeInstructions'
+    | 'answer'
+    | 'steer';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

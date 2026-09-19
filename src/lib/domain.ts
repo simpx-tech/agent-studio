@@ -8,6 +8,7 @@ import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
+import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import {
   workflowSchema,
@@ -191,6 +192,7 @@ export const messageSchema = z
     plan: planSchema.optional(),
     visualizations: visualizationsSchema.optional(),
     questions: questionsSchema.optional(),
+    steering: steeringSchema.optional(),
     fileChanges: fileChangesSchema.optional(),
     workflow: workflowProgressSchema.optional(),
     workflowDefinition: workflowSchema.optional(),
@@ -201,6 +203,12 @@ export const messageSchema = z
       !message.accountUsage ||
       (message.role === 'assistant' && message.accountUsage.runId === message.runId),
     { message: 'Account observation does not match its response run' },
+  )
+  .refine(
+    (message) =>
+      !message.steering?.length ||
+      (message.role === 'assistant' && message.steering.every((s) => s.runId === message.runId)),
+    { message: 'Steering does not match its response run' },
   );
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
@@ -248,6 +256,7 @@ export type RunEvent = TokenUsage & {
     | 'filechanges'
     | 'visualization'
     | 'question'
+    | 'steering'
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
@@ -259,6 +268,7 @@ export type RunEvent = TokenUsage & {
   plan?: Plan;
   visualization?: Visualization;
   question?: QuestionRequest;
+  steering?: SteeringReceipt;
   fileChanges?: FileChanges;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
@@ -297,12 +307,18 @@ export const messageText = (message: Message) =>
 export function historyFor(conversation: Conversation): RunRequest['messages'] {
   // Interrupted and failed responses never become fabricated assistant history.
   return conversation.messages
-    .filter((m) => m.role === 'user' || m.status === 'complete' || questionHistory(m.questions))
+    .filter(
+      (m) =>
+        m.role === 'user' ||
+        m.status === 'complete' ||
+        questionHistory(m.questions) ||
+        m.steering?.length,
+    )
     .map((m) => ({
       role: m.role === 'assistant' && m.status !== 'complete' ? ('user' as const) : m.role,
       text:
         (m.role === 'assistant' && m.status !== 'complete' ? '' : messageText(m)) +
-        (m.role === 'assistant' ? questionHistory(m.questions) : ''),
+        (m.role === 'assistant' ? questionHistory(m.questions) + steeringHistory(m.steering) : ''),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
       ...(m.role === 'assistant' && m.status === 'complete' && m.visualizations?.length

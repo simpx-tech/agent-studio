@@ -13,6 +13,7 @@ pub mod defaults;
 mod login_console;
 pub mod questions;
 pub mod sessions;
+pub mod steering;
 pub mod visualize;
 
 #[derive(Clone, Debug)]
@@ -891,6 +892,9 @@ pub async fn chat_command(
                 c.arg("--no-session-persistence");
             }
             c.args(["--input-format", "stream-json"]);
+            if request.tools_enabled() {
+                c.arg("--replay-user-messages");
+            }
             if request.tools_enabled() {
                 c.args([
                     "--tools",

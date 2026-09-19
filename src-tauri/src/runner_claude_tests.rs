@@ -24,6 +24,11 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         continue
     }
     if ($value.type -eq 'user') {
+        if ($open -and $value.uuid) {
+            if ($value.message.content[0].text -ne 'Race completion') { [Console]::WriteLine($line) }
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"STEERED"}')
+            continue
+        }
         if ($value.shouldQuery -eq $false) {
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}')
             continue
@@ -43,6 +48,65 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 "#;
+
+#[tokio::test]
+async fn steering_requires_the_human_echo_and_kills_unconfirmed_input_at_completion() {
+    for text in ["Correction", "Race completion"] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let first = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"}]),
+        );
+        let mut process = fixture(
+            root.path(),
+            first.native_session.as_ref().unwrap().id(),
+            true,
+            false,
+        );
+        let hub = Questions::default();
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+        let mut questions = hub.open(&first.run_id, None, channel.clone()).unwrap();
+        let run_id = first.run_id.clone();
+        let task = tokio::spawn(async move {
+            let result = stream_turn(
+                &mut process,
+                &first,
+                Some(&channel),
+                CancellationToken::new(),
+                None,
+                Some(&mut questions),
+                false,
+            )
+            .await;
+            let healthy = process.healthy;
+            process.kill().await;
+            (result, healthy)
+        });
+        while let Some(e) = events.recv().await {
+            if matches!(e, RunEvent::Progress { .. }) {
+                break;
+            }
+        }
+        let sent = hub
+            .1
+            .send(
+                &run_id,
+                None,
+                crate::providers::steering::Input {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    text: text.into(),
+                },
+            )
+            .await;
+        let (result, healthy) = task.await.unwrap();
+        assert_eq!(sent.is_ok(), text == "Correction");
+        assert_eq!(healthy, text == "Correction");
+        assert_eq!(result.unwrap().0, "complete");
+    }
+}
 
 /// The real CLI is launched with the binding's --session-id, so the fixture echoes it.
 fn fixture(

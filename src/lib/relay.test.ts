@@ -53,6 +53,40 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('routes bounded steering jobs only to their target host and rejects extra payload fields', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'steer',
+      args: {
+        runId: crypto.randomUUID(),
+        connectionId: crypto.randomUUID(),
+        input: { id: crypto.randomUUID(), text: 'Keep the current files' },
+      },
+    };
+    expect(
+      (await f.call('POST', 'jobs', { ...job, args: { ...job.args, threadId: 'caller-supplied' } }))
+        .status,
+    ).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.source)).body).toEqual([]);
+    const claimed = (await f.call('GET', 'jobs', undefined, f.target)).body;
+    expect(claimed[0].args).toEqual(job.args);
+    expect((await f.call('PUT', `jobs/${job.id}`, { status: 'complete' }, f.source)).status).toBe(
+      404,
+    );
+    expect(
+      (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [] }, f.target)).status,
+    ).toBe(200);
+  });
   it('carries bounded reasoning alongside a full activity checkpoint', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();
