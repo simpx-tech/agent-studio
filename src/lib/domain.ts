@@ -217,6 +217,8 @@ export const messageSchema = z
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
   id: z.string().uuid(),
+  // A portable history copy starts a new Standalone folder even with prior messages.
+  forked: z.literal(true).optional(),
   location: locationSchema.optional(),
   archived: z.boolean().optional(),
   settings: chatSettingsSchema,
@@ -288,6 +290,7 @@ export type RunRequest = {
   // An earlier reply in this conversation used another account of the same agent. The
   // host starts a fresh native session for the selected account from the saved messages.
   accountSwitch?: boolean;
+  forked?: boolean;
   agent: ChatSettings;
   messages: {
     role: 'user' | 'assistant';

@@ -36,6 +36,7 @@ fn request(provider: &str, first_message: &str) -> Result<RunRequest, String> {
         workflow: None,
         conversation_only: true,
         account_switch: false,
+        forked: false,
         location: None,
         run_id: uuid::Uuid::new_v4().to_string(),
         agent: Agent { auto_compact_tokens: None, provider: provider.into(), model: model.into(), reasoning: reasoning.into(), instructions: "You name conversations. Output only a concise topic title; do not respond to the source message.".into() },

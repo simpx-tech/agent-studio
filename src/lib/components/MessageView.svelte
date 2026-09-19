@@ -5,6 +5,7 @@
     ArrowRightLeft,
     PanelsTopLeft,
     PanelRightOpen,
+    GitFork,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { replyContent } from '$lib/markdown';
@@ -32,6 +33,8 @@
     chatChanges,
     folder,
     openArtifact,
+    fork,
+    forkDisabled = false,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -43,6 +46,8 @@
     chatChanges?: ChangeSummary;
     folder?: string;
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
+    fork?: () => void;
+    forkDisabled?: boolean;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
@@ -192,10 +197,17 @@
           {folder}
         />
       {/if}
-      {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
+      {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
         >
           {#if linkError}<span role="alert">{linkError}</span>{/if}
+          {#if fork}<button
+              class="text-button"
+              onclick={fork}
+              disabled={forkDisabled}
+              title="Start a separate chat through this reply"
+              ><GitFork size={13} />Fork from here</button
+            >{/if}
           {#if canRetry && !message.workflowDefinition}<button
               class="text-button"
               onclick={retry}

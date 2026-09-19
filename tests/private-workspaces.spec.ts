@@ -111,6 +111,35 @@ async function hostedWorkspaces(duplicateIds = false) {
 
 const pair = signInPwa;
 
+test('Viewer forks persist only in their authenticated workspace and retain offline host routing', async ({ page }) => {
+  const f = await hostedWorkspaces();
+  const [alice, bob] = f.users;
+  try {
+    const source = (await f.call(alice.token, 'GET', 'state')).workspace.conversations[0];
+    await page.goto(f.url);
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    await page.getByRole('button', { name: 'Fork conversation', exact: true }).click();
+    await expect(page.locator('.page-title')).toHaveText(`${source.title} (fork)`);
+    await expect.poll(async () => (await f.call(alice.token, 'GET', 'state')).workspace.conversations.length).toBe(2);
+    const chats = (await f.call(alice.token, 'GET', 'state')).workspace.conversations;
+    const fork = chats.find((c: { id: string }) => c.id !== source.id);
+    expect(fork.location).toEqual(source.location);
+    expect(fork.settings).toEqual(source.settings);
+    expect(fork.messages[0].blocks).toEqual(source.messages[0].blocks);
+    expect(chats.find((c: { id: string }) => c.id === source.id)).toEqual(source);
+    expect((await f.call(bob.token, 'GET', 'state')).workspace.conversations).toHaveLength(1);
+    expect((await f.call(f.ownerToken, 'GET', 'state')).workspace.conversations).toHaveLength(0);
+    await page.reload();
+    await page.getByRole('tab', { name: /^Active/ }).click();
+    await page.getByRole('button', { name: fork.title, exact: true }).click();
+    await expect(page.getByText('Alice private answer in this workspace.', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+  } finally {
+    await f.close();
+  }
+});
+
 test('workspace login gates startup, authentication, restoration, and expired sessions', async ({
   page,
   context,

@@ -902,7 +902,10 @@ export async function readUsage(
   return routed('usage', { provider, model, force, connectionId }, connectionId);
 }
 export async function readContext(
-  settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> & { conversationId?: string },
+  settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> & {
+    conversationId?: string;
+    forked?: boolean;
+  },
   location?: ChatLocation,
 ): Promise<ContextSnapshot> {
   return routed(
@@ -913,6 +916,7 @@ export async function readContext(
       connectionId: settings.connectionId,
       location: location ?? null,
       conversationId: settings.conversationId ?? null,
+      forked: settings.forked ?? false,
     },
     settings.connectionId,
   );

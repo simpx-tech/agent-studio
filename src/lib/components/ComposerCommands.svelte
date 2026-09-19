@@ -18,6 +18,7 @@
     prompt = $bindable(),
     settings,
     conversationId,
+    forked = false,
     location,
     available,
     busy,
@@ -28,6 +29,7 @@
     prompt: string;
     settings: ChatSettings;
     conversationId?: string;
+    forked?: boolean;
     location?: ChatLocation;
     available: boolean;
     busy: boolean;
@@ -43,7 +45,7 @@
   let queryError = $state('');
   let chosen = $state<ComposerCommand>();
   let pending: Promise<ContextSnapshot> | undefined;
-  const key = $derived(contextKey({ ...settings, conversationId }, location));
+  const key = $derived(contextKey({ ...settings, conversationId, forked }, location));
   const token = $derived(commandToken(prompt));
   const query = $derived(commandQuery(prompt, caret));
   const choices = $derived(
@@ -80,6 +82,7 @@
         model: settings.model,
         connectionId: settings.connectionId,
         conversationId,
+        forked,
       };
       snapshot = contextCache.peek(selected, location);
       loading = true;
