@@ -226,6 +226,12 @@ impl Default for ClaudeInputLifetime {
     }
 }
 impl ClaudeInputLifetime {
+    pub fn with_context(context_pending: bool) -> Self {
+        Self {
+            context_pending,
+            ..Self::default()
+        }
+    }
     pub fn ended(&mut self, value: &Value) -> bool {
         // The non-human shouldQuery=false history message emits a zero-turn
         // result before the queued human message. It does not end this run.

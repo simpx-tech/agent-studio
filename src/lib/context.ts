@@ -65,6 +65,7 @@ export const contextStatuses: Record<ContextEntry['status'], string> = {
 
 export type ContextSelection = Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> & {
   conversationId?: string;
+  forked?: boolean;
 };
 export function contextKey(settings: ContextSelection, location?: ChatLocation): string {
   return JSON.stringify([
@@ -76,6 +77,7 @@ export function contextKey(settings: ContextSelection, location?: ChatLocation):
     location?.executionEnvironmentId ?? location?.environmentId ?? null,
     location?.path ?? null,
     location?.path ? null : (settings.conversationId ?? null),
+    location?.path ? false : !!settings.forked,
   ]);
 }
 

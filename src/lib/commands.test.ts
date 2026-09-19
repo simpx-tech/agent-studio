@@ -35,9 +35,13 @@ describe('composer commands', () => {
   it('uses only confirmed skills for the selected provider and preserves duplicate source identities', () => {
     const options = commandChoices('codex', catalog);
     expect(options.filter((c) => c.kind === 'skill').map((c) => c.name)).toEqual(['/skill-0']);
-    expect(commandChoices('claude', catalog).every((c) => c.kind === 'app')).toBe(true);
     expect(
-      commandChoices('codex', { ...catalog, commands: undefined }).every((c) => c.kind === 'app'),
+      commandChoices('claude', catalog).every((c) => c.kind === 'app' || c.kind === 'compact'),
+    ).toBe(true);
+    expect(
+      commandChoices('codex', { ...catalog, commands: undefined }).every(
+        (c) => c.kind === 'app' || c.kind === 'compact',
+      ),
     ).toBe(true);
     const duplicate = {
       ...catalog,
@@ -55,7 +59,7 @@ describe('composer commands', () => {
       ],
     });
     expect(native.some((c) => c.name === '/plugin:review')).toBe(true);
-    expect(native.some((c) => c.name === '/compact')).toBe(false);
+    expect(native.find((c) => c.name === '/compact')?.kind).toBe('compact');
   });
   it('preserves skill identity in saved, exported and relayed user history but excludes assistant references', () => {
     const workspace = initialWorkspace(),

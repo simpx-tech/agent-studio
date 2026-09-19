@@ -28,8 +28,10 @@ describe('context cache', () => {
     expect(cache.peek(b)).toBeUndefined();
     expect(cache.peek(selected)).toBeUndefined();
     expect(cache.peek(a)).toBeDefined();
+    expect(cache.peek({ ...a, forked: true })).toBeUndefined();
     await cache.refresh(a, folder);
     expect(cache.peek(b, folder)).toBeDefined();
+    expect(cache.peek({ ...b, forked: true }, folder)).toBeDefined();
   });
   it('retains the previous result while refreshing, shares pending work, and preserves it on failure', async () => {
     const read = vi

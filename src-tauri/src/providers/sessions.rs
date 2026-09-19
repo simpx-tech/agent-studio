@@ -239,6 +239,9 @@ impl Session {
                 }
             }
         }
+        if request.compact && (previous.is_none() || switched_account) {
+            return Err("Send a message with this account first to establish its native session before compacting.".into());
+        }
         // Retrying the same request under another account still continues the earlier
         // attempt's work instead of treating it as a new independent task.
         let retry = previous.as_ref().is_some_and(|p| p.history == history);
@@ -327,6 +330,30 @@ mod tests {
     }
     fn saved(session: &Session) -> Record {
         serde_json::from_slice(&std::fs::read(&session.path).unwrap()).unwrap()
+    }
+    #[test]
+    fn manual_compaction_requires_an_existing_binding_and_cannot_switch_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        r.compact = true;
+        r.messages[0].text = "/compact".into();
+        assert!(Session::prepare(root.path(), &r).is_err());
+        r.compact = false;
+        let session = Session::prepare(root.path(), &r).unwrap().unwrap();
+        session.bind(session.id(), true).unwrap();
+        let before = std::fs::read(&session.path).unwrap();
+        let path = session.path.clone();
+        drop(session);
+        r.compact = true;
+        assert!(Session::prepare(root.path(), &r).unwrap().unwrap().resumed);
+        let mut previous: Record = serde_json::from_slice(&before).unwrap();
+        previous.account = "another-account".into();
+        previous.scope = "another-scope".into();
+        std::fs::write(&path, serde_json::to_vec(&previous).unwrap()).unwrap();
+        let foreign = std::fs::read(&path).unwrap();
+        r.account_switch = true;
+        assert!(Session::prepare(root.path(), &r).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), foreign);
     }
     #[tokio::test]
     async fn inspection_is_read_only_and_checks_the_same_profile_scope_as_execution() {

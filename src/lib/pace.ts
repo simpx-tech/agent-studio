@@ -155,6 +155,7 @@ export function contextPace(
   for (let i = (conversation?.messages.length ?? 0) - 1; i >= 0 && points.length < 6; i--) {
     const message = conversation!.messages[i];
     if (message.role !== 'assistant') continue;
+    if (message.compact || message.compactions?.some((c) => c.status === 'complete')) break;
     if (!points.length && message.status === 'running' && message.usage?.contextInput == null)
       continue;
     const count = message.usage?.contextInput;

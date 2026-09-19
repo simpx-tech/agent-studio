@@ -4,6 +4,7 @@ import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeQuestions } from './questions.ts';
 import { mergeSteering } from './steering.ts';
+import { mergeCompactions } from './compaction.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 
@@ -43,6 +44,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         (!previous.blocks.some((b) => b.type === 'reasoning') &&
           !previous.questions?.length &&
           !previous.steering?.length &&
+          !previous.compactions?.length &&
           !previous.fileChanges &&
           !previous.accountUsage &&
           previous.usage?.revision == null)
@@ -50,6 +52,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         return message;
       return {
         ...message,
+        ...(message.compactions || previous.compactions
+          ? { compactions: mergeCompactions(message.compactions, previous.compactions) }
+          : {}),
         blocks: mergeActivityBlocks(
           message.blocks,
           previous.blocks.filter((b) => b.type === 'reasoning'),
@@ -128,6 +133,9 @@ function sameRun(
       score(a) > score(b) ? a : score(b) > score(a) ? b : at.length >= bt.length ? a : b;
     messages.push({
       ...selected,
+      ...(a.compactions || b.compactions
+        ? { compactions: mergeCompactions(a.compactions, b.compactions) }
+        : {}),
       ...(a.usage || b.usage
         ? { usage: latestTokenUsage(selected.usage, selected === a ? b.usage : a.usage) }
         : {}),

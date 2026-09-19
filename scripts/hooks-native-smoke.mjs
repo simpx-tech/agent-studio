@@ -121,7 +121,10 @@ try {
   await page.evaluate(() => (window.hooksReload = true));
   await page.cdp('Page.reload');
   await page.waitFor(
-    () => !window.hooksReload && document.querySelector('#conversation-tab-history'),
+    () =>
+      !window.hooksReload &&
+      document.querySelector('[aria-label="New conversation"]')?.disabled === false &&
+      document.querySelector('#conversation-tab-history'),
   );
   await page.click('#conversation-tab-history');
   await page.waitFor(
@@ -136,6 +139,12 @@ try {
       [...document.querySelectorAll('.conversation-item')]
         .find((e) => e.textContent.includes(title))
         .click(),
+    chat.title,
+  );
+  await page.waitFor(
+    (title) =>
+      document.querySelector('.conversation-item.current')?.textContent.includes(title) &&
+      document.querySelector('[aria-label="Model context"]')?.disabled === false,
     chat.title,
   );
   await page.button('Model context');

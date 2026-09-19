@@ -5,6 +5,7 @@
     ArrowRightLeft,
     PanelsTopLeft,
     PanelRightOpen,
+    GitFork,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { replyContent } from '$lib/markdown';
@@ -13,6 +14,7 @@
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import Reasoning from './Reasoning.svelte';
+  import { compactionLabel } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
@@ -31,6 +33,8 @@
     chatChanges,
     folder,
     openArtifact,
+    fork,
+    forkDisabled = false,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -42,6 +46,8 @@
     chatChanges?: ChangeSummary;
     folder?: string;
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
+    fork?: () => void;
+    forkDisabled?: boolean;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
@@ -99,7 +105,9 @@
           ><i class="pulse-dot"></i>
           {message.questions?.some((q) => q.status === 'pending')
             ? 'Waiting for you'
-            : 'Responding'}</span
+            : message.compact || message.compactions?.at(-1)?.status === 'running'
+              ? 'Compacting context'
+              : 'Responding'}</span
         >{/if}
     </div>
     {#if message.role === 'user'}
@@ -108,6 +116,17 @@
     {:else}
       <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
       <Reasoning blocks={message.blocks} />
+      {#if message.compactions?.length}
+        <div class="compaction-history" aria-label="Context compaction">
+          {#each message.compactions as item (item.id)}
+            <p role="status">
+              {compactionLabel(item, message.status)}{#if item.preTokens != null}
+                <span>{` · ${item.preTokens.toLocaleString()} tokens before${item.postTokens != null ? ` → ${item.postTokens.toLocaleString()} after` : ''}`}</span>
+              {/if}
+            </p>
+          {/each}
+        </div>
+      {/if}
       {#if message.steering?.length}
         <div class="steering-history" aria-label="Steering messages">
           {#each message.steering as input (input.id)}
@@ -178,10 +197,17 @@
           {folder}
         />
       {/if}
-      {#if message.status !== 'running' && ((canRetry && !message.workflowDefinition) || linkError)}<div
+      {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError)}<div
           class="message-actions"
         >
           {#if linkError}<span role="alert">{linkError}</span>{/if}
+          {#if fork}<button
+              class="text-button"
+              onclick={fork}
+              disabled={forkDisabled}
+              title="Start a separate chat through this reply"
+              ><GitFork size={13} />Fork from here</button
+            >{/if}
           {#if canRetry && !message.workflowDefinition}<button
               class="text-button"
               onclick={retry}
@@ -193,6 +219,14 @@
 </article>
 
 <style>
+  .compaction-history {
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .compaction-history p {
+    margin: 4px 0;
+  }
   .steering-history {
     margin-block: 10px;
   }

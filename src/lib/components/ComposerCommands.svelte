@@ -18,6 +18,7 @@
     prompt = $bindable(),
     settings,
     conversationId,
+    forked = false,
     location,
     available,
     busy,
@@ -28,6 +29,7 @@
     prompt: string;
     settings: ChatSettings;
     conversationId?: string;
+    forked?: boolean;
     location?: ChatLocation;
     available: boolean;
     busy: boolean;
@@ -43,7 +45,7 @@
   let queryError = $state('');
   let chosen = $state<ComposerCommand>();
   let pending: Promise<ContextSnapshot> | undefined;
-  const key = $derived(contextKey({ ...settings, conversationId }, location));
+  const key = $derived(contextKey({ ...settings, conversationId, forked }, location));
   const token = $derived(commandToken(prompt));
   const query = $derived(commandQuery(prompt, caret));
   const choices = $derived(
@@ -80,6 +82,7 @@
         model: settings.model,
         connectionId: settings.connectionId,
         conversationId,
+        forked,
       };
       snapshot = contextCache.peek(selected, location);
       loading = true;
@@ -158,12 +161,26 @@
     return picker?.handleKeydown(event) ?? false;
   }
   export async function submission(): Promise<
-    { handled: boolean; skills?: SkillReference[] } | undefined
+    { handled: boolean; skills?: SkillReference[]; compact?: boolean } | undefined
   > {
     error = '';
     const match = commandToken(prompt);
     if (!match) return { handled: false };
     const name = `/${match[1]}`;
+    if (name === '/compact') {
+      if (!conversationId || busy || !available || settings.provider === 'gemini') {
+        error =
+          'Compaction is available in an idle Claude or Codex conversation on a connected computer.';
+        return;
+      }
+      if (settings.provider === 'codex' && prompt.trim() !== '/compact') {
+        error =
+          'Codex compaction does not accept additional instructions. Use /compact on its own.';
+        return;
+      }
+      open = false;
+      return { handled: false, compact: true };
+    }
     if (busy && name === '/instructions') {
       error = 'Wait for the reply to finish before editing instructions.';
       return;

@@ -972,6 +972,7 @@ pub async fn read(
     model: String,
     location: Option<ChatLocation>,
     conversation_id: Option<String>,
+    forked: bool,
 ) -> Result<ContextSnapshot, String> {
     if !crate::providers::valid_provider(&provider) || model.len() > 200 {
         return Err("Invalid context selection".into());
@@ -985,7 +986,7 @@ pub async fn read(
     let standalone = if location.is_none() {
         conversation_id
             .as_deref()
-            .map(|id| crate::standalone::lookup(&data, id, &provider, None))
+            .map(|id| crate::standalone::context_directory(&data, id, &provider, forked))
             .transpose()?
             .flatten()
     } else {

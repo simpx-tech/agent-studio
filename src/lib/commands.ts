@@ -6,7 +6,7 @@ export type ComposerCommand = {
   name: string;
   detail: string;
   title?: string;
-  kind: 'app' | 'native' | 'skill';
+  kind: 'app' | 'native' | 'skill' | 'compact';
   skill?: SkillReference;
 };
 export const appCommands: ComposerCommand[] = [
@@ -30,7 +30,6 @@ export const appCommands: ComposerCommand[] = [
 // CLI process may restart between replies, so do not present them as working commands.
 export const sessionCommands = new Set([
   'clear',
-  'compact',
   'resume',
   'fork',
   'rewind',
@@ -64,6 +63,13 @@ export function commandChoices(
   snapshot?: ContextSnapshot,
 ): ComposerCommand[] {
   const choices = [...appCommands];
+  if (provider === 'claude' || provider === 'codex')
+    choices.push({
+      id: 'compact',
+      name: '/compact',
+      kind: 'compact',
+      detail: 'Compact the current native conversation context',
+    });
   // The command catalog was introduced with native skill-input support. Older
   // hosts omit it and must not silently accept then discard a skill reference.
   if (!snapshot || snapshot.provider !== provider || !Array.isArray(snapshot.commands))

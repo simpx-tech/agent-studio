@@ -34,6 +34,14 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             continue
         }
         $turn += 1
+        if ($value.message.content[0].text -like '/compact*') {
+            [Console]::WriteLine('{"type":"system","subtype":"status","status":"compacting"}')
+            if ($value.message.content[0].text -ne '/compact missing') {
+                [Console]::WriteLine('{"type":"system","subtype":"compact_boundary","uuid":"boundary","compact_metadata":{"trigger":"manual","pre_tokens":90000,"post_tokens":5000}}')
+            }
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}')
+            continue
+        }
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
         [Console]::WriteLine('{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg' + $turn + '"}}}')
         [Console]::WriteLine('{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}')
@@ -144,14 +152,68 @@ fn request(root: &std::path::Path, conversation: &str, messages: serde_json::Val
     request
 }
 
+#[tokio::test]
+async fn manual_compaction_requires_a_boundary_and_keeps_the_native_process() {
+    for command in ["/compact", "/compact missing"] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let first = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"}]),
+        );
+        let id = first.native_session.as_ref().unwrap().id().to_string();
+        let mut process = fixture(root.path(), &id, false, false);
+        assert!(
+            turn(&mut process, &first, CancellationToken::new(), false, false)
+                .await
+                .0
+                .is_ok()
+        );
+        drop(first);
+        let mut next = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"},{"role":"assistant","text":"Turn 1"},{"role":"user","text":command}]),
+        );
+        next.compact = true;
+        let (result, events) =
+            turn(&mut process, &next, CancellationToken::new(), true, false).await;
+        if command == "/compact" {
+            assert_eq!(
+                result.unwrap(),
+                ("complete".into(), "Context compacted.".into())
+            );
+            assert!(process.alive() && process.healthy);
+            assert!(events.iter().any(
+                |e| matches!(e, RunEvent::Compaction{compaction} if compaction.status == "complete")
+            ));
+        } else {
+            assert!(result
+                .unwrap_err()
+                .contains("without confirming compaction"));
+        }
+        process.kill().await;
+    }
+}
+
 async fn turn(
     process: &mut crate::pool::Process,
     request: &RunRequest,
     cancel: CancellationToken,
     reused: bool,
+    interrupt_after_progress: bool,
 ) -> (Result<(String, String), String>, Vec<RunEvent>) {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
-    let channel = EventSink::new(move |event| events.send(event).map_err(|e| e.to_string()));
+    let stop = cancel.clone();
+    let channel = EventSink::new(move |event| {
+        // Process startup can exceed a fixed delay under full-suite load. Wait for
+        // parent output so interruption exercises the active turn, not early Stop.
+        if interrupt_after_progress && matches!(event, RunEvent::Progress { .. }) {
+            stop.cancel();
+        }
+        events.send(event).map_err(|e| e.to_string())
+    });
     let mut questions = Questions::default()
         .open(&request.run_id, None, channel.clone())
         .unwrap();
@@ -189,12 +251,7 @@ async fn interrupt_keeps_the_process_and_the_next_reply_reuses_it() {
     let session_id = first.native_session.as_ref().unwrap().id().to_string();
     let mut process = fixture(root.path(), &session_id, true, false);
     let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        stop.cancel();
-    });
-    let (result, _) = turn(&mut process, &first, cancel, false).await;
+    let (result, _) = turn(&mut process, &first, cancel, false, true).await;
     assert_eq!(result.unwrap().0, "cancelled");
     assert!(
         process.alive() && process.healthy,
@@ -212,7 +269,7 @@ async fn interrupt_keeps_the_process_and_the_next_reply_reuses_it() {
     let session = second.native_session.as_ref().unwrap();
     assert!(session.resumed);
     assert_eq!(session.id(), session_id);
-    let (result, events) = turn(&mut process, &second, CancellationToken::new(), true).await;
+    let (result, events) = turn(&mut process, &second, CancellationToken::new(), true, false).await;
     assert_eq!(
         result.unwrap(),
         ("complete".to_string(), "Turn 2".to_string())
@@ -237,13 +294,8 @@ async fn an_unconfirmed_interrupt_falls_back_to_killing_the_process() {
     let session_id = first.native_session.as_ref().unwrap().id().to_string();
     let mut process = fixture(root.path(), &session_id, true, true);
     let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        stop.cancel();
-    });
     let started = std::time::Instant::now();
-    let (result, _) = turn(&mut process, &first, cancel, false).await;
+    let (result, _) = turn(&mut process, &first, cancel, false, true).await;
     assert_eq!(result.unwrap().0, "cancelled");
     assert!(started.elapsed() >= crate::pool::INTERRUPT_GRACE);
     assert!(!process.healthy);
@@ -261,7 +313,7 @@ async fn a_completed_turn_leaves_the_process_waiting_for_input() {
     );
     let session_id = first.native_session.as_ref().unwrap().id().to_string();
     let mut process = fixture(root.path(), &session_id, false, false);
-    let (result, events) = turn(&mut process, &first, CancellationToken::new(), false).await;
+    let (result, events) = turn(&mut process, &first, CancellationToken::new(), false, false).await;
     assert_eq!(
         result.unwrap(),
         ("complete".to_string(), "Turn 1".to_string())

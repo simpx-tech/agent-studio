@@ -24,6 +24,7 @@
 
   let {
     conversationId,
+    forked = false,
     settings,
     location,
     modelName,
@@ -33,6 +34,7 @@
     useSkill,
   }: {
     conversationId?: string;
+    forked?: boolean;
     settings: ChatSettings;
     location?: ChatLocation;
     modelName: string;
@@ -49,7 +51,7 @@
   let refresh = $state(0);
   let copied = $state('');
   let closeButton: HTMLButtonElement;
-  const selectionKey = $derived(contextKey({ ...settings, conversationId }, location));
+  const selectionKey = $derived(contextKey({ ...settings, conversationId, forked }, location));
   const categories = [
     { id: 'instructions', name: 'Instructions', icon: FileText },
     { id: 'native', name: 'Native prompt', icon: FileText },
@@ -81,6 +83,7 @@
         model: settings.model,
         connectionId: settings.connectionId,
         conversationId,
+        forked,
       };
       const folder = location;
       snapshot = contextCache.peek(selected, folder);

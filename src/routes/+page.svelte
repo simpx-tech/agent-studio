@@ -37,6 +37,7 @@
     BookOpen,
     Paperclip,
     FileText,
+    GitFork,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -93,6 +94,7 @@
     type InputTemplate,
   } from '$lib/input-templates';
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
+  import { forkConversation, forkPoint, forkFitsWorkspace } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
   import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
@@ -230,6 +232,9 @@
     if (view !== 'chat') templatesOpen = false;
   });
   let attachedImages = $state<ChatImage[]>([]);
+  // Drafts displaced by opening a fork stay local until their source chat is reopened.
+  const forkDrafts = new Map<string, { text: string; images: ChatImage[] }>();
+  let forking = $state(false);
   let attachmentError = $state('');
   let imagesLoading = $state(false);
   let imageDragDepth = $state(0);
@@ -568,6 +573,9 @@
       selectedStatus.auth === 'ready',
   );
   const activeQueue = $derived(activeId ? (queued[activeId] ?? []) : []);
+  const canCompact = $derived(canSend && !!active?.messages.some(m => m.role === 'assistant') &&
+    ['claude', 'codex'].includes(selectedSettings.provider) &&
+    active?.messages.findLast(m => m.role === 'assistant')?.settings?.connectionId === selectedSettings.connectionId);
   const steeringSupported = $derived(
     observedReply?.settings?.provider === 'codex' || observedReply?.settings?.provider === 'claude',
   );
@@ -575,6 +583,7 @@
     loaded &&
       activeRunning &&
       steeringSupported &&
+      !observedReply?.compact &&
       !!observedReply?.runId &&
       !stopping &&
       !steeringPending &&
@@ -782,6 +791,8 @@
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
               queued = {};
+              forkDrafts.clear();
+              forking = false;
               const previousView = view;
               workspace = value;
               connectionStatuses = {};
@@ -1505,10 +1516,64 @@
     activeId = c.id;
     prompt = '';
     clearImages();
+    const savedDraft = forkDrafts.get(c.id);
+    if (savedDraft) {
+      prompt = savedDraft.text;
+      attachedImages = savedDraft.images;
+      forkDrafts.delete(c.id);
+    }
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
     void scrollToEnd();
+  }
+  async function forkChat(id: string, messageId?: string) {
+    if (!loaded || forking || deleting || imagesLoading) return;
+    const source = workspace.conversations.find((c) => c.id === id);
+    if (!source) return;
+    const session = workspaceSession;
+    const selected = activeId;
+    const selectedView = view;
+    let fork: Conversation | undefined;
+    forking = true;
+    closeConversationMenu();
+    try {
+      notice = '';
+      fork = forkConversation($state.snapshot(source), messageId);
+      if (!forkFitsWorkspace($state.snapshot(workspace), fork))
+        throw new Error(
+          'This fork would exceed the 20 MB workspace limit. Export and remove older chats first.',
+        );
+      workspace.conversations.unshift(fork);
+      await persist();
+      if (session !== workspaceSession) return;
+      query = '';
+      revealConversation(fork);
+      // Navigation or a blank draft may have changed while saving. Do not
+      // replace that selection or move an unrelated draft into the new chat.
+      if (
+        activeId !== selected || view !== selectedView || imagesLoading ||
+        (!activeId && (prompt || attachedImages.length))
+      ) {
+        notice = `“${fork.title}” was created in Active. Your current draft is unchanged.`;
+        return;
+      }
+      if (activeId && (prompt || attachedImages.length))
+        forkDrafts.set(activeId, {
+          text: prompt,
+          images: structuredClone($state.snapshot(attachedImages)),
+        });
+      nearBottom = true;
+      openConversation(fork);
+      await tick();
+      composerInput?.focus();
+    } catch (error) {
+      if (session !== workspaceSession) return;
+      if (fork) workspace.conversations = workspace.conversations.filter((c) => c.id !== fork!.id);
+      notice = `Could not fork conversation: ${String(error)}`;
+    } finally {
+      if (session === workspaceSession) forking = false;
+    }
   }
   function revealConversation(c: Conversation) {
     conversationScope = c.archived ? 'history' : 'active';
@@ -1761,12 +1826,12 @@
       if (steeringPending === runId) steeringPending = null;
     }
   }
-  async function send(retry = false, queuedMessage?: QueuedMessage) {
+  async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
     if (steeringPending) return;
     if (preparingCommand) return;
     const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
-    if (!retry && !queuedMessage) {
+    if (!retry && !queuedMessage && !compactRequest) {
       const draft = prompt,
         selected = activeId;
       preparingCommand = true;
@@ -1778,8 +1843,13 @@
       if (session !== workspaceSession) return;
       if (!command || command.handled || prompt !== draft || activeId !== selected) return;
     }
-    const text = queuedMessage ? queuedMessage.text : prompt.trim();
-    const images = queuedMessage ? queuedMessage.images : attachedImages;
+    const compact = !!compactRequest || !!command?.compact || (retry && !!active?.messages.at(-1)?.compact);
+    if (compact && (!canCompact || (!compactRequest && attachedImages.length))) {
+      notice = 'Compact an idle conversation with its current account and no attachments. Send a message first after switching accounts.';
+      return;
+    }
+    const text = compactRequest ?? (queuedMessage ? queuedMessage.text : prompt.trim());
+    const images = compactRequest ? [] : queuedMessage ? queuedMessage.images : attachedImages;
     const skills = queuedMessage ? queuedMessage.skills : command?.skills;
     if (!retry && !queuedMessage && activeId && activeRunning) {
       // The reply is still running: hold this message and send it once the reply completes.
@@ -1864,7 +1934,7 @@
         status: 'complete',
         createdAt: now,
       });
-      if (!queuedMessage) {
+      if (!queuedMessage && !compactRequest) {
         prompt = '';
         clearImages();
       }
@@ -1892,6 +1962,7 @@
         ? connectionLabel(workspace.fleet, responseSettings.connectionId)
         : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
       runId,
+      ...(compact ? { compact: true } : {}),
       promptTokensEstimate: estimatePromptTokens(responseSettings, history),
       blocks: [],
       status: 'running',
@@ -1918,12 +1989,14 @@
         : await runAgent(
             {
               runId,
+              ...(compact ? { compact: true } : {}),
               agent: responseSettings,
               messages: history,
               conversationId: conversation.id,
               assistantId,
               location: conversation.location?.path ? { ...conversation.location } : undefined,
               ...(accountSwitch ? { accountSwitch: true } : {}),
+              ...(conversation.forked ? { forked: true } : {}),
             },
             (event) => {
               if (session !== workspaceSession) return;
@@ -1938,6 +2011,7 @@
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
                 event.kind === 'steering' ||
+                event.kind === 'compaction' ||
                 (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               ) {
@@ -2615,7 +2689,14 @@
                 </ChoicePicker>
               </div>
             </div>
-            <ToolbarActions>
+            {#key activeId}<ToolbarActions>
+              {#if active}<button
+                  class="icon-button"
+                  disabled={forking || imagesLoading || forkPoint(active) < 0}
+                  onclick={() => active && void forkChat(active.id)}
+                  title="Fork conversation"
+                  aria-label="Fork conversation"><GitFork size={16} /></button
+                >{/if}
               <button
                 class="icon-button"
                 title="Model context"
@@ -2640,7 +2721,7 @@
                 title="Chat instructions"
                 aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
               >
-            </ToolbarActions>
+            </ToolbarActions>{/key}
           </div>
           {#if nextReplyChanged}
             <p class="next-reply-settings" role="status">
@@ -2681,6 +2762,10 @@
                       !run}
                     retry={() => void send(true)}
                     retryDisabled={!canSend}
+                    fork={m.role === 'assistant' && m.status !== 'running'
+                      ? () => active && void forkChat(active.id, m.id)
+                      : undefined}
+                    forkDisabled={forking || imagesLoading}
                     {openArtifact}
                   />{/each}
               {:else}<div class="chat-empty">
@@ -2818,6 +2903,7 @@
                 }}></textarea>
               <ComposerCommands
                 conversationId={active?.id}
+                forked={active?.forked}
                 bind:this={composerCommands}
                 input={composerInput}
                 bind:prompt
@@ -2908,6 +2994,10 @@
               </div>
             </form>
             <UsagePanel
+              {canCompact}
+              compact={() => void send(false, undefined, '/compact')}
+              changeAutoCompact={(autoCompactTokens) => changeSettings({ ...selectedSettings, autoCompactTokens })}
+              compactionSettingsDisabled={activeRunning || !!run}
               bind:expanded={usageExpanded}
               conversation={active}
               settings={selectedSettings}
@@ -2980,6 +3070,7 @@
 {/if}
 {#if contextOpen}<ModelContext
     conversationId={active?.id}
+    forked={active?.forked}
     settings={selectedSettings}
     location={selectedLocation?.path ? selectedLocation : undefined}
     modelName={selectedModelName(selectedSettings.model, availableModels)}
@@ -3026,6 +3117,8 @@
       trigger={conversationMenu.trigger}
       close={closeConversationMenu}
       remove={requestConversationDeletion}
+      fork={() => menuConversation && void forkChat(menuConversation.id)}
+      forkDisabled={forking || imagesLoading || forkPoint(menuConversation) < 0}
     />
   {/key}
 {/if}

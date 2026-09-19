@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { compactionSchema, mergeCompactions } from './compaction.ts';
 import { accountUsageSchema, latestAccountUsage } from './spend.ts';
 import type { ContentBlock, Message, RunEvent } from './domain';
 import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
@@ -102,6 +103,21 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
+  if (event.kind === 'compaction') {
+    const parsed = compactionSchema.safeParse(event.compaction);
+    if (message.role === 'assistant' && parsed.success) {
+      const previous = message.compactions?.find((c) => c.id === parsed.data.id);
+      message.compactions = mergeCompactions(message.compactions, [parsed.data]);
+      if (
+        parsed.data.status === 'complete' &&
+        parsed.data.revision > (previous?.revision ?? -1) &&
+        message.usage &&
+        (message.usage.revision ?? 0) <= (parsed.data.usageRevision ?? 0)
+      )
+        message.usage.contextInput = null;
+    }
+    return;
+  }
   if (event.kind === 'steering') {
     const parsed = steeringReceiptSchema.safeParse(event.steering);
     if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
@@ -220,6 +236,19 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'compaction') {
+    const parsed = compactionSchema.safeParse(event.compaction);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'compaction' && e.compaction?.id === parsed.data.id,
+    );
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].compaction?.revision ?? -1))
+        events[index] = { kind: 'compaction', compaction: parsed.data };
+    } else if (events.filter((e) => e.kind === 'compaction').length < 32)
+      events.push({ kind: 'compaction', compaction: parsed.data });
+    return;
+  }
   if (event.kind === 'steering') {
     const parsed = steeringReceiptSchema.safeParse(event.steering);
     if (

@@ -4,6 +4,7 @@
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
   import ChatSpend from './ChatSpend.svelte';
+  import CompactionControls from './CompactionControls.svelte';
   import { providers, type ChatSettings, type Conversation } from '$lib/domain';
   import type { ModelInfo } from '$lib/models';
   import { contextPace, quotaPace } from '$lib/pace';
@@ -27,6 +28,10 @@
     error,
     preview = false,
     expanded = $bindable(false),
+    canCompact = false,
+    compact = () => {},
+    changeAutoCompact = () => {},
+    compactionSettingsDisabled = false,
   }: {
     conversation?: Conversation;
     settings: ChatSettings;
@@ -36,6 +41,10 @@
     error: string;
     preview?: boolean;
     expanded?: boolean;
+    canCompact?: boolean;
+    compact?: () => void;
+    changeAutoCompact?: (tokens?: number) => void;
+    compactionSettingsDisabled?: boolean;
   } = $props();
   let now = $state(Date.now());
   onMount(() => {
@@ -258,6 +267,17 @@
                 </p>{/if}
             </div>{/if}
         </div>
+        {#if settings.provider === 'claude' || settings.provider === 'codex'}<div
+            class="usage-card"
+          >
+            <CompactionControls
+              {settings}
+              {canCompact}
+              {compact}
+              disabled={compactionSettingsDisabled}
+              change={changeAutoCompact}
+            />
+          </div>{/if}
         {#each limits as window (window.id)}
           <div
             class="usage-card"

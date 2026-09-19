@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
@@ -87,6 +88,7 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),
   connectionId: z.string().uuid().optional(),
   provider: z.enum(providerIds),
   model: z.string().max(100),
@@ -193,6 +195,8 @@ export const messageSchema = z
     visualizations: visualizationsSchema.optional(),
     questions: questionsSchema.optional(),
     steering: steeringSchema.optional(),
+    compact: z.boolean().optional(),
+    compactions: compactionsSchema.optional(),
     fileChanges: fileChangesSchema.optional(),
     workflow: workflowProgressSchema.optional(),
     workflowDefinition: workflowSchema.optional(),
@@ -213,6 +217,8 @@ export const messageSchema = z
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
   id: z.string().uuid(),
+  // A portable history copy starts a new Standalone folder even with prior messages.
+  forked: z.literal(true).optional(),
   location: locationSchema.optional(),
   archived: z.boolean().optional(),
   settings: chatSettingsSchema,
@@ -257,6 +263,7 @@ export type RunEvent = TokenUsage & {
     | 'visualization'
     | 'question'
     | 'steering'
+    | 'compaction'
     | 'workflow'
     | 'nativeworkflow';
   id?: string;
@@ -269,11 +276,13 @@ export type RunEvent = TokenUsage & {
   visualization?: Visualization;
   question?: QuestionRequest;
   steering?: SteeringReceipt;
+  compaction?: Compaction;
   fileChanges?: FileChanges;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
 };
 export type RunRequest = {
+  compact?: boolean;
   location?: ChatLocation;
   conversationId?: string;
   assistantId?: string;
@@ -281,6 +290,7 @@ export type RunRequest = {
   // An earlier reply in this conversation used another account of the same agent. The
   // host starts a fresh native session for the selected account from the saved messages.
   accountSwitch?: boolean;
+  forked?: boolean;
   agent: ChatSettings;
   messages: {
     role: 'user' | 'assistant';

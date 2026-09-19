@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 mod activity;
+pub mod compaction;
 pub mod file_changes;
 pub(crate) mod hooks;
 pub mod plan;
@@ -39,6 +40,9 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    Compaction {
+        compaction: compaction::Compaction,
+    },
     Steering {
         steering: crate::providers::steering::Receipt,
     },
@@ -90,6 +94,7 @@ pub enum RunEvent {
 }
 #[derive(Default)]
 pub struct Decoder {
+    pub compactions: compaction::Compactions,
     pub text: String,
     pub failure: Option<String>,
     pub completed: bool,
@@ -162,6 +167,9 @@ impl Decoder {
         }
         if params["threadId"] != root {
             return events;
+        }
+        if let Some(compaction) = self.compactions.codex(value) {
+            events.push(RunEvent::Compaction { compaction });
         }
         events.extend(self.reasoning.codex_server(value));
         match value["method"].as_str().unwrap_or_default() {
@@ -242,6 +250,12 @@ impl Decoder {
             return events;
         }
         if provider == "claude" {
+            if let Some(compaction) = self.compactions.claude(&v) {
+                if compaction.status == "complete" {
+                    self.context_input = None;
+                }
+                events.push(RunEvent::Compaction { compaction });
+            }
             events.extend(self.reasoning.claude(&v, &self.current_message));
             if let Some(native_workflows) = self.workflows.decode(&v) {
                 events.push(RunEvent::NativeWorkflow { native_workflows });
