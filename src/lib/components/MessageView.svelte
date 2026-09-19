@@ -12,6 +12,7 @@
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
+  import Reasoning from './Reasoning.svelte';
   import ReplyFooter from './ReplyFooter.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
@@ -106,6 +107,7 @@
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
       <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
+      <Reasoning blocks={message.blocks} />
       {#each content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
@@ -125,7 +127,7 @@
         />
       {/each}
       {#if !content.length && message.status === 'running' && !message.blocks.length}<div
-          class="thinking"
+          class="reply-waiting"
         >
           <span></span><span></span><span></span><small>Making room for a good answer…</small>
         </div>{/if}

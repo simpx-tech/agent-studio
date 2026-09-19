@@ -6,6 +6,7 @@ import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
+import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import {
@@ -109,6 +110,7 @@ export const preferencesSchema = z.object({
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 const blockSchema = z.discriminatedUnion('type', [
+  reasoningBlockSchema,
   z.object({ type: z.literal('markdown'), text: z.string() }),
   z.object({
     type: z.literal('activity'),
@@ -166,7 +168,12 @@ export const messageSchema = z
   .object({
     id: z.string().uuid(),
     role: z.enum(['user', 'assistant']),
-    blocks: z.array(blockSchema),
+    blocks: z
+      .array(blockSchema)
+      .refine(
+        (blocks) => blocks.filter((b) => b.type === 'reasoning').length <= maxReasoningBlocks,
+        'Too many reasoning blocks',
+      ),
     images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
     skills: z.array(skillReferenceSchema).max(4).optional(),
     status: z.enum(['complete', 'running', 'error', 'cancelled']),
@@ -236,6 +243,7 @@ export type RunEvent = TokenUsage & {
     | 'error'
     | 'tool'
     | 'progress'
+    | 'reasoning'
     | 'plan'
     | 'filechanges'
     | 'visualization'
@@ -246,6 +254,7 @@ export type RunEvent = TokenUsage & {
   accountUsage?: AccountUsage;
   revision?: number;
   text?: string;
+  truncated?: boolean;
   tool?: ToolActivity;
   plan?: Plan;
   visualization?: Visualization;

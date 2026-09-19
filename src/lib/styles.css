@@ -1784,27 +1784,27 @@ code {
   color: #e5cfad;
   line-height: 1.7;
 }
-.thinking {
+.reply-waiting {
   display: flex;
   gap: 4px;
   align-items: center;
   color: #8ba571;
   font-size: 11px;
 }
-.thinking > span {
+.reply-waiting > span {
   height: 5px;
   width: 5px;
   background: #94b36f;
   border-radius: 50%;
   animation: pulse 1s infinite;
 }
-.thinking > span:nth-child(2) {
+.reply-waiting > span:nth-child(2) {
   animation-delay: 0.15s;
 }
-.thinking > span:nth-child(3) {
+.reply-waiting > span:nth-child(3) {
   animation-delay: 0.3s;
 }
-.thinking small {
+.reply-waiting small {
   margin-left: 9px;
 }
 .activity {

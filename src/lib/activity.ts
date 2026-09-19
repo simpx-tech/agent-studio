@@ -6,6 +6,7 @@ import { planSchema } from './plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
+import { reasoningBlockSchema, maxReasoningBlocks, mergeReasoningBlocks } from './reasoning.ts';
 
 export const activityStatusSchema = z.enum([
   'running',
@@ -65,6 +66,15 @@ export function safeSourceUrl(value: string): string | undefined {
 
 export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[]): ContentBlock[] {
   const result = [...left];
+  const reasoning = mergeReasoningBlocks(
+    left.filter((b) => b.type === 'reasoning'),
+    right.filter((b) => b.type === 'reasoning'),
+  );
+  for (const block of reasoning) {
+    const index = result.findIndex((b) => b.type === 'reasoning' && b.id === block.id);
+    if (index >= 0) result[index] = block;
+    else result.push(block);
+  }
   for (const block of right) {
     if (block.type !== 'activity') continue;
     const tool = block.tool;
@@ -90,7 +100,11 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
-  if (event.kind === 'accountusage') {
+  if (event.kind === 'reasoning') {
+    const parsed = reasoningBlockSchema.safeParse({ ...event, type: 'reasoning' });
+    if (message.role !== 'assistant' || !parsed.success) return;
+    message.blocks = mergeActivityBlocks(message.blocks, [parsed.data]);
+  } else if (event.kind === 'accountusage') {
     const parsed = accountUsageSchema.safeParse(event.accountUsage);
     if (message.role === 'assistant' && parsed.success && message.runId === parsed.data.runId)
       message.accountUsage = latestAccountUsage(message.accountUsage, parsed.data);
@@ -198,6 +212,18 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'reasoning') {
+    const parsed = reasoningBlockSchema.safeParse({ ...event, type: 'reasoning' });
+    if (!parsed.success) return;
+    const { type: _type, ...data } = parsed.data;
+    const next: RunEvent = { kind: 'reasoning', ...data };
+    const index = events.findIndex((e) => e.kind === 'reasoning' && e.id === next.id);
+    if (index >= 0) {
+      if (next.revision! > (events[index].revision ?? -1)) events[index] = next;
+    } else if (events.filter((e) => e.kind === 'reasoning').length < maxReasoningBlocks)
+      events.push(next);
+    return;
+  }
   if (event.kind === 'usage') {
     const previous = events.find((e) => e.kind === 'usage');
     if (previous?.revision != null && (event.revision ?? -1) <= previous.revision) return;
@@ -269,7 +295,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     )
       events[index] = event;
   } else if (
-    events.length < 336 &&
+    events.filter((e) => e.kind !== 'reasoning').length < 336 &&
     (event.kind !== 'progress' || events.filter((e) => e.kind === 'progress').length < 64) &&
     (event.kind !== 'activity' || events.filter((e) => e.kind === 'activity').length < 30)
   )

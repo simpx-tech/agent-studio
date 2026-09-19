@@ -53,6 +53,52 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('carries bounded reasoning alongside a full activity checkpoint', async () => {
+    const f = await fixture(),
+      id = crypto.randomUUID();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    expect(
+      (
+        await f.call('POST', 'jobs', {
+          id,
+          source: f.source,
+          target: f.target,
+          method: 'run',
+          args: { request: { runId: id, agent: { provider: 'codex' } } },
+        })
+      ).status,
+    ).toBe(200);
+    await f.call('GET', 'jobs', undefined, f.target);
+    const events = [
+      ...Array.from({ length: 336 }, (_, i) => ({ kind: 'activity', text: `Activity ${i}` })),
+      ...Array.from({ length: 64 }, (_, i) => ({
+        kind: 'reasoning',
+        id: `r${i}`,
+        revision: 2,
+        text: `Reasoning ${i}`,
+        truncated: false,
+      })),
+    ];
+    expect(
+      (await f.call('PUT', `jobs/${id}`, { status: 'running', events }, f.target)).status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${id}`)).body.events).toEqual(events);
+    expect(
+      (
+        await f.call(
+          'PUT',
+          `jobs/${id}`,
+          { status: 'running', events: Array(449).fill(events[0]) },
+          f.target,
+        )
+      ).status,
+    ).toBe(400);
+  });
   it('routes bounded native instruction requests as transient jobs and rejects caller-supplied paths', async () => {
     const f = await fixture();
     await f.call(

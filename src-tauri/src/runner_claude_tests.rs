@@ -30,7 +30,10 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         }
         $turn += 1
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
-        [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg' + $turn + '","model":"fixture-model","content":[{"type":"text","text":"Turn ' + $turn + '"}],"usage":{"input_tokens":10,"output_tokens":2}}}')
+        [Console]::WriteLine('{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg' + $turn + '"}}}')
+        [Console]::WriteLine('{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}')
+        [Console]::WriteLine('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Compare paths."}}}')
+        [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg' + $turn + '","model":"fixture-model","content":[{"type":"thinking","thinking":"Compare paths."},{"type":"text","text":"Turn ' + $turn + '"}],"usage":{"input_tokens":10,"output_tokens":2}}}')
         if ($turn -eq 1 -and $env:STUDIO_TEST_HANG -eq 'true') {
             # Keep the turn open like a long tool call while still reading control requests.
             $open = $true
@@ -203,5 +206,17 @@ async fn a_completed_turn_leaves_the_process_waiting_for_input() {
     assert!(events
         .iter()
         .any(|e| matches!(e, RunEvent::Text { text } if text == "Turn 1")));
+    let reasoning: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, RunEvent::Reasoning { .. }))
+        .collect();
+    assert_eq!(
+        reasoning.len(),
+        1,
+        "The full block must not duplicate its streamed text"
+    );
+    assert!(
+        matches!(reasoning[0], RunEvent::Reasoning { id, text, revision: 1, truncated: false } if id == "msg1:0" && text == "Compare paths.")
+    );
     process.kill().await;
 }

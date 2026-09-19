@@ -39,7 +39,8 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !message.runId ||
         message.runId !== previous.runId ||
         !equal(message.settings, previous.settings) ||
-        (!previous.questions?.length &&
+        (!previous.blocks.some((b) => b.type === 'reasoning') &&
+          !previous.questions?.length &&
           !previous.fileChanges &&
           !previous.accountUsage &&
           previous.usage?.revision == null)
@@ -47,6 +48,10 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         return message;
       return {
         ...message,
+        blocks: mergeActivityBlocks(
+          message.blocks,
+          previous.blocks.filter((b) => b.type === 'reasoning'),
+        ),
         ...(message.usage || previous.usage
           ? { usage: latestTokenUsage(message.usage, previous.usage) }
           : {}),

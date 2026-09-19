@@ -95,7 +95,7 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
             message.text = format!("${}{}", skill.name, rest);
         }
     }
-    let mut params = json!({"threadId":thread,"input":[]});
+    let mut params = json!({"threadId":thread,"input":[],"summary":"auto"});
     let input = params["input"].as_array_mut().expect("input is an array");
     if current.native_session.is_some() {
         if let Some(context) = current.native_context() {
@@ -321,6 +321,8 @@ pub async fn run(
                 }
                 questions.resolved_codex(&value, &thread);
                 if value["method"] == "thread/tokenUsage/updated" && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
+                let reasoning = value["method"].as_str().is_some_and(|method| method.starts_with("item/reasoning/")) || value["params"]["item"]["type"] == "reasoning";
+                if reasoning && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 for event in decoder.decode_codex_server(&value, &thread) {
                     if let crate::protocol::RunEvent::Usage { usage } = &event { last_usage = usage.clone(); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
@@ -403,6 +405,7 @@ mod tests {
         assert_eq!(turn["input"].as_array().unwrap().len(), 1);
         assert_eq!(turn["input"][0]["text"], "Continue");
         assert_eq!(turn["effort"], "high");
+        assert_eq!(turn["summary"], "auto");
     }
     #[test]
     fn only_current_skills_are_native_inputs_and_arguments_remain_literal() {

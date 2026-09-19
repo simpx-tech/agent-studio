@@ -512,7 +512,7 @@ export function createRelay({
             const update = z
               .object({
                 status: z.enum(['running', 'complete', 'cancelled', 'error']),
-                events: z.array(z.unknown()).max(384),
+                events: z.array(z.unknown()).max(448),
                 result: z.unknown().optional(),
                 error: z.string().max(4000).optional(),
               })

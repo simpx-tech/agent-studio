@@ -3,6 +3,9 @@ use serde_json::Value;
 mod activity;
 pub mod file_changes;
 pub mod plan;
+mod reasoning;
+#[cfg(test)]
+mod reasoning_tests;
 mod workflow;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -64,6 +67,12 @@ pub enum RunEvent {
         revision: u64,
         text: String,
     },
+    Reasoning {
+        id: String,
+        revision: u64,
+        text: String,
+        truncated: bool,
+    },
     Activity {
         text: String,
     },
@@ -88,6 +97,7 @@ pub struct Decoder {
     plan: plan::PlanDecoder,
     workflows: workflow::WorkflowDecoder,
     progress: Vec<(String, String, u64)>,
+    reasoning: reasoning::ReasoningDecoder,
     current_message: String,
     message_number: u64,
 }
@@ -149,6 +159,7 @@ impl Decoder {
         if params["threadId"] != root {
             return events;
         }
+        events.extend(self.reasoning.codex_server(value));
         match value["method"].as_str().unwrap_or_default() {
             "turn/plan/updated" => {
                 if let Some(plan) = self.plan.codex(params) {
@@ -227,6 +238,7 @@ impl Decoder {
             return events;
         }
         if provider == "claude" {
+            events.extend(self.reasoning.claude(&v, &self.current_message));
             if let Some(native_workflows) = self.workflows.decode(&v) {
                 events.push(RunEvent::NativeWorkflow { native_workflows });
             }
@@ -250,6 +262,15 @@ impl Decoder {
         }
         match provider {
             "codex" => match kind.as_str() {
+                "item.started" | "item.updated" | "item.completed"
+                    if v["item"]["type"] == "reasoning" =>
+                {
+                    if let (Some(id), Some(text)) =
+                        (v["item"]["id"].as_str(), v["item"]["text"].as_str())
+                    {
+                        events.extend(self.reasoning.text(id, text, false));
+                    }
+                }
                 "item.started" => {
                     let activity = match string(&v, "/item/type").as_str() {
                         "command_execution" => Some("Running command"),

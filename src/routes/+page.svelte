@@ -1838,6 +1838,7 @@
     const message = () => conversation.messages.find((m) => m.id === assistantId)!;
     run = { id: runId, conversationId: conversation.id };
     const started = performance.now();
+    let reasoningSavedAt = 0;
     try {
       await persist();
       if (session !== workspaceSession) return;
@@ -1873,9 +1874,12 @@
                 event.kind === 'visualization' ||
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
+                (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
-              )
+              ) {
+                if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
                 saveSoon();
+              }
               if (activeId === conversation.id) void scrollToEnd();
             },
           );

@@ -10,6 +10,16 @@ Existing chats retain their previous shared runtime to preserve file references 
 
 The saved conversation retains its computer and environment even though no project path is sent to the provider. Desktop, managed WSL, and paired Viewer use the same selection and routing rules; unavailable or signed-out connections still cannot send, and another computer is never used as a fallback. Working-folder contents and bindings stay on the execution host, outside workspace exports and relay sync. Background title generation continues to use its separate restricted runtime.
 
+## Reasoning display
+
+Claude thinking text and Codex reasoning summaries appear in a collapsed **Reasoning** disclosure above the answer. Open it during streaming or after a completed, stopped, or failed reply; streamed updates preserve the user's expansion. Markdown and code highlighting use the same sanitized renderer as answers. Replies without reported reasoning have no disclosure, including older history.
+
+The decoder accepts parent Claude `thinking` blocks and `thinking_delta` events, Codex app-server `reasoning` items and `item/reasoning/summaryTextDelta` / `textDelta`, and legacy Codex exec reasoning snapshots. Codex turns request automatic summaries. Indexed parts preserve paragraph boundaries, and complete snapshots replace streamed content by identity without duplication. When Codex supplies both a summary and content, the summary is displayed. Signatures, encrypted or redacted payloads, child messages, and reasoning from another Codex turn are excluded.
+
+Reasoning is saved as separate revisioned blocks, retained through workspace exports, relay events and same-run checkpoints. Capture is bounded to 64 items per reply and 16,000 Unicode characters per item; truncated text is marked incomplete. It never becomes final-answer text, prompt replay, title context, or an executable artifact.
+
+Provider availability matters: live Windows checks on 2026-09-19 with Claude Code 2.1.277, Sonnet 5 and Sonnet 4.6 returned no thinking text despite reported thinking tokens. No disclosure is fabricated from tokens or signatures. This matches the [upstream headless thinking-display report](https://github.com/anthropics/claude-code/issues/82896). Claude's decoder and process/event path are covered by controlled thinking streams; live Codex GPT-6-Astra supplied a summary that streamed, rendered, and survived save/reload. The opt-in native check is `scripts/reasoning-native-smoke.mjs`, with results in `artifacts/reasoning-native/results.json`. Update the relay and Viewer alongside the native app to accept the new block type and expanded event envelope.
+
 ## Agent questions
 
 Codex and Claude can ask questions during a running reply. A **Your input is needed** form appears in the conversation. Choose an option, select several when allowed, or type your own answer. **Send answers** returns all answers to the same running agent. No option is preselected or submitted automatically. **Skip questions** explicitly tells the agent you declined to answer. The normal message draft stays intact, and a delivery error leaves the form available to retry.
