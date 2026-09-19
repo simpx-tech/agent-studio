@@ -11,6 +11,7 @@ import { answerSchema, type QuestionAnswer } from './questions';
 import { steeringInputSchema, type SteeringInput } from './steering';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
+import { mcpActionSchema, type McpAction, type McpResult } from './mcp';
 import {
   browserScopeKey,
   browserSessionSignal,
@@ -738,6 +739,7 @@ async function localCall(
     title: 'generate_title',
     folders: 'list_folders',
     context: 'read_context',
+    mcp: 'manage_mcp',
     nativeInstructions: 'read_native_instructions',
     answer: 'answer_question',
     steer: 'steer_run',
@@ -770,6 +772,7 @@ async function routed<T>(
       method === 'run' ||
       method === 'folders' ||
       method === 'context' ||
+      method === 'mcp' ||
       method === 'nativeInstructions'
     ) {
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -922,6 +925,25 @@ export async function readContext(
   );
 }
 export let contextCache = createContextCache(readContext);
+export async function manageMcp(
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
+  conversationId: string | undefined,
+  location: ChatLocation | undefined,
+  action: McpAction,
+): Promise<McpResult> {
+  if (!settings.connectionId) throw new Error('Select an account connection first.');
+  return routed(
+    'mcp',
+    {
+      provider: settings.provider,
+      connectionId: settings.connectionId,
+      conversationId: conversationId ?? null,
+      location: location ?? null,
+      action: mcpActionSchema.parse(action),
+    },
+    settings.connectionId,
+  );
+}
 export async function readNativeInstructions(
   conversationId: string,
   settings: Pick<ChatSettings, 'provider' | 'connectionId'>,

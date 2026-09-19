@@ -357,6 +357,7 @@ export type RelayJob = {
     | 'folders'
     | 'context'
     | 'nativeInstructions'
+    | 'mcp'
     | 'answer'
     | 'steer';
   args: Record<string, unknown>;

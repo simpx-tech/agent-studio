@@ -20,6 +20,7 @@ import { pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
 import { answerSchema } from '../src/lib/questions.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
+import { mcpRequestSchema } from '../src/lib/mcp.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z
@@ -35,12 +36,15 @@ const jobInput = z
       'folders',
       'context',
       'nativeInstructions',
+      'mcp',
       'answer',
       'steer',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (job.method === 'mcp' && !mcpRequestSchema.safeParse(job.args).success)
+      ctx.addIssue({ code: 'custom', message: 'Invalid MCP management request' });
     if (
       job.method === 'steer' &&
       !z

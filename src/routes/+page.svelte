@@ -3069,6 +3069,7 @@
   />
 {/if}
 {#if contextOpen}<ModelContext
+    running={!!run}
     conversationId={active?.id}
     forked={active?.forked}
     settings={selectedSettings}

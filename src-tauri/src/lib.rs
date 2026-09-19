@@ -3,6 +3,7 @@ mod badges;
 mod cli_queries;
 mod context;
 mod folders;
+mod mcp;
 mod models;
 mod native_instructions;
 mod notifications;
@@ -24,6 +25,26 @@ use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Storage(Mutex<()>);
+
+#[tauri::command]
+async fn manage_mcp(
+    app: tauri::AppHandle,
+    provider: String,
+    connection_id: String,
+    conversation_id: Option<String>,
+    location: Option<folders::ChatLocation>,
+    action: mcp::Action,
+) -> Result<mcp::ResultView, String> {
+    mcp::manage(
+        app,
+        provider,
+        connection_id,
+        conversation_id,
+        location,
+        action,
+    )
+    .await
+}
 
 #[tauri::command]
 async fn read_native_instructions(
@@ -478,6 +499,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(runner::Runs::default())
         .manage(pool::Pool::default())
+        .manage(mcp::Management::default())
         .manage(providers::questions::Questions::default())
         .manage(titles::Titles::default())
         .manage(Storage::default())
@@ -491,6 +513,10 @@ pub fn run() {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     handle.state::<pool::Pool>().sweep().await;
+                    handle
+                        .state::<mcp::Management>()
+                        .sweep(&handle, false)
+                        .await;
                 }
             });
             Ok(())
@@ -500,6 +526,10 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
                 webview.state::<runner::Runs>().interrupt_for_reload();
+                let handle = webview.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    handle.state::<mcp::Management>().sweep(&handle, true).await;
+                });
             }
         })
         .on_window_event(|window, event| {
@@ -527,7 +557,7 @@ pub fn run() {
                         .unwrap_or_default(),
                 );
                 let parked = window.state::<pool::Pool>().len() > 0;
-                if !tokens.is_empty() || parked {
+                if !tokens.is_empty() || parked || window.state::<mcp::Management>().has_work() {
                     // Cancel all owned work and release parked CLIs before closing the window.
                     for token in tokens {
                         token.cancel();
@@ -535,6 +565,10 @@ pub fn run() {
                     api.prevent_close();
                     let window = window.clone();
                     tauri::async_runtime::spawn(async move {
+                        window
+                            .state::<mcp::Management>()
+                            .sweep(window.app_handle(), true)
+                            .await;
                         window.state::<pool::Pool>().shutdown().await;
                         loop {
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -587,6 +621,7 @@ pub fn run() {
             list_models,
             read_usage,
             read_context,
+            manage_mcp,
             read_native_instructions,
             load_workspace,
             save_workspace,

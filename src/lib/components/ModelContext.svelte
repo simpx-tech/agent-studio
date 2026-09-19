@@ -15,6 +15,7 @@
   import { providers, type ChatSettings, type ChatLocation } from '$lib/domain';
   import { contextCache } from '$lib/transport';
   import NativeInstructions from './NativeInstructions.svelte';
+  import McpManagement from './McpManagement.svelte';
   import {
     contextKey,
     contextStatuses,
@@ -32,6 +33,7 @@
     computerName,
     close,
     useSkill,
+    running = false,
   }: {
     conversationId?: string;
     forked?: boolean;
@@ -42,6 +44,7 @@
     computerName: string;
     close: () => void;
     useSkill: (name: string, path: string) => void;
+    running?: boolean;
   } = $props();
   let snapshot = $state<ContextSnapshot>();
   let error = $state('');
@@ -192,16 +195,21 @@
       <div class="context-entries" aria-busy={category !== 'native' && loading}>
         {#if category === 'native'}
           <NativeInstructions {conversationId} {settings} />
+        {:else if category === 'mcps'}
+          <McpManagement
+            {settings}
+            {conversationId}
+            {location}
+            {entries}
+            {search}
+            {running}
+            changed={() => refresh++}
+          />
         {:else}
           {#if category === 'memories'}
             <p class="context-category-help">
               Global memory entrypoints and sources for this project or folder. Topic files are read
               when relevant to the task.
-            </p>
-          {:else if category === 'mcps'}
-            <p class="context-category-help">
-              MCP servers for the selected CLI profile and folder. Configured servers may still need
-              to connect.
             </p>
           {/if}
           {#if loading && !snapshot}<p class="context-empty" role="status">
@@ -210,13 +218,11 @@
           {:else if snapshot && !filtered.length}<p class="context-empty">
               {search
                 ? 'No sources match this filter.'
-                : category === 'mcps'
-                  ? 'No MCP servers were reported. Check the inspection notes for availability.'
-                  : category === 'hooks'
-                    ? settings.provider === 'gemini'
-                      ? 'Hook discovery is unavailable for this agent.'
-                      : 'No hooks were reported or discovered. Check the inspection notes for availability.'
-                    : `No ${category} were reported or found in the inspected locations.`}
+                : category === 'hooks'
+                  ? settings.provider === 'gemini'
+                    ? 'Hook discovery is unavailable for this agent.'
+                    : 'No hooks were reported or discovered. Check the inspection notes for availability.'
+                  : `No ${category} were reported or found in the inspected locations.`}
             </p>
           {:else}
             {#each filtered as entry (entry.kind + entry.path + entry.name)}

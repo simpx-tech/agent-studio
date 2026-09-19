@@ -53,6 +53,48 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('routes MCP OAuth jobs transiently and rejects arbitrary native protocol payloads', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const args = {
+      provider: 'codex',
+      connectionId: crypto.randomUUID(),
+      action: { kind: 'authenticate', name: 'docs' },
+    };
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'mcp',
+      args,
+    };
+    expect(
+      (await f.call('POST', 'jobs', { ...job, args: { ...args, nativeSessionId: 'foreign' } }))
+        .status,
+    ).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.source)).body).toEqual([]);
+    expect((await f.call('GET', 'jobs', undefined, f.target)).body[0].args).toEqual(args);
+    const result = {
+      status: 'pending',
+      authorizationUrl: 'https://example.com/authorize?state=synthetic-private',
+      operationId: crypto.randomUUID(),
+      servers: [],
+    };
+    expect(
+      (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result }, f.target))
+        .status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${job.id}`)).body.result).toEqual(result);
+    expect(JSON.stringify((await f.call('GET', 'state')).body)).not.toContain('synthetic-private');
+    f.advance(600_001);
+    expect((await f.call('GET', `jobs/${job.id}`)).status).toBe(404);
+  });
   it('routes bounded steering jobs only to their target host and rejects extra payload fields', async () => {
     const f = await fixture();
     await f.call(

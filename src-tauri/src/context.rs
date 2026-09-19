@@ -601,7 +601,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
     scan
 }
 
-async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
+pub(crate) async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
     if exe.wsl.is_some() {
@@ -728,7 +728,11 @@ async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
     Ok(report)
 }
 
-async fn claude_report(exe: &Executable, folder: &str, model: &str) -> Result<Value, String> {
+pub(crate) async fn claude_report(
+    exe: &Executable,
+    folder: &str,
+    model: &str,
+) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
     if exe.wsl.is_some() {
@@ -1138,7 +1142,7 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
     }))
 }
 
-async fn wsl_paths(
+pub(crate) async fn wsl_paths(
     wsl: &crate::wsl::Launch,
     profile: &crate::profiles::Profile,
     provider: &str,

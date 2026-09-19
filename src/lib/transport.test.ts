@@ -14,6 +14,41 @@ beforeEach(() => {
   native.invoke.mockReset();
 });
 
+it('routes MCP management and OAuth polling to the exact selected host', async () => {
+  const connectionId = crypto.randomUUID();
+  const transport = await fixture(connectionId);
+  await transport.resumeRelay();
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path.startsWith('v1/jobs/'))
+      return {
+        status: 200,
+        body: {
+          status: 'complete',
+          events: [],
+          result: { status: 'pending', servers: [], message: 'Waiting', operationId: 'synthetic' },
+        },
+      };
+    return original(command, args);
+  });
+  const action = { kind: 'authenticate' as const, name: 'docs' };
+  await transport.manageMcp({ provider: 'codex', connectionId }, undefined, undefined, action);
+  const call = native.invoke.mock.calls.find(
+    ([command, args]) =>
+      command === 'relay_request' && args.method === 'POST' && args.path === 'v1/jobs',
+  );
+  expect(call?.[1].body).toMatchObject({
+    method: 'mcp',
+    args: { provider: 'codex', connectionId, action },
+  });
+  expect(native.invoke.mock.calls.some(([command]) => command === 'manage_mcp')).toBe(false);
+  await transport.disconnectRelay();
+  await expect(
+    transport.manageMcp({ provider: 'codex', connectionId }, undefined, undefined, action),
+  ).rejects.toThrow();
+  expect(native.invoke.mock.calls.some(([command]) => command === 'manage_mcp')).toBe(false);
+});
+
 async function fixture(remoteConnection?: string) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();
