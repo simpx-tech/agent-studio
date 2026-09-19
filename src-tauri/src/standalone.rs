@@ -149,7 +149,7 @@ pub fn prepare(root: &Path, request: &RunRequest) -> Result<Option<uuid::Uuid>, 
         None => {
             // Old native sessions must resume in their original cwd (particularly Claude).
             // Imported/saved history without a binding also retains the legacy folder.
-            let legacy = request.messages.len() > 1
+            let legacy = (request.messages.len() > 1 && !request.forked)
                 || request.native_session.as_ref().is_some_and(|s| s.resumed)
                 || root
                     .join("native-sessions")
@@ -174,6 +174,26 @@ pub fn prepare(root: &Path, request: &RunRequest) -> Result<Option<uuid::Uuid>, 
     Ok((directory == Directory::Dedicated).then_some(id))
 }
 
+// Inspection before the first fork reply must use the folder that execution
+// will bind. A flag never overrides an existing folder or native session.
+pub fn context_directory(
+    root: &Path,
+    conversation: &str,
+    provider: &str,
+    forked: bool,
+) -> Result<Option<Directory>, String> {
+    let existing = lookup(root, conversation, provider, None)?;
+    if existing.is_some() || !forked {
+        return Ok(existing);
+    }
+    let id = uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
+    Ok((!root
+        .join("native-sessions")
+        .join(format!("{id}.json"))
+        .exists())
+    .then_some(Directory::Dedicated))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +211,50 @@ mod tests {
     fn binding(root: &Path, r: &RunRequest) -> std::path::PathBuf {
         root.join("standalone-bindings")
             .join(format!("{}.json", r.conversation_id.as_ref().unwrap()))
+    }
+    #[test]
+    fn forks_get_dedicated_folders_with_history_and_never_rebind_existing_chats() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fork = request();
+        fork.messages.push(fork.messages[0].clone());
+        fork.forked = true;
+        let id = fork.conversation_id.as_deref().unwrap();
+        assert_eq!(
+            context_directory(root.path(), id, "codex", true).unwrap(),
+            Some(Directory::Dedicated)
+        );
+        assert!(prepare(root.path(), &fork).unwrap().is_some());
+        fork.forked = false;
+        assert!(prepare(root.path(), &fork).unwrap().is_some());
+
+        let mut old = request();
+        old.messages.push(old.messages[0].clone());
+        assert_eq!(prepare(root.path(), &old).unwrap(), None);
+        old.forked = true;
+        assert_eq!(prepare(root.path(), &old).unwrap(), None);
+        assert_eq!(
+            context_directory(
+                root.path(),
+                old.conversation_id.as_deref().unwrap(),
+                "codex",
+                true
+            )
+            .unwrap(),
+            Some(Directory::Legacy)
+        );
+
+        let mut native = request();
+        native.forked = true;
+        let sessions = root.path().join("native-sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let id = native.conversation_id.as_deref().unwrap();
+        std::fs::write(sessions.join(format!("{id}.json")), "existing").unwrap();
+        assert_eq!(
+            context_directory(root.path(), id, "codex", true).unwrap(),
+            None
+        );
+        assert_eq!(prepare(root.path(), &native).unwrap(), None);
+        assert!(context_directory(root.path(), "../other", "codex", true).is_err());
     }
     #[test]
     fn legacy_history_and_native_sessions_keep_their_folder() {

@@ -389,6 +389,9 @@ pub struct RunRequest {
     // explicit request before a mismatched account may start a fresh session.
     #[serde(default)]
     pub account_switch: bool,
+    // Portable forks with prior messages still receive a new Standalone folder.
+    #[serde(default)]
+    pub forked: bool,
     // Internal background requests must never inherit interactive chat permissions.
     #[serde(skip)]
     pub conversation_only: bool,
@@ -1204,6 +1207,7 @@ mod tests {
             workflow: None,
             conversation_only: false,
             account_switch: false,
+            forked: false,
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             agent: Agent {

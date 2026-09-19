@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Trash2 } from '@lucide/svelte';
+  import { GitFork, Trash2 } from '@lucide/svelte';
 
   let {
     x,
@@ -9,6 +9,8 @@
     trigger,
     close,
     remove,
+    fork,
+    forkDisabled = false,
   }: {
     x: number;
     y: number;
@@ -16,9 +18,10 @@
     trigger: HTMLElement;
     close: (restoreFocus?: boolean) => void;
     remove: () => void;
+    fork: () => void;
+    forkDisabled?: boolean;
   } = $props();
   let menu: HTMLDivElement;
-  let item: HTMLButtonElement;
 
   onMount(() => {
     menu.showPopover();
@@ -30,7 +33,7 @@
     const bounds = menu.getBoundingClientRect();
     menu.style.left = `${Math.max(left + 8, Math.min(x, left + width - bounds.width - 8))}px`;
     menu.style.top = `${Math.max(top + 8, Math.min(y, top + height - bounds.height - 8))}px`;
-    item.focus({ preventScroll: true });
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
     const dismiss = () => close();
     const scroll = (event: Event) => {
       if (
@@ -57,7 +60,15 @@
     } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
       event.stopPropagation();
-      item.focus();
+      const items = [...menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const index =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? items.length - 1
+            : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+      items[index]?.focus();
     }
   }
 </script>
@@ -78,7 +89,18 @@
   onkeydown={keyboard}
   oncontextmenu={(event) => event.preventDefault()}
 >
-  <button type="button" role="menuitem" tabindex="-1" bind:this={item} onclick={remove}
+  <button
+    type="button"
+    role="menuitem"
+    tabindex="-1"
+    onclick={fork}
+    disabled={forkDisabled}
+    title={forkDisabled
+      ? 'A finished reply is needed to fork this conversation'
+      : 'Start a separate chat from the finished replies'}
+    ><GitFork size={15} aria-hidden="true" />Fork conversation</button
+  >
+  <button class="danger" type="button" role="menuitem" tabindex="-1" onclick={remove}
     ><Trash2 size={15} aria-hidden="true" />Delete conversation</button
   >
 </div>
@@ -104,11 +126,18 @@
     gap: 9px;
     border-radius: 5px;
     font-size: 12px;
-    color: #efaa96;
+    color: var(--text);
     white-space: nowrap;
   }
-  button:hover,
+  button:hover:not(:disabled),
   button:focus-visible {
+    background: #2b3427;
+  }
+  button.danger {
+    color: #efaa96;
+  }
+  button.danger:hover,
+  button.danger:focus-visible {
     background: #392921;
   }
   @media (pointer: coarse) {

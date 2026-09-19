@@ -42,6 +42,7 @@ async fn read_context(
     location: Option<folders::ChatLocation>,
     connection_id: Option<String>,
     conversation_id: Option<String>,
+    forked: Option<bool>,
 ) -> Result<context::ContextSnapshot, String> {
     folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
     let mut profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
@@ -52,7 +53,14 @@ async fn read_context(
         .flatten();
     profiles::scope(
         profile,
-        context::read(app, provider, model, location, conversation_id),
+        context::read(
+            app,
+            provider,
+            model,
+            location,
+            conversation_id,
+            forked.unwrap_or(false),
+        ),
     )
     .await
 }

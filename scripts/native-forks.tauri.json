@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.forks-qa",
+  "productName": "Agent Studio Forks QA",
+  "build": { "beforeDevCommand": "", "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Forks QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}
