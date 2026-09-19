@@ -13,13 +13,14 @@ export const activityStatusSchema = z.enum([
   'running',
   'complete',
   'error',
+  'blocked',
   'cancelled',
   'unknown',
 ]);
 export const toolActivitySchema = z.object({
   id: z.string().max(240),
   revision: z.number().int().nonnegative(),
-  category: z.enum(['skill', 'search', 'agent', 'tool']),
+  category: z.enum(['skill', 'search', 'agent', 'tool', 'hook']),
   name: z.string().max(200),
   status: activityStatusSchema,
   parentId: z.string().max(240).optional(),

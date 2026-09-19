@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const MAX_ENTRIES: usize = 600;
 const MAX_VISITS: usize = 6000;
+mod hooks;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -433,6 +434,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         if let Some(values) = user_settings["enabledPlugins"].as_object() {
             enabled.extend(values.clone());
         }
+        scan.claude_hook_file(&config.join("settings.json"), "User");
+        let mut hooks_disabled = user_settings["disableAllHooks"].as_bool();
         for dir in &dirs {
             for name in ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"] {
                 scan.file(
@@ -458,7 +461,11 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 0,
             );
             for name in ["settings.json", "settings.local.json"] {
+                scan.claude_hook_file(&dir.join(".claude").join(name), "Project");
                 if let Some(v) = scan.json(&dir.join(".claude").join(name)) {
+                    if let Some(disabled) = v["disableAllHooks"].as_bool() {
+                        hooks_disabled = Some(disabled);
+                    }
                     if let Some(values) = v["enabledPlugins"].as_object() {
                         enabled.extend(values.clone());
                     }
@@ -477,6 +484,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                         }
                     }
                     if let Some(path) = install["installPath"].as_str() {
+                        scan.claude_plugin_hooks(Path::new(path));
                         scan.walk(&Path::new(path).join("skills"), "skills", "Plugin", true, 0);
                         scan.walk(
                             &Path::new(path).join("commands"),
@@ -489,6 +497,20 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 }
             }
         }
+        if hooks_disabled == Some(true) {
+            for entry in scan
+                .snapshot
+                .entries
+                .iter_mut()
+                .filter(|e| e.kind == "hooks")
+            {
+                entry.status = "disabled".into();
+                entry
+                    .detail
+                    .push_str(" Disabled by the discovered disableAllHooks setting.");
+            }
+        }
+        scan.note("Claude hooks are discovered from selected-profile and project settings and enabled installed plugins. Managed policy, runtime hooks and trust can change availability. Inspection does not execute hooks; Work history records only lifecycle events actually reported by the CLI.");
         let memory_enabled = user_settings["autoMemoryEnabled"] != false
             && (scan.bridge.is_some()
                 || std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
@@ -598,12 +620,12 @@ async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
     let mut lines = BufReader::new(child.stdout.take().ok_or("Missing query output")?).lines();
     let mut report = json!({});
     let query = async {
-        let init = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"}}});
+        let init = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true}}});
         input
             .write_all(format!("{init}\n").as_bytes())
             .await
             .map_err(|_| "Context query input failed")?;
-        let mut remaining = HashSet::from([2, 3, 4]);
+        let mut remaining = HashSet::from([2, 3, 4, 5]);
         let mut cursors = HashSet::new();
         while let Some(line) = lines
             .next_line()
@@ -631,6 +653,7 @@ async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
                     json!({"id":2,"method":"skills/list","params":{"cwds":[folder],"forceReload":true}}),
                     json!({"id":3,"method":"config/read","params":{"cwd":folder,"includeLayers":false}}),
                     json!({"id":4,"method":"mcpServerStatus/list","params":{"limit":100,"detail":"toolsAndAuthOnly"}}),
+                    json!({"id":5,"method":"hooks/list","params":{"cwds":[folder]}}),
                 ] {
                     input
                         .write_all(format!("{request}\n").as_bytes())
@@ -641,6 +664,7 @@ async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
                 if !value["error"].is_object() {
                     let result = &value["result"];
                     match id {
+                        5 => hooks::codex_report(&mut report, result, folder),
                         2 => report["data"] = result["data"].clone(),
                         3 => {
                             // Keep names and enabled flags only; discard commands, URLs, env and auth.
@@ -859,6 +883,9 @@ fn merge_mcps(scan: &mut Scan, report: &Value) {
 
 fn merge_report(scan: &mut Scan, report: &Value) {
     merge_mcps(scan, report);
+    if scan.snapshot.provider == "codex" {
+        hooks::merge_codex(scan, report);
+    }
     if scan.snapshot.provider == "codex" {
         if !report["data"].is_array() {
             scan.note("Codex did not return a skill catalog. Skill availability is unconfirmed.");
@@ -1339,7 +1366,7 @@ mod tests {
         assert!(!serialized.contains("private"));
         assert!(!serialized.contains("body"));
     }
-    fn scanner(provider: &str, folder: &Path) -> Scan {
+    pub(super) fn scanner(provider: &str, folder: &Path) -> Scan {
         Scan {
             snapshot: ContextSnapshot {
                 provider: provider.into(),
@@ -1358,7 +1385,7 @@ mod tests {
             visits: 0,
         }
     }
-    fn file(path: &Path, text: &str) {
+    pub(super) fn file(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }

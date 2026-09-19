@@ -172,6 +172,7 @@ pub async fn run(
     let mut pending: HashMap<u64, Kind> = HashMap::new();
     let mut steering = HashMap::new();
     let mut decoder = Decoder::default();
+    let mut startup_hooks = Vec::new();
     let mut thread = String::new();
     let mut turn = String::new();
     if reused {
@@ -304,6 +305,11 @@ pub async fn run(
                             // The binding records the CLI-named thread; reuse must match it.
                             process.session_id = thread.clone();
                             if let Some(session) = &request.native_session { session.bind(&thread, false)?; }
+                            for hook in startup_hooks.drain(..) {
+                                for event in decoder.decode_codex_server(&hook, &thread) {
+                                    if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                                }
+                            }
                             send(process, &mut pending, Kind::Turn, "turn/start", turn_params(request, &thread)).await?;
                         }
                         Kind::Turn => {
@@ -336,11 +342,18 @@ pub async fn run(
                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex tool")?;
                     continue;
                 }
-                if thread.is_empty() { continue; }
+                if thread.is_empty() {
+                    if startup_hooks.len() < 400 {
+                        if let Some(hook) = crate::protocol::hooks::startup_hook(&value) { startup_hooks.push(hook); }
+                    }
+                    continue;
+                }
                 if value["method"] == "turn/started" && value["params"]["threadId"] == thread {
                     turn = value["params"]["turn"]["id"].as_str().unwrap_or_default().into();
                 }
                 questions.resolved_codex(&value, &thread);
+                if crate::protocol::hooks::is_codex_hook(&value) && value["params"]["threadId"] == thread
+                    && !turn.is_empty() && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 if value["method"] == "thread/tokenUsage/updated" && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 let reasoning = value["method"].as_str().is_some_and(|method| method.starts_with("item/reasoning/")) || value["params"]["item"]["type"] == "reasoning";
                 if reasoning && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }

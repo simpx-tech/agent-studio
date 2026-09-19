@@ -13,10 +13,17 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     switch ($request.method) {
         'initialize' { [Console]::WriteLine('{"id":' + $id + ',"result":{}}') }
         'account/usage/read' { [Console]::WriteLine('{"id":' + $id + ',"result":{"threadUsage":{"threadId":"fixture","estimatedUsageCreditsMicros":1250000,"estimatedUsageUsdMicros":250000}}}') }
-        'thread/start' { [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}') }
+        'thread/start' {
+            [Console]::WriteLine('{"method":"hook/started","params":{"threadId":"fixture","run":{"id":"startup-hook","eventName":"sessionStart","status":"running","entries":[{"text":"PRIVATE_HOOK_OUTPUT"}]}}}')
+            [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"foreign","run":{"id":"foreign-hook","eventName":"sessionStart","status":"completed"}}}')
+            [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","run":{"id":"startup-hook","eventName":"sessionStart","status":"completed"}}}')
+            [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}')
+        }
         'turn/start' {
             $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
             [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
+            [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","turnId":"stale-turn","run":{"id":"stale-hook","eventName":"stop","status":"completed"}}}')
+            [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","turnId":"turn' + $env:STUDIO_TEST_TURNS + '","run":{"id":"current-hook","eventName":"userPromptSubmit","status":"blocked"}}}')
             if ($env:STUDIO_TEST_QUESTION -eq 'true') {
                 [Console]::WriteLine('{"id":10,"method":"item/tool/call","params":{"threadId":"fixture","tool":"studio_ask_user","arguments":{"questions":[{"id":"choice","question":"Continue?"}]}}}')
             }
@@ -255,7 +262,13 @@ async fn a_parked_process_serves_the_next_reply_without_restarting_the_thread() 
     assert_eq!(second, ("complete".into(), "READY2".into()));
     assert!(process.alive() && process.healthy);
     let mut models = vec![];
+    let mut hooks = vec![];
     while let Ok(event) = received.try_recv() {
+        if let RunEvent::Tool { ref tool } = event {
+            if tool.category == "hook" {
+                hooks.push(tool.clone());
+            }
+        }
         if let RunEvent::Usage { usage } = event {
             models.push(usage.model);
         }
@@ -264,5 +277,14 @@ async fn a_parked_process_serves_the_next_reply_without_restarting_the_thread() 
         models.iter().all(|m| m.as_deref() == Some("fixture-model")),
         "the reused thread keeps reporting its model: {models:?}"
     );
+    assert_eq!(hooks.len(), 4);
+    assert_eq!(hooks[0].status, "running");
+    assert_eq!(hooks[1].status, "complete");
+    assert_eq!(hooks[2].status, "blocked");
+    assert_eq!(hooks[3].status, "blocked");
+    let metadata = serde_json::to_string(&hooks).unwrap();
+    for excluded in ["PRIVATE_HOOK_OUTPUT", "foreign-hook", "stale-hook"] {
+        assert!(!metadata.contains(excluded));
+    }
     process.kill().await;
 }

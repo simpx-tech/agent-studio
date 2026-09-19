@@ -29,6 +29,7 @@ export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] 
 
 // Use only reported operation/category/name metadata, never infer actions from output or paths.
 function action(tool: ToolActivity): keyof typeof phrases {
+  if (tool.category === 'hook') return tool.operation === 'hookContext' ? 'hookContext' : 'hook';
   if (tool.operation === 'read' || ['Read', 'Read file', 'Read skill file'].includes(tool.name))
     return 'read';
   if (
@@ -57,6 +58,8 @@ function action(tool: ToolActivity): keyof typeof phrases {
 }
 
 const phrases = {
+  hook: ['ran hooks', 'running hooks', 'hooks'],
+  hookContext: ['received hook context', 'receiving hook context', 'hook context'],
   read: ['read files', 'reading files', 'file reads'],
   edit: ['edited files', 'editing files', 'file edits'],
   files: ['searched files', 'searching files', 'file searches'],
@@ -83,7 +86,7 @@ export function activityGroupSummary(
     .flatMap((tool) => [tool.status, ...tool.agents.map((a) => a.status)])
     .map((status) => visibleActivityStatus(status, replyStatus));
   const running = statuses.includes('running');
-  const issue = (['error', 'cancelled', 'unknown'] as const).find((status) =>
+  const issue = (['error', 'blocked', 'cancelled', 'unknown'] as const).find((status) =>
     statuses.includes(status),
   );
   // Nouns avoid claiming success for failed, stopped, or unconfirmed operations.

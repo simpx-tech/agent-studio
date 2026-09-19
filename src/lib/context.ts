@@ -1,6 +1,6 @@
 import type { ChatLocation, ChatSettings, ProviderId } from './domain';
 
-export type ContextKind = 'instructions' | 'skills' | 'memories' | 'mcps';
+export type ContextKind = 'instructions' | 'skills' | 'memories' | 'mcps' | 'hooks';
 export type ContextEntry = {
   name: string;
   path: string;
@@ -17,6 +17,7 @@ export type ContextEntry = {
     | 'failed'
     | 'pending'
     | 'needsAuth'
+    | 'needsReview'
     | 'unknown';
   detail: string;
 };
@@ -58,6 +59,7 @@ export const contextStatuses: Record<ContextEntry['status'], string> = {
   failed: 'Failed',
   pending: 'Connecting',
   needsAuth: 'Sign-in required',
+  needsReview: 'Review required',
   unknown: 'Unknown',
 };
 

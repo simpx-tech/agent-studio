@@ -14,6 +14,7 @@
     Search,
     Terminal,
     Images,
+    Webhook,
   } from '@lucide/svelte';
   import { safeSourceUrl, visibleActivityStatus, type ToolActivity } from '$lib/activity';
   import { activityGroupSummary, groupActivityEntries } from '$lib/activity-groups';
@@ -36,11 +37,14 @@
     running: 'Running',
     complete: 'Completed',
     error: 'Failed',
+    blocked: 'Blocked',
     cancelled: 'Stopped',
     unknown: 'Outcome unconfirmed',
   };
-  const icons = { skill: Sparkles, search: Globe, agent: GitBranch, tool: Wrench };
+  const icons = { skill: Sparkles, search: Globe, agent: GitBranch, tool: Wrench, hook: Webhook };
   const groupIcons = {
+    hook: Webhook,
+    hookContext: Webhook,
     read: FileText,
     edit: Pencil,
     files: Search,
@@ -102,7 +106,11 @@
 
 {#snippet statusMark(status: ToolActivity['status'])}
   {@const current = visibleActivityStatus(status, replyStatus)}
-  <span class="tool-status" class:failed={current === 'error'} class:live={current === 'running'}>
+  <span
+    class="tool-status"
+    class:failed={current === 'error' || current === 'blocked'}
+    class:live={current === 'running'}
+  >
     {#if current === 'running'}<LoaderCircle size={13} class="spinning" />
     {:else if current === 'complete'}<Check size={13} />
     {:else}<CircleAlert size={13} />{/if}{labels[current]}
@@ -111,14 +119,15 @@
 
 {#snippet toolCard(tool: ToolActivity, nested = false)}
   {@const Icon = icons[tool.category]}
+  {@const preview =
+    tool.category === 'hook'
+      ? tool.path || tool.facts?.find((fact) => fact.label === 'Hook')?.value
+      : tool.query || tool.path || tool.detail}
   <details class="tool-card" class:nested data-category={tool.category}>
     <summary>
       <Icon size={15} aria-hidden="true" />
       <span class="tool-title"
-        >{tool.name}{#if tool.query || tool.path || tool.detail}<span
-            class="query-preview"
-            title={tool.query || tool.path || tool.detail}
-            >{tool.query || tool.path || tool.detail}</span
+        >{tool.name}{#if preview}<span class="query-preview" title={preview}>{preview}</span
           >{/if}</span
       >
       {@render statusMark(tool.status)}
@@ -234,7 +243,7 @@
   <div
     class="tool-activity"
     class:live-activity={replyStatus === 'running'}
-    aria-label="Tools and sub-agents"
+    aria-label="Tools, hooks and sub-agents"
   >
     {#if replyStatus === 'running'}{@render timeline()}
     {:else}

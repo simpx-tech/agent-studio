@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+mod hooks;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +209,9 @@ impl ToolDecoder {
         }
         let item = &params["item"];
         let kind = item["type"].as_str().unwrap_or_default();
+        if self.codex_hook(value, root, &mut out) {
+            return out;
+        }
         if matches!(method, "item/started" | "item/completed") && kind == "subAgentActivity" {
             if let Some(id) = field(item, "agentThreadId", 240) {
                 let mut group = self.group("codex");
@@ -681,6 +685,9 @@ impl ToolDecoder {
         self.publish(tool, out);
     }
     fn claude(&mut self, v: &Value, out: &mut Vec<ToolActivity>) {
+        if self.claude_hook(v, out) {
+            return;
+        }
         let kind = v["type"].as_str().unwrap_or_default();
         let parent = field(v, "parent_tool_use_id", 240);
         if kind == "stream_event" {

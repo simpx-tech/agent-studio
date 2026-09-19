@@ -8,6 +8,7 @@
     Sparkles,
     Brain,
     Plug,
+    Webhook,
     Copy,
     Check,
   } from '@lucide/svelte';
@@ -55,11 +56,12 @@
     { id: 'skills', name: 'Skills', icon: Sparkles },
     { id: 'memories', name: 'Memories', icon: Brain },
     { id: 'mcps', name: 'MCPs', icon: Plug },
+    { id: 'hooks', name: 'Hooks', icon: Webhook },
   ] as const;
   const entries = $derived((snapshot?.entries ?? []).filter((e) => e.kind === category));
   const filtered = $derived(
     entries.filter((e) =>
-      `${e.name} ${e.path} ${e.scope} ${contextStatuses[e.status]}`
+      `${e.name} ${e.path} ${e.scope} ${contextStatuses[e.status]} ${e.detail}`
         .toLowerCase()
         .includes(search.toLowerCase()),
     ),
@@ -207,10 +209,14 @@
                 ? 'No sources match this filter.'
                 : category === 'mcps'
                   ? 'No MCP servers were reported. Check the inspection notes for availability.'
-                  : `No ${category} were reported or found in the inspected locations.`}
+                  : category === 'hooks'
+                    ? settings.provider === 'gemini'
+                      ? 'Hook discovery is unavailable for this agent.'
+                      : 'No hooks were reported or discovered. Check the inspection notes for availability.'
+                    : `No ${category} were reported or found in the inspected locations.`}
             </p>
           {:else}
-            {#each filtered as entry (entry.kind + entry.path)}
+            {#each filtered as entry (entry.kind + entry.path + entry.name)}
               <article class="context-entry">
                 <div class="context-entry-title">
                   <strong>{entry.name}</strong><span class="context-scope">{entry.scope}</span><span

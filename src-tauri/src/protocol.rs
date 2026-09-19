@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 mod activity;
 pub mod file_changes;
+pub(crate) mod hooks;
 pub mod plan;
 mod reasoning;
 #[cfg(test)]

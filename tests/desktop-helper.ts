@@ -239,6 +239,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
                     ]
                   : [],
               entries: [
+                ...(state.hookEntries ?? []),
                 {
                   name: 'docs-mcp',
                   path: 'docs-mcp',
