@@ -170,7 +170,10 @@ export function resetLabel(value: LimitWindow['resetsAt'], now: number): string 
   const time = resetTime(value);
   if (!time) return 'Reset time not reported';
   if (time <= now) return 'Reset due · awaiting update';
-  return `Resets ${new Date(time).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
+  const date = new Date(time);
+  const weekday = date.toLocaleDateString([], { weekday: 'long' });
+  const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  return `Resets ${weekday}, ${clock}`;
 }
 export function isFable(settings: ChatSettings, snapshot?: UsageSnapshot) {
   return (

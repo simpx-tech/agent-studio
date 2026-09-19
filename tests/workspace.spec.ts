@@ -656,12 +656,12 @@ test('subscription windows include resets and Fable is shown only for Fable', as
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-5-hour')).toContainText('12%');
   await expect(page.getByTestId('limit-weekly')).toContainText('31%');
-  const resetDate = await page.evaluate(() =>
-    new Date('2026-09-19T13:00:00Z').toLocaleString([], {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }),
-  );
+  const resetDate = await page.evaluate(() => {
+    const date = new Date('2026-09-19T13:00:00Z');
+    const weekday = date.toLocaleDateString([], { weekday: 'long' });
+    const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    return `${weekday}, ${clock}`;
+  });
   await expect(page.getByTestId('limit-weekly')).toContainText(`Resets ${resetDate}`);
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
   await pick(page, 'Model', 'Fable');

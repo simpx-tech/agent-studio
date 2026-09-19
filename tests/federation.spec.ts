@@ -320,10 +320,10 @@ test('Connections shows separate account quotas, refresh progress, and retained 
   await expect(usage('Second Claude')).toContainText('Budget');
   const resetDate = await page.evaluate((id) => {
     const reset = (window as any).usageReadings[id].windows[0].resetsAt;
-    return new Date(reset * 1000).toLocaleString([], {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
+    const date = new Date(reset * 1000);
+    const weekday = date.toLocaleDateString([], { weekday: 'long' });
+    const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    return `${weekday}, ${clock}`;
   }, ids['Second Claude']);
   await expect(usage('Second Claude')).toContainText(`Resets ${resetDate}`);
   await expect(usage('Second Claude').locator('.limit-advice')).toHaveCount(0);
