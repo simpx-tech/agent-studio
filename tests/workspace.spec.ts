@@ -647,6 +647,7 @@ async function returnAfterUsageCacheExpires(page: Page) {
 }
 
 test('subscription windows include resets and Fable is shown only for Fable', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-19T12:00:00Z'));
   await mockDesktop(page, 'usage-success');
   await page.goto('/');
   await chooseTestFolder(page);
@@ -655,7 +656,13 @@ test('subscription windows include resets and Fable is shown only for Fable', as
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-5-hour')).toContainText('12%');
   await expect(page.getByTestId('limit-weekly')).toContainText('31%');
-  await expect(page.getByTestId('limit-weekly')).toContainText('Resets in');
+  const resetDate = await page.evaluate(() =>
+    new Date('2026-09-19T13:00:00Z').toLocaleString([], {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }),
+  );
+  await expect(page.getByTestId('limit-weekly')).toContainText(`Resets ${resetDate}`);
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
   await pick(page, 'Model', 'Fable');
   await expect(page.locator('.usage-strip').getByRole('progressbar')).toHaveCount(3);
@@ -690,7 +697,8 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
     /Ahead of pace/,
   );
   await expect(short.locator('.pace-indicator')).toHaveText('');
-  await expect(short).toContainText('58%');
+  await expect(short.locator('.pace-advice')).toHaveCount(0);
+  await expect(page.locator('[title*="less until reset"]')).toHaveCount(0);
   await expect(short).toContainText('Budget: 12%/hour');
   await expect(short.locator('.pace-indicator')).toHaveClass(/tone-watch/);
   await expect(week.getByRole('img', { name: 'Below pace' })).toBeVisible();

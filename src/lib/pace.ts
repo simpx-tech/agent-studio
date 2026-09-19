@@ -69,10 +69,6 @@ export function quotaPace(
   const remainingUnits = (reset - measuredAt) / (unit === 'hour' ? 3_600_000 : 86_400_000);
   // A projection from the first few moments of a window is too unstable to show.
   const projected = expected >= 5 ? (used / expected) * 100 : null;
-  const reduction =
-    used > 0 && expected > 0
-      ? Math.max(0, Math.min(100, (1 - (100 - used) / (100 - expected) / (used / expected)) * 100))
-      : null;
   return {
     state,
     label: {
@@ -101,9 +97,7 @@ export function quotaPace(
       state === 'exhausted'
         ? 'Wait for reset or switch provider.'
         : state === 'ahead'
-          ? projected != null && reduction != null
-            ? `Use ~${Math.ceil(reduction)}% less until reset.`
-            : 'Ease usage until reset.'
+          ? ''
           : state === 'below'
             ? 'Room to spare compared with evenly spread usage.'
             : 'Keep usage close to the guide to last until reset.',

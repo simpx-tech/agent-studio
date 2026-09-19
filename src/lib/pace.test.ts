@@ -71,7 +71,7 @@ describe('quota pace', () => {
       allowanceUnit: 'hour',
       tone: 'watch',
     });
-    expect(quotaPace(window, snapshot, now).advice).toContain('58%');
+    expect(quotaPace(window, snapshot, now).advice).toBe('');
     const week = {
       ...window,
       model: 'fable',

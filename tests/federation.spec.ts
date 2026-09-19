@@ -318,7 +318,16 @@ test('Connections shows separate account quotas, refresh progress, and retained 
   await expect(meter('Codex CLI login')).toHaveAttribute('aria-valuenow', '0');
   await expect(meter('Codex CLI login', 'Weekly')).not.toHaveAttribute('aria-valuenow');
   await expect(usage('Second Claude')).toContainText('Budget');
-  await expect(usage('Second Claude')).toContainText('Resets in');
+  const resetDate = await page.evaluate((id) => {
+    const reset = (window as any).usageReadings[id].windows[0].resetsAt;
+    return new Date(reset * 1000).toLocaleString([], {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  }, ids['Second Claude']);
+  await expect(usage('Second Claude')).toContainText(`Resets ${resetDate}`);
+  await expect(usage('Second Claude').locator('.limit-advice')).toHaveCount(0);
+  await expect(usage('Second Claude').locator('[title*="less until reset"]')).toHaveCount(0);
   await expect(usage('Second Claude').getByRole('img', { name: 'Ahead of pace' })).toBeVisible();
   await expect(usage('Claude CLI login').getByRole('img', { name: 'Below pace' })).toBeVisible();
   await expect(usage('Gemini CLI login')).toContainText('Not reported');

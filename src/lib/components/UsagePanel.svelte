@@ -315,7 +315,7 @@
                 >
                   Budget: {percentage(window.pace.allowance)}/{window.pace.allowanceUnit}
                 </p>{/if}
-              {#if window.pace.state === 'ahead' || window.pace.state === 'exhausted'}<p
+              {#if window.pace.state === 'exhausted'}<p
                   class="pace-advice"
                 >
                   {window.pace.advice}

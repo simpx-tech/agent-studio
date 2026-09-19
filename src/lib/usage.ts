@@ -169,11 +169,8 @@ export function resetTime(value: LimitWindow['resetsAt']): number | null {
 export function resetLabel(value: LimitWindow['resetsAt'], now: number): string {
   const time = resetTime(value);
   if (!time) return 'Reset time not reported';
-  const minutes = Math.ceil((time - now) / 60_000);
-  if (minutes <= 0) return 'Reset due · awaiting update';
-  if (minutes < 60) return `Resets in ${minutes}m`;
-  if (minutes < 1440) return `Resets in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-  return `Resets in ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`;
+  if (time <= now) return 'Reset due · awaiting update';
+  return `Resets ${new Date(time).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
 }
 export function isFable(settings: ChatSettings, snapshot?: UsageSnapshot) {
   return (

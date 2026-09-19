@@ -127,7 +127,7 @@
                 >Budget {percentage(window.pace.allowance)}/{window.pace.allowanceUnit}</span
               >{/if}
           </div>
-          {#if window.pace.state === 'ahead' || window.pace.state === 'exhausted'}<p
+          {#if window.pace.state === 'exhausted'}<p
               class={`limit-advice tone-${window.pace.tone}`}
             >
               {window.pace.advice}
