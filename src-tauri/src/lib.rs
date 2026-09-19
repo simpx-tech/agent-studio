@@ -14,6 +14,7 @@ mod relay;
 mod runner;
 mod spend;
 mod standalone;
+mod startup;
 mod titles;
 mod usage;
 mod wsl;
@@ -455,6 +456,21 @@ fn export_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Resu
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    let check_only = std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == "--check-startup");
+    if let Err(message) = startup::verify(&context.config().identifier) {
+        eprintln!("{message}");
+        if !check_only {
+            startup::show_error(message);
+        }
+        std::process::exit(1);
+    }
+    if check_only {
+        println!("Agent Studio startup storage verified.");
+        return;
+    }
     tauri::Builder::default()
         .register_uri_scheme_protocol("studio-artifact", |_context, request| {
             artifacts::response(request.uri().path())
@@ -584,6 +600,6 @@ pub fn run() {
             sign_in,
             export_workspace
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

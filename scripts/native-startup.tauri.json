@@ -1,0 +1,19 @@
+{
+  "identifier": "com.vinicius.agentstudio.startup-qa",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://127.0.0.1:1438"
+  },
+  "app": {
+    "windows": [{
+      "title": "Agent Studio Startup QA",
+      "decorations": false,
+      "dragDropEnabled": false,
+      "width": 1380,
+      "height": 900,
+      "minWidth": 840,
+      "minHeight": 640,
+      "backgroundColor": "#141615"
+    }]
+  }
+}

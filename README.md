@@ -9,6 +9,10 @@ npm install
 npm run tauri dev
 ```
 
+On Windows, run `tauri dev` from a normal terminal. Packaged launchers such as Codex can redirect a child process's AppData even when Windows reports no package identity. Agent Studio checks the physical storage destination before opening its UI, loading chats, or detecting accounts, and refuses an unexpected destination without changing saved data.
+
+To open an already-built development executable from Codex, keep `npm run dev` running, then use `npm run start:windows`. The launcher uses a temporary, current-user Windows task and removes it after launch; it requires no administrator access and leaves an existing instance alone. Use `npm run start:windows -- -Executable "C:\path\to\agent-studio.exe"` for another build, or add `-CheckOnly` to verify startup without opening a window. Build new source before launching; this command does not compile or restart a running app. See [Windows startup safeguards](docs/WINDOWS-STARTUP.md).
+
 Choose **Codex**, **Claude**, or **Gemini**, then send a message. The app uses the CLI's existing login. Open **Connections** to check installations and launch sign-in. Authentication runs in the provider's own browser/CLI flow; you complete it yourself.
 
 The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The installer is `src-tauri/target/release/bundle/nsis/Agent Studio_0.1.0_x64-setup.exe`.
