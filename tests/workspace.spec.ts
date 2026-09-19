@@ -658,8 +658,9 @@ test('subscription windows include resets and Fable is shown only for Fable', as
   await expect(page.getByTestId('limit-weekly')).toContainText('31%');
   const resetDate = await page.evaluate(() => {
     const date = new Date('2026-09-19T13:00:00Z');
-    const weekday = date.toLocaleDateString([], { weekday: 'long' });
     const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    if (date.toDateString() === new Date().toDateString()) return clock;
+    const weekday = date.toLocaleDateString([], { weekday: 'long' });
     return `${weekday}, ${clock}`;
   });
   await expect(page.getByTestId('limit-weekly')).toContainText(`Resets ${resetDate}`);

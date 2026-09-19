@@ -319,7 +319,7 @@ test('Connections shows separate account quotas, refresh progress, and retained 
   await expect(meter('Codex CLI login', 'Weekly')).not.toHaveAttribute('aria-valuenow');
   await expect(usage('Second Claude')).toContainText('Budget');
   const resetDate = await page.evaluate((id) => {
-    const reset = (window as any).usageReadings[id].windows[0].resetsAt;
+    const reset = (window as any).usageReadings[id].windows[1].resetsAt;
     const date = new Date(reset * 1000);
     const weekday = date.toLocaleDateString([], { weekday: 'long' });
     const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
