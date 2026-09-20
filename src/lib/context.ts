@@ -84,6 +84,7 @@ export function contextKey(settings: ContextSelection, location?: ChatLocation):
 // Session-only metadata cache survives closing the inspector, without entering saved chats.
 export function createContextCache(
   read: (settings: ContextSelection, location?: ChatLocation) => Promise<ContextSnapshot>,
+  scope: () => string = () => '',
 ) {
   const snapshots = new Map<string, ContextSnapshot>();
   const pending = new Map<string, Promise<ContextSnapshot>>();
@@ -101,20 +102,25 @@ export function createContextCache(
       pending.clear();
     },
     peek(settings: ContextSelection, location?: ChatLocation): ContextSnapshot | undefined {
-      const key = contextKey(settings, location);
+      const key = contextKey(settings, location) + scope();
       const value = snapshots.get(key);
       return value ? remember(key, value) : undefined;
     },
     refresh(settings: ContextSelection, location?: ChatLocation): Promise<ContextSnapshot> {
       const selected = { ...settings };
       const folder = location ? { ...location } : undefined;
-      const key = contextKey(selected, folder);
+      const selectedScope = scope();
+      const key = contextKey(selected, folder) + selectedScope;
       const existing = pending.get(key);
       if (existing) return existing;
       const started = generation;
       const request = Promise.resolve()
         .then(() => read(selected, folder))
-        .then((value) => (started === generation ? remember(key, value) : value))
+        .then((value) => {
+          if (scope() !== selectedScope)
+            throw new Error('Shared context changed during inspection. Open Model context again.');
+          return started === generation ? remember(key, value) : value;
+        })
         .finally(() => {
           if (pending.get(key) === request) pending.delete(key);
         });

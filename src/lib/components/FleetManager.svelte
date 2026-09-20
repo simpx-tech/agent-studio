@@ -27,13 +27,14 @@
     type Environment,
     type WslDiscovery,
     type CliInventory,
+    type Connection,
   } from '$lib/fleet';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop } from '$lib/transport';
+  import { desktop, contextCache } from '$lib/transport';
   let {
     workspace = $bindable(),
     installation,
@@ -99,6 +100,8 @@
   let managedAccountId = $state('');
   let managedComputerId = $state<string | null>(null);
   let accountName = $state('');
+  let sharedSources = $state<Record<string, string>>({});
+  let sharedSourcesBaseline = $state<Record<string, string>>({});
   let removing = $state('');
   let environmentId = $state('');
   let accountComputerId = $state('');
@@ -292,9 +295,37 @@
     managedAccountId = account.id;
     managedComputerId = computerId;
     accountName = account.name;
+    sharedSources = Object.fromEntries(
+      workspace.fleet.connections.map((c) => [c.id, c.sharedContextConnectionId ?? '']),
+    );
+    sharedSourcesBaseline = { ...sharedSources };
     error = '';
     removing = '';
     dialog = 'manage-account';
+  }
+  function sharedOptions(connection: Connection) {
+    const isSource = workspace.fleet.connections.some(
+      (c) => c.sharedContextConnectionId === connection.id,
+    );
+    return [
+      { id: '', name: 'This account only' },
+      ...workspace.fleet.connections
+        .filter(
+          (c) =>
+            !isSource &&
+            c.id !== connection.id &&
+            c.environmentId === connection.environmentId &&
+            !c.sharedContextConnectionId &&
+            workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider ===
+              managedAccount?.provider,
+        )
+        .map((c) => ({
+          id: c.id,
+          name:
+            workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ??
+            'Unavailable account',
+        })),
+    ];
   }
   function openAccount(
     id: ProviderId = 'claude',
@@ -778,11 +809,56 @@
         event.preventDefault();
         void action(async () => {
           if (!managedAccount) return;
-          Object.assign(
-            managedAccount,
-            accountSchema.parse({ ...managedAccount, name: accountName }),
-          );
-          await save();
+          const editedAccount = managedAccount;
+          const previousName = editedAccount.name;
+          const nextAccount = accountSchema.parse({ ...editedAccount, name: accountName });
+          const editedConnections = managedConnections.map((connection) => ({
+            connection,
+            before: connection.sharedContextConnectionId,
+            after: sharedSources[connection.id] || undefined,
+          }));
+          for (const connection of workspace.fleet.connections) {
+            if (
+              (connection.sharedContextConnectionId ?? '') !==
+              (sharedSourcesBaseline[connection.id] ?? '')
+            )
+              throw new Error(
+                'Shared context changed elsewhere. Reopen Manage account before saving.',
+              );
+          }
+          for (const connection of managedConnections) {
+            if (
+              (connection.sharedContextConnectionId ?? '') !== sharedSourcesBaseline[connection.id]
+            )
+              throw new Error(
+                'This account’s shared context changed elsewhere. Reopen Manage account before saving.',
+              );
+            const source = sharedSources[connection.id] ?? '';
+            if (running && source !== (connection.sharedContextConnectionId ?? ''))
+              throw new Error('Wait for the running reply before changing shared context.');
+            if (source && !sharedOptions(connection).some((option) => option.id === source))
+              throw new Error(
+                'The shared context source changed. Reopen Manage account and choose it again.',
+              );
+          }
+          Object.assign(editedAccount, nextAccount);
+          for (const connection of managedConnections) {
+            const source = sharedSources[connection.id] ?? '';
+            if (source) connection.sharedContextConnectionId = source;
+            else delete connection.sharedContextConnectionId;
+          }
+          try {
+            await save();
+          } catch (error) {
+            if (editedAccount.name === nextAccount.name) editedAccount.name = previousName;
+            for (const { connection, before, after } of editedConnections) {
+              if (connection.sharedContextConnectionId !== after) continue;
+              if (before) connection.sharedContextConnectionId = before;
+              else delete connection.sharedContextConnectionId;
+            }
+            throw error;
+          }
+          contextCache.clear();
           closeDialog();
         });
       }}
@@ -814,6 +890,25 @@
                 : 'Shares the login and settings you use in your terminal.'}
             </p>
           </div>
+          {#if managedAccount.provider !== 'gemini'}
+            <div class="shared-context-control">
+              <span>Shared context source</span>
+              <ChoicePicker
+                field
+                label="Shared context source"
+                options={sharedOptions(connection)}
+                value={sharedSources[connection.id] ?? ''}
+                fallbackToFirst={false}
+                placeholder="Source unavailable"
+                disabled={busy || running}
+                onchange={(value) => (sharedSources[connection.id] = value)}
+              />
+              <p>
+                Load this source’s instructions, memories, and skills alongside this account’s
+                context. Login and integration settings stay separate. Applies to the next reply.
+              </p>
+            </div>
+          {/if}
           {#if localEnvironment(connection.environmentId)}
             {#if removing === connection.id}<div
                 class="remove-connection"
@@ -1038,6 +1133,15 @@
   .managed-connection {
     border-top: 1px solid var(--line);
     padding-top: 18px;
+  }
+  .shared-context-control {
+    display: grid;
+    gap: 7px;
+    margin-top: 12px;
+  }
+  .shared-context-control > span {
+    font-size: 12px;
+    font-weight: 600;
   }
   .managed-connection h3 {
     font-size: 13px;

@@ -125,7 +125,9 @@ pub fn runtime(conversation: Option<&str>) -> Runtime {
 }
 pub fn for_run(request: &RunRequest) -> Runtime {
     if request.tools_enabled() {
-        runtime(request.conversation_id.as_deref())
+        let mut runtime = runtime(request.conversation_id.as_deref());
+        request.shared_context.extend_runtime(&mut runtime);
+        runtime
     } else {
         Runtime::default()
     }

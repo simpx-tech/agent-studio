@@ -386,6 +386,8 @@ pub struct RunRequest {
     pub conversation_id: Option<String>,
     #[serde(skip)]
     pub native_session: Option<sessions::Session>,
+    #[serde(skip)]
+    pub shared_context: crate::shared_context::SharedContext,
     // Host-resolved selected-profile default for an in-band model reset.
     #[serde(skip)]
     pub claude_default_model: Option<String>,
@@ -716,6 +718,23 @@ impl RunRequest {
         format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:")
     }
     pub fn native_context(&self) -> Option<String> {
+        let native = self.base_native_context();
+        let shared = self.shared_context.guidance();
+        if shared.is_empty() {
+            if self
+                .native_session
+                .as_ref()
+                .is_some_and(|s| s.shared_context_changed)
+            {
+                Some(format!("{}\nAccount context sharing is now disabled. Earlier shared source instructions are historical and no longer apply. Use the selected account's own context and current project and conversation instructions.", native.unwrap_or_default()))
+            } else {
+                native
+            }
+        } else {
+            Some(format!("{}\n{}", native.unwrap_or_default(), shared))
+        }
+    }
+    fn base_native_context(&self) -> Option<String> {
         let session = self.native_session.as_ref()?;
         if !session.resumed {
             let mut history = self.clone();
@@ -999,14 +1018,24 @@ pub async fn chat_command(
                 "--include-partial-messages",
             ]);
             if let Some(session) = &request.native_session {
-                c.args([
-                    if session.resumed {
-                        "--resume"
-                    } else {
-                        "--session-id"
-                    },
-                    session.id(),
-                ]);
+                if let Some(path) = &session.transfer_path {
+                    c.args([
+                        "--resume",
+                        path,
+                        "--fork-session",
+                        "--session-id",
+                        session.id(),
+                    ]);
+                } else {
+                    c.args([
+                        if session.resumed {
+                            "--resume"
+                        } else {
+                            "--session-id"
+                        },
+                        session.id(),
+                    ]);
+                }
             } else {
                 c.arg("--no-session-persistence");
             }
@@ -1043,6 +1072,9 @@ pub async fn chat_command(
                 });
                 if let Some(fast) = request.agent.fast_mode {
                     settings["fastMode"] = fast.into();
+                }
+                if let Some(directory) = &request.shared_context.memory_dir {
+                    settings["autoMemoryDirectory"] = directory.clone().into();
                 }
                 if let Some(fallback) = &request.agent.fallback_model {
                     c.arg("--fallback-model").arg(fallback);
@@ -1352,6 +1384,7 @@ mod tests {
             compact: false,
             conversation_id: None,
             native_session: None,
+            shared_context: Default::default(),
             claude_default_model: None,
             workflow: None,
             conversation_only: false,

@@ -16,6 +16,7 @@ mod protocol;
 mod providers;
 mod relay;
 mod runner;
+mod shared_context;
 mod spend;
 mod standalone;
 mod startup;

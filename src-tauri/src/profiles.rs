@@ -83,6 +83,8 @@ pub struct Profile {
     pub namespace: String,
     #[cfg_attr(not(windows), allow(dead_code))]
     pub isolated: bool,
+    pub shared_source: Option<Box<Profile>>,
+    pub shared_error: Option<String>,
 }
 tokio::task_local! { static CURRENT: Profile; }
 pub fn current() -> Profile {
@@ -158,6 +160,18 @@ pub fn resolve(
         }
         _ => return Err("This provider does not support a separate account profile".into()),
     };
+    // A broken context source must not break sign-in, account usage, or credential management.
+    let shared = connection["sharedContextConnectionId"]
+        .as_str()
+        .map(|source_id| {
+            validate_shared_source(&workspace["fleet"], id, source_id)?;
+            resolve(app, provider, Some(source_id)).map(Box::new)
+        })
+        .transpose();
+    let (shared_source, shared_error) = match shared {
+        Ok(source) => (source, None),
+        Err(error) => (None, Some(error)),
+    };
     Ok(Profile {
         id: id.into(),
         provider: provider.into(),
@@ -166,7 +180,36 @@ pub fn resolve(
         folder_distribution: None,
         namespace: app.config().identifier.clone(),
         isolated: connection["profile"] == "isolated",
+        shared_source,
+        shared_error,
     })
+}
+fn validate_shared_source(fleet: &Value, target_id: &str, source_id: &str) -> Result<(), String> {
+    let connections = fleet["connections"]
+        .as_array()
+        .ok_or("Cannot read account connections")?;
+    let target = connections
+        .iter()
+        .find(|c| c["id"] == target_id)
+        .ok_or("Connection no longer exists")?;
+    let source = connections.iter().find(|c| c["id"] == source_id).ok_or(
+        "The shared context source is unavailable. Choose another source in Manage account.",
+    )?;
+    let provider = |c: &Value| {
+        fleet["accounts"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["id"] == c["accountId"]))
+            .and_then(|a| a["provider"].as_str())
+    };
+    if source_id == target_id
+        || source["environmentId"] != target["environmentId"]
+        || source.get("sharedContextConnectionId").is_some()
+        || !matches!(provider(target), Some("claude" | "codex"))
+        || provider(target) != provider(source)
+    {
+        return Err("Shared context requires a different account of the same agent on the same computer, with no chained sharing.".into());
+    }
+    Ok(())
 }
 pub async fn scope<T>(profile: Profile, future: impl Future<Output = T>) -> T {
     CURRENT.scope(profile, future).await
@@ -208,6 +251,25 @@ pub fn configure(command: &mut tokio::process::Command, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_sources_require_matching_provider_environment_and_no_chains() {
+        let mut fleet = serde_json::json!({"accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"}],
+            "connections":[{"id":"one","accountId":"a","environmentId":"host"},{"id":"two","accountId":"b","environmentId":"host"}]});
+        assert!(validate_shared_source(&fleet, "one", "two").is_ok());
+        assert!(validate_shared_source(&fleet, "one", "one").is_err());
+        assert!(validate_shared_source(&fleet, "one", "missing").is_err());
+        fleet["connections"][1]["environmentId"] = "elsewhere".into();
+        assert!(validate_shared_source(&fleet, "one", "two").is_err());
+        fleet["connections"][1]["environmentId"] = "host".into();
+        fleet["connections"][1]["sharedContextConnectionId"] = "one".into();
+        assert!(validate_shared_source(&fleet, "one", "two").is_err());
+        fleet["connections"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("sharedContextConnectionId");
+        fleet["accounts"][1]["provider"] = "claude".into();
+        assert!(validate_shared_source(&fleet, "one", "two").is_err());
+    }
     #[tokio::test]
     async fn concurrent_profile_scopes_do_not_cross_accounts_or_providers() {
         async fn check(id: &str, provider: &str, root: &str) {

@@ -746,16 +746,28 @@ pub(crate) async fn claude_report(
     folder: &str,
     model: &str,
 ) -> Result<Value, String> {
-    claude_report_sources(exe, folder, model, &crate::plugins::Runtime::default()).await
+    claude_report_sources(
+        exe,
+        folder,
+        model,
+        &crate::plugins::Runtime::default(),
+        None,
+    )
+    .await
 }
 async fn claude_report_sources(
     exe: &Executable,
     folder: &str,
     model: &str,
     sources: &crate::plugins::Runtime,
+    memory_dir: Option<&str>,
 ) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
+    let mut settings = json!({"disableAllHooks":true});
+    if let Some(directory) = memory_dir {
+        settings["autoMemoryDirectory"] = json!(directory);
+    }
     if exe.wsl.is_some() {
         command.args(["--agent-studio-cwd", folder]);
     } else {
@@ -775,7 +787,7 @@ async fn claude_report_sources(
             "--permission-mode",
             "dontAsk",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            &settings.to_string(),
         ])
         .env_remove("CLAUDECODE")
         .env_remove("CODEX_THREAD_ID")
@@ -1119,7 +1131,9 @@ pub async fn read(
     let mut scan = tokio::task::spawn_blocking(move || inventory(scan, home, config))
         .await
         .map_err(|_| "Context inspection failed")?;
-    let sources = crate::plugins::runtime(conversation_id.as_deref());
+    let shared = crate::shared_context::load(&provider, &folder).await?;
+    let mut sources = crate::plugins::runtime(conversation_id.as_deref());
+    shared.extend_runtime(&mut sources);
     if provider == "claude" {
         for source in &sources.plugin_dirs {
             let path = Path::new(source);
@@ -1140,11 +1154,26 @@ pub async fn read(
     }
     let report = match provider.as_str() {
         "codex" => Some(codex_report_sources(&exe, &folder, &sources).await),
-        "claude" => Some(claude_report_sources(&exe, &folder, &model, &sources).await),
+        "claude" => Some(
+            claude_report_sources(
+                &exe,
+                &folder,
+                &model,
+                &sources,
+                shared.memory_dir.as_deref(),
+            )
+            .await,
+        ),
         _ => None,
     };
     if let Some(report) = report {
         match report { Ok(report) => { scan = tokio::task::spawn_blocking(move || { merge_report(&mut scan, &report); scan }).await.map_err(|_| "Context report processing failed")?; }, Err(_) => scan.note("The CLI context query failed. Showing discovered files; actual loading and enabled state are unconfirmed. Refresh to retry.") }
+    }
+    if !shared.source.is_empty() {
+        for source in shared.files {
+            scan.add(Path::new(&source.path), &source.kind, "Shared account", "reference", "Shared source requested by this account. Chat guidance directs the agent to read applicable instructions and consult task-relevant memories; this inventory does not claim a previous read.");
+        }
+        scan.note("Shared account sources supplement this profile. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account.");
     }
     Ok(scan.snapshot)
 }

@@ -25,6 +25,8 @@ struct Record {
     history: Vec<String>,
     instructions: String,
     received: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    shared_context: String,
 }
 
 #[derive(Clone)]
@@ -35,11 +37,15 @@ pub struct Session {
     record: Record,
     pub resumed: bool,
     pub retry: bool,
-    /// The selected account differs from the bound one: this reply starts a fresh native
-    /// session for it from the saved messages instead of resuming the old transcript.
+    /// The selected account differs from the bound one: fork its latest native history
+    /// into the selected profile, preserving the source and the conversation's folder.
     pub switched_account: bool,
     pub instructions_changed: bool,
+    pub shared_context_changed: bool,
     pub unconfirmed_message: Option<usize>,
+    transfer_from: Option<Record>,
+    transfer_file: Option<Arc<tempfile::TempPath>>,
+    pub transfer_path: Option<String>,
 }
 
 struct Identity {
@@ -183,6 +189,11 @@ impl Session {
             .map(fingerprint)
             .collect::<Result<Vec<_>, _>>()?;
         let instructions = fingerprint(&request.agent.instructions)?;
+        let shared_context = if request.shared_context.source.is_empty() {
+            String::new()
+        } else {
+            fingerprint(&request.shared_context)?
+        };
         let directory = root.join("native-sessions");
         std::fs::create_dir_all(&directory)
             .map_err(|_| "Cannot create native session directory")?;
@@ -218,7 +229,8 @@ impl Session {
                     return Err("This conversation's native session belongs to a different account, computer, or folder. Start a new conversation there.".into());
                 }
                 switched_account = true;
-            } else {
+            }
+            {
                 if !history.starts_with(&previous.history) {
                     return Err("This conversation's history differs from its native session. Start a new conversation to keep the histories separate.".into());
                 }
@@ -245,8 +257,11 @@ impl Session {
         // Retrying the same request under another account still continues the earlier
         // attempt's work instead of treating it as a new independent task.
         let retry = previous.as_ref().is_some_and(|p| p.history == history);
-        // The old account's transcript is not resumed; a fresh session receives the saved
-        // messages as earlier context, like an older chat's first native reply.
+        let transfer_from = previous.clone().filter(|_| switched_account);
+        let shared_context_changed = previous
+            .as_ref()
+            .is_some_and(|p| p.shared_context != shared_context);
+        // Allocate a destination identity; prepare_transfer must succeed before sending.
         let previous = previous.filter(|_| !switched_account);
         Ok(Some(Self {
             path,
@@ -254,6 +269,10 @@ impl Session {
             resumed: previous.is_some(),
             retry,
             switched_account,
+            shared_context_changed,
+            transfer_from,
+            transfer_file: None,
+            transfer_path: None,
             instructions_changed: previous
                 .as_ref()
                 .is_some_and(|p| !p.received || p.instructions != instructions),
@@ -272,6 +291,7 @@ impl Session {
                 history,
                 instructions,
                 received: false,
+                shared_context,
             },
         }))
     }
@@ -279,13 +299,92 @@ impl Session {
     pub fn id(&self) -> &str {
         &self.record.id
     }
+    pub fn transfer_id(&self) -> Option<&str> {
+        self.transfer_path
+            .as_ref()
+            .and(self.transfer_from.as_ref())
+            .map(|record| record.id.as_str())
+    }
+
+    /// Resolve the previous profile from the host's registry, never a caller-supplied path.
+    /// The caller releases its old parked process before taking this immutable snapshot.
+    pub async fn prepare_transfer(
+        &mut self,
+        app: &tauri::AppHandle,
+        request: &RunRequest,
+    ) -> Result<(), String> {
+        use tauri::Manager;
+        let Some(previous) = self.transfer_from.as_ref() else {
+            return Ok(());
+        };
+        let root = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        File::open(root.join("workspace.json"))
+            .map_err(|_| "Cannot read account registry")?
+            .take(20_000_001)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read account registry")?;
+        if bytes.len() > 20_000_000 {
+            return Err("Account registry exceeds its limit".into());
+        }
+        let workspace: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "Cannot read account registry")?;
+        let provider = &request.agent.provider;
+        let selected = crate::profiles::current();
+        let mut candidates = vec![None];
+        candidates.extend(
+            workspace["fleet"]["connections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["id"].as_str().map(|id| Some(id.to_string()))),
+        );
+        let mut source = None;
+        for connection in candidates {
+            let Ok(mut profile) = crate::profiles::resolve(app, provider, connection.as_deref())
+            else {
+                continue;
+            };
+            profile.folder_distribution = selected.folder_distribution.clone();
+            let matches = crate::profiles::scope(profile.clone(), async {
+                identity(provider, request.location.as_ref())
+                    .is_ok_and(|i| i.scope == previous.scope)
+            })
+            .await;
+            if matches {
+                source = Some(
+                    crate::profiles::scope(profile, async {
+                        crate::context::native_profile_root(provider).await
+                    })
+                    .await?,
+                );
+                break;
+            }
+        }
+        let source = source.ok_or("The previous account profile is unavailable. Reconnect it before transferring this chat; its saved history was preserved.")?;
+        let target = crate::context::native_profile_root(provider).await?;
+        let snapshot = transcript_snapshot(&source, &target, provider, &previous.id)?;
+        let native =
+            crate::shared_context::native_path(&snapshot, selected.distribution.as_deref())?;
+        self.transfer_path = Some(native);
+        self.transfer_file = Some(Arc::new(snapshot));
+        self.resumed = true;
+        // Refresh conversation instructions while leaving provider-native history intact.
+        self.instructions_changed = true;
+        self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
+        Ok(())
+    }
 
     // Persist immediately when the provider confirms its parent identity, before
     // forwarding further output, so stopped/failed replies can resume as well.
     pub fn bind(&self, id: &str, received: bool) -> Result<(), String> {
         uuid::Uuid::parse_str(id)
             .map_err(|_| "The provider returned an invalid native session identity")?;
-        if self.resumed && id != self.id() {
+        if self.resumed && self.transfer_path.is_none() && id != self.id() {
             return Err(
                 "The provider did not resume the requested native session. The reply was stopped."
                     .into(),
@@ -309,10 +408,370 @@ impl Session {
     }
 }
 
+struct Transcript {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    base: Option<(String, u64)>,
+    prefix: bool,
+}
+const TRANSFER_LIMIT: u64 = 64 * 1024 * 1024;
+
+fn read_transcript(
+    source: &Path,
+    provider: &str,
+    id: &str,
+    prefix: Option<u64>,
+) -> Result<Transcript, String> {
+    use std::io::Read;
+    let path = crate::native_instructions::find_record(source, provider, id)?.ok_or(
+        "The previous native transcript or its history ancestor is unavailable. No display-history fallback was sent.",
+    )?;
+    if prefix.is_some_and(|size| size == 0 || size > TRANSFER_LIMIT) {
+        return Err("The native history boundary exceeds the transfer limit".into());
+    }
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .map_err(|_| "Cannot read the bound native transcript")?
+        .take(prefix.unwrap_or(TRANSFER_LIMIT + 1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read the bound native transcript")?;
+    if bytes.len() as u64 > TRANSFER_LIMIT {
+        return Err("The native transcript exceeds the transfer limit".into());
+    }
+    if prefix.is_some_and(|size| bytes.len() as u64 != size) {
+        return Err("The native history ancestor is shorter than its recorded boundary".into());
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(
+            "The native transcript has an unfinished record. Retry after its writer finishes."
+                .into(),
+        );
+    }
+    let mut verified = false;
+    let mut base = None;
+    for line in bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let record: serde_json::Value = serde_json::from_slice(line).map_err(|_| {
+            "The native transcript is malformed; no partial history was transferred"
+        })?;
+        if provider == "codex" && record["type"] == "session_meta" {
+            if verified || record["payload"]["id"] != id {
+                return Err("The native transcript identity does not match its binding".into());
+            }
+            verified = true;
+            let meta = &record["payload"];
+            if !meta["history_base"].is_null() {
+                let parent = meta["history_base"]["thread_id"]
+                    .as_str()
+                    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                    .ok_or("The native history ancestor identity is invalid")?;
+                let end = meta["history_base"]["end_byte_offset"]
+                    .as_u64()
+                    .ok_or("The native history ancestor boundary is invalid")?;
+                if meta["history_mode"] != "paginated"
+                    || meta["history_base"]["end_ordinal_exclusive"]
+                        .as_u64()
+                        .is_none()
+                    || meta["forked_from_id"]
+                        .as_str()
+                        .is_some_and(|id| id != parent)
+                {
+                    return Err("The native history lineage is unsupported or inconsistent".into());
+                }
+                base = Some((parent.into(), end));
+            }
+        } else if provider == "claude" {
+            if let Some(session) = record["sessionId"].as_str() {
+                if session != id {
+                    return Err("The native transcript identity does not match its binding".into());
+                }
+                verified = true;
+            }
+        }
+    }
+    if !verified {
+        return Err("The native transcript has no verified session identity".into());
+    }
+    Ok(Transcript {
+        path,
+        bytes,
+        base,
+        prefix: prefix.is_some(),
+    })
+}
+
+fn transcript_snapshot(
+    source: &Path,
+    target: &Path,
+    provider: &str,
+    id: &str,
+) -> Result<tempfile::TempPath, String> {
+    use std::io::Read;
+    let current = read_transcript(source, provider, id, None)?;
+    let mut records = vec![current];
+    let mut visited = std::collections::HashSet::from([id.to_string()]);
+    let mut total = records[0].bytes.len() as u64;
+    while let Some((parent, end)) = records.last().and_then(|r| r.base.clone()) {
+        if records.len() >= 128 || !visited.insert(parent.clone()) {
+            return Err(
+                "The native history lineage is cyclic or exceeds the transfer limit".into(),
+            );
+        }
+        let record = read_transcript(source, provider, &parent, Some(end))?;
+        total += record.bytes.len() as u64;
+        if total > TRANSFER_LIMIT {
+            return Err("The native history lineage exceeds the transfer limit".into());
+        }
+        records.push(record);
+    }
+    std::fs::create_dir_all(target).map_err(|_| "Cannot access the selected profile")?;
+    let mut snapshot = tempfile::Builder::new()
+        .prefix("studio-transfer-")
+        .suffix(".jsonl")
+        .tempfile_in(target)
+        .map_err(|_| "Cannot prepare the native transcript snapshot")?;
+    snapshot
+        .write_all(&records[0].bytes)
+        .map_err(|_| "Cannot write the native transcript snapshot")?;
+    snapshot
+        .as_file()
+        .sync_all()
+        .map_err(|_| "Cannot flush the native transcript snapshot")?;
+    if provider == "codex" {
+        // Native forks retain paginated ancestry. Keep each verified ancestor in the
+        // destination profile for later resume/fork, including only its recorded prefix.
+        // The random snapshot remains temporary; CLI-owned imported rollouts remain.
+        let source_root = source
+            .canonicalize()
+            .map_err(|_| "Cannot resolve source profile")?;
+        let mut imports = Vec::new();
+        for record in records.iter().rev() {
+            let relative = record
+                .path
+                .strip_prefix(&source_root)
+                .map_err(|_| "Transcript is outside its source profile")?;
+            let destination = target.join(relative);
+            if destination.exists() {
+                let mut existing = Vec::new();
+                File::open(&destination)
+                    .map_err(|_| "Cannot inspect the existing native transcript")?
+                    .take(if record.prefix {
+                        record.bytes.len() as u64
+                    } else {
+                        TRANSFER_LIMIT + 1
+                    })
+                    .read_to_end(&mut existing)
+                    .map_err(|_| "Cannot inspect the existing native transcript")?;
+                if existing != record.bytes {
+                    return Err("A different transcript already exists in the selected profile. Both copies were preserved.".into());
+                }
+            } else {
+                imports.push((destination, &record.bytes));
+            }
+        }
+        // Validate the entire lineage and existing destinations before writing any import.
+        for (destination, bytes) in imports {
+            std::fs::create_dir_all(destination.parent().unwrap())
+                .map_err(|_| "Cannot prepare native session storage")?;
+            let mut file = tempfile::NamedTempFile::new_in(destination.parent().unwrap())
+                .map_err(|_| "Cannot stage native history")?;
+            file.write_all(bytes)
+                .map_err(|_| "Cannot write native history")?;
+            file.as_file()
+                .sync_all()
+                .map_err(|_| "Cannot flush native history")?;
+            file.persist_noclobber(&destination).map_err(|_| {
+                "Cannot stage the native transcript without replacing existing history"
+            })?;
+        }
+    }
+    Ok(snapshot.into_temp_path())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn codex_transfers_keep_paginated_ancestors_and_their_exact_recorded_prefixes() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let child = uuid::Uuid::new_v4().to_string();
+        let directory = source.path().join("sessions/2026/09/20");
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = |id: &str| format!("rollout-2026-09-20-{id}.jsonl");
+        let ancestor = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":parent}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":"tool-only context"}})
+        );
+        let source_bytes = format!(
+            "{ancestor}{}\n",
+            json!({"type":"response_item","payload":{"type":"message","content":"later branch content excluded"}})
+        );
+        std::fs::write(directory.join(name(&parent)), &source_bytes).unwrap();
+        let leaf = format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":child,"history_mode":"paginated","forked_from_id":parent,"history_base":{"thread_id":parent,"end_byte_offset":ancestor.len(),"end_ordinal_exclusive":2}}})
+        );
+        std::fs::write(directory.join(name(&child)), &leaf).unwrap();
+        let temporary = transcript_snapshot(source.path(), target.path(), "codex", &child).unwrap();
+        drop(temporary);
+        let imported = target.path().join("sessions/2026/09/20");
+        assert_eq!(
+            std::fs::read_to_string(imported.join(name(&parent))).unwrap(),
+            ancestor
+        );
+        assert_eq!(
+            std::fs::read_to_string(imported.join(name(&child))).unwrap(),
+            leaf
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join(name(&parent))).unwrap(),
+            source_bytes
+        );
+        // A subsequent transfer can resolve the entire native lineage from the recipient.
+        let next = tempfile::tempdir().unwrap();
+        transcript_snapshot(target.path(), next.path(), "codex", &child).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(next.path().join("sessions/2026/09/20").join(name(&parent)))
+                .unwrap(),
+            ancestor
+        );
+        // Existing longer original histories are preserved when returning to their account.
+        transcript_snapshot(target.path(), source.path(), "codex", &child).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.join(name(&parent))).unwrap(),
+            source_bytes
+        );
+        std::fs::remove_file(directory.join(name(&parent))).unwrap();
+        let missing_target = tempfile::tempdir().unwrap();
+        assert!(
+            transcript_snapshot(source.path(), missing_target.path(), "codex", &child)
+                .unwrap_err()
+                .contains("ancestor is unavailable")
+        );
+        assert_eq!(std::fs::read_dir(missing_target.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn codex_rejects_cyclic_or_incomplete_lineage_before_importing_anything() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let directory = source.path().join("sessions/2026/09/20");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("rollout-2026-09-20-{id}.jsonl"));
+        let row = json!({"type":"session_meta","payload":{"id":id,"history_mode":"paginated","history_base":{"thread_id":id,"end_byte_offset":1,"end_ordinal_exclusive":1}}});
+        std::fs::write(path, format!("{row}\n")).unwrap();
+        assert!(
+            transcript_snapshot(source.path(), target.path(), "codex", &id)
+                .unwrap_err()
+                .contains("cyclic")
+        );
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn account_transfer_snapshots_only_the_bound_complete_transcript() {
+        for provider in ["codex", "claude"] {
+            let source = tempfile::tempdir().unwrap();
+            let target = tempfile::tempdir().unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            let parent = source.path().join(if provider == "codex" {
+                "sessions/2026/09/20"
+            } else {
+                "projects/fixture"
+            });
+            std::fs::create_dir_all(&parent).unwrap();
+            let path = parent.join(if provider == "codex" {
+                format!("rollout-2026-09-20-{id}.jsonl")
+            } else {
+                format!("{id}.jsonl")
+            });
+            let record = if provider == "codex" {
+                json!({"type":"session_meta","payload":{"id":id}})
+            } else {
+                json!({"type":"user","sessionId":id,"message":{"content":"fixture"}})
+            };
+            let bytes = format!("{record}\n");
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::write(target.path().join("auth.json"), "do-not-copy-or-change").unwrap();
+            let snapshot =
+                transcript_snapshot(source.path(), target.path(), provider, &id).unwrap();
+            assert_eq!(std::fs::read(&snapshot).unwrap(), bytes.as_bytes());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+            assert_eq!(
+                std::fs::read_to_string(target.path().join("auth.json")).unwrap(),
+                "do-not-copy-or-change"
+            );
+            let snapshot_path = snapshot.to_path_buf();
+            drop(snapshot);
+            assert!(!snapshot_path.exists());
+            std::fs::write(&path, record.to_string()).unwrap();
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id)
+                    .unwrap_err()
+                    .contains("unfinished")
+            );
+            std::fs::write(&path, "{broken}\n").unwrap();
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id)
+                    .unwrap_err()
+                    .contains("malformed")
+            );
+            let foreign = bytes.replace(&id, &uuid::Uuid::new_v4().to_string());
+            std::fs::write(&path, foreign).unwrap();
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id)
+                    .unwrap_err()
+                    .contains("identity")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transferred_sessions_keep_native_context_and_disable_removed_shared_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let a = profile("claude");
+        let mut b = a.clone();
+        b.id = uuid::Uuid::new_v4().to_string();
+        r.shared_context.source = "shared-source".into();
+        crate::profiles::scope(a, async {
+            let s = Session::prepare(root.path(), &r).unwrap().unwrap();
+            s.bind(s.id(), true).unwrap();
+        })
+        .await;
+        r.messages.extend([
+            message("assistant", "READY"),
+            message("user", "Recall tool output"),
+        ]);
+        r.shared_context = Default::default();
+        let mut switched = crate::profiles::scope(b, async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        switched.resumed = true;
+        switched.transfer_path = Some("host-owned-snapshot.jsonl".into());
+        assert!(switched.shared_context_changed);
+        r.native_session = Some(switched);
+        let context = r.native_context().unwrap();
+        assert!(context.contains("sharing is now disabled"));
+        assert!(!context.contains("READY") && !context.contains("earlier context only"));
+        assert!(!r.native_image_message(0));
+        let returned = uuid::Uuid::new_v4().to_string();
+        r.native_session
+            .as_ref()
+            .unwrap()
+            .bind(&returned, false)
+            .unwrap();
+        assert_eq!(saved(r.native_session.as_ref().unwrap()).id, returned);
+    }
 
     fn request() -> RunRequest {
         serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"","instructions":"Private guidance"},"messages":[{"role":"user","text":"Private request"}]})).unwrap()
@@ -551,7 +1010,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn account_switches_start_a_fresh_session_from_saved_history_at_the_same_location() {
+    async fn account_switches_prepare_a_new_destination_and_keep_the_latest_binding() {
         let root = tempfile::tempdir().unwrap();
         let mut r = request();
         let first = profile("claude");
@@ -567,7 +1026,7 @@ mod tests {
             .extend([message("assistant", "Done"), message("user", "Continue")]);
         // A version 2 binding recognizes the same location under another account by itself.
         assert!(!r.account_switch);
-        let switched = crate::profiles::scope(second.clone(), async {
+        let mut switched = crate::profiles::scope(second.clone(), async {
             Session::prepare(root.path(), &r).unwrap().unwrap()
         })
         .await;
@@ -576,12 +1035,15 @@ mod tests {
         assert_eq!(switched.unconfirmed_message, None);
         let second_id = switched.id().to_string();
         assert_ne!(second_id, first_id);
+        // Simulate the verified snapshot step; the native smoke exercises it end to end.
+        switched.resumed = true;
+        switched.transfer_path = Some("host-owned-transcript.jsonl".into());
+        switched.instructions_changed = true;
         r.native_session = Some(switched);
         let context = r.native_context().unwrap();
-        assert!(context.contains("Private request") && context.contains("Done"));
-        assert!(context.contains("earlier context only"));
+        assert!(!context.contains("Private request") && !context.contains("Done"));
         assert_eq!(r.native_user_text(), "Continue");
-        assert!(r.native_image_message(0));
+        assert!(!r.native_image_message(0));
         assert_eq!(r.stdin_payload().lines().count(), 2);
         let switched = r.native_session.take().unwrap();
         switched.bind(&second_id, true).unwrap();

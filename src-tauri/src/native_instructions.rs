@@ -139,7 +139,11 @@ fn conversation_location(
         .map_err(|_| "The saved conversation location is invalid".into())
 }
 
-fn find_record(config: &Path, provider: &str, id: &str) -> Result<Option<PathBuf>, String> {
+pub(crate) fn find_record(
+    config: &Path,
+    provider: &str,
+    id: &str,
+) -> Result<Option<PathBuf>, String> {
     uuid::Uuid::parse_str(id).map_err(|_| "Invalid native session identity")?;
     let directory = config.join(if provider == "claude" {
         "projects"

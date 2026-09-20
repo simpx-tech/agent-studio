@@ -22,6 +22,7 @@ export const connectionSchema = z.object({
   environmentId: id,
   accountId: id,
   profile: z.enum(['existing', 'isolated']),
+  sharedContextConnectionId: id.optional(),
 });
 export const fleetSchema = z.object({
   computers: z.array(computerSchema),

@@ -222,8 +222,6 @@ pub(crate) async fn execute(
     std::fs::create_dir_all(&root)
         .map_err(|_| "Cannot create the conversation runtime directory")?;
     let exe = crate::providers::resolve(&request.agent.provider).await?;
-    request.native_session =
-        crate::providers::sessions::Session::prepare(root.parent().unwrap(), &request)?;
     if request.agent.provider == "gemini" {
         let login = crate::providers::require_gemini_login(&exe, &cancel).await;
         if !cancel.is_cancelled() {
@@ -234,6 +232,45 @@ pub(crate) async fn execute(
         return Ok(("cancelled".into(), String::new()));
     }
     let pool = app.state::<crate::pool::Pool>();
+    if request.tools_enabled()
+        && (crate::profiles::current().shared_source.is_some()
+            || crate::profiles::current().shared_error.is_some())
+    {
+        let command = chat_command(&request, &root, &exe).await?;
+        let folder = if let Some(wsl) = &exe.wsl {
+            if let Some(location) = &request.location {
+                location.path.clone()
+            } else {
+                let (_, _, _, fallback) = crate::context::wsl_paths(
+                    wsl,
+                    &crate::profiles::current(),
+                    &request.agent.provider,
+                )
+                .await?;
+                match crate::standalone::prepare(root.parent().unwrap(), &request)? {
+                    Some(id) => std::path::Path::new(&fallback)
+                        .parent()
+                        .ok_or("Cannot locate Standalone folder")?
+                        .join("standalone")
+                        .join(id.to_string())
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    None => fallback,
+                }
+            }
+        } else {
+            command
+                .as_std()
+                .get_current_dir()
+                .unwrap_or(&root)
+                .to_string_lossy()
+                .into_owned()
+        };
+        request.shared_context =
+            crate::shared_context::load(&request.agent.provider, &folder).await?;
+    }
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.parent().unwrap(), &request)?;
     // Only conversation-bound Claude/Codex chats keep their process between replies.
     let parkable = request.native_session.is_some();
     let fingerprint = if parkable {
@@ -256,6 +293,10 @@ pub(crate) async fn execute(
         }
     }
     let mut config_cwd = None;
+    if let Some(mut session) = request.native_session.take() {
+        session.prepare_transfer(&app, &request).await?;
+        request.native_session = Some(session);
+    }
     let mut process = match reused {
         Some(process) => process,
         None => {
@@ -279,10 +320,14 @@ pub(crate) async fn execute(
                 }
                 command.args(["--model", &model?]);
             }
-            if let Some(session) = request.native_session.as_ref().filter(|s| !s.resumed) {
+            if let Some(session) = request
+                .native_session
+                .as_ref()
+                .filter(|s| !s.resumed || s.switched_account)
+            {
                 if let Some(channel) = &channel {
                     if session.switched_account {
-                        let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Switched to another account. This reply starts a new native session for the selected account from this chat's saved messages; the previous account's native tool history is not transferred.".into() });
+                        let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Continuing the latest native conversation history under the selected account. Saved tool results and compacted context are carried forward; live terminals and background processes are not restarted.".into() });
                     } else if request.messages.len() > 1 {
                         let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });
                     }
@@ -586,7 +631,7 @@ async fn stream_turn(
                             }
                             if !session_received && (value["type"] == "assistant" || (request.compact && value["type"] == "system" && value["subtype"] == "compact_boundary")) && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
-                                    if let Err(error) = session.bind(session.id(), true) { process.healthy = false; break Err(error); }
+                                    if let Err(error) = session.bind(&process.session_id, true) { process.healthy = false; break Err(error); }
                                     session_received = true;
                                 }
                                 if let Some(q) = &questions { q.steering.ready(!request.compact && !interrupting); }

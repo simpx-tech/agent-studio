@@ -76,11 +76,18 @@ fn start_params(request: &RunRequest) -> Value {
         if session.resumed {
             params.as_object_mut().unwrap().remove("ephemeral");
             params.as_object_mut().unwrap().remove("dynamicTools");
-            params["threadId"] = json!(session.id());
+            params["threadId"] = json!(session.transfer_id().unwrap_or(session.id()));
             params["excludeTurns"] = json!(true);
         }
     }
     params
+}
+fn thread_method(request: &RunRequest) -> &'static str {
+    match request.native_session.as_ref() {
+        Some(s) if s.transfer_path.is_some() => "thread/fork",
+        Some(s) if s.resumed => "thread/resume",
+        _ => "thread/start",
+    }
 }
 fn turn_params(request: &RunRequest, thread: &str) -> Value {
     // Keep the visible slash spelling in history; only the current invocation
@@ -348,7 +355,7 @@ pub async fn run(
                             if resolve_defaults {
                                 send(process, &mut pending, Kind::Config, "config/read", json!({"includeLayers":false,"cwd":config_cwd})).await?;
                             } else {
-                                let method = if request.native_session.as_ref().is_some_and(|s| s.resumed) { "thread/resume" } else { "thread/start" };
+                                let method = thread_method(request);
                                 send(process, &mut pending, Kind::Thread, method, start_params(request)).await?;
                             }
                         }
@@ -357,13 +364,13 @@ pub async fn run(
                             if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
                                 send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true})).await?;
                             } else {
-                                send(process, &mut pending, Kind::Thread, "thread/resume", start_params(request)).await?;
+                                send(process, &mut pending, Kind::Thread, thread_method(request), start_params(request)).await?;
                             }
                         }
                         Kind::Models => {
                             model_pages += 1;
                             if super::defaults::codex_models(request, value["result"]["data"].as_array().ok_or("Codex did not report model defaults")?) {
-                                send(process, &mut pending, Kind::Thread, "thread/resume", start_params(request)).await?;
+                                send(process, &mut pending, Kind::Thread, thread_method(request), start_params(request)).await?;
                             } else if let Some(cursor) = value["result"]["nextCursor"].as_str().filter(|_| model_pages < 10) {
                                 send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true,"cursor":cursor})).await?;
                             } else {

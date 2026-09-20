@@ -6,6 +6,69 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
 
+test('shared account context is explicit, scoped, cancellable and saved across reloads', async ({
+  page,
+}) => {
+  await host(page, '', '', 'Desktop', 'windows');
+  const computer = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  const claude = computer.getByRole('article', { name: 'Claude connections', exact: true });
+  for (const name of ['Shared source', 'Second account']) {
+    await computer.getByRole('button', { name: 'Add account', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add account' });
+    await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill(name);
+    await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+  }
+  const account = claude.locator('.fleet-account').filter({ hasText: 'Second account' });
+  await account.getByRole('button', { name: 'Manage account' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Manage account' });
+  await dialog.getByRole('combobox', { name: 'Shared context source' }).click();
+  await page.getByRole('option', { name: 'Shared source', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await account.getByRole('button', { name: 'Manage account' }).click();
+  await expect(dialog.getByRole('combobox', { name: 'Shared context source' })).toHaveText(
+    'This account only',
+  );
+  await dialog.getByRole('combobox', { name: 'Shared context source' }).click();
+  await page.getByRole('option', { name: 'Shared source', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
+  const saved = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('fixture-workspace')!).fleet,
+  );
+  const source = saved.connections.find(
+    (c: any) => c.accountId === saved.accounts.find((a: any) => a.name === 'Shared source').id,
+  );
+  const target = saved.connections.find(
+    (c: any) => c.accountId === saved.accounts.find((a: any) => a.name === 'Second account').id,
+  );
+  expect(target.sharedContextConnectionId).toBe(source.id);
+  expect(source.sharedContextConnectionId).toBeUndefined();
+  await page.reload();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await account.getByRole('button', { name: 'Manage account' }).click();
+  await expect(dialog.getByRole('combobox', { name: 'Shared context source' })).toHaveText(
+    'Shared source',
+  );
+  await page.setViewportSize({ width: 840, height: 640 });
+  await dialog.screenshot({ path: 'artifacts/shared-context-account.png' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await dialog.screenshot({ path: 'artifacts/shared-context-account-mobile.png' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await dialog.getByRole('combobox', { name: 'Shared context source' }).click();
+  await page.getByRole('option', { name: 'This account only', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
+  const cleared = await page.evaluate(
+    (id) =>
+      JSON.parse(localStorage.getItem('fixture-workspace')!).fleet.connections.find(
+        (c: any) => c.id === id,
+      ),
+    target.id,
+  );
+  expect(cleared.sharedContextConnectionId).toBeUndefined();
+  await expect(page.locator('select')).toHaveCount(0);
+});
+
 async function host(page: Page, relay: string, token: string, name: string, platform: string) {
   const identity = { id: crypto.randomUUID(), computerId: crypto.randomUUID(), name, platform };
   await page.exposeFunction('relayBridge', async (method: string, path: string, body?: unknown) => {

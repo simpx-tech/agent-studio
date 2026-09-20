@@ -20,6 +20,24 @@ const snapshot = (checkedAt: number): ContextSnapshot => ({
 });
 
 describe('context cache', () => {
+  it('does not reuse pending or cached inventories after the shared source changes', async () => {
+    let scope = 'account-a';
+    let finish!: (value: ContextSnapshot) => void;
+    const read = vi
+      .fn<Parameters<typeof createContextCache>[0]>()
+      .mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)))
+      .mockResolvedValueOnce(snapshot(2));
+    const cache = createContextCache(read, () => scope);
+    const previous = cache.refresh(selected, folder);
+    await Promise.resolve();
+    scope = 'account-b';
+    expect(cache.peek(selected, folder)).toBeUndefined();
+    await cache.refresh(selected, folder);
+    finish(snapshot(1));
+    await expect(previous).rejects.toThrow('Shared context changed');
+    expect(cache.peek(selected, folder)?.checkedAt).toBe(2);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
   it('keeps conversation inventories separate including temporary sources in the same project', async () => {
     const cache = createContextCache(async () => snapshot(1));
     const a = { ...selected, conversationId: 'chat-a' };

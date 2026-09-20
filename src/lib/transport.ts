@@ -398,7 +398,7 @@ async function endBrowserSession(reason: string) {
   browserScope = undefined;
   notifyRelayConnection(false);
   baseline = emptyShared();
-  contextCache = createContextCache(readContext);
+  contextCache = makeContextCache();
   updatePendingBadge(0);
   await runtime?.replaceBrowserWorkspace?.(initialWorkspace(), reason);
   if (previousScope) clearBrowserWorkspace(localStorage, previousScope);
@@ -1080,7 +1080,16 @@ export async function readContext(
     settings.connectionId,
   );
 }
-export let contextCache = createContextCache(readContext);
+function makeContextCache() {
+  return createContextCache(readContext, () =>
+    JSON.stringify(
+      runtime
+        ?.workspace()
+        .fleet.connections.map((c) => [c.id, c.sharedContextConnectionId ?? '']) ?? [],
+    ),
+  );
+}
+export let contextCache = makeContextCache();
 export async function searchMentions(
   settings: Pick<ChatSettings, 'provider' | 'connectionId'> & { conversationId?: string },
   location: ChatLocation | undefined,
@@ -1088,8 +1097,12 @@ export async function searchMentions(
   query: string,
 ): Promise<MentionResult> {
   const args = mentionRequestSchema.parse({
-    provider: settings.provider, connectionId: settings.connectionId,
-    conversationId: settings.conversationId ?? null, location: location ?? null, kind, query,
+    provider: settings.provider,
+    connectionId: settings.connectionId,
+    conversationId: settings.conversationId ?? null,
+    location: location ?? null,
+    kind,
+    query,
   });
   return mentionResultSchema.parse(await routed('mentions', args, settings.connectionId));
 }

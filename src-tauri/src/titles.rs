@@ -33,6 +33,7 @@ fn request(provider: &str, first_message: &str) -> Result<RunRequest, String> {
         compact: false,
         conversation_id: None,
         native_session: None,
+        shared_context: Default::default(),
         claude_default_model: None,
         workflow: None,
         conversation_only: true,
