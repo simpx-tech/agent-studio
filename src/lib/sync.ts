@@ -374,6 +374,7 @@ export type RelayJob = {
     | 'title'
     | 'folders'
     | 'context'
+    | 'mentions'
     | 'nativeInstructions'
     | 'mcp'
     | 'plugins'

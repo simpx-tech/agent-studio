@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { mentionSchema, maxMentions, type Mention } from './mentions.ts';
 import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
 import { emptyFleet, fleetSchema } from './fleet.ts';
@@ -182,6 +183,7 @@ export const messageSchema = z
       ),
     images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
     skills: z.array(skillReferenceSchema).max(4).optional(),
+    mentions: z.array(mentionSchema).max(maxMentions).optional(),
     status: z.enum(['complete', 'running', 'error', 'cancelled']),
     createdAt: z.string(),
     error: z.string().optional(),
@@ -314,6 +316,7 @@ export type RunRequest = {
     text: string;
     images?: ChatImage[];
     skills?: SkillReference[];
+    mentions?: Mention[];
     visualizations?: Visualization[];
   }[];
 };
@@ -352,6 +355,7 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
           : ''),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
+      ...(m.role === 'user' && m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.role === 'assistant' && m.status === 'complete' && m.visualizations?.length
         ? { visualizations: m.visualizations }
         : {}),

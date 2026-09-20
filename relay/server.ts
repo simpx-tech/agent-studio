@@ -23,6 +23,7 @@ import { elicitationInputSchema } from '../src/lib/elicitations.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
 import { mcpRequestSchema } from '../src/lib/mcp.ts';
 import { pluginRequestSchema } from '../src/lib/plugins.ts';
+import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
 
@@ -40,6 +41,7 @@ const jobInput = z
       'title',
       'folders',
       'context',
+      'mentions',
       'nativeInstructions',
       'mcp',
       'plugins',
@@ -50,6 +52,8 @@ const jobInput = z
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (job.method === 'mentions' && !mentionRequestSchema.safeParse(job.args).success)
+      ctx.addIssue({ code: 'custom', message: 'Invalid mention search' });
     if (
       job.method === 'account' &&
       !z.object({ connectionId: uuid, input: accountActionSchema }).strict().safeParse(job.args)

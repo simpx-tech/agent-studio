@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
+import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 
@@ -874,6 +875,7 @@ async function localCall(
     title: 'generate_title',
     folders: 'list_folders',
     context: 'read_context',
+    mentions: 'search_mentions',
     mcp: 'manage_mcp',
     plugins: 'manage_plugins',
     nativeInstructions: 'read_native_instructions',
@@ -911,6 +913,7 @@ async function routed<T>(
       method === 'run' ||
       method === 'folders' ||
       method === 'context' ||
+      method === 'mentions' ||
       method === 'mcp' ||
       method === 'plugins' ||
       method === 'nativeInstructions'
@@ -1078,6 +1081,18 @@ export async function readContext(
   );
 }
 export let contextCache = createContextCache(readContext);
+export async function searchMentions(
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'> & { conversationId?: string },
+  location: ChatLocation | undefined,
+  kind: 'file' | 'app',
+  query: string,
+): Promise<MentionResult> {
+  const args = mentionRequestSchema.parse({
+    provider: settings.provider, connectionId: settings.connectionId,
+    conversationId: settings.conversationId ?? null, location: location ?? null, kind, query,
+  });
+  return mentionResultSchema.parse(await routed('mentions', args, settings.connectionId));
+}
 function invalidateSources() {
   contextCache.clear();
   window.dispatchEvent(new Event('studio-skills-changed'));

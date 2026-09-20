@@ -430,6 +430,8 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<crate::mentions::Mention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visualizations: Vec<visualize::Visualization>,
 }
 mod images;
@@ -459,6 +461,7 @@ impl RunRequest {
                         && m.text.chars().count() <= 30_000
                         && m.images.is_empty()
                         && m.skills.is_empty()
+                        && m.mentions.is_empty()
                         && (m.text.trim() == "/compact"
                             || (self.agent.provider == "claude"
                                 && m.text
@@ -526,6 +529,17 @@ impl RunRequest {
             return Err("Visualization history is too large. Start a new conversation.".into());
         }
         for message in &self.messages {
+            if !message.mentions.is_empty()
+                && (!self.uses_codex_server()
+                    || message.role != "user"
+                    || message.mentions.len() > 16
+                    || message.mentions.iter().any(|m| {
+                        !crate::mentions::valid(m)
+                            || !crate::mentions::has_token(&message.text, &m.token)
+                    }))
+            {
+                return Err("Invalid Codex mention input".into());
+            }
             if !visualize::valid_history(&message.visualizations)
                 || (!message.visualizations.is_empty()
                     && (message.role != "assistant"
@@ -898,6 +912,8 @@ pub async fn chat_command(
                     "--stdio",
                     "-c",
                     "features.shell_tool=true",
+                    "-c",
+                    "features.mentions_v2=true",
                     "-c",
                     "features.apply_patch_freeform=true",
                     "-c",
@@ -1288,6 +1304,7 @@ mod tests {
                 text: "Quotes \" & $(echo) `hello`\nこんにちは".into(),
                 images: vec![],
                 skills: vec![],
+                mentions: vec![],
                 visualizations: vec![],
             }],
         }
@@ -1941,6 +1958,7 @@ mod tests {
             text: "/saved-audit today".into(),
             images: vec![],
             skills: vec![],
+            mentions: vec![],
             visualizations: vec![],
         });
         let lines: Vec<serde_json::Value> = r

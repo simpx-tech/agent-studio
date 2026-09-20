@@ -113,6 +113,14 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
         }
         input.push(json!({"type":"skill","name":skill.name,"path":skill.path}));
     }
+    // Historical references remain portable metadata, never repeated invocations.
+    if !current.native_session.as_ref().is_some_and(|s| s.retry) {
+        if let Some(message) = request.messages.last() {
+            for mention in &message.mentions {
+                input.push(json!({"type":"mention","name":mention.name,"path":mention.path}));
+            }
+        }
+    }
     for (message_index, message) in request.messages.iter().enumerate() {
         if !request.native_image_message(message_index) {
             continue;
@@ -565,6 +573,35 @@ mod tests {
         assert!(text.contains("/old"));
         assert_eq!(request.messages[2].text, "/review quote $(literal)");
         request.messages[2].skills.clear();
+        assert_eq!(
+            turn_params(&request, "thread")["input"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        request.agent.provider = "claude".into();
+        assert!(request.validate().is_err());
+    }
+    #[test]
+    fn mentions_are_current_turn_inputs_and_never_replayed_from_history() {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[
+            {"role":"user","text":"$old","mentions":[{"kind":"app","name":"Old","path":"app://old","token":"$old"}]},
+            {"role":"assistant","text":"Done"},
+            {"role":"user","text":"Read @src/file.ts with $demo","mentions":[{"kind":"file","name":"src/file.ts","path":"/project/src/file.ts","token":"@src/file.ts"},{"kind":"app","name":"Demo","path":"app://demo","token":"$demo"}]}
+        ]})).unwrap();
+        assert!(request.validate().is_ok());
+        let params = turn_params(&request, "thread");
+        assert_eq!(params["input"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            params["input"][1],
+            json!({"type":"mention","name":"src/file.ts","path":"/project/src/file.ts"})
+        );
+        assert_eq!(
+            params["input"][2],
+            json!({"type":"mention","name":"Demo","path":"app://demo"})
+        );
+        request.messages.last_mut().unwrap().mentions.clear();
         assert_eq!(
             turn_params(&request, "thread")["input"]
                 .as_array()

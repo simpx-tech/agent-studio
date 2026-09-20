@@ -5,6 +5,7 @@ mod context;
 mod folders;
 mod live_usage;
 mod mcp;
+mod mentions;
 mod models;
 mod native_instructions;
 mod notifications;
@@ -76,6 +77,30 @@ async fn read_native_instructions(
     connection_id: Option<String>,
 ) -> Result<native_instructions::NativeInstructions, String> {
     native_instructions::read(app, conversation_id, provider, connection_id).await
+}
+
+#[tauri::command]
+async fn search_mentions(
+    app: tauri::AppHandle,
+    provider: String,
+    connection_id: String,
+    location: Option<folders::ChatLocation>,
+    conversation_id: Option<String>,
+    kind: String,
+    query: String,
+) -> Result<mentions::Results, String> {
+    folders::validate_chat(&app, location.as_ref(), Some(&connection_id))?;
+    let mut profile = profiles::resolve(&app, &provider, Some(&connection_id))?;
+    profile.folder_distribution = location
+        .as_ref()
+        .map(|l| folders::environment_distribution(&app, &l.environment_id))
+        .transpose()?
+        .flatten();
+    profiles::scope(
+        profile,
+        mentions::read(app, provider, location, conversation_id, kind, query),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -678,6 +703,7 @@ pub fn run() {
             live_account_updates,
             manage_account,
             read_context,
+            search_mentions,
             manage_mcp,
             manage_plugins,
             read_native_instructions,

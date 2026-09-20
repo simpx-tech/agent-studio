@@ -139,6 +139,10 @@
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
+  let draftMentions = $state<import('$lib/mentions').Mention[]>([]);
+  let staleMentionTokens = $state<string[]>([]);
+  let mentionSelection = $state('');
+  const hasComposerMentions = $derived(!!draftMentions.length || !!staleMentionTokens.length);
   let modelPicker = $state<ChoicePicker>();
   let reasoningPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
@@ -594,6 +598,7 @@
       !steeringPending &&
       !imagesLoading &&
       !attachedImages.length &&
+      !hasComposerMentions &&
       !!prompt.trim() &&
       !prompt.trimStart().startsWith('/') &&
       (desktop() || (paired && online)) &&
@@ -1855,11 +1860,17 @@
     if (activeId !== id) return;
     const restored = restoreToDraft(returning, prompt, attachedImages, maxImagesPerMessage);
     prompt = restored.draft;
+    for (const item of returning) restoreDraftMentions(item);
     attachedImages = restored.images;
     attachmentError = restored.droppedImages
       ? `${restored.droppedImages} queued image${restored.droppedImages === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`
       : '';
     void tick().then(() => composerInput?.focus());
+  }
+  function restoreDraftMentions(item: QueuedMessage) {
+    if (item.mentionConnectionId !== selectedSettings.connectionId)
+      staleMentionTokens = [...staleMentionTokens, ...(item.mentions ?? []).map((m) => m.token)];
+    else draftMentions = [...draftMentions, ...(item.mentions ?? []).map((m) => ({ ...m }))];
   }
   // Send the next queued message once the running reply completes. A stopped or failed
   // reply returns queued messages to the composer instead of sending into a broken state.
@@ -1910,6 +1921,14 @@
   async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
     if (steeringPending) return;
     if (preparingCommand) return;
+    if (queuedMessage?.mentions?.length && queuedMessage.mentionConnectionId !== selectedSettings.connectionId) {
+      const restored = restoreToDraft([queuedMessage], prompt, attachedImages, maxImagesPerMessage);
+      prompt = restored.draft;
+      attachedImages = restored.images;
+      restoreDraftMentions(queuedMessage);
+      attachmentError = 'The account changed. Choose the queued mentions again before sending.';
+      return;
+    }
     const session = workspaceSession;
     let command: Awaited<ReturnType<ComposerCommands['submission']>>;
     if (!retry && !queuedMessage && !compactRequest) {
@@ -1932,6 +1951,7 @@
     const text = compactRequest ?? (queuedMessage ? queuedMessage.text : prompt.trim());
     const images = compactRequest ? [] : queuedMessage ? queuedMessage.images : attachedImages;
     const skills = queuedMessage ? queuedMessage.skills : command?.skills;
+    const mentions = queuedMessage ? queuedMessage.mentions : command?.mentions;
     if (!retry && !queuedMessage && activeId && activeRunning) {
       // The reply is still running: hold this message and send it once the reply completes.
       if (!canQueue) return;
@@ -1939,6 +1959,8 @@
         text,
         images: structuredClone($state.snapshot(attachedImages)),
         skills,
+        mentions,
+        mentionConnectionId: selectedSettings.connectionId,
       });
       if (next.error) {
         attachmentError = next.error;
@@ -2005,6 +2027,7 @@
         id: crypto.randomUUID(),
         role: 'user',
         ...(skills?.length ? { skills } : {}),
+        ...(mentions?.length ? { mentions } : {}),
         blocks: [
           {
             type: 'markdown',
@@ -2963,7 +2986,7 @@
               <textarea
                 bind:this={composerInput}
                 aria-label="Message"
-                title="Enter to send · Shift + Enter for a new line · / for commands and skills"
+                title="Enter to send · Shift + Enter for a new line · / commands · @ files · $ apps in Codex"
                 placeholder={activeRunning
                   ? `Message ${selectedAgent.name} after this reply… Type / for commands`
                   : `Message ${selectedAgent.name}… Type / for commands`}
@@ -2988,6 +3011,9 @@
                 conversationId={active?.id}
                 forked={active?.forked}
                 bind:this={composerCommands}
+                bind:references={draftMentions}
+                bind:staleTokens={staleMentionTokens}
+                bind:referenceSelection={mentionSelection}
                 input={composerInput}
                 bind:prompt
                 settings={selectedSettings}
@@ -3053,7 +3079,7 @@
                 </div>
                 {#if activeRunning}
                   {#if steeringSupported}<button type="button" class="steer-button" disabled={!canSteer} onclick={steer}
-                    title={attachedImages.length || prompt.trimStart().startsWith('/') ? 'Queue images, commands, and skills for the next reply' : 'Send text to the active reply'}
+                    title={attachedImages.length || hasComposerMentions || prompt.trimStart().startsWith('/') ? 'Queue images, mentions, commands, and skills for the next reply' : 'Send text to the active reply'}
                     >{steeringPending === observedReply?.runId ? 'Sending…' : 'Steer now'}</button>{/if}
                   <button
                     class="stop-button"

@@ -20,6 +20,7 @@ COPY src/lib/plugins.ts ./src/lib/
 COPY src/lib/proposed-plans.ts ./src/lib/
 COPY src/lib/elicitations.ts ./src/lib/
 COPY src/lib/live-usage.ts ./src/lib/
+COPY src/lib/mentions.ts ./src/lib/
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
 USER node
 EXPOSE 4317

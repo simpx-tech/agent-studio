@@ -130,6 +130,45 @@ it('routes MCP management and OAuth polling to the exact selected host', async (
   expect(native.invoke.mock.calls.some(([command]) => command === 'manage_mcp')).toBe(false);
 });
 
+it('routes bounded mention discovery to its selected host and rejects offline fallback', async () => {
+  const connectionId = crypto.randomUUID();
+  const transport = await fixture(connectionId);
+  await transport.resumeRelay();
+  const original = native.invoke.getMockImplementation()!;
+  const result = {
+    entries: [{ kind: 'file', name: 'file.ts', path: '/remote/file.ts', token: '@file.ts' }],
+    truncated: false,
+    notice: '',
+  };
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path.startsWith('v1/jobs/'))
+      return { status: 200, body: { status: 'complete', events: [], result } };
+    return original(command, args);
+  });
+  const location = {
+    computerId: crypto.randomUUID(),
+    environmentId: crypto.randomUUID(),
+    path: '/remote',
+  };
+  expect(
+    await transport.searchMentions({ provider: 'codex', connectionId }, location, 'file', 'fi'),
+  ).toEqual(result);
+  const call = native.invoke.mock.calls.find(
+    ([command, args]) =>
+      command === 'relay_request' && args.method === 'POST' && args.path === 'v1/jobs',
+  );
+  expect(call?.[1].body).toMatchObject({
+    method: 'mentions',
+    args: { provider: 'codex', connectionId, location, kind: 'file', query: 'fi' },
+  });
+  expect(native.invoke.mock.calls.some(([command]) => command === 'search_mentions')).toBe(false);
+  await transport.disconnectRelay();
+  await expect(
+    transport.searchMentions({ provider: 'codex', connectionId }, location, 'file', 'fi'),
+  ).rejects.toThrow();
+  expect(native.invoke.mock.calls.some(([command]) => command === 'search_mentions')).toBe(false);
+});
+
 async function fixture(remoteConnection?: string) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();

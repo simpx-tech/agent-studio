@@ -1,0 +1,17 @@
+{
+  "identifier": "com.vinicius.agentstudio.mentions-qa",
+  "productName": "Agent Studio Mentions QA",
+  "build": { "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Mentions QA",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "additionalBrowserArgs": "--remote-debugging-port=19661"
+      }
+    ]
+  }
+}

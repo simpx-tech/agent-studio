@@ -208,6 +208,18 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   ],
             };
           }
+          if (command === 'search_mentions') {
+            const state = window as any;
+            (state.mentionCalls ??= []).push(args);
+            if (state.holdMentions) await new Promise<void>((resolve) => { (state.pendingMentions ??= []).push({ ...args, resolve }); });
+            if (state.failMentions) throw 'File search is unavailable on the selected computer.';
+            return { entries: args.kind === 'app' ? [
+              { kind: 'app', name: 'Demo App', path: 'app://demo', token: '$demo-app' },
+            ] : [
+              { kind: 'file', name: 'src/my file.ts', path: `${args.location?.path ?? '/standalone'}/src/my file.ts`, token: '@"src/my file.ts"' },
+              { kind: 'file', name: 'src/other.ts', path: `${args.location?.path ?? '/standalone'}/src/other.ts`, token: '@src/other.ts' },
+            ], truncated: false, notice: '' };
+          }
           if (command === 'read_context') {
             const state = window as any;
             (state.contextCalls ??= []).push(args);

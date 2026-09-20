@@ -1,4 +1,5 @@
 import type { SkillReference } from './domain';
+import type { Mention } from './mentions';
 import type { ChatImage } from './images';
 
 /**
@@ -12,6 +13,8 @@ export type QueuedMessage = {
   text: string;
   images: ChatImage[];
   skills?: SkillReference[];
+  mentions?: Mention[];
+  mentionConnectionId?: string;
 };
 
 export const maxQueuedMessages = 8;
@@ -35,6 +38,8 @@ export function enqueueMessage(
         text,
         images: [...message.images],
         ...(message.skills?.length ? { skills: [...message.skills] } : {}),
+        ...(message.mentions?.length ? { mentions: message.mentions.map((m) => ({ ...m })) } : {}),
+        ...(message.mentions?.length ? { mentionConnectionId: message.mentionConnectionId } : {}),
       },
     ],
   };
