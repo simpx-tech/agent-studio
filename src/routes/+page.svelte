@@ -1344,6 +1344,7 @@
         settings.connectionId !== selectedSettings.connectionId ||
         !!settings.planMode !== !!selectedSettings.planMode ||
         settings.outputSchema !== selectedSettings.outputSchema ||
+        settings.maxThinkingTokens !== selectedSettings.maxThinkingTokens ||
         settings.instructions !== selectedSettings.instructions)
     )
       return;
@@ -3209,10 +3210,11 @@
 {#if editorOpen}<ChatInstructions
     instructions={selectedSettings.instructions}
     outputSchema={selectedSettings.outputSchema}
+    maxThinkingTokens={selectedSettings.maxThinkingTokens}
     provider={selectedSettings.provider}
     close={() => (editorOpen = false)}
-    save={(instructions, outputSchema) => {
-      changeSettings({ ...selectedSettings, instructions, outputSchema });
+    save={(instructions, outputSchema, maxThinkingTokens) => {
+      changeSettings({ ...selectedSettings, instructions, outputSchema, maxThinkingTokens });
       editorOpen = false;
     }}
   />{/if}

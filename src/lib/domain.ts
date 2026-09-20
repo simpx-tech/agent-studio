@@ -92,6 +92,11 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  maxThinkingTokens: z
+    .number()
+    .int()
+    .refine((n) => n === 0 || (n >= 1024 && n <= 128_000))
+    .optional(),
   outputSchema: outputSchemaSetting.optional(),
   planMode: z.boolean().optional(),
   autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),

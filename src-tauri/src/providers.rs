@@ -7,6 +7,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+pub mod claude_settings;
 pub mod codex_chat;
 pub mod defaults;
 pub mod elicitation;
@@ -385,6 +386,9 @@ pub struct RunRequest {
     pub conversation_id: Option<String>,
     #[serde(skip)]
     pub native_session: Option<sessions::Session>,
+    // Host-resolved selected-profile default for an in-band model reset.
+    #[serde(skip)]
+    pub claude_default_model: Option<String>,
     #[serde(default)]
     pub workflow: Option<serde_json::Value>,
     pub run_id: String,
@@ -406,6 +410,8 @@ pub struct RunRequest {
 }
 #[derive(Clone, Deserialize)]
 pub struct Agent {
+    #[serde(default, rename = "maxThinkingTokens")]
+    pub max_thinking_tokens: Option<u32>,
     #[serde(default, rename = "outputSchema")]
     pub output_schema: Option<String>,
     #[serde(default, rename = "planMode")]
@@ -439,6 +445,17 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(tokens) = self.agent.max_thinking_tokens {
+            if self.conversation_only || self.agent.provider != "claude" {
+                return Err("A thinking-token budget is available only for Claude chats.".into());
+            }
+            if tokens != 0 && !(1024..=128_000).contains(&tokens) {
+                return Err(
+                    "Claude thinking budget must be 0 (off) or between 1,024 and 128,000 tokens."
+                        .into(),
+                );
+            }
+        }
         if let Some(schema) = &self.agent.output_schema {
             if self.conversation_only || !matches!(self.agent.provider.as_str(), "claude" | "codex")
             {
@@ -1301,6 +1318,7 @@ mod tests {
             compact: false,
             conversation_id: None,
             native_session: None,
+            claude_default_model: None,
             workflow: None,
             conversation_only: false,
             account_switch: false,
@@ -1310,6 +1328,7 @@ mod tests {
             agent: Agent {
                 plan_mode: false,
                 auto_compact_tokens: None,
+                max_thinking_tokens: None,
                 output_schema: None,
                 provider: "claude".into(),
                 model: String::new(),

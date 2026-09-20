@@ -38,9 +38,11 @@ pub struct Process {
     pub stdin: ChildStdin,
     pub lines: mpsc::Receiver<Line>,
     idle: Arc<AtomicBool>,
-    /// Launch identity: provider, account/profile, computer, folder, executable, model,
-    /// reasoning, and native session.
+    /// Launch identity: provider, account/profile, computer, folder, executable,
+    /// reasoning, and (except for Claude's in-band selection) model.
     pub fingerprint: String,
+    /// Claude's acknowledged mutable settings, separate from its launch identity.
+    pub claude_settings: Option<crate::providers::claude_settings::Settings>,
     pub session_id: String,
     /// False once the protocol state is unknown (an interrupt that never confirmed, a
     /// desynchronized response); such a process is killed instead of parked.
@@ -109,6 +111,7 @@ impl Process {
             lines,
             idle,
             fingerprint,
+            claude_settings: None,
             session_id,
             healthy: true,
             thread: String::new(),
@@ -159,7 +162,7 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
     Ok(serde_json::json!({
         "scope": scope,
         "provider": request.agent.provider,
-        "model": request.agent.model,
+        "model": if request.agent.provider == "claude" { "" } else { &request.agent.model },
         "reasoning": request.agent.reasoning,
         "autoCompactTokens": request.agent.auto_compact_tokens,
         "outputSchema": if request.agent.provider == "claude" && !request.compact { request.agent.output_schema.as_deref() } else { None },
@@ -484,5 +487,25 @@ mod tests {
             fingerprint(&changed, &exe()).unwrap(),
             "instructions travel in-band and do not restart the process"
         );
+    }
+
+    #[test]
+    fn claude_only_excludes_native_mutable_settings_from_launch_identity() {
+        let mut request: RunRequest = serde_json::from_value(serde_json::json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","reasoning":"high","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
+        let base = fingerprint(&request, &exe()).unwrap();
+        request.agent.model = "opus".into();
+        request.agent.max_thinking_tokens = Some(4096);
+        assert_eq!(base, fingerprint(&request, &exe()).unwrap());
+        request.agent.reasoning = "low".into();
+        assert_ne!(base, fingerprint(&request, &exe()).unwrap());
+        request.agent.reasoning = "high".into();
+        request.agent.plan_mode = true;
+        assert_ne!(base, fingerprint(&request, &exe()).unwrap());
+        request.agent.plan_mode = false;
+        request.agent.auto_compact_tokens = Some(200000);
+        assert_ne!(base, fingerprint(&request, &exe()).unwrap());
+        request.agent.auto_compact_tokens = None;
+        request.agent.output_schema = Some("{\"type\":\"object\"}".into());
+        assert_ne!(base, fingerprint(&request, &exe()).unwrap());
     }
 }

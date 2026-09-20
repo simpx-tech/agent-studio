@@ -6,17 +6,27 @@ use std::{path::Path, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-pub async fn claude_model(
+fn claude_command(
     exe: &Executable,
     request: &RunRequest,
     cwd: &Path,
-    cancel: &CancellationToken,
-) -> Result<String, String> {
+) -> Result<tokio::process::Command, String> {
     let mut command = exe.command();
     command.current_dir(cwd);
     if exe.wsl.is_some() {
         if let Some(location) = &request.location {
             command.args(["--agent-studio-cwd", &location.path]);
+        } else if let Some(conversation) = &request.conversation_id {
+            // chat_command has already validated and prepared this binding. The
+            // inspection must use the same Linux folder without creating one.
+            let root = cwd.parent().ok_or("Cannot locate conversation data")?;
+            let directory = crate::standalone::lookup(root, conversation, "claude", None)?
+                .ok_or("Cannot find this chat's working-folder binding")?;
+            if directory == crate::standalone::Directory::Dedicated {
+                let id =
+                    uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
+                command.args(["--agent-studio-standalone", &id.to_string()]);
+            }
         }
     }
     command
@@ -40,6 +50,16 @@ pub async fn claude_model(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    Ok(command)
+}
+
+pub async fn claude_model(
+    exe: &Executable,
+    request: &RunRequest,
+    cwd: &Path,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
+    let mut command = claude_command(exe, request, cwd)?;
     let mut child = command
         .spawn()
         .map_err(|_| "Could not query Claude's default model")?;
@@ -127,6 +147,70 @@ pub fn codex_models(request: &mut RunRequest, models: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_default_inspection_preserves_wsl_working_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("chat-runtime");
+        let mut request: RunRequest = serde_json::from_value(json!({
+            "runId":uuid::Uuid::new_v4(), "conversationId":uuid::Uuid::new_v4(),
+            "agent":{"provider":"claude","model":"","instructions":""},
+            "messages":[{"role":"user","text":"Hello"}]
+        }))
+        .unwrap();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "wsl.exe".into(),
+            prefix: vec![],
+            wsl: Some(crate::wsl::Launch {
+                distribution: "Ubuntu".into(),
+                namespace: "test".into(),
+                job: uuid::Uuid::new_v4().to_string(),
+            }),
+        };
+        // Missing bindings must fail instead of inspecting the shared folder.
+        assert!(claude_command(&exe, &request, &cwd).is_err());
+        let id = crate::standalone::prepare(root.path(), &request)
+            .unwrap()
+            .unwrap();
+        let command = claude_command(&exe, &request, &cwd).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[..2], &["--agent-studio-standalone", &id.to_string()]);
+        assert!(!args.iter().any(|s| s == "--resume" || s == "--model"));
+        request.location = Some(
+            serde_json::from_value(
+                json!({"computerId":"host", "environmentId":"wsl", "path":"/home/user/project"}),
+            )
+            .unwrap(),
+        );
+        let command = claude_command(&exe, &request, &cwd).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[..2], &["--agent-studio-cwd", "/home/user/project"]);
+        request.location = None;
+        request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        request.messages.push(request.messages[0].clone());
+        assert!(crate::standalone::prepare(root.path(), &request)
+            .unwrap()
+            .is_none());
+        let command = claude_command(&exe, &request, &cwd).unwrap();
+        assert!(!command
+            .as_std()
+            .get_args()
+            .any(|s| s == "--agent-studio-standalone"));
+        // Windows already receives the validated native folder as its cwd.
+        let mut local = exe;
+        local.wsl = None;
+        let command = claude_command(&local, &request, root.path()).unwrap();
+        assert_eq!(command.as_std().get_current_dir(), Some(root.path()));
+    }
+
     #[test]
     fn defaults_honor_profile_configuration_and_explicit_picks() {
         let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","instructions":""},"messages":[{"role":"user","text":"Hello"}]})).unwrap();

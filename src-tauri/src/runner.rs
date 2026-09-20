@@ -249,7 +249,8 @@ pub(crate) async fn execute(
                 parked.claim();
                 reused = Some(parked);
             } else {
-                // Changed account, model, reasoning, folder, or session: start over.
+                // Changed launch identity or session: start over. Claude model and
+                // thinking budgets are acknowledged in-band before the next prompt.
                 parked.kill().await;
             }
         }
@@ -318,6 +319,40 @@ pub(crate) async fn execute(
         }
     };
     let reused = process.turns > 0;
+    if reused
+        && request.agent.provider == "claude"
+        && request.agent.model.trim().is_empty()
+        && process
+            .claude_settings
+            .as_ref()
+            .is_none_or(|s| !s.uses_default_model())
+    {
+        // Query the selected profile/folder without a model turn, then update the
+        // existing chat process. Never infer that an acknowledged null reset worked.
+        let default = async {
+            let command = chat_command(&request, &root, &exe).await?;
+            crate::providers::defaults::claude_model(
+                &exe,
+                &request,
+                command.as_std().get_current_dir().unwrap_or(&root),
+                &cancel,
+            )
+            .await
+        };
+        // The reader handles cancellation and releases its owned process tree.
+        let result = default.await;
+        match result {
+            Ok(model) => request.claude_default_model = Some(model),
+            Err(error) => {
+                process.kill().await;
+                return if cancel.is_cancelled() {
+                    Ok(("cancelled".into(), String::new()))
+                } else {
+                    Err(error)
+                };
+            }
+        }
+    }
     if matches!(request.agent.provider.as_str(), "codex" | "claude") {
         if let Some(channel) = &channel {
             let _ = channel.send(RunEvent::FileChanges {
@@ -376,12 +411,24 @@ async fn stream_turn(
     reused: bool,
 ) -> Result<(String, String), String> {
     use crate::pool::Line;
+    if cancel.is_cancelled() {
+        process.healthy = false;
+        return Ok(("cancelled".into(), String::new()));
+    }
     let claude_visualizer = request.uses_claude_visualizer();
     let persistent = claude_visualizer && request.native_session.is_some();
     let prompt = request.stdin_payload();
     let mut stdin_open = true;
     let mut initialized = reused;
     let mut prompt_sent = false;
+    let mut settings = crate::providers::claude_settings::Update::new(
+        &request.agent,
+        process.claude_settings.as_ref(),
+        reused,
+        request.claude_default_model.as_deref(),
+    )?;
+    let settings_deadline = tokio::time::sleep(Duration::from_secs(30));
+    tokio::pin!(settings_deadline);
     let send_failed = "Could not send input to the provider CLI.";
     if !claude_visualizer {
         // Background and text-only runs send one prompt and close their input.
@@ -397,12 +444,7 @@ async fn stream_turn(
         if let Some(session) = &request.native_session {
             session.bind(session.id(), false)?;
         }
-        process
-            .stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|_| send_failed)?;
-        prompt_sent = true;
+        prompt_sent = settings.advance(process, &prompt).await?;
     } else {
         process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
     }
@@ -465,6 +507,7 @@ async fn stream_turn(
                 break Ok(("cancelled".to_string(), decoder.text));
             }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
+            _ = &mut settings_deadline, if claude_visualizer && initialized && !prompt_sent => { process.healthy = false; break Err("Claude did not acknowledge the next-reply settings within 30 seconds. No message was sent. Retry to resume with a fresh process.".into()); }
             _ = &mut deadline => { process.healthy = false; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
             Some(delivery) = async { match answer_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
                 let result = if stdin_open && questions.as_ref().unwrap().can_deliver(&delivery) {
@@ -507,6 +550,29 @@ async fn stream_turn(
                     let mut turn_ended = false;
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if initialized && !prompt_sent {
+                                match settings.acknowledge(&value, &process.session_id) {
+                                    Ok(true) => {
+                                        prompt_sent = settings.advance(process, &prompt).await?;
+                                        continue;
+                                    }
+                                    Err(error) => { process.healthy = false; break Err(error); }
+                                    Ok(false) => {}
+                                }
+                                // Late prior-turn text/results must not complete this reply
+                                // or bind its history before the settings are acknowledged.
+                                if value["type"] != "control_request" { continue; }
+                                // Only SDK tool discovery is needed between turns. Never
+                                // accept an old question or visualization as this reply's work.
+                                let discovery = value["request"]["subtype"] == "mcp_message"
+                                    && value["request"]["server_name"] == "agent_studio"
+                                    && matches!(value["request"]["message"]["method"].as_str(), Some("initialize" | "notifications/initialized" | "ping" | "tools/list"));
+                                let response = if discovery { visualizer.claude_response(&value) } else {
+                                    serde_json::json!({"type":"control_response","response":{"subtype":"error","request_id":value["request_id"],"error":"Unavailable while applying next-reply settings"}})
+                                };
+                                process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                continue;
+                            }
                             if value["type"] == "user" && value["parent_tool_use_id"].is_null() {
                                 if let Some(delivery) = value["uuid"].as_str().and_then(|id| steering.remove(id)) {
                                     questions.as_ref().unwrap().steering.delivered(delivery, Ok(()));
@@ -528,8 +594,8 @@ async fn stream_turn(
                             if value["type"] == "control_response" && value["response"]["request_id"] == "studio-init" && !initialized {
                                 if value["response"]["subtype"] != "success" { process.healthy = false; break Err("Claude could not initialize conversation tools. Check its CLI version.".into()); }
                                 initialized = true;
-                                if process.stdin.write_all(prompt.as_bytes()).await.is_err() { process.healthy = false; break Err(send_failed.into()); }
-                                prompt_sent = true;
+                                settings_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(30));
+                                prompt_sent = settings.advance(process, &prompt).await?;
                                 continue;
                             }
                             if let Some(questions) = &mut questions { questions.observe_claude(&value); questions.elicitation.observe(&value, None); }

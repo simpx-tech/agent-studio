@@ -5,18 +5,26 @@
   let {
     instructions,
     outputSchema,
+    maxThinkingTokens,
     provider,
     close,
     save,
   }: {
     instructions: string;
     outputSchema?: string;
+    maxThinkingTokens?: number;
     provider: string;
     close: () => void;
-    save: (value: string, schema?: string) => void;
+    save: (value: string, schema?: string, tokens?: number) => void;
   } = $props();
   let draft = $state(untrack(() => instructions));
   let schema = $state(untrack(() => outputSchema ?? ''));
+  let tokens = $state<number | null | undefined>(untrack(() => maxThinkingTokens));
+  const tokensError = $derived(
+    provider === 'claude' &&
+      tokens != null &&
+      (!Number.isInteger(tokens) || (tokens !== 0 && (tokens < 1024 || tokens > 128000))),
+  );
   const schemaError = $derived(schema.trim() ? outputSchemaError(schema) : undefined);
   let input: HTMLTextAreaElement;
   onMount(() => input.focus());
@@ -42,7 +50,12 @@
     <form
       onsubmit={(event) => {
         event.preventDefault();
-        if (!schemaError) save(draft, schema.trim() || undefined);
+        if (!schemaError && !tokensError)
+          save(
+            draft,
+            schema.trim() || undefined,
+            provider === 'claude' ? (tokens ?? undefined) : undefined,
+          );
       }}
     >
       <label
@@ -74,11 +87,31 @@
         </p>
         {#if schemaError}<p role="alert">{schemaError}</p>{/if}
       {/if}
+      {#if provider === 'claude'}
+        <label
+          >Thinking token budget<input
+            type="number"
+            min="0"
+            max="128000"
+            step="1"
+            bind:value={tokens}
+            placeholder="Automatic"
+            aria-describedby="thinking-budget-hint"
+            aria-invalid={!!tokensError}
+          /></label
+        >
+        <p id="thinking-budget-hint" class="field-hint">
+          Leave empty for Claude's default, use 0 to turn thinking off, or enter 1,024–128,000
+          tokens. Applies to the next reply. This is separate from Reasoning effort; model support
+          varies.
+        </p>
+        {#if tokensError}<p role="alert">Use 0 or a whole number from 1,024 to 128,000.</p>{/if}
+      {/if}
       <footer>
         <button type="button" class="secondary" onclick={close}>Cancel</button><button
           class="primary"
           type="submit"
-          disabled={!!schemaError}>Save instructions</button
+          disabled={!!schemaError || !!tokensError}>Save instructions</button
         >
       </footer>
     </form>

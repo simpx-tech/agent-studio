@@ -11,6 +11,20 @@ $turn = 0
 $open = $false
 while ($null -ne ($line = [Console]::ReadLine())) {
     $value = $line | ConvertFrom-Json
+    $settingsLog = Join-Path (Split-Path $PSCommandPath) 'settings.jsonl'
+    Add-Content -LiteralPath $settingsLog -Value $line
+    if ($value.type -eq 'control_request' -and $value.request.subtype -in @('set_model', 'set_max_thinking_tokens')) {
+        # Unrelated, stale and child responses must not release the next prompt.
+        [Console]::WriteLine('{"type":"control_response","response":{"subtype":"error","request_id":"foreign","error":"PRIVATE"}}')
+        [Console]::WriteLine('{"type":"result","subtype":"success","num_turns":1,"result":"STALE"}')
+        $modeFile = Join-Path (Split-Path $PSCommandPath) 'settings-mode'
+        $mode = if (Test-Path -LiteralPath $modeFile) { Get-Content -LiteralPath $modeFile } else { '' }
+        if ($mode -eq 'exit') { exit 1 }
+        if ($mode -eq 'hang') { continue }
+        $status = if ($mode -eq 'reject' -or ($mode -eq 'partial' -and $value.request.subtype -eq 'set_max_thinking_tokens')) { 'error' } else { 'success' }
+        [Console]::WriteLine('{"type":"control_response","response":{"subtype":"' + $status + '","request_id":"' + $value.request_id + '","error":"PRIVATE"}}')
+        continue
+    }
     if ($value.type -eq 'control_request' -and $value.request.subtype -eq 'initialize') {
         [Console]::WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"' + $value.request_id + '"}}')
         continue
@@ -197,6 +211,207 @@ fn request(root: &std::path::Path, conversation: &str, messages: serde_json::Val
     request.native_session = crate::providers::sessions::Session::prepare(root, &request).unwrap();
     assert!(request.native_session.is_some());
     request
+}
+
+fn settings_input(root: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(root.join("settings.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line.trim_start_matches('\u{feff}')).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn claude_settings_acknowledged_before_prompt_and_reused_without_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let mut messages = serde_json::json!([{"role":"user","text":"First"}]);
+    let mut process = None;
+    let mut first_pid = None;
+    for (index, (model, budget)) in [
+        ("fixture", Some(1024)),
+        ("other", Some(4096)),
+        ("other", Some(4096)),
+        ("", Some(0)),
+        ("", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut r = request(root.path(), &conversation, messages.clone());
+        r.agent.model = model.into();
+        r.agent.max_thinking_tokens = budget;
+        r.claude_default_model = Some("configured-default".into());
+        if process.is_none() {
+            let mut p = fixture(
+                root.path(),
+                r.native_session.as_ref().unwrap().id(),
+                false,
+                false,
+            );
+            p.fingerprint = crate::pool::fingerprint(&r, &p.exe).unwrap();
+            first_pid = p.child.id();
+            process = Some(p);
+        }
+        let p = process.as_mut().unwrap();
+        if index > 0 {
+            assert!(p.serves(
+                &crate::pool::fingerprint(&r, &p.exe).unwrap(),
+                r.native_session.as_ref().unwrap()
+            ));
+            p.claim();
+        }
+        let (result, _) = turn(p, &r, CancellationToken::new(), index > 0, false).await;
+        assert_eq!(
+            result.unwrap(),
+            ("complete".into(), format!("Turn {}", index + 1))
+        );
+        assert_eq!(p.child.id(), first_pid);
+        assert!(p.healthy && p.alive());
+        p.turns += 1;
+        p.park();
+        messages.as_array_mut().unwrap().extend([
+            serde_json::json!({"role":"assistant","text":format!("Turn {}", index + 1)}),
+            serde_json::json!({"role":"user","text":"Next"}),
+        ]);
+    }
+    process.as_mut().unwrap().kill().await;
+    let input = settings_input(root.path());
+    let controls: Vec<_> = input
+        .iter()
+        .filter(|v| v["type"] == "control_request" && v["request"]["subtype"] != "initialize")
+        .map(|v| v["request"].clone())
+        .collect();
+    assert_eq!(
+        controls,
+        vec![
+            serde_json::json!({"subtype":"set_max_thinking_tokens","max_thinking_tokens":1024}),
+            serde_json::json!({"subtype":"set_model","model":"other"}),
+            serde_json::json!({"subtype":"set_max_thinking_tokens","max_thinking_tokens":4096}),
+            serde_json::json!({"subtype":"set_model","model":"configured-default"}),
+            serde_json::json!({"subtype":"set_max_thinking_tokens","max_thinking_tokens":0}),
+            serde_json::json!({"subtype":"set_max_thinking_tokens","max_thinking_tokens":null}),
+        ]
+    );
+    let order: Vec<_> = input
+        .iter()
+        .filter(|v| v["shouldQuery"] != false)
+        .map(|v| {
+            if v["type"] == "user" {
+                "user"
+            } else {
+                v["request"]["subtype"].as_str().unwrap()
+            }
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "initialize",
+            "set_max_thinking_tokens",
+            "user",
+            "set_model",
+            "set_max_thinking_tokens",
+            "user",
+            "user",
+            "set_model",
+            "set_max_thinking_tokens",
+            "user",
+            "set_max_thinking_tokens",
+            "user"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn claude_settings_failure_never_sends_the_prompt_or_reuses_partial_state() {
+    for mode in ["reject", "partial", "exit", "cancel", "timeout"] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let r = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"}]),
+        );
+        let mut process = fixture(
+            root.path(),
+            r.native_session.as_ref().unwrap().id(),
+            false,
+            false,
+        );
+        assert!(
+            turn(&mut process, &r, CancellationToken::new(), false, false)
+                .await
+                .0
+                .is_ok()
+        );
+        drop(r);
+        let before = process.claude_settings.clone();
+        let mut r = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"},{"role":"assistant","text":"Turn 1"},{"role":"user","text":"Must not send"}]),
+        );
+        r.agent.model = "other".into();
+        r.agent.max_thinking_tokens = Some(4096);
+        std::fs::write(
+            root.path().join("settings-mode"),
+            if matches!(mode, "cancel" | "timeout") {
+                "hang"
+            } else {
+                mode
+            },
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let task = tokio::spawn(async move {
+            let result = stream_turn(&mut process, &r, None, cancel, None, None, true).await;
+            (process, result)
+        });
+        if matches!(mode, "cancel" | "timeout") {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !settings_input(root.path())
+                    .iter()
+                    .any(|v| v["request"]["subtype"] == "set_model")
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if mode == "cancel" {
+                stop.cancel();
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+            }
+        }
+        let (mut process, result) = task.await.unwrap();
+        if mode == "timeout" {
+            tokio::time::resume();
+        }
+        if mode == "cancel" {
+            assert_eq!(result.unwrap().0, "cancelled");
+        } else {
+            let error = result.unwrap_err();
+            assert!(!error.contains("PRIVATE"));
+            if mode == "timeout" {
+                assert!(error.contains("30 seconds"));
+            }
+        }
+        assert!(!process.healthy);
+        assert_eq!(process.claude_settings, before);
+        process.kill().await;
+        assert_eq!(
+            settings_input(root.path())
+                .iter()
+                .filter(|v| v["type"] == "user" && v["shouldQuery"] != false)
+                .count(),
+            1,
+            "{mode}: no second human message"
+        );
+    }
 }
 
 #[tokio::test]
