@@ -1,7 +1,12 @@
-//! Read-only CLI queries. No prompts, credential reads, or raw diagnostics leave this module.
+//! Restricted CLI account queries and explicit reset redemption. No prompts or credential reads.
 use crate::providers::resolve;
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    path::Path,
+    process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -10,7 +15,35 @@ pub async fn codex(
     params: Value,
     cancel: CancellationToken,
 ) -> Result<Value, String> {
+    codex_operation(method, params, cancel, None).await
+}
+
+pub async fn codex_reset(key: &str, retry: bool, sent: &AtomicBool) -> Result<Value, String> {
+    codex_operation(
+        "account/rateLimits/read",
+        Value::Null,
+        CancellationToken::new(),
+        Some((key, retry, sent)),
+    )
+    .await
+}
+
+async fn codex_operation(
+    method: &str,
+    params: Value,
+    cancel: CancellationToken,
+    reset: Option<(&str, bool, &AtomicBool)>,
+) -> Result<Value, String> {
     let exe = resolve("codex").await?;
+    codex_exchange(exe, method, params, cancel, reset).await
+}
+async fn codex_exchange(
+    exe: crate::providers::Executable,
+    method: &str,
+    params: Value,
+    cancel: CancellationToken,
+    reset: Option<(&str, bool, &AtomicBool)>,
+) -> Result<Value, String> {
     let mut child = exe
         .command()
         .args(["app-server", "--stdio"])
@@ -22,6 +55,7 @@ pub async fn codex(
     let mut input = child.stdin.take().ok_or("Missing CLI input")?;
     let mut lines = BufReader::new(child.stdout.take().ok_or("Missing CLI output")?).lines();
     let query = async {
+        let mut awaiting_reset = false;
         let init = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"}}});
         input
             .write_all(format!("{init}\n").as_bytes())
@@ -44,8 +78,37 @@ pub async fn codex(
                     .await
                     .map_err(|_| "CLI input failed")?;
             } else if v["id"] == 2 {
+                if let Some((key, retry, sent)) = reset {
+                    if v["error"].is_object() {
+                        return Err("Codex could not verify account limits before the reset.");
+                    }
+                    if !retry && !crate::live_usage::reset_eligible(&v["result"]) {
+                        return match v["result"]["rateLimitResetCredits"]["availableCount"].as_u64()
+                        {
+                            Some(0) => Ok(json!({"outcome":"noCredit"})),
+                            Some(_) => Ok(json!({"outcome":"nothingToReset"})),
+                            None => Err("Codex did not report reset-credit availability."),
+                        };
+                    }
+                    let request = json!({"id":3,"method":"account/rateLimitResetCredit/consume","params":{"idempotencyKey":key}});
+                    // A partial write is uncertain. Failures before this point are
+                    // known not to have sent a redemption and must recheck eligibility.
+                    sent.store(true, Ordering::Relaxed);
+                    input
+                        .write_all(format!("{request}\n").as_bytes())
+                        .await
+                        .map_err(|_| "Reset delivery is unconfirmed. Retry the same attempt.")?;
+                    awaiting_reset = true;
+                    continue;
+                }
                 return if v["error"].is_object() {
                     Err("Codex usage could not be read. Check its login and connection.")
+                } else {
+                    Ok(v["result"].clone())
+                };
+            } else if awaiting_reset && v["id"] == 3 {
+                return if v["error"].is_object() {
+                    Err("Reset outcome is unconfirmed. Retry the same attempt.")
                 } else {
                     Ok(v["result"].clone())
                 };
@@ -184,4 +247,77 @@ pub async fn gemini_usage(directory: &Path, cancel: CancellationToken) -> Result
     };
     exe.kill(&mut child).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn reset_preflight_and_redemption_share_one_process_and_retry_key() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("account-fixture.cjs");
+        std::fs::write(&script, r#"
+const fs=require('node:fs');
+const rl=require('node:readline').createInterface({input:process.stdin});
+const [scenario,trace]=process.argv.slice(2);
+rl.on('line',line=>{
+ const q=JSON.parse(line); if(!q.id)return;
+ fs.appendFileSync(trace,JSON.stringify(q)+'\n');
+ let result={};
+ if(q.method==='account/rateLimits/read' && scenario==='unavailable') {console.log(JSON.stringify({id:q.id,error:{code:-1}}));return;}
+ if(q.method==='account/rateLimits/read') result={rateLimits:{primary:{usedPercent:['eligible','lost'].includes(scenario)?95:20,windowDurationMins:10080}},rateLimitResetCredits:{availableCount:scenario==='empty'?0:2}};
+ if(q.method==='account/rateLimitResetCredit/consume' && scenario==='lost') process.exit(0);
+ if(q.method==='account/rateLimitResetCredit/consume') result={outcome:scenario==='eligible'?'reset':'alreadyRedeemed'};
+ console.log(JSON.stringify({id:q.id,result}));
+});
+"#).unwrap();
+        let key = uuid::Uuid::new_v4().to_string();
+        for (scenario, retry, expected, consumes) in [
+            ("eligible", false, "reset", true),
+            ("low", false, "nothingToReset", false),
+            ("empty", false, "noCredit", false),
+            ("empty", true, "alreadyRedeemed", true),
+            ("unavailable", false, "", false),
+            ("lost", false, "", true),
+        ] {
+            let trace = root.path().join(format!("{scenario}-{retry}.jsonl"));
+            let exe = crate::providers::Executable {
+                provider: "codex".into(),
+                program: "node".into(),
+                prefix: vec![
+                    script.to_string_lossy().into(),
+                    scenario.into(),
+                    trace.to_string_lossy().into(),
+                ],
+                wsl: None,
+            };
+            let sent = AtomicBool::new(false);
+            let result = codex_exchange(
+                exe,
+                "account/rateLimits/read",
+                Value::Null,
+                CancellationToken::new(),
+                Some((&key, retry, &sent)),
+            )
+            .await;
+            if expected.is_empty() {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap()["outcome"], expected);
+            }
+            assert_eq!(sent.load(Ordering::Relaxed), consumes);
+            let calls: Vec<Value> = std::fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(calls.len(), if consumes { 3 } else { 2 });
+            assert_eq!(calls[0]["method"], "initialize");
+            assert_eq!(calls[1]["method"], "account/rateLimits/read");
+            if consumes {
+                assert_eq!(calls[2]["params"]["idempotencyKey"], key);
+            }
+            assert!(calls.iter().all(|q| q["method"] != "turn/start"));
+        }
+    }
 }

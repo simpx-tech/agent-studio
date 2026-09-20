@@ -12,6 +12,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
     pub id: String,
     pub label: String,
     pub used_percent: Option<f64>,
@@ -69,6 +71,14 @@ impl Default for UsageState {
             active: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
             slots: tokio::sync::Semaphore::new(3),
+        }
+    }
+}
+impl UsageState {
+    pub fn invalidate(&self, connection: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            let prefix = format!("{connection}:");
+            cache.retain(|key, _| !key.starts_with(&prefix));
         }
     }
 }
@@ -168,6 +178,7 @@ pub fn parse_codex(v: &Value) -> Vec<LimitWindow> {
             }
             let duration = w["windowDurationMins"].as_u64();
             windows.push(LimitWindow {
+                checked_at: None,
                 id: format!("{key}-{slot}"),
                 label: label(duration),
                 used_percent: percent(&w["usedPercent"]),
@@ -199,6 +210,7 @@ pub fn parse_claude(v: &Value) -> Vec<LimitWindow> {
             continue;
         }
         windows.push(LimitWindow {
+            checked_at: None,
             id: key.into(),
             label: label(Some(minutes)),
             used_percent: percent(&limits[key]["utilization"]),
@@ -217,6 +229,7 @@ pub fn parse_claude(v: &Value) -> Vec<LimitWindow> {
             continue;
         }
         windows.push(LimitWindow {
+            checked_at: None,
             id: "fable-weekly".into(),
             label: "Fable weekly".into(),
             used_percent: percent(&w["utilization"]),
@@ -261,6 +274,7 @@ pub fn parse_gemini(v: &Value) -> Vec<LimitWindow> {
                 .filter(|n| n.is_finite() && (0. ..=1.).contains(n))
                 .map(|remaining| (1. - remaining) * 100.);
             windows.push(LimitWindow {
+                checked_at: None,
                 id: format!("gemini-{index}"),
                 label: if minutes.is_some() {
                     label(minutes)
@@ -303,6 +317,10 @@ pub async fn read_cancellable(
         return Err("Invalid usage query".into());
     }
     let location = crate::providers::resolve(provider).await?.location();
+    let connection = crate::profiles::current().id;
+    let revision = app
+        .state::<crate::live_usage::LiveUsage>()
+        .revision(&connection);
     let key = format!(
         "{}:{location}:{provider}:{model}",
         crate::profiles::current().id
@@ -365,7 +383,9 @@ pub async fn read_cancellable(
     if cache.len() >= 30 {
         cache.clear();
     }
-    cache.insert(key, snapshot.clone());
+    if revision == app.state::<crate::live_usage::LiveUsage>().revision(&connection) {
+        cache.insert(key, snapshot.clone());
+    }
     Ok(snapshot)
     }.await;
     if let Ok(mut active) = state.active.lock() {

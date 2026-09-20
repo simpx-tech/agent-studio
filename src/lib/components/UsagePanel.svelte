@@ -3,6 +3,7 @@
   import { X } from '@lucide/svelte';
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
+  import AccountControls from './AccountControls.svelte';
   import ChatSpend from './ChatSpend.svelte';
   import CompactionControls from './CompactionControls.svelte';
   import { providers, type ChatSettings, type Conversation } from '$lib/domain';
@@ -27,6 +28,8 @@
     loading,
     error,
     preview = false,
+    accountName = 'this Codex account',
+    accountUnavailable = false,
     expanded = $bindable(false),
     canCompact = false,
     compact = () => {},
@@ -40,6 +43,8 @@
     loading: boolean;
     error: string;
     preview?: boolean;
+    accountName?: string;
+    accountUnavailable?: boolean;
     expanded?: boolean;
     canCompact?: boolean;
     compact?: () => void;
@@ -315,9 +320,7 @@
                 >
                   Budget: {percentage(window.pace.allowance)}/{window.pace.allowanceUnit}
                 </p>{/if}
-              {#if window.pace.state === 'exhausted'}<p
-                  class="pace-advice"
-                >
+              {#if window.pace.state === 'exhausted'}<p class="pace-advice">
                   {window.pace.advice}
                 </p>{/if}
             </div>
@@ -329,6 +332,13 @@
         />{/if}
       {#if credits}<div class="usage-card credit-card">
           <CreditUsage provider={settings.provider} {snapshot} {loading} {stale} />
+          <AccountControls
+            provider={settings.provider}
+            connectionId={settings.connectionId}
+            name={accountName}
+            {snapshot}
+            disabled={!!error || preview || accountUnavailable}
+          />
         </div>{/if}
     </div>
   {/if}

@@ -23,6 +23,8 @@ import { elicitationInputSchema } from '../src/lib/elicitations.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
 import { mcpRequestSchema } from '../src/lib/mcp.ts';
 import { pluginRequestSchema } from '../src/lib/plugins.ts';
+import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
+import { executionHost } from '../src/lib/fleet.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z
@@ -33,6 +35,7 @@ const jobInput = z
     method: z.enum([
       'run',
       'usage',
+      'account',
       'models',
       'title',
       'folders',
@@ -47,6 +50,12 @@ const jobInput = z
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'account' &&
+      !z.object({ connectionId: uuid, input: accountActionSchema }).strict().safeParse(job.args)
+        .success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid account action' });
     if (job.method === 'plugins' && !pluginRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid plugin management request' });
     if (
@@ -90,6 +99,7 @@ const jobInput = z
       ctx.addIssue({ code: 'custom', message: 'Invalid question response' });
   });
 const presenceInput = z.object({
+  accountUpdates: z.array(accountUpdateSchema).max(32).optional(),
   environmentId: uuid,
   connections: z
     .array(
@@ -427,12 +437,33 @@ export function createRelay({
         }
         if (url.pathname === '/v1/heartbeat' && req.method === 'POST') {
           const value = presenceInput.parse(await body(req, authorized, 128_000));
-          if (!bearer && (value.connections.length || value.running.length)) {
+          if (
+            !bearer &&
+            (value.connections.length || value.running.length || value.accountUpdates?.length)
+          ) {
             send(403, { error: 'Browser devices cannot execute agent jobs.' });
             return;
           }
           if (value.environmentId !== actor) {
             send(403, { error: 'Environment identity mismatch.' });
+            return;
+          }
+          if (
+            value.accountUpdates?.some((update) => {
+              const connection = state.workspace.fleet.connections.find(
+                (c) => c.id === update.connectionId,
+              );
+              const account = state.workspace.fleet.accounts.find(
+                (a) => a.id === connection?.accountId,
+              );
+              return (
+                !connection ||
+                account?.provider !== update.snapshot.provider ||
+                executionHost(state.workspace.fleet, connection.environmentId) !== actor
+              );
+            })
+          ) {
+            send(403, { error: 'Account updates belong to another execution host.' });
             return;
           }
           if (!peers.has(value.environmentId) && peers.size >= 1000) {

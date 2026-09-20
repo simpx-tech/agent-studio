@@ -13,6 +13,7 @@ import type { ModelInfo } from './models';
 const CODEX_CREDIT_USD_RATE = 0.04;
 
 export type LimitWindow = {
+  checkedAt?: number;
   id: string;
   label: string;
   usedPercent: number | null;
@@ -22,6 +23,19 @@ export type LimitWindow = {
   bucket: string;
 };
 export type UsageSnapshot = {
+  creditsCheckedAt?: number;
+  live?: {
+    accountChanged: string;
+    authMode: string | null;
+    planType: string | null;
+    limitStatus: {
+      status: string;
+      limitType: string | null;
+      resetsAt: number | null;
+      usingOverage: boolean | null;
+      checkedAt: number;
+    } | null;
+  };
   connectionId?: string;
   provider: string;
   checkedAt: number;
@@ -171,7 +185,11 @@ export function resetLabel(value: LimitWindow['resetsAt'], now: number): string 
   if (!time) return 'Reset time not reported';
   if (time <= now) return 'Reset due · awaiting update';
   const date = new Date(time);
-  const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const clock = date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
   if (date.toDateString() === new Date(now).toDateString()) return `Resets ${clock}`;
   const weekday = date.toLocaleDateString([], { weekday: 'long' });
   return `Resets ${weekday}, ${clock}`;
@@ -234,8 +252,8 @@ export function isStale(snapshot: UsageSnapshot | undefined, window: LimitWindow
   if (!snapshot) return false;
   const reset = resetTime(window.resetsAt);
   return (
-    now - snapshot.checkedAt * 1000 > 180_000 ||
-    (reset != null && now >= reset && snapshot.checkedAt * 1000 < reset)
+    now - (window.checkedAt ?? snapshot.checkedAt) * 1000 > 180_000 ||
+    (reset != null && now >= reset && (window.checkedAt ?? snapshot.checkedAt) * 1000 < reset)
   );
 }
 // An account view has no selected chat model. Keep model-specific quotas explicitly labelled.

@@ -214,6 +214,109 @@ function privateState(name: string, source: string, target: string) {
 }
 
 describe('private relay workspaces over real HTTP', () => {
+  it('keeps account pushes transient and private, rejects foreign hosts and requires explicit reset confirmation', async () => {
+    const f = await fixture();
+    for (const [key, name] of [
+      [f.alice.token, 'Alice'],
+      [f.bob.token, 'Bob'],
+    ]) {
+      const state = await f.call(key, 'GET', 'state');
+      expect(
+        (
+          await f.call(key, 'PUT', 'state', {
+            revision: state.body.revision,
+            workspace: privateState(name, f.source, f.target),
+          })
+        ).status,
+      ).toBe(200);
+    }
+    const update = {
+      connectionId: f.source,
+      epoch: crypto.randomUUID(),
+      revision: 1,
+      accountChanged: 0,
+      authMode: null,
+      planType: 'pro',
+      creditsCheckedAt: null,
+      limitStatus: null,
+      snapshot: {
+        provider: 'codex',
+        checkedAt: Math.floor(Date.now() / 1000),
+        windows: [],
+        credits: null,
+        context: null,
+        detail: 'Alice live usage',
+      },
+    };
+    const heartbeat = {
+      environmentId: f.target,
+      connections: [],
+      running: [],
+      accountUpdates: [update],
+    };
+    expect((await f.call(f.alice.token, 'POST', 'heartbeat', heartbeat, f.target)).status).toBe(200);
+    const viewer = await f.pair(f.alice.token);
+    const viewed = await f.request(
+      'POST',
+      'heartbeat',
+      { environmentId: f.source, connections: [], running: [] },
+      viewer.headers,
+    );
+    expect(viewed.body.find((p: any) => p.environmentId === f.target).accountUpdates).toEqual([
+      update,
+    ]);
+    expect((await f.heartbeat(f.bob.token)).body.some((p: any) => p.accountUpdates?.length)).toBe(
+      false,
+    );
+    expect(
+      (
+        await f.call(
+          f.alice.token,
+          'POST',
+          'heartbeat',
+          { ...heartbeat, environmentId: f.source },
+          f.source,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await f.request(
+          'POST',
+          'heartbeat',
+          { ...heartbeat, environmentId: f.source },
+          viewer.headers,
+        )
+      ).status,
+    ).toBe(403);
+    const request = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'account',
+      args: {
+        connectionId: f.source,
+        input: {
+          action: 'consumeResetCredit',
+          idempotencyKey: crypto.randomUUID(),
+          confirmed: false,
+        },
+      },
+    };
+    expect((await f.request('POST', 'jobs', request, viewer.headers)).status).toBe(400);
+    request.args.input.confirmed = true;
+    expect((await f.request('POST', 'jobs', request, viewer.headers)).status).toBe(200);
+    expect((await f.call(f.alice.token, 'GET', 'jobs', undefined, f.target)).body[0].args).toEqual(
+      request.args,
+    );
+    expect(JSON.stringify((await f.call(f.alice.token, 'GET', 'state')).body)).not.toContain(
+      'Alice live usage',
+    );
+    await f.restart();
+    expect((await f.heartbeat(f.alice.token)).body.some((p: any) => p.accountUpdates?.length)).toBe(
+      false,
+    );
+  });
   it('runs local workspace administration with plain Node and lists only public metadata', async () => {
     const f = await fixture();
     const command = (...args: string[]) =>

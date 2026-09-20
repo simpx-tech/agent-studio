@@ -13,9 +13,11 @@
   } from '$lib/usage';
   import PaceIndicator from './PaceIndicator.svelte';
   import CreditUsage from './CreditUsage.svelte';
+  import AccountControls from './AccountControls.svelte';
 
   let {
     provider,
+    connectionId,
     name,
     snapshot,
     loading,
@@ -23,6 +25,7 @@
     unavailable = '',
   }: {
     provider: ProviderId;
+    connectionId?: string;
     name: string;
     snapshot?: UsageSnapshot;
     loading: boolean;
@@ -127,9 +130,7 @@
                 >Budget {percentage(window.pace.allowance)}/{window.pace.allowanceUnit}</span
               >{/if}
           </div>
-          {#if window.pace.state === 'exhausted'}<p
-              class={`limit-advice tone-${window.pace.tone}`}
-            >
+          {#if window.pace.state === 'exhausted'}<p class={`limit-advice tone-${window.pace.tone}`}>
               {window.pace.advice}
             </p>{/if}
         </div>
@@ -137,6 +138,7 @@
       <CreditUsage {provider} {snapshot} {loading} {stale} />
     </div>
   {/if}
+  <AccountControls {provider} {connectionId} {name} {snapshot} disabled={!!unavailable} />
   {#if unavailable || error}<p class="usage-note" role="status">
       {unavailable || error}{snapshot ? ' Keeping the last reported values.' : ''}
     </p>

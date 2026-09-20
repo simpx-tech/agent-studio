@@ -60,6 +60,9 @@
     loadWorkspace,
     loadModels,
     readUsage,
+    watchAccountUpdates,
+    watchUsageRefresh,
+    accountUsageRevision,
     generateTitle,
     cancelTitle,
     steerRun,
@@ -170,6 +173,7 @@
   import UsagePanel from '$lib/components/UsagePanel.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
+  import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import '$lib/styles.css';
 
   type View = 'chat' | 'connections' | 'settings';
@@ -683,6 +687,8 @@
   });
   onMount(() => {
     let disposed = false;
+    const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
+    const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
       () => (loaded && view === 'chat' ? activeId || undefined : undefined),
     );
@@ -885,6 +891,8 @@
     })();
     return () => {
       disposed = true;
+      stopAccountUpdates();
+      stopUsageRefresh();
       stopNotificationView();
       stopNotifications();
       stopBrowserSession();
@@ -1230,6 +1238,10 @@
     const key = usageKey(settings);
     if (usageLoading[key]) return;
     usageLoading[key] = true;
+    const scope = workspaceStorageScope();
+    const revision = accountUsageRevision(settings.connectionId);
+    const current = () =>
+      scope === workspaceStorageScope() && revision === accountUsageRevision(settings.connectionId);
     try {
       await saveQueue;
       const snapshot = await readUsage(
@@ -1240,12 +1252,79 @@
       );
       if (!snapshot || !Array.isArray(snapshot.windows))
         throw new Error('Usage was not reported by this CLI.');
+      if (!current()) return;
+      snapshot.live = snapshotFor(usageSnapshots, settings)?.live;
       usageSnapshots[key] = { ...snapshot, connectionId: settings.connectionId };
       usageErrors[key] = '';
     } catch (e) {
-      usageErrors[key] = String(e);
+      if (current()) usageErrors[key] = String(e);
     } finally {
-      usageLoading[key] = false;
+      if (scope === workspaceStorageScope()) {
+        usageLoading[key] = false;
+        const latest = accountUsageRevision(settings.connectionId);
+        if (latest?.accountChanged && (latest.epoch !== revision?.epoch || latest.accountChanged !== revision?.accountChanged))
+          void refreshUsage(settings, true);
+      }
+    }
+  }
+  function refreshUsageConnection(connectionId: string) {
+    const account = workspace.fleet.accounts.find(
+      (a) => a.id === workspace.fleet.connections.find((c) => c.id === connectionId)?.accountId,
+    );
+    if (account)
+      void refreshUsage(
+        {
+          provider: account.provider,
+          connectionId,
+          model: selectedSettings.connectionId === connectionId ? selectedSettings.model : '',
+        },
+        true,
+      );
+  }
+  function applyAccountUpdate(update: AccountUpdate, accountChanged: boolean) {
+    if (!loaded) return;
+    const matching = Object.entries(usageSnapshots).filter(
+      ([, snapshot]) =>
+        snapshot.connectionId === update.connectionId &&
+        snapshot.provider === update.snapshot.provider,
+    );
+    for (const [key, previous] of matching) {
+      usageSnapshots[key] = mergeLiveUsage(accountChanged ? undefined : previous, update);
+      usageErrors[key] = '';
+    }
+    if (!matching.length) {
+      const key = usageKey({
+        provider: update.snapshot.provider,
+        connectionId: update.connectionId,
+        model: '',
+      });
+      usageSnapshots[key] = mergeLiveUsage(undefined, update);
+    }
+    if (accountChanged) {
+      const scope = workspaceStorageScope();
+      const connection = workspace.fleet.connections.find((c) => c.id === update.connectionId);
+      if (
+        connection &&
+        executionHost(workspace.fleet, connection.environmentId) === installation?.id
+      ) {
+        connectionStatuses[connection.id] = {
+          id: update.snapshot.provider,
+          installed: true,
+          auth: update.authMode === null ? 'login' : 'unknown',
+          detail: 'Account changed. Checking sign-in…',
+          version: null,
+        };
+        void detectConnection(update.snapshot.provider, connection.id)
+          .then((status) => {
+            const latest = accountUsageRevision(connection.id);
+            if (scope !== workspaceStorageScope() || latest?.epoch !== update.epoch || latest.accountChanged !== update.accountChanged)
+              return;
+            connectionStatuses[connection.id] = status;
+            refreshUsageConnection(connection.id);
+            if (selectedSettings.connectionId === connection.id) void refreshModels();
+          })
+          .catch(() => {});
+      } else refreshUsageConnection(update.connectionId);
     }
   }
   async function refreshAccountUsage(force = false) {
@@ -3011,6 +3090,8 @@
               loading={!!usageLoading[selectedUsageKey]}
               error={usageErrors[selectedUsageKey] ?? ''}
               preview={!desktop() && !paired}
+              accountName={workspace.fleet.accounts.find(a => a.id === workspace.fleet.connections.find(c => c.id === selectedSettings.connectionId)?.accountId)?.name}
+              accountUnavailable={!canQueryConnection(selectedSettings.connectionId, selectedSettings.provider)}
             />
           </div>
         </section>

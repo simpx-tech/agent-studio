@@ -349,6 +349,7 @@ export function mergeShared(
   };
 }
 export type Presence = {
+  accountUpdates?: import('./live-usage').AccountUpdate[];
   environmentId: string;
   seenAt: number;
   online: boolean;
@@ -368,6 +369,7 @@ export type RelayJob = {
   method:
     | 'run'
     | 'usage'
+    | 'account'
     | 'models'
     | 'title'
     | 'folders'

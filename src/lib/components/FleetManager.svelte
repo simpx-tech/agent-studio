@@ -434,6 +434,7 @@
             </p>{/if}
         </div>
         <AccountUsage
+          connectionId={connection.id}
           provider={account.provider}
           name={account.name}
           snapshot={snapshotFor(usageSnapshots, usageSettings)}

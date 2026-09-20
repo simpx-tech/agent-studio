@@ -6,6 +6,13 @@ import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
+import {
+  AccountUpdateGate,
+  accountUpdateSchema,
+  accountActionSchema,
+  type AccountUpdate,
+  type AccountAction,
+} from './live-usage';
 import { retainRunEvent } from './activity';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
@@ -239,10 +246,127 @@ let browserWorkspaceId = '';
 let browserScope: BrowserWorkspaceScope | undefined;
 let browserSessionBlocked = false;
 const relayConnectionListeners = new Set<(ready: boolean) => void>();
-const remoteRuns = new Set<string>();
+const remoteRuns = new Map<string, boolean>();
 const workerRuns = new Map<string, RelayJob>();
+function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, unknown>) {
+  return method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages';
+}
+function hasBlockingRemoteWork() {
+  return (
+    [...remoteRuns.values()].some(Boolean) ||
+    [...workerRuns.values()].some((job) => !workspaceNoticeRead(job.method, job.args))
+  );
+}
 export function configureRuntime(context: RuntimeContext) {
   runtime = context;
+  void startAccountUpdates();
+}
+const accountUpdateGate = new AccountUpdateGate();
+const localAccountUpdates = new Map<string, AccountUpdate>();
+const accountUpdateListeners = new Set<(update: AccountUpdate, accountChanged: boolean) => void>();
+const usageRefreshListeners = new Set<(connectionId: string) => void>();
+const resetAttempts = new Map<string, string>();
+export const watchUsageRefresh = (listener: (connectionId: string) => void) => {
+  usageRefreshListeners.add(listener);
+  return () => {
+    usageRefreshListeners.delete(listener);
+  };
+};
+export const requestUsageRefresh = (connectionId: string) => {
+  for (const listener of usageRefreshListeners) listener(connectionId);
+};
+const resetScope = (connectionId: string) => `${workspaceStorageScope()}:${connectionId}`;
+export const hasPendingReset = (connectionId: string) =>
+  resetAttempts.has(resetScope(connectionId));
+export async function redeemResetCredit(connectionId: string) {
+  const scope = resetScope(connectionId);
+  const key = resetAttempts.get(scope) ?? crypto.randomUUID();
+  resetAttempts.set(scope, key);
+  const result = (await manageAccount(connectionId, {
+    action: 'consumeResetCredit',
+    idempotencyKey: key,
+    confirmed: true,
+  })) as { outcome?: string };
+  if (!['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit'].includes(result?.outcome ?? ''))
+    throw new Error('Reset outcome is unconfirmed. Retry this same attempt.');
+  resetAttempts.delete(scope);
+  requestUsageRefresh(connectionId);
+  return result.outcome!;
+}
+let accountUpdatesStarted = false;
+export const accountUsageRevision = (connection?: string) =>
+  connection ? accountUpdateGate.get(connection) : undefined;
+export function watchAccountUpdates(
+  listener: (update: AccountUpdate, accountChanged: boolean) => void,
+) {
+  accountUpdateListeners.add(listener);
+  return () => {
+    accountUpdateListeners.delete(listener);
+  };
+}
+function receiveAccountUpdate(value: unknown, host: string, local = false) {
+  const parsed = accountUpdateSchema.safeParse(value);
+  if (!parsed.success || !runtime) return;
+  const update = parsed.data;
+  const fleet = runtime.workspace().fleet;
+  const connection = fleet.connections.find((c) => c.id === update.connectionId);
+  const account = fleet.accounts.find((a) => a.id === connection?.accountId);
+  if (
+    !connection ||
+    account?.provider !== update.snapshot.provider ||
+    executionHost(fleet, connection.environmentId) !== host
+  )
+    return;
+  if (
+    Date.now() - update.snapshot.checkedAt * 1000 > 180_000 ||
+    update.snapshot.checkedAt * 1000 > Date.now() + 60_000
+  )
+    return;
+  const previous = accountUpdateGate.get(update.connectionId);
+  if (!accountUpdateGate.accept(update)) return;
+  if (local) localAccountUpdates.set(update.connectionId, update);
+  const changed =
+    update.accountChanged > 0 &&
+    (previous?.epoch !== update.epoch || previous?.accountChanged !== update.accountChanged);
+  for (const listener of accountUpdateListeners) listener(update, changed);
+}
+async function startAccountUpdates() {
+  if (!desktop() || accountUpdatesStarted || !runtime) return;
+  accountUpdatesStarted = true;
+  try {
+    await listen<unknown>('studio-account-update', ({ payload }) => {
+      if (runtime) receiveAccountUpdate(payload, runtime.installation.id, true);
+    });
+    for (const update of await invoke<unknown[]>('live_account_updates')) {
+      if (runtime) receiveAccountUpdate(update, runtime.installation.id, true);
+    }
+  } catch {
+    /* Older hosts keep the read-only polling fallback. */
+  }
+}
+function accountHeartbeat() {
+  if (!desktop() || !runtime) return [];
+  const updates: AccountUpdate[] = [];
+  let bytes = 0;
+  for (const update of [...localAccountUpdates.values()].sort(
+    (a, b) => b.snapshot.checkedAt - a.snapshot.checkedAt,
+  )) {
+    const connection = runtime
+      .workspace()
+      .fleet.connections.find((c) => c.id === update.connectionId);
+    if (
+      !connection ||
+      executionHost(runtime.workspace().fleet, connection.environmentId) !==
+        runtime.installation.id ||
+      Date.now() - update.snapshot.checkedAt * 1000 > 180_000
+    )
+      continue;
+    const size = new TextEncoder().encode(JSON.stringify(update)).length;
+    if (bytes + size > 60_000 || updates.length >= 32) break;
+    bytes += size;
+    updates.push(update);
+  }
+  return updates;
 }
 export const workspaceStorageScope = () =>
   desktop() ? 'desktop' : browserScope ? browserScopeKey(browserScope) : null;
@@ -254,6 +378,7 @@ export function watchRelayConnection(listener: (ready: boolean) => void): () => 
   };
 }
 function notifyRelayConnection(ready: boolean) {
+  if (!ready) accountUpdateGate.clear();
   for (const listener of relayConnectionListeners) listener(ready);
 }
 
@@ -484,7 +609,7 @@ async function relayApi<T = any>(method: string, path: string, body?: unknown): 
 }
 export async function connectRelay(url: string, token: string) {
   if (!runtime) throw new Error('This device is still loading.');
-  if (workerRuns.size || remoteRuns.size)
+  if (hasBlockingRemoteWork())
     throw new Error('Wait for remote requests to finish before changing relays.');
   let generation = ++relayGeneration;
   notifyRelayConnection(false);
@@ -598,7 +723,7 @@ export async function resumeBrowserRelay(): Promise<boolean> {
   return relayConnected || acceptRelay(window.location.origin, generation, true);
 }
 export async function disconnectRelay() {
-  if (workerRuns.size || remoteRuns.size)
+  if (hasBlockingRemoteWork())
     throw new Error('Stop remote responses and wait for requests to finish before disconnecting.');
   ++relayGeneration;
   notifyRelayConnection(false);
@@ -677,7 +802,14 @@ export async function pollRelay(): Promise<Presence[] | null> {
       environmentId: runtime.installation.id,
       connections,
       running: desktop() ? [...runtime.localRuns(), ...workerRuns.keys()] : [],
+      accountUpdates: accountHeartbeat(),
     });
+    if (generation !== relayGeneration) return null;
+    for (const peer of presence) {
+      if (!peer.online || peer.environmentId === runtime.installation.id) continue;
+      for (const update of peer.accountUpdates ?? [])
+        receiveAccountUpdate(update, peer.environmentId);
+    }
     const jobs = desktop() ? await relayApi<RelayJob[]>('GET', 'v1/jobs') : [];
     for (const job of jobs)
       if (!workerRuns.has(job.id)) {
@@ -738,6 +870,7 @@ async function localCall(
   const commands = {
     models: 'list_models',
     usage: 'read_usage',
+    account: 'manage_account',
     title: 'generate_title',
     folders: 'list_folders',
     context: 'read_context',
@@ -769,7 +902,9 @@ async function routed<T>(
     if (generation !== relayGeneration || !relayConnected)
       throw new Error('The private workspace connection changed. This request was not replayed.');
   };
-  remoteRuns.add(id);
+  // Optional notice reads must not prevent disconnecting. Session guards discard
+  // their late results; credit redemption and other work still block a switch.
+  remoteRuns.set(id, !workspaceNoticeRead(method, args));
   try {
     // Publish the conversation and its pinned connection before the target claims its work.
     if (
@@ -822,6 +957,7 @@ async function routed<T>(
   }
 }
 async function executeJob(job: RelayJob) {
+  const generation = relayGeneration;
   let timer: ReturnType<typeof setInterval> | undefined;
   let publishing = Promise.resolve();
   let status: RelayJob['status'] = 'running';
@@ -843,6 +979,7 @@ async function executeJob(job: RelayJob) {
     publishing = publishing
       .catch(() => {})
       .then(async () => {
+        if (generation !== relayGeneration || !relayConnected) return;
         const response = await relayApi<RelayJob>('PUT', `v1/jobs/${job.id}`, {
           status,
           events,
@@ -915,6 +1052,10 @@ export async function readUsage(
   connectionId?: string,
 ): Promise<UsageSnapshot> {
   return routed('usage', { provider, model, force, connectionId }, connectionId);
+}
+
+export function manageAccount(connectionId: string, input: AccountAction): Promise<unknown> {
+  return routed('account', { connectionId, input: accountActionSchema.parse(input) }, connectionId);
 }
 export async function readContext(
   settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'> & {

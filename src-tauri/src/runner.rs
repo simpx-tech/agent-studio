@@ -306,7 +306,15 @@ pub(crate) async fn execute(
                 .as_ref()
                 .map(|s| s.id().to_string())
                 .unwrap_or_default();
-            crate::pool::Process::new(exe.clone(), child, fingerprint, session_id)?
+            crate::pool::Process::new_observed(
+                exe.clone(),
+                child,
+                fingerprint,
+                session_id,
+                channel
+                    .as_ref()
+                    .and_then(|_| crate::live_usage::observer(&app, &request.agent.provider)),
+            )?
         }
     };
     let reused = process.turns > 0;

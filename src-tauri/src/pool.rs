@@ -30,6 +30,8 @@ pub enum Line {
     Err(String),
 }
 
+pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Process {
     pub exe: Executable,
     pub child: Child,
@@ -53,9 +55,18 @@ pub struct Process {
 impl Process {
     pub fn new(
         exe: Executable,
+        child: Child,
+        fingerprint: String,
+        session_id: String,
+    ) -> Result<Self, String> {
+        Self::new_observed(exe, child, fingerprint, session_id, None)
+    }
+    pub fn new_observed(
+        exe: Executable,
         mut child: Child,
         fingerprint: String,
         session_id: String,
+        observer: Option<OutputObserver>,
     ) -> Result<Self, String> {
         let stdin = child.stdin.take().ok_or("CLI stdin is unavailable")?;
         let stdout = child.stdout.take().ok_or("CLI stdout is unavailable")?;
@@ -68,6 +79,9 @@ impl Process {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(observer) = &observer {
+                    observer(&line);
+                }
                 if out_idle.load(Ordering::Relaxed) {
                     continue;
                 }
@@ -279,6 +293,40 @@ mod tests {
     }
     fn process(id: &str) -> Process {
         Process::new(exe(), idle_child(), format!("fingerprint-{id}"), id.into()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn account_observer_receives_output_while_parked_without_replaying_chat_lines() {
+        use tokio::io::AsyncWriteExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut process = Process::new_observed(
+            exe(),
+            idle_child(),
+            "live".into(),
+            "session".into(),
+            Some(Arc::new(move |line| {
+                tx.send(line.to_owned()).unwrap();
+            })),
+        )
+        .unwrap();
+        process.park();
+        process
+            .stdin
+            .write_all(b"{\"method\":\"account/updated\"}\n")
+            .await
+            .unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(observed.contains("account/updated"));
+        assert!(process.lines.try_recv().is_err());
+        process.claim();
+        process.stdin.write_all(b"active\n").await.unwrap();
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(10),process.lines.recv()).await.unwrap(),Some(Line::Out(line)) if line == "active")
+        );
+        process.kill().await;
     }
 
     #[tokio::test]

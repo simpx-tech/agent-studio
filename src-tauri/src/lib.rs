@@ -3,6 +3,7 @@ mod badges;
 mod cli_queries;
 mod context;
 mod folders;
+mod live_usage;
 mod mcp;
 mod models;
 mod native_instructions;
@@ -119,6 +120,21 @@ async fn read_usage(
 ) -> Result<usage::UsageSnapshot, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
     profiles::scope(profile, usage::read(app, &state, &provider, &model, force)).await
+}
+
+#[tauri::command]
+fn live_account_updates(state: State<'_, live_usage::LiveUsage>) -> Vec<live_usage::Update> {
+    state.snapshots()
+}
+
+#[tauri::command]
+async fn manage_account(
+    app: tauri::AppHandle,
+    connection_id: String,
+    input: live_usage::Action,
+) -> Result<serde_json::Value, String> {
+    let profile = profiles::resolve(&app, "codex", Some(&connection_id))?;
+    profiles::scope(profile, live_usage::manage(&app, input)).await
 }
 
 #[tauri::command]
@@ -539,6 +555,7 @@ pub fn run() {
         .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
+        .manage(live_usage::LiveUsage::default())
         .setup(|app| {
             // Release parked CLI processes that stayed idle past their limit.
             let handle = app.handle().clone();
@@ -658,6 +675,8 @@ pub fn run() {
             detect_providers,
             list_models,
             read_usage,
+            live_account_updates,
+            manage_account,
             read_context,
             manage_mcp,
             manage_plugins,

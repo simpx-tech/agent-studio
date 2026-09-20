@@ -37,7 +37,7 @@ export function quotaPace(
     return unknown('Waiting for a current usage reading to compare pace.');
   const reset = resetTime(window.resetsAt);
   const duration = (window.windowMinutes ?? 0) * 60_000;
-  const measuredAt = snapshot.checkedAt * 1000;
+  const measuredAt = (window.checkedAt ?? snapshot.checkedAt) * 1000;
   if (
     !reset ||
     !Number.isFinite(now) ||

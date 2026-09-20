@@ -43,6 +43,17 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           if (command === 'plugin:window|is_maximized') return false;
           if (command === 'plugin:event|listen') return 0;
           if (command === 'plugin:event|unlisten') return;
+          if (command === 'live_account_updates') return [];
+          if (command === 'manage_account') {
+            if (args.input.action !== 'workspaceMessages')
+              throw new Error('This fixture cannot redeem credits.');
+            if (w.holdAccountNoticeReads)
+              await new Promise<void>((resolve) => (w.pendingNoticeReads ??= []).push(resolve));
+            return {
+              featureEnabled: true,
+              messages: [{ messageId: 'fixture', messageBody: 'Synthetic workspace notice' }],
+            };
+          }
           if (command === 'get_installation') return identity;
           if (command === 'read_native_instructions') {
             localStorage.setItem('fixture-native-instructions', JSON.stringify(args));
@@ -322,7 +333,11 @@ test('Connections shows separate account quotas, refresh progress, and retained 
     const reset = (window as any).usageReadings[id].windows[1].resetsAt;
     const date = new Date(reset * 1000);
     const weekday = date.toLocaleDateString([], { weekday: 'long' });
-    const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const clock = date.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
     return `${weekday}, ${clock}`;
   }, ids['Second Claude']);
   await expect(usage('Second Claude')).toContainText(`Resets ${resetDate}`);
@@ -1106,10 +1121,16 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
       connection.id,
     );
     expect(await mac.evaluate(() => localStorage.getItem('fixture-run'))).toBeNull();
+    await windows.evaluate(() => {
+      (window as any).holdAccountNoticeReads = true;
+    });
     await mac.getByRole('button', { name: 'Connections', exact: true }).click();
     await expect(mac.locator('.account-usage[aria-busy="true"]')).toHaveCount(0, {
       timeout: 15000,
     });
+    await expect
+      .poll(() => windows.evaluate(() => (window as any).pendingNoticeReads?.length ?? 0))
+      .toBeGreaterThan(0);
     await mac.getByText('Sync settings', { exact: true }).click();
     await mac.getByRole('button', { name: 'Disconnect relay', exact: true }).click();
     await expect(
@@ -1119,6 +1140,10 @@ test('a remote computer reaches a WSL account through the paired Windows host', 
       account.getByRole('progressbar', { name: '5-hour limit used', exact: true }),
     ).toHaveAttribute('aria-valuenow', '42');
     await expect(account.locator('.recommended-fill')).toHaveCount(0);
+    await windows.evaluate(() =>
+      (window as any).pendingNoticeReads.forEach((resolve: () => void) => resolve()),
+    );
+    await expect(mac.locator('.fleet-account .workspace-message')).toHaveCount(0);
   } finally {
     await a.close();
     await b.close();
