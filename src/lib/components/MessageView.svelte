@@ -8,7 +8,7 @@
     GitFork,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
-  import { replyContent } from '$lib/markdown';
+  import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
@@ -57,7 +57,9 @@
   const author = $derived(message.settings ?? agent);
   const text = $derived(
     messageText(message) ||
-      (message.status !== 'running' && !message.proposedPlans?.length
+      (message.status !== 'running' &&
+      !message.proposedPlans?.length &&
+      !message.settings?.outputSchema
         ? (message.blocks.filter((b) => b.type === 'activity' && b.progress).at(-1)?.text ?? '')
         : ''),
   );
@@ -66,6 +68,8 @@
   );
   const artifacts = $derived(messageArtifacts(message));
   const content = $derived(replyContent(text, message.visualizations));
+  const structured = $derived(!!message.settings?.outputSchema && !message.compact);
+  const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
   const savedProgress = $derived(
     message.role === 'assistant' &&
       message.status !== 'running' &&
@@ -143,7 +147,12 @@
           {/each}
         </div>
       {/if}
-      {#each content as part (part.key)}
+      {#if structured && text}
+        <div class="prose" aria-label="Structured output">
+          <pre><code class="hljs language-json">{#if jsonHighlight}{@html jsonHighlight.html}{:else}{text}{/if}</code></pre>
+        </div>
+      {/if}
+      {#each structured ? [] : content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
         {:else}

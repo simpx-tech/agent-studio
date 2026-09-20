@@ -133,6 +133,12 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
     if !request.agent.reasoning.is_empty() {
         params["effort"] = json!(request.agent.reasoning);
     }
+    if !request.compact {
+        if let Some(schema) = &request.agent.output_schema {
+            // RunRequest::validate checked syntax and bounds before process launch.
+            params["outputSchema"] = serde_json::from_str(schema).expect("validated output schema");
+        }
+    }
     if !request.agent.model.is_empty() {
         params["collaborationMode"] = json!({"mode":if request.agent.plan_mode {"plan"} else {"default"},
             "settings":{"model":request.agent.model,"reasoning_effort":if request.agent.reasoning.is_empty() {Value::Null} else {json!(request.agent.reasoning)},"developer_instructions":null}});
@@ -328,6 +334,8 @@ pub async fn run(
                         process.healthy = false;
                         return Err(if kind == Kind::Thread && request.native_session.as_ref().is_some_and(|s| s.resumed) {
                             "Codex could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
+                        } else if kind == Kind::Turn && request.agent.output_schema.is_some() && !request.compact {
+                            "Codex could not start this structured reply. Check the output schema, model access, and CLI version, or disable structured output."
                         } else { "Codex could not start this reply. Check its login, model access, and CLI version." }.into());
                     }
                     match kind {
@@ -462,6 +470,11 @@ pub async fn run(
                         return Ok(("complete".into(), "Context compacted.".into()));
                     }
                     if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                    if request.agent.output_schema.is_some() {
+                        let value = serde_json::from_str(&decoder.text).unwrap_or(Value::Null);
+                        decoder.text = crate::structured_output::result(&value)?;
+                        if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: decoder.text.clone() }); }
+                    }
                     // The billing route may only be available while this exact thread is loaded.
                     // Optional read failure must never turn a successful reply into an error.
                     let usage_id = process.next_id;
@@ -502,6 +515,20 @@ mod deadline_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structured_output_is_a_turn_parameter_and_clears_when_disabled() {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":"","outputSchema":"{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"],\"additionalProperties\":false}"},"messages":[{"role":"user","text":"Answer"}]})).unwrap();
+        request.validate().unwrap();
+        let schema: Value =
+            serde_json::from_str(request.agent.output_schema.as_ref().unwrap()).unwrap();
+        assert_eq!(turn_params(&request, "root")["outputSchema"], schema);
+        assert!(start_params(&request).get("outputSchema").is_none());
+        request.compact = true;
+        assert!(turn_params(&request, "root").get("outputSchema").is_none());
+        request.compact = false;
+        request.agent.output_schema = None;
+        assert!(turn_params(&request, "root").get("outputSchema").is_none());
+    }
     #[test]
     fn proposed_plan_mode_uses_native_collaboration_and_build_resets_it() {
         let mut request:RunRequest=serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","reasoning":"low","instructions":"","planMode":true},"messages":[{"role":"user","text":"Plan"}]})).unwrap();

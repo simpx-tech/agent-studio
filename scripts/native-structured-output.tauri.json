@@ -1,0 +1,17 @@
+{
+  "identifier": "com.vinicius.agentstudio.structured-output-qa",
+  "productName": "Agent Studio Structured Output QA",
+  "build": { "beforeDevCommand": "", "devUrl": "http://127.0.0.1:1457" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Structured Output QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "additionalBrowserArgs": "--remote-debugging-port=19668"
+      }
+    ]
+  }
+}

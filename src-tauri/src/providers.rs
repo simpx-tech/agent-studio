@@ -406,6 +406,8 @@ pub struct RunRequest {
 }
 #[derive(Clone, Deserialize)]
 pub struct Agent {
+    #[serde(default, rename = "outputSchema")]
+    pub output_schema: Option<String>,
     #[serde(default, rename = "planMode")]
     pub plan_mode: bool,
     #[serde(default, rename = "autoCompactTokens")]
@@ -437,6 +439,15 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(schema) = &self.agent.output_schema {
+            if self.conversation_only || !matches!(self.agent.provider.as_str(), "claude" | "codex")
+            {
+                return Err(
+                    "Structured output is available only for Claude and Codex chats.".into(),
+                );
+            }
+            crate::structured_output::schema(schema)?;
+        }
         if self.agent.plan_mode
             && (self.conversation_only
                 || !matches!(self.agent.provider.as_str(), "claude" | "codex"))
@@ -959,6 +970,11 @@ pub async fn chat_command(
                 c.arg("--no-session-persistence");
             }
             c.args(["--input-format", "stream-json"]);
+            if !request.compact {
+                if let Some(schema) = &request.agent.output_schema {
+                    c.arg("--json-schema").arg(schema);
+                }
+            }
             if request.tools_enabled() {
                 c.args([
                     "--replay-user-messages",
@@ -1294,6 +1310,7 @@ mod tests {
             agent: Agent {
                 plan_mode: false,
                 auto_compact_tokens: None,
+                output_schema: None,
                 provider: "claude".into(),
                 model: String::new(),
                 instructions: "Be concise".into(),
@@ -1353,6 +1370,43 @@ mod tests {
         assert!(r.validate().is_err());
         r.conversation_only = false;
         r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
+    }
+    #[tokio::test]
+    async fn structured_output_arguments_validation_and_process_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "fixture".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let baseline = crate::pool::fingerprint(&r, &exe).unwrap();
+        let schema = r#"{"type":"object","description":"literal $(echo) `value`","properties":{},"additionalProperties":false}"#;
+        r.agent.output_schema = Some(schema.into());
+        r.validate().unwrap();
+        assert_ne!(baseline, crate::pool::fingerprint(&r, &exe).unwrap());
+        let command = chat_command(&r, root.path(), &exe).await.unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy())
+            .collect();
+        assert!(args.windows(2).any(|a| a == ["--json-schema", schema]));
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        r.compact = true;
+        let command = chat_command(&r, root.path(), &exe).await.unwrap();
+        assert!(!command.as_std().get_args().any(|a| a == "--json-schema"));
+        assert_eq!(baseline, crate::pool::fingerprint(&r, &exe).unwrap());
+        r.compact = false;
+        r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
+        r.agent.provider = "claude".into();
+        r.conversation_only = true;
+        assert!(r.validate().is_err());
+        r.conversation_only = false;
+        r.agent.output_schema = Some("{".into());
         assert!(r.validate().is_err());
     }
     #[tokio::test]

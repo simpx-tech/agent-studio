@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { outputSchemaSetting } from './structured-output.ts';
 import { mentionSchema, maxMentions, type Mention } from './mentions.ts';
 import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
@@ -91,6 +92,7 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  outputSchema: outputSchemaSetting.optional(),
   planMode: z.boolean().optional(),
   autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),
   connectionId: z.string().uuid().optional(),

@@ -407,6 +407,7 @@ async fn stream_turn(
         process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
     }
     let mut decoder = Decoder::default();
+    decoder.expect_structured_output = request.agent.output_schema.is_some() && !request.compact;
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     decoder.compactions.manual = request.compact;
@@ -567,7 +568,10 @@ async fn stream_turn(
                                 let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await;
                                 continue;
                             }
+                            let context_result = input_lifetime.is_context_result(&value);
                             turn_ended = input_lifetime.ended(&value);
+                            // A zero-turn acknowledgement of injected history is not a reply.
+                            if context_result { continue; }
                         }
                     }
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
@@ -622,6 +626,12 @@ async fn stream_turn(
 }
 fn provider_error(diagnostic: &str) -> &'static str {
     let diagnostic = diagnostic.to_lowercase();
+    if diagnostic.contains("structured")
+        || diagnostic.contains("json-schema")
+        || diagnostic.contains("json schema")
+    {
+        return "The provider could not return the requested structured JSON output. Check the schema, retry, or disable structured output.";
+    }
     if diagnostic.contains("no conversation found") || diagnostic.contains("session not found") {
         "Claude could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
     } else if diagnostic.contains("selected folder is unavailable") {

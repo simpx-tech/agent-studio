@@ -1343,6 +1343,7 @@
       (settings.provider !== selectedSettings.provider ||
         settings.connectionId !== selectedSettings.connectionId ||
         !!settings.planMode !== !!selectedSettings.planMode ||
+        settings.outputSchema !== selectedSettings.outputSchema ||
         settings.instructions !== selectedSettings.instructions)
     )
       return;
@@ -1375,7 +1376,11 @@
       model
     )
       settings.reasoning = model.defaultReasoning;
-    changeSettings({ ...settings, instructions: selectedSettings.instructions });
+    changeSettings({
+      ...settings,
+      instructions: selectedSettings.instructions,
+      outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
+    });
   }
   function chooseAgent(value: string) {
     const option = agentOptions.find((option) => option.id === value);
@@ -1405,6 +1410,7 @@
       ...settings,
       connectionId: option.connectionId,
       instructions: selectedSettings.instructions,
+      outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
     });
   }
   function chooseModel(model: string) {
@@ -1532,6 +1538,7 @@
     return {
       ...(provider === settings.provider ? settings : settingsFor(workspace.preferences, provider)),
       instructions: settings.instructions,
+      outputSchema: provider === 'gemini' ? undefined : settings.outputSchema,
       connectionId: preferredConnection(provider, location),
     };
   }
@@ -3201,9 +3208,11 @@
   />{/if}
 {#if editorOpen}<ChatInstructions
     instructions={selectedSettings.instructions}
+    outputSchema={selectedSettings.outputSchema}
+    provider={selectedSettings.provider}
     close={() => (editorOpen = false)}
-    save={(instructions) => {
-      changeSettings({ ...selectedSettings, instructions });
+    save={(instructions, outputSchema) => {
+      changeSettings({ ...selectedSettings, instructions, outputSchema });
       editorOpen = false;
     }}
   />{/if}

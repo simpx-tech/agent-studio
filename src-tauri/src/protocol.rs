@@ -103,6 +103,7 @@ pub enum RunEvent {
 }
 #[derive(Default)]
 pub struct Decoder {
+    pub expect_structured_output: bool,
     pub compactions: compaction::Compactions,
     pub text: String,
     codex_final: bool,
@@ -422,8 +423,24 @@ impl Decoder {
                                         .collect::<Vec<_>>()
                                         .join("\n")
                                 })
-                                .unwrap_or_else(|| string(&v, "/result")),
+                                .filter(|text| !text.is_empty())
+                                .unwrap_or_else(|| {
+                                    format!("{} {}", string(&v, "/subtype"), string(&v, "/result"))
+                                }),
                         );
+                    } else if self.expect_structured_output {
+                        match crate::structured_output::result(&v["structured_output"]) {
+                            Ok(text) => {
+                                self.text = text;
+                                events.push(RunEvent::Text {
+                                    text: self.text.clone(),
+                                });
+                            }
+                            Err(error) => {
+                                self.text.clear();
+                                self.failure = Some(error);
+                            }
+                        }
                     } else {
                         let result = string(&v, "/result");
                         if !result.is_empty() {

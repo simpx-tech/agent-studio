@@ -19,6 +19,7 @@ mod runner;
 mod spend;
 mod standalone;
 mod startup;
+mod structured_output;
 mod titles;
 mod usage;
 mod wsl;

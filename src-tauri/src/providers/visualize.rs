@@ -232,16 +232,20 @@ impl ClaudeInputLifetime {
             ..Self::default()
         }
     }
-    pub fn ended(&mut self, value: &Value) -> bool {
-        // The non-human shouldQuery=false history message emits a zero-turn
-        // result before the queued human message. It does not end this run.
-        if self.context_pending
+    pub fn is_context_result(&self, value: &Value) -> bool {
+        self.context_pending
             && value["type"] == "result"
+            && value["parent_tool_use_id"].is_null()
             && value["subtype"] == "success"
             && value["is_error"] != true
             && value["num_turns"] == 0
             && value["result"] == ""
-        {
+            && value.get("structured_output").is_none()
+    }
+    pub fn ended(&mut self, value: &Value) -> bool {
+        // The non-human shouldQuery=false history message emits a zero-turn
+        // result before the queued human message. It does not end this run.
+        if self.is_context_result(value) {
             self.context_pending = false;
             return false;
         }
@@ -274,7 +278,7 @@ impl ClaudeInputLifetime {
                 }
             }
         }
-        value["type"] == "result" && self.tasks.is_empty()
+        value["type"] == "result" && value["parent_tool_use_id"].is_null() && self.tasks.is_empty()
     }
 }
 
@@ -357,6 +361,22 @@ mod tests {
         assert!(state.observe_claude(&failed).is_empty());
         assert!(state.pending.is_empty());
         assert!(state.accepted.is_empty());
+    }
+    #[test]
+    fn structured_output_distinguishes_context_acknowledgement_and_child_results() {
+        let mut life = ClaudeInputLifetime::with_context(true);
+        let ack =
+            json!({"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""});
+        assert!(life.is_context_result(&ack));
+        assert!(!life.ended(&ack));
+        assert!(!life.is_context_result(&ack));
+        assert!(!life.ended(&json!({"type":"result","parent_tool_use_id":"child","structured_output":{"wrong":true}})));
+        assert!(life.ended(&json!({"type":"result","structured_output":{}})));
+        let mut life = ClaudeInputLifetime::with_context(true);
+        let mut result = ack;
+        result["structured_output"] = json!({});
+        assert!(!life.is_context_result(&result));
+        assert!(life.ended(&result));
     }
     #[test]
     fn claude_waits_for_workflows_but_not_persistent_shell_servers() {
