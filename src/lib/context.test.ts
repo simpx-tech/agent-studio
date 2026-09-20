@@ -20,7 +20,7 @@ const snapshot = (checkedAt: number): ContextSnapshot => ({
 });
 
 describe('context cache', () => {
-  it('keeps Standalone chat inventories separate while sharing an explicit project inventory', async () => {
+  it('keeps conversation inventories separate including temporary sources in the same project', async () => {
     const cache = createContextCache(async () => snapshot(1));
     const a = { ...selected, conversationId: 'chat-a' };
     const b = { ...selected, conversationId: 'chat-b' };
@@ -30,8 +30,8 @@ describe('context cache', () => {
     expect(cache.peek(a)).toBeDefined();
     expect(cache.peek({ ...a, forked: true })).toBeUndefined();
     await cache.refresh(a, folder);
-    expect(cache.peek(b, folder)).toBeDefined();
-    expect(cache.peek({ ...b, forked: true }, folder)).toBeDefined();
+    expect(cache.peek(b, folder)).toBeUndefined();
+    expect(cache.peek({ ...b, forked: true }, folder)).toBeUndefined();
   });
   it('retains the previous result while refreshing, shares pending work, and preserves it on failure', async () => {
     const read = vi

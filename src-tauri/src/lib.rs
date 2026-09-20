@@ -7,6 +7,7 @@ mod mcp;
 mod models;
 mod native_instructions;
 mod notifications;
+mod plugins;
 mod pool;
 mod profiles;
 mod protocol;
@@ -25,6 +26,26 @@ use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Storage(Mutex<()>);
+
+#[tauri::command]
+async fn manage_plugins(
+    app: tauri::AppHandle,
+    provider: String,
+    connection_id: String,
+    conversation_id: Option<String>,
+    location: Option<folders::ChatLocation>,
+    action: plugins::Action,
+) -> Result<plugins::ResultView, String> {
+    plugins::manage(
+        app,
+        provider,
+        connection_id,
+        conversation_id,
+        location,
+        action,
+    )
+    .await
+}
 
 #[tauri::command]
 async fn manage_mcp(
@@ -538,6 +559,9 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
                 webview.state::<runner::Runs>().interrupt_for_reload();
+                for token in plugins::active_tokens() {
+                    token.cancel();
+                }
                 let handle = webview.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     handle.state::<mcp::Management>().sweep(&handle, true).await;
@@ -569,6 +593,7 @@ pub fn run() {
                         .unwrap_or_default(),
                 );
                 let parked = window.state::<pool::Pool>().len() > 0;
+                tokens.extend(plugins::active_tokens());
                 if !tokens.is_empty() || parked || window.state::<mcp::Management>().has_work() {
                     // Cancel all owned work and release parked CLIs before closing the window.
                     for token in tokens {
@@ -602,6 +627,7 @@ pub fn run() {
                                     .lock()
                                     .map(|r| r.is_empty())
                                     .unwrap_or(true)
+                                && plugins::active_tokens().is_empty()
                             {
                                 break;
                             }
@@ -634,6 +660,7 @@ pub fn run() {
             read_usage,
             read_context,
             manage_mcp,
+            manage_plugins,
             read_native_instructions,
             load_workspace,
             save_workspace,

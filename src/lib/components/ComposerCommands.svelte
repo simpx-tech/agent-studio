@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import ChoicePicker from './ChoicePicker.svelte';
   import { contextCache } from '$lib/transport';
   import { contextKey, type ContextSnapshot } from '$lib/context';
@@ -45,6 +45,16 @@
   let queryError = $state('');
   let chosen = $state<ComposerCommand>();
   let pending: Promise<ContextSnapshot> | undefined;
+  let inventoryRevision = $state(0);
+  onMount(() => {
+    const changed = () => {
+      chosen = undefined;
+      snapshot = undefined;
+      inventoryRevision++;
+    };
+    window.addEventListener('studio-skills-changed', changed);
+    return () => window.removeEventListener('studio-skills-changed', changed);
+  });
   const key = $derived(contextKey({ ...settings, conversationId, forked }, location));
   const token = $derived(commandToken(prompt));
   const query = $derived(commandQuery(prompt, caret));
@@ -70,6 +80,7 @@
   $effect(() => {
     key;
     needsCatalog;
+    inventoryRevision;
     let cancelled = false;
     untrack(() => {
       snapshot = undefined;

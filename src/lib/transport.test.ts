@@ -12,6 +12,87 @@ vi.mock('@tauri-apps/api/core', () => ({
 beforeEach(() => {
   vi.resetModules();
   native.invoke.mockReset();
+  vi.unstubAllGlobals();
+});
+
+it('invalidates host skill inventories after Viewer plugin mutations, including uncertain failures', async () => {
+  const transport = await fixture();
+  const workspace = initialWorkspace();
+  const host = crypto.randomUUID(),
+    computerId = crypto.randomUUID();
+  const connectionId = crypto.randomUUID(),
+    accountId = crypto.randomUUID();
+  workspace.fleet.computers.push({ id: computerId, name: 'QA' });
+  workspace.fleet.environments.push({ id: host, computerId, name: 'QA', platform: 'windows' });
+  workspace.fleet.accounts.push({
+    id: accountId,
+    provider: 'codex',
+    name: 'QA',
+    purpose: 'personal',
+  });
+  workspace.fleet.connections.push({
+    id: connectionId,
+    accountId,
+    environmentId: host,
+    profile: 'existing',
+  });
+  transport.configureRuntime({
+    installation: { id: host, computerId, name: 'QA', platform: 'windows' },
+    workspace: () => workspace,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply: async () => {},
+    checkpointRun: async () => {},
+  });
+  const changed = vi.fn();
+  const events = new EventTarget();
+  events.addEventListener('studio-skills-changed', changed);
+  vi.stubGlobal('window', events);
+  const clear = vi.spyOn(transport.contextCache, 'clear');
+  const job = {
+    id: crypto.randomUUID(),
+    method: 'plugins',
+    args: {
+      provider: 'codex',
+      connectionId,
+      action: { kind: 'skill', path: '/fixture/SKILL.md', enabled: false },
+    },
+  };
+  let claimed = false;
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'manage_plugins') throw new Error('Unconfirmed CLI result');
+    if (command === 'relay_request' && args.path === 'v1/state')
+      return {
+        status: 200,
+        body: { instanceId: 'same-relay', workspace: sharedWorkspace(workspace), revision: 0 },
+      };
+    if (command === 'relay_request' && args.path === 'v1/jobs') {
+      const jobs = claimed ? [] : [job];
+      claimed = true;
+      return { status: 200, body: jobs };
+    }
+    if (command === 'relay_request' && args.path === `v1/jobs/${job.id}`)
+      return { status: 200, body: { status: 'error' } };
+    return original(command, args);
+  });
+  await transport.resumeRelay();
+  clear.mockClear();
+  await transport.pollRelay();
+  await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+  expect(clear).toHaveBeenCalledOnce();
+  expect(native.invoke).toHaveBeenCalledWith('manage_plugins', job.args);
+  await vi.waitFor(() =>
+    expect(
+      native.invoke.mock.calls.some(
+        ([command, args]) =>
+          command === 'relay_request' &&
+          args.path === `v1/jobs/${job.id}` &&
+          args.body.status === 'error',
+      ),
+    ).toBe(true),
+  );
+  await transport.disconnectRelay();
 });
 
 it('routes MCP management and OAuth polling to the exact selected host', async () => {

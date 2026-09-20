@@ -22,6 +22,7 @@ import { answerSchema } from '../src/lib/questions.ts';
 import { elicitationInputSchema } from '../src/lib/elicitations.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
 import { mcpRequestSchema } from '../src/lib/mcp.ts';
+import { pluginRequestSchema } from '../src/lib/plugins.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z
@@ -38,6 +39,7 @@ const jobInput = z
       'context',
       'nativeInstructions',
       'mcp',
+      'plugins',
       'answer',
       'elicitation',
       'steer',
@@ -45,6 +47,8 @@ const jobInput = z
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (job.method === 'plugins' && !pluginRequestSchema.safeParse(job.args).success)
+      ctx.addIssue({ code: 'custom', message: 'Invalid plugin management request' });
     if (
       job.method === 'elicitation' &&
       !z
@@ -204,11 +208,13 @@ export function createRelay({
           !terminal(job.status) &&
           (now() - job.updated > 45_000 ||
             now() - job.created >
-              runTimeoutMs(
-                job.method === 'run'
-                  ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
-                  : undefined,
-              ))
+              (job.method === 'plugins'
+                ? 660_000
+                : runTimeoutMs(
+                    job.method === 'run'
+                      ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
+                      : undefined,
+                  )))
         ) {
           job.status = 'error';
           job.error =

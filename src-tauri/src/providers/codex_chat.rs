@@ -281,6 +281,10 @@ pub async fn run(
                 let Line::Out(line) = line else { continue; };
                 if line.len() > output_limit { process.healthy = false; return Err("Provider output exceeded the message limit".into()); }
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
+                if value["method"] == "skills/changed" && value.get("id").is_none() {
+                    if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::SkillsChanged); }
+                    continue;
+                }
                 if let Some(id) = value["id"].as_u64().filter(|_| value.get("method").is_none()) {
                     let Some(kind) = pending.remove(&id) else { continue; };
                     if kind == Kind::Steer {
@@ -301,6 +305,10 @@ pub async fn run(
                     match kind {
                         Kind::Init => {
                             process.stdin.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Codex initialization failed")?;
+                            let runtime = crate::plugins::for_run(request);
+                            if !runtime.skill_roots.is_empty() {
+                                crate::plugins::rpc(process, "skills/extraRoots/set", json!({"extraRoots":runtime.skill_roots})).await?;
+                            }
                             if resolve_defaults {
                                 send(process, &mut pending, Kind::Config, "config/read", json!({"includeLayers":false,"cwd":config_cwd})).await?;
                             } else {

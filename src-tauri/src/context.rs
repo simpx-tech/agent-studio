@@ -602,6 +602,13 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
 }
 
 pub(crate) async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
+    codex_report_sources(exe, folder, &crate::plugins::Runtime::default()).await
+}
+async fn codex_report_sources(
+    exe: &Executable,
+    folder: &str,
+    sources: &crate::plugins::Runtime,
+) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
     if exe.wsl.is_some() {
@@ -641,14 +648,20 @@ pub(crate) async fn codex_report(exe: &Executable, folder: &str) -> Result<Value
             let Some(id) = value["id"].as_i64() else {
                 continue;
             };
-            if id == 1 {
+            if id == 1 || id == 6 {
                 if value["error"].is_object() {
                     return Err("Codex context initialization failed");
                 }
-                input
-                    .write_all(b"{\"method\":\"initialized\"}\n")
-                    .await
-                    .map_err(|_| "Context query input failed")?;
+                if id == 1 {
+                    input
+                        .write_all(b"{\"method\":\"initialized\"}\n")
+                        .await
+                        .map_err(|_| "Context query input failed")?;
+                    if !sources.skill_roots.is_empty() {
+                        input.write_all(format!("{}\n",json!({"id":6,"method":"skills/extraRoots/set","params":{"extraRoots":sources.skill_roots}})).as_bytes()).await.map_err(|_|"Context query input failed")?;
+                        continue;
+                    }
+                }
                 for request in [
                     json!({"id":2,"method":"skills/list","params":{"cwds":[folder],"forceReload":true}}),
                     json!({"id":3,"method":"config/read","params":{"cwd":folder,"includeLayers":false}}),
@@ -733,6 +746,14 @@ pub(crate) async fn claude_report(
     folder: &str,
     model: &str,
 ) -> Result<Value, String> {
+    claude_report_sources(exe, folder, model, &crate::plugins::Runtime::default()).await
+}
+async fn claude_report_sources(
+    exe: &Executable,
+    folder: &str,
+    model: &str,
+    sources: &crate::plugins::Runtime,
+) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
     if exe.wsl.is_some() {
@@ -764,6 +785,7 @@ pub(crate) async fn claude_report(
     if !model.is_empty() {
         command.args(["--model", model]);
     }
+    crate::plugins::claude_args(&mut command, sources);
     let mut child = command
         .spawn()
         .map_err(|_| "Could not start the Claude context query")?;
@@ -1097,9 +1119,28 @@ pub async fn read(
     let mut scan = tokio::task::spawn_blocking(move || inventory(scan, home, config))
         .await
         .map_err(|_| "Context inspection failed")?;
+    let sources = crate::plugins::runtime(conversation_id.as_deref());
+    if provider == "claude" {
+        for source in &sources.plugin_dirs {
+            let path = Path::new(source);
+            if scan.physical(path).is_dir() {
+                scan.walk(&path.join("skills"), "skills", "Temporary plugin", true, 0);
+                scan.walk(
+                    &path.join("commands"),
+                    "skills",
+                    "Temporary plugin commands",
+                    false,
+                    0,
+                );
+            }
+        }
+        if !sources.plugin_dirs.is_empty() || !sources.plugin_urls.is_empty() {
+            scan.note("Temporary Claude plugins are included in this conversation's CLI initialization. Zip and URL component paths are CLI-owned; their commands may be available even when no local skill path was reported.");
+        }
+    }
     let report = match provider.as_str() {
-        "codex" => Some(codex_report(&exe, &folder).await),
-        "claude" => Some(claude_report(&exe, &folder, &model).await),
+        "codex" => Some(codex_report_sources(&exe, &folder, &sources).await),
+        "claude" => Some(claude_report_sources(&exe, &folder, &model, &sources).await),
         _ => None,
     };
     if let Some(report) = report {

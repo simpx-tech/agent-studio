@@ -53,6 +53,89 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('keeps active plugin evaluations beyond six minutes but bounds their lifetime and heartbeat', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'plugins',
+      args: {
+        provider: 'claude',
+        connectionId: crypto.randomUUID(),
+        action: {
+          kind: 'eval',
+          id: 'fixture@local',
+          operationId: crypto.randomUUID(),
+          trusted: true,
+          maxCostUsd: 1,
+        },
+      },
+    };
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    for (let second = 30; second <= 660; second += 30) {
+      f.advance(30_000);
+      const update = await f.call(
+        'PUT',
+        `jobs/${job.id}`,
+        { status: 'running', events: [] },
+        f.target,
+      );
+      expect(update.status).toBe(200);
+      expect(update.body.status).toBe('running');
+    }
+    f.advance(1);
+    expect((await f.call('GET', `jobs/${job.id}`)).body.status).toBe('error');
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const abandoned = { ...job, id: crypto.randomUUID() };
+    expect((await f.call('POST', 'jobs', abandoned)).status).toBe(200);
+    f.advance(45_001);
+    expect((await f.call('GET', `jobs/${abandoned.id}`)).body.status).toBe('error');
+  });
+  it('routes plugin management to its owner without persisting configuration in workspace state', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const args = {
+      provider: 'codex',
+      connectionId: crypto.randomUUID(),
+      action: { kind: 'skill', path: '/skills/private-fixture/SKILL.md', enabled: false },
+    };
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'plugins',
+      args,
+    };
+    expect(
+      (
+        await f.call('POST', 'jobs', {
+          ...job,
+          args: { ...args, action: { kind: 'raw', method: 'config/write' } },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.source)).body).toEqual([]);
+    expect((await f.call('GET', 'jobs', undefined, f.target)).body[0].args).toEqual(args);
+    expect(JSON.stringify((await f.call('GET', 'state')).body)).not.toContain('private-fixture');
+  });
   it('routes MCP OAuth jobs transiently and rejects arbitrary native protocol payloads', async () => {
     const f = await fixture();
     await f.call(

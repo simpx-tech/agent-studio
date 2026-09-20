@@ -415,7 +415,7 @@ async fn inventory(pending: &mut Pending) -> Result<(), String> {
     Ok(())
 }
 
-async fn folder(
+pub(crate) async fn folder(
     app: &tauri::AppHandle,
     provider: &str,
     exe: &Executable,
@@ -475,7 +475,7 @@ async fn folder(
     }
     Ok(folder)
 }
-fn command(exe: &Executable, folder: &str) -> tokio::process::Command {
+pub(crate) fn command(exe: &Executable, folder: &str) -> tokio::process::Command {
     let mut command = exe.command();
     if exe.wsl.is_some() {
         command.args(["--agent-studio-cwd", folder]);

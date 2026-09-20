@@ -243,6 +243,13 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'skillschanged') {
+    const previous = events.findIndex((e) => e.kind === 'skillschanged');
+    const revision = previous < 0 ? 1 : (events[previous].revision ?? 0) + 1;
+    if (previous < 0) events.push({ kind: 'skillschanged', revision });
+    else events[previous] = { kind: 'skillschanged', revision };
+    return;
+  }
   if (event.kind === 'elicitation') {
     const parsed = elicitationReceiptSchema.safeParse(event.elicitation);
     if (!parsed.success) return;

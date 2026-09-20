@@ -13,7 +13,8 @@
     Check,
   } from '@lucide/svelte';
   import { providers, type ChatSettings, type ChatLocation } from '$lib/domain';
-  import { contextCache } from '$lib/transport';
+  import { contextCache, managePlugins } from '$lib/transport';
+  import PluginManagement from './PluginManagement.svelte';
   import NativeInstructions from './NativeInstructions.svelte';
   import McpManagement from './McpManagement.svelte';
   import {
@@ -49,7 +50,8 @@
   let snapshot = $state<ContextSnapshot>();
   let error = $state('');
   let loading = $state(false);
-  let category = $state<ContextKind | 'native'>('instructions');
+  let category = $state<ContextKind | 'native' | 'plugins'>('instructions');
+  let changingSkill = $state('');
   let search = $state('');
   let refresh = $state(0);
   let copied = $state('');
@@ -59,6 +61,7 @@
     { id: 'instructions', name: 'Instructions', icon: FileText },
     { id: 'native', name: 'Native prompt', icon: FileText },
     { id: 'skills', name: 'Skills', icon: Sparkles },
+    { id: 'plugins', name: 'Plugins', icon: Plug },
     { id: 'memories', name: 'Memories', icon: Brain },
     { id: 'mcps', name: 'MCPs', icon: Plug },
     { id: 'hooks', name: 'Hooks', icon: Webhook },
@@ -74,7 +77,12 @@
   onMount(() => {
     const previous = document.activeElement as HTMLElement | null;
     closeButton.focus();
-    return () => previous?.isConnected && previous.focus();
+    const changed = () => refresh++;
+    window.addEventListener('studio-skills-changed', changed);
+    return () => {
+      window.removeEventListener('studio-skills-changed', changed);
+      if (previous?.isConnected) previous.focus();
+    };
   });
   $effect(() => {
     selectionKey;
@@ -116,6 +124,18 @@
       error = 'Could not copy the path. Select the path text to copy it manually.';
     }
   }
+  async function toggleSkill(path: string, enabled: boolean) {
+    changingSkill = path;
+    error = '';
+    const selected = selectionKey;
+    try {
+      await managePlugins(settings, conversationId, location, { kind: 'skill', path, enabled });
+    } catch (e) {
+      if (selectionKey === selected) error = String(e);
+    } finally {
+      if (selectionKey === selected) changingSkill = '';
+    }
+  }
 </script>
 
 <div class="modal-backdrop" role="presentation">
@@ -143,8 +163,7 @@
         {#if category === 'native'}
           Recorded CLI instructions for this conversation’s selected account and computer.
         {:else}
-          Instructions and resources for this model’s selected account and folder. Models using the
-          same CLI profile and folder share these sources.
+          Instructions and resources for this model’s selected account, folder, and conversation.
         {/if}
       </p>
       <div class="context-location">
@@ -170,7 +189,7 @@
               search = '';
             }}
           >
-            <tab.icon size={15} />{tab.name}{#if tab.id !== 'native'}<span
+            <tab.icon size={15} />{tab.name}{#if tab.id !== 'native' && tab.id !== 'plugins'}<span
                 >{snapshot ? snapshot.entries.filter((e) => e.kind === tab.id).length : '—'}</span
               >{/if}
           </button>
@@ -195,6 +214,15 @@
       <div class="context-entries" aria-busy={category !== 'native' && loading}>
         {#if category === 'native'}
           <NativeInstructions {conversationId} {settings} />
+        {:else if category === 'plugins'}
+          {#key selectionKey}<PluginManagement
+              {settings}
+              {conversationId}
+              {location}
+              {running}
+              {search}
+              changed={() => refresh++}
+            />{/key}
         {:else if category === 'mcps'}
           <McpManagement
             {settings}
@@ -247,6 +275,20 @@
                   </div>{/if}
                 <p>{entry.detail}</p>
                 {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
+                  {#if settings.provider === 'codex' && ['reported', 'disabled'].includes(entry.status)}
+                    <button
+                      class="text-button"
+                      disabled={running || loading || !!changingSkill}
+                      aria-label={`${entry.status === 'disabled' ? 'Enable' : 'Disable'} skill ${entry.name}`}
+                      onclick={() => toggleSkill(entry.path, entry.status === 'disabled')}
+                    >
+                      {changingSkill === entry.path
+                        ? 'Saving…'
+                        : entry.status === 'disabled'
+                          ? 'Enable'
+                          : 'Disable'}
+                    </button>
+                  {/if}
                   <button
                     class="text-button"
                     disabled={entry.status === 'disabled'}

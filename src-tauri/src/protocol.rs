@@ -40,6 +40,7 @@ fn input_with_cache(v: &Value) -> Option<u64> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum RunEvent {
+    SkillsChanged,
     Compaction {
         compaction: compaction::Compaction,
     },

@@ -13,6 +13,7 @@ import { steeringInputSchema, type SteeringInput } from './steering';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import { mcpActionSchema, type McpAction, type McpResult } from './mcp';
+import { pluginActionSchema, type PluginAction, type PluginResult } from './plugins';
 import {
   browserScopeKey,
   browserSessionSignal,
@@ -741,6 +742,7 @@ async function localCall(
     folders: 'list_folders',
     context: 'read_context',
     mcp: 'manage_mcp',
+    plugins: 'manage_plugins',
     nativeInstructions: 'read_native_instructions',
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
@@ -775,6 +777,7 @@ async function routed<T>(
       method === 'folders' ||
       method === 'context' ||
       method === 'mcp' ||
+      method === 'plugins' ||
       method === 'nativeInstructions'
     ) {
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -790,11 +793,13 @@ async function routed<T>(
     });
     const deadline =
       Date.now() +
-      (method === 'folders'
-        ? 30_000
-        : runTimeoutMs(
-            method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
-          ) + 10_000);
+      (method === 'plugins'
+        ? 660_000
+        : method === 'folders'
+          ? 30_000
+          : runTimeoutMs(
+              method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
+            ) + 10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
       currentSession();
@@ -825,6 +830,10 @@ async function executeJob(job: RelayJob) {
   const request = job.method === 'run' ? (job.args.request as RunRequest) : undefined;
   let checkpoint = Promise.resolve();
   const persistEvent = (event?: RunEvent, finalStatus?: 'complete' | 'cancelled' | 'error') => {
+    if (event?.kind === 'skillschanged') {
+      invalidateSources();
+      return;
+    }
     if (!request || !runtime) return;
     checkpoint = checkpoint
       .catch(() => {})
@@ -889,6 +898,7 @@ async function executeJob(job: RelayJob) {
     error = String(e).slice(0, 4000);
   } finally {
     clearInterval(timer);
+    if (job.method === 'plugins') invalidatePluginMutation(job.args.action as PluginAction);
     persistEvent(
       undefined,
       status === 'cancelled' ? 'cancelled' : status === 'error' ? 'error' : 'complete',
@@ -927,6 +937,37 @@ export async function readContext(
   );
 }
 export let contextCache = createContextCache(readContext);
+function invalidateSources() {
+  contextCache.clear();
+  window.dispatchEvent(new Event('studio-skills-changed'));
+}
+function invalidatePluginMutation(action: PluginAction) {
+  if (!['list', 'details', 'eval', 'cancel'].includes(action.kind)) invalidateSources();
+}
+export async function managePlugins(
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
+  conversationId: string | undefined,
+  location: ChatLocation | undefined,
+  action: PluginAction,
+): Promise<PluginResult> {
+  if (!settings.connectionId) throw new Error('Select an account connection first.');
+  const parsed = pluginActionSchema.parse(action);
+  try {
+    return await routed(
+      'plugins',
+      {
+        provider: settings.provider,
+        connectionId: settings.connectionId,
+        conversationId: conversationId ?? null,
+        location: location ?? null,
+        action: parsed,
+      },
+      settings.connectionId,
+    );
+  } finally {
+    invalidatePluginMutation(parsed);
+  }
+}
 export async function manageMcp(
   settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
   conversationId: string | undefined,
@@ -1043,7 +1084,11 @@ export async function runAgent(
     'run',
     { request, connectionId: request.agent.connectionId },
     request.agent.connectionId,
-    onEvent,
+    (event) => {
+      if (event.kind === 'skillschanged') {
+        invalidateSources();
+      } else onEvent(event);
+    },
     request.runId,
   );
 }

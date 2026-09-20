@@ -573,7 +573,7 @@ impl RunRequest {
         }
         Ok(())
     }
-    fn tools_enabled(&self) -> bool {
+    pub(crate) fn tools_enabled(&self) -> bool {
         !self.conversation_only && valid_provider(&self.agent.provider)
     }
     pub fn uses_codex_server(&self) -> bool {
@@ -937,6 +937,7 @@ pub async fn chat_command(
             c.args(["--input-format", "stream-json"]);
             if request.tools_enabled() {
                 c.args(["--replay-user-messages", "--include-hook-events"]);
+                crate::plugins::claude_args(&mut c, &crate::plugins::for_run(request));
                 if let Some(tokens) = request.agent.auto_compact_tokens {
                     c.arg("--autocompact").arg(tokens.to_string());
                 }

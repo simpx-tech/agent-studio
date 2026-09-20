@@ -259,6 +259,7 @@ export type ProviderStatus = {
 };
 export type RunEvent = TokenUsage & {
   kind:
+    | 'skillschanged'
     | 'text'
     | 'activity'
     | 'usage'

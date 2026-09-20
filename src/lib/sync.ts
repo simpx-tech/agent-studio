@@ -366,6 +366,7 @@ export type RelayJob = {
     | 'context'
     | 'nativeInstructions'
     | 'mcp'
+    | 'plugins'
     | 'answer'
     | 'elicitation'
     | 'steer';

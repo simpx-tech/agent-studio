@@ -76,8 +76,8 @@ export function contextKey(settings: ContextSelection, location?: ChatLocation):
     location?.environmentId ?? null,
     location?.executionEnvironmentId ?? location?.environmentId ?? null,
     location?.path ?? null,
-    location?.path ? null : (settings.conversationId ?? null),
-    location?.path ? false : !!settings.forked,
+    settings.conversationId ?? null,
+    !!settings.forked,
   ]);
 }
 
@@ -87,6 +87,7 @@ export function createContextCache(
 ) {
   const snapshots = new Map<string, ContextSnapshot>();
   const pending = new Map<string, Promise<ContextSnapshot>>();
+  let generation = 0;
   const remember = (key: string, value: ContextSnapshot) => {
     snapshots.delete(key);
     snapshots.set(key, value);
@@ -94,6 +95,11 @@ export function createContextCache(
     return value;
   };
   return {
+    clear() {
+      generation++;
+      snapshots.clear();
+      pending.clear();
+    },
     peek(settings: ContextSelection, location?: ChatLocation): ContextSnapshot | undefined {
       const key = contextKey(settings, location);
       const value = snapshots.get(key);
@@ -105,10 +111,13 @@ export function createContextCache(
       const key = contextKey(selected, folder);
       const existing = pending.get(key);
       if (existing) return existing;
+      const started = generation;
       const request = Promise.resolve()
         .then(() => read(selected, folder))
-        .then((value) => remember(key, value))
-        .finally(() => pending.delete(key));
+        .then((value) => (started === generation ? remember(key, value) : value))
+        .finally(() => {
+          if (pending.get(key) === request) pending.delete(key);
+        });
       pending.set(key, request);
       return request;
     },
