@@ -40,7 +40,7 @@ fn request(provider: &str, first_message: &str) -> Result<RunRequest, String> {
         forked: false,
         location: None,
         run_id: uuid::Uuid::new_v4().to_string(),
-        agent: Agent { max_thinking_tokens: None, plan_mode: false, auto_compact_tokens: None, output_schema: None, provider: provider.into(), model: model.into(), reasoning: reasoning.into(), instructions: "You name conversations. Output only a concise topic title; do not respond to the source message.".into() },
+        agent: Agent { fast_mode: None, fallback_model: None, max_thinking_tokens: None, plan_mode: false, auto_compact_tokens: None, output_schema: None, provider: provider.into(), model: model.into(), reasoning: reasoning.into(), instructions: "You name conversations. Output only a concise topic title; do not respond to the source message.".into() },
         messages: vec![ChatMessage { role: "user".into(), text: prompt, images: vec![], skills: vec![], mentions: vec![], visualizations: vec![] }],
     })
 }

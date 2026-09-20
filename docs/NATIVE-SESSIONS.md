@@ -1,5 +1,19 @@
 # Native session continuity
 
+## Claude Fast mode and fallback models
+
+Chat instructions offers Fast mode (CLI default, On, or Off) and an optional ordered fallback-model list. `/fast` opens that control without sending anything. `/fast on`, `/fast off`, and `/fast default` change the next-reply preference directly; they are local shortcuts, work only while idle, and never reactivate a History chat. Selecting the shortcut preserves trailing draft text and attachments. Invalid command arguments remain in the composer.
+
+The execution host adds an explicit `fastMode` boolean to the chat's process-local `--settings` JSON, preserving TODO tools and plan permission rules. CLI default omits the key. The selected profile's settings and provider eligibility still apply. Fast mode requests faster service at higher per-token pricing and uses usage credits on subscription plans; a saved preference is not proof of actual fast service. Claude can use standard speed when unavailable. No global/profile settings are written, and Agent Studio does not silently change the primary model.
+
+Fallback models accept up to three distinct, bounded aliases or IDs, comma-separated. The host passes the validated list as one literal `--fallback-model` argument, allowing Claude to handle overload or unavailable models. Leaving it empty omits the flag and retains the CLI profile's fallback default. This does not mean fallback is disabled if the profile configures a chain. Model support and pricing are determined by the selected CLI/account.
+
+Both settings are captured per reply and preserved through save, export, relay, retry, and forks. Changes invalidate the owning conversation's parked process, and the next process resumes the same native session. They never enter prompt history or restricted background title/usage requests. Other providers reject these request fields. Compaction retains the same launch preferences.
+
+References: [Claude Fast mode](https://code.claude.com/docs/en/fast-mode) and [CLI fallback-model flag](https://code.claude.com/docs/en/cli-reference). Installed CLI checked: 2.1.277.
+
+Verification on 2026-09-20: isolated Windows Tauri app, four real Opus replies with Off → On → Off → Off. Verified literal launch preferences, process replacement on changes, `--resume` on the same chat, unchanged-settings process reuse, saved reply settings, and actual provider completion. An earlier marker-recall probe also confirmed remembered context across replacements; a later repetition received a provider `reasoning_extraction` refusal, so the reusable smoke uses simple arithmetic. The checked Fast-mode request was served at standard speed; premium service eligibility and forced overload/unavailable-model fallback remain unverified. Browser checks cover desktop/mobile controls, draft/cancel behavior, History state, slash commands, validation, and reload; schema/native tests cover relay/fork preservation, launch identity, and background/provider rejection.
+
 Claude and Codex conversations now resume the installed CLI's own saved transcript. A healthy parked process handles later replies; a replacement process resumes the same session. The provider retains its tool results, intermediate messages, and compaction state according to its native persistence behavior. Agent Studio's bounded display history is no longer used to reconstruct every follow-up.
 
 - Claude creates a UUID session with `--session-id` and uses that exact `--resume` ID thereafter. Initial app guidance and legacy context use non-query input; only the current submitted message has human provenance. Changed conversation instructions are supplied as new context. Background title generation retains `--no-session-persistence`.

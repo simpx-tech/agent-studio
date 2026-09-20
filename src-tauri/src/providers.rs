@@ -410,6 +410,10 @@ pub struct RunRequest {
 }
 #[derive(Clone, Deserialize)]
 pub struct Agent {
+    #[serde(default, rename = "fastMode")]
+    pub fast_mode: Option<bool>,
+    #[serde(default, rename = "fallbackModel")]
+    pub fallback_model: Option<String>,
     #[serde(default, rename = "maxThinkingTokens")]
     pub max_thinking_tokens: Option<u32>,
     #[serde(default, rename = "outputSchema")]
@@ -445,6 +449,26 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if self.agent.fast_mode.is_some() || self.agent.fallback_model.is_some() {
+            if self.conversation_only || self.agent.provider != "claude" {
+                return Err(
+                    "Fast mode and fallback models are available only for Claude chats.".into(),
+                );
+            }
+            if let Some(value) = &self.agent.fallback_model {
+                let models: Vec<_> = value.split(',').collect();
+                let pattern =
+                    regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*(?:\[1m\])?$").unwrap();
+                let unique: std::collections::HashSet<_> = models.iter().collect();
+                if value.len() > 302
+                    || models.len() > 3
+                    || unique.len() != models.len()
+                    || models.iter().any(|m| m.len() > 100 || !pattern.is_match(m))
+                {
+                    return Err("Enter up to three distinct fallback model aliases or IDs, separated by commas.".into());
+                }
+            }
+        }
         if let Some(tokens) = self.agent.max_thinking_tokens {
             if self.conversation_only || self.agent.provider != "claude" {
                 return Err("A thinking-token budget is available only for Claude chats.".into());
@@ -1013,13 +1037,23 @@ pub async fn chat_command(
                 } else {
                     c.arg("--dangerously-skip-permissions");
                 }
+                let mut settings = serde_json::json!({
+                    "env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"},
+                    "permissions": {"ask": ["EnterPlanMode", "ExitPlanMode"]}
+                });
+                if let Some(fast) = request.agent.fast_mode {
+                    settings["fastMode"] = fast.into();
+                }
+                if let Some(fallback) = &request.agent.fallback_model {
+                    c.arg("--fallback-model").arg(fallback);
+                }
                 c.args([
                     "--tools",
                     "default",
                     "--permission-prompt-tool",
                     "stdio",
                     "--settings",
-                    r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#,
+                    &settings.to_string(),
                     "--mcp-config",
                     r#"{"mcpServers":{"agent_studio":{"type":"sdk","name":"agent_studio"}}}"#,
                 ]);
@@ -1326,6 +1360,8 @@ mod tests {
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             agent: Agent {
+                fast_mode: None,
+                fallback_model: None,
                 plan_mode: false,
                 auto_compact_tokens: None,
                 max_thinking_tokens: None,
@@ -1344,6 +1380,82 @@ mod tests {
                 visualizations: vec![],
             }],
         }
+    }
+    #[tokio::test]
+    async fn claude_fast_and_fallback_are_validated_literal_chat_launch_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "fixture".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let baseline = crate::pool::fingerprint(&r, &exe).unwrap();
+        for fast in [None, Some(false), Some(true)] {
+            r.agent.fast_mode = fast;
+            r.validate().unwrap();
+            let c = chat_command(&r, root.path(), &exe).await.unwrap();
+            let args: Vec<_> = c.as_std().get_args().map(|a| a.to_string_lossy()).collect();
+            let settings: serde_json::Value =
+                serde_json::from_str(&args.windows(2).find(|a| a[0] == "--settings").unwrap()[1])
+                    .unwrap();
+            assert_eq!(settings.get("fastMode").and_then(|v| v.as_bool()), fast);
+            assert_eq!(settings["env"]["CLAUDE_CODE_ENABLE_TODO_TOOLS"], "1");
+            assert_eq!(
+                settings["permissions"]["ask"],
+                serde_json::json!(["EnterPlanMode", "ExitPlanMode"])
+            );
+            assert_eq!(
+                baseline == crate::pool::fingerprint(&r, &exe).unwrap(),
+                fast.is_none()
+            );
+            assert!(!args.iter().any(|a| a == "--fallback-model"));
+        }
+        r.agent.fast_mode = None;
+        for fallback in [
+            "sonnet",
+            "sonnet,haiku",
+            "default",
+            "claude-opus-4-8[1m]",
+            "us.anthropic.claude-sonnet-4-6-v1:0",
+            "claude-sonnet-4-5@20250929",
+        ] {
+            r.agent.fallback_model = Some(fallback.into());
+            r.validate().unwrap();
+            assert_ne!(baseline, crate::pool::fingerprint(&r, &exe).unwrap());
+            let c = chat_command(&r, root.path(), &exe).await.unwrap();
+            let args: Vec<_> = c.as_std().get_args().map(|a| a.to_string_lossy()).collect();
+            assert!(args.windows(2).any(|a| a == ["--fallback-model", fallback]));
+        }
+        for fallback in [
+            "",
+            "sonnet,",
+            "sonnet,sonnet",
+            "a,b,c,d",
+            "--flag",
+            "$(echo)",
+            "sonnet\nhaiku",
+            "sonnet, haiku",
+            &"a".repeat(101),
+        ] {
+            r.agent.fallback_model = Some(fallback.into());
+            assert!(r.validate().is_err(), "accepted {fallback}");
+        }
+        r.agent.fallback_model = Some("sonnet".into());
+        r.agent.fast_mode = Some(true);
+        r.conversation_only = true;
+        assert!(r.validate().is_err());
+        let c = chat_command(&r, root.path(), &exe).await.unwrap();
+        assert!(!c
+            .as_std()
+            .get_args()
+            .any(|a| a == "--fallback-model" || a == "--settings"));
+        r.conversation_only = false;
+        r.agent.provider = "codex".into();
+        assert!(r.validate().is_err());
+        r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
     }
     #[tokio::test]
     async fn plan_mode_launches_with_native_permissions_and_keeps_background_restricted() {

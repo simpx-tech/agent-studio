@@ -63,6 +63,13 @@ export function commandChoices(
   snapshot?: ContextSnapshot,
 ): ComposerCommand[] {
   const choices = [...appCommands];
+  if (provider === 'claude')
+    choices.push({
+      id: 'app:fast',
+      name: '/fast',
+      kind: 'app',
+      detail: 'App · Configure Fast mode for the next reply · /fast on, off, or default',
+    });
   if (provider === 'claude' || provider === 'codex')
     choices.push({
       id: 'compact',

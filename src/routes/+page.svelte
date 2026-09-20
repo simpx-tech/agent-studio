@@ -139,6 +139,7 @@
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
+  let focusFast = $state(false);
   let draftMentions = $state<import('$lib/mentions').Mention[]>([]);
   let staleMentionTokens = $state<string[]>([]);
   let mentionSelection = $state('');
@@ -1345,6 +1346,8 @@
         !!settings.planMode !== !!selectedSettings.planMode ||
         settings.outputSchema !== selectedSettings.outputSchema ||
         settings.maxThinkingTokens !== selectedSettings.maxThinkingTokens ||
+        settings.fastMode !== selectedSettings.fastMode ||
+        settings.fallbackModel !== selectedSettings.fallbackModel ||
         settings.instructions !== selectedSettings.instructions)
     )
       return;
@@ -3035,8 +3038,20 @@
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
                   else if (name === 'reasoning')
                     void tick().then(() => reasoningPicker?.showPicker());
-                  else if (name === 'instructions') editorOpen = true;
-                  else if (name === 'context') contextOpen = true;
+                  else if (name === 'instructions' || name === 'fast') {
+                    focusFast = name === 'fast';
+                    editorOpen = true;
+                  } else if (name.startsWith('fast:') && selectedSettings.provider === 'claude') {
+                    changeSettings({
+                      ...selectedSettings,
+                      fastMode: name === 'fast:default' ? undefined : name === 'fast:on',
+                    });
+                    notice = name === 'fast:on'
+                      ? 'Fast mode requested for the next reply. Supported Opus models use higher per-token pricing and usage credits on subscription plans; account availability applies.'
+                      : name === 'fast:off'
+                        ? 'Fast mode is off for the next reply.'
+                        : 'The next reply will use the Claude CLI profile’s Fast mode default.';
+                  } else if (name === 'context') contextOpen = true;
                   else if (name === 'usage') usageExpanded = true;
                   else if (name === 'connections') view = 'connections';
                   else if (name === 'settings') view = 'settings';
@@ -3211,11 +3226,20 @@
     instructions={selectedSettings.instructions}
     outputSchema={selectedSettings.outputSchema}
     maxThinkingTokens={selectedSettings.maxThinkingTokens}
+    fastMode={selectedSettings.fastMode}
+    fallbackModel={selectedSettings.fallbackModel}
+    {focusFast}
     provider={selectedSettings.provider}
-    close={() => (editorOpen = false)}
-    save={(instructions, outputSchema, maxThinkingTokens) => {
-      changeSettings({ ...selectedSettings, instructions, outputSchema, maxThinkingTokens });
+    close={() => {
       editorOpen = false;
+      focusFast = false;
+    }}
+    save={(instructions, outputSchema, maxThinkingTokens, fastMode, fallbackModel) => {
+      changeSettings({
+        ...selectedSettings, instructions, outputSchema, maxThinkingTokens, fastMode, fallbackModel,
+      });
+      editorOpen = false;
+      focusFast = false;
     }}
   />{/if}
 {#if templatesOpen && view === 'chat'}

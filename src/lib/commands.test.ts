@@ -24,6 +24,11 @@ const catalog: ContextSnapshot = {
   })),
 };
 describe('composer commands', () => {
+  it('offers Fast mode as a local Claude setting even without a command catalog', () => {
+    expect(commandChoices('claude').find((c) => c.name === '/fast')?.kind).toBe('app');
+    for (const provider of ['codex', 'gemini'] as const)
+      expect(commandChoices(provider).some((c) => c.name === '/fast')).toBe(false);
+  });
   it('recognizes a leading command at the caret without swallowing paths, prose, or arguments', () => {
     expect(commandQuery('/skill rest', 4)).toBe('ski');
     expect(commandQuery('/skill rest', 8)).toBeUndefined();

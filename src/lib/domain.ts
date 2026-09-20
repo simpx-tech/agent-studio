@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { fallbackModelSetting } from './claude-options.ts';
 import { outputSchemaSetting } from './structured-output.ts';
 import { mentionSchema, maxMentions, type Mention } from './mentions.ts';
 import { compactionsSchema, type Compaction } from './compaction.ts';
@@ -92,6 +93,8 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  fastMode: z.boolean().optional(),
+  fallbackModel: fallbackModelSetting.optional(),
   maxThinkingTokens: z
     .number()
     .int()
