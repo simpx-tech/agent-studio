@@ -48,7 +48,9 @@ export function replyModelName(message: Message): string {
 
 // Older snapshots may lack a connection; only two recorded connections can differ.
 export function replyAccountChanged(previous: ChatSettings, next: ChatSettings): boolean {
-  return !!previous.connectionId && !!next.connectionId && previous.connectionId !== next.connectionId;
+  return (
+    !!previous.connectionId && !!next.connectionId && previous.connectionId !== next.connectionId
+  );
 }
 
 export function replySettingsChanged(previous: ChatSettings, next: ChatSettings): boolean {
@@ -56,6 +58,7 @@ export function replySettingsChanged(previous: ChatSettings, next: ChatSettings)
     previous.provider !== next.provider ||
     previous.model !== next.model ||
     previous.reasoning !== next.reasoning ||
+    !!previous.planMode !== !!next.planMode ||
     replyAccountChanged(previous, next)
   );
 }
@@ -89,6 +92,8 @@ export function replySwitches(
         changes.push(replyModelName(message));
       if (before.reasoning !== after.reasoning)
         changes.push(`${reasoningName(after.reasoning)} reasoning`);
+      if (!!before.planMode !== !!after.planMode)
+        changes.push(after.planMode ? 'Plan mode' : 'Build mode');
       notices.set(message.id, `Switched to ${changes.join(' · ')}`);
     }
     previous = message;

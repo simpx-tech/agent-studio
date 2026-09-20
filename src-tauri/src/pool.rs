@@ -148,6 +148,7 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "model": request.agent.model,
         "reasoning": request.agent.reasoning,
         "autoCompactTokens": request.agent.auto_compact_tokens,
+        "planMode": request.agent.plan_mode,
         "plugins": crate::plugins::for_run(request),
         "program": exe.program,
         "prefix": exe.prefix,

@@ -5,6 +5,7 @@ pub mod compaction;
 pub mod file_changes;
 pub(crate) mod hooks;
 pub mod plan;
+pub mod proposed_plan;
 mod reasoning;
 #[cfg(test)]
 mod reasoning_tests;
@@ -67,6 +68,10 @@ pub enum RunEvent {
     Plan {
         plan: plan::Plan,
     },
+    ProposedPlan {
+        #[serde(rename = "proposedPlan")]
+        proposed_plan: proposed_plan::ProposedPlan,
+    },
     NativeWorkflow {
         #[serde(rename = "nativeWorkflows")]
         native_workflows: workflow::Snapshot,
@@ -100,6 +105,7 @@ pub enum RunEvent {
 pub struct Decoder {
     pub compactions: compaction::Compactions,
     pub text: String,
+    codex_final: bool,
     pub failure: Option<String>,
     pub completed: bool,
     items: Vec<(String, String)>,
@@ -108,6 +114,7 @@ pub struct Decoder {
     tools: activity::ToolDecoder,
     file_changes: file_changes::FileChangeDecoder,
     plan: plan::PlanDecoder,
+    pub proposed_plans: proposed_plan::ProposedPlans,
     workflows: workflow::WorkflowDecoder,
     progress: Vec<(String, String, u64)>,
     reasoning: reasoning::ReasoningDecoder,
@@ -176,6 +183,9 @@ impl Decoder {
             events.push(RunEvent::Compaction { compaction });
         }
         events.extend(self.reasoning.codex_server(value));
+        if let Some(proposed_plan) = self.proposed_plans.codex(value) {
+            events.push(RunEvent::ProposedPlan { proposed_plan });
+        }
         match value["method"].as_str().unwrap_or_default() {
             "turn/plan/updated" => {
                 if let Some(plan) = self.plan.codex(params) {
@@ -200,10 +210,19 @@ impl Decoder {
                 }
                 self.text = text;
                 if item["phase"] == "final_answer" {
+                    self.codex_final = true;
                     events.push(RunEvent::Text {
                         text: self.text.clone(),
                     });
                 }
+            }
+            "turn/completed" if self.proposed_plans.completed() && !self.codex_final => {
+                // A proposed plan is the response. Earlier commentary remains
+                // in Work history rather than becoming a fabricated final answer.
+                self.text.clear();
+                events.push(RunEvent::Text {
+                    text: String::new(),
+                });
             }
             "turn/completed" if !self.text.is_empty() => events.push(RunEvent::Text {
                 text: self.text.clone(),

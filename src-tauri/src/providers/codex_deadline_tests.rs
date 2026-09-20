@@ -31,6 +31,14 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         'turn/start' {
             $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
             [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
+            if ($request.params.collaborationMode.mode -eq 'plan') {
+                [Console]::WriteLine('{"method":"item/plan/delta","params":{"threadId":"fixture","turnId":"old","itemId":"old-plan","delta":"Stale"}}')
+                [Console]::WriteLine('{"method":"item/plan/delta","params":{"threadId":"child","turnId":"turn1","itemId":"child-plan","delta":"Child"}}')
+                [Console]::WriteLine('{"method":"item/plan/delta","params":{"threadId":"fixture","turnId":"turn1","itemId":"p","delta":"Draft"}}')
+                [Console]::WriteLine('{"method":"item/completed","params":{"threadId":"fixture","turnId":"turn1","item":{"type":"plan","id":"p","text":"Final proposal"}}}')
+                [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn1","status":"completed"}}}')
+                continue
+            }
             [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","turnId":"stale-turn","run":{"id":"stale-hook","eventName":"stop","status":"completed"}}}')
             [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","turnId":"turn' + $env:STUDIO_TEST_TURNS + '","run":{"id":"current-hook","eventName":"userPromptSubmit","status":"blocked"}}}')
             if ($env:STUDIO_TEST_QUESTION -eq 'true') {
@@ -58,6 +66,46 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 "#;
+
+#[tokio::test]
+async fn proposed_plan_only_reply_completes_and_ignores_child_and_stale_items() {
+    let root = tempfile::tempdir().unwrap();
+    let mut process = fixture(root.path(), &root.path().join("unused"), false);
+    let request:RunRequest=serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","planMode":true,"instructions":""},"messages":[{"role":"user","text":"Plan"}]})).unwrap();
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        run(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            false,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result, ("complete".into(), String::new()));
+    assert!(process.healthy);
+    let mut proposals = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let RunEvent::ProposedPlan { proposed_plan } = event {
+            proposals.push(proposed_plan);
+        }
+    }
+    assert_eq!(proposals.len(), 2);
+    assert!(proposals.iter().all(|p| p.id == "p"));
+    assert_eq!(proposals[1].text, "Final proposal");
+    assert!(proposals[1].complete);
+    process.kill().await;
+}
 
 #[tokio::test]
 async fn manual_compaction_waits_for_native_completion_not_the_empty_acknowledgement() {

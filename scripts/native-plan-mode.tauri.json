@@ -1,0 +1,17 @@
+{
+  "identifier": "com.vinicius.agentstudio.plan-mode-qa",
+  "productName": "Agent Studio Plan Mode QA",
+  "build": { "beforeDevCommand": "", "devUrl": "http://127.0.0.1:1448" },
+  "app": {
+    "windows": [{
+      "title": "Agent Studio Plan Mode QA",
+      "decorations": false,
+      "dragDropEnabled": false,
+      "width": 1380,
+      "height": 900,
+      "minWidth": 840,
+      "minHeight": 640,
+      "additionalBrowserArgs": "--remote-debugging-port=9538"
+    }]
+  }
+}

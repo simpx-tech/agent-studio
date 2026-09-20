@@ -8,6 +8,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, oneshot};
+mod plan_approval;
+pub use plan_approval::PlanApproval;
 
 pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask one to four concise questions with stable ids and optional choices. Set multiSelect=false for one answer (radio buttons), or true only when multiple answers are allowed (checkboxes), independently for each question. Multiple questions do not imply multiple answers per question. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
 pub fn tool() -> Value {
@@ -65,6 +67,8 @@ pub struct Request {
     pub revision: u64,
     pub status: String,
     pub questions: Vec<Question>,
+    #[serde(rename = "planApproval", skip_serializing_if = "Option::is_none")]
+    pub plan_approval: Option<PlanApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Answer>,
 }
@@ -144,6 +148,12 @@ fn valid_answer(request: &Request, answer: &Answer) -> bool {
     if answer.skipped {
         return answer.answers.is_empty();
     }
+    if request.plan_approval.is_some() {
+        return answer.answers.len() == 1
+            && answer.answers[0].id == "approval"
+            && answer.answers[0].values.len() == 1
+            && matches!(answer.answers[0].values[0].as_str(), "Approve" | "Decline");
+    }
     answer.answers.len() == request.questions.len()
         && request.questions.iter().all(|q| {
             let Some(a) = answer.answers.iter().find(|a| a.id == q.id) else {
@@ -166,6 +176,7 @@ fn valid_answer(request: &Request, answer: &Answer) -> bool {
 enum Wire {
     Codex(Value, bool),
     Claude(Value, bool),
+    ClaudePlan(Value),
 }
 impl Wire {
     fn response(
@@ -181,6 +192,7 @@ impl Wire {
             .collect();
         let result = json!({"answers":values,"skipped":answer.is_some_and(|a| a.skipped)});
         match self {
+            Self::ClaudePlan(value) => plan_approval::response(value, answer, error),
             Self::Codex(value, dynamic) => {
                 if *dynamic {
                     json!({"id":value["id"],"result":{"success":error.is_none(),"contentItems":[{"type":"inputText","text":error.map(String::from).unwrap_or_else(|| result.to_string())}]}})
@@ -253,6 +265,7 @@ pub struct Delivery {
     ack: oneshot::Sender<Result<(), String>>,
 }
 pub struct Session {
+    approvals: plan_approval::Tracker,
     pub steering: super::steering::Session,
     pub elicitation: super::elicitation::Session,
     hub: Questions,
@@ -286,6 +299,7 @@ impl Questions {
             },
         );
         Ok(Session {
+            approvals: plan_approval::Tracker::default(),
             elicitation: self.2.open(run_id, connection.clone(), channel.clone()),
             steering: self.1.open(run_id, connection, channel.clone()),
             hub: self.clone(),
@@ -364,6 +378,37 @@ impl Questions {
     }
 }
 impl Session {
+    pub fn can_deliver(&self, delivery: &Delivery) -> bool {
+        self.hub
+            .0
+            .lock()
+            .ok()
+            .and_then(|runs| {
+                runs.get(&self.run_id)
+                    .and_then(|r| r.entries.get(&delivery.request.id))
+                    .map(|e| {
+                        e.request.status == "pending" && e.submitted == delivery.request.response
+                    })
+            })
+            .unwrap_or(false)
+    }
+    pub fn close(&self) {
+        if let Ok(mut runs) = self.hub.0.lock() {
+            if let Some(run) = runs.get_mut(&self.run_id) {
+                for entry in run
+                    .entries
+                    .values_mut()
+                    .filter(|e| e.request.status == "pending")
+                {
+                    entry.request.status = "cancelled".into();
+                    entry.request.revision = 3;
+                    let _ = self.channel.send(RunEvent::Question {
+                        question: entry.request.clone(),
+                    });
+                }
+            }
+        }
+    }
     #[cfg(test)]
     pub fn pending(&self) -> bool {
         self.hub
@@ -403,6 +448,7 @@ impl Session {
             Err(e) => return Some(wire.response(None, None, Some(e))),
         };
         let request = Request {
+            plan_approval: None,
             id: uuid::Uuid::new_v4().to_string(),
             revision: 1,
             status: "pending".into(),
@@ -456,11 +502,12 @@ impl Session {
         ))
     }
     pub fn observe_claude(&mut self, value: &Value) {
+        self.observe_plan(value);
         if value["type"] == "control_cancel_request" {
             if let Ok(mut runs) = self.hub.0.lock() {
                 if let Some(run) = runs.get_mut(&self.run_id) {
                     for entry in run.entries.values_mut() {
-                        if matches!(&entry.wire, Wire::Claude(v, _) if v["request_id"] == value["request_id"])
+                        if matches!(&entry.wire, Wire::Claude(v, _) | Wire::ClaudePlan(v) if v["request_id"] == value["request_id"])
                             && entry.request.status == "pending"
                         {
                             entry.request.status = "cancelled".into();
@@ -718,6 +765,7 @@ mod tests {
     #[test]
     fn multi_select_and_explicit_skip_are_preserved() {
         let mut request = Request {
+            plan_approval: None,
             id: "request".into(),
             revision: 1,
             status: "pending".into(),

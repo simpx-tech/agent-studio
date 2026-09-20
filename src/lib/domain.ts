@@ -5,6 +5,7 @@ import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
+import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
@@ -89,6 +90,7 @@ export const reasoningSchema = z.enum([
 ]);
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
+  planMode: z.boolean().optional(),
   autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),
   connectionId: z.string().uuid().optional(),
   provider: z.enum(providerIds),
@@ -193,6 +195,7 @@ export const messageSchema = z
     executionLabel: z.string().optional(),
     runId: z.string().uuid().optional(),
     plan: planSchema.optional(),
+    proposedPlans: proposedPlansSchema.optional(),
     visualizations: visualizationsSchema.optional(),
     questions: questionsSchema.optional(),
     elicitations: elicitationReceiptsSchema.optional(),
@@ -269,6 +272,7 @@ export type RunEvent = TokenUsage & {
     | 'progress'
     | 'reasoning'
     | 'plan'
+    | 'proposedplan'
     | 'filechanges'
     | 'visualization'
     | 'question'
@@ -284,6 +288,7 @@ export type RunEvent = TokenUsage & {
   truncated?: boolean;
   tool?: ToolActivity;
   plan?: Plan;
+  proposedPlan?: ProposedPlan;
   visualization?: Visualization;
   question?: QuestionRequest;
   elicitation?: ElicitationReceipt;
@@ -340,7 +345,11 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
       role: m.role === 'assistant' && m.status !== 'complete' ? ('user' as const) : m.role,
       text:
         (m.role === 'assistant' && m.status !== 'complete' ? '' : messageText(m)) +
-        (m.role === 'assistant' ? questionHistory(m.questions) + steeringHistory(m.steering) : ''),
+        (m.role === 'assistant'
+          ? questionHistory(m.questions) +
+            steeringHistory(m.steering) +
+            (m.status === 'complete' ? proposedPlanHistory(m.proposedPlans) : '')
+          : ''),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),
       ...(m.role === 'assistant' && m.status === 'complete' && m.visualizations?.length

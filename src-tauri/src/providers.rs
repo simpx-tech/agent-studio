@@ -406,6 +406,8 @@ pub struct RunRequest {
 }
 #[derive(Clone, Deserialize)]
 pub struct Agent {
+    #[serde(default, rename = "planMode")]
+    pub plan_mode: bool,
     #[serde(default, rename = "autoCompactTokens")]
     pub auto_compact_tokens: Option<u64>,
     pub provider: String,
@@ -433,6 +435,12 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if self.agent.plan_mode
+            && (self.conversation_only
+                || !matches!(self.agent.provider.as_str(), "claude" | "codex"))
+        {
+            return Err("Plan mode is available only for Claude and Codex chats.".into());
+        }
         if self
             .agent
             .auto_compact_tokens
@@ -943,14 +951,22 @@ pub async fn chat_command(
                 }
             }
             if request.tools_enabled() {
+                if request.agent.plan_mode {
+                    c.args([
+                        "--permission-mode",
+                        "plan",
+                        "--allow-dangerously-skip-permissions",
+                    ]);
+                } else {
+                    c.arg("--dangerously-skip-permissions");
+                }
                 c.args([
                     "--tools",
                     "default",
-                    "--dangerously-skip-permissions",
                     "--permission-prompt-tool",
                     "stdio",
                     "--settings",
-                    r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#,
+                    r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#,
                     "--mcp-config",
                     r#"{"mcpServers":{"agent_studio":{"type":"sdk","name":"agent_studio"}}}"#,
                 ]);
@@ -1256,6 +1272,7 @@ mod tests {
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             agent: Agent {
+                plan_mode: false,
                 auto_compact_tokens: None,
                 provider: "claude".into(),
                 model: String::new(),
@@ -1270,6 +1287,52 @@ mod tests {
                 visualizations: vec![],
             }],
         }
+    }
+    #[tokio::test]
+    async fn plan_mode_launches_with_native_permissions_and_keeps_background_restricted() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "fixture".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        for plan in [true, false] {
+            r.agent.plan_mode = plan;
+            r.validate().unwrap();
+            let c = chat_command(&r, root.path(), &exe).await.unwrap();
+            let args: Vec<_> = c
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert_eq!(
+                args.iter().any(|a| a == "--dangerously-skip-permissions"),
+                !plan
+            );
+            assert_eq!(
+                args.iter()
+                    .any(|a| a == "--allow-dangerously-skip-permissions"),
+                plan
+            );
+            assert_eq!(
+                args.windows(2).any(|a| a == ["--permission-mode", "plan"]),
+                plan
+            );
+            let settings = args.windows(2).find(|a| a[0] == "--settings").unwrap();
+            let settings: serde_json::Value = serde_json::from_str(&settings[1]).unwrap();
+            assert_eq!(
+                settings["permissions"]["ask"],
+                serde_json::json!(["EnterPlanMode", "ExitPlanMode"])
+            );
+        }
+        r.agent.plan_mode = true;
+        r.conversation_only = true;
+        assert!(r.validate().is_err());
+        r.conversation_only = false;
+        r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
     }
     #[tokio::test]
     async fn compaction_sizes_are_validated_and_only_change_claude_chat_launches() {
@@ -1463,7 +1526,7 @@ mod tests {
                     assert!(args_contain("--tools", "default"));
                     assert!(args_contain(
                         "--settings",
-                        r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"}}"#
+                        r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#
                     ));
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| matches!(

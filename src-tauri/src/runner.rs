@@ -427,6 +427,7 @@ async fn stream_turn(
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !interrupting => {
+                if let Some(q) = &questions { q.close(); }
                 if let Some(q) = &questions { q.elicitation.close(); }
                 if let Some(q) = &questions { q.steering.ready(false); }
                 if persistent && prompt_sent && stdin_open {
@@ -449,12 +450,17 @@ async fn stream_turn(
             }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             _ = &mut deadline => { process.healthy = false; break Err(if channel.is_some() { format!("The provider did not finish within {} minutes. The owned run was stopped.", timeout.expect("bounded deadline").as_secs() / 60) } else { "Title generation timed out".into() }); }
-            Some(delivery) = async { match answer_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
-                let result = if stdin_open {
+            Some(delivery) = async { match answer_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                let result = if stdin_open && questions.as_ref().unwrap().can_deliver(&delivery) {
                     process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Claude.".to_string())
                 } else {
                     Err("Claude is no longer waiting for answers.".into())
                 };
+                // Until a native mode status confirms the transition, this
+                // process cannot be reused under its old permission identity.
+                if result.is_ok() && delivery.payload["response"]["response"]["updatedPermissions"].is_array() {
+                    process.fingerprint.clear();
+                }
                 questions.as_ref().unwrap().delivered(delivery, result);
             },
             Some(delivery) = async { match steering_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
@@ -511,15 +517,35 @@ async fn stream_turn(
                                 continue;
                             }
                             if let Some(questions) = &mut questions { questions.observe_claude(&value); questions.elicitation.observe(&value, None); }
+                            // Track the CLI's actual permission mode in the parked-process
+                            // identity. The next reply still applies its explicit mode choice.
+                            if value["type"] == "system" && value["parent_tool_use_id"].is_null()
+                                && matches!(value["subtype"].as_str(), Some("init" | "status"))
+                                && (value["session_id"].is_null() || value["session_id"].as_str() == Some(process.session_id.as_str())) {
+                                if let Some(mode) = value["permissionMode"].as_str().filter(|m| matches!(*m,"plan" | "bypassPermissions")) {
+                                    let mut effective = request.clone();
+                                    effective.agent.plan_mode = mode == "plan";
+                                    if effective.native_session.is_some() { process.fingerprint = crate::pool::fingerprint(&effective, &process.exe)?; }
+                                }
+                            }
                             for event in visualizer.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if value["type"] == "control_request" {
                                 let own_session = value["session_id"].is_null() || value["session_id"].as_str() == Some(process.session_id.as_str());
+                                if let Some(response) = questions.as_mut().and_then(|q| q.claude_plan(&value, initialized && prompt_sent && !interrupting && !request.compact && own_session)) {
+                                    if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?; }
+                                    continue;
+                                }
                                 if let Some(response) = questions.as_mut().and_then(|q| q.elicitation.claude(&value, initialized && prompt_sent && !interrupting && !request.compact && own_session)) {
                                     if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?; }
                                     continue;
                                 }
                                 if let Some(response) = questions.as_mut().and_then(|q| q.claude(&value)) {
                                     if let Some(response) = response { let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await; }
+                                    continue;
+                                }
+                                if value["request"]["subtype"] == "can_use_tool" {
+                                    let response = serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"behavior":"deny","message":"This action requires permission that is unavailable in the current mode. While planning, propose the change and request ExitPlanMode approval before implementation."}}});
+                                    process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
                                     continue;
                                 }
                                 let response = visualizer.claude_response(&value);
@@ -532,6 +558,7 @@ async fn stream_turn(
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
                     if turn_ended {
+                        if let Some(q) = &questions { q.close(); }
                         if let Some(q) = &questions { q.elicitation.close(); }
                         if let Some(q) = &questions { q.steering.ready(false); }
                         if !steering.is_empty() {

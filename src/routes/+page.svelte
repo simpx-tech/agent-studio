@@ -133,6 +133,7 @@
   import type { Presence } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
+  import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
   let modelPicker = $state<ChoicePicker>();
@@ -1257,6 +1258,7 @@
       (run || activeRunning) &&
       (settings.provider !== selectedSettings.provider ||
         settings.connectionId !== selectedSettings.connectionId ||
+        !!settings.planMode !== !!selectedSettings.planMode ||
         settings.instructions !== selectedSettings.instructions)
     )
       return;
@@ -2007,6 +2009,7 @@
               if (
                 event.kind === 'nativeworkflow' ||
                 event.kind === 'plan' ||
+                event.kind === 'proposedplan' ||
                 event.kind === 'visualization' ||
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
@@ -2645,7 +2648,7 @@
                         ? 'The agent, computer, and folder are fixed for this conversation. Choosing another account applies to the next message and starts a new native session for it from the saved messages. '
                         : 'Fixed for this conversation. Start a new conversation to change it, or connect another account of this agent to switch accounts between replies. '
                       : ''
-                  }Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts.`}
+                  }${selectedSettings.planMode ? 'Plan mode: explore and propose changes before implementation. Claude asks for plan-mode approval; Codex returns a proposed plan.' : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts, except explicit plan-mode decisions.'}`}
                   value={selectedAgentOption}
                   options={agentOptions}
                   fallbackToFirst={false}
@@ -2948,6 +2951,7 @@
                 </p>{/if}
               <div class="composer-bottom">
                 <div class="composer-tools">
+                  <PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning || !!run} change={changeSettings} />
                   <button
                     type="button"
                     class="attach-button"

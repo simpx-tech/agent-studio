@@ -6,6 +6,7 @@ import { mergeQuestions } from './questions.ts';
 import { mergeElicitations } from './elicitations.ts';
 import { mergeSteering } from './steering.ts';
 import { mergeCompactions } from './compaction.ts';
+import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 
@@ -47,6 +48,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           !previous.elicitations?.length &&
           !previous.steering?.length &&
           !previous.compactions?.length &&
+          !previous.proposedPlans?.length &&
           !previous.fileChanges &&
           !previous.accountUsage &&
           previous.usage?.revision == null)
@@ -54,6 +56,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         return message;
       return {
         ...message,
+        ...(message.proposedPlans || previous.proposedPlans
+          ? { proposedPlans: mergeProposedPlans(message.proposedPlans, previous.proposedPlans) }
+          : {}),
         ...(message.compactions || previous.compactions
           ? { compactions: mergeCompactions(message.compactions, previous.compactions) }
           : {}),
@@ -138,6 +143,9 @@ function sameRun(
       score(a) > score(b) ? a : score(b) > score(a) ? b : at.length >= bt.length ? a : b;
     messages.push({
       ...selected,
+      ...(a.proposedPlans || b.proposedPlans
+        ? { proposedPlans: mergeProposedPlans(a.proposedPlans, b.proposedPlans) }
+        : {}),
       ...(a.compactions || b.compactions
         ? { compactions: mergeCompactions(a.compactions, b.compactions) }
         : {}),

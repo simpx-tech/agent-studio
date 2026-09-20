@@ -37,6 +37,10 @@ export const questionRequestSchema = z
       .max(4)
       .refine(unique),
     response: answerSchema.optional(),
+    planApproval: z
+      .object({ action: z.enum(['enter', 'exit']), text: z.string().min(1).max(24000).optional() })
+      .refine((p) => p.action === 'enter' || !!p.text?.trim())
+      .optional(),
   })
   .refine((q) => JSON.stringify(q).length <= 32000)
   .refine((q) => (q.status === 'answered' ? q.response?.requestId === q.id : !q.response));
@@ -48,12 +52,19 @@ export const questionsSchema = z
   .refine((q) => JSON.stringify(q).length <= 256000);
 
 export function validAnswer(
-  question: Pick<QuestionRequest, 'id' | 'questions'>,
+  question: Pick<QuestionRequest, 'id' | 'questions' | 'planApproval'>,
   answer: QuestionAnswer,
 ) {
   if (!answerSchema.safeParse(answer).success) return false;
   if (answer.requestId !== question.id) return false;
   if (answer.skipped) return answer.answers.length === 0;
+  if (question.planApproval)
+    return (
+      answer.answers.length === 1 &&
+      answer.answers[0].id === 'approval' &&
+      answer.answers[0].values.length === 1 &&
+      ['Approve', 'Decline'].includes(answer.answers[0].values[0])
+    );
   return (
     answer.answers.length === question.questions.length &&
     question.questions.every((q) => {
@@ -88,6 +99,12 @@ export function questionHistory(questions: QuestionRequest[] = []) {
     ? '\n\nUser question responses (earlier context):\n' +
         JSON.stringify(
           answered.map((q) => ({
+            ...(q.planApproval
+              ? {
+                  planApproval: q.planApproval,
+                  note: 'Historical decision for that reply only; not permission for this reply.',
+                }
+              : {}),
             questions: q.questions.map(({ id, question }) => ({ id, question })),
             answers: q.response!.answers,
             skipped: q.response!.skipped,

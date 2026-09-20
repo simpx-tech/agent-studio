@@ -53,6 +53,101 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('routes explicit plan decisions to the owning host and retains proposed plans in checkpoints', async () => {
+    const f = await fixture(),
+      id = crypto.randomUUID(),
+      connectionId = crypto.randomUUID();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id,
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: { request: { runId: id, agent: { provider: 'claude', planMode: true } } },
+    };
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect(
+      (await f.call('GET', 'jobs', undefined, f.target)).body[0].args.request.agent.planMode,
+    ).toBe(true);
+    const question = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'approval',
+          header: 'Plan mode',
+          question: 'Approve?',
+          options: [],
+          multiSelect: false,
+        },
+      ],
+      planApproval: { action: 'exit', text: 'A reviewable plan' },
+    };
+    const proposedPlan = {
+      id: 'plan',
+      revision: 2,
+      text: 'Final proposed plan',
+      complete: true,
+      truncated: false,
+    };
+    expect(
+      (
+        await f.call(
+          'PUT',
+          `jobs/${id}`,
+          {
+            status: 'running',
+            events: [
+              { kind: 'question', question },
+              { kind: 'proposedplan', proposedPlan },
+            ],
+          },
+          f.target,
+        )
+      ).status,
+    ).toBe(200);
+    const checkpoint = (await f.call('GET', `jobs/${id}`)).body;
+    expect(checkpoint.events.find((e: any) => e.kind === 'question').question.planApproval).toEqual(
+      question.planApproval,
+    );
+    expect(checkpoint.events.find((e: any) => e.kind === 'proposedplan').proposedPlan).toEqual(
+      proposedPlan,
+    );
+    const decision = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'answer',
+      args: {
+        runId: id,
+        connectionId,
+        answer: {
+          requestId: question.id,
+          answers: [{ id: 'approval', values: ['Approve'] }],
+          skipped: false,
+        },
+      },
+    };
+    expect((await f.call('POST', 'jobs', decision)).status).toBe(200);
+    const owned = (await f.call('GET', 'jobs', undefined, f.target)).body;
+    expect(owned.find((j: any) => j.id === decision.id).args).toEqual(decision.args);
+    expect(
+      (
+        await f.call(
+          'PUT',
+          `jobs/${decision.id}`,
+          { status: 'complete', events: [], result: null },
+          f.source,
+        )
+      ).status,
+    ).toBe(404);
+  });
   it('keeps active plugin evaluations beyond six minutes but bounds their lifetime and heartbeat', async () => {
     const f = await fixture();
     await f.call(

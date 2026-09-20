@@ -125,6 +125,10 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
     if !request.agent.reasoning.is_empty() {
         params["effort"] = json!(request.agent.reasoning);
     }
+    if !request.agent.model.is_empty() {
+        params["collaborationMode"] = json!({"mode":if request.agent.plan_mode {"plan"} else {"default"},
+            "settings":{"model":request.agent.model,"reasoning_effort":if request.agent.reasoning.is_empty() {Value::Null} else {json!(request.agent.reasoning)},"developer_instructions":null}});
+    }
     params
 }
 
@@ -172,12 +176,19 @@ async fn start_turn(
         )
         .await
     } else {
+        let mut effective = request.clone();
+        if effective.agent.model.is_empty() {
+            effective.agent.model = process.reported_model.clone().unwrap_or_default();
+        }
+        if effective.agent.plan_mode && effective.agent.model.is_empty() {
+            return Err("Codex did not report the model needed to enter plan mode. Select a model and try again.".into());
+        }
         send(
             process,
             pending,
             Kind::Turn,
             "turn/start",
-            turn_params(request, thread),
+            turn_params(&effective, thread),
         )
         .await
     }
@@ -233,6 +244,7 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !cancelling => {
+                questions.close();
                 questions.elicitation.close();
                 questions.steering.ready(false);
                 if thread.is_empty() || turn.is_empty() {
@@ -256,8 +268,9 @@ pub async fn run(
                 return Ok(("cancelled".into(), decoder.text));
             }
             Some(delivery) = questions.rx.recv(), if !cancelling => {
-                let result = process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string());
-                let failed = result.is_err();
+                let live = questions.can_deliver(&delivery);
+                let result = if live { process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send answers to Codex.".to_string()) } else { Err("This request is no longer waiting.".into()) };
+                let failed = live && result.is_err();
                 questions.delivered(delivery, result);
                 if failed { process.healthy = false; return Err("Could not send answers to Codex.".into()); }
             },
@@ -402,6 +415,8 @@ pub async fn run(
                 if value["method"] == "thread/tokenUsage/updated" && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 let reasoning = value["method"].as_str().is_some_and(|method| method.starts_with("item/reasoning/")) || value["params"]["item"]["type"] == "reasoning";
                 if reasoning && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
+                let proposed_plan = value["method"] == "item/plan/delta" || value["params"]["item"]["type"] == "plan";
+                if proposed_plan && (turn.is_empty() || value["params"]["turnId"] != turn) { continue; }
                 for mut event in decoder.decode_codex_server(&value, &thread) {
                     if let crate::protocol::RunEvent::Compaction { compaction } = &event {
                         if compaction.status == "complete" { last_usage.context_input = None; }
@@ -414,6 +429,7 @@ pub async fn run(
                 }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
                     if value["params"]["turn"]["id"] != turn { continue; }
+                    questions.close();
                     questions.elicitation.close();
                     questions.steering.ready(false);
                     // Never leave unacknowledged input running invisibly in a parked process.
@@ -427,7 +443,7 @@ pub async fn run(
                         if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }
                         return Ok(("complete".into(), "Context compacted.".into()));
                     }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     // The billing route may only be available while this exact thread is loaded.
                     // Optional read failure must never turn a successful reply into an error.
                     let usage_id = process.next_id;
@@ -468,6 +484,24 @@ mod deadline_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proposed_plan_mode_uses_native_collaboration_and_build_resets_it() {
+        let mut request:RunRequest=serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","reasoning":"low","instructions":"","planMode":true},"messages":[{"role":"user","text":"Plan"}]})).unwrap();
+        let params = turn_params(&request, "thread");
+        assert_eq!(
+            params["collaborationMode"],
+            json!({"mode":"plan","settings":{"model":"fixture","reasoning_effort":"low","developer_instructions":null}})
+        );
+        assert_eq!(start_params(&request)["sandbox"], "danger-full-access");
+        request.agent.plan_mode = false;
+        assert_eq!(
+            turn_params(&request, "thread")["collaborationMode"]["mode"],
+            "default"
+        );
+        let mut d = Decoder::default();
+        assert!(d.decode_codex_server(&json!({"method":"item/plan/delta","params":{"threadId":"child","itemId":"p","delta":"Foreign"}}),"thread").is_empty());
+        assert!(!d.proposed_plans.completed());
+    }
     #[test]
     fn persistent_turns_resume_exact_thread_and_only_send_new_input() {
         let root = tempfile::tempdir().unwrap();

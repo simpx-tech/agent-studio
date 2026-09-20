@@ -4,6 +4,7 @@ import { accountUsageSchema, latestAccountUsage } from './spend.ts';
 import type { ContentBlock, Message, RunEvent } from './domain';
 import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
+import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
@@ -104,6 +105,12 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
+  if (event.kind === 'proposedplan') {
+    const parsed = proposedPlanSchema.safeParse(event.proposedPlan);
+    if (message.role === 'assistant' && parsed.success)
+      message.proposedPlans = mergeProposedPlans(message.proposedPlans, [parsed.data]);
+    return;
+  }
   if (event.kind === 'elicitation') {
     const parsed = elicitationReceiptSchema.safeParse(event.elicitation);
     if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
@@ -243,6 +250,20 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'proposedplan') {
+    const parsed = proposedPlanSchema.safeParse(event.proposedPlan);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'proposedplan' && e.proposedPlan?.id === parsed.data.id,
+    );
+    if (index >= 0) {
+      const previous = events[index].proposedPlan!;
+      if (!previous.complete && parsed.data.revision > previous.revision)
+        events[index] = { kind: 'proposedplan', proposedPlan: parsed.data };
+    } else if (events.filter((e) => e.kind === 'proposedplan').length < 8)
+      events.push({ kind: 'proposedplan', proposedPlan: parsed.data });
+    return;
+  }
   if (event.kind === 'skillschanged') {
     const previous = events.findIndex((e) => e.kind === 'skillschanged');
     const revision = previous < 0 ? 1 : (events[previous].revision ?? 0) + 1;

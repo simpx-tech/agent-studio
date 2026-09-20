@@ -21,6 +21,8 @@
   import PlanPanel from './PlanPanel.svelte';
   import VisualizationView from './VisualizationView.svelte';
   import QuestionForm from './QuestionForm.svelte';
+  import PlanApproval from './PlanApproval.svelte';
+  import ProposedPlan from './ProposedPlan.svelte';
   import ElicitationForm from './ElicitationForm.svelte';
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
@@ -55,7 +57,7 @@
   const author = $derived(message.settings ?? agent);
   const text = $derived(
     messageText(message) ||
-      (message.status !== 'running'
+      (message.status !== 'running' && !message.proposedPlans?.length
         ? (message.blocks.filter((b) => b.type === 'activity' && b.progress).at(-1)?.text ?? '')
         : ''),
   );
@@ -152,10 +154,27 @@
         {/if}
       {/each}
       {#each message.questions ?? [] as request (request.id)}
-        <QuestionForm
-          {request}
-          runId={message.runId}
-          connectionId={author.connectionId}
+        {#if request.planApproval}
+          <PlanApproval
+            {request}
+            runId={message.runId}
+            connectionId={author.connectionId}
+            running={message.status === 'running'}
+          />
+        {:else}
+          <QuestionForm
+            {request}
+            runId={message.runId}
+            connectionId={author.connectionId}
+            running={message.status === 'running'}
+          />
+        {/if}
+      {/each}
+      {#each message.proposedPlans ?? [] as proposal (proposal.id)}
+        <ProposedPlan
+          text={proposal.text}
+          complete={proposal.complete}
+          truncated={proposal.truncated}
           running={message.status === 'running'}
         />
       {/each}
