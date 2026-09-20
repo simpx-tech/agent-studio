@@ -16,7 +16,13 @@
     Images,
     Webhook,
   } from '@lucide/svelte';
-  import { safeSourceUrl, visibleActivityStatus, type ToolActivity } from '$lib/activity';
+  import {
+    safeSourceUrl,
+    visibleActivityStatus,
+    toolElapsed,
+    toolProgressLabel,
+    type ToolActivity,
+  } from '$lib/activity';
   import { activityGroupSummary, groupActivityEntries } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
@@ -130,10 +136,24 @@
         >{tool.name}{#if preview}<span class="query-preview" title={preview}>{preview}</span
           >{/if}</span
       >
-      {@render statusMark(tool.status)}
+      <span class="tool-state">
+        {#if tool.elapsedMs != null}<span
+            class="tool-elapsed"
+            title="Elapsed time recorded on the execution computer"
+            aria-label={`Tool elapsed time: ${toolElapsed(tool.elapsedMs)}`}
+            >{toolElapsed(tool.elapsedMs)}</span
+          >{/if}
+        {@render statusMark(tool.status)}
+      </span>
       <ChevronDown size={13} class="disclosure" />
     </summary>
     <div class="tool-body">
+      {#if tool.progress}<p
+          class="tool-progress"
+          title="Only progress metadata is recorded. Tool output and terminal input remain private."
+        >
+          {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
+        </p>{/if}
       {#if tool.parentId && !nested}<p class="tool-note">
           By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
             'sub-agent'}
@@ -212,11 +232,23 @@
         {#if visible.length}
           {@const summary = activityGroupSummary(visible, replyStatus, tools)}
           {@const Icon = groupIcons[summary.icon]}
+          {@const active = group.tools.filter((tool) => tool.status === 'running')}
+          {@const elapsed = Math.max(-1, ...active.map((tool) => tool.elapsedMs ?? -1))}
+          {@const progressTool = active.findLast((tool) => tool.progress)}
           <details class="activity-group">
             <summary title="Expand for tool details">
               {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
               {:else}<Icon size={16} aria-hidden="true" />{/if}
               <span class="group-label">{summary.label}</span>
+              {#if summary.running && elapsed >= 0}<span class="group-progress">
+                  {#if progressTool}<span>{toolProgressLabel(progressTool)}</span>{/if}
+                  <span
+                    class="tool-elapsed"
+                    title="Longest currently running tool; parallel times are not added"
+                    aria-label={`Longest running tool: ${toolElapsed(elapsed)}`}
+                    >{toolElapsed(elapsed)}</span
+                  >
+                </span>{/if}
               {#if summary.issue}{@render statusMark(summary.issue)}{/if}
               <ChevronDown size={13} class="disclosure" aria-hidden="true" />
             </summary>
@@ -299,6 +331,24 @@
   .group-label {
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+  .group-progress,
+  .tool-state {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .group-progress {
+    margin-left: auto;
+    justify-content: flex-end;
+    text-align: right;
+  }
+  .tool-elapsed {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .group-tools {
     display: grid;

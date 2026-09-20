@@ -26,6 +26,13 @@ export const toolActivitySchema = z.object({
   category: z.enum(['skill', 'search', 'agent', 'tool', 'hook']),
   name: z.string().max(200),
   status: activityStatusSchema,
+  elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
+  progress: z
+    .object({
+      kind: z.enum(['heartbeat', 'output', 'terminal']),
+      atElapsedMs: z.number().int().min(0).max(31_536_000_000),
+    })
+    .optional(),
   parentId: z.string().max(240).optional(),
   detail: z.string().max(4096).optional(),
   query: z.string().max(2048).optional(),
@@ -58,6 +65,23 @@ export const toolActivitySchema = z.object({
 export type ToolActivity = Omit<z.infer<typeof toolActivitySchema>, 'facts'> & {
   facts?: z.infer<typeof toolActivitySchema>['facts'];
 };
+
+export function toolElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+export function toolProgressLabel(tool: ToolActivity): string | undefined {
+  if (!tool.progress) return;
+  return {
+    heartbeat: 'Progress reported',
+    output: 'Output received',
+    terminal: 'Terminal interaction',
+  }[tool.progress.kind];
+}
 
 export function safeSourceUrl(value: string): string | undefined {
   try {

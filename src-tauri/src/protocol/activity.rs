@@ -4,6 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 mod hooks;
+mod progress;
+use progress::{ToolClock, ToolProgress};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +36,10 @@ pub struct ToolActivity {
     pub category: String,
     pub name: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ToolProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +105,8 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         category: category.into(),
         name: clean(name, 200),
         status: "running".into(),
+        elapsed_ms: None,
+        progress: None,
         parent_id: None,
         detail: None,
         query: None,
@@ -190,6 +198,8 @@ pub struct ToolDecoder {
     partial: HashMap<String, PartialTool>,
     tasks: HashMap<String, String>,
     overflow: bool,
+    clocks: HashMap<String, ToolClock>,
+    progress_bindings: HashMap<String, (String, String)>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -207,8 +217,14 @@ impl ToolDecoder {
         if !self.owns_codex_thread(thread, root) {
             return out;
         }
+        if self.codex_progress(value, &mut out) {
+            return out;
+        }
         let item = &params["item"];
         let kind = item["type"].as_str().unwrap_or_default();
+        if !self.bind_progress(value) {
+            return out;
+        }
         if self.codex_hook(value, root, &mut out) {
             return out;
         }
@@ -267,6 +283,7 @@ impl ToolDecoder {
                 }
                 .into();
                 tool.detail = Some("Application tool call reported by Codex. Arguments and returned content are not displayed.".into());
+                tool.elapsed_ms = progress::duration_ms(&item["durationMs"]);
                 if thread != root {
                     tool.parent_id = Some(thread.into());
                 }
@@ -316,6 +333,19 @@ impl ToolDecoder {
         self.tools.iter().find(|t| t.id == id).cloned()
     }
     fn publish(&mut self, mut tool: ToolActivity, out: &mut Vec<ToolActivity>) {
+        if let Some(previous) = self.existing(&tool.id) {
+            if tool.category != "agent" && previous.status != "running" && tool.status == "running"
+            {
+                return;
+            }
+            if tool.progress.is_none() {
+                tool.progress = previous.progress;
+            }
+            if previous.status != "running" && tool.elapsed_ms.is_none() {
+                tool.elapsed_ms = previous.elapsed_ms;
+            }
+        }
+        self.time_tool(&mut tool);
         if let Some(index) = self.tools.iter().position(|t| t.id == tool.id) {
             tool.revision = self.tools[index].revision;
             if tool == self.tools[index] {
@@ -459,6 +489,10 @@ impl ToolDecoder {
         let mut tool = self
             .existing(&id)
             .unwrap_or_else(|| fresh(id, category, name));
+        if event == "item.completed" {
+            tool.elapsed_ms = progress::duration_ms(&item["durationMs"])
+                .or_else(|| progress::duration_ms(&item["duration_ms"]));
+        }
         tool.parent_id = field(item, "parent_id", 240);
         tool.status = if let Some(value) = item["status"].as_str() {
             status(value)
@@ -653,7 +687,7 @@ impl ToolDecoder {
                     tool.query = Some(query);
                 }
             }
-            "Bash" => {
+            "Bash" | "PowerShell" => {
                 tool.name = "Run command".into();
                 tool.command_run = true;
                 tool.operation = Some("command".into());
@@ -685,6 +719,9 @@ impl ToolDecoder {
         self.publish(tool, out);
     }
     fn claude(&mut self, v: &Value, out: &mut Vec<ToolActivity>) {
+        if self.claude_progress(v, out) {
+            return;
+        }
         if self.claude_hook(v, out) {
             return;
         }
@@ -778,6 +815,11 @@ impl ToolDecoder {
                                 || block["content"]["type"] == "web_search_tool_result_error"
                             {
                                 "error"
+                            } else if tool.command_run
+                                && (v["tool_use_result"]["isAsync"] == true
+                                    || v["tool_use_result"]["backgroundTaskId"].is_string())
+                            {
+                                "running"
                             } else {
                                 "complete"
                             }
@@ -909,6 +951,23 @@ impl ToolDecoder {
                 }
                 if self.tasks.len() < 64 {
                     self.tasks.insert(task, id.clone());
+                }
+                // CLI shell tasks use the same task lifecycle as delegated work.
+                // They belong to the existing tool, never a sub-agent result: their
+                // summary can contain raw stdout/stderr and must not cross the boundary.
+                if let Some(mut tool) = self.existing(&format!("claude:{id}")) {
+                    if v["subtype"] == "task_notification" {
+                        tool.status = status(v["status"].as_str().unwrap_or_default()).into();
+                        tool.elapsed_ms = None;
+                        self.publish(tool, out);
+                    }
+                    return;
+                }
+                // Unknown task types cannot establish a child-agent identity.
+                if !self.group("claude").agents.iter().any(|a| a.id == id)
+                    && v["task_type"] != "local_agent"
+                {
+                    return;
                 }
                 let mut group = self.group("claude");
                 if let Some(agent) = Self::agent(&mut group, &id) {

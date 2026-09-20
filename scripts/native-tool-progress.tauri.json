@@ -1,0 +1,17 @@
+{
+  "identifier": "com.vinicius.agentstudio.tool-progress-qa",
+  "productName": "Agent Studio Tool Progress QA",
+  "build": { "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Tool Progress QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "additionalBrowserArgs": "--remote-debugging-port=19659"
+      }
+    ]
+  }
+}

@@ -254,6 +254,13 @@ impl Decoder {
         }
         events
     }
+    pub fn tool_tick(&mut self) -> Vec<RunEvent> {
+        self.tools
+            .tick()
+            .into_iter()
+            .map(|tool| RunEvent::Tool { tool })
+            .collect()
+    }
     pub fn decode(&mut self, provider: &str, line: &str) -> Vec<RunEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];

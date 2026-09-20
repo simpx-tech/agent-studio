@@ -407,6 +407,8 @@ async fn stream_turn(
         process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
     }
     let mut decoder = Decoder::default();
+    let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
+    tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     decoder.compactions.manual = request.compact;
     let mut visualizer = crate::providers::visualize::Visualizer::default();
     let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::with_context(
@@ -434,6 +436,11 @@ async fn stream_turn(
         };
         tokio::select! {
             biased;
+            _ = tool_tick.tick() => {
+                for event in decoder.tool_tick() {
+                    if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                }
+            }
             _ = cancel.cancelled(), if !interrupting => {
                 if let Some(q) = &questions { q.close(); }
                 if let Some(q) = &questions { q.elicitation.close(); }

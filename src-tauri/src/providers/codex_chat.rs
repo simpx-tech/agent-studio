@@ -240,9 +240,16 @@ pub async fn run(
     };
     let mut visualizer = super::visualize::Visualizer::default();
     let output_limit = request.output_line_limit();
+    let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
+    tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
+            _ = tool_tick.tick() => {
+                for event in decoder.tool_tick() {
+                    if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                }
+            }
             _ = cancel.cancelled(), if !cancelling => {
                 questions.close();
                 questions.elicitation.close();
@@ -408,6 +415,9 @@ pub async fn run(
                 }
                 questions.resolved_codex(&value, &thread);
                 questions.elicitation.observe(&value, Some(&thread));
+                if value["params"]["threadId"] == thread
+                    && value["method"].as_str().is_some_and(|m| m.starts_with("item/"))
+                    && value["params"]["turnId"].as_str().is_some_and(|id| turn.is_empty() || id != turn) { continue; }
                 if crate::protocol::hooks::is_codex_hook(&value) && value["params"]["threadId"] == thread
                     && !turn.is_empty() && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 let compaction = value["method"] == "thread/compacted" || value["params"]["item"]["type"] == "contextCompaction";

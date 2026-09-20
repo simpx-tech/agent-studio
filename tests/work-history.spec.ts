@@ -109,7 +109,9 @@ for (const mobile of [false, true])
         .locator('.activity-timeline')
         .evaluate((el) =>
           [...el.children].map((child) =>
-            (child.querySelector(':scope > summary') ?? child).textContent?.trim(),
+            (child.querySelector(':scope > summary') ?? child).textContent
+              ?.replace(/\s+/g, ' ')
+              .trim(),
           ),
         );
     const savedSequence = await sequence();

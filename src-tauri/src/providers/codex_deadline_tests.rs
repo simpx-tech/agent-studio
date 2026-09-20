@@ -31,6 +31,17 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         'turn/start' {
             $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
             [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
+            if (Test-Path -LiteralPath (Join-Path (Split-Path $PSCommandPath) 'tool-progress')) {
+                [Console]::WriteLine('{"method":"item/started","params":{"threadId":"fixture","turnId":"turn1","item":{"type":"commandExecution","id":"cmd","status":"inProgress"}}}')
+                [Console]::WriteLine('{"method":"item/commandExecution/outputDelta","params":{"threadId":"fixture","turnId":"stale","itemId":"cmd","delta":"PRIVATE_STALE"}}')
+                [Console]::WriteLine('{"method":"item/commandExecution/terminalInteraction","params":{"threadId":"fixture","turnId":"turn1","itemId":"cmd","stdin":"PRIVATE_INPUT","processId":"PRIVATE_PROCESS"}}')
+                [Console]::WriteLine('{"method":"command/exec/outputDelta","params":{"processId":"PRIVATE_UNOWNED","deltaBase64":"UFJJVkFURQ=="}}')
+                Start-Sleep -Milliseconds 2200
+                [Console]::WriteLine('{"method":"item/completed","params":{"threadId":"fixture","turnId":"turn1","item":{"type":"commandExecution","id":"cmd","status":"completed","durationMs":2200}}}')
+                [Console]::WriteLine('{"method":"item/agentMessage/delta","params":{"threadId":"fixture","turnId":"turn1","itemId":"answer","delta":"Done"}}')
+                [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn1","status":"completed"}}}')
+                continue
+            }
             if ($request.params.collaborationMode.mode -eq 'plan') {
                 [Console]::WriteLine('{"method":"item/plan/delta","params":{"threadId":"fixture","turnId":"old","itemId":"old-plan","delta":"Stale"}}')
                 [Console]::WriteLine('{"method":"item/plan/delta","params":{"threadId":"child","turnId":"turn1","itemId":"child-plan","delta":"Child"}}')
@@ -66,6 +77,52 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 "#;
+
+#[tokio::test]
+async fn tool_progress_native_loop_ticks_and_rejects_stale_and_unowned_events() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("tool-progress"), "enabled").unwrap();
+    let mut process = fixture(root.path(), &root.path().join("unused"), false);
+    let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Progress"}]})).unwrap();
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        run(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    process.kill().await;
+    assert_eq!(result.unwrap().0, "complete");
+    let mut tools = vec![];
+    while let Ok(event) = events.try_recv() {
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("PRIVATE"));
+        if let RunEvent::Tool { tool } = event {
+            if tool.id.ends_with(":cmd") {
+                tools.push(serde_json::to_value(tool).unwrap());
+            }
+        }
+    }
+    assert!(tools
+        .iter()
+        .any(|t| t["status"] == "running" && t["elapsedMs"].as_u64().unwrap_or(0) >= 1000));
+    assert!(!tools.iter().any(|t| t["progress"]["kind"] == "output"));
+    assert_eq!(tools.last().unwrap()["progress"]["kind"], "terminal");
+    assert_eq!(tools.last().unwrap()["elapsedMs"], 2200);
+    assert_eq!(tools.last().unwrap()["status"], "complete");
+}
 
 #[tokio::test]
 async fn proposed_plan_only_reply_completes_and_ignores_child_and_stale_items() {

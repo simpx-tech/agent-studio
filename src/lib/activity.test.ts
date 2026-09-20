@@ -5,6 +5,8 @@ import {
   visibleActivityStatus,
   safeSourceUrl,
   activityCounts,
+  toolActivitySchema,
+  toolElapsed,
   type ToolActivity,
 } from './activity';
 import {
@@ -41,6 +43,60 @@ const message = (): Message => ({
 });
 
 describe('structured tool activity', () => {
+  it('retains bounded tool progress through revisions, relay, restore and export, never prompts', () => {
+    const m = message();
+    const events: RunEvent[] = [];
+    for (const revision of [1, 3, 2]) {
+      const event: RunEvent = {
+        kind: 'tool',
+        tool: {
+          ...tool('command', revision),
+          elapsedMs: revision * 1000,
+          progress: { kind: 'output', atElapsedMs: revision * 1000 },
+        },
+      };
+      applyRunEvent(m, event);
+      retainRunEvent(events, event);
+    }
+    expect(events).toHaveLength(1);
+    const replay = message();
+    for (const event of events) applyRunEvent(replay, event);
+    expect(replay.blocks).toEqual(m.blocks);
+    m.status = 'complete';
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(w.preferences),
+      title: 'Progress',
+      createdAt: '',
+      updatedAt: '',
+      messages: [m],
+    });
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(w)));
+    expect(restored.conversations[0].messages[0].blocks).toEqual(m.blocks);
+    expect(JSON.stringify(historyFor(restored.conversations[0]))).not.toMatch(
+      /elapsedMs|atElapsedMs|output/,
+    );
+    const parsed = toolActivitySchema.parse({
+      ...tool(),
+      elapsedMs: 12345,
+      progress: {
+        kind: 'terminal',
+        atElapsedMs: 12000,
+        stdin: 'PRIVATE_INPUT',
+        message: 'PRIVATE_MESSAGE',
+      },
+      delta: 'PRIVATE_OUTPUT',
+    });
+    expect(JSON.stringify(parsed)).not.toContain('PRIVATE');
+    for (const elapsedMs of [-1, Infinity, NaN, 0.5, 31_536_000_001])
+      expect(toolActivitySchema.safeParse({ ...tool(), elapsedMs }).success).toBe(false);
+    expect(
+      toolActivitySchema.safeParse({ ...tool(), progress: { kind: 'arbitrary', atElapsedMs: 0 } })
+        .success,
+    ).toBe(false);
+    expect([0, 12000, 65000, 3_660_000].map(toolElapsed)).toEqual(['0s', '12s', '1m 5s', '1h 1m']);
+  });
   it('keeps progress revisions in sequence, restores them, and excludes them from final history', () => {
     const m = message();
     const events: RunEvent[] = [];
@@ -182,7 +238,11 @@ describe('structured tool activity', () => {
     applyRunEvent(a.conversations[0].messages[0], { kind: 'tool', tool: tool() });
     applyRunEvent(b.conversations[0].messages[0], {
       kind: 'tool',
-      tool: tool('search1', 4, 'complete'),
+      tool: {
+        ...tool('search1', 4, 'complete'),
+        elapsedMs: 15000,
+        progress: { kind: 'heartbeat', atElapsedMs: 12000 },
+      },
     });
     applyRunEvent(a.conversations[0].messages[0], { kind: 'tool', tool: tool('search2') });
     for (const merged of [mergeShared(base, a, b), mergeShared(base, b, a)]) {
@@ -192,6 +252,8 @@ describe('structured tool activity', () => {
       );
       expect(tools).toHaveLength(2);
       expect(tools.find((t) => t.id === 'search1')?.status).toBe('complete');
+      expect(tools.find((t) => t.id === 'search1')?.elapsedMs).toBe(15000);
+      expect(tools.find((t) => t.id === 'search1')?.progress?.kind).toBe('heartbeat');
     }
   });
   it('retains every bounded operation over relay plus its newest terminal state', () => {

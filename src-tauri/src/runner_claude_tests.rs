@@ -43,6 +43,15 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             continue
         }
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+        if (Test-Path -LiteralPath (Join-Path (Split-Path $PSCommandPath) 'tool-progress')) {
+            [Console]::WriteLine('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cmd","name":"Bash","input":{}}]}}')
+            [Console]::WriteLine('{"type":"tool_progress","tool_use_id":"cmd","parent_tool_use_id":null,"tool_name":"Bash","elapsed_time_seconds":12.5,"message":"PRIVATE_OUTPUT"}')
+            Start-Sleep -Milliseconds 2200
+            [Console]::WriteLine('{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"cmd","content":"PRIVATE_OUTPUT"}]}}')
+            [Console]::WriteLine('{"type":"tool_progress","tool_use_id":"cmd","parent_tool_use_id":null,"elapsed_time_seconds":90}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Done"}')
+            continue
+        }
         [Console]::WriteLine('{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg' + $turn + '"}}}')
         [Console]::WriteLine('{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}')
         [Console]::WriteLine('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Compare paths."}}}')
@@ -56,6 +65,44 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 "#;
+
+#[tokio::test]
+async fn claude_tool_progress_native_loop_ticks_without_output_or_late_revival() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("tool-progress"), "enabled").unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Progress"}]),
+    );
+    let session = request.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let (result, events) = turn(
+        &mut process,
+        &request,
+        CancellationToken::new(),
+        false,
+        false,
+    )
+    .await;
+    process.kill().await;
+    assert_eq!(result.unwrap().0, "complete");
+    assert!(!serde_json::to_string(&events).unwrap().contains("PRIVATE"));
+    let tools: Vec<_> = events
+        .into_iter()
+        .filter_map(|e| match e {
+            RunEvent::Tool { tool } => Some(serde_json::to_value(tool).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert!(tools
+        .iter()
+        .any(|t| t["status"] == "running" && t["elapsedMs"].as_u64().unwrap_or(0) >= 13000));
+    assert!(tools.last().unwrap()["elapsedMs"].as_u64().unwrap() < 90000);
+    assert_eq!(tools.last().unwrap()["status"], "complete");
+    assert_eq!(tools.last().unwrap()["progress"]["kind"], "heartbeat");
+}
 
 #[tokio::test]
 async fn steering_requires_the_human_echo_and_kills_unconfirmed_input_at_completion() {
