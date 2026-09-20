@@ -210,6 +210,18 @@
             </p>
           {/if}
           {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
+          {#if agent.messages?.length}<details class="agent-result">
+              <summary><ChevronDown size={12} />Messages</summary>
+              {#each agent.messages as message (message.id)}
+                <p>{message.text}</p>
+                {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
+                    Message incomplete
+                  </p>{/if}
+              {/each}
+              {#if agent.messagesTruncated}<p class="tool-note">
+                  Additional child text was omitted at the activity limit.
+                </p>{/if}
+            </details>{/if}
           {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
               child,
               true,

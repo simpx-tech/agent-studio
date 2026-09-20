@@ -276,7 +276,7 @@ impl Decoder {
             events.push(RunEvent::FileChanges { file_changes });
         }
         // Child-agent text and usage belong to its activity, never the main reply.
-        if provider == "claude" && v["parent_tool_use_id"].as_str().is_some() {
+        if provider == "claude" && !v["parent_tool_use_id"].is_null() {
             return events;
         }
         if provider == "claude" {
@@ -602,6 +602,13 @@ mod tests {
         assert_eq!(d.text, "Main reply");
         assert_eq!(d.model.as_deref(), Some("main"));
         assert_eq!(d.context_input, Some(100));
+        d.decode("claude", r#"{"type":"assistant","message":{"model":"main","usage":{"input_tokens":100},"content":[{"type":"tool_use","id":"child","name":"Agent","input":{"description":"Reader"}}]}}"#);
+        let known = d.decode("claude", r#"{"type":"assistant","uuid":"child-message","parent_tool_use_id":"child","message":{"model":"child","usage":{"input_tokens":9000},"content":[{"type":"text","text":"Child detail"},{"type":"thinking","thinking":"Private child thought"}]}}"#);
+        assert!(known.iter().all(|e| matches!(e, RunEvent::Tool { .. })));
+        assert_eq!(d.text, "Main reply");
+        assert_eq!(d.model.as_deref(), Some("main"));
+        assert_eq!(d.context_input, Some(100));
+        assert!(d.decode("claude", r#"{"type":"assistant","parent_tool_use_id":42,"message":{"content":[{"type":"text","text":"Malformed child"}]}}"#).is_empty());
     }
     #[test]
     fn tool_activity_does_not_render_arguments_or_command_output() {

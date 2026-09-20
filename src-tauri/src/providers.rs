@@ -944,7 +944,11 @@ pub async fn chat_command(
             }
             c.args(["--input-format", "stream-json"]);
             if request.tools_enabled() {
-                c.args(["--replay-user-messages", "--include-hook-events"]);
+                c.args([
+                    "--replay-user-messages",
+                    "--include-hook-events",
+                    "--forward-subagent-text",
+                ]);
                 crate::plugins::claude_args(&mut c, &crate::plugins::for_run(request));
                 if let Some(tokens) = request.agent.auto_compact_tokens {
                     c.arg("--autocompact").arg(tokens.to_string());
@@ -1465,6 +1469,7 @@ mod tests {
                     .any(|a| a[0] == "--permission-mode" && a[1] == "dontAsk"));
                 assert!(args.iter().any(|a| a == "--safe-mode"));
                 assert!(!args.iter().any(|a| a == "--include-hook-events"));
+                assert!(!args.iter().any(|a| a == "--forward-subagent-text"));
                 assert!(args.iter().any(|a| a == "--strict-mcp-config"));
             } else {
                 assert!(args.windows(2).any(|a| a[0] == "--mode" && a[1] == "plan"));
@@ -1523,6 +1528,7 @@ mod tests {
                 }
                 "claude" => {
                     assert!(args.iter().any(|a| a == "--include-hook-events"));
+                    assert!(args.iter().any(|a| a == "--forward-subagent-text"));
                     assert!(args_contain("--tools", "default"));
                     assert!(args_contain(
                         "--settings",

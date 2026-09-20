@@ -52,6 +52,7 @@ function action(tool: ToolActivity): keyof typeof phrases {
     return 'command';
   if (tool.category === 'search') return tool.name === 'Open web page' ? 'browse' : 'search';
   if (tool.category === 'agent') return 'agent';
+  if (['sendMessage', 'listAgents'].includes(tool.operation ?? '')) return 'agent';
   if (tool.category === 'skill') return 'skill';
   if (['View image', 'view_image'].includes(tool.name)) return 'image';
   return 'tool';

@@ -1,0 +1,17 @@
+{
+  "identifier": "com.vinicius.agentstudio.subagent-detail-qa",
+  "productName": "Agent Studio Subagent Detail QA",
+  "build": { "beforeDevCommand": "", "devUrl": "http://localhost:1452" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Subagent Detail QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "additionalBrowserArgs": "--remote-debugging-port=19660"
+      }
+    ]
+  }
+}

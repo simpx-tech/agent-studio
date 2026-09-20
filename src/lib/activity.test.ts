@@ -43,6 +43,64 @@ const message = (): Message => ({
 });
 
 describe('structured tool activity', () => {
+  it('retains child messages through revision merge, relay and export without prompt replay', () => {
+    const m = message();
+    const events: RunEvent[] = [];
+    for (const revision of [1, 3, 2]) {
+      const event: RunEvent = {
+        kind: 'tool',
+        tool: {
+          ...tool('agents', revision),
+          category: 'agent',
+          agents: [
+            {
+              id: 'child',
+              name: 'Reader',
+              status: 'complete',
+              messages: [{ id: 'message', text: `Child detail ${revision}`, complete: true }],
+              messagesTruncated: true,
+            },
+          ],
+        },
+      };
+      applyRunEvent(m, event);
+      retainRunEvent(events, event);
+    }
+    const replay = message();
+    for (const event of events) applyRunEvent(replay, event);
+    expect(replay.blocks).toEqual(m.blocks);
+    m.status = 'complete';
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(w.preferences),
+      title: 'Children',
+      createdAt: '',
+      updatedAt: '',
+      messages: [m],
+    });
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(w)));
+    expect(restored.conversations[0].messages[0].blocks).toEqual(m.blocks);
+    expect(JSON.stringify(m.blocks)).toContain('Child detail 3');
+    expect(JSON.stringify(historyFor(restored.conversations[0]))).not.toContain('Child detail');
+    expect(
+      toolActivitySchema.safeParse({
+        ...tool(),
+        agents: [
+          {
+            id: 'bad',
+            name: 'Bad',
+            status: 'running',
+            messages: Array.from({ length: 5 }, (_, id) => ({
+              id: String(id),
+              text: 'x'.repeat(4000),
+              complete: true,
+            })),
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
   it('retains bounded tool progress through revisions, relay, restore and export, never prompts', () => {
     const m = message();
     const events: RunEvent[] = [];

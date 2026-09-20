@@ -57,6 +57,18 @@ export const toolActivitySchema = z.object({
         parentId: z.string().max(240).optional(),
         task: z.string().max(2048).optional(),
         result: z.string().max(8000).optional(),
+        messages: z
+          .array(
+            z.object({
+              id: z.string().max(220),
+              text: z.string().max(4000),
+              complete: z.boolean(),
+            }),
+          )
+          .max(16)
+          .refine((messages) => messages.reduce((sum, m) => sum + m.text.length, 0) <= 16000)
+          .optional(),
+        messagesTruncated: z.boolean().optional(),
       }),
     )
     .max(64)

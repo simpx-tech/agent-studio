@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 mod hooks;
 mod progress;
+mod subagents;
 use progress::{ToolClock, ToolProgress};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -27,6 +28,10 @@ pub struct AgentActivity {
     task: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    messages: Vec<subagents::AgentMessage>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    messages_truncated: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +205,8 @@ pub struct ToolDecoder {
     overflow: bool,
     clocks: HashMap<String, ToolClock>,
     progress_bindings: HashMap<String, (String, String)>,
+    child_turns: HashMap<String, String>,
+    agent_lifecycle: std::collections::HashSet<String>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -217,6 +224,9 @@ impl ToolDecoder {
         if !self.owns_codex_thread(thread, root) {
             return out;
         }
+        if self.codex_subagent(value, root, &mut out) {
+            return out;
+        }
         if self.codex_progress(value, &mut out) {
             return out;
         }
@@ -228,46 +238,7 @@ impl ToolDecoder {
         if self.codex_hook(value, root, &mut out) {
             return out;
         }
-        if matches!(method, "item/started" | "item/completed") && kind == "subAgentActivity" {
-            if let Some(id) = field(item, "agentThreadId", 240) {
-                let mut group = self.group("codex");
-                if let Some(agent) = Self::agent(&mut group, &id) {
-                    if let Some(name) = field(item, "agentPath", 200) {
-                        agent.name = name;
-                    }
-                    agent.parent_id = Some(thread.into());
-                    agent.status = match item["kind"].as_str() {
-                        Some("started" | "interacted") => "running",
-                        Some("completed") => "complete",
-                        Some("interrupted") => "cancelled",
-                        _ => "unknown",
-                    }
-                    .into();
-                }
-                self.publish_group(group, &mut out);
-            }
-        } else if thread != root
-            && (method == "turn/completed"
-                || (method == "item/completed" && matches!(kind, "agentMessage" | "userMessage")))
-        {
-            let mut group = self.group("codex");
-            if let Some(agent) = Self::agent(&mut group, thread) {
-                if method == "turn/completed" {
-                    agent.status =
-                        status(params["turn"]["status"].as_str().unwrap_or_default()).into();
-                } else if kind == "agentMessage" {
-                    if let Some(text) = field(item, "text", 8000) {
-                        agent.result = Some(text);
-                    }
-                } else {
-                    let task = text_content(&item["content"], 2048);
-                    if !task.is_empty() {
-                        agent.task = Some(task);
-                    }
-                }
-            }
-            self.publish_group(group, &mut out);
-        } else if matches!(method, "item/started" | "item/completed") && kind == "dynamicToolCall" {
+        if matches!(method, "item/started" | "item/completed") && kind == "dynamicToolCall" {
             if let Some(id) = field(item, "id", 220) {
                 let mut tool = fresh(
                     format!("codex:{thread}:{id}"),
@@ -407,6 +378,8 @@ impl ToolDecoder {
             parent_id: None,
             task: None,
             result: None,
+            messages: vec![],
+            messages_truncated: false,
         });
         group.agents.last_mut()
     }
@@ -637,6 +610,10 @@ impl ToolDecoder {
             .existing(&tool_id)
             .unwrap_or_else(|| fresh(tool_id, category, name));
         tool.parent_id = parent;
+        if self.claude_team_tool(&mut tool, name, input) {
+            self.publish(tool, out);
+            return;
+        }
         match name {
             "Skill" => {
                 tool.name = field(input, "skill", 180)
@@ -727,6 +704,10 @@ impl ToolDecoder {
         }
         let kind = v["type"].as_str().unwrap_or_default();
         let parent = field(v, "parent_tool_use_id", 240);
+        if !v["parent_tool_use_id"].is_null() && parent.is_none() {
+            return;
+        }
+        self.claude_child_text(v, out);
         if kind == "stream_event" {
             let event = &v["event"];
             let key = format!("{}:{}", parent.as_deref().unwrap_or("root"), event["index"]);
@@ -789,6 +770,9 @@ impl ToolDecoder {
                         };
                         let mut group = self.group("claude");
                         if let Some(agent) = group.agents.iter_mut().find(|a| a.id == id) {
+                            if agent.parent_id != parent {
+                                continue;
+                            }
                             if let Some(agent_id) = field(&v["tool_use_result"], "agentId", 240) {
                                 agent.agent_id = Some(agent_id);
                             }
@@ -811,6 +795,9 @@ impl ToolDecoder {
                             }
                             self.publish_group(group, out);
                         } else if let Some(mut tool) = self.existing(&format!("claude:{id}")) {
+                            if tool.parent_id != parent {
+                                continue;
+                            }
                             tool.status = if block["is_error"] == true
                                 || block["content"]["type"] == "web_search_tool_result_error"
                             {
@@ -829,6 +816,9 @@ impl ToolDecoder {
                                 sources(&v["tool_use_result"], &mut tool.sources, 0);
                             }
                             let result = &v["tool_use_result"];
+                            if tool.operation.as_deref() == Some("listAgents") {
+                                Self::claude_agent_list(&mut tool, result);
+                            }
                             match tool.operation.as_deref() {
                                 Some("read") => {
                                     for (key, label) in [
@@ -886,18 +876,6 @@ impl ToolDecoder {
                         }
                     }
                     _ => {}
-                }
-            }
-            if kind == "assistant" {
-                if let Some(parent) = &parent {
-                    let mut group = self.group("claude");
-                    if let Some(agent) = group.agents.iter_mut().find(|a| &a.id == parent) {
-                        let text = text_content(&v["message"]["content"], 8000);
-                        if !text.is_empty() {
-                            agent.result = Some(text);
-                            self.publish_group(group, out);
-                        }
-                    }
                 }
             }
         }
