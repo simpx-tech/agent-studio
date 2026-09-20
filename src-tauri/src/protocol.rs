@@ -57,6 +57,9 @@ pub enum RunEvent {
     Question {
         question: crate::providers::questions::Request,
     },
+    Elicitation {
+        elicitation: crate::providers::elicitation::Receipt,
+    },
     Visualization {
         visualization: crate::providers::visualize::Visualization,
     },

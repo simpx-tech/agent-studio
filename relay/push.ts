@@ -15,6 +15,7 @@ import type { SharedWorkspace, RelayJob } from '../src/lib/sync.ts';
 import { toolActivitySchema } from '../src/lib/activity.ts';
 import { attentionKeys, requestsAttention, type PushNotice } from '../src/lib/notifications.ts';
 import { questionRequestSchema } from '../src/lib/questions.ts';
+import { elicitationReceiptSchema } from '../src/lib/elicitations.ts';
 
 const day = 24 * 60 * 60 * 1000;
 // Browser-supplied endpoints must never turn the relay into an HTTP proxy.
@@ -344,17 +345,25 @@ export function pushService({
         const parsed = questionRequestSchema.safeParse(value?.question);
         return value?.kind === 'question' && parsed.success ? [parsed.data] : [];
       });
-      const attention = questions.length
-        ? attentionKeys({ blocks: [], questions }).length > 0
-        : job.events.some((event) => {
-            const value = event as { kind?: string; tool?: unknown };
-            const tool = toolActivitySchema.safeParse(value?.tool);
-            return (
-              value?.kind === 'tool' &&
-              tool.success &&
-              requestsAttention({ blocks: [{ type: 'activity', text: '', tool: tool.data }] })
-            );
-          });
+      const elicitations = job.events.flatMap((event) => {
+        const value = event as { kind?: string; elicitation?: unknown };
+        const parsed = elicitationReceiptSchema.safeParse(value?.elicitation);
+        return value?.kind === 'elicitation' && parsed.success && parsed.data.runId === job.id
+          ? [parsed.data]
+          : [];
+      });
+      const attention =
+        questions.length || elicitations.length
+          ? attentionKeys({ blocks: [], questions, elicitations }).length > 0
+          : job.events.some((event) => {
+              const value = event as { kind?: string; tool?: unknown };
+              const tool = toolActivitySchema.safeParse(value?.tool);
+              return (
+                value?.kind === 'tool' &&
+                tool.success &&
+                requestsAttention({ blocks: [{ type: 'activity', text: '', tool: tool.data }] })
+              );
+            });
       const kind = ['complete', 'error', 'cancelled'].includes(job.status)
         ? (job.status as 'complete' | 'error' | 'cancelled')
         : attention
@@ -364,8 +373,8 @@ export function pushService({
       try {
         const next = pruned();
         for (const key of kind === 'attention'
-          ? questions.length
-            ? attentionKeys({ blocks: [], questions })
+          ? questions.length || elicitations.length
+            ? attentionKeys({ blocks: [], questions, elicitations })
             : ['attention']
           : ['terminal'])
           enqueue(

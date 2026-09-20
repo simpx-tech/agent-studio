@@ -433,6 +433,18 @@ async fn answer_question(
         .await
 }
 #[tauri::command]
+async fn manage_elicitation(
+    questions: State<'_, providers::questions::Questions>,
+    run_id: String,
+    connection_id: Option<String>,
+    input: providers::elicitation::Input,
+) -> Result<Option<providers::elicitation::Request>, String> {
+    questions
+        .2
+        .manage(&run_id, connection_id.as_deref(), input)
+        .await
+}
+#[tauri::command]
 async fn steer_run(
     questions: State<'_, providers::questions::Questions>,
     run_id: String,
@@ -631,6 +643,7 @@ pub fn run() {
             cancel_run,
             release_conversation,
             answer_question,
+            manage_elicitation,
             steer_run,
             sign_in,
             export_workspace

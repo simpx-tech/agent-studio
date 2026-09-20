@@ -416,13 +416,18 @@ async fn stream_turn(
     let deadline = response_deadline(timeout);
     tokio::pin!(deadline);
     loop {
-        let (answer_rx, steering_rx) = questions
-            .as_mut()
-            .map(|q| (&mut q.rx, &mut q.steering.rx))
-            .unzip();
+        let (answer_rx, steering_rx, elicitation_rx) = match questions.as_mut() {
+            Some(q) => (
+                Some(&mut q.rx),
+                Some(&mut q.steering.rx),
+                Some(&mut q.elicitation.rx),
+            ),
+            None => (None, None, None),
+        };
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !interrupting => {
+                if let Some(q) = &questions { q.elicitation.close(); }
                 if let Some(q) = &questions { q.steering.ready(false); }
                 if persistent && prompt_sent && stdin_open {
                     // Ask the CLI to end this turn in-band so it stays usable for the next reply.
@@ -459,6 +464,13 @@ async fn stream_turn(
                     process.healthy = false; break Err(send_failed.into());
                 }
                 steering.insert(delivery.input.id.clone(), delivery);
+            },
+            Some(delivery) = async { match elicitation_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                let q = &questions.as_ref().unwrap().elicitation;
+                let result = if stdin_open && q.can_deliver(&delivery) {
+                    process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send MCP input to Claude.".to_string())
+                } else { Err("This MCP request is no longer waiting.".into()) };
+                q.delivered(delivery, result);
             },
             line = process.lines.recv() => match line {
                 Some(Line::Err(line)) => {
@@ -498,9 +510,14 @@ async fn stream_turn(
                                 prompt_sent = true;
                                 continue;
                             }
-                            if let Some(questions) = &mut questions { questions.observe_claude(&value); }
+                            if let Some(questions) = &mut questions { questions.observe_claude(&value); questions.elicitation.observe(&value, None); }
                             for event in visualizer.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if value["type"] == "control_request" {
+                                let own_session = value["session_id"].is_null() || value["session_id"].as_str() == Some(process.session_id.as_str());
+                                if let Some(response) = questions.as_mut().and_then(|q| q.elicitation.claude(&value, initialized && prompt_sent && !interrupting && !request.compact && own_session)) {
+                                    if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?; }
+                                    continue;
+                                }
                                 if let Some(response) = questions.as_mut().and_then(|q| q.claude(&value)) {
                                     if let Some(response) = response { let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await; }
                                     continue;
@@ -515,6 +532,7 @@ async fn stream_turn(
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
                     if turn_ended {
+                        if let Some(q) = &questions { q.elicitation.close(); }
                         if let Some(q) = &questions { q.steering.ready(false); }
                         if !steering.is_empty() {
                             // A late input can become Claude's next turn. Stop the owned process
@@ -601,6 +619,10 @@ fn provider_error(diagnostic: &str) -> &'static str {
 #[cfg(test)]
 #[path = "runner_claude_tests.rs"]
 mod claude_tests;
+
+#[cfg(test)]
+#[path = "elicitation_native_tests.rs"]
+mod elicitation_native_tests;
 
 #[cfg(test)]
 mod tests {

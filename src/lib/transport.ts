@@ -8,6 +8,7 @@ import { fallbackModels, type ModelCatalog } from './models';
 import type { UsageSnapshot } from './usage';
 import { retainRunEvent } from './activity';
 import { answerSchema, type QuestionAnswer } from './questions';
+import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
@@ -742,6 +743,7 @@ async function localCall(
     mcp: 'manage_mcp',
     nativeInstructions: 'read_native_instructions',
     answer: 'answer_question',
+    elicitation: 'manage_elicitation',
     steer: 'steer_run',
   };
   return invoke(commands[method], args);
@@ -1094,6 +1096,17 @@ export async function answerQuestion(runId: string, answer: QuestionAnswer, conn
   return routed<void>(
     'answer',
     { runId, answer: answerSchema.parse(answer), connectionId },
+    connectionId,
+  );
+}
+export async function manageElicitation(
+  runId: string,
+  input: ElicitationInput,
+  connectionId?: string,
+): Promise<unknown> {
+  return routed(
+    'elicitation',
+    { runId, input: elicitationInputSchema.parse(input), connectionId },
     connectionId,
   );
 }

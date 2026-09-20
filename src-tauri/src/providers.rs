@@ -9,6 +9,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 pub mod codex_chat;
 pub mod defaults;
+pub mod elicitation;
+mod elicitation_schema;
 #[cfg(windows)]
 mod login_console;
 pub mod questions;

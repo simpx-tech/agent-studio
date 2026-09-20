@@ -1,0 +1,20 @@
+{
+  "identifier": "com.vinicius.agentstudio.elicitation-qa",
+  "productName": "Agent Studio Elicitation QA",
+  "build": { "beforeDevCommand": "", "devUrl": "http://127.0.0.1:1461" },
+  "app": {
+    "security": {
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:1461 ws://127.0.0.1:1461; object-src 'none'; base-uri 'none'; frame-src studio-artifact: http://studio-artifact.localhost"
+    },
+    "windows": [
+      {
+        "title": "Agent Studio Elicitation QA",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "additionalBrowserArgs": "--remote-debugging-port=19671"
+      }
+    ]
+  }
+}

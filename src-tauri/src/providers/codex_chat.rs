@@ -65,7 +65,9 @@ fn plan_response(
 }
 
 fn start_params(request: &RunRequest) -> Value {
-    let mut params = json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool()]});
+    // `never` also silently declines MCP user input inside Codex. Allow only
+    // that interaction category, keeping ordinary execution approvals disabled.
+    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool()]});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -231,6 +233,7 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled(), if !cancelling => {
+                questions.elicitation.close();
                 questions.steering.ready(false);
                 if thread.is_empty() || turn.is_empty() {
                     process.healthy = false;
@@ -257,6 +260,12 @@ pub async fn run(
                 let failed = result.is_err();
                 questions.delivered(delivery, result);
                 if failed { process.healthy = false; return Err("Could not send answers to Codex.".into()); }
+            },
+            Some(delivery) = questions.elicitation.rx.recv(), if !cancelling => {
+                let result = if questions.elicitation.can_deliver(&delivery) {
+                    process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send MCP input to Codex.".to_string())
+                } else { Err("This MCP request is no longer waiting.".into()) };
+                questions.elicitation.delivered(delivery, result);
             },
             Some(delivery) = questions.steering.rx.recv(), if !cancelling => {
                 let id = process.next_id;
@@ -343,6 +352,10 @@ pub async fn run(
                     continue;
                 }
                 if value.get("id").is_some() && value["method"].is_string() {
+                    if let Some(response) = questions.elicitation.codex(&value, &thread, &turn, !cancelling && !request.compact) {
+                        if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to MCP input")?; }
+                        continue;
+                    }
                     if let Some(response) = questions.codex(&value, &thread) {
                         if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
                         continue;
@@ -373,6 +386,7 @@ pub async fn run(
                     turn = value["params"]["turn"]["id"].as_str().unwrap_or_default().into();
                 }
                 questions.resolved_codex(&value, &thread);
+                questions.elicitation.observe(&value, Some(&thread));
                 if crate::protocol::hooks::is_codex_hook(&value) && value["params"]["threadId"] == thread
                     && !turn.is_empty() && value["params"]["turnId"].as_str().is_some_and(|id| id != turn) { continue; }
                 let compaction = value["method"] == "thread/compacted" || value["params"]["item"]["type"] == "contextCompaction";
@@ -392,6 +406,7 @@ pub async fn run(
                 }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
                     if value["params"]["turn"]["id"] != turn { continue; }
+                    questions.elicitation.close();
                     questions.steering.ready(false);
                     // Never leave unacknowledged input running invisibly in a parked process.
                     if !steering.is_empty() { process.healthy = false; }
@@ -534,7 +549,7 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":"never","sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool()]})
+            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool()]})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");

@@ -6,6 +6,7 @@ import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
+import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
 import { steeringReceiptSchema, mergeSteering } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, maxReasoningBlocks, mergeReasoningBlocks } from './reasoning.ts';
@@ -103,6 +104,12 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
+  if (event.kind === 'elicitation') {
+    const parsed = elicitationReceiptSchema.safeParse(event.elicitation);
+    if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
+      message.elicitations = mergeElicitations(message.elicitations, [parsed.data]);
+    return;
+  }
   if (event.kind === 'compaction') {
     const parsed = compactionSchema.safeParse(event.compaction);
     if (message.role === 'assistant' && parsed.success) {
@@ -236,6 +243,22 @@ export function visibleActivityStatus(
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'elicitation') {
+    const parsed = elicitationReceiptSchema.safeParse(event.elicitation);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'elicitation' && e.elicitation?.id === parsed.data.id,
+    );
+    const next: RunEvent = { kind: 'elicitation', elicitation: parsed.data };
+    if (index < 0 && events.filter((e) => e.kind === 'elicitation').length < 16) events.push(next);
+    else if (
+      index >= 0 &&
+      events[index].elicitation?.status === 'pending' &&
+      (events[index].elicitation?.revision ?? 0) < parsed.data.revision
+    )
+      events[index] = next;
+    return;
+  }
   if (event.kind === 'compaction') {
     const parsed = compactionSchema.safeParse(event.compaction);
     if (!parsed.success) return;

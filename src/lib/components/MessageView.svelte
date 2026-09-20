@@ -21,6 +21,7 @@
   import PlanPanel from './PlanPanel.svelte';
   import VisualizationView from './VisualizationView.svelte';
   import QuestionForm from './QuestionForm.svelte';
+  import ElicitationForm from './ElicitationForm.svelte';
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
@@ -103,7 +104,8 @@
         })}</span
       >{#if message.status === 'running'}<span class="live-label"
           ><i class="pulse-dot"></i>
-          {message.questions?.some((q) => q.status === 'pending')
+          {message.questions?.some((q) => q.status === 'pending') ||
+          message.elicitations?.some((q) => q.status === 'pending')
             ? 'Waiting for you'
             : message.compact || message.compactions?.at(-1)?.status === 'running'
               ? 'Compacting context'
@@ -121,7 +123,9 @@
           {#each message.compactions as item (item.id)}
             <p role="status">
               {compactionLabel(item, message.status)}{#if item.preTokens != null}
-                <span>{` · ${item.preTokens.toLocaleString()} tokens before${item.postTokens != null ? ` → ${item.postTokens.toLocaleString()} after` : ''}`}</span>
+                <span
+                  >{` · ${item.preTokens.toLocaleString()} tokens before${item.postTokens != null ? ` → ${item.postTokens.toLocaleString()} after` : ''}`}</span
+                >
               {/if}
             </p>
           {/each}
@@ -150,6 +154,14 @@
       {#each message.questions ?? [] as request (request.id)}
         <QuestionForm
           {request}
+          runId={message.runId}
+          connectionId={author.connectionId}
+          running={message.status === 'running'}
+        />
+      {/each}
+      {#each message.elicitations ?? [] as receipt (receipt.id)}
+        <ElicitationForm
+          {receipt}
           runId={message.runId}
           connectionId={author.connectionId}
           running={message.status === 'running'}

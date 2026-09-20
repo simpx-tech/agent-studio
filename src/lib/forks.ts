@@ -20,6 +20,11 @@ export function forkConversation(source: Conversation, messageId?: string): Conv
   const messages = structuredClone(source.messages.slice(0, end + 1));
   for (const message of messages) {
     message.id = crypto.randomUUID();
+    for (const receipt of message.elicitations ?? [])
+      if (receipt.status === 'pending') {
+        receipt.status = 'cancelled';
+        receipt.revision += 1;
+      }
     // Run IDs describe historical evidence, not a live execution binding. Keep
     // them with their recorded usage/steering, but never revive answer channels.
     for (const question of message.questions ?? []) {

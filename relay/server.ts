@@ -19,6 +19,7 @@ import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
 import { answerSchema } from '../src/lib/questions.ts';
+import { elicitationInputSchema } from '../src/lib/elicitations.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
 import { mcpRequestSchema } from '../src/lib/mcp.ts';
 
@@ -38,11 +39,20 @@ const jobInput = z
       'nativeInstructions',
       'mcp',
       'answer',
+      'elicitation',
       'steer',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'elicitation' &&
+      !z
+        .object({ runId: uuid, connectionId: uuid, input: elicitationInputSchema })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid MCP input request' });
     if (job.method === 'mcp' && !mcpRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid MCP management request' });
     if (

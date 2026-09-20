@@ -2010,6 +2010,7 @@
                 event.kind === 'visualization' ||
                 event.kind === 'filechanges' ||
                 event.kind === 'question' ||
+                event.kind === 'elicitation' ||
                 event.kind === 'steering' ||
                 event.kind === 'compaction' ||
                 (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||

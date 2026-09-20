@@ -9,6 +9,7 @@ import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
+import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
 import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import {
@@ -194,6 +195,7 @@ export const messageSchema = z
     plan: planSchema.optional(),
     visualizations: visualizationsSchema.optional(),
     questions: questionsSchema.optional(),
+    elicitations: elicitationReceiptsSchema.optional(),
     steering: steeringSchema.optional(),
     compact: z.boolean().optional(),
     compactions: compactionsSchema.optional(),
@@ -213,6 +215,13 @@ export const messageSchema = z
       !message.steering?.length ||
       (message.role === 'assistant' && message.steering.every((s) => s.runId === message.runId)),
     { message: 'Steering does not match its response run' },
+  )
+  .refine(
+    (message) =>
+      !message.elicitations?.length ||
+      (message.role === 'assistant' &&
+        message.elicitations.every((e) => e.runId === message.runId)),
+    { message: 'MCP input does not match its response run' },
   );
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
@@ -262,6 +271,7 @@ export type RunEvent = TokenUsage & {
     | 'filechanges'
     | 'visualization'
     | 'question'
+    | 'elicitation'
     | 'steering'
     | 'compaction'
     | 'workflow'
@@ -275,6 +285,7 @@ export type RunEvent = TokenUsage & {
   plan?: Plan;
   visualization?: Visualization;
   question?: QuestionRequest;
+  elicitation?: ElicitationReceipt;
   steering?: SteeringReceipt;
   compaction?: Compaction;
   fileChanges?: FileChanges;

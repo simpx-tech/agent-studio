@@ -3,6 +3,7 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeQuestions } from './questions.ts';
+import { mergeElicitations } from './elicitations.ts';
 import { mergeSteering } from './steering.ts';
 import { mergeCompactions } from './compaction.ts';
 import { latestFileChanges } from './file-changes.ts';
@@ -43,6 +44,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !equal(message.settings, previous.settings) ||
         (!previous.blocks.some((b) => b.type === 'reasoning') &&
           !previous.questions?.length &&
+          !previous.elicitations?.length &&
           !previous.steering?.length &&
           !previous.compactions?.length &&
           !previous.fileChanges &&
@@ -67,6 +69,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           : {}),
         ...(message.questions || previous.questions
           ? { questions: mergeQuestions(message.questions, previous.questions) }
+          : {}),
+        ...(message.elicitations || previous.elicitations
+          ? { elicitations: mergeElicitations(message.elicitations, previous.elicitations) }
           : {}),
         ...(message.steering || previous.steering
           ? { steering: mergeSteering(message.steering, previous.steering) }
@@ -148,6 +153,9 @@ function sameRun(
         : {}),
       ...(a.questions || b.questions
         ? { questions: mergeQuestions(a.questions, b.questions) }
+        : {}),
+      ...(a.elicitations || b.elicitations
+        ? { elicitations: mergeElicitations(a.elicitations, b.elicitations) }
         : {}),
       ...(a.steering || b.steering ? { steering: mergeSteering(a.steering, b.steering) } : {}),
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
@@ -359,6 +367,7 @@ export type RelayJob = {
     | 'nativeInstructions'
     | 'mcp'
     | 'answer'
+    | 'elicitation'
     | 'steer';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';

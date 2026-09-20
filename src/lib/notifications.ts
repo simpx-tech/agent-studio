@@ -39,7 +39,10 @@ export async function applyAppBadge(
 
 // Only explicit parent tool identities indicate an in-progress question. Prose
 // questions are covered by the finished-reply notification, in every language.
-export function requestsAttention(message: Pick<Message, 'blocks' | 'questions'>): boolean {
+export function requestsAttention(
+  message: Pick<Message, 'blocks' | 'questions' | 'elicitations'>,
+): boolean {
+  if (message.elicitations?.some((e) => e.status === 'pending')) return true;
   if (message.questions?.length) return message.questions.some((q) => q.status === 'pending');
   return message.blocks.some((block) => {
     if (block.type !== 'activity' || !block.tool || block.tool.parentId) return false;
@@ -50,11 +53,20 @@ export function requestsAttention(message: Pick<Message, 'blocks' | 'questions'>
   });
 }
 
-export function attentionKeys(message: Pick<Message, 'blocks' | 'questions'>): string[] {
+export function attentionKeys(
+  message: Pick<Message, 'blocks' | 'questions' | 'elicitations'>,
+): string[] {
+  const elicitationKeys =
+    message.elicitations?.flatMap((e) => (e.status === 'pending' ? [`elicitation:${e.id}`] : [])) ??
+    [];
   if (message.questions?.length)
-    return message.questions.flatMap((q, index) =>
-      q.status === 'pending' ? [index === 0 ? 'attention' : `attention:${q.id}`] : [],
-    );
+    return [
+      ...elicitationKeys,
+      ...message.questions.flatMap((q, index) =>
+        q.status === 'pending' ? [index === 0 ? 'attention' : `attention:${q.id}`] : [],
+      ),
+    ];
+  if (message.elicitations?.length) return elicitationKeys;
   return requestsAttention(message) ? ['attention'] : [];
 }
 
