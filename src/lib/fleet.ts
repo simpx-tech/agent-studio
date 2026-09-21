@@ -23,6 +23,8 @@ export const connectionSchema = z.object({
   accountId: id,
   profile: z.enum(['existing', 'isolated']),
   sharedContextConnectionId: id.optional(),
+  // Separate profiles share this computer's CLI context unless set to 'none' or to an account.
+  sharedContext: z.enum(['computer', 'none']).optional(),
 });
 export const fleetSchema = z.object({
   computers: z.array(computerSchema),
@@ -161,6 +163,18 @@ export function registerWslEnvironments(
     });
   }
   reconcileDiscoveredWsl(fleet);
+}
+// Effective shared-context choice: an account connection id, 'computer', or '' for none.
+export function sharedContextChoice(connection: Connection): string {
+  if (connection.sharedContextConnectionId) return connection.sharedContextConnectionId;
+  return connection.profile === 'isolated' && connection.sharedContext !== 'none' ? 'computer' : '';
+}
+export function applySharedContextChoice(connection: Connection, choice: string) {
+  delete connection.sharedContextConnectionId;
+  delete connection.sharedContext;
+  if (choice === 'computer') return;
+  if (choice) connection.sharedContextConnectionId = choice;
+  else if (connection.profile === 'isolated') connection.sharedContext = 'none';
 }
 export function accountName(fleet: Fleet, connectionId?: string): string | undefined {
   const connection = fleet.connections.find((c) => c.id === connectionId);

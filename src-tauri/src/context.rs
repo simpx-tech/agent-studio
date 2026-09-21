@@ -1170,10 +1170,26 @@ pub async fn read(
         match report { Ok(report) => { scan = tokio::task::spawn_blocking(move || { merge_report(&mut scan, &report); scan }).await.map_err(|_| "Context report processing failed")?; }, Err(_) => scan.note("The CLI context query failed. Showing discovered files; actual loading and enabled state are unconfirmed. Refresh to retry.") }
     }
     if !shared.source.is_empty() {
+        let computer = shared.source == crate::profiles::COMPUTER_SOURCE;
+        let scope = if computer {
+            "Computer context"
+        } else {
+            "Shared account"
+        };
+        let empty = shared.files.is_empty();
         for source in shared.files {
-            scan.add(Path::new(&source.path), &source.kind, "Shared account", "reference", "Shared source requested by this account. Chat guidance directs the agent to read applicable instructions and consult task-relevant memories; this inventory does not claim a previous read.");
+            scan.add(Path::new(&source.path), &source.kind, scope, "reference", "Shared source requested by this account. Chat guidance directs the agent to read applicable instructions and consult task-relevant memories; this inventory does not claim a previous read.");
         }
-        scan.note("Shared account sources supplement this profile. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account.");
+        scan.note(if computer {
+            "This separate profile uses this computer's CLI context: the terminal's instructions, rules, skills and project memories. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account."
+        } else {
+            "Shared account sources supplement this profile. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account."
+        });
+        if empty {
+            scan.note(
+                "The selected shared source has no instructions or memories for this folder yet.",
+            );
+        }
     }
     Ok(scan.snapshot)
 }

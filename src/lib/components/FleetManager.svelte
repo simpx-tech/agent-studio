@@ -28,6 +28,8 @@
     type WslDiscovery,
     type CliInventory,
     type Connection,
+    sharedContextChoice,
+    applySharedContextChoice,
   } from '$lib/fleet';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
@@ -296,7 +298,7 @@
     managedComputerId = computerId;
     accountName = account.name;
     sharedSources = Object.fromEntries(
-      workspace.fleet.connections.map((c) => [c.id, c.sharedContextConnectionId ?? '']),
+      workspace.fleet.connections.map((c) => [c.id, sharedContextChoice(c)]),
     );
     sharedSourcesBaseline = { ...sharedSources };
     error = '';
@@ -308,6 +310,9 @@
       (c) => c.sharedContextConnectionId === connection.id,
     );
     return [
+      ...(connection.profile === 'isolated'
+        ? [{ id: 'computer', name: 'This computer’s CLI context' }]
+        : []),
       { id: '', name: 'This account only' },
       ...workspace.fleet.connections
         .filter(
@@ -814,27 +819,22 @@
           const nextAccount = accountSchema.parse({ ...editedAccount, name: accountName });
           const editedConnections = managedConnections.map((connection) => ({
             connection,
-            before: connection.sharedContextConnectionId,
-            after: sharedSources[connection.id] || undefined,
+            before: sharedContextChoice(connection),
+            after: sharedSources[connection.id] ?? '',
           }));
           for (const connection of workspace.fleet.connections) {
-            if (
-              (connection.sharedContextConnectionId ?? '') !==
-              (sharedSourcesBaseline[connection.id] ?? '')
-            )
+            if (sharedContextChoice(connection) !== (sharedSourcesBaseline[connection.id] ?? ''))
               throw new Error(
                 'Shared context changed elsewhere. Reopen Manage account before saving.',
               );
           }
           for (const connection of managedConnections) {
-            if (
-              (connection.sharedContextConnectionId ?? '') !== sharedSourcesBaseline[connection.id]
-            )
+            if (sharedContextChoice(connection) !== sharedSourcesBaseline[connection.id])
               throw new Error(
                 'This account’s shared context changed elsewhere. Reopen Manage account before saving.',
               );
             const source = sharedSources[connection.id] ?? '';
-            if (running && source !== (connection.sharedContextConnectionId ?? ''))
+            if (running && source !== sharedContextChoice(connection))
               throw new Error('Wait for the running reply before changing shared context.');
             if (source && !sharedOptions(connection).some((option) => option.id === source))
               throw new Error(
@@ -842,19 +842,15 @@
               );
           }
           Object.assign(editedAccount, nextAccount);
-          for (const connection of managedConnections) {
-            const source = sharedSources[connection.id] ?? '';
-            if (source) connection.sharedContextConnectionId = source;
-            else delete connection.sharedContextConnectionId;
-          }
+          for (const connection of managedConnections)
+            applySharedContextChoice(connection, sharedSources[connection.id] ?? '');
           try {
             await save();
           } catch (error) {
             if (editedAccount.name === nextAccount.name) editedAccount.name = previousName;
             for (const { connection, before, after } of editedConnections) {
-              if (connection.sharedContextConnectionId !== after) continue;
-              if (before) connection.sharedContextConnectionId = before;
-              else delete connection.sharedContextConnectionId;
+              if (sharedContextChoice(connection) !== after) continue;
+              applySharedContextChoice(connection, before);
             }
             throw error;
           }
@@ -886,7 +882,7 @@
             </h3>
             <p>
               {connection.profile === 'isolated'
-                ? 'This account has its own login and settings.'
+                ? 'This account has its own login and settings. By default it uses this computer’s CLI context.'
                 : 'Shares the login and settings you use in your terminal.'}
             </p>
           </div>
@@ -904,8 +900,10 @@
                 onchange={(value) => (sharedSources[connection.id] = value)}
               />
               <p>
-                Load this source’s instructions, memories, and skills alongside this account’s
-                context. Login and integration settings stay separate. Applies to the next reply.
+                This computer’s CLI context is the terminal’s instructions, rules, skills, and
+                project memories. Choose another account to use its context instead, or This
+                account only to keep this profile separate. Login and integration settings always
+                stay with the account. Applies to the next reply.
               </p>
             </div>
           {/if}

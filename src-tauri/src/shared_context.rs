@@ -21,7 +21,7 @@ impl SharedContext {
         if self.source.is_empty() {
             return String::new();
         }
-        format!("The user selected shared account context for this conversation. Before working, read the shared instruction files below and follow their applicable instructions and imports, resolving relative references from each source file. These supplement project and conversation instructions. For relevant prior knowledge, consult the shared memory entrypoints and their task-relevant references. Keep learned memories in the selected shared memory location when the user authorizes saving them. Do not inspect other profile files, configuration or credentials. Recheck these sources on later replies when they may have changed. Shared sources (JSON): {}", serde_json::to_string(&self.files).unwrap())
+        format!("The user selected shared context for this conversation (this computer's CLI context or another account's). Before working, read the shared instruction files below and follow their applicable instructions and imports, resolving relative references from each source file. These supplement project and conversation instructions. For relevant prior knowledge, consult the shared memory entrypoints and their task-relevant references. Keep learned memories in the selected shared memory location when the user authorizes saving them. Do not inspect other profile files, configuration or credentials. Recheck these sources on later replies when they may have changed. Shared sources (JSON): {}", serde_json::to_string(&self.files).unwrap())
     }
     pub fn extend_runtime(&self, runtime: &mut crate::plugins::Runtime) {
         if let Some(root) = &self.skill_root {

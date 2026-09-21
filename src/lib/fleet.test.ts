@@ -8,6 +8,8 @@ import {
   computerViews,
   computerViewId,
   executionHost,
+  sharedContextChoice,
+  applySharedContextChoice,
   type Installation,
 } from './fleet';
 const windows = (): Installation => ({
@@ -111,5 +113,39 @@ describe('WSL inventory', () => {
     expect(fleet.environments).toHaveLength(2);
     expect(fleet.environments.find((e) => e.id === linux.id)?.discoveredOn).toBe(host.id);
     expect(fleet.environments.some((e) => e.id === discovery.distributions[0].id)).toBe(false);
+  });
+});
+
+describe('shared context choice', () => {
+  it('defaults separate profiles to the computer context and round-trips explicit choices', () => {
+    const isolated = {
+      id: crypto.randomUUID(),
+      environmentId: crypto.randomUUID(),
+      accountId: crypto.randomUUID(),
+      profile: 'isolated' as const,
+    };
+    const existing = { ...isolated, id: crypto.randomUUID(), profile: 'existing' as const };
+    expect(sharedContextChoice(isolated)).toBe('computer');
+    expect(sharedContextChoice(existing)).toBe('');
+    const other = crypto.randomUUID();
+    applySharedContextChoice(isolated, other);
+    expect(sharedContextChoice(isolated)).toBe(other);
+    expect(isolated).not.toHaveProperty('sharedContext');
+    applySharedContextChoice(isolated, '');
+    expect(isolated).not.toHaveProperty('sharedContextConnectionId');
+    expect(isolated).toMatchObject({ sharedContext: 'none' });
+    expect(sharedContextChoice(isolated)).toBe('');
+    applySharedContextChoice(isolated, 'computer');
+    expect(isolated).not.toHaveProperty('sharedContext');
+    expect(sharedContextChoice(isolated)).toBe('computer');
+    applySharedContextChoice(existing, '');
+    expect(existing).not.toHaveProperty('sharedContext');
+    const parsed = fleetSchema.parse({
+      computers: [],
+      environments: [],
+      accounts: [],
+      connections: [{ ...isolated, sharedContext: 'none' }],
+    });
+    expect(parsed.connections[0].sharedContext).toBe('none');
   });
 });

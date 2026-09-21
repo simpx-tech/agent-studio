@@ -138,13 +138,23 @@ pub fn resolve(
         _ => return Err("This provider does not support a separate account profile".into()),
     };
     // A broken context source must not break sign-in, account usage, or credential management.
-    let shared = connection["sharedContextConnectionId"]
-        .as_str()
-        .map(|source_id| {
-            validate_shared_source(&workspace["fleet"], id, source_id)?;
-            resolve(app, provider, Some(source_id)).map(Box::new)
-        })
-        .transpose();
+    let shared = match shared_source_kind(connection) {
+        SharedSource::Connection(source_id) => {
+            validate_shared_source(&workspace["fleet"], id, &source_id)
+                .and_then(|()| resolve(app, provider, Some(&source_id)))
+                .map(|source| Some(Box::new(source)))
+        }
+        // This computer's own CLI context: the same directory the terminal uses, with no
+        // connection record required and no credentials involved.
+        SharedSource::Computer => Ok(Some(Box::new(Profile {
+            id: COMPUTER_SOURCE.into(),
+            provider: provider.into(),
+            distribution: distribution.clone(),
+            namespace: app.config().identifier.clone(),
+            ..Profile::default()
+        }))),
+        SharedSource::None => Ok(None),
+    };
     let (shared_source, shared_error) = match shared {
         Ok(source) => (source, None),
         Err(error) => (None, Some(error)),
@@ -224,6 +234,25 @@ fn managed_distribution(
     }
     Ok(distro.to_string())
 }
+/// Identifier of the implicit computer-context source in shared-context metadata.
+pub const COMPUTER_SOURCE: &str = "computer";
+#[derive(Debug, PartialEq)]
+enum SharedSource {
+    Connection(String),
+    Computer,
+    None,
+}
+// Separate profiles share this computer's CLI context unless the user chose another account
+// or "This account only". Existing logins already are that context, so they never default.
+fn shared_source_kind(connection: &Value) -> SharedSource {
+    if let Some(source) = connection["sharedContextConnectionId"].as_str() {
+        return SharedSource::Connection(source.into());
+    }
+    if connection["profile"] == "isolated" && connection["sharedContext"] != "none" {
+        return SharedSource::Computer;
+    }
+    SharedSource::None
+}
 fn validate_shared_source(fleet: &Value, target_id: &str, source_id: &str) -> Result<(), String> {
     let connections = fleet["connections"]
         .as_array()
@@ -291,6 +320,24 @@ pub fn configure(command: &mut tokio::process::Command, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn separate_profiles_default_to_the_computer_context_and_existing_logins_never_do() {
+        let isolated = serde_json::json!({"profile":"isolated"});
+        assert_eq!(shared_source_kind(&isolated), SharedSource::Computer);
+        let explicit = serde_json::json!({"profile":"isolated","sharedContext":"computer"});
+        assert_eq!(shared_source_kind(&explicit), SharedSource::Computer);
+        let own = serde_json::json!({"profile":"isolated","sharedContext":"none"});
+        assert_eq!(shared_source_kind(&own), SharedSource::None);
+        let account = serde_json::json!({"profile":"isolated","sharedContextConnectionId":"two"});
+        assert_eq!(
+            shared_source_kind(&account),
+            SharedSource::Connection("two".into())
+        );
+        let existing = serde_json::json!({"profile":"existing"});
+        assert_eq!(shared_source_kind(&existing), SharedSource::None);
+        let existing_marked = serde_json::json!({"profile":"existing","sharedContext":"computer"});
+        assert_eq!(shared_source_kind(&existing_marked), SharedSource::None);
+    }
     #[test]
     fn shared_sources_require_matching_provider_environment_and_no_chains() {
         let mut fleet = serde_json::json!({"accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"}],

@@ -31,7 +31,13 @@ import {
   readBrowserWorkspace,
   type BrowserWorkspaceScope,
 } from './browser-workspace';
-import { executionHost, type Installation, type WslDiscovery, type CliInstallation } from './fleet';
+import {
+  executionHost,
+  sharedContextChoice,
+  type Installation,
+  type WslDiscovery,
+  type CliInstallation,
+} from './fleet';
 import {
   emptyShared,
   mergeShared,
@@ -1098,9 +1104,7 @@ export async function readContext(
 function makeContextCache() {
   return createContextCache(readContext, () =>
     JSON.stringify(
-      runtime
-        ?.workspace()
-        .fleet.connections.map((c) => [c.id, c.sharedContextConnectionId ?? '']) ?? [],
+      runtime?.workspace().fleet.connections.map((c) => [c.id, sharedContextChoice(c)]) ?? [],
     ),
   );
 }

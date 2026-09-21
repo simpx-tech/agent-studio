@@ -26,8 +26,9 @@ test('shared account context is explicit, scoped, cancellable and saved across r
   await page.getByRole('option', { name: 'Shared source', exact: true }).click();
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await account.getByRole('button', { name: 'Manage account' }).click();
+  // Separate profiles use this computer's CLI context until another choice is saved.
   await expect(dialog.getByRole('combobox', { name: 'Shared context source' })).toHaveText(
-    'This account only',
+    'This computer’s CLI context',
   );
   await dialog.getByRole('combobox', { name: 'Shared context source' }).click();
   await page.getByRole('option', { name: 'Shared source', exact: true }).click();
@@ -42,7 +43,9 @@ test('shared account context is explicit, scoped, cancellable and saved across r
     (c: any) => c.accountId === saved.accounts.find((a: any) => a.name === 'Second account').id,
   );
   expect(target.sharedContextConnectionId).toBe(source.id);
+  expect(target.sharedContext).toBeUndefined();
   expect(source.sharedContextConnectionId).toBeUndefined();
+  expect(source.sharedContext).toBeUndefined();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await account.getByRole('button', { name: 'Manage account' }).click();
@@ -66,6 +69,23 @@ test('shared account context is explicit, scoped, cancellable and saved across r
     target.id,
   );
   expect(cleared.sharedContextConnectionId).toBeUndefined();
+  expect(cleared.sharedContext).toBe('none');
+  await account.getByRole('button', { name: 'Manage account' }).click();
+  await expect(dialog.getByRole('combobox', { name: 'Shared context source' })).toHaveText(
+    'This account only',
+  );
+  await dialog.getByRole('combobox', { name: 'Shared context source' }).click();
+  await page.getByRole('option', { name: 'This computer’s CLI context', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
+  const restored = await page.evaluate(
+    (id) =>
+      JSON.parse(localStorage.getItem('fixture-workspace')!).fleet.connections.find(
+        (c: any) => c.id === id,
+      ),
+    target.id,
+  );
+  expect(restored.sharedContextConnectionId).toBeUndefined();
+  expect(restored.sharedContext).toBeUndefined();
   await expect(page.locator('select')).toHaveCount(0);
 });
 
