@@ -1,10 +1,12 @@
 name: Desktop builds
 
+# Hosted runs are reserved for the production branch; development relies on the local
+# pipeline documented in docs/DEVELOPMENT.md. Manual dispatch remains available for any branch.
 on:
   push:
-    branches: [main, development]
+    branches: [main]
   pull_request:
-    branches: [main, development]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

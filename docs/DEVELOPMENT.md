@@ -8,8 +8,10 @@ so the workflow is available immediately.
 
 The [Desktop builds workflow](../.github/workflows/desktop-build.yml) runs the
 frontend checks, unit tests, production build, browser tests, Rust formatting,
-Clippy, and Rust tests on pushes and pull requests targeting either branch.
-The verification job uses Windows and the same Edge browser as local checks.
+Clippy, and Rust tests only for the production branch: on pushes to `main`, on
+pull requests targeting `main`, and on manual dispatch. Pushes to `development`
+start no hosted run, so the local pipeline is the gate for that branch. The
+verification job uses Windows and the same Edge browser as local checks.
 
 The shell scripts under `src-tauri/src/*.sh` are compiled into the desktop
 binary with `include_str!` and executed by bash inside WSL, so they must keep
