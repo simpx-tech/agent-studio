@@ -602,12 +602,13 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
 }
 
 pub(crate) async fn codex_report(exe: &Executable, folder: &str) -> Result<Value, String> {
-    codex_report_sources(exe, folder, &crate::plugins::Runtime::default()).await
+    codex_report_sources(exe, folder, &crate::plugins::Runtime::default(), &[]).await
 }
 async fn codex_report_sources(
     exe: &Executable,
     folder: &str,
     sources: &crate::plugins::Runtime,
+    overrides: &[String],
 ) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
@@ -616,8 +617,11 @@ async fn codex_report_sources(
     } else {
         command.current_dir(folder);
     }
+    command.args(["app-server", "--stdio"]);
+    for entry in overrides {
+        command.args(["-c", entry]);
+    }
     let mut child = command
-        .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -752,6 +756,7 @@ pub(crate) async fn claude_report(
         model,
         &crate::plugins::Runtime::default(),
         None,
+        &serde_json::Map::new(),
     )
     .await
 }
@@ -761,6 +766,7 @@ async fn claude_report_sources(
     model: &str,
     sources: &crate::plugins::Runtime,
     memory_dir: Option<&str>,
+    mcp: &serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
@@ -796,6 +802,9 @@ async fn claude_report_sources(
         .stderr(Stdio::null());
     if !model.is_empty() {
         command.args(["--model", model]);
+    }
+    if !mcp.is_empty() {
+        command.args(["--mcp-config", &json!({"mcpServers": mcp}).to_string()]);
     }
     crate::plugins::claude_args(&mut command, sources);
     let mut child = command
@@ -1153,7 +1162,9 @@ pub async fn read(
         }
     }
     let report = match provider.as_str() {
-        "codex" => Some(codex_report_sources(&exe, &folder, &sources).await),
+        "codex" => {
+            Some(codex_report_sources(&exe, &folder, &sources, &shared.codex_overrides).await)
+        }
         "claude" => Some(
             claude_report_sources(
                 &exe,
@@ -1161,6 +1172,7 @@ pub async fn read(
                 &model,
                 &sources,
                 shared.memory_dir.as_deref(),
+                &shared.mcp_servers,
             )
             .await,
         ),
@@ -1181,9 +1193,9 @@ pub async fn read(
             scan.add(Path::new(&source.path), &source.kind, scope, "reference", "Shared source requested by this account. Chat guidance directs the agent to read applicable instructions and consult task-relevant memories; this inventory does not claim a previous read.");
         }
         scan.note(if computer {
-            "This separate profile uses this computer's CLI context: the terminal's instructions, rules, skills and project memories. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account."
+            "This separate profile uses this computer's CLI context: the terminal's instructions, rules, skills, project memories and MCP server definitions. Credentials, model settings, installed-plugin configuration and MCP sign-ins remain with the selected account."
         } else {
-            "Shared account sources supplement this profile. Credentials, model settings, installed-plugin configuration and MCP authentication remain with the selected account."
+            "Shared account sources supplement this profile, including its MCP server definitions. Credentials, model settings, installed-plugin configuration and MCP sign-ins remain with the selected account."
         });
         if empty {
             scan.note(
@@ -1226,6 +1238,42 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
     } else {
         ".claude"
     }))
+}
+
+/// The file holding the selected profile's MCP definitions: Claude keeps .claude.json beside
+/// the default directory but inside a custom one; Codex keeps config.toml in its home.
+pub async fn native_global_config(provider: &str) -> Result<PathBuf, String> {
+    let profile = crate::profiles::current();
+    if provider == "codex" {
+        return Ok(native_profile_root(provider).await?.join("config.toml"));
+    }
+    if profile.distribution.is_some() {
+        let exe = crate::providers::resolve(provider).await?;
+        let wsl = exe
+            .wsl
+            .as_ref()
+            .ok_or("The selected WSL CLI is unavailable")?;
+        let (home, config, bridge, _) = wsl_paths(wsl, &profile, provider).await?;
+        let file = claude_global_config_file(&config, Some(&home));
+        return Ok(bridge
+            .ok_or("The selected WSL profile is unavailable")?
+            .join(file.to_string_lossy().trim_start_matches('/')));
+    }
+    if let Some(root) = profile.root {
+        return Ok(root.join(".claude.json"));
+    }
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join(".claude.json"));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .ok_or("Cannot locate the selected CLI profile")?;
+    Ok(PathBuf::from(home).join(".claude.json"))
+}
+fn claude_global_config_file(config: &Path, home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(home) if config == home.join(".claude") => home.join(".claude.json"),
+        _ => config.join(".claude.json"),
+    }
 }
 
 pub(crate) async fn wsl_paths(

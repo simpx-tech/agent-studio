@@ -1009,6 +1009,9 @@ pub async fn chat_command(
                     "-c",
                     "features.multi_agent=true",
                 ]);
+                for entry in &request.shared_context.codex_overrides {
+                    c.args(["-c", entry]);
+                }
             } else {
                 c.args([
                     "exec",
@@ -1096,6 +1099,12 @@ pub async fn chat_command(
                 if let Some(fallback) = &request.agent.fallback_model {
                     c.arg("--fallback-model").arg(fallback);
                 }
+                // Shared MCP definitions ride along; the app's own SDK server keeps its name.
+                let mut mcp = request.shared_context.mcp_servers.clone();
+                mcp.insert(
+                    "agent_studio".into(),
+                    serde_json::json!({"type":"sdk","name":"agent_studio"}),
+                );
                 c.args([
                     "--tools",
                     "default",
@@ -1104,7 +1113,7 @@ pub async fn chat_command(
                     "--settings",
                     &settings.to_string(),
                     "--mcp-config",
-                    r#"{"mcpServers":{"agent_studio":{"type":"sdk","name":"agent_studio"}}}"#,
+                    &serde_json::json!({"mcpServers": mcp}).to_string(),
                 ]);
             } else {
                 c.args([

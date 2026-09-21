@@ -900,10 +900,10 @@
                 onchange={(value) => (sharedSources[connection.id] = value)}
               />
               <p>
-                This computer’s CLI context is the terminal’s instructions, rules, skills, and
-                project memories. Choose another account to use its context instead, or This
-                account only to keep this profile separate. Login and integration settings always
-                stay with the account. Applies to the next reply.
+                This computer’s CLI context is the terminal’s instructions, rules, skills, project
+                memories, and MCP server definitions. Choose another account to use its context
+                instead, or This account only to keep this profile separate. Logins and MCP sign-ins
+                always stay with the account. Applies to the next reply.
               </p>
             </div>
           {/if}

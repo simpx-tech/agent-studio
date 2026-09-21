@@ -9,7 +9,18 @@ pub struct SharedContext {
     pub skill_root: Option<String>,
     pub plugin_dir: Option<String>,
     pub memory_dir: Option<String>,
+    // MCP server definitions from the source (Claude .claude.json scopes) and the equivalent
+    // Codex -c overrides. Definitions may carry environment values, so they are handed to the
+    // launched process only and never serialized into identities, history or the relay.
+    #[serde(skip)]
+    pub mcp_servers: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip)]
+    pub codex_overrides: Vec<String>,
+    pub mcp_names: Vec<String>,
+    pub mcp_digest: u64,
 }
+/// Launch arguments have bounded length on Windows; shared MCP definitions stay well under it.
+const MCP_LAUNCH_LIMIT: usize = 24_000;
 #[derive(Clone, Serialize)]
 pub struct Source {
     pub path: String,
@@ -21,7 +32,7 @@ impl SharedContext {
         if self.source.is_empty() {
             return String::new();
         }
-        format!("The user selected shared context for this conversation (this computer's CLI context or another account's). Before working, read the shared instruction files below and follow their applicable instructions and imports, resolving relative references from each source file. These supplement project and conversation instructions. For relevant prior knowledge, consult the shared memory entrypoints and their task-relevant references. Keep learned memories in the selected shared memory location when the user authorizes saving them. Do not inspect other profile files, configuration or credentials. Recheck these sources on later replies when they may have changed. Shared sources (JSON): {}", serde_json::to_string(&self.files).unwrap())
+        format!("The user selected shared context for this conversation (this computer's CLI context or another account's); its MCP server definitions are loaded for this conversation too. Before working, read the shared instruction files below and follow their applicable instructions and imports, resolving relative references from each source file. These supplement project and conversation instructions. For relevant prior knowledge, consult the shared memory entrypoints and their task-relevant references. Keep learned memories in the selected shared memory location when the user authorizes saving them. Do not inspect other profile files, configuration or credentials. Recheck these sources on later replies when they may have changed. Shared sources (JSON): {}", serde_json::to_string(&self.files).unwrap())
     }
     pub fn extend_runtime(&self, runtime: &mut crate::plugins::Runtime) {
         if let Some(root) = &self.skill_root {
@@ -72,13 +83,197 @@ pub async fn load(provider: &str, folder: &str) -> Result<SharedContext, String>
     if !config.is_dir() {
         return Err("The shared account context directory is unavailable".into());
     }
-    collect(
+    let mut result = collect(
         provider,
         folder,
         &config,
         distribution.as_deref(),
         &source.id,
+    )?;
+    let global = crate::profiles::scope(*source.clone(), async {
+        crate::context::native_global_config(provider).await
+    })
+    .await?;
+    if provider == "claude" {
+        result.mcp_servers = claude_mcp_servers(&global, folder, distribution.as_deref())?;
+    } else if provider == "codex" {
+        result.codex_overrides = codex_mcp_overrides(&global)?;
+    }
+    result.describe_mcp();
+    Ok(result)
+}
+
+impl SharedContext {
+    // Names and a digest identify the shared definitions for process reuse and the inventory
+    // without exposing commands, URLs or environment values.
+    fn describe_mcp(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut names: Vec<String> = self.mcp_servers.keys().cloned().collect();
+        names.extend(self.codex_overrides.iter().filter_map(|line| {
+            line.strip_prefix("mcp_servers.")
+                .and_then(|rest| rest.split('.').next())
+                .map(str::to_string)
+        }));
+        names.sort();
+        names.dedup();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let canonical: std::collections::BTreeMap<_, _> = self.mcp_servers.iter().collect();
+        serde_json::to_string(&canonical)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        self.codex_overrides.hash(&mut hasher);
+        self.mcp_names = names;
+        self.mcp_digest = hasher.finish();
+    }
+}
+
+// Claude keys its projects map by the working directory as the CLI saw it: forward slashes on
+// Windows and wsl:<distribution>:<path> for folders reached through WSL.
+fn claude_project_key(folder: &str, distribution: Option<&str>) -> String {
+    let normal = folder.replace('\\', "/");
+    let normal = normal.trim_end_matches('/');
+    let key = if distribution.is_none() {
+        normal
+            .strip_prefix("//wsl.localhost/")
+            .or_else(|| normal.strip_prefix("//wsl$/"))
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(distro, path)| format!("wsl:{}:/{}", distro.to_lowercase(), path))
+            .unwrap_or_else(|| normal.to_string())
+    } else {
+        normal.to_string()
+    };
+    key.to_lowercase()
+}
+fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name != "agent_studio"
+        && !name.chars().any(char::is_control)
+}
+/// User-scope servers plus the selected folder's local-scope servers, definitions only. Every
+/// other key of the file, including MCP sign-in state, is never read into the result.
+fn claude_mcp_servers(
+    file: &Path,
+    folder: &str,
+    distribution: Option<&str>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut result = serde_json::Map::new();
+    let Ok(meta) = std::fs::metadata(file) else {
+        return Ok(result);
+    };
+    if meta.len() > 8_000_000 {
+        return Err("Shared MCP configuration exceeds the size limit".into());
+    }
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(file).map_err(|_| "Cannot read shared MCP configuration")?,
     )
+    .map_err(|_| "Shared MCP configuration is malformed")?;
+    let key = claude_project_key(folder, distribution);
+    let local = config["projects"]
+        .as_object()
+        .into_iter()
+        .flat_map(|projects| projects.iter())
+        .find(|(path, _)| claude_project_key(path, distribution) == key)
+        .map(|(_, project)| &project["mcpServers"]);
+    for scope in [Some(&config["mcpServers"]), local].into_iter().flatten() {
+        for (name, definition) in scope.as_object().into_iter().flat_map(|m| m.iter()) {
+            if valid_server_name(name) && definition.is_object() {
+                result.insert(name.clone(), definition.clone());
+            }
+        }
+    }
+    if result.len() > 64 || serde_json::to_string(&result).map_or(0, |s| s.len()) > MCP_LAUNCH_LIMIT
+    {
+        return Err("Shared MCP configuration exceeds the launch limit. Remove servers from the source account or choose This account only.".into());
+    }
+    Ok(result)
+}
+fn bare_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+fn toml_literal(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => {
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        toml::Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(toml_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        toml::Value::Table(table) => format!(
+            "{{ {} }}",
+            table
+                .iter()
+                .map(|(k, v)| format!(
+                    "{} = {}",
+                    if bare_key(k) {
+                        k.clone()
+                    } else {
+                        toml_literal(&toml::Value::String(k.clone()))
+                    },
+                    toml_literal(v)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_string(),
+    }
+}
+fn flatten_overrides(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, inner) in table {
+                if bare_key(key) {
+                    flatten_overrides(&format!("{prefix}.{key}"), inner, out);
+                }
+            }
+        }
+        leaf => out.push(format!("{prefix}={}", toml_literal(leaf))),
+    }
+}
+/// Codex mcp_servers tables flattened into -c launch overrides, definitions only.
+fn codex_mcp_overrides(file: &Path) -> Result<Vec<String>, String> {
+    let Ok(meta) = std::fs::metadata(file) else {
+        return Ok(Vec::new());
+    };
+    if meta.len() > 1_000_000 {
+        return Err("Shared MCP configuration exceeds the size limit".into());
+    }
+    let text = std::fs::read_to_string(file).map_err(|_| "Cannot read shared MCP configuration")?;
+    let config: toml::Value =
+        toml::from_str(&text).map_err(|_| "Shared MCP configuration is malformed")?;
+    let mut out = Vec::new();
+    if let Some(servers) = config.get("mcp_servers").and_then(toml::Value::as_table) {
+        for (name, table) in servers {
+            if bare_key(name) && valid_server_name(name) && table.is_table() {
+                flatten_overrides(&format!("mcp_servers.{name}"), table, &mut out);
+            }
+        }
+    }
+    if out.len() > 512 || out.iter().map(String::len).sum::<usize>() > MCP_LAUNCH_LIMIT {
+        return Err("Shared MCP configuration exceeds the launch limit. Remove servers from the source account or choose This account only.".into());
+    }
+    Ok(out)
 }
 
 fn collect(
@@ -214,6 +409,86 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_shared_mcp_takes_definitions_for_user_and_selected_project_scope_only() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join(".claude.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({
+                "mcpServers": {"linear": {"type": "http", "url": "https://example.test"}, "agent_studio": {"command": "never"}},
+                "mcpOAuth": {"linear": {"accessToken": "must-never-appear"}},
+                "projects": {
+                    "D:/Unreal Projects/EmpireGame": {"mcpServers": {"unreal": {"command": "unreal-mcp"}}, "allowedTools": ["x"]},
+                    "wsl:ubuntu:/home/v/olympus": {"mcpServers": {"olympus": {"command": "npx"}}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let windows =
+            claude_mcp_servers(&config, "D:\\Unreal Projects\\EmpireGame\\", None).unwrap();
+        assert_eq!(windows.keys().collect::<Vec<_>>(), ["linear", "unreal"]);
+        let wsl = claude_mcp_servers(&config, "\\\\wsl.localhost\\Ubuntu\\home\\v\\olympus", None)
+            .unwrap();
+        assert_eq!(wsl.keys().collect::<Vec<_>>(), ["linear", "olympus"]);
+        let linux = claude_mcp_servers(&config, "/home/v/olympus", Some("Ubuntu")).unwrap();
+        assert_eq!(linux.keys().collect::<Vec<_>>(), ["linear"]);
+        assert!(!serde_json::to_string(&windows)
+            .unwrap()
+            .contains("must-never-appear"));
+        assert!(
+            claude_mcp_servers(&root.path().join("missing.json"), "C:/p", None)
+                .unwrap()
+                .is_empty()
+        );
+        let mut shared = SharedContext {
+            mcp_servers: windows,
+            ..Default::default()
+        };
+        shared.describe_mcp();
+        let json = serde_json::to_string(&shared).unwrap();
+        assert!(json.contains("\"linear\"") && !json.contains("example.test"));
+        let digest = shared.mcp_digest;
+        shared.mcp_servers.remove("unreal");
+        shared.describe_mcp();
+        assert_ne!(digest, shared.mcp_digest);
+    }
+    #[test]
+    fn codex_shared_mcp_flattens_server_tables_into_launch_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"gpt\"\n[mcp_servers.node_repl]\ncommand = \"node\"\nargs = [\"-e\", \"x\\\"y\"]\nstartup_timeout_sec = 30\n[mcp_servers.node_repl.env]\nKEY = \"v\\n2\"\n[mcp_servers.\"odd.name\"]\ncommand = \"skipped\"\n",
+        )
+        .unwrap();
+        let overrides = codex_mcp_overrides(&config).unwrap();
+        assert_eq!(
+            overrides,
+            [
+                "mcp_servers.node_repl.args=[\"-e\", \"x\\\"y\"]",
+                "mcp_servers.node_repl.command=\"node\"",
+                "mcp_servers.node_repl.env.KEY=\"v\\n2\"",
+                "mcp_servers.node_repl.startup_timeout_sec=30",
+            ]
+        );
+        assert!(overrides
+            .iter()
+            .all(|o| !o.contains("model") && !o.contains("skipped")));
+        let mut shared = SharedContext {
+            codex_overrides: overrides,
+            ..Default::default()
+        };
+        shared.describe_mcp();
+        assert_eq!(shared.mcp_names, ["node_repl"]);
+        assert!(!serde_json::to_string(&shared)
+            .unwrap()
+            .contains("node_repl.command"));
+        assert!(codex_mcp_overrides(&root.path().join("missing.toml"))
+            .unwrap()
+            .is_empty());
+    }
     fn file(root: &Path, path: &str, contents: &str) {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
