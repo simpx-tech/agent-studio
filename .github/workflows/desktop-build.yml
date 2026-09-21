@@ -34,11 +34,16 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: verify
+          cache-on-failure: true
       - run: npm ci
       - name: Install test browser
         run: npx playwright install msedge
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
+      - name: Initialize native fixture shell
+        shell: powershell
+        run: Write-Output 'Native fixture shell ready'
       # Native fixtures spawn PowerShell children with bounded startup waits.
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
       # Run browser checks after native compilation and the frontend build.
@@ -54,7 +59,6 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    needs: verify
     # A merge updates main via a push, covering merge, squash, and rebase merges.
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     timeout-minutes: 90
@@ -91,6 +95,7 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
+          cache-on-failure: true
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
