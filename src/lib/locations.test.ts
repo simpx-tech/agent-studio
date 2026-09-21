@@ -7,8 +7,10 @@ import {
   groupConversations,
   knownLocations,
   locationConnections,
+  loginIdentity,
   rememberLocation,
   computerFolderEnvironments,
+  type LoginIdentity,
 } from './locations';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
 
@@ -113,6 +115,112 @@ describe('computer and folder chat scope', () => {
         environmentId: crypto.randomUUID(),
       }),
     ).toThrow();
+  });
+  it('keeps a terminal login out while another profile of the same account is connected there', () => {
+    const { workspace, installation } = fixture();
+    const native = {
+      computerId: installation.computerId,
+      environmentId: installation.id,
+      path: '',
+    };
+    const profile = {
+      id: crypto.randomUUID(),
+      name: 'vinporb',
+      provider: 'claude' as const,
+      purpose: 'personal' as const,
+    };
+    const isolated = {
+      id: crypto.randomUUID(),
+      environmentId: installation.id,
+      accountId: profile.id,
+      profile: 'isolated' as const,
+    };
+    workspace.fleet.accounts.push(profile);
+    workspace.fleet.connections.push(isolated);
+    const identities = (login: LoginIdentity, connections: Record<string, LoginIdentity>) => ({
+      login: (_environmentId: string, provider: string) => (provider === 'claude' ? login : null),
+      connection: (id: string) => connections[id],
+    });
+    const claude = () => locationConnections(workspace.fleet, native, 'claude');
+    const labels = () =>
+      workspace.fleet.accounts.filter((a) => a.provider === 'claude').map((a) => a.name);
+    // An unchecked login waits for the CLI's report while the agent is already offered here.
+    ensureLocationConnections(workspace.fleet, native, identities(undefined, {}));
+    expect(claude()).toEqual([isolated]);
+    expect(locationConnections(workspace.fleet, native, 'codex')).toHaveLength(1);
+    // The terminal login is the connected profile's own account: nothing to add.
+    ensureLocationConnections(
+      workspace.fleet,
+      native,
+      identities('vinporb@example.com', { [isolated.id]: 'vinporb@example.com' }),
+    );
+    expect(claude()).toEqual([isolated]);
+    // A sibling whose identity is still unresolved also defers the decision.
+    ensureLocationConnections(workspace.fleet, native, identities('other@example.com', {}));
+    expect(claude()).toEqual([isolated]);
+    expect(labels()).toEqual(['vinporb']);
+    // A different signed-in account becomes the CLI login connection.
+    ensureLocationConnections(
+      workspace.fleet,
+      native,
+      identities('other@example.com', { [isolated.id]: 'vinporb@example.com' }),
+    );
+    const login = claude().find((c) => c.profile === 'existing');
+    expect(login).toBeDefined();
+    expect(labels()).toEqual(['vinporb', 'Claude CLI login']);
+    // Removing that connection leaves its label; a signed-out terminal login reuses the label
+    // instead of creating another one.
+    workspace.fleet.connections = workspace.fleet.connections.filter((c) => c.id !== login!.id);
+    ensureLocationConnections(
+      workspace.fleet,
+      native,
+      identities(null, { [isolated.id]: 'vinporb@example.com' }),
+    );
+    expect(
+      claude()
+        .map((c) => c.profile)
+        .sort(),
+    ).toEqual(['existing', 'isolated']);
+    expect(labels()).toEqual(['vinporb', 'Claude CLI login']);
+    expect(claude().find((c) => c.profile === 'existing')?.accountId).toBe(
+      workspace.fleet.accounts.find((a) => a.name === 'Claude CLI login')?.id,
+    );
+  });
+  it('connects another environment’s terminal login under the account that already reports it', () => {
+    const { workspace, installation, location } = fixture();
+    const profile = {
+      id: crypto.randomUUID(),
+      name: 'vinporb',
+      provider: 'claude' as const,
+      purpose: 'personal' as const,
+    };
+    const isolated = {
+      id: crypto.randomUUID(),
+      environmentId: installation.id,
+      accountId: profile.id,
+      profile: 'isolated' as const,
+    };
+    workspace.fleet.accounts.push(profile);
+    workspace.fleet.connections.push(isolated);
+    ensureLocationConnections(workspace.fleet, location, {
+      login: (environmentId, provider) =>
+        provider === 'claude' && environmentId === location.environmentId
+          ? 'vinporb@example.com'
+          : null,
+      connection: (id) => (id === isolated.id ? 'vinporb@example.com' : null),
+    });
+    const wsl = locationConnections(workspace.fleet, location, 'claude');
+    expect(wsl).toHaveLength(1);
+    expect(wsl[0]).toMatchObject({ accountId: profile.id, profile: 'existing' });
+    expect(workspace.fleet.accounts.filter((a) => a.provider === 'claude')).toHaveLength(1);
+    expect(workspace.fleet.accounts.find((a) => a.provider === 'codex')?.name).toBe(
+      'Codex CLI login',
+    );
+    expect(loginIdentity(undefined)).toBeUndefined();
+    expect(loginIdentity({ auth: 'unknown', account: 'a@b' })).toBeUndefined();
+    expect(loginIdentity({ auth: 'login', account: 'a@b' })).toBeNull();
+    expect(loginIdentity({ auth: 'ready' })).toBeNull();
+    expect(loginIdentity({ auth: 'ready', account: '  a@b ' })).toBe('a@b');
   });
   it('restores folders and archived messages and groups identical names independently by computer', () => {
     const { workspace, installation, location } = fixture();

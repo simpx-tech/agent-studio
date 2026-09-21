@@ -440,6 +440,21 @@ export async function detectConnection(
 ): Promise<ProviderStatus> {
   return invoke('detect_connection', { provider, connectionId });
 }
+// Read-only login check for an environment's existing CLI login before any connection is saved.
+export async function detectEnvironmentLogin(
+  environmentId: string,
+  provider: ProviderId,
+): Promise<ProviderStatus> {
+  if (!desktop())
+    return {
+      id: provider,
+      installed: false,
+      version: null,
+      auth: 'unknown',
+      detail: 'Open the desktop app to use installed CLIs.',
+    };
+  return invoke('detect_environment_login', { provider, environmentId });
+}
 export async function discoverWsl(): Promise<WslDiscovery> {
   return desktop() ? invoke('discover_wsl') : { distributions: [], warning: null };
 }

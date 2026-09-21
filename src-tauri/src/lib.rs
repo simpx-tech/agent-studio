@@ -255,6 +255,17 @@ async fn detect_connection(
     let profile = profiles::resolve(&app, &provider, Some(&connection_id))?;
     Ok(profiles::scope(profile, providers::detect_one(&provider)).await)
 }
+// Read-only check of one environment's existing CLI login, used before a connection exists so
+// the app can tell whether that login is already connected through another profile.
+#[tauri::command]
+async fn detect_environment_login(
+    app: tauri::AppHandle,
+    provider: String,
+    environment_id: String,
+) -> Result<providers::ProviderStatus, String> {
+    let profile = profiles::environment_profile(&app, &provider, &environment_id)?;
+    Ok(profiles::scope(profile, providers::detect_one(&provider)).await)
+}
 #[tauri::command]
 async fn relay_connect(
     app: tauri::AppHandle,
@@ -693,6 +704,7 @@ pub fn run() {
             inspect_environment_clis,
             list_folders,
             detect_connection,
+            detect_environment_login,
             relay_connect,
             relay_resume,
             relay_disconnect,

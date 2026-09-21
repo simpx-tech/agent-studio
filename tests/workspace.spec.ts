@@ -3108,3 +3108,73 @@ test('an existing chat can switch to another account of the same agent between r
   expect(saved.messages[3].settings.connectionId).toBe(second.agent.connectionId);
   expect(saved.settings.connectionId).toBe(first.agent.connectionId);
 });
+
+test('a removed terminal login is not added again while its account stays connected through another profile', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.addInitScript(() => {
+    localStorage.setItem('test-account-claude', 'person@example.com');
+    localStorage.setItem('test-account-isolated-claude', 'person@example.com');
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const card = page
+    .locator('.connection-card')
+    .filter({ has: page.getByRole('heading', { name: 'Claude' }) });
+  await expect(card).toContainText('Claude CLI login');
+  await page.getByRole('button', { name: 'Add account', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+  await page.getByRole('option', { name: 'Claude', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill('vinporb');
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(card).toContainText('vinporb');
+  await card
+    .locator('.fleet-account')
+    .filter({ has: page.getByRole('heading', { name: 'Claude CLI login', exact: true }) })
+    .getByRole('button', { name: 'Manage account' })
+    .click();
+  const management = page.getByRole('dialog', { name: 'Manage account', exact: true });
+  await management.getByRole('button', { name: 'Disconnect account' }).click();
+  await management.getByRole('button', { name: 'Remove connection' }).click();
+  await expect(management).toHaveCount(0);
+  await expect(card).not.toContainText('Claude CLI login');
+  // The terminal login reports the same account as the separate profile: nothing is re-added.
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(card).toContainText('vinporb');
+  await expect(card).not.toContainText('Claude CLI login');
+  await page.reload();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(card).toContainText('vinporb');
+  await expect(card).not.toContainText('Claude CLI login');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await agent.click();
+  // A single remaining Claude connection is offered as the plain agent choice.
+  await expect(page.getByRole('option', { name: 'Claude', exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: /Claude · / })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  const claudeLabels = () =>
+    page.evaluate(() =>
+      JSON.parse(localStorage.getItem('test-workspace')!)
+        .fleet.accounts.filter((a: any) => a.provider === 'claude')
+        .map((a: any) => a.name),
+    );
+  expect(await claudeLabels()).toEqual(['Claude CLI login', 'vinporb']);
+  // Signing the terminal into a different account restores its own connection, reusing the
+  // label left behind instead of adding another one.
+  await page.evaluate(() => {
+    localStorage.setItem('test-account-claude', 'other@example.com');
+    window.dispatchEvent(new Event('focus'));
+  });
+  await agent.click();
+  await expect(page.getByRole('option', { name: /Claude · / })).toHaveText([
+    /Claude · vinporb/,
+    /Claude · Claude CLI login/,
+  ]);
+  await page.keyboard.press('Escape');
+  expect(await claudeLabels()).toEqual(['Claude CLI login', 'vinporb']);
+});

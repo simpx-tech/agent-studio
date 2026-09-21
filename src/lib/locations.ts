@@ -5,7 +5,13 @@ import {
   type ProviderId,
   type Workspace,
 } from './domain';
-import { computerViewId, computerViews, type Fleet, type Installation } from './fleet';
+import {
+  computerViewId,
+  computerViews,
+  type Connection,
+  type Fleet,
+  type Installation,
+} from './fleet';
 
 export const locationKey = (location: ChatLocation) =>
   `${location.computerId}/${locationExecutionId(location)}/${location.environmentId}/${location.path}`;
@@ -43,38 +49,83 @@ export function computerFolderEnvironments(fleet: Fleet, computerId: string) {
     ),
   );
 }
+// The signed-in identity a CLI reports for one login: `undefined` while it is still unchecked or
+// could not be verified, `null` when it is signed out or the CLI reports no identity, otherwise
+// the identity itself (Claude's account email).
+export type LoginIdentity = string | null | undefined;
+export type LoginIdentities = {
+  login: (environmentId: string, provider: ProviderId) => LoginIdentity;
+  connection: (connectionId: string) => LoginIdentity;
+};
+export function loginIdentity(
+  status: { auth: string; account?: string | null } | undefined,
+): LoginIdentity {
+  if (!status || status.auth === 'unknown') return undefined;
+  if (status.auth === 'login') return null;
+  const account = status.account?.trim();
+  return account ? account : null;
+}
 // Account connections belong to the selected execution computer, independently of the folder.
-export function ensureLocationConnections(fleet: Fleet, location: ChatLocation) {
+export function ensureLocationConnections(
+  fleet: Fleet,
+  location: ChatLocation,
+  identities?: LoginIdentities,
+) {
   const environment = locationExecutionEnvironment(fleet, location);
   if (!environment) throw new Error('This folder or execution computer is no longer available.');
-  ensureEnvironmentConnections(fleet, environment.id, providerIds);
+  ensureEnvironmentConnections(fleet, environment.id, providerIds, identities);
 }
+// Registers each detected CLI's existing login as a connection, unless that login is already
+// connected on the environment through another profile of the same account. While the login
+// or a sibling connection is still unchecked, an environment that already offers the agent
+// waits for the CLI's own report instead of adding a duplicate label.
 export function ensureEnvironmentConnections(
   fleet: Fleet,
   environmentId: string,
   detectedProviders: readonly ProviderId[],
+  identities?: LoginIdentities,
 ) {
   const environment = fleet.environments.find((e) => e.id === environmentId);
   if (!environment) return;
+  const providerOf = (connection: Connection) =>
+    fleet.accounts.find((a) => a.id === connection.accountId)?.provider;
   for (const provider of detectedProviders) {
     if (environment.platform === 'wsl' && environment.discoveredOn && provider === 'gemini')
       continue;
-    if (
-      fleet.connections.some(
-        (c) =>
-          c.environmentId === environment.id &&
-          c.profile === 'existing' &&
-          fleet.accounts.some((a) => a.id === c.accountId && a.provider === provider),
-      )
-    )
-      continue;
-    const account = {
-      id: crypto.randomUUID(),
-      name: `${provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude' : 'Gemini'} CLI login`,
-      provider,
-      purpose: 'personal' as const,
-    };
-    fleet.accounts.push(account);
+    const siblings = fleet.connections.filter(
+      (c) => c.environmentId === environment.id && providerOf(c) === provider,
+    );
+    if (siblings.some((c) => c.profile === 'existing')) continue;
+    const login = identities?.login(environment.id, provider);
+    if (siblings.length) {
+      if (login === undefined) continue;
+      if (login !== null) {
+        const known = siblings.map((c) => identities!.connection(c.id));
+        if (known.includes(login) || known.includes(undefined)) continue;
+      }
+    }
+    const match = login
+      ? fleet.connections.find(
+          (c) =>
+            c.environmentId !== environment.id &&
+            providerOf(c) === provider &&
+            identities!.connection(c.id) === login,
+        )
+      : undefined;
+    const name = `${provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude' : 'Gemini'} CLI login`;
+    // A default label left behind by a removed login connection is reused rather than duplicated.
+    let account =
+      fleet.accounts.find((a) => a.id === match?.accountId) ??
+      fleet.accounts.find(
+        (a) =>
+          a.provider === provider &&
+          a.name === name &&
+          !fleet.connections.some((c) => c.accountId === a.id),
+      );
+    if (!account) {
+      account = { id: crypto.randomUUID(), name, provider, purpose: 'personal' as const };
+      fleet.accounts.push(account);
+    }
     fleet.connections.push({
       id: crypto.randomUUID(),
       environmentId: environment.id,

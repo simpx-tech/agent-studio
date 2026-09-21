@@ -205,6 +205,10 @@ pub struct ProviderStatus {
     pub auth: String,
     pub detail: String,
     pub location: Option<String>,
+    // The signed-in identity the CLI itself reports (Claude's account email). It is
+    // bounded session metadata for recognising an already connected login, never a credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 async fn output(exe: &Executable, args: &[&str]) -> Result<std::process::Output, String> {
     let result = tokio::time::timeout(
@@ -320,6 +324,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         auth: "unknown".into(),
         detail: "CLI not found. Install it to get started.".into(),
         location: None,
+        account: None,
     };
     let exe = match resolve(id).await {
         Ok(exe) => exe,
@@ -364,8 +369,9 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
     } else if id == "claude" {
         if let Ok(o) = output(&exe, &["auth", "status"]).await {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
-                let ready = v["loggedIn"].as_bool().unwrap_or(false);
+                let (ready, account) = claude_login(&v);
                 s.auth = if ready { "ready" } else { "login" }.into();
+                s.account = account;
                 s.detail = if ready {
                     "Signed in with your existing Claude login."
                 } else {
@@ -376,6 +382,17 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         }
     }
     s
+}
+// `claude auth status` reports whether the selected configuration directory is signed in and,
+// when it is, the account email. Only that bounded identity is kept; tokens are never read.
+fn claude_login(status: &serde_json::Value) -> (bool, Option<String>) {
+    let ready = status["loggedIn"].as_bool().unwrap_or(false);
+    let account = status["email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|email| ready && !email.is_empty())
+        .map(|email| email.chars().take(200).collect());
+    (ready, account)
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2026,6 +2043,27 @@ mod tests {
         assert!(r.validate().is_err());
         r.agent.reasoning = "high\"; run()".into();
         assert!(r.validate().is_err());
+    }
+    #[test]
+    fn claude_login_reports_only_a_signed_in_account_email() {
+        let signed_in =
+            serde_json::json!({"loggedIn": true, "email": " person@example.com ", "orgId": "org"});
+        assert_eq!(
+            claude_login(&signed_in),
+            (true, Some("person@example.com".to_string()))
+        );
+        let signed_out = serde_json::json!({"loggedIn": false, "email": "person@example.com"});
+        assert_eq!(claude_login(&signed_out), (false, None));
+        assert_eq!(
+            claude_login(&serde_json::json!({"loggedIn": true})),
+            (true, None)
+        );
+        assert_eq!(
+            claude_login(&serde_json::json!({"loggedIn": true, "email": "   "})),
+            (true, None)
+        );
+        let long = serde_json::json!({"loggedIn": true, "email": "a".repeat(300)});
+        assert_eq!(claude_login(&long).1.map(|s| s.len()), Some(200));
     }
     #[test]
     fn gemini_login_requires_a_successful_account_check() {

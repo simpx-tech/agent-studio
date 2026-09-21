@@ -78,6 +78,7 @@
     inspectEnvironmentClis,
     configureRuntime,
     detectConnection,
+    detectEnvironmentLogin,
     connectRelay,
     disconnectRelay,
     pollRelay,
@@ -115,6 +116,8 @@
     folderName,
     ensureLocationConnections,
     ensureEnvironmentConnections,
+    loginIdentity,
+    type LoginIdentities,
     locationConnections,
     rememberLocation,
     knownLocations,
@@ -187,6 +190,8 @@
   let wslError = $state('');
   let wslRefreshing = false;
   let connectionStatuses = $state<Record<string, ProviderStatus>>({});
+  // Existing CLI login reports per locally managed environment, kept only for this session.
+  let environmentLogins = $state<Record<string, Partial<Record<ProviderId, ProviderStatus>>>>({});
   let cliInventories = $state<Record<string, CliInventory>>({});
   const connectionChecks = new Map<string, Promise<void>>();
   let presence = $state<Presence[]>([]);
@@ -1028,19 +1033,25 @@
       await refreshWsl();
       await refreshCliInventories();
       statuses = await detectProviders();
+      if (installation)
+        environmentLogins[installation.id] = Object.fromEntries(statuses.map((s) => [s.id, s]));
+      // Connected accounts report their own login identities first, so a terminal login that
+      // is already connected through another profile is recognised instead of duplicated.
+      await refreshConnections();
       const before = workspace.fleet.connections.length;
       for (const environment of workspace.fleet.environments) {
         if (executionHost(workspace.fleet, environment.id) !== installation?.id) continue;
         const inventory = cliInventories[environment.id];
         if (inventory?.error || !inventory?.entries) continue;
-        ensureEnvironmentConnections(
-          workspace.fleet,
-          environment.id,
-          inventory.entries.filter((entry) => entry.path).map((entry) => entry.id),
-        );
+        const detected = inventory.entries.filter((entry) => entry.path).map((entry) => entry.id);
+        if (environment.id !== installation?.id)
+          await probeEnvironmentLogins(environment.id, detected);
+        ensureEnvironmentConnections(workspace.fleet, environment.id, detected, loginIdentities());
       }
-      if (workspace.fleet.connections.length !== before) await persist();
-      await refreshConnections();
+      if (workspace.fleet.connections.length !== before) {
+        await persist();
+        await refreshConnections(undefined, true);
+      }
       if (view === 'connections') void refreshAccountUsage(forceUsage);
       const loginStatus = pendingSignIn?.connectionId
         ? connectionStatuses[pendingSignIn.connectionId]
@@ -1106,6 +1117,46 @@
           return check;
         }),
     );
+  }
+  // Managed WSL distributions have no provider-level status; check their existing logins only
+  // while no connection registers them yet.
+  async function probeEnvironmentLogins(environmentId: string, detected: ProviderId[]) {
+    const missing = detected.filter(
+      (provider) =>
+        !workspace.fleet.connections.some(
+          (c) =>
+            c.environmentId === environmentId &&
+            c.profile === 'existing' &&
+            workspace.fleet.accounts.some((a) => a.id === c.accountId && a.provider === provider),
+        ),
+    );
+    await Promise.all(
+      missing.map(async (provider) => {
+        let status: ProviderStatus;
+        try {
+          status = await detectEnvironmentLogin(environmentId, provider);
+        } catch (e) {
+          status = {
+            id: provider,
+            installed: false,
+            auth: 'unknown',
+            version: null,
+            detail: String(e),
+          };
+        }
+        environmentLogins[environmentId] = {
+          ...environmentLogins[environmentId],
+          [provider]: status,
+        };
+      }),
+    );
+  }
+  function loginIdentities(): LoginIdentities {
+    return {
+      login: (environmentId, provider) =>
+        loginIdentity(environmentLogins[environmentId]?.[provider]),
+      connection: (id) => loginIdentity(connectionStatus(id)),
+    };
   }
   async function refreshCliInventories() {
     if (!desktop() || !installation) return;
@@ -1463,14 +1514,14 @@
     } else {
       draftLocation ??= standaloneLocation(draftComputerId);
       if (draftLocation) {
-        ensureLocationConnections(workspace.fleet, draftLocation);
+        ensureLocationConnections(workspace.fleet, draftLocation, loginIdentities());
         draftComputerId = locationComputerId(draftLocation);
         draftSettings = settingsAtLocation(draftSettings, draftLocation);
       } else delete draftSettings.connectionId;
     }
     if (draftLocation && !draftLocation.path) {
       const scope = { ...draftLocation };
-      ensureLocationConnections(workspace.fleet, scope);
+      ensureLocationConnections(workspace.fleet, scope, loginIdentities());
       saveSoon();
       void saveQueue
         .then(() => refreshConnections(scope, true))
@@ -1558,7 +1609,7 @@
         location = { ...location, path: listing.path };
       }
       if (generation !== locationGeneration || conversationId !== activeId) return;
-      ensureLocationConnections(workspace.fleet, location);
+      ensureLocationConnections(workspace.fleet, location, loginIdentities());
       const sameComputer = selectedComputerId === locationComputerId(location);
       const settings = sameComputer
         ? { ...selectedSettings }

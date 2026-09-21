@@ -103,15 +103,7 @@ pub fn resolve(
     };
     uuid::Uuid::parse_str(id).map_err(|_| "Invalid connection id")?;
     let local = installation(app)?;
-    let data = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|_| "Cannot locate app data")?;
-    let workspace: Value = serde_json::from_slice(
-        &std::fs::read(data.join("workspace.json"))
-            .map_err(|_| "Save Connections before using an account")?,
-    )
-    .map_err(|_| "Cannot read connection registry")?;
+    let (data, workspace) = read_workspace(app)?;
     let connection = workspace["fleet"]["connections"]
         .as_array()
         .and_then(|v| v.iter().find(|v| v["id"] == id))
@@ -123,22 +115,7 @@ pub fn resolve(
             .as_array()
             .and_then(|list| list.iter().find(|e| e["id"] == connection["environmentId"]))
             .ok_or("Connection environment no longer exists")?;
-        let distro = environment["distribution"]
-            .as_str()
-            .ok_or("Remote environment must use its relay host")?;
-        if !cfg!(windows)
-            || environment["platform"] != "wsl"
-            || environment["discoveredOn"] != local.id
-        {
-            return Err(
-                "This connection belongs to another computer; it must run through its relay host"
-                    .into(),
-            );
-        }
-        if !["codex", "claude"].contains(&provider) {
-            return Err("WSL connections support Codex and Claude.".into());
-        }
-        Some(distro.to_string())
+        Some(managed_distribution(&local, environment, provider)?)
     };
     let account = workspace["fleet"]["accounts"]
         .as_array()
@@ -183,6 +160,69 @@ pub fn resolve(
         shared_source,
         shared_error,
     })
+}
+// The existing CLI login of one locally managed environment, before any connection is saved
+// for it. Used to recognise a terminal login that is already connected through another profile.
+pub fn environment_profile(
+    app: &tauri::AppHandle,
+    provider: &str,
+    environment_id: &str,
+) -> Result<Profile, String> {
+    uuid::Uuid::parse_str(environment_id).map_err(|_| "Invalid environment id")?;
+    if !["codex", "claude", "gemini"].contains(&provider) {
+        return Err("Unknown provider".into());
+    }
+    let local = installation(app)?;
+    let distribution = if environment_id == local.id {
+        None
+    } else {
+        let (_, workspace) = read_workspace(app)?;
+        let environment = workspace["fleet"]["environments"]
+            .as_array()
+            .and_then(|list| list.iter().find(|e| e["id"] == environment_id))
+            .ok_or("Environment no longer exists")?;
+        Some(managed_distribution(&local, environment, provider)?)
+    };
+    Ok(Profile {
+        provider: provider.into(),
+        distribution,
+        namespace: app.config().identifier.clone(),
+        ..Profile::default()
+    })
+}
+fn read_workspace(app: &tauri::AppHandle) -> Result<(PathBuf, Value), String> {
+    let data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "Cannot locate app data")?;
+    let workspace: Value = serde_json::from_slice(
+        &std::fs::read(data.join("workspace.json"))
+            .map_err(|_| "Save Connections before using an account")?,
+    )
+    .map_err(|_| "Cannot read connection registry")?;
+    Ok((data, workspace))
+}
+// Only a WSL distribution discovered by this Windows host runs through wsl.exe; every other
+// environment belongs to its own relay host.
+fn managed_distribution(
+    local: &Installation,
+    environment: &Value,
+    provider: &str,
+) -> Result<String, String> {
+    let distro = environment["distribution"]
+        .as_str()
+        .ok_or("Remote environment must use its relay host")?;
+    if !cfg!(windows) || environment["platform"] != "wsl" || environment["discoveredOn"] != local.id
+    {
+        return Err(
+            "This connection belongs to another computer; it must run through its relay host"
+                .into(),
+        );
+    }
+    if !["codex", "claude"].contains(&provider) {
+        return Err("WSL connections support Codex and Claude.".into());
+    }
+    Ok(distro.to_string())
 }
 fn validate_shared_source(fleet: &Value, target_id: &str, source_id: &str) -> Result<(), String> {
     let connections = fleet["connections"]

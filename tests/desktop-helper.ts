@@ -99,12 +99,34 @@ export async function mockDesktop(page: Page, mode = 'success') {
                     ? '/usr/local/bin/codex'
                     : null,
             }));
+          if (command === 'detect_environment_login') {
+            const wsl = args.environmentId === '33333333-3333-4333-8333-333333333333';
+            return {
+              id: args.provider,
+              installed:
+                !wsl ||
+                (args.provider === 'codex' &&
+                  mode !== 'wsl-empty' &&
+                  !localStorage.getItem('test-wsl-missing')),
+              location: wsl ? 'WSL · Ubuntu' : 'Windows',
+              auth: localStorage.getItem(`test-auth-${args.provider}`) ?? 'ready',
+              version: 'Test fixture',
+              detail: 'Fixture connection',
+              account:
+                localStorage.getItem(`test-account-${wsl ? 'wsl-' : ''}${args.provider}`) ??
+                undefined,
+            };
+          }
           if (command === 'detect_connection') {
             const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
-            const wsl =
-              fleet.connections.find((c: any) => c.id === args.connectionId)?.environmentId ===
-              '33333333-3333-4333-8333-333333333333';
+            const connection = fleet.connections.find((c: any) => c.id === args.connectionId);
+            const wsl = connection?.environmentId === '33333333-3333-4333-8333-333333333333';
+            const account =
+              connection?.profile === 'isolated'
+                ? localStorage.getItem(`test-account-isolated-${args.provider}`)
+                : localStorage.getItem(`test-account-${wsl ? 'wsl-' : ''}${args.provider}`);
             return {
+              account: account ?? undefined,
               id: args.provider,
               installed:
                 !wsl ||
@@ -166,6 +188,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
               id,
               installed: true,
               version: 'Test fixture',
+              account: localStorage.getItem(`test-account-${id}`) ?? undefined,
               auth:
                 localStorage.getItem(`test-auth-${id}`) ??
                 (mode === 'login-flow' &&

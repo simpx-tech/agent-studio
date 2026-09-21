@@ -271,6 +271,8 @@ export type ProviderStatus = {
   auth: 'ready' | 'login' | 'unknown';
   detail: string;
   location?: string | null;
+  // Signed-in identity reported by the CLI itself (Claude's account email); session-only metadata.
+  account?: string | null;
 };
 export type RunEvent = TokenUsage & {
   kind:
