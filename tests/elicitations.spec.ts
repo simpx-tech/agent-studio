@@ -322,6 +322,18 @@ test('paired Viewer fetches private MCP input from its owning host without persi
     const form = page.getByRole('region', { name: 'MCP request' });
     await expect(form.getByText('Private remote request', { exact: true })).toBeVisible();
     await page.getByLabel('Message', { exact: true }).fill('Keep remote draft');
+    // A relay checkpoint replaces receipt objects without changing the request.
+    // It must not fetch private input again or reset the visible form.
+    const checkpoint = await call('GET', 'state');
+    const remoteChat = checkpoint.workspace.conversations.find((c: any) => c.id === conversationId);
+    remoteChat.title = 'Remote elicitation refreshed';
+    remoteChat.updatedAt = new Date().toISOString();
+    await call('PUT', 'state', {
+      revision: checkpoint.revision,
+      workspace: checkpoint.workspace,
+    });
+    await expect(page.getByRole('button', { name: /Remote elicitation refreshed/ })).toBeVisible();
+    await expect(form.getByText('Private remote request', { exact: true })).toBeVisible();
     await form.getByRole('button', { name: 'Decline', exact: true }).click();
     await expect(page.getByText('MCP response reached the host.', { exact: true })).toBeVisible();
     await expect(form).toHaveCount(0);

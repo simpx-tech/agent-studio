@@ -39,7 +39,8 @@ jobs:
         run: npx playwright install msedge
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      # Native fixtures spawn PowerShell children with bounded startup waits.
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
       # Run browser checks after native compilation and the frontend build.
       - run: npm run verify
       - name: Retain failed browser traces

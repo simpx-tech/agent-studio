@@ -28,19 +28,34 @@
   const active = $derived(
     running && receipt.status === 'pending' && receipt.runId === runId && !sent,
   );
+  // Relay checkpoints replace receipt objects. Only a changed request or an
+  // explicit retry should reload private input and clear the form's values.
+  const requestIdentity = $derived(
+    JSON.stringify([
+      active,
+      runId,
+      connectionId,
+      receipt.id,
+      receipt.revision,
+      receipt.mode,
+      receipt.serverName,
+      reload,
+    ]),
+  );
   $effect(() => {
-    const id = receipt.id,
-      run = runId,
-      connection = connectionId,
-      refresh = reload;
-    let disposed = false;
-    if (!active || !run) {
-      request = undefined;
-      values.clear();
-      return;
-    }
-    loading = true;
-    untrack(() => {
+    void requestIdentity;
+    return untrack(() => {
+      const id = receipt.id,
+        run = runId,
+        connection = connectionId,
+        refresh = reload;
+      let disposed = false;
+      if (!active || !run) {
+        request = undefined;
+        values.clear();
+        return;
+      }
+      loading = true;
       void (async () => {
         try {
           const result = elicitationRequestSchema.parse(
@@ -67,12 +82,12 @@
           if (!disposed) loading = false;
         }
       })();
+      return () => {
+        disposed = true;
+        request = undefined;
+        values.clear();
+      };
     });
-    return () => {
-      disposed = true;
-      request = undefined;
-      values.clear();
-    };
   });
   async function send(action: ElicitationInput['action']) {
     if (!active || !runId || busy) return;
