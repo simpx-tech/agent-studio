@@ -4,6 +4,11 @@ A desktop workspace for your AI agents, with a mobile PWA to control them from y
 
 ## Start
 
+Ongoing work uses `development` and is merged into `main` for releases. Merges to
+`main` automatically verify the app and build Windows, Linux, and universal macOS
+installers. See [development and desktop builds](docs/DEVELOPMENT.md) for the
+workflow and downloads.
+
 ```powershell
 npm install
 npm run tauri dev

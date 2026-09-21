@@ -1,0 +1,41 @@
+# Development and desktop builds
+
+Use `development` for ongoing work. Merge tested changes from `development` into
+`main` when publishing a release. Keep `main` as the stable/default branch, and
+merge release fixes back into `development` before starting the next change.
+Do not force-push either branch. The setup change is published to both branches
+so the workflow is available immediately.
+
+The [Desktop builds workflow](../.github/workflows/desktop-build.yml) runs the
+frontend checks, unit tests, production build, browser tests, Rust formatting,
+Clippy, and Rust tests on pushes and pull requests targeting either branch.
+The verification job uses Windows and the same Edge browser as local checks.
+
+Every push to `main`, including a merge, then builds these downloadable artifacts:
+
+| Platform | Architecture | Packages |
+| --- | --- | --- |
+| Windows | x64 | NSIS `.exe` and `.msi` installers |
+| Linux | x64 | `.deb` and `.AppImage` |
+| macOS | Universal, Intel and Apple Silicon | `.dmg` |
+
+Open **Actions → Desktop builds → the completed run → Artifacts** to download
+them. Artifact names include the complete commit SHA and are retained for 30
+days. A failed verification prevents packaging; a failed platform build does
+not cancel the other platforms. **Run workflow** on `main` rebuilds it manually.
+Runs on `development` and pull requests verify only.
+
+The workflow uses Node 24, Rust stable, the npm/Cargo lockfiles, and pinned action
+revisions. It needs no deployment credentials. Windows packages are unsigned;
+macOS packages use ad-hoc signing and are not Apple notarized. Trusted publisher
+signing requires a separate certificate setup. Building an installer does not
+verify provider sign-in or desktop runtime behavior on that platform.
+
+The workflow stores packages in GitHub Actions; it does not create GitHub
+Releases, update the VPS, or replace the public Windows download automatically.
+Follow [production operations](DEPLOYMENT.md) to publish a tested release while
+preserving private workspaces, pairing keys, and browser sessions.
+
+Before pushing changes, run the full local verification in `CLAUDE.md`. Native
+packaging for other operating systems is verified on its corresponding hosted
+runner. Do not treat an unrun or failed job as a successful build.
