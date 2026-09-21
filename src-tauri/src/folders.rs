@@ -159,6 +159,7 @@ pub async fn windows_path(distribution: &str, path: &str) -> Result<PathBuf, Str
     #[cfg(windows)]
     {
         use std::{process::Stdio, time::Duration};
+        let script = crate::wsl::embedded_script(include_str!("folders-windows-path.sh"));
         let mut command = tokio::process::Command::new("wsl.exe");
         command
             .args([
@@ -167,7 +168,7 @@ pub async fn windows_path(distribution: &str, path: &str) -> Result<PathBuf, Str
                 "--exec",
                 "bash",
                 "-c",
-                include_str!("folders-windows-path.sh"),
+                &script,
                 "agent-studio",
                 path,
             ])
@@ -239,6 +240,7 @@ pub async fn list(
     if let Some(distribution) = distribution {
         #[cfg(windows)]
         {
+            let script = crate::wsl::embedded_script(include_str!("folders-wsl.sh"));
             let mut command = tokio::process::Command::new("wsl.exe");
             command
                 .args([
@@ -249,7 +251,7 @@ pub async fn list(
                     "--exec",
                     "bash",
                     "-c",
-                    include_str!("folders-wsl.sh"),
+                    &script,
                     "agent-studio",
                     &path,
                 ])

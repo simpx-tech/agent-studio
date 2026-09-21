@@ -1220,7 +1220,7 @@ pub(crate) async fn wsl_paths(
     #[cfg(windows)]
     {
         let mut command = tokio::process::Command::new("wsl.exe");
-        let script = format!("{}\nprintf '%s\\0%s\\0%s\\0' \"$HOME\" \"${{CODEX_HOME:-$HOME/.codex}}\" \"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"", include_str!("wsl-env.sh"));
+        let script = format!("{}\nprintf '%s\\0%s\\0%s\\0' \"$HOME\" \"${{CODEX_HOME:-$HOME/.codex}}\" \"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"", crate::wsl::embedded_script(include_str!("wsl-env.sh")));
         command
             .args([
                 "--distribution",

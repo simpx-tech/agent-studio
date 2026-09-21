@@ -10,6 +10,14 @@ The [Desktop builds workflow](../.github/workflows/desktop-build.yml) runs the
 frontend checks, unit tests, production build, browser tests, Rust formatting,
 Clippy, and Rust tests on pushes and pull requests targeting either branch.
 The verification job uses Windows and the same Edge browser as local checks.
+
+The shell scripts under `src-tauri/src/*.sh` are compiled into the desktop
+binary with `include_str!` and executed by bash inside WSL, so they must keep
+LF line endings on every checkout. `.gitattributes` pins `*.sh` to `eol=lf`,
+which overrides `core.autocrlf` on Windows build runners, and
+`wsl::embedded_script` strips any remaining CRLF before a script reaches bash.
+A Rust test fails if a checked-out script contains a carriage return; run
+`git add --renormalize .` after updating an older Windows checkout.
 Rust tests compile first, initialize their PowerShell fixture shell, then run
 serially so cold startup and competing child processes do not consume protocol
 assertion deadlines.

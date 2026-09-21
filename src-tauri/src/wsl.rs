@@ -33,12 +33,11 @@ impl Launch {
             "--exec".into(),
             "bash".into(),
             "-lc".into(),
-            format!(
+            embedded_script(&format!(
                 "{}\n{}",
                 include_str!("wsl-env.sh"),
                 include_str!("wsl-launch.sh")
-            )
-            .replace("\r\n", "\n"),
+            )),
             "agent-studio".into(),
             self.namespace.clone(),
             profile.into(),
@@ -51,7 +50,7 @@ impl Launch {
         #[cfg(windows)]
         {
             // Only our generated job marker is read. Never stop an entire WSL distribution.
-            let script = include_str!("wsl-cancel.sh").replace("\r\n", "\n");
+            let script = embedded_script(include_str!("wsl-cancel.sh"));
             let mut command = tokio::process::Command::new("wsl.exe");
             command
                 .args([
@@ -93,7 +92,10 @@ pub async fn resolve(
             .collect();
         let profile = crate::profiles::current();
         for distro in candidates {
-            let script = format!("{}\ncommand -v -- \"$1\"", include_str!("wsl-env.sh"));
+            let script = format!(
+                "{}\ncommand -v -- \"$1\"",
+                embedded_script(include_str!("wsl-env.sh"))
+            );
             let mut command = tokio::process::Command::new("wsl.exe");
             command
                 .args([
@@ -280,17 +282,22 @@ pub async fn discover(environment_id: &str) -> Result<Discovery, String> {
     }
 }
 
+/// Embedded shell scripts run inside Linux, so they must keep LF endings even when a Windows
+/// checkout rewrote the source files to CRLF before compilation; bash rejects `\r` with exit 2.
+pub(crate) fn embedded_script(source: &str) -> String {
+    source.replace("\r\n", "\n")
+}
 /// Inventory checks PATH inside one distribution, without authentication or Windows fallback.
 pub async fn installations(
     distribution: &str,
 ) -> Result<Vec<crate::providers::CliInstallation>, String> {
     #[cfg(windows)]
     {
-        let script = format!(
+        let script = embedded_script(&format!(
             "{}\n{}",
             include_str!("wsl-env.sh"),
             include_str!("wsl-inventory.sh")
-        );
+        ));
         let mut command = tokio::process::Command::new("wsl.exe");
         command
             .args([
@@ -346,6 +353,37 @@ fn parse_installations(text: &str) -> Result<Vec<crate::providers::CliInstallati
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_shell_scripts_reach_linux_with_lf_endings() {
+        assert_eq!(embedded_script("a\r\nb\r\n"), "a\nb\n");
+        let names = [
+            "wsl-env.sh",
+            "wsl-inventory.sh",
+            "wsl-launch.sh",
+            "wsl-cancel.sh",
+            "folders-wsl.sh",
+            "folders-windows-path.sh",
+        ];
+        for (name, source) in names.iter().zip([
+            include_str!("wsl-env.sh"),
+            include_str!("wsl-inventory.sh"),
+            include_str!("wsl-launch.sh"),
+            include_str!("wsl-cancel.sh"),
+            include_str!("folders-wsl.sh"),
+            include_str!("folders-windows-path.sh"),
+        ]) {
+            assert!(!embedded_script(source).contains('\r'), "{name}");
+            // The repository pins these files to LF so every checkout embeds them unchanged.
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join(name);
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes.contains(&b'\r'),
+                "{name} must use LF line endings; renormalize the checkout (see .gitattributes)"
+            );
+        }
+    }
     #[test]
     fn installation_inventory_excludes_windows_shims_and_requires_all_results() {
         let values = parse_installations("profile noise\nagent-studio-cli\tcodex\t/home/test/.local/bin/codex\nagent-studio-cli\tclaude\t/mnt/c/Users/test/claude\nagent-studio-cli\tgemini\t\n").unwrap();
