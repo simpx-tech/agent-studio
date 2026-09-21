@@ -3178,3 +3178,60 @@ test('a removed terminal login is not added again while its account stays connec
   await page.keyboard.press('Escape');
   expect(await claudeLabels()).toEqual(['Claude CLI login', 'vinporb']);
 });
+
+test('a terminal login can become a separate profile for the same account without being re-added', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const card = page
+    .locator('.connection-card')
+    .filter({ has: page.getByRole('heading', { name: 'Codex' }) });
+  await card
+    .locator('.fleet-account')
+    .filter({ has: page.getByRole('heading', { name: 'Codex CLI login', exact: true }) })
+    .getByRole('button', { name: 'Manage account' })
+    .click();
+  const dialog = page.getByRole('dialog', { name: 'Manage account', exact: true });
+  await expect(dialog).toContainText('Existing CLI login');
+  const source = dialog.getByRole('combobox', { name: 'Shared context source' });
+  await expect(source).toHaveText('This computer’s CLI context');
+  await source.click();
+  await page.getByRole('option', { name: 'This account only', exact: true }).click();
+  await expect(dialog).toContainText('creates a separate profile for this account');
+  await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('test-sign-in-provider'))).toBe('codex');
+  const connection = () =>
+    page.evaluate(() => {
+      const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
+      const account = fleet.accounts.find(
+        (a: any) => a.provider === 'codex' && a.name === 'Codex CLI login',
+      );
+      return {
+        labels: fleet.accounts.filter((a: any) => a.provider === 'codex').map((a: any) => a.name),
+        connections: fleet.connections.filter((c: any) => c.accountId === account.id),
+      };
+    });
+  const converted = await connection();
+  expect(converted.connections).toHaveLength(1);
+  expect(converted.connections[0]).toMatchObject({
+    profile: 'isolated',
+    sharedContext: 'none',
+    fromTerminalLogin: true,
+  });
+  // A refresh must not register the terminal login again as another label.
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(card.locator('.fleet-account')).toHaveCount(1);
+  const after = await connection();
+  expect(after.labels.filter((name: string) => name === 'Codex CLI login')).toHaveLength(1);
+  expect(after.connections).toHaveLength(1);
+  await card.getByRole('button', { name: 'Manage account' }).click();
+  await expect(dialog).toContainText('Separate CLI profile');
+  await expect(dialog.getByRole('combobox', { name: 'Shared context source' })).toHaveText(
+    'This account only',
+  );
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+});

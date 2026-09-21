@@ -102,6 +102,10 @@ export function ensureEnvironmentConnections(
       if (login !== null) {
         const known = siblings.map((c) => identities!.connection(c.id));
         if (known.includes(login) || known.includes(undefined)) continue;
+      } else if (siblings.some((c) => c.fromTerminalLogin)) {
+        // The CLI reports no identity, but this login was turned into a separate profile
+        // for the same account; registering it again would recreate the duplicate.
+        continue;
       }
     }
     const match = login

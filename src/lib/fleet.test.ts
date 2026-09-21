@@ -126,7 +126,8 @@ describe('shared context choice', () => {
     };
     const existing = { ...isolated, id: crypto.randomUUID(), profile: 'existing' as const };
     expect(sharedContextChoice(isolated)).toBe('computer');
-    expect(sharedContextChoice(existing)).toBe('');
+    // A terminal login is the computer context by itself.
+    expect(sharedContextChoice(existing)).toBe('computer');
     const other = crypto.randomUUID();
     applySharedContextChoice(isolated, other);
     expect(sharedContextChoice(isolated)).toBe(other);
@@ -138,14 +139,24 @@ describe('shared context choice', () => {
     applySharedContextChoice(isolated, 'computer');
     expect(isolated).not.toHaveProperty('sharedContext');
     expect(sharedContextChoice(isolated)).toBe('computer');
-    applySharedContextChoice(existing, '');
+    applySharedContextChoice(existing, 'computer');
+    expect(existing.profile).toBe('existing');
     expect(existing).not.toHaveProperty('sharedContext');
+    // "This account only" on a terminal login makes it a separate profile for that account.
+    applySharedContextChoice(existing, '');
+    expect(existing).toMatchObject({
+      profile: 'isolated',
+      sharedContext: 'none',
+      fromTerminalLogin: true,
+    });
+    expect(sharedContextChoice(existing)).toBe('');
     const parsed = fleetSchema.parse({
       computers: [],
       environments: [],
       accounts: [],
-      connections: [{ ...isolated, sharedContext: 'none' }],
+      connections: [{ ...isolated, sharedContext: 'none' }, existing],
     });
     expect(parsed.connections[0].sharedContext).toBe('none');
+    expect(parsed.connections[1].fromTerminalLogin).toBe(true);
   });
 });

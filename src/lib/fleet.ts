@@ -25,6 +25,9 @@ export const connectionSchema = z.object({
   sharedContextConnectionId: id.optional(),
   // Separate profiles share this computer's CLI context unless set to 'none' or to an account.
   sharedContext: z.enum(['computer', 'none']).optional(),
+  // A separate profile made from this computer's terminal login: the same account is signed in
+  // there, so detection must not register that login again as another label.
+  fromTerminalLogin: z.boolean().optional(),
 });
 export const fleetSchema = z.object({
   computers: z.array(computerSchema),
@@ -165,16 +168,27 @@ export function registerWslEnvironments(
   reconcileDiscoveredWsl(fleet);
 }
 // Effective shared-context choice: an account connection id, 'computer', or '' for none.
+// A terminal login is this computer's context by itself, so it reads as 'computer'.
 export function sharedContextChoice(connection: Connection): string {
   if (connection.sharedContextConnectionId) return connection.sharedContextConnectionId;
-  return connection.profile === 'isolated' && connection.sharedContext !== 'none' ? 'computer' : '';
+  return connection.sharedContext === 'none' ? '' : 'computer';
 }
+// Choosing "This account only" on a terminal login turns that connection into a separate
+// profile for the same account: its own directory, its own sign-in, and no shared context.
+// The terminal keeps its login and files; existing chats continue through history transfer.
 export function applySharedContextChoice(connection: Connection, choice: string) {
   delete connection.sharedContextConnectionId;
   delete connection.sharedContext;
   if (choice === 'computer') return;
-  if (choice) connection.sharedContextConnectionId = choice;
-  else if (connection.profile === 'isolated') connection.sharedContext = 'none';
+  if (choice) {
+    connection.sharedContextConnectionId = choice;
+    return;
+  }
+  if (connection.profile === 'existing') {
+    connection.profile = 'isolated';
+    connection.fromTerminalLogin = true;
+  }
+  connection.sharedContext = 'none';
 }
 export function accountName(fleet: Fleet, connectionId?: string): string | undefined {
   const connection = fleet.connections.find((c) => c.id === connectionId);

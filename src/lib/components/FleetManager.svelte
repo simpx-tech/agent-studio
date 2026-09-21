@@ -310,9 +310,7 @@
       (c) => c.sharedContextConnectionId === connection.id,
     );
     return [
-      ...(connection.profile === 'isolated'
-        ? [{ id: 'computer', name: 'This computer’s CLI context' }]
-        : []),
+      { id: 'computer', name: 'This computer’s CLI context' },
       { id: '', name: 'This account only' },
       ...workspace.fleet.connections
         .filter(
@@ -821,7 +819,20 @@
             connection,
             before: sharedContextChoice(connection),
             after: sharedSources[connection.id] ?? '',
+            snapshot: { ...connection },
           }));
+          const converting = managedConnections.filter(
+            (connection) =>
+              connection.profile === 'existing' && (sharedSources[connection.id] ?? '') === '',
+          );
+          for (const connection of converting) {
+            if (!localEnvironment(connection.environmentId))
+              throw new Error('Separate this login on its own computer.');
+            if (!cliInstalled(connection.environmentId, managedAccount.provider))
+              throw new Error('Install this CLI on the selected computer, then refresh Connections.');
+            if (managedAccount.provider === 'gemini')
+              throw new Error('Separate profiles are supported for Claude and Codex.');
+          }
           for (const connection of workspace.fleet.connections) {
             if (sharedContextChoice(connection) !== (sharedSourcesBaseline[connection.id] ?? ''))
               throw new Error(
@@ -848,14 +859,27 @@
             await save();
           } catch (error) {
             if (editedAccount.name === nextAccount.name) editedAccount.name = previousName;
-            for (const { connection, before, after } of editedConnections) {
+            for (const { connection, after, snapshot } of editedConnections) {
               if (sharedContextChoice(connection) !== after) continue;
-              applySharedContextChoice(connection, before);
+              for (const key of Object.keys(connection) as (keyof Connection)[])
+                if (!(key in snapshot)) delete connection[key];
+              Object.assign(connection, snapshot);
             }
             throw error;
           }
           contextCache.clear();
+          for (const connection of converting) {
+            statuses[connection.id] = {
+              id: managedAccount.provider,
+              installed: true,
+              auth: 'login',
+              version: null,
+              detail: 'Sign in to connect this account.',
+            };
+          }
+          const opened = converting[0];
           closeDialog();
+          if (opened) await login(managedAccount.provider, opened.id);
         });
       }}
     >
@@ -900,10 +924,16 @@
                 onchange={(value) => (sharedSources[connection.id] = value)}
               />
               <p>
-                This computer’s CLI context is the terminal’s instructions, rules, skills, project
-                memories, and MCP server definitions. Choose another account to use its context
-                instead, or This account only to keep this profile separate. Logins and MCP sign-ins
-                always stay with the account. Applies to the next reply.
+                {#if connection.profile === 'existing' && (sharedSources[connection.id] ?? '') === ''}
+                  Saving creates a separate profile for this account on this computer and opens its
+                  sign-in. Existing chats continue from the terminal’s history, and the terminal
+                  keeps its own login and files.
+                {:else}
+                  This computer’s CLI context is the terminal’s instructions, rules, skills, project
+                  memories, and MCP server definitions. Choose another account to use its context
+                  instead, or This account only to keep this profile separate. Logins and MCP
+                  sign-ins always stay with the account. Applies to the next reply.
+                {/if}
               </p>
             </div>
           {/if}

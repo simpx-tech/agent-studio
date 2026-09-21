@@ -120,6 +120,22 @@ fn valid(record: &Record) -> bool {
 }
 
 /// A version 2 binding for the same computer and folder under another account.
+// A terminal login turned into a separate profile keeps its connection id while its earlier
+// native history stays in the terminal directory, so that directory is also a transfer source.
+fn source_variants(profile: crate::profiles::Profile) -> Vec<crate::profiles::Profile> {
+    let mut variants = vec![profile.clone()];
+    if profile.isolated {
+        variants.push(crate::profiles::Profile {
+            root: None,
+            isolated: false,
+            shared_source: None,
+            shared_error: None,
+            ..profile
+        });
+    }
+    variants
+}
+
 fn other_account(record: &Record, identity: &Identity) -> bool {
     record.version >= 2
         && record.scope != identity.scope
@@ -344,25 +360,27 @@ impl Session {
                 .filter_map(|c| c["id"].as_str().map(|id| Some(id.to_string()))),
         );
         let mut source = None;
-        for connection in candidates {
+        'connections: for connection in candidates {
             let Ok(mut profile) = crate::profiles::resolve(app, provider, connection.as_deref())
             else {
                 continue;
             };
             profile.folder_distribution = selected.folder_distribution.clone();
-            let matches = crate::profiles::scope(profile.clone(), async {
-                identity(provider, request.location.as_ref())
-                    .is_ok_and(|i| i.scope == previous.scope)
-            })
-            .await;
-            if matches {
-                source = Some(
-                    crate::profiles::scope(profile, async {
-                        crate::context::native_profile_root(provider).await
-                    })
-                    .await?,
-                );
-                break;
+            for variant in source_variants(profile) {
+                let matches = crate::profiles::scope(variant.clone(), async {
+                    identity(provider, request.location.as_ref())
+                        .is_ok_and(|i| i.scope == previous.scope)
+                })
+                .await;
+                if matches {
+                    source = Some(
+                        crate::profiles::scope(variant, async {
+                            crate::context::native_profile_root(provider).await
+                        })
+                        .await?,
+                    );
+                    break 'connections;
+                }
             }
         }
         let source = source.ok_or("The previous account profile is unavailable. Reconnect it before transferring this chat; its saved history was preserved.")?;
@@ -773,6 +791,38 @@ mod tests {
         assert_eq!(saved(r.native_session.as_ref().unwrap()).id, returned);
     }
 
+    #[tokio::test]
+    async fn a_terminal_login_made_separate_is_detected_as_an_account_switch_with_its_old_source() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let terminal = profile("codex");
+        let mut separate = terminal.clone();
+        separate.root = Some(PathBuf::from("C:/profiles/codex/separate"));
+        separate.isolated = true;
+        crate::profiles::scope(terminal.clone(), async {
+            let s = Session::prepare(root.path(), &r).unwrap().unwrap();
+            s.bind(s.id(), true).unwrap();
+        })
+        .await;
+        r.messages
+            .extend([message("assistant", "READY"), message("user", "Continue")]);
+        let switched = crate::profiles::scope(separate.clone(), async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(switched.switched_account);
+        let variants = source_variants(separate.clone());
+        assert_eq!(variants.len(), 2);
+        assert!(variants[1].root.is_none() && !variants[1].isolated);
+        assert_eq!(variants[1].id, separate.id);
+        let previous = saved(&switched).scope;
+        let reproduced = crate::profiles::scope(variants[1].clone(), async {
+            identity(&r.agent.provider, None).unwrap().scope
+        })
+        .await;
+        assert_eq!(reproduced, previous);
+        assert_eq!(source_variants(terminal).len(), 1);
+    }
     fn request() -> RunRequest {
         serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"","instructions":"Private guidance"},"messages":[{"role":"user","text":"Private request"}]})).unwrap()
     }

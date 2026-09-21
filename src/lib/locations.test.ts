@@ -186,6 +186,33 @@ describe('computer and folder chat scope', () => {
       workspace.fleet.accounts.find((a) => a.name === 'Claude CLI login')?.id,
     );
   });
+  it('does not register a terminal login again after it became a separate profile without an identity', () => {
+    const { workspace, installation } = fixture();
+    const native = { computerId: installation.computerId, environmentId: installation.id, path: '' };
+    const account = {
+      id: crypto.randomUUID(),
+      name: 'vinicius.portela.stm',
+      provider: 'codex' as const,
+      purpose: 'personal' as const,
+    };
+    const separated = {
+      id: crypto.randomUUID(),
+      environmentId: installation.id,
+      accountId: account.id,
+      profile: 'isolated' as const,
+      sharedContext: 'none' as const,
+      fromTerminalLogin: true,
+    };
+    workspace.fleet.accounts.push(account);
+    workspace.fleet.connections.push(separated);
+    // Codex reports no login identity: the marker stands in for the matching identity.
+    const identities = { login: () => null, connection: () => null };
+    ensureLocationConnections(workspace.fleet, native, identities);
+    expect(locationConnections(workspace.fleet, native, 'codex')).toEqual([separated]);
+    delete (separated as { fromTerminalLogin?: boolean }).fromTerminalLogin;
+    ensureLocationConnections(workspace.fleet, native, identities);
+    expect(locationConnections(workspace.fleet, native, 'codex')).toHaveLength(2);
+  });
   it('connects another environment’s terminal login under the account that already reports it', () => {
     const { workspace, installation, location } = fixture();
     const profile = {
