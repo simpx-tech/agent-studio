@@ -8,6 +8,8 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
   workers: ci ? 1 : 4,
+  // Hosted Windows screenshots and browser actions can exceed the local budget.
+  timeout: ci ? 60000 : 30000,
   retries: 0,
   reporter: 'list',
   use: {
