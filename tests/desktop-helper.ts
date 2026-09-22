@@ -75,16 +75,76 @@ export async function mockDesktop(page: Page, mode = 'success') {
             };
           if (command === 'list_folders') {
             if (args.path === '/missing') throw new Error('Folder does not exist');
-            const path =
-              args.path ||
-              (args.environmentId === '33333333-3333-4333-8333-333333333333'
-                ? '/home/test/studio'
-                : 'C:\\Projects\\studio');
+            if (args.path === 'D:\\') throw new Error('Drive not ready');
+            const wsl = args.environmentId === '33333333-3333-4333-8333-333333333333';
+            const path = args.path || (wsl ? '/home/test/studio' : 'C:\\Projects\\studio');
+            const separator = wsl ? '/' : '\\';
+            // A small fixture tree; unknown paths open as empty folders like before.
+            const tree: Record<
+              string,
+              {
+                parent: string | null;
+                entries: { name: string; hidden?: boolean; repository?: boolean }[];
+              }
+            > = wsl
+              ? {
+                  '/': { parent: null, entries: [{ name: 'home' }, { name: 'mnt' }] },
+                  '/home': { parent: '/', entries: [{ name: 'test' }] },
+                  '/home/test': {
+                    parent: '/home',
+                    entries: [
+                      { name: '.config', hidden: true },
+                      { name: 'studio', repository: true },
+                    ],
+                  },
+                  '/home/test/studio': { parent: '/home/test', entries: [] },
+                }
+              : {
+                  'C:\\': {
+                    parent: null,
+                    entries: [
+                      { name: '$RECYCLE.BIN', hidden: true },
+                      { name: 'Projects' },
+                      { name: 'Users' },
+                    ],
+                  },
+                  'C:\\Projects': {
+                    parent: 'C:\\',
+                    entries: [
+                      { name: '.cache', hidden: true },
+                      { name: 'archive' },
+                      { name: 'studio', repository: true },
+                      { name: 'tools', repository: true },
+                    ],
+                  },
+                  'C:\\Projects\\studio': { parent: 'C:\\Projects', entries: [] },
+                };
+            const node = tree[path] ?? {
+              parent: wsl ? '/home/test' : 'C:\\Projects',
+              entries: [],
+            };
             return {
               path,
-              parent: path.startsWith('/') ? '/home/test' : 'C:\\Projects',
-              entries: [],
+              parent: node.parent,
+              entries: node.entries.map((entry) => ({
+                hidden: false,
+                repository: false,
+                ...entry,
+                path: `${path.endsWith(separator) ? path : path + separator}${entry.name}`,
+              })),
               truncated: false,
+              places: wsl
+                ? [
+                    { kind: 'home', name: 'Home', path: '/home/test/studio' },
+                    { kind: 'root', name: 'Root', path: '/' },
+                    { kind: 'mount', name: 'C: drive', path: '/mnt/c' },
+                  ]
+                : [
+                    { kind: 'home', name: 'Home', path: 'C:\\Projects\\studio' },
+                    { kind: 'folder', name: 'Projects', path: 'C:\\Projects' },
+                    { kind: 'drive', name: 'C:\\', path: 'C:\\' },
+                    { kind: 'drive', name: 'D:\\', path: 'D:\\' },
+                  ],
             };
           }
           if (command === 'inspect_environment_clis')

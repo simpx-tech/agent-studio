@@ -5,11 +5,14 @@
   let {
     title,
     busy = false,
+    wide = false,
     close,
     children,
   }: {
     title: string;
     busy?: boolean;
+    // Wide dialogs keep a fixed height and let their content scroll internally.
+    wide?: boolean;
     close: () => void;
     children: Snippet;
   } = $props();
@@ -28,6 +31,7 @@
 
 <dialog
   class="connection-dialog"
+  class:wide
   bind:this={dialog}
   aria-labelledby={id}
   oncancel={(event) => {
@@ -58,6 +62,16 @@
     border: 1px solid #46523c;
     border-radius: 16px;
     box-shadow: 0 24px 100px #0008;
+  }
+  dialog.wide[open] {
+    display: flex;
+    flex-direction: column;
+    width: min(940px, calc(100vw - 32px));
+    height: min(720px, calc(100dvh - 48px));
+    overflow: hidden;
+  }
+  dialog.wide header {
+    flex-shrink: 0;
   }
   dialog::backdrop {
     background: #080d0bc9;

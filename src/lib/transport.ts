@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
+import type { FolderEntry, FolderPlace } from './folders';
 import type { UsageSnapshot } from './usage';
 import {
   AccountUpdateGate,
@@ -1211,8 +1212,10 @@ export async function readNativeInstructions(
 export type FolderListing = {
   path: string;
   parent: string | null;
-  entries: { name: string; path: string }[];
+  entries: FolderEntry[];
   truncated: boolean;
+  // Older hosts omit quick-access places; the browser then offers only Home.
+  places?: FolderPlace[];
 };
 export async function listFolders(environmentId: string, path = ''): Promise<FolderListing> {
   return routed('folders', { environmentId, path });

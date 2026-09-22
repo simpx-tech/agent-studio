@@ -3249,6 +3249,8 @@
     environments={computerEnvironments}
     executionEnvironmentId={selectedExecutionEnvironment?.id}
     initialEnvironment={selectedLocation?.environmentId ?? selectedConnection?.environmentId}
+    initialLocation={selectedLocation}
+    recent={savedLocations}
     browse={listFolders}
     choose={(location) => chooseLocation(location, true)}
     close={() => (folderBrowserOpen = false)}

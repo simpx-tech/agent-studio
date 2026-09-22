@@ -1847,6 +1847,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   await expect(page.getByRole('combobox', { name: 'Folder environment', exact: true })).toHaveText(
     'WSL · Ubuntu',
   );
+  await page.getByRole('button', { name: 'Edit path', exact: true }).click();
   await expect(page.getByLabel('Folder path', { exact: true })).toHaveValue('/home/test/studio');
   await page.getByLabel('Folder path', { exact: true }).fill('/missing');
   await page.getByRole('button', { name: 'Go', exact: true }).click();
@@ -1984,6 +1985,7 @@ test('reselecting the computer preserves the draft and folders reuse ready CLI a
   expect(await page.evaluate(() => (window as any).cliCalls)).toEqual(calls);
   await picker('Folder').click();
   await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit path', exact: true }).click();
   await page.getByLabel('Folder path', { exact: true }).fill('C:\\Projects\\second');
   await page.getByRole('button', { name: 'Go', exact: true }).click();
   await page.getByRole('button', { name: 'Use this folder', exact: true }).click();

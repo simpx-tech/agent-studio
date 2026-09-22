@@ -82,6 +82,18 @@ fn validate_connection(
 pub struct FolderEntry {
     name: String,
     path: String,
+    // Derived from the name and directory attributes only; folder contents are never read.
+    hidden: bool,
+    // A ".git" entry exists inside the folder (directory or worktree file); its body is not read.
+    repository: bool,
+}
+// Quick-access destinations reported by the environment: its home folder, common project
+// locations that exist, drive roots, and WSL drive mounts.
+#[derive(Debug, Serialize)]
+pub struct FolderPlace {
+    kind: &'static str,
+    name: String,
+    path: String,
 }
 #[derive(Debug, Serialize)]
 pub struct FolderListing {
@@ -89,7 +101,17 @@ pub struct FolderListing {
     parent: Option<String>,
     entries: Vec<FolderEntry>,
     truncated: bool,
+    places: Vec<FolderPlace>,
 }
+const COMMON_FOLDERS: [&str; 7] = [
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Projects",
+    "Developer",
+    "source",
+    "Documents/GitHub",
+];
 pub fn environment_distribution(
     app: &tauri::AppHandle,
     environment_id: &str,
@@ -198,6 +220,73 @@ pub async fn windows_path(distribution: &str, path: &str) -> Result<PathBuf, Str
         Err("Windows CLI access to WSL folders requires their Windows host".into())
     }
 }
+#[cfg(windows)]
+fn hidden_attribute(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
+    entry
+        .metadata()
+        .map(|m| m.file_attributes() & HIDDEN_OR_SYSTEM != 0)
+        .unwrap_or(false)
+}
+#[cfg(not(windows))]
+fn hidden_attribute(_entry: &std::fs::DirEntry) -> bool {
+    false
+}
+fn native_home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+// Existence checks on a fixed list of directory names; nothing inside them is read.
+fn common_places(home: &Path) -> Vec<FolderPlace> {
+    let mut seen = std::collections::HashSet::new();
+    COMMON_FOLDERS
+        .iter()
+        .filter_map(|relative| {
+            let path = relative
+                .split('/')
+                .fold(home.to_path_buf(), |p, part| p.join(part));
+            let text = path.to_string_lossy().to_string();
+            (path.is_dir() && seen.insert(text.to_lowercase())).then(|| FolderPlace {
+                kind: "folder",
+                name: relative.rsplit('/').next().unwrap_or(relative).to_string(),
+                path: text,
+            })
+        })
+        .collect()
+}
+fn native_places() -> Vec<FolderPlace> {
+    let mut places = Vec::new();
+    if let Some(home) = native_home() {
+        places.push(FolderPlace {
+            kind: "home",
+            name: "Home".into(),
+            path: home.to_string_lossy().to_string(),
+        });
+        places.extend(common_places(&home));
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: GetLogicalDrives takes no arguments and only returns a bitmask.
+        let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+        for index in 0..26u32 {
+            if mask & (1 << index) != 0 {
+                let path = format!("{}:\\", (b'A' + index as u8) as char);
+                places.push(FolderPlace {
+                    kind: "drive",
+                    name: path.clone(),
+                    path,
+                });
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    places.push(FolderPlace {
+        kind: "root",
+        name: "Root".into(),
+        path: "/".into(),
+    });
+    places
+}
 fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
     // Preserve the selected spelling (including drive roots) rather than emitting Windows device paths.
     let read = std::fs::read_dir(&path)
@@ -206,7 +295,8 @@ fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
     let mut truncated = false;
     for entry in read {
         let entry = entry.map_err(|_| "Could not finish reading this folder")?;
-        if !entry.path().is_dir() {
+        let child = entry.path();
+        if !child.is_dir() {
             continue;
         }
         if entries.len() == 1000 {
@@ -218,8 +308,10 @@ fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
             continue;
         }
         entries.push(FolderEntry {
+            hidden: name.starts_with('.') || hidden_attribute(&entry),
+            repository: child.join(".git").exists(),
             name,
-            path: entry.path().to_string_lossy().to_string(),
+            path: child.to_string_lossy().to_string(),
         });
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
@@ -228,6 +320,7 @@ fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
         path: path.to_string_lossy().to_string(),
         entries,
         truncated,
+        places: native_places(),
     })
 }
 pub async fn list(
@@ -274,10 +367,7 @@ pub async fn list(
         }
     }
     let path = if path.is_empty() {
-        PathBuf::from(
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                .ok_or("Home folder is unavailable")?,
-        )
+        native_home().ok_or("Home folder is unavailable")?
     } else {
         PathBuf::from(path)
     };
@@ -285,6 +375,8 @@ pub async fn list(
         .await
         .map_err(|_| "Folder browsing failed")?
 }
+// The script prints NUL-separated records: the resolved folder, "@kind:path" places, then
+// "flags:name" entries where flags are "h" (hidden) and/or "g" (contains ".git").
 #[cfg(any(windows, test))]
 fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "WSL returned unreadable folder names")?;
@@ -294,16 +386,59 @@ fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
         .filter(|s| s.starts_with('/'))
         .ok_or("WSL did not return a folder")?
         .to_string();
-    let mut entries: Vec<_> = values
-        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
-        .take(1001)
-        .map(|name| FolderEntry {
+    let mut places = Vec::new();
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for record in values.filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) {
+        if let Some(place) = record.strip_prefix('@') {
+            let Some((kind, target)) = place.split_once(':') else {
+                continue;
+            };
+            let kind = match kind {
+                "home" => "home",
+                "root" => "root",
+                "mount" => "mount",
+                "folder" => "folder",
+                _ => continue,
+            };
+            if !target.starts_with('/') {
+                continue;
+            }
+            let leaf = target
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let name = match kind {
+                "home" => "Home".to_string(),
+                "root" => "Root".to_string(),
+                "mount" => format!("{}: drive", leaf.to_uppercase()),
+                _ => leaf.to_string(),
+            };
+            places.push(FolderPlace {
+                kind,
+                name,
+                path: target.to_string(),
+            });
+            continue;
+        }
+        let Some((flags, name)) = record.split_once(':') else {
+            continue;
+        };
+        if name.is_empty() || flags.chars().any(|c| !matches!(c, 'h' | 'g')) {
+            continue;
+        }
+        if entries.len() == 1000 {
+            truncated = true;
+            break;
+        }
+        entries.push(FolderEntry {
             name: name.to_string(),
             path: format!("{}/{name}", path.trim_end_matches('/')),
-        })
-        .collect();
-    let truncated = entries.len() > 1000;
-    entries.truncate(1000);
+            hidden: flags.contains('h'),
+            repository: flags.contains('g'),
+        });
+    }
     entries.sort_by_key(|e| e.name.to_lowercase());
     Ok(FolderListing {
         parent: Path::new(&path)
@@ -312,6 +447,7 @@ fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
         path,
         entries,
         truncated,
+        places,
     })
 }
 #[cfg(test)]
@@ -321,14 +457,74 @@ mod tests {
     fn lists_directories_without_reading_files_and_handles_special_names() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("project with spaces")).unwrap();
+        std::fs::create_dir_all(root.path().join("repo").join(".git")).unwrap();
+        std::fs::create_dir(root.path().join("worktree")).unwrap();
+        std::fs::write(
+            root.path().join("worktree").join(".git"),
+            "gitdir: elsewhere",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join(".cache")).unwrap();
         std::fs::write(root.path().join("file.txt"), "not a folder").unwrap();
         let result = native_listing(root.path().into()).unwrap();
-        assert_eq!(result.entries.len(), 1);
-        assert_eq!(result.entries[0].name, "project with spaces");
+        let names: Vec<_> = result.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [".cache", "project with spaces", "repo", "worktree"]);
+        let flags: Vec<_> = result
+            .entries
+            .iter()
+            .map(|e| (e.hidden, e.repository))
+            .collect();
+        assert_eq!(
+            flags,
+            [(true, false), (false, false), (false, true), (false, true)]
+        );
+        assert!(result
+            .places
+            .iter()
+            .any(|p| p.kind == "home" && p.name == "Home"));
+        assert!(result
+            .places
+            .iter()
+            .any(|p| p.kind == if cfg!(windows) { "drive" } else { "root" }));
         assert!(native_listing(root.path().join("missing")).is_err());
-        let wsl = parse_wsl(b"/home/test\0a 'quoted' $(literal)\0project\0").unwrap();
-        assert_eq!(wsl.entries[0].path, "/home/test/a 'quoted' $(literal)");
+        let wsl = parse_wsl(
+            b"/home/test\0@home:/home/test\0@root:/\0@mount:/mnt/c\0@folder:/home/test/Projects\0@bogus:/x\0@home:relative\0:a 'quoted' $(literal)\0g:project\0h:.config\0hg:.dotrepo\0:with:colon\0z:bad flag\0",
+        )
+        .unwrap();
+        assert_eq!(wsl.entries[0].path, "/home/test/.config");
+        assert_eq!(wsl.entries[1].name, ".dotrepo");
+        assert!(wsl.entries[1].hidden && wsl.entries[1].repository);
+        assert_eq!(wsl.entries[2].path, "/home/test/a 'quoted' $(literal)");
+        assert!(!wsl.entries[2].hidden && !wsl.entries[2].repository);
+        assert!(wsl.entries[3].repository && wsl.entries[3].name == "project");
+        assert_eq!(wsl.entries[4].name, "with:colon");
+        assert_eq!(wsl.entries.len(), 5);
         assert_eq!(wsl.parent.as_deref(), Some("/home"));
+        let places: Vec<_> = wsl
+            .places
+            .iter()
+            .map(|p| (p.kind, p.name.as_str(), p.path.as_str()))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("home", "Home", "/home/test"),
+                ("root", "Root", "/"),
+                ("mount", "C: drive", "/mnt/c"),
+                ("folder", "Projects", "/home/test/Projects"),
+            ]
+        );
+    }
+    #[test]
+    fn wsl_listing_truncates_after_one_thousand_entries() {
+        let mut bytes = b"/srv\0".to_vec();
+        for index in 0..1001 {
+            bytes.extend_from_slice(format!(":dir{index:04}\0").as_bytes());
+        }
+        let listing = parse_wsl(&bytes).unwrap();
+        assert_eq!(listing.entries.len(), 1000);
+        assert!(listing.truncated);
+        assert!(!parse_wsl(b"/srv\0:one\0").unwrap().truncated);
     }
     #[test]
     fn rejects_relative_and_control_paths() {
