@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { initialWorkspace, restoreWorkspace, settingsFor, type Conversation } from './domain';
+import {
+  initialWorkspace,
+  interruptedReplyError,
+  restoreWorkspace,
+  settingsFor,
+  type Conversation,
+} from './domain';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
 import { registerInstallation } from './fleet';
 import { snapshotFor, type UsageSnapshot } from './usage';
@@ -143,6 +149,49 @@ describe('workspace replication', () => {
     expect(continued.conversations).toHaveLength(1);
     expect(continued.conversations[0].messages).toHaveLength(2);
     expect(continued.conversations[0].messages[0].durationMs).toBe(1200);
+  });
+  it('lets only the restarted execution host interrupt its dead run over a newer checkpoint', () => {
+    const base = emptyShared();
+    const c = chat();
+    const runId = crypto.randomUUID();
+    c.messages.push({
+      id: crypto.randomUUID(),
+      runId,
+      role: 'assistant',
+      createdAt: '',
+      status: 'running',
+      blocks: [{ type: 'markdown', text: 'Hel' }],
+    });
+    base.conversations.push(c);
+    const local = structuredClone(base),
+      remote = structuredClone(base);
+    // This device restarted: its saved copy was restored as interrupted.
+    local.conversations[0].messages[0].status = 'cancelled';
+    local.conversations[0].messages[0].error = interruptedReplyError;
+    // The relay holds a later checkpoint of the same run.
+    remote.conversations[0].messages[0].blocks[0].text = 'Hello world';
+    const viewer = mergeShared(base, local, remote);
+    expect(viewer.conversations[0].messages[0].status).toBe('running');
+    expect(viewer.conversations[0].messages[0].blocks[0].text).toBe('Hello world');
+    const live = mergeShared(base, local, remote, { deadRun: () => false });
+    expect(live.conversations[0].messages[0].status).toBe('running');
+    const seen: string[] = [];
+    const host = mergeShared(base, local, remote, {
+      deadRun: (conversation, message) => {
+        seen.push(`${conversation.id}:${message.runId}`);
+        return true;
+      },
+    });
+    expect(seen).toEqual([`${c.id}:${runId}`]);
+    expect(host.conversations[0].messages[0]).toMatchObject({
+      status: 'cancelled',
+      error: interruptedReplyError,
+    });
+    expect(host.conversations[0].messages[0].blocks[0].text).toBe('Hello world');
+    remote.conversations[0].messages[0].status = 'complete';
+    const finished = mergeShared(base, local, remote, { deadRun: () => true });
+    expect(finished.conversations[0].messages[0].status).toBe('complete');
+    expect(finished.conversations[0].messages[0].error).toBeUndefined();
   });
   it('preserves archive and restore changes alongside a concurrent response checkpoint', () => {
     for (const archived of [true, false]) {

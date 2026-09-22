@@ -374,6 +374,8 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
     }))
     .filter((m) => m.text.trim() || m.images?.length || m.visualizations?.length);
 }
+// Loading a saved workspace cannot regain a run that was live when the app stopped.
+export const interruptedReplyError = 'This response was interrupted when the app closed.';
 export function restoreWorkspace(value: unknown): Workspace {
   const oldSchema = z.object({
     version: z.literal(1),
@@ -417,7 +419,7 @@ export function restoreWorkspace(value: unknown): Workspace {
     for (const m of c.messages)
       if (m.status === 'running') {
         m.status = 'cancelled';
-        m.error = 'This response was interrupted when the app closed.';
+        m.error = interruptedReplyError;
       }
   }
   return data;

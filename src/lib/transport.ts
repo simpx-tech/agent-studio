@@ -34,6 +34,7 @@ import {
 import {
   executionHost,
   sharedContextChoice,
+  type Fleet,
   type Installation,
   type WslDiscovery,
   type CliInstallation,
@@ -58,6 +59,8 @@ import {
   type Workspace,
   type ChatSettings,
   type ChatLocation,
+  type Conversation,
+  type Message,
 } from './domain';
 
 export const desktop = () => isTauri();
@@ -482,6 +485,19 @@ function remoteTarget(connectionId?: string, environmentId?: string) {
   const host = executionHost(runtime!.workspace().fleet, connection.environmentId);
   return host === runtime?.installation.id ? undefined : host;
 }
+// Only the execution host can declare a run dead. After it restarts, an unfinished reply it
+// owns can never finish; a viewer or another computer must keep following the live host.
+function deadRunHere(fleet: Fleet, conversation: Conversation, message: Message): boolean {
+  if (!runtime || !message.runId) return false;
+  const connection = fleet.connections.find((c) => c.id === message.settings?.connectionId);
+  const environmentId =
+    connection?.environmentId ??
+    conversation.location?.executionEnvironmentId ??
+    conversation.location?.environmentId;
+  if (!environmentId || !fleet.environments.some((e) => e.id === environmentId)) return false;
+  if (executionHost(fleet, environmentId) !== runtime.installation.id) return false;
+  return !runtime.localRuns().includes(message.runId) && !workerRuns.has(message.runId);
+}
 async function relayRaw(
   method: string,
   path: string,
@@ -781,9 +797,12 @@ export async function pollRelay(): Promise<Presence[] | null> {
     // completion checkpoint can enqueue push.
     await publishNotificationView();
     if (generation !== relayGeneration) return null;
+    const options = desktop()
+      ? { deadRun: (c: Conversation, m: Message) => deadRunHere(start.fleet, c, m) }
+      : undefined;
     let accepted: SharedWorkspace | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
-      const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace));
+      const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace), options);
       if (JSON.stringify(merged) === JSON.stringify(remote.workspace)) {
         accepted = merged;
         break;
@@ -804,7 +823,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
     if (!accepted) throw new Error('Workspace is changing quickly. Sync will retry shortly.');
     if (generation !== relayGeneration) return null;
     const current = sharedWorkspace(runtime.workspace());
-    const combined = mergeShared(start, current, accepted);
+    const combined = mergeShared(start, current, accepted, options);
     await runtime.apply(combined);
     if (generation !== relayGeneration) return null;
     // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.

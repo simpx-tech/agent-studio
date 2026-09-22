@@ -1,6 +1,12 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { initialWorkspace, type Workspace } from './domain';
-import { emptyShared, sharedWorkspace } from './sync';
+import {
+  initialWorkspace,
+  interruptedReplyError,
+  restoreWorkspace,
+  settingsFor,
+  type Workspace,
+} from './domain';
+import { emptyShared, sharedWorkspace, type SharedWorkspace } from './sync';
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
@@ -167,6 +173,124 @@ it('routes bounded mention discovery to its selected host and rejects offline fa
     transport.searchMentions({ provider: 'codex', connectionId }, location, 'file', 'fi'),
   ).rejects.toThrow();
   expect(native.invoke.mock.calls.some(([command]) => command === 'search_mentions')).toBe(false);
+});
+
+// A reply was streaming when power was lost. The relay kept a later checkpoint than the
+// last sync; the restarted app restored its own saved copy as interrupted.
+async function restartedDevice(ownsRun: boolean) {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const host = crypto.randomUUID(),
+    computerId = crypto.randomUUID(),
+    connectionId = crypto.randomUUID(),
+    accountId = crypto.randomUUID();
+  workspace.fleet.computers.push({ id: computerId, name: 'Host' });
+  workspace.fleet.environments.push({ id: host, computerId, name: 'Host', platform: 'windows' });
+  workspace.fleet.accounts.push({
+    id: accountId,
+    provider: 'claude',
+    name: 'Host',
+    purpose: 'personal',
+  });
+  workspace.fleet.connections.push({
+    id: connectionId,
+    accountId,
+    environmentId: host,
+    profile: 'existing',
+  });
+  const settings = { ...settingsFor(workspace.preferences, 'claude'), connectionId };
+  const runId = crypto.randomUUID();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    settings,
+    title: 'Outage',
+    createdAt: '2026-09-21',
+    updatedAt: '2026-09-21',
+    location: { computerId, environmentId: host, path: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        createdAt: '2026-09-21',
+        status: 'complete',
+        blocks: [{ type: 'markdown', text: 'Build it' }],
+      },
+      {
+        id: crypto.randomUUID(),
+        runId,
+        role: 'assistant',
+        createdAt: '2026-09-21',
+        status: 'running',
+        settings,
+        blocks: [{ type: 'markdown', text: 'Working' }],
+      },
+    ],
+  });
+  const base = sharedWorkspace(workspace);
+  const remote = structuredClone(base);
+  remote.conversations[0].messages[1].blocks = [{ type: 'markdown', text: 'Working on it' }];
+  const restored = restoreWorkspace(structuredClone(workspace));
+  expect(restored.conversations[0].messages[1]).toMatchObject({
+    status: 'cancelled',
+    error: interruptedReplyError,
+  });
+  const applied: SharedWorkspace[] = [];
+  transport.configureRuntime({
+    installation: {
+      id: ownsRun ? host : crypto.randomUUID(),
+      computerId: ownsRun ? computerId : crypto.randomUUID(),
+      name: 'QA',
+      platform: 'windows',
+    },
+    workspace: () => restored,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply: async (value) => {
+      applied.push(value);
+    },
+    checkpointRun: async () => {},
+  });
+  const puts: SharedWorkspace[] = [];
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_resume') return 'https://relay.example.com/';
+    if (command === 'load_sync_state')
+      return { url: 'https://relay.example.com', instanceId: 'same-relay', base };
+    if (command !== 'relay_request') return null;
+    if (args.path === 'v1/state' && args.method === 'GET')
+      return { status: 200, body: { instanceId: 'same-relay', workspace: remote, revision: 1 } };
+    if (args.path === 'v1/state' && args.method === 'PUT') {
+      puts.push(args.body.workspace);
+      return {
+        status: 200,
+        body: { instanceId: 'same-relay', workspace: args.body.workspace, revision: 2 },
+      };
+    }
+    return { status: 200, body: [] };
+  });
+  expect(await transport.resumeRelay()).toBe(true);
+  expect(await transport.pollRelay()).toEqual([]);
+  return { puts, applied };
+}
+
+it('publishes the restarted execution host’s interrupted reply over a newer running checkpoint', async () => {
+  const { puts, applied } = await restartedDevice(true);
+  expect(puts).toHaveLength(1);
+  const reply = puts[0].conversations[0].messages[1];
+  expect(reply).toMatchObject({ status: 'cancelled', error: interruptedReplyError });
+  expect(reply.blocks).toEqual([{ type: 'markdown', text: 'Working on it' }]);
+  expect(applied.at(-1)?.conversations[0].messages[1]).toMatchObject({
+    status: 'cancelled',
+    error: interruptedReplyError,
+  });
+});
+
+it('keeps following a run another computer still executes after this device restarts', async () => {
+  const { puts, applied } = await restartedDevice(false);
+  expect(puts).toHaveLength(0);
+  const reply = applied.at(-1)?.conversations[0].messages[1];
+  expect(reply).toMatchObject({ status: 'running' });
+  expect(reply?.error).toBeUndefined();
+  expect(reply?.blocks).toEqual([{ type: 'markdown', text: 'Working on it' }]);
 });
 
 async function fixture(remoteConnection?: string) {

@@ -1,4 +1,11 @@
-import { workspaceSchema, messageText, type Conversation, type Workspace } from './domain.ts';
+import {
+  workspaceSchema,
+  messageText,
+  interruptedReplyError,
+  type Conversation,
+  type Message,
+  type Workspace,
+} from './domain.ts';
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
@@ -20,6 +27,14 @@ export const sharedSchema = workspaceSchema.pick({
   workflows: true,
   inputTemplates: true,
 });
+export type MergeOptions = {
+  /**
+   * Reports whether this device is the execution host of the run that produced `message`
+   * and no longer executes it. Only then may a locally recorded restart interruption outrank
+   * a running checkpoint from the relay; any other device's restart keeps following the run.
+   */
+  deadRun?: (conversation: Conversation, message: Message) => boolean;
+};
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -93,6 +108,7 @@ function sameRun(
   left: Conversation,
   right: Conversation,
   base?: Conversation,
+  options?: MergeOptions,
 ): Conversation | undefined {
   let settings = left.settings;
   let archived = left.archived;
@@ -135,12 +151,18 @@ function sameRun(
       bt = messageText(b);
     if (!at.startsWith(bt) && !bt.startsWith(at)) return;
     const rank = { running: 0, cancelled: 1, error: 2, complete: 3 };
-    const score = (message: typeof a) =>
-      message.error === 'This response was interrupted when the app closed.'
-        ? -1
-        : rank[message.status];
-    const selected =
+    // A restarted device only saw its own copy stop; any other copy of the run knows better.
+    const interrupted = (message: typeof a) => message.error === interruptedReplyError;
+    const score = (message: typeof a) => (interrupted(message) ? -1 : rank[message.status]);
+    const chosen =
       score(a) > score(b) ? a : score(b) > score(a) ? b : at.length >= bt.length ? a : b;
+    const other = chosen === a ? b : a;
+    // Unless the execution host itself restarted without this run: keep the newest checkpoint
+    // content, but nothing will finish it, so its interruption outranks the stale running copy.
+    const selected =
+      chosen.status === 'running' && interrupted(a) && options?.deadRun?.(left, a)
+        ? { ...chosen, status: 'cancelled' as const, error: interruptedReplyError }
+        : chosen;
     messages.push({
       ...selected,
       ...(a.proposedPlans || b.proposedPlans
@@ -149,13 +171,11 @@ function sameRun(
       ...(a.compactions || b.compactions
         ? { compactions: mergeCompactions(a.compactions, b.compactions) }
         : {}),
-      ...(a.usage || b.usage
-        ? { usage: latestTokenUsage(selected.usage, selected === a ? b.usage : a.usage) }
-        : {}),
+      ...(a.usage || b.usage ? { usage: latestTokenUsage(selected.usage, other.usage) } : {}),
       ...(a.accountUsage || b.accountUsage
         ? { accountUsage: latestAccountUsage(a.accountUsage, b.accountUsage) }
         : {}),
-      blocks: mergeActivityBlocks(selected.blocks, selected === a ? b.blocks : a.blocks),
+      blocks: mergeActivityBlocks(selected.blocks, other.blocks),
       ...(a.fileChanges || b.fileChanges
         ? { fileChanges: latestFileChanges(a.fileChanges, b.fileChanges) }
         : {}),
@@ -233,6 +253,7 @@ export function mergeShared(
   base: SharedWorkspace,
   local: SharedWorkspace,
   remote: SharedWorkspace,
+  options?: MergeOptions,
 ): SharedWorkspace {
   const merge = <T extends { id: string }>(
     old: T[],
@@ -293,6 +314,7 @@ export function mergeShared(
             left as unknown as Conversation,
             right as unknown as Conversation,
             before as unknown as Conversation | undefined,
+            options,
           );
           if (response) {
             result.push(response as unknown as T);
