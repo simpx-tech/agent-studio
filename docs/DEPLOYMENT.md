@@ -1,6 +1,6 @@
 # Production VPS
 
-Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d6d`. Subsequent releases are selected by the `/opt/agent-studio/current` symlink; inspect it for the live revision.
+Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d6d`. Subsequent releases are selected by the `/opt/agent-studio/current` symlink; inspect it for the live revision. Since 2026-09-23 the server installs each published GitHub release by itself; see [automatic updates](#automatic-updates).
 
 - Initial HTTPS endpoint: https://studio.72.61.63.95.sslip.io
 - VPS: `72.61.63.95` / `srv1169603`, Debian 13.
@@ -10,7 +10,7 @@ Agent Studio was initially deployed on 2026-09-09 from application commit `12f2d
 - Service: `/etc/systemd/system/agent-studio.service`, enabled on boot and running as the dedicated `agent-studio` system user. It listens on `127.0.0.1:4317`; memory is capped at 512 MiB and CPU at one core.
 - Persistent workspace: `/var/lib/agent-studio`, owned by the service user with mode 0700.
 - Pairing configuration: `/etc/agent-studio/relay.env`, root-only mode 0600. A copy of the pairing key is in the Windows user's protected `.ssh/agent-studio-vps-pairing-key.txt`. Neither secret is committed. Do not print secrets in command logs.
-- Desktop downloads: `/opt/agent-studio/downloads/agent-studio-windows-x64-setup.exe`, selected by `AGENT_STUDIO_DOWNLOADS_DIR` in the service's `downloads.conf` drop-in. Use the tested Windows NSIS installer from the matching GitHub Release (installed copies then update themselves; see [automatic updates](UPDATES.md)), checksum it after upload, and publish it atomically. Retain the previous package for rollback. This directory contains only public installers; the relay streams its fixed allowlisted package separately from the public shell and private workspace files. No macOS or Linux installer is currently published.
+- Desktop downloads: `/opt/agent-studio/downloads/agent-studio-windows-x64-setup.exe`, selected by `AGENT_STUDIO_DOWNLOADS_DIR` in the service's `downloads.conf` drop-in. After each automatic relay update, the release's signed Windows NSIS installer replaces it atomically (installed copies then update themselves; see [desktop updates](UPDATES.md)), and the previous package is kept in `/var/backups/agent-studio`. This directory contains only public installers; the relay streams its fixed allowlisted package separately from the public shell and private workspace files. No macOS or Linux installer is currently published.
 - HTTPS: the existing Caddy service imports `/etc/caddy/sites-enabled/agent-studio.caddy`. Caddy obtained a trusted Let's Encrypt certificate and manages renewal. The original Caddyfile backup path is recorded in `/etc/agent-studio/caddy-backup-path`.
 
 ## Connect a desktop and phone
@@ -21,11 +21,31 @@ Open **Connections → Set up sync** in the desktop app, enter the HTTPS endpoin
 
 The IP-based hostname needs no user-managed DNS record. To use `studio.simpx.net`, point its A record at `72.61.63.95`, confirm public resolution, then add that hostname to the dedicated Caddy site, validate, and reload Caddy. Preserve the previous hostname during migration. Browser storage and sessions are scoped to the origin, so pair the new origin separately.
 
+## Automatic updates
+
+`agent-studio-update.timer` runs [`scripts/vps/update.ts`](../scripts/vps/update.ts) as root every five minutes. It reads the repository's latest GitHub release through the public API and installs each new release once, usually within fifteen minutes of publication, including build time. GitHub holds no credentials for this server, and a merge to `main` without a new version publishes no release, so it changes nothing here.
+
+1. **Authenticate.** The release must contain `Agent-Studio_<version>_x64-setup.exe` and its `.sig`. The installer must match GitHub's SHA-256 digest and carry a valid updater signature for exactly that version from the trusted key, the same check installed apps make. Only the signing release pipeline can therefore deploy. The trusted key is stored in `/var/lib/agent-studio-update/state.json`, seeded from `src-tauri/tauri.conf.json` at installation, and follows a key rotation after activating a release that ships a new public key.
+2. **Build.** The tagged commit's source is built as the unprivileged `agent-studio-build` user in `/opt/agent-studio/releases/.building-<commit>`, one sandboxed `systemd-run` step at a time: `npm ci --ignore-scripts` (the only step with network access), `npm run build` and `npm test`. The sandbox cannot read the relay's data, backups, the updater state or `/etc/agent-studio`, may write only that directory and `/var/cache/agent-studio-build`, and runs with 4 GiB of memory and low CPU and I/O weight beside the other workloads. The finished release becomes root-owned, not writable by others, and is renamed to `releases/<commit>`.
+3. **Activate.** A stopped relay is left alone. While any workspace checkpoint shows a running reply, activation waits up to two hours, then proceeds. The updater stops `agent-studio`, backs up `/var/lib/agent-studio` (without the `.npm` cache earlier manual builds left there) to `/var/backups/agent-studio/pre-<commit>.tar.gz`, points `current` at the release and starts the service. The relay must answer an unauthenticated `/v1/state` request with 401 within 30 seconds and again after five more. Otherwise the updater restores the data backup and the previous release and restarts the service; the replaced data stays in `/var/lib/.agent-studio-failed-<short commit>-<time>`.
+4. **Publish the installer.** The verified installer replaces the public Windows download only after a successful activation. The updater confirms the relay serves the new file and restores the previous package otherwise.
+
+Download and build failures are retried after 10 and 60 minutes, three attempts in total. An untrusted installer or a failed health check marks the release failed without automatic retries. A newer release replaces one that has not been activated yet, removing its unused build. Older releases are never installed. The updater keeps the five most recent releases it activated, with their data and installer backups, and removes older ones it activated; releases and backups deployed by hand are left alone.
+
+- **Status:** `systemctl list-timers agent-studio-update.timer`, `journalctl -u agent-studio-update` and `/var/lib/agent-studio-update/state.json`, which holds no secrets. Quiet runs log nothing.
+- **Check now:** `systemctl start agent-studio-update`.
+- **Retry a failed release:** `/opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts retry`.
+- **Pause:** `systemctl disable --now agent-studio-update.timer`; `enable --now` resumes. Manual deployments hold `flock /opt/agent-studio/.deploy.lock`, and the updater skips runs while it is held.
+- **Install or update the updater:** it never updates itself, because release code only ever runs as unprivileged users. When a release changes `scripts/vps/` or `scripts/release.ts`, its journal says so. Copy the repository's `scripts` directory and `src-tauri/tauri.conf.json` to the server and run `bash scripts/vps/install.sh <scripts directory> <tauri.conf.json>` as root. It creates the build user and state directories, installs the files under `/opt/agent-studio/updater` and the units, and enables the timer, leaving the relay, its data and releases unchanged.
+- **End-to-end check:** `node scripts/vps/smoke.mjs` packages the committed HEAD and runs the updater on the VPS against an isolated relay instance on port 4399 and a local stand-in for GitHub signed with a throwaway key. It installs a release, waits for a running reply, rolls back a release whose relay exits, refuses an installer from another key, ignores a downgrade, confirms production is unchanged and removes everything it created. Results are written to `artifacts/vps-update-qa/result.json`.
+
+Both units pin the Node runtime path; update `agent-studio.service` and `agent-studio-update.service` together when changing it.
+
 ## Inspect and update
 
 Read status with `systemctl status agent-studio` and logs with `journalctl -u agent-studio`. Do not print `relay.env`. The server only hosts the PWA and relay; it does not contain provider CLI credentials.
 
-Build and test the final candidate before deployment. Create a new release directory, install dependencies using its lockfile, build the frontend, and run tests as an unprivileged user. Keep release files root-owned after building. Checksum source archives after transfer. Point `current` at the new release and restart only `agent-studio`. Keep the previous release for rollback. Never overwrite persistent data or generate a replacement pairing key as part of an ordinary update.
+To deploy something other than a published release, pause the timer or hold the deployment lock. Build and test the final candidate before deployment. Create a new release directory, install dependencies using its lockfile, build the frontend, and run tests as an unprivileged user. Keep release files root-owned after building. Checksum source archives after transfer. Point `current` at the new release and restart only `agent-studio`. Keep the previous release for rollback. Never overwrite persistent data or generate a replacement pairing key as part of an ordinary update.
 
 The single-admin upgrade writes version 2 of the private workspace registry at startup. Keep the pre-upgrade registry backup: older relay releases cannot read version 2. If startup fails and a rollback is needed, stop the service, restore only the registry from that private backup (or remove the new registry if none existed), then restart the previous release. Preserve the current chat and session files.
 

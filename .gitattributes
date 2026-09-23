@@ -1,3 +1,6 @@
 # Shell scripts are embedded into the desktop binary and executed inside Linux.
 # Keep LF endings on every checkout, including Windows CI runners with autocrlf.
 *.sh text eol=lf
+# systemd units are installed on Linux as-is.
+*.service text eol=lf
+*.timer text eol=lf

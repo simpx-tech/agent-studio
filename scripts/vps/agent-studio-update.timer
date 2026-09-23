@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for new Agent Studio releases every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -62,7 +62,9 @@ The build job fails with an explanation while either is missing. Keep a private 
 a password manager entry. Never commit, print, or copy the key elsewhere.
 
 If the key is lost, installed copies cannot accept any new update: publish a release with a new
-key and reinstall every copy by hand. To rotate a key deliberately, publish one release signed
+key and reinstall every copy by hand. The VPS refuses that release too until its trusted key is
+replaced with `update.ts trust <tauri.conf.json> --replace` (see
+[automatic VPS updates](DEPLOYMENT.md#automatic-updates)). To rotate a key deliberately, publish one release signed
 with the old key that contains the new public key, and switch the secret afterwards.
 
 ## Publishing a release
@@ -78,6 +80,9 @@ with the old key that contains the new public key, and switch the secret afterwa
    creates the release `v<version>` with the installers, their `.sig` files, and `latest.json`.
    Release notes list the commit subjects since the previous release tag. `gh` keeps the release
    a draft until every asset is uploaded.
+4. The production VPS installs the published release by itself and replaces its public Windows
+   download. It deploys only releases whose NSIS installer carries this key's signature for their
+   version. See [automatic VPS updates](DEPLOYMENT.md#automatic-updates).
 
 A push to `main` whose version already has a release publishes nothing and shows a warning;
 published releases are never replaced. Running the workflow manually on `main` retries a failed

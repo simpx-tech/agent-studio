@@ -1,0 +1,15 @@
+[Unit]
+Description=Install new Agent Studio releases
+Documentation=https://github.com/simpx-tech/agent-studio/blob/main/docs/DEPLOYMENT.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Skip this run while a manual deployment holds the same lock.
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 0 /opt/agent-studio/.deploy.lock /opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts check
+TimeoutStartSec=2h
+UMask=0077
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

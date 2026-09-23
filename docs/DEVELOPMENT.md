@@ -66,9 +66,11 @@ has a release is never replaced: the job only warns. Bump the version on
 `x.y.z`) before merging a release. See [automatic updates](UPDATES.md) for the
 signing key, local `--no-sign` builds, and the release format.
 
-Publishing does not update the VPS or replace its public Windows download. Follow
-[production operations](DEPLOYMENT.md) to publish a tested release while
-preserving private workspaces, pairing keys, and browser sessions.
+The production VPS then installs the release by itself, usually within fifteen
+minutes, and replaces its public Windows download. It authenticates the release
+by its signed installer, builds and tests it in a sandbox, and rolls back on a
+failed health check while preserving private workspaces, pairing keys, and
+browser sessions. See [automatic updates](DEPLOYMENT.md#automatic-updates).
 
 Before pushing changes, run the full local verification in `CLAUDE.md`. Native
 packaging for other operating systems is verified on its corresponding hosted

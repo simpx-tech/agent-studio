@@ -145,7 +145,8 @@ jobs:
 
   release:
     name: Publish release
-    # Publish only after verification and every platform build succeed.
+    # Publish only after verification and every platform build succeed. The production VPS
+    # installs each published release by itself; see docs/DEPLOYMENT.md.
     needs: [verify, build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
