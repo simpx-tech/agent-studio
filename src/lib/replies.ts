@@ -18,12 +18,14 @@ export function replyTimeTotals(messages: Message[]): Map<string, ReplyTimeTotal
   return totals;
 }
 
+// Tenths of a second only matter under a minute; longer times round to whole seconds.
 export function formatReplyTime(durationMs: number): string {
   const tenths = Math.round(durationMs / 100);
-  const hours = Math.floor(tenths / 36000);
-  const minutes = Math.floor((tenths % 36000) / 600);
-  const seconds = ((tenths % 600) / 10).toFixed(1);
-  return `${hours ? `${hours}h ` : ''}${hours || minutes ? `${minutes}m ` : ''}${seconds}s`;
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+  const seconds = Math.round(durationMs / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours ? `${hours}h ` : ''}${minutes}m ${seconds % 60}s`;
 }
 
 export function formatModelName(id: string): string {

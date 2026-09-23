@@ -2765,11 +2765,14 @@ test('total AI time accumulates saved replies in this conversation and survives 
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.getByRole('button', { name: 'Cumulative time fixture', exact: true }).click();
   const totals = page.locator('.usage-toggle');
+  const elapsed = (index: number) => totals.nth(index).locator('.usage-summary > span').first();
+  await expect(elapsed(0)).toHaveText('1.3s');
   await expect(totals.nth(0)).toContainText('1.3s total');
-  await expect(totals.nth(1)).toContainText('1m 2.5s total');
-  await expect(totals.nth(2)).toContainText('≥ 1m 2.5s total');
+  await expect(elapsed(1)).toHaveText('1m 1s');
+  await expect(totals.nth(1)).toContainText('1m 3s total');
+  await expect(totals.nth(2)).toContainText('≥ 1m 3s total');
   await expect(totals.nth(2)).toContainText('Time not recorded');
-  await expect(totals.nth(3)).toContainText('≥ 1m 2.5s total');
+  await expect(totals.nth(3)).toContainText('≥ 1m 3s total');
   await totals.last().click();
   await expect(page.getByText('Total AI time', { exact: true }).last()).toBeVisible();
   await expect(page.locator('.reply-usage').last()).toContainText('Timing is missing for 1 reply');
@@ -2806,8 +2809,8 @@ test('total AI time accumulates saved replies in this conversation and survives 
         .conversations.find((c: any) => c.title === 'Cumulative time fixture')
         .messages.at(-1).durationMs,
   );
-  const tenths = Math.round((62500 + durations) / 100);
-  const expected = `≥ ${Math.floor(tenths / 600)}m ${((tenths % 600) / 10).toFixed(1)}s total`;
+  const seconds = Math.round((62500 + durations) / 1000);
+  const expected = `≥ ${Math.floor(seconds / 60)}m ${seconds % 60}s total`;
   await expect(totals.last()).toContainText(expected);
   await expect(totals.first()).toContainText('1.3s total');
   await page.reload();

@@ -24,6 +24,9 @@
     expanded = expanded === section ? null : section;
   }
   const usage = $derived(message.usage);
+  const elapsed = $derived(
+    message.durationMs == null ? 'Time not recorded' : formatReplyTime(message.durationMs),
+  );
   const totalTime = $derived(
     timeTotal?.durationMs == null
       ? 'Not recorded'
@@ -61,11 +64,7 @@
     >
       <ChevronDown size={13} class="disclosure" aria-hidden="true" />
       <span class="usage-summary">
-        <span
-          >{message.durationMs == null
-            ? 'Time not recorded'
-            : `${(message.durationMs / 1000).toFixed(1)}s`}</span
-        >
+        <span>{elapsed}</span>
         {#if timeTotal}<span title="Recorded AI time in this conversation through this reply"
             >{timeTotal.durationMs == null ? 'Total time not recorded' : `${totalTime} total`}</span
           >{/if}
@@ -118,7 +117,7 @@
         {#if message.durationMs != null}
           <div>
             <dt>Elapsed time</dt>
-            <dd>{(message.durationMs / 1000).toFixed(1)}s</dd>
+            <dd>{elapsed}</dd>
           </div>
         {/if}
         {#if timeTotal}<div>

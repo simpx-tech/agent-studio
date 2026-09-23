@@ -53,12 +53,16 @@ describe('reply identities and model switches', () => {
     expect(totals.get(timed.id)).toEqual({ durationMs: 12000, missing: 2 });
     expect(replyTimeTotals([]).size).toBe(0);
   });
-  it('formats totals with minutes and hours and carries rounded seconds across boundaries', () => {
+  it('keeps tenths under a minute and whole seconds with minutes and hours', () => {
     expect(formatReplyTime(0)).toBe('0.0s');
-    expect(formatReplyTime(62500)).toBe('1m 2.5s');
-    expect(formatReplyTime(59999)).toBe('1m 0.0s');
-    expect(formatReplyTime(3661250)).toBe('1h 1m 1.3s');
-    expect(formatReplyTime(3599999)).toBe('1h 0m 0.0s');
+    expect(formatReplyTime(1250)).toBe('1.3s');
+    expect(formatReplyTime(59949)).toBe('59.9s');
+    expect(formatReplyTime(59950)).toBe('1m 0s');
+    expect(formatReplyTime(62500)).toBe('1m 3s');
+    expect(formatReplyTime(1710800)).toBe('28m 31s');
+    expect(formatReplyTime(3599499)).toBe('59m 59s');
+    expect(formatReplyTime(3599500)).toBe('1h 0m 0s');
+    expect(formatReplyTime(4052000)).toBe('1h 7m 32s');
   });
   it('captures a resolved CLI default name without relabeling old replies', () => {
     const message = reply('');

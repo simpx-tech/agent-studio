@@ -1,6 +1,7 @@
 <script lang="ts">
   import { GitBranch, ChevronDown, Check, LoaderCircle, Circle } from '@lucide/svelte';
   import type { Message } from '$lib/domain';
+  import { formatReplyTime } from '$lib/replies';
   let { message, compact = false }: { message: Message; compact?: boolean } = $props();
   function label(status: string) {
     if (['running', 'pending', 'paused'].includes(status) && message.status !== 'running')
@@ -34,7 +35,7 @@
           >{run.agents.filter((a) => a.status === 'complete').length}/{run.agents.length} agents complete</span
         >
         {#if run.tokens !== null}<span>{run.tokens.toLocaleString()} tokens</span>{/if}
-        {#if run.durationMs !== null}<span>{(run.durationMs / 1000).toFixed(1)}s</span>{/if}
+        {#if run.durationMs !== null}<span>{formatReplyTime(run.durationMs)}</span>{/if}
       </div>
       {#if run.description}<p>{run.description}</p>{/if}
       {#each [...run.phases, ...(run.agents.some((a) => !run.phases.some((p) => p.index === a.phaseIndex)) ? [{ index: -1, title: 'Agents' }] : [])] as phase (phase.index)}
@@ -58,7 +59,7 @@
                   {#if agent.model}<span>{agent.model}</span>{/if}
                   {#if agent.tokens !== null}<span>{agent.tokens.toLocaleString()} tokens</span
                     >{/if}
-                  {#if agent.durationMs !== null}<span>{(agent.durationMs / 1000).toFixed(1)}s</span
+                  {#if agent.durationMs !== null}<span>{formatReplyTime(agent.durationMs)}</span
                     >{/if}
                 </div>
                 {#if agent.result}<p class="agent-result">{agent.result}</p>{:else}<p class="muted">
