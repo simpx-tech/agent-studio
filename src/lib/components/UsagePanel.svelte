@@ -81,7 +81,6 @@
           ? 'unknown'
           : 'up';
   const stale = $derived(!!error || limits.some((w) => isStale(snapshot, w, now)));
-  const primaryLimits = $derived(limits.slice(0, 2));
   const contextValue = $derived(
     context.reported == null
       ? 'Not measured yet'
@@ -134,7 +133,7 @@
 />
 
 <section class="usage-panel" aria-label="Usage and context">
-  <div class="usage-strip" style:--usage-groups={primaryLimits.length + 1}>
+  <div class="usage-strip" style:--usage-groups={limits.length + 1}>
     <button
       class="usage-chip context-chip"
       class:usage-warning={(context.percent ?? 0) >= 80}
@@ -166,7 +165,7 @@
           ></i>{/if}
       </span>
     </button>
-    {#each primaryLimits as window (window.id)}
+    {#each limits as window (window.id)}
       <button
         class="usage-chip"
         class:usage-warning={window.pace.tone === 'watch' || window.pace.tone === 'danger'}
@@ -177,19 +176,21 @@
         aria-label={`Show ${window.label} usage details. ${window.pace.label}`}
       >
         <span class="usage-bar-heading"
-          ><span>{window.label}</span><strong
-            >{window.usedPercent == null
-              ? loading && !snapshot
-                ? 'Checking…'
-                : 'Not reported'
-              : `${percentage(window.usedPercent)} used`}</strong
-          >
-          {#if window.pace.state !== 'unknown'}<PaceIndicator
-              label={window.pace.label}
-              tone={window.pace.tone}
-              direction={quotaDirection(window.pace.state)}
-              description={`${window.pace.detail} ${window.pace.advice}`}
-            />{/if}</span
+          ><span>{window.label}</span><span class="usage-bar-value"
+            ><strong
+              >{window.usedPercent == null
+                ? loading && !snapshot
+                  ? 'Checking…'
+                  : 'Not reported'
+                : `${percentage(window.usedPercent)} used`}</strong
+            >
+            {#if window.pace.state !== 'unknown'}<PaceIndicator
+                label={window.pace.label}
+                tone={window.pace.tone}
+                direction={quotaDirection(window.pace.state)}
+                description={`${window.pace.detail} ${window.pace.advice}`}
+              />{/if}</span
+          ></span
         >
         {@render quotaBar(window, true)}
       </button>

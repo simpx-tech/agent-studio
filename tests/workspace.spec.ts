@@ -665,8 +665,16 @@ test('subscription windows include resets and Fable is shown only for Fable', as
   });
   await expect(page.getByTestId('limit-weekly')).toContainText(`Resets ${resetDate}`);
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
+  const strip = page.locator('.usage-strip');
+  await expect(strip.getByRole('progressbar')).toHaveCount(3);
   await pick(page, 'Model', 'Fable');
-  await expect(page.locator('.usage-strip').getByRole('progressbar')).toHaveCount(3);
+  await expect(strip.getByRole('progressbar')).toHaveCount(4);
+  const fableChip = strip.getByRole('button', { name: /^Show Fable weekly usage details/ });
+  await expect(fableChip.locator('.usage-bar-heading > span').first()).toHaveText('Fable weekly');
+  await expect(fableChip.locator('strong')).toHaveText('62% used');
+  await expect(
+    fableChip.getByRole('progressbar', { name: 'Fable weekly limit used', exact: true }),
+  ).toHaveAttribute('aria-valuenow', '62');
   await expect(page.getByTestId('limit-fable-weekly')).toContainText('62%');
   await expect(page.getByTestId('limit-fable-weekly').getByRole('meter')).toHaveAttribute(
     'aria-valuenow',
@@ -676,8 +684,15 @@ test('subscription windows include resets and Fable is shown only for Fable', as
   await page.setViewportSize({ width: 880, height: 720 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'artifacts/usage-compact.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(fableChip).toBeInViewport();
+  expect(await strip.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'artifacts/usage-phone.png' });
+  await page.setViewportSize({ width: 880, height: 720 });
   await pick(page, 'Model', 'Sonnet');
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
+  await expect(strip.getByRole('progressbar')).toHaveCount(3);
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
 });
 
@@ -747,7 +762,7 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
     expect(bars.aligned && bars.sameTrack).toBe(true);
     await expectVisibleQuotaComparison(card.getByRole('meter'), current > 50);
   }
-  await expect(page.locator('.usage-strip .recommended-fill')).toHaveCount(2);
+  await expect(page.locator('.usage-strip .recommended-fill')).toHaveCount(3);
   await expect(page.locator('.usage-strip')).not.toContainText(/Recommended|Guide unavailable/);
   await expect(page.locator('.context-chip .recommended-fill')).toHaveCount(0);
   await expect(page.locator('.usage-extra, .usage-totals')).toHaveCount(0);
@@ -755,6 +770,18 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
   await page.screenshot({ path: 'artifacts/pace-browser.png', fullPage: true });
   await page.setViewportSize({ width: 880, height: 720 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  // Fable weekly's heading can wrap at this width; its arrow must stay beside the value.
+  await expect(page.locator('.usage-strip .usage-bar-value .pace-indicator')).toHaveCount(3);
+  expect(
+    await page.locator('.usage-strip .usage-bar-value').evaluateAll((values) =>
+      values.every((value) => {
+        const text = value.querySelector('strong')!.getBoundingClientRect();
+        const arrow = value.querySelector('.pace-indicator')!.getBoundingClientRect();
+        const middle = arrow.top + arrow.height / 2;
+        return middle > text.top && middle < text.bottom;
+      }),
+    ),
+  ).toBe(true);
   await page.screenshot({ path: 'artifacts/pace-compact.png', fullPage: true });
   await page.evaluate(() => localStorage.setItem('test-usage-error', '1'));
   await returnAfterUsageCacheExpires(page);

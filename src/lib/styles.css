@@ -1775,6 +1775,15 @@ button.setup-hint:not(:disabled):hover {
 .usage-bar-heading strong {
   margin-left: auto;
 }
+/* A quota value wraps with its pace arrow, leaving the arrow alone only when both cannot fit. */
+.usage-bar-value {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-left: auto;
+}
 .usage-meter.compact-meter {
   display: block;
   width: 100%;
