@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    Brain,
     Sparkles,
     Globe,
     GitBranch,
@@ -23,7 +24,11 @@
     toolProgressLabel,
     type ToolActivity,
   } from '$lib/activity';
-  import { activityGroupSummary, groupActivityEntries } from '$lib/activity-groups';
+  import {
+    activityEntries,
+    activityGroupSummary,
+    groupActivityEntries,
+  } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
   import { openLink } from '$lib/transport';
@@ -62,34 +67,7 @@
     image: Images,
     tool: Wrench,
   };
-  const entries = $derived(
-    (blocks.length
-      ? blocks
-      : tools.map((tool) => ({
-          type: 'activity' as const,
-          text: tool.name,
-          tool,
-          progress: undefined,
-        }))
-    )
-      .filter((b) => b.type === 'activity')
-      .filter(
-        (b) =>
-          b.tool ||
-          b.progress ||
-          !['Starting the provider CLI', 'Connected to Claude'].includes(b.text.trim()),
-      )
-      .filter((b) => !b.progress || b.text.trim() !== finalText.trim())
-      .filter(
-        (b) =>
-          b.tool ||
-          b.progress ||
-          !tools.length ||
-          !/^(Using |Running command|Editing files|Searching the web|Using connected tool)/.test(
-            b.text,
-          ),
-      ),
-  );
+  const entries = $derived(activityEntries(blocks, tools, finalText));
   const groups = $derived(groupActivityEntries(entries));
   function topLevel(tool: ToolActivity) {
     return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
@@ -269,6 +247,22 @@
             </div>
           </details>
         {/if}
+      {:else if group.kind === 'reasoning'}
+        <div class="reasoning-entry" role="group" aria-label="Reasoning">
+          <span class="reasoning-mark" title="Reasoning reported by the provider"
+            ><Brain size={16} aria-hidden="true" /></span
+          >
+          <div class="reasoning-body">
+            <!-- Sanitized markdown; nested links provide keyboard interaction. -->
+            <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+            <div class="prose reasoning-text" onclick={progressLink}>
+              {@html renderMarkdown(group.block.text)}
+            </div>
+            {#if group.block.truncated}<p class="tool-note">
+                Reasoning display limit reached. This section is incomplete.
+              </p>{/if}
+          </div>
+        </div>
       {:else}
         {@const entry = group.entry}
         {#if entry.progress}
@@ -432,6 +426,34 @@
     color: var(--text-secondary);
   }
   .progress-message > :global(:last-child) {
+    margin-bottom: 0;
+  }
+  /* Reasoning reads as quieter prose beside a brain mark, aligned with tool group labels. */
+  .reasoning-entry {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
+    min-width: 0;
+    font-size: var(--text-base);
+    line-height: var(--leading-prose);
+  }
+  .reasoning-mark {
+    display: flex;
+    align-items: center;
+    height: calc(1em * var(--leading-prose));
+    color: var(--text-faint);
+  }
+  .reasoning-body {
+    min-width: 0;
+  }
+  .reasoning-text {
+    font-size: inherit;
+    color: var(--text-muted);
+  }
+  .reasoning-text > :global(:first-child) {
+    margin-top: 0;
+  }
+  .reasoning-text > :global(:last-child) {
     margin-bottom: 0;
   }
   .metadata-label,

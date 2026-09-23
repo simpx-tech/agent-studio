@@ -68,15 +68,15 @@ for (const mobile of [false, true])
       'complete',
     );
     await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
-    const summary = '.reasoning-panel > summary';
+    const summary = '.activity-summary > summary';
     await page.locator(summary).click();
-    await expect(page.locator('.reasoning-panel')).toHaveAttribute('open', '');
+    await expect(page.locator('.activity-summary')).toHaveAttribute('open', '');
     await place(page, summary, 120);
     const before = await measure(page, summary);
     expect(Math.abs(before.target - 120)).toBeLessThan(1);
     expect(before.space).toBe(0);
     await page.locator(summary).click();
-    await expect(page.locator('.reasoning-panel')).not.toHaveAttribute('open', '');
+    await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
     await frames(page);
     await page.locator('.chat-scroll').screenshot({
       path: `artifacts/chat-virtual-space-${mobile ? 'mobile' : 'desktop'}.png`,
@@ -200,16 +200,25 @@ test('collapsing while following fills the space with new content before followi
   page,
 }) => {
   await start(page);
-  await emit(page, {
-    kind: 'reasoning',
-    id: 'r1',
-    revision: 1,
-    text: reasoning(10),
-    truncated: false,
+  await page.evaluate(() => {
+    for (let i = 0; i < 7; i++)
+      (window as any).emitCapability({
+        kind: 'tool',
+        tool: {
+          id: `held-tool-${i}`,
+          revision: 1,
+          category: 'tool',
+          name: 'Run command',
+          status: 'complete',
+          detail: `Check project file ${i}`,
+          sources: [],
+          agents: [],
+        },
+      });
   });
-  const summary = '.reasoning-panel > summary';
+  const summary = '.activity-group > summary';
   await page.locator(summary).click();
-  await expect(page.locator('.reasoning-panel')).toHaveAttribute('open', '');
+  await expect(page.locator('.activity-group')).toHaveAttribute('open', '');
   // Expanding stopped following; return to the end to follow again.
   await page.locator('.chat-scroll').hover({ position: { x: 20, y: 20 } });
   await page.mouse.wheel(0, 50000);

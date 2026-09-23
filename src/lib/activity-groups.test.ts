@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { activityGroupSummary, groupActivityEntries } from './activity-groups';
+import { activityEntries, activityGroupSummary, groupActivityEntries } from './activity-groups';
 import type { ToolActivity } from './activity';
+import type { ContentBlock } from './domain';
 
 const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
   id,
@@ -36,7 +37,9 @@ describe('activity groups', () => {
     ]);
     expect(updated.map((g) => g.key)).toEqual(original.map((g) => g.key));
     expect(
-      updated.map((g) => (g.kind === 'tools' ? g.tools.map((t) => t.id) : g.entry.text)),
+      updated.map((g) =>
+        g.kind === 'comment' ? g.entry.text : g.kind === 'tools' && g.tools.map((t) => t.id),
+      ),
     ).toEqual([['read1', 'read2'], comment.text, ['run1']]);
     expect(first.tool.revision).toBe(1);
     const arbitraryId = groupActivityEntries([
@@ -44,6 +47,54 @@ describe('activity groups', () => {
       { ...comment, progress: { id: '0', revision: 1 } },
     ]);
     expect(new Set(arbitraryId.map((g) => g.key)).size).toBe(2);
+  });
+
+  it('places reasoning between comments and tool groups in recorded order', () => {
+    const think = (id: string, text: string): ContentBlock => ({
+      type: 'reasoning',
+      id,
+      revision: 1,
+      text,
+      truncated: false,
+    });
+    const call = (value: ToolActivity): ContentBlock => ({
+      type: 'activity',
+      text: value.name,
+      tool: { ...value, facts: [] },
+    });
+    const blocks: ContentBlock[] = [
+      { type: 'activity', text: 'Starting the provider CLI', order: 0 },
+      { type: 'activity', text: 'I will check the folder.', progress: { id: 'p1', revision: 1 } },
+      call(tool('read1')),
+      think('msg1:1', 'Leave the folder untouched.'),
+      // Older Claude replies saved the snapshot of the same thinking block again.
+      think('msg1:0', 'Leave the folder untouched.'),
+      call(tool('run1', { name: 'Run command' })),
+      call(tool('run2', { name: 'Run command' })),
+      think('msg2:1', 'Leave the folder untouched.'),
+      think('rs_codex', '**Checking tests**'),
+      { type: 'activity', text: 'Done.', progress: { id: 'p2', revision: 1 } },
+      { type: 'markdown', text: 'Done.' },
+    ];
+    const tools = blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+    const groups = groupActivityEntries(activityEntries(blocks, tools, 'Done.'));
+    expect(
+      groups.map((g) =>
+        g.kind === 'reasoning'
+          ? `reasoning ${g.block.id}`
+          : g.kind === 'tools'
+            ? g.tools.map((t) => t.id).join(',')
+            : g.entry.text,
+      ),
+    ).toEqual([
+      'I will check the folder.',
+      'read1',
+      'reasoning msg1:1',
+      'run1,run2',
+      'reasoning msg2:1',
+      'reasoning rs_codex',
+    ]);
+    expect(new Set(groups.map((g) => g.key)).size).toBe(groups.length);
   });
 
   it('uses reported file operations before the command flag and distinguishes reading a skill from invoking one', () => {

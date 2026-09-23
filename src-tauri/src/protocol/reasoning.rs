@@ -2,10 +2,16 @@
 //! payloads never enter the display channel or the answer/prompt text.
 use super::RunEvent;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 const MAX_ITEMS: usize = 64;
 const MAX_TEXT: usize = 16000;
+/// Claude messages remembered while their snapshot lines arrive.
+const RECENT_MESSAGES: usize = 8;
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control)
+}
 
 #[derive(Default)]
 struct Parts {
@@ -53,16 +59,21 @@ struct Item {
 #[derive(Default)]
 pub struct ReasoningDecoder {
     items: Vec<Item>,
+    /// Claude messages whose thinking arrived as partial stream events.
+    streamed: VecDeque<String>,
+    /// Content blocks already printed in each Claude message's snapshot lines.
+    printed: VecDeque<(String, usize)>,
 }
 impl ReasoningDecoder {
-    fn item(&mut self, id: &str) -> Option<&mut Item> {
-        if id.is_empty() || id.len() > 240 || id.chars().any(char::is_control) {
+    /// Only reported text reserves one of the bounded items; an empty start does not.
+    fn item(&mut self, id: &str, create: bool) -> Option<&mut Item> {
+        if !valid_id(id) {
             return None;
         }
         let index = if let Some(index) = self.items.iter().position(|i| i.id == id) {
             index
         } else {
-            if self.items.len() >= MAX_ITEMS {
+            if !create || self.items.len() >= MAX_ITEMS {
                 return None;
             }
             self.items.push(Item {
@@ -95,7 +106,7 @@ impl ReasoningDecoder {
         })
     }
     pub fn text(&mut self, id: &str, text: &str, append: bool) -> Option<RunEvent> {
-        let item = self.item(id)?;
+        let item = self.item(id, !text.is_empty())?;
         item.content.update(0, text, append);
         Self::emit(item)
     }
@@ -114,7 +125,7 @@ impl ReasoningDecoder {
                     return None;
                 }
                 let delta = p["delta"].as_str()?;
-                let item = self.item(p["itemId"].as_str()?)?;
+                let item = self.item(p["itemId"].as_str()?, !delta.is_empty())?;
                 let parts = if summary {
                     &mut item.summary
                 } else {
@@ -125,7 +136,15 @@ impl ReasoningDecoder {
             }
             "item/started" | "item/completed" if p["item"]["type"] == "reasoning" => {
                 let source = &p["item"];
-                let item = self.item(source["id"].as_str()?)?;
+                let reported = ["summary", "content"].iter().any(|key| {
+                    source[*key].as_array().is_some_and(|values| {
+                        values
+                            .iter()
+                            .take(64)
+                            .any(|text| text.as_str().is_some_and(|text| !text.is_empty()))
+                    })
+                });
+                let item = self.item(source["id"].as_str()?, reported)?;
                 for (key, parts) in [
                     ("summary", &mut item.summary),
                     ("content", &mut item.content),
@@ -164,17 +183,39 @@ impl ReasoningDecoder {
                     _ => None,
                 };
                 if let Some((text, append)) = update {
+                    if valid_id(&id) && !self.streamed.iter().any(|m| m == current_message) {
+                        if self.streamed.len() >= RECENT_MESSAGES {
+                            self.streamed.pop_front();
+                        }
+                        self.streamed.push_back(current_message.to_owned());
+                    }
                     events.extend(self.text(&id, text, append));
                 }
             }
             Some("assistant") => {
                 let id = value["message"]["id"].as_str().unwrap_or(current_message);
-                if let Some(blocks) = value["message"]["content"].as_array() {
-                    for (index, block) in blocks.iter().take(256).enumerate() {
-                        if block["type"] == "thinking" {
-                            if let Some(text) = block["thinking"].as_str() {
-                                events.extend(self.text(&format!("{id}:{index}"), text, false));
-                            }
+                let Some(blocks) = value["message"]["content"].as_array() else {
+                    return events;
+                };
+                if !valid_id(id) {
+                    return events;
+                }
+                // Claude Code prints each content block of a message as its own assistant
+                // line, so a block's array index is not its position in the message.
+                let offset = self.printed(id, blocks.len());
+                // Partial messages already reported this message's thinking, numbered by
+                // stream index; the snapshot would add a second copy under another number.
+                if self.streamed.iter().any(|m| m == id) {
+                    return events;
+                }
+                for (index, block) in blocks.iter().enumerate() {
+                    let position = offset + index;
+                    if position >= 256 {
+                        break;
+                    }
+                    if block["type"] == "thinking" {
+                        if let Some(text) = block["thinking"].as_str() {
+                            events.extend(self.text(&format!("{id}:{position}"), text, false));
                         }
                     }
                 }
@@ -182,5 +223,18 @@ impl ReasoningDecoder {
             _ => {}
         }
         events
+    }
+    /// Returns how many content blocks earlier snapshot lines printed for this message.
+    fn printed(&mut self, message: &str, count: usize) -> usize {
+        if let Some(entry) = self.printed.iter_mut().find(|(m, _)| m == message) {
+            let offset = entry.1;
+            entry.1 = offset.saturating_add(count);
+            return offset;
+        }
+        if self.printed.len() >= RECENT_MESSAGES {
+            self.printed.pop_front();
+        }
+        self.printed.push_back((message.to_owned(), count));
+        0
     }
 }

@@ -144,3 +144,90 @@ fn reasoning_bounds_unicode_text_and_item_count() {
         }
     }
 }
+
+#[test]
+fn reasoning_claude_split_snapshot_lines_after_stream_are_one_block() {
+    // Claude Code prints each content block as its own assistant line. This message opens
+    // with an omitted thinking block, so the visible one streams at index 1 while its
+    // snapshot line holds it at array index 0.
+    let mut d = Decoder::default();
+    let mut events = Vec::new();
+    for value in [
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"msg1"}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"PRIVATE"}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+        json!({"type":"assistant","message":{"id":"msg1","content":[{"type":"thinking","thinking":"","signature":"PRIVATE"}]}}),
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Leave the folder "}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"untouched."}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":1}}),
+        json!({"type":"assistant","message":{"id":"msg1","content":[{"type":"thinking","thinking":"Leave the folder untouched.","signature":"PRIVATE"}]}}),
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool1","name":"Bash","input":{}}}}),
+        json!({"type":"assistant","message":{"id":"msg1","content":[{"type":"tool_use","id":"tool1","name":"Bash","input":{"command":"ls"}}]}}),
+    ] {
+        events.extend(reasoning(d.decode("claude", &value.to_string())));
+    }
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|e| e["id"] == "msg1:1"));
+    assert_eq!(events[1]["text"], "Leave the folder untouched.");
+    assert_eq!(events[1]["revision"], 2);
+    assert!(!serde_json::to_string(&events).unwrap().contains("PRIVATE"));
+}
+
+#[test]
+fn reasoning_claude_split_snapshot_lines_without_stream_keep_their_positions() {
+    let mut d = Decoder::default();
+    let line = |text: &str| {
+        json!({"type":"assistant","message":{"id":"msg2","content":[{"type":"thinking","thinking":text}]}})
+            .to_string()
+    };
+    let mut events = reasoning(d.decode("claude", &line("")));
+    for text in ["First thought.", "Second thought.", "Second thought."] {
+        events.extend(reasoning(d.decode("claude", &line(text))));
+    }
+    let ids: Vec<_> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["msg2:1", "msg2:2", "msg2:3"]);
+    assert_eq!(events[0]["text"], "First thought.");
+    // A snapshot that prints every block in one line keeps its array positions.
+    let whole = json!({"type":"assistant","message":{"id":"msg3","content":[{"type":"thinking","thinking":"A"},{"type":"text","text":"B"},{"type":"thinking","thinking":"C"}]}});
+    let ids: Vec<_> = reasoning(d.decode("claude", &whole.to_string()))
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, ["msg3:0", "msg3:2"]);
+}
+
+#[test]
+fn reasoning_empty_blocks_and_items_reserve_no_display_slot() {
+    let mut d = Decoder::default();
+    let mut ids = Vec::new();
+    for index in 0..65 {
+        let message = format!("m{index}");
+        for value in [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":message}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Step"}}}),
+        ] {
+            ids.extend(
+                reasoning(d.decode("claude", &value.to_string()))
+                    .iter()
+                    .map(|e| e["id"].as_str().unwrap().to_owned()),
+            );
+        }
+    }
+    assert_eq!(ids.len(), 64);
+    assert_eq!(ids[0], "m0:1");
+    assert_eq!(ids[63], "m63:1");
+
+    let mut codex = Decoder::default();
+    for index in 0..70 {
+        let empty = json!({"method":"item/started","params":{"threadId":"root","item":{"type":"reasoning","id":format!("e{index}"),"summary":[],"content":[""]}}});
+        assert!(reasoning(codex.decode_codex_server(&empty, "root")).is_empty());
+    }
+    let summary = json!({"method":"item/reasoning/summaryTextDelta","params":{"threadId":"root","itemId":"e3","summaryIndex":0,"delta":"Now reported"}});
+    let events = reasoning(codex.decode_codex_server(&summary, "root"));
+    assert_eq!(events[0]["id"], "e3");
+    assert_eq!(events[0]["text"], "Now reported");
+}

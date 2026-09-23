@@ -1,18 +1,51 @@
 import { visibleActivityStatus, type ToolActivity } from './activity';
 import type { ContentBlock, Message } from './domain';
+import type { ReasoningBlock } from './reasoning';
 
-type ActivityEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
+type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
   tool?: ToolActivity;
 };
+type ActivityEntry = CommentEntry | ReasoningBlock;
 type ActivityGroup =
   | { kind: 'tools'; key: string; tools: ToolActivity[] }
-  | { kind: 'comment'; key: string; entry: ActivityEntry };
+  | { kind: 'comment'; key: string; entry: CommentEntry }
+  | { kind: 'reasoning'; key: string; block: ReasoningBlock };
 
-/** Consecutive tool calls share a group; comments remain chronological boundaries. */
+const lifecycleNotes = ['Starting the provider CLI', 'Connected to Claude'];
+const toolNotes = /^(Using |Running command|Editing files|Searching the web|Using connected tool)/;
+
+/** Reasoning, progress comments and tool calls in their recorded order. */
+export function activityEntries(
+  blocks: ContentBlock[],
+  tools: ToolActivity[],
+  finalText: string,
+): ActivityEntry[] {
+  const source: ActivityEntry[] = blocks.length
+    ? blocks.filter((b) => b.type !== 'markdown')
+    : tools.map((tool) => ({ type: 'activity' as const, text: tool.name, tool }));
+  const reasoning = new Set<string>();
+  return source.filter((b) => {
+    if (b.type === 'reasoning') {
+      // Older Claude replies saved each streamed thinking block again from its snapshot,
+      // numbered within the same message ("message:index").
+      const key = `${b.id.replace(/:\d+$/, '')}\n${b.text}`;
+      if (reasoning.has(key)) return false;
+      reasoning.add(key);
+      return true;
+    }
+    if (b.progress && b.text.trim() === finalText.trim()) return false;
+    if (b.tool || b.progress) return true;
+    return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
+  });
+}
+
+/** Consecutive tool calls share a group; reasoning and comments remain chronological boundaries. */
 export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] {
   const groups: ActivityGroup[] = [];
   for (const [index, entry] of entries.entries()) {
-    if (entry.tool) {
+    if (entry.type === 'reasoning') {
+      groups.push({ kind: 'reasoning', key: `reasoning:${entry.id}`, block: entry });
+    } else if (entry.tool) {
       const previous = groups.at(-1);
       if (previous?.kind === 'tools') previous.tools.push(entry.tool);
       else groups.push({ kind: 'tools', key: `tools:${entry.tool.id}`, tools: [entry.tool] });

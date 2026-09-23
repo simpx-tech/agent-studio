@@ -15,7 +15,6 @@
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
-  import Reasoning from './Reasoning.svelte';
   import { compactionLabel } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
@@ -131,7 +130,6 @@
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
       <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
-      <Reasoning blocks={message.blocks} />
       {#if message.compactions?.length}
         <div class="compaction-history" aria-label="Context compaction">
           {#each message.compactions as item (item.id)}
