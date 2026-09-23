@@ -187,6 +187,7 @@
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
+  import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
   import '$lib/styles.css';
 
   type View = 'chat' | 'connections' | 'settings';
@@ -319,7 +320,34 @@
   let longPressedConversation: string | undefined;
   let composerInput = $state<HTMLTextAreaElement>();
   let chatScroll = $state<HTMLDivElement>();
+  let chatColumn = $state<HTMLDivElement>();
+  let chatSpace = $state<HTMLDivElement>();
+  let virtualSpace: VirtualSpace | undefined;
   let nearBottom = true;
+  // Runs after the reader scrolls, expands, or collapses content.
+  function readingPosition() {
+    const hold = virtualSpace?.scrolled() ?? 'free';
+    // Scrolling up through held space is a deliberate reading position too. While space
+    // holds the position, new content fills it before the chat follows.
+    if (hold === 'up') nearBottom = false;
+    else if (hold === 'free' && chatScroll)
+      // Only follow at the end. A reading position just above it is still deliberate.
+      nearBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 2;
+  }
+  $effect(() => {
+    if (!chatScroll || !chatColumn || !chatSpace) return;
+    // Expanding or collapsing content keeps the chat in place.
+    const space = createVirtualSpace(chatScroll, chatColumn, chatSpace, readingPosition);
+    virtualSpace = space;
+    return () => {
+      space.destroy();
+      if (virtualSpace === space) virtualSpace = undefined;
+    };
+  });
+  $effect(() => {
+    void activeId;
+    untrack(() => virtualSpace?.clear());
+  });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
   const selectedSettings = $derived(active?.settings ?? draftSettings);
@@ -1793,7 +1821,11 @@
   }
   async function scrollToEnd() {
     await tick();
-    if (nearBottom && chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+    if (nearBottom && chatScroll) {
+      // New content fills any held space before the chat follows it.
+      virtualSpace?.trim();
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+    }
   }
   function conversationRunning(conversation: Conversation) {
     return (
@@ -2970,14 +3002,13 @@
             onwheel={(event) => {
               if (event.deltaY < 0 && !event.ctrlKey) nearBottom = false;
             }}
-            onscroll={() => {
-              if (chatScroll)
-                // Only follow at the end. A reading position just above it is still deliberate.
-                nearBottom =
-                  chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 2;
-            }}
+            onscroll={readingPosition}
           >
-            <div class="message-column" class:empty={!active?.messages.length}>
+            <div
+              class="message-column"
+              class:empty={!active?.messages.length}
+              bind:this={chatColumn}
+            >
               {#if active?.messages.length}
                 {#each active.messages as m, i (m.id)}<MessageView
                     message={m}
@@ -3009,6 +3040,7 @@
                   <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
                 </div>{/if}
             </div>
+            <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
           </div>
           <div class="composer-area">
             {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}

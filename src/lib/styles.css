@@ -1319,6 +1319,10 @@ code {
   flex-direction: column;
   justify-content: center;
 }
+/* Blank space that holds the reading position after a collapse; never a scroll anchor. */
+.chat-virtual-space {
+  overflow-anchor: none;
+}
 .chat-empty {
   text-align: center;
   padding: 16px 0;
