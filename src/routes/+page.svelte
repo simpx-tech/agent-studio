@@ -391,6 +391,7 @@
   let chatScroll = $state<HTMLDivElement>();
   let chatColumn = $state<HTMLDivElement>();
   let chatSpace = $state<HTMLDivElement>();
+  let composerArea = $state<HTMLDivElement>();
   let virtualSpace: VirtualSpace | undefined;
   let nearBottom = true;
   // Runs after the reader scrolls, expands, or collapses content.
@@ -426,6 +427,27 @@
     };
     scroll.addEventListener('wheel', wheel, { passive: true });
     return () => scroll.removeEventListener('wheel', wheel);
+  });
+  $effect(() => {
+    const scroll = chatScroll,
+      area = composerArea;
+    if (!scroll || !area) return;
+    let height = 0;
+    const observer = new ResizeObserver(() => {
+      const next = scroll.clientHeight;
+      if (next === height) return;
+      // Usage details open over the conversation, so they must fit in what remains of it.
+      area.style.setProperty('--chat-height', `${next}px`);
+      // A growing draft, a smaller window or a phone keyboard shortens the chat from below.
+      // While following, keep its end in view instead of pushing it under the composer.
+      if (next < height && nearBottom) {
+        virtualSpace?.trim();
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+      height = next;
+    });
+    observer.observe(scroll);
+    return () => observer.disconnect();
   });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
@@ -3389,7 +3411,7 @@
             </div>
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
           </div>
-          <div class="composer-area">
+          <div class="composer-area" bind:this={composerArea}>
             {#if active?.rewind}<div class="setup-hint neutral" role="status">
                 <Rewind size={15} aria-hidden="true" /><span
                   >Conversation rewound. Send a new message to continue from here.</span

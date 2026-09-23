@@ -1455,8 +1455,11 @@ pre {
   padding: 2px 6px 0 0;
   background: none;
   resize: none;
-  max-height: 200px;
-  min-height: 46px;
+  /* Three lines at rest. Longer drafts grow the composer up to half the window, then
+     scroll; the other 64px are its padding, border and tool row. */
+  field-sizing: content;
+  min-height: calc(3lh + 2px);
+  max-height: calc(50dvh - 64px);
   font-size: var(--text-md);
   line-height: 1.55;
   color: var(--text);
@@ -1810,7 +1813,8 @@ button.setup-hint:not(:disabled):hover {
   border-radius: var(--radius-2xl);
   background: var(--surface-overlay);
   box-shadow: var(--shadow-lg);
-  max-height: clamp(140px, calc(100dvh - 400px), 480px);
+  /* A long draft makes the composer taller; stay within the conversation above it. */
+  max-height: min(480px, max(140px, 100dvh - 400px), var(--chat-height, 100dvh) - 12px);
   overflow-y: auto;
   animation: fade-in var(--duration) ease;
 }
@@ -2278,8 +2282,8 @@ button.setup-hint:not(:disabled):hover {
   }
   .composer textarea {
     font-size: 16px;
-    min-height: 42px;
-    max-height: 100px;
+    /* Phones stop at four lines to keep the conversation visible above the keyboard. */
+    max-height: calc(4lh + 2px);
   }
   .composer {
     padding: 10px 8px 8px 12px;
