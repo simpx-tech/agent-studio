@@ -2,7 +2,6 @@
   import { onMount, tick } from 'svelte';
   import {
     ArrowUp,
-    Check,
     ChevronRight,
     Clock,
     Folder,
@@ -21,7 +20,6 @@
   import type { ChatLocation } from '$lib/domain';
   import type { FolderListing } from '$lib/transport';
   import {
-    compactPath,
     describeFolders,
     expandHome,
     filterFolders,
@@ -181,9 +179,9 @@
     if (!target) return;
     void load(target);
   }
-  async function accept(target?: string) {
-    const selected = target ?? listing?.path;
-    if (!selected || busy || (!target && !canUse)) return;
+  async function accept() {
+    const selected = listing?.path;
+    if (!selected || !canUse) return;
     saving = true;
     error = '';
     try {
@@ -399,15 +397,6 @@
               onclick={() => void startEditing()}><Pencil size={14} /></button
             >
           {/if}
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Refresh folders"
-            title="Refresh"
-            disabled={busy || !path}
-            onclick={() => void load(path)}
-            ><RefreshCw size={14} class={loading ? 'spinning' : undefined} /></button
-          >
         </div>
         <div class="filter-bar">
           <label class="filter-field">
@@ -481,15 +470,6 @@
                         >{/if}
                       <ChevronRight size={14} class="folder-chevron" aria-hidden="true" />
                     </button>
-                    <button
-                      type="button"
-                      class="folder-use"
-                      aria-label={`Use ${entry.name}`}
-                      title={`Use ${entry.name} without opening it`}
-                      disabled={busy}
-                      onclick={() => void accept(entry.path)}
-                      onkeydown={listKeydown}><Check size={14} />Use</button
-                    >
                   </li>
                 {/each}
               </ul>
@@ -513,9 +493,6 @@
       </section>
     </div>
     <div class="dialog-actions">
-      <span class="dialog-selection" title={listing?.path}>
-        {#if listing}Use <strong>{compactPath(listing.path)}</strong> on {computerName}{/if}
-      </span>
       <button class="secondary" disabled={saving} onclick={close}>Cancel</button><button
         class="primary"
         disabled={!canUse}
@@ -743,8 +720,6 @@
   }
   .folder-row {
     display: flex;
-    align-items: stretch;
-    gap: 2px;
   }
   .folder-open {
     flex: 1;
@@ -788,27 +763,6 @@
   }
   .hidden-entry .folder-open {
     color: var(--muted);
-  }
-  .folder-use {
-    flex-shrink: 0;
-    gap: 5px;
-    padding: 0 10px;
-    border-radius: 7px;
-    font-size: 11px;
-    color: #b7c7a4;
-    opacity: 0;
-    transition:
-      opacity 0.12s,
-      background 0.16s;
-  }
-  .folder-row:hover .folder-use,
-  .folder-row:focus-within .folder-use,
-  .folder-use:focus-visible {
-    opacity: 1;
-  }
-  .folder-use:not(:disabled):hover {
-    background: #323e28;
-    color: var(--green);
   }
   .jump-row {
     width: 100%;
@@ -854,20 +808,6 @@
     align-items: center;
     margin-top: 2px;
   }
-  .dialog-selection {
-    flex: 1;
-    min-width: 0;
-    margin-right: auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .dialog-selection strong {
-    color: var(--text);
-    font-weight: 600;
-  }
   @media (max-width: 720px) {
     .browser-body {
       grid-template-columns: minmax(0, 1fr);
@@ -906,13 +846,6 @@
     .filter-bar {
       flex-wrap: wrap;
       gap: 8px;
-    }
-    .folder-use {
-      opacity: 1;
-    }
-    .dialog-selection {
-      flex-basis: 100%;
-      white-space: normal;
     }
     .folder-open {
       min-height: 44px;

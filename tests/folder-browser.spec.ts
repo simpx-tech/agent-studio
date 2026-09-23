@@ -16,7 +16,7 @@ async function openBrowser(page: Page) {
   };
 }
 
-test('folder browser offers breadcrumbs, places, filtering, hidden folders, and direct selection', async ({
+test('folder browser offers breadcrumbs, places, filtering, hidden folders, and selection', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -71,10 +71,13 @@ test('folder browser offers breadcrumbs, places, filtering, hidden folders, and 
   await expect(places.getByRole('button', { name: 'C:\\', exact: true })).toHaveClass(/active/);
   await page.screenshot({ path: 'artifacts/folder-browser-desktop.png', animations: 'disabled' });
 
-  // A row's Use action selects that folder without opening it first.
+  // Rows only open folders; the footer action selects the open folder.
   await places.getByRole('button', { name: 'Projects', exact: true }).click();
-  await list.getByRole('button', { name: 'tools', exact: true }).hover();
-  await list.getByRole('button', { name: 'Use tools', exact: true }).click();
+  await expect(list.getByRole('button', { name: /^Use / })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Refresh folders', exact: true })).toHaveCount(0);
+  await list.getByRole('button', { name: 'tools', exact: true }).click();
+  await expect(crumbs.getByText('tools')).toHaveAttribute('aria-current', 'location');
+  await dialog.getByRole('button', { name: 'Use this folder', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(picker(page, 'Folder')).toHaveAttribute('title', 'C:\\Projects\\tools');
   await expect(picker(page, 'Folder')).toHaveText('tools');
