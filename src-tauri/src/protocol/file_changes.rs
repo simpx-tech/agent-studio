@@ -1,39 +1,39 @@
 //! Explicit file-edit results, kept separate from activity metadata and prompt replay.
 //! Never reads paths, command output, or arbitrary tool result bodies.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
 const MAX_BYTES: usize = 900_000;
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hunk {
-    old_start: u64,
-    old_lines: u64,
-    new_start: u64,
-    new_lines: u64,
-    lines: Vec<String>,
+    pub old_start: u64,
+    pub old_lines: u64,
+    pub new_start: u64,
+    pub new_lines: u64,
+    pub lines: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePatch {
-    path: String,
+    pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    previous_path: Option<String>,
-    kind: String,
+    pub previous_path: Option<String>,
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hunks: Option<Vec<Hunk>>,
+    pub hunks: Option<Vec<Hunk>>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
-    id: String,
-    files: Vec<FilePatch>,
+    pub id: String,
+    pub files: Vec<FilePatch>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    revision: u64,
-    edits: Vec<Edit>,
-    limited: bool,
+    pub revision: u64,
+    pub edits: Vec<Edit>,
+    pub limited: bool,
 }
 pub struct FileChangeDecoder {
     snapshot: Snapshot,
@@ -62,7 +62,7 @@ fn valid_path(value: &Value) -> Option<String> {
         .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control))
         .map(String::from)
 }
-fn private_path(path: &str) -> bool {
+pub(crate) fn private_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_lowercase();
     let name = normalized.rsplit('/').next().unwrap_or_default();
     name == ".env"
@@ -132,7 +132,8 @@ fn unified(text: &str) -> Option<Vec<Hunk>> {
         return None;
     }
     let mut hunks: Vec<Hunk> = vec![];
-    for line in text.lines() {
+    // Retain CR bytes from source lines so file Undo can compare/restore CRLF exactly.
+    for line in text.split_terminator('\n') {
         if line.starts_with("@@ ") {
             let mut header = line.split_whitespace();
             header.next()?;
@@ -149,7 +150,13 @@ fn unified(text: &str) -> Option<Vec<Hunk>> {
                 lines: vec![],
             });
         } else if let Some(hunk) = hunks.last_mut() {
-            hunk.lines.push(line.into());
+            hunk.lines.push(
+                if line.trim_end_matches('\r') == "\\ No newline at end of file" {
+                    "\\ No newline at end of file".into()
+                } else {
+                    line.into()
+                },
+            );
         }
     }
     (!hunks.is_empty() && valid_hunks(&hunks)).then_some(hunks)
@@ -287,6 +294,25 @@ impl FileChangeDecoder {
             let hunks = if private_path(&path) || previous_path.as_deref().is_some_and(private_path)
             {
                 None
+            } else if kind == "added" {
+                // App-server add/delete events carry the complete file text in `diff`;
+                // updates carry unified hunks. This is confirmed tool-result source.
+                change["diff"].as_str().and_then(created)
+            } else if kind == "deleted" {
+                change["diff"].as_str().and_then(created).map(|mut hunks| {
+                    for h in &mut hunks {
+                        h.old_start = h.new_start;
+                        h.old_lines = h.new_lines;
+                        h.new_start = 0;
+                        h.new_lines = 0;
+                        for line in &mut h.lines {
+                            if line.starts_with('+') {
+                                line.replace_range(..1, "-");
+                            }
+                        }
+                    }
+                    hunks
+                })
             } else {
                 change["diff"]
                     .as_str()
@@ -446,5 +472,26 @@ mod tests {
         assert!(!private_path("src/auth.ts"));
         let h = created("line without newline").unwrap();
         assert_eq!(h[0].lines[1], "\\ No newline at end of file");
+    }
+    #[test]
+    fn codex_add_delete_results_contain_source_text_not_unified_hunks() {
+        let mut decoder = FileChangeDecoder::default();
+        let result = decoder.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","item":{"id":"add","type":"fileChange","status":"completed","changes":[{"path":"new.txt","kind":{"type":"add"},"diff":"ORIGINAL\n"},{"path":"gone.txt","kind":{"type":"delete"},"diff":"gone"}]}}})).unwrap();
+        assert_eq!(
+            result.edits[0].files[0].hunks.as_ref().unwrap()[0].lines,
+            vec!["+ORIGINAL"]
+        );
+        let deleted = &result.edits[0].files[1].hunks.as_ref().unwrap()[0];
+        assert_eq!(deleted.old_lines, 1);
+        assert_eq!(deleted.new_lines, 0);
+        assert_eq!(deleted.lines, vec!["-gone", "\\ No newline at end of file"]);
+    }
+    #[test]
+    fn source_line_endings_are_not_normalized() {
+        assert_eq!(created("new\r\n").unwrap()[0].lines, vec!["+new\r"]);
+        assert_eq!(
+            unified("@@ -1 +1 @@\n-old\r\n+new\r\n").unwrap()[0].lines,
+            vec!["-old\r", "+new\r"]
+        );
     }
 }

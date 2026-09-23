@@ -952,6 +952,22 @@ async function localCall(
     channel.onmessage = onEvent ?? (() => {});
     return invoke('run_agent', { ...args, onEvent: channel });
   }
+  if (method === 'undoFiles') {
+    const owner = runtime;
+    const result = await invoke<{ files: string[]; undone: boolean }>('undo_files', args);
+    if (result.undone && owner && runtime === owner) {
+      const shared = sharedWorkspace(owner.workspace());
+      const conversation = shared.conversations.find((c) => c.id === args.conversationId);
+      const message = conversation?.messages.find((m) => m.runId === args.runId);
+      if (conversation && message && !message.filesUndone) {
+        message.filesUndone = true;
+        conversation.historyRevision = (conversation.historyRevision ?? 0) + 1;
+        conversation.updatedAt = new Date().toISOString();
+        await owner.apply(shared);
+      }
+    }
+    return result;
+  }
   const commands = {
     models: 'list_models',
     usage: 'read_usage',
@@ -1000,6 +1016,7 @@ async function routed<T>(
       method === 'mentions' ||
       method === 'mcp' ||
       method === 'plugins' ||
+      method === 'undoFiles' ||
       method === 'nativeInstructions'
     ) {
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1409,6 +1426,27 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
 export async function releaseConversation(conversationId: string, connectionId?: string) {
   if (!desktop() || remoteTarget(connectionId)) return;
   await invoke('release_conversation', { conversationId });
+}
+export async function undoFiles(
+  conversationId: string,
+  runId: string,
+  connectionId: string | undefined,
+  commit = false,
+): Promise<{ files: string[]; undone: boolean }> {
+  const result = await routed<{ files: string[]; undone: boolean }>(
+    'undoFiles',
+    { conversationId, runId, connectionId, commit },
+    connectionId,
+  );
+  if (
+    !result ||
+    !Array.isArray(result.files) ||
+    result.files.length > 32 ||
+    !result.files.every((p) => typeof p === 'string' && p.length <= 4096) ||
+    typeof result.undone !== 'boolean'
+  )
+    throw new Error('The execution computer returned an invalid Undo result.');
+  return result;
 }
 export async function answerQuestion(runId: string, answer: QuestionAnswer, connectionId?: string) {
   return routed<void>(

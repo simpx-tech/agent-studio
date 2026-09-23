@@ -401,6 +401,8 @@ pub struct RunRequest {
     #[serde(default)]
     pub compact: bool,
     #[serde(default)]
+    pub history_revision: u64,
+    #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(skip)]
     pub native_session: Option<sessions::Session>,
@@ -545,6 +547,9 @@ impl RunRequest {
                 }))
         {
             return Err("Compaction requires an existing Claude or Codex conversation and a plain /compact request.".into());
+        }
+        if self.history_revision > 9_007_199_254_740_991 {
+            return Err("Invalid history revision".into());
         }
         if let Some(id) = &self.conversation_id {
             uuid::Uuid::parse_str(id).map_err(|_| "Invalid conversation id")?;
@@ -1428,6 +1433,7 @@ mod tests {
     fn request() -> RunRequest {
         RunRequest {
             compact: false,
+            history_revision: 0,
             conversation_id: None,
             native_session: None,
             shared_context: Default::default(),

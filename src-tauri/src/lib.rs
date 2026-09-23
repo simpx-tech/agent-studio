@@ -23,6 +23,7 @@ mod standalone;
 mod startup;
 mod structured_output;
 mod titles;
+mod undo;
 mod updates;
 mod usage;
 mod wsl;
@@ -437,6 +438,28 @@ async fn run_agent(
     connection_id: Option<String>,
 ) -> Result<String, String> {
     request.validate()?;
+    // A request from a window or device that has not received a later rewind or file Undo
+    // must not continue the replaced history. A newer request may arrive before sync does.
+    if let Some(id) = &request.conversation_id {
+        let root = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?;
+        if let Ok(bytes) = std::fs::read(root.join("workspace.json")) {
+            if let Ok(workspace) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(conversation) = workspace["conversations"]
+                    .as_array()
+                    .and_then(|list| list.iter().find(|c| c["id"] == *id))
+                {
+                    if conversation["historyRevision"].as_u64().unwrap_or(0)
+                        > request.history_revision
+                    {
+                        return Err(providers::sessions::STALE_HISTORY.into());
+                    }
+                }
+            }
+        }
+    }
     folders::validate_chat(&app, request.location.as_ref(), connection_id.as_deref())?;
     let mut profile = profiles::resolve(&app, &request.agent.provider, connection_id.as_deref())?;
     profile.folder_distribution = request
@@ -497,6 +520,134 @@ async fn release_conversation(
     uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
     pool.release(&conversation_id).await;
     Ok(())
+}
+#[tauri::command]
+async fn undo_files(
+    app: tauri::AppHandle,
+    runs: State<'_, runner::Runs>,
+    storage: State<'_, Storage>,
+    conversation_id: String,
+    run_id: String,
+    connection_id: Option<String>,
+    commit: bool,
+) -> Result<undo::Preview, String> {
+    let operation = uuid::Uuid::new_v4().to_string();
+    runs.begin(&operation, CancellationToken::new()).await?;
+    let result = async {
+        let root = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?;
+        let workspace: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("workspace.json"))
+                .map_err(|_| "Save the conversation before Undo")?,
+        )
+        .map_err(|_| "Cannot read the saved conversation")?;
+        let conversation = workspace["conversations"]
+            .as_array()
+            .and_then(|list| list.iter().find(|c| c["id"] == conversation_id))
+            .ok_or("Conversation is unavailable")?;
+        if conversation["settings"]["connectionId"].as_str() != connection_id.as_deref() {
+            return Err("The selected account changed. Reopen Undo.".into());
+        }
+        let messages = conversation["messages"]
+            .as_array()
+            .ok_or("Invalid conversation")?;
+        if messages.iter().any(|m| m["status"] == "running") {
+            return Err("Wait for the response to finish before Undo".into());
+        }
+        if !messages
+            .iter()
+            .any(|m| m["role"] == "assistant" && m["runId"] == run_id)
+        {
+            return Err("The response is no longer in this conversation".into());
+        }
+        let provider = conversation["settings"]["provider"]
+            .as_str()
+            .ok_or("Invalid provider")?;
+        let location: Option<folders::ChatLocation> = if conversation["location"]["path"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        {
+            None
+        } else {
+            Some(
+                serde_json::from_value(conversation["location"].clone())
+                    .map_err(|_| "Invalid conversation folder")?,
+            )
+        };
+        folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
+        let mut profile = profiles::resolve(&app, provider, connection_id.as_deref())?;
+        profile.folder_distribution = location
+            .as_ref()
+            .map(|l| folders::environment_distribution(&app, &l.environment_id))
+            .transpose()?
+            .flatten();
+        uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
+        std::fs::create_dir_all(root.join("native-sessions"))
+            .map_err(|_| "Cannot lock the conversation")?;
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(
+                root.join("native-sessions")
+                    .join(format!("{conversation_id}.lock")),
+            )
+            .map_err(|_| "Cannot lock the conversation")?;
+        lock.try_lock()
+            .map_err(|_| "This conversation is running in another window")?;
+        if commit {
+            app.state::<pool::Pool>().release(&conversation_id).await;
+        }
+        let preview = profiles::scope(profile, async {
+            let scope = providers::sessions::location_scope(provider, location.as_ref())?;
+            undo::apply(&root, &conversation_id, &run_id, &scope, commit)
+        })
+        .await?;
+        if preview.undone {
+            // Save the receipt on the executing host even if the requesting Viewer
+            // disconnects before receiving its result. Retrying is idempotent.
+            let _storage = storage.0.lock().map_err(|_| "Storage lock failed")?;
+            let mut workspace: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.join("workspace.json")).map_err(
+                    |_| "Files were undone, but their status could not be saved. Retry Undo.",
+                )?)
+                .map_err(|_| "Cannot read workspace")?;
+            if let Some(conversation) = workspace["conversations"]
+                .as_array_mut()
+                .and_then(|list| list.iter_mut().find(|c| c["id"] == conversation_id))
+            {
+                if let Some(message) = conversation["messages"]
+                    .as_array_mut()
+                    .and_then(|list| list.iter_mut().find(|m| m["runId"] == run_id))
+                {
+                    if message["filesUndone"] != true {
+                        message["filesUndone"] = true.into();
+                        conversation["historyRevision"] =
+                            (conversation["historyRevision"].as_u64().unwrap_or(0) + 1).into();
+                    }
+                }
+            }
+            let mut file = tempfile::NamedTempFile::new_in(&root).map_err(|_| {
+                "Files were undone, but their status could not be saved. Retry Undo."
+            })?;
+            file.write_all(&serde_json::to_vec(&workspace).map_err(|_| "Cannot encode workspace")?)
+                .map_err(|_| "Cannot save Undo status")?;
+            file.as_file()
+                .sync_all()
+                .map_err(|_| "Cannot flush Undo status")?;
+            file.persist(root.join("workspace.json"))
+                .map_err(|_| "Cannot save Undo status")?;
+        }
+        Ok(preview)
+    }
+    .await;
+    if let Ok(mut active) = runs.0.lock() {
+        active.remove(&operation);
+    }
+    result
 }
 #[tauri::command]
 async fn answer_question(
@@ -749,6 +900,7 @@ pub fn run() {
             cancel_title,
             cancel_run,
             release_conversation,
+            undo_files,
             answer_question,
             manage_elicitation,
             steer_run,

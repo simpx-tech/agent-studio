@@ -1714,6 +1714,14 @@ button.setup-hint {
 button.setup-hint:not(:disabled):hover {
   background: var(--accent-soft-hover);
 }
+/* Informational state, such as a rewound conversation that can still be restored. */
+.setup-hint.neutral {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+.setup-hint.neutral > svg {
+  color: var(--text-muted);
+}
 
 /* ── Usage ────────────────────────────────────────────────────────────── */
 

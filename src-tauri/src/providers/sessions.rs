@@ -9,9 +9,14 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) const STALE_HISTORY: &str =
+    "This conversation changed in another window or on another device. Wait for it to sync, then send again.";
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
+    #[serde(default)]
+    history_revision: u64,
     version: u32,
     scope: String,
     // Version 2 also records the account and location parts of the scope separately, so a
@@ -40,6 +45,8 @@ pub struct Session {
     /// The selected account differs from the bound one: fork its latest native history
     /// into the selected profile, preserving the source and the conversation's folder.
     pub switched_account: bool,
+    /// A rewind or file Undo replaced the history since the binding was written.
+    pub history_rewritten: bool,
     pub instructions_changed: bool,
     pub shared_context_changed: bool,
     pub unconfirmed_message: Option<usize>,
@@ -231,6 +238,7 @@ impl Session {
             Err(_) => return Err("Cannot read native session binding".into()),
         };
         let mut switched_account = false;
+        let mut history_rewritten = false;
         if let Some(previous) = &previous {
             if !valid(previous) {
                 return Err("Native session binding is invalid. It was preserved; start a new conversation.".into());
@@ -246,26 +254,42 @@ impl Session {
                 }
                 switched_account = true;
             }
-            {
-                if !history.starts_with(&previous.history) {
+            if request.history_revision < previous.history_revision {
+                return Err(STALE_HISTORY.into());
+            }
+            let continues = history.starts_with(&previous.history);
+            // Ordinary follow-ups add the previous final answer (or answered
+            // question context after interruption), followed by one human input.
+            let unseen = continues
+                && history.len() > previous.history.len()
+                && request.messages[previous.history.len()..request.messages.len() - 1]
+                    .iter()
+                    .any(|m| {
+                        m.role != "assistant"
+                            && !m
+                                .text
+                                .starts_with("\n\nUser question responses (earlier context):\n")
+                            && !m.text.starts_with(
+                                "\n\nUser steering accepted during this reply (earlier context):\n",
+                            )
+                    });
+            if request.history_revision == previous.history_revision {
+                if !continues {
                     return Err("This conversation's history differs from its native session. Start a new conversation to keep the histories separate.".into());
                 }
-                // Ordinary follow-ups add the previous final answer (or answered
-                // question context after interruption), followed by one human input.
-                if history.len() > previous.history.len()
-                    && request.messages[previous.history.len()..request.messages.len() - 1]
-                        .iter()
-                        .any(|m| {
-                            m.role != "assistant"
-                                && !m
-                                    .text
-                                    .starts_with("\n\nUser question responses (earlier context):\n")
-                                && !m.text.starts_with("\n\nUser steering accepted during this reply (earlier context):\n")
-                        })
-                {
+                if unseen {
                     return Err("This conversation has messages the native session has not received. Start a new conversation to include the saved history.".into());
                 }
+            } else {
+                // Rewind and file Undo advance the history revision. Unless the retained
+                // history still continues exactly what the native session received (Undo
+                // rewind), its transcript holds discarded context: it is neither resumed nor
+                // carried to another account, and a fresh session gets the retained messages.
+                history_rewritten = !continues || unseen;
             }
+        }
+        if request.compact && history_rewritten {
+            return Err("Send a message before compacting. After a rewind or file Undo, the next reply starts a new native session.".into());
         }
         if request.compact && (previous.is_none() || switched_account) {
             return Err("Send a message with this account first to establish its native session before compacting.".into());
@@ -273,6 +297,7 @@ impl Session {
         // Retrying the same request under another account still continues the earlier
         // attempt's work instead of treating it as a new independent task.
         let retry = previous.as_ref().is_some_and(|p| p.history == history);
+        let previous = previous.filter(|_| !history_rewritten);
         let transfer_from = previous.clone().filter(|_| switched_account);
         let shared_context_changed = previous
             .as_ref()
@@ -285,6 +310,7 @@ impl Session {
             resumed: previous.is_some(),
             retry,
             switched_account,
+            history_rewritten,
             shared_context_changed,
             transfer_from,
             transfer_file: None,
@@ -297,6 +323,7 @@ impl Session {
                 .filter(|p| !p.received)
                 .map(|p| p.history.len() - 1),
             record: Record {
+                history_revision: request.history_revision,
                 version: 2,
                 scope: identity.scope,
                 account: identity.account,
@@ -945,6 +972,97 @@ mod tests {
         assert!(resumed
             .bind(&uuid::Uuid::new_v4().to_string(), true)
             .is_err());
+    }
+
+    #[test]
+    fn rewound_history_starts_fresh_and_rejects_stale_revisions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let session = Session::prepare(root.path(), &r).unwrap().unwrap();
+        let original = session.id().to_string();
+        session.bind(&original, true).unwrap();
+        drop(session);
+        r.messages[0].text = "A replacement message".into();
+        assert!(Session::prepare(root.path(), &r).is_err());
+        r.history_revision = 1;
+        let next = Session::prepare(root.path(), &r).unwrap().unwrap();
+        assert!(!next.resumed);
+        assert_ne!(next.id(), original);
+        next.bind(next.id(), true).unwrap();
+        drop(next);
+        r.history_revision = 0;
+        assert!(Session::prepare(root.path(), &r).is_err());
+        r.history_revision = 1;
+        r.messages.push(message("assistant", "New answer"));
+        r.messages.push(message("user", "Continue"));
+        assert!(Session::prepare(root.path(), &r).unwrap().unwrap().resumed);
+    }
+    #[test]
+    fn undoing_a_rewind_resumes_the_session_that_received_the_same_history() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let session = Session::prepare(root.path(), &r).unwrap().unwrap();
+        let original = session.id().to_string();
+        session.bind(&original, true).unwrap();
+        drop(session);
+        // Rewind and Undo rewind advanced the revision twice but restored the same history.
+        r.history_revision = 2;
+        r.messages
+            .extend([message("assistant", "Answer"), message("user", "Continue")]);
+        let resumed = Session::prepare(root.path(), &r).unwrap().unwrap();
+        assert!(resumed.resumed && !resumed.history_rewritten);
+        assert_eq!(resumed.id(), original);
+        resumed.bind(&original, true).unwrap();
+        drop(resumed);
+        // A file Undo notes the undone edits on an earlier reply: the history no longer
+        // continues the transcript, so the next reply starts a fresh session.
+        r.history_revision = 3;
+        r.messages[1].text =
+            "Answer\n\n[The user undid this response’s recorded file edits.]".into();
+        r.messages
+            .extend([message("assistant", "Done"), message("user", "Next")]);
+        let fresh = Session::prepare(root.path(), &r).unwrap().unwrap();
+        assert!(fresh.history_rewritten && !fresh.resumed);
+        assert_ne!(fresh.id(), original);
+    }
+    #[tokio::test]
+    async fn rewound_history_is_neither_carried_to_another_account_nor_compacted() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let first = profile("claude");
+        let mut second = first.clone();
+        second.id = uuid::Uuid::new_v4().to_string();
+        r.messages.extend([
+            message("assistant", "Kept answer"),
+            message("user", "Discarded"),
+        ]);
+        crate::profiles::scope(first, async {
+            let s = Session::prepare(root.path(), &r).unwrap().unwrap();
+            s.bind(s.id(), true).unwrap();
+        })
+        .await;
+        // Rewound to before "Discarded", then a new question under another account.
+        r.history_revision = 1;
+        r.messages.last_mut().unwrap().text = "A new question".into();
+        let mut compact = r.clone();
+        compact.compact = true;
+        compact.messages.last_mut().unwrap().text = "/compact".into();
+        let error = crate::profiles::scope(second.clone(), async {
+            Session::prepare(root.path(), &compact).err().unwrap()
+        })
+        .await;
+        assert!(error.contains("before compacting"), "{error}");
+        let switched = crate::profiles::scope(second, async {
+            Session::prepare(root.path(), &r).unwrap().unwrap()
+        })
+        .await;
+        assert!(switched.switched_account && switched.history_rewritten);
+        assert!(!switched.resumed && switched.transfer_from.is_none());
+        // The fresh session receives the retained messages instead of the old transcript.
+        r.native_session = Some(switched);
+        let context = r.native_context().unwrap();
+        assert!(context.contains("Private request") && context.contains("Kept answer"));
+        assert_eq!(r.native_user_text(), "A new question");
     }
     #[test]
     fn retries_preserve_partial_work_and_unconfirmed_input_is_explicit() {

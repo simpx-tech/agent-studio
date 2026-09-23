@@ -216,6 +216,7 @@ export const messageSchema = z
     compact: z.boolean().optional(),
     compactions: compactionsSchema.optional(),
     fileChanges: fileChangesSchema.optional(),
+    filesUndone: z.boolean().optional(),
     workflow: workflowProgressSchema.optional(),
     workflowDefinition: workflowSchema.optional(),
     nativeWorkflows: nativeWorkflowsSchema.optional(),
@@ -253,6 +254,13 @@ export const conversationSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   messages: z.array(messageSchema),
+  historyRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  rewind: z
+    .object({
+      removed: z.array(messageSchema).min(1).max(200),
+      createdAt: z.string(),
+    })
+    .optional(),
 });
 export type Conversation = z.infer<typeof conversationSchema>;
 export const workspaceSchema = z.object({
@@ -318,6 +326,7 @@ export type RunRequest = {
   compact?: boolean;
   location?: ChatLocation;
   conversationId?: string;
+  historyRevision?: number;
   assistantId?: string;
   runId: string;
   // An earlier reply in this conversation used another account of the same agent. The
@@ -364,6 +373,9 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
       role: m.role === 'assistant' && m.status !== 'complete' ? ('user' as const) : m.role,
       text:
         (m.role === 'assistant' && m.status !== 'complete' ? '' : messageText(m)) +
+        (m.filesUndone
+          ? '\n\n[The user undid this response’s recorded file edits after the response. Check the current files before continuing.]'
+          : '') +
         (m.role === 'assistant'
           ? questionHistory(m.questions) +
             steeringHistory(m.steering) +

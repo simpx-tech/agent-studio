@@ -6,6 +6,8 @@
     PanelsTopLeft,
     PanelRightOpen,
     GitFork,
+    Rewind,
+    Undo2,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { replyContent, highlightCode } from '$lib/markdown';
@@ -29,6 +31,9 @@
     message,
     agent,
     retry,
+    rewind,
+    undoEdits,
+    historyDisabled = false,
     canRetry = false,
     retryDisabled = false,
     switchNotice = '',
@@ -42,6 +47,9 @@
     message: Message;
     agent: ChatSettings;
     retry: () => void;
+    rewind?: () => void;
+    undoEdits?: () => void;
+    historyDisabled?: boolean;
     canRetry?: boolean;
     retryDisabled?: boolean;
     switchNotice?: string;
@@ -237,10 +245,16 @@
           {folder}
         />
       {/if}
-      {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError)}<div
+      {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError || undoEdits || message.filesUndone)}<div
           class="message-actions"
         >
           {#if linkError}<span role="alert">{linkError}</span>{/if}
+          {#if message.filesUndone}<span class="muted">File edits undone</span>
+          {:else if undoEdits}<button
+              class="text-button"
+              disabled={historyDisabled}
+              onclick={undoEdits}><Undo2 size={13} />Undo edits</button
+            >{/if}
           {#if fork}<button
               class="text-button"
               onclick={fork}
@@ -256,9 +270,29 @@
         </div>{/if}
     {/if}
   </div>
+  {#if message.role === 'user' && rewind}<div class="message-actions user-actions">
+      <button class="text-button" disabled={historyDisabled} onclick={rewind}
+        ><Rewind size={13} />Rewind here</button
+      >
+    </div>{/if}
 </article>
 
 <style>
+  /* Quiet below your bubble until hovered or focused; always shown on touch screens. */
+  .user-actions {
+    margin-top: 4px;
+    opacity: 0;
+    transition: opacity var(--duration-fast) ease;
+  }
+  .message.user:hover .user-actions,
+  .message.user:focus-within .user-actions {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .user-actions {
+      opacity: 1;
+    }
+  }
   .compaction-history {
     margin: 8px 0;
     font-size: var(--text-sm);

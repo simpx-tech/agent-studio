@@ -106,9 +106,16 @@ pub async fn run(
     connection_id: Option<String>,
 ) -> Result<String, String> {
     let usage_revision = AtomicU64::new(0);
+    let changes = Arc::new(Mutex::new(None));
+    let recorded_changes = changes.clone();
     let output = EventSink::new(move |mut event| {
         if let RunEvent::Compaction { compaction } = &mut event {
             compaction.usage_revision = usage_revision.load(Ordering::Relaxed);
+        }
+        if let RunEvent::FileChanges { file_changes } = &event {
+            if let Ok(mut recorded) = recorded_changes.lock() {
+                *recorded = Some(file_changes.clone());
+            }
         }
         if let RunEvent::Usage { usage } = &mut event {
             usage.revision = Some(usage_revision.fetch_add(1, Ordering::Relaxed) + 1);
@@ -150,6 +157,7 @@ pub async fn run(
         });
     }
     let run_started = std::time::Instant::now();
+    let undo_request = request.clone();
     let result = execute(
         app.clone(),
         request,
@@ -161,9 +169,17 @@ pub async fn run(
     )
     .await
     .map(|(status, _)| status);
+    let run_duration_ms = run_started.elapsed().as_millis().min(9_007_199_254_740_991) as u64;
+    let snapshot = changes.lock().ok().and_then(|mut s| s.take());
+    if let Some(snapshot) = snapshot {
+        if let Err(error) = crate::undo::capture(&app, &undo_request, &snapshot).await {
+            let _ = output.send(RunEvent::Activity {
+                text: format!("File Undo unavailable: {error}"),
+            });
+        }
+    }
     if tracking {
-        observation.run_duration_ms =
-            Some(run_started.elapsed().as_millis().min(9_007_199_254_740_991) as u64);
+        observation.run_duration_ms = Some(run_duration_ms);
         if !cancel.is_cancelled() {
             observation.after = crate::usage::read_cancellable(
                 app.clone(),
@@ -326,7 +342,11 @@ pub(crate) async fn execute(
                 .filter(|s| !s.resumed || s.switched_account)
             {
                 if let Some(channel) = &channel {
-                    if session.switched_account {
+                    if session.history_rewritten {
+                        if request.messages.len() > 1 {
+                            let _ = channel.send(RunEvent::Progress { id: "studio-session-rewound".into(), revision: 1, text: "Starting a new native session from the retained messages after a rewind or file Undo. Earlier tool details and compacted context are not carried over.".into() });
+                        }
+                    } else if session.switched_account {
                         let _ = channel.send(RunEvent::Progress { id: "studio-account-switch".into(), revision: 1, text: "Continuing the latest native conversation history under the selected account. Saved tool results and compacted context are carried forward; live terminals and background processes are not restarted.".into() });
                     } else if request.messages.len() > 1 {
                         let _ = channel.send(RunEvent::Progress { id: "studio-session-bootstrap".into(), revision: 1, text: "Continuing this older chat from its saved messages. Native session history is retained from this reply onward; earlier unrecorded tool details are unavailable.".into() });

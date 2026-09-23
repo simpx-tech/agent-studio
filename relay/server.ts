@@ -45,6 +45,7 @@ const jobInput = z
       'nativeInstructions',
       'mcp',
       'plugins',
+      'undoFiles',
       'answer',
       'elicitation',
       'steer',
@@ -72,6 +73,15 @@ const jobInput = z
       ctx.addIssue({ code: 'custom', message: 'Invalid MCP input request' });
     if (job.method === 'mcp' && !mcpRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid MCP management request' });
+    if (
+      job.method === 'undoFiles' &&
+      !z
+        .object({ conversationId: uuid, runId: uuid, connectionId: uuid, commit: z.boolean() })
+        .strict()
+        .safeParse(job.args).success
+    ) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid Undo request' });
+    }
     if (
       job.method === 'steer' &&
       !z

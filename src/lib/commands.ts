@@ -17,6 +17,8 @@ export const appCommands: ComposerCommand[] = [
   ['instructions', 'Edit conversation instructions'],
   ['context', 'Inspect model context and available skills'],
   ['usage', 'Show usage and context limits'],
+  ['rewind', 'Return to an earlier message'],
+  ['undo', 'Undo the latest response’s recorded file edits'],
   ['connections', 'Manage computers and agent accounts'],
   ['settings', 'Notifications, Claude instructions, workspace administration, and data'],
 ].map(([name, detail]) => ({
@@ -32,7 +34,6 @@ export const sessionCommands = new Set([
   'clear',
   'resume',
   'fork',
-  'rewind',
   'exit',
   'quit',
   'workflows',

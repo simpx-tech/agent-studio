@@ -53,6 +53,38 @@ async function fixture() {
   };
 }
 describe('real HTTP relay', () => {
+  it('routes Undo identities without accepting caller-supplied file content or paths', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'undoFiles',
+      args: {
+        conversationId: crypto.randomUUID(),
+        runId: crypto.randomUUID(),
+        connectionId: crypto.randomUUID(),
+        commit: true,
+      },
+    };
+    expect(
+      (
+        await f.call('POST', 'jobs', {
+          ...job,
+          args: { ...job.args, path: '/outside/file', content: 'replacement' },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.source)).body).toEqual([]);
+    expect((await f.call('GET', 'jobs', undefined, f.target)).body[0].args).toEqual(job.args);
+  });
   it('routes explicit plan decisions to the owning host and retains proposed plans in checkpoints', async () => {
     const f = await fixture(),
       id = crypto.randomUUID(),

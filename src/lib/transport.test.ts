@@ -293,6 +293,58 @@ it('keeps following a run another computer still executes after this device rest
   expect(reply?.blocks).toEqual([{ type: 'markdown', text: 'Working on it' }]);
 });
 
+it('saves a host Undo receipt into the live workspace once, including requests from a Viewer', async () => {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const runId = crypto.randomUUID(),
+    conversationId = crypto.randomUUID();
+  workspace.conversations.push({
+    id: conversationId,
+    title: 'Undo',
+    createdAt: '2026-09-19',
+    updatedAt: '2026-09-19',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        runId,
+        role: 'assistant',
+        status: 'complete',
+        createdAt: '2026-09-19',
+        blocks: [],
+      },
+    ],
+  });
+  const apply = vi.fn(async (shared) => {
+    workspace.conversations = shared.conversations;
+  });
+  transport.configureRuntime({
+    installation: {
+      id: crypto.randomUUID(),
+      computerId: crypto.randomUUID(),
+      name: 'QA',
+      platform: 'windows',
+    },
+    workspace: () => workspace,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply,
+    checkpointRun: async () => {},
+  });
+  native.invoke.mockResolvedValue({ files: ['example.txt'], undone: true });
+  await transport.undoFiles(conversationId, runId, undefined, true);
+  await transport.undoFiles(conversationId, runId, undefined, true);
+  expect(apply).toHaveBeenCalledTimes(1);
+  expect(workspace.conversations[0].historyRevision).toBe(1);
+  expect(workspace.conversations[0].messages[0].filesUndone).toBe(true);
+  expect(native.invoke).toHaveBeenCalledWith('undo_files', {
+    conversationId,
+    runId,
+    connectionId: undefined,
+    commit: true,
+  });
+});
+
 async function fixture(remoteConnection?: string) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();

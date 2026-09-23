@@ -67,6 +67,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           !previous.compactions?.length &&
           !previous.proposedPlans?.length &&
           !previous.fileChanges &&
+          !previous.filesUndone &&
           !previous.accountUsage &&
           previous.usage?.revision == null)
       )
@@ -79,6 +80,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         ...(message.compactions || previous.compactions
           ? { compactions: mergeCompactions(message.compactions, previous.compactions) }
           : {}),
+        ...(message.filesUndone || previous.filesUndone ? { filesUndone: true } : {}),
         blocks: mergeActivityBlocks(
           message.blocks,
           previous.blocks.filter((b) => b.type === 'reasoning'),
@@ -115,6 +117,8 @@ function sameRun(
   let settings = left.settings;
   let archived = left.archived;
   if (
+    (left.historyRevision ?? 0) !== (right.historyRevision ?? 0) ||
+    !equal(left.rewind, right.rewind) ||
     left.settings.provider !== right.settings.provider ||
     left.settings.connectionId !== right.settings.connectionId ||
     !equal(left.location, right.location)
@@ -167,6 +171,7 @@ function sameRun(
         : chosen;
     messages.push({
       ...selected,
+      ...(a.filesUndone || b.filesUndone ? { filesUndone: true } : {}),
       ...(a.proposedPlans || b.proposedPlans
         ? { proposedPlans: mergeProposedPlans(a.proposedPlans, b.proposedPlans) }
         : {}),
@@ -312,6 +317,34 @@ export function mergeShared(
         )
           continue;
         if (left && right) {
+          const a = left as unknown as Conversation,
+            b = right as unknown as Conversation;
+          if ((a.historyRevision ?? 0) !== (b.historyRevision ?? 0)) {
+            // Rewind and file Undo replace the history: an older copy yields unless it holds
+            // deliberate edits. Its one-sided archive change still applies, as for replies.
+            const newer = (a.historyRevision ?? 0) > (b.historyRevision ?? 0) ? a : b;
+            const older = newer === a ? b : a;
+            const original = before as unknown as Conversation | undefined;
+            const archivedOlder =
+              !!original &&
+              !!older.archived !== !!original.archived &&
+              !!newer.archived === !!original.archived;
+            result.push(
+              (archivedOlder ? { ...newer, archived: older.archived } : newer) as unknown as T,
+            );
+            if (
+              !original ||
+              !backgroundUpdate(original, { ...older, archived: original.archived })
+            ) {
+              result.push({
+                ...older,
+                id: crypto.randomUUID(),
+                title: `${older.title.slice(0, 70)} (conflict copy)`,
+                titleStatus: 'fallback',
+              } as unknown as T);
+            }
+            continue;
+          }
           const response = sameRun(
             left as unknown as Conversation,
             right as unknown as Conversation,
@@ -412,6 +445,7 @@ export type RelayJob = {
     | 'nativeInstructions'
     | 'mcp'
     | 'plugins'
+    | 'undoFiles'
     | 'answer'
     | 'elicitation'
     | 'steer';

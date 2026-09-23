@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
+  import RewindDialog from '$lib/components/RewindDialog.svelte';
+  import UndoFilesDialog from '$lib/components/UndoFilesDialog.svelte';
+  import { rewindConversation, undoRewind } from '$lib/rewind';
   import { trackMobileViewport } from '$lib/mobileViewport';
   import {
     notificationConversation,
@@ -42,6 +45,7 @@
     Paperclip,
     FileText,
     GitFork,
+    Rewind,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -251,6 +255,30 @@
   let pendingSignIn = $state<{ provider: ProviderId; connectionId?: string } | null>(null);
   let signInDeadline = 0;
   let activeId = $state<string | null>(null);
+  let historyAction = $state<{
+    kind: 'rewind' | 'files';
+    conversationId: string;
+    session: number;
+    messageId?: string;
+    runId?: string;
+  }>();
+  let historyBusy = $state(false);
+  let historyError = $state('');
+  $effect(() => {
+    if (
+      historyAction &&
+      (historyAction.session !== workspaceSession ||
+        activeId !== historyAction.conversationId ||
+        view !== 'chat' ||
+        activeRunning)
+    )
+      historyAction = undefined;
+  });
+  // A rewind or Undo error belongs to the conversation it was raised in.
+  $effect(() => {
+    void activeId;
+    untrack(() => (historyError = ''));
+  });
   let draftSettings = $state<ChatSettings>(untrack(() => settingsFor(workspace.preferences)));
   let draftLocation = $state<ChatLocation>();
   let draftComputerId = $state('');
@@ -622,7 +650,9 @@
       lastReplyConnection !== selectedSettings.connectionId,
   );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
-  const chatChanges = $derived(summarizeFileChanges(active?.messages ?? []));
+  const chatChanges = $derived(
+    summarizeFileChanges((active?.messages ?? []).filter((m) => !m.filesUndone)),
+  );
   const nextReplyChanged = $derived(
     !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),
   );
@@ -643,6 +673,8 @@
   );
   const canSend = $derived(
     loaded &&
+      !historyBusy &&
+      !historyAction &&
       !imagesLoading &&
       (!attachedImages.length || imagesSupported) &&
       !selectingLocation &&
@@ -664,7 +696,7 @@
       selectedStatus.auth === 'ready',
   );
   const activeQueue = $derived(activeId ? (queued[activeId] ?? []) : []);
-  const canCompact = $derived(canSend && !!active?.messages.some(m => m.role === 'assistant') &&
+  const canCompact = $derived(canSend && !active?.rewind && !!active?.messages.some(m => m.role === 'assistant') &&
     ['claude', 'codex'].includes(selectedSettings.provider) &&
     active?.messages.findLast(m => m.role === 'assistant')?.settings?.connectionId === selectedSettings.connectionId);
   const steeringSupported = $derived(
@@ -1109,6 +1141,103 @@
     } finally {
       restartingForUpdate = false;
     }
+  }
+  function openRewind(messageId?: string) {
+    if (!active?.messages.some((m) => m.role === 'user')) {
+      historyError = 'There are no messages to rewind.';
+      return;
+    }
+    if (activeRunning || run || historyBusy || activeQueue.length) {
+      historyError = 'Wait for the response and queued messages to finish before rewinding.';
+      return;
+    }
+    historyError = '';
+    historyAction = {
+      kind: 'rewind',
+      conversationId: active.id,
+      messageId,
+      session: workspaceSession,
+    };
+  }
+  function openUndoFiles(runId?: string) {
+    if (!active || activeRunning || run || historyBusy || activeQueue.length) {
+      historyError = 'Open an idle conversation before Undo.';
+      return;
+    }
+    const target =
+      runId ??
+      active.messages.findLast(
+        (m) => m.role === 'assistant' && m.fileChanges?.edits.length && !m.filesUndone,
+      )?.runId;
+    if (!target) {
+      historyError = 'There are no recorded file edits to undo.';
+      return;
+    }
+    historyError = '';
+    historyAction = {
+      kind: 'files',
+      conversationId: active.id,
+      runId: target,
+      session: workspaceSession,
+    };
+  }
+  async function changeHistory(messageId?: string) {
+    if (!active || activeRunning || run || historyBusy || activeQueue.length)
+      throw new Error('Wait for the response to finish before rewinding.');
+    const before = $state.snapshot(active),
+      session = workspaceSession;
+    const next = messageId ? rewindConversation(before, messageId) : undoRewind(before);
+    historyBusy = true;
+    try {
+      workspace.conversations = workspace.conversations.map((c) => (c.id === next.id ? next : c));
+      await persist();
+      if (session !== workspaceSession) return;
+      await releaseConversation(next.id, next.settings.connectionId).catch(() => {});
+      selectedArtifact = null;
+      historyError = '';
+      // The conversation now ends elsewhere: drop held space and show the new end.
+      virtualSpace?.clear();
+      nearBottom = true;
+      void scrollToEnd();
+      // The control that started this is usually gone; continue in the composer.
+      void tick().then(() =>
+        requestAnimationFrame(() => {
+          if (!historyAction && session === workspaceSession)
+            composerInput?.focus({ preventScroll: true });
+        }),
+      );
+    } catch (e) {
+      if (session === workspaceSession)
+        workspace.conversations = workspace.conversations.map((c) =>
+          c.id === before.id ? before : c,
+        );
+      throw e;
+    } finally {
+      if (session === workspaceSession) historyBusy = false;
+    }
+  }
+  async function prepareUndo(conversationId: string, session: number) {
+    if (
+      session !== workspaceSession ||
+      !active ||
+      active.id !== conversationId ||
+      activeRunning ||
+      run
+    )
+      throw new Error('The conversation changed. Reopen Undo.');
+    await persist();
+  }
+  async function markFilesUndone(conversationId: string, runId: string, session: number) {
+    if (session !== workspaceSession) return;
+    const conversation = workspace.conversations.find((c) => c.id === conversationId);
+    const message = conversation?.messages.find((m) => m.runId === runId);
+    if (!conversation || !message) return;
+    if (!message.filesUndone) {
+      message.filesUndone = true;
+      conversation.historyRevision = (conversation.historyRevision ?? 0) + 1;
+    }
+    conversation.updatedAt = new Date().toISOString();
+    await persist();
   }
   async function updateInputTemplate(
     template: InputTemplate | undefined,
@@ -2279,7 +2408,7 @@
     }
     const compact = !!compactRequest || !!command?.compact || (retry && !!active?.messages.at(-1)?.compact);
     if (compact && (!canCompact || (!compactRequest && attachedImages.length))) {
-      notice = 'Compact an idle conversation with its current account and no attachments. Send a message first after switching accounts.';
+      notice = 'Compact an idle conversation with its current account and no attachments. Send a message first after switching accounts or rewinding.';
       return;
     }
     const text = compactRequest ?? (queuedMessage ? queuedMessage.text : prompt.trim());
@@ -2340,6 +2469,8 @@
       conversation.archived = false;
       revealConversation(conversation);
     }
+    // Any submission, including a retry, ends the chance to undo a rewind.
+    delete conversation.rewind;
     if (retry && conversation.messages.at(-1)?.role === 'assistant') {
       if (conversation.messages.at(-1)?.steering?.length) {
         // Preserve the steered attempt and its accepted inputs for portable history.
@@ -2438,6 +2569,7 @@
               ...(instructions.trim() ? { claudeInstructions: instructions } : {}),
               messages: history,
               conversationId: conversation.id,
+              historyRevision: conversation.historyRevision,
               assistantId,
               location: conversation.location?.path ? { ...conversation.location } : undefined,
               ...(accountSwitch ? { accountSwitch: true } : {}),
@@ -3222,6 +3354,14 @@
                       !run}
                     retry={() => void send(true)}
                     retryDisabled={!canSend}
+                    rewind={m.role === 'user' ? () => openRewind(m.id) : undefined}
+                    undoEdits={m.runId && m.fileChanges?.edits.length
+                      ? () => openUndoFiles(m.runId)
+                      : undefined}
+                    historyDisabled={!!run ||
+                      activeRunning ||
+                      historyBusy ||
+                      !!activeQueue.length}
                     fork={m.role === 'assistant' && m.status !== 'running'
                       ? () => active && void forkChat(active.id, m.id)
                       : undefined}
@@ -3243,6 +3383,17 @@
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
           </div>
           <div class="composer-area">
+            {#if active?.rewind}<div class="setup-hint neutral" role="status">
+                <Rewind size={15} aria-hidden="true" /><span
+                  >Conversation rewound. Send a new message to continue from here.</span
+                ><button
+                  class="text-button"
+                  disabled={historyBusy || activeRunning || !!run}
+                  onclick={() => void changeHistory().catch((e) => (historyError = String(e)))}
+                  >Undo rewind</button
+                >
+              </div>{/if}
+            {#if historyError}<p class="attachment-notice" role="alert">{historyError}</p>{/if}
             {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
             {#if selectedComputerOffline}<div class="setup-hint">
                 <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
@@ -3397,6 +3548,8 @@
                         : 'The next reply will use the Claude CLI profile’s Fast mode default.';
                   } else if (name === 'context') contextOpen = true;
                   else if (name === 'usage') usageExpanded = true;
+                  else if (name === 'rewind') openRewind();
+                  else if (name === 'undo') openUndoFiles();
                   else if (name === 'connections') view = 'connections';
                   else if (name === 'settings') view = 'settings';
                   else if (name === 'new') {
@@ -3625,6 +3778,34 @@
       fork={() => menuConversation && void forkChat(menuConversation.id)}
       forkDisabled={forking || imagesLoading || forkPoint(menuConversation) < 0}
     />
+  {/key}
+{/if}
+{#if historyAction && active?.id === historyAction.conversationId}
+  {@const action = historyAction}
+  {#key `${workspaceSession}:${active.id}:${historyAction.kind}:${historyAction.runId ?? ''}`}
+    {#if historyAction.kind === 'rewind'}
+      <RewindDialog
+        conversation={active}
+        messageId={historyAction.messageId}
+        close={() => {
+          if (historyAction === action) historyAction = undefined;
+        }}
+        apply={(id) => changeHistory(id)}
+      />
+    {:else if historyAction.runId}
+      {@const conversationId = active.id}
+      {@const runId = historyAction.runId}
+      <UndoFilesDialog
+        {conversationId}
+        {runId}
+        connectionId={active.settings.connectionId}
+        close={() => {
+          if (historyAction === action) historyAction = undefined;
+        }}
+        prepare={() => prepareUndo(conversationId, action.session)}
+        applied={() => markFilesUndone(conversationId, runId, action.session)}
+      />
+    {/if}
   {/key}
 {/if}
 {#if deletion}<div class="modal-backdrop confirmation-backdrop" role="presentation">
