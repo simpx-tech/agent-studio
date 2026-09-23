@@ -101,6 +101,7 @@
     inputTemplatesSchema,
     type InputTemplate,
   } from '$lib/input-templates';
+  import { claudeInstructions } from '$lib/claude-instructions';
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
   import { forkConversation, forkPoint, forkFitsWorkspace } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
@@ -882,6 +883,7 @@
               workspace.fleet = value.fleet;
               workspace.workflows = value.workflows;
               workspace.inputTemplates = value.inputTemplates;
+              workspace.claudeInstructions = value.claudeInstructions;
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
@@ -1048,6 +1050,22 @@
       )
         workspace.inputTemplates = before;
       throw new Error('The template could not be saved. Your changes are still here; try again.');
+    }
+  }
+  async function saveClaudeInstructions(value: string | undefined, previous: string | undefined) {
+    const session = workspaceSession;
+    const before = workspace.claudeInstructions;
+    if (before !== previous)
+      throw new Error(
+        'These instructions changed on another device. Save again to replace them with your text.',
+      );
+    workspace.claudeInstructions = value;
+    try {
+      await persist();
+    } catch {
+      if (session === workspaceSession && workspace.claudeInstructions === value)
+        workspace.claudeInstructions = before;
+      throw new Error('The instructions could not be saved. Your text is still here; try again.');
     }
   }
   function closeTemplates() {
@@ -2178,6 +2196,8 @@
           conversation.title,
           responseSettings.connectionId,
         );
+      const instructions =
+        responseSettings.provider === 'claude' ? claudeInstructions(workspace) : '';
       const result = stopping
         ? 'cancelled'
         : await runAgent(
@@ -2185,6 +2205,7 @@
               runId,
               ...(compact ? { compact: true } : {}),
               agent: responseSettings,
+              ...(instructions.trim() ? { claudeInstructions: instructions } : {}),
               messages: history,
               conversationId: conversation.id,
               assistantId,
@@ -3277,7 +3298,15 @@
       {/key}
     {:else if view === 'settings'}
       {#key workspaceSession}
-        <SettingsPage {paired} {workspaceSession} {exportWorkspace} {appUpdate} {restartToUpdate} />
+        <SettingsPage
+          {paired}
+          {workspaceSession}
+          {exportWorkspace}
+          {appUpdate}
+          {restartToUpdate}
+          claudeInstructions={workspace.claudeInstructions}
+          {saveClaudeInstructions}
+        />
       {/key}
     {/if}
   </main>

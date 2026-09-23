@@ -426,6 +426,9 @@ pub struct RunRequest {
     #[serde(default)]
     pub location: Option<crate::folders::ChatLocation>,
     pub agent: Agent,
+    // Workspace-wide instructions appended to the system prompt of Claude chats.
+    #[serde(default)]
+    pub claude_instructions: Option<String>,
     pub messages: Vec<ChatMessage>,
 }
 #[derive(Clone, Deserialize)]
@@ -567,6 +570,14 @@ impl RunRequest {
         }
         if self.agent.instructions.len() > 64000 {
             return Err("Agent instructions are too long".into());
+        }
+        if let Some(text) = &self.claude_instructions {
+            if self.conversation_only || self.agent.provider != "claude" {
+                return Err("Claude chat instructions apply only to Claude chats.".into());
+            }
+            if text.chars().count() > 4000 || text.contains('\0') {
+                return Err("Claude chat instructions must be at most 4,000 characters.".into());
+            }
         }
         let allowed: &[&str] = match self.agent.provider.as_str() {
             "codex" => &[
@@ -1100,6 +1111,14 @@ pub async fn chat_command(
                 if let Some(fallback) = &request.agent.fallback_model {
                     c.arg("--fallback-model").arg(fallback);
                 }
+                // A literal argument: system text, never replayed as conversation history.
+                if let Some(text) = request
+                    .claude_instructions
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    c.arg("--append-system-prompt").arg(text);
+                }
                 // Shared MCP definitions ride along; the app's own SDK server keeps its name.
                 let mut mcp = request.shared_context.mcp_servers.clone();
                 mcp.insert(
@@ -1419,6 +1438,7 @@ mod tests {
             forked: false,
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
+            claude_instructions: None,
             agent: Agent {
                 fast_mode: None,
                 fallback_model: None,
@@ -1516,6 +1536,50 @@ mod tests {
         assert!(r.validate().is_err());
         r.agent.provider = "gemini".into();
         assert!(r.validate().is_err());
+    }
+    #[tokio::test]
+    async fn claude_chat_instructions_are_a_validated_literal_system_prompt_append() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "fixture".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let baseline = crate::pool::fingerprint(&r, &exe).unwrap();
+        let text = "Run tests in the foreground.\nQuotes \" & $(echo) `x` stay literal.";
+        r.claude_instructions = Some(text.into());
+        r.validate().unwrap();
+        assert_ne!(baseline, crate::pool::fingerprint(&r, &exe).unwrap());
+        let c = chat_command(&r, root.path(), &exe).await.unwrap();
+        let args: Vec<_> = c.as_std().get_args().map(|a| a.to_string_lossy()).collect();
+        assert!(args
+            .windows(2)
+            .any(|a| a == ["--append-system-prompt", text]));
+        assert!(!r.stdin_payload().contains("Run tests in the foreground"));
+        for blank in ["", " \n "] {
+            r.claude_instructions = Some(blank.into());
+            r.validate().unwrap();
+            let c = chat_command(&r, root.path(), &exe).await.unwrap();
+            assert!(!c.as_std().get_args().any(|a| a == "--append-system-prompt"));
+        }
+        r.claude_instructions = Some("é".repeat(4000));
+        r.validate().unwrap();
+        for invalid in ["é".repeat(4001), "null\0".into()] {
+            r.claude_instructions = Some(invalid);
+            assert!(r.validate().is_err());
+        }
+        r.claude_instructions = Some(text.into());
+        r.conversation_only = true;
+        assert!(r.validate().is_err());
+        let c = chat_command(&r, root.path(), &exe).await.unwrap();
+        assert!(!c.as_std().get_args().any(|a| a == "--append-system-prompt"));
+        r.conversation_only = false;
+        for provider in ["codex", "gemini"] {
+            r.agent.provider = provider.into();
+            assert!(r.validate().is_err());
+        }
     }
     #[tokio::test]
     async fn plan_mode_launches_with_native_permissions_and_keeps_background_restricted() {

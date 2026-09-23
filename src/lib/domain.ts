@@ -16,6 +16,7 @@ import { questionsSchema, questionHistory, type QuestionRequest } from './questi
 import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
 import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
+import { claudeInstructionsSchema } from './claude-instructions.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -262,6 +263,7 @@ export const workspaceSchema = z.object({
   conversations: z.array(conversationSchema),
   workflows: z.array(workflowSchema).max(100).optional(),
   inputTemplates: inputTemplatesSchema.optional(),
+  claudeInstructions: claudeInstructionsSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {
@@ -323,6 +325,8 @@ export type RunRequest = {
   accountSwitch?: boolean;
   forked?: boolean;
   agent: ChatSettings;
+  // Workspace-wide Claude chat instructions, appended to the CLI's system prompt.
+  claudeInstructions?: string;
   messages: {
     role: 'user' | 'assistant';
     text: string;

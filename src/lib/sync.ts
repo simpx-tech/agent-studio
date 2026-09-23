@@ -16,16 +16,18 @@ import { mergeCompactions } from './compaction.ts';
 import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
+import { mergeClaudeInstructions } from './claude-instructions.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
-  'fleet' | 'conversations' | 'workflows' | 'inputTemplates'
+  'fleet' | 'conversations' | 'workflows' | 'inputTemplates' | 'claudeInstructions'
 >;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
   conversations: true,
   workflows: true,
   inputTemplates: true,
+  claudeInstructions: true,
 });
 export type MergeOptions = {
   /**
@@ -368,8 +370,18 @@ export function mergeShared(
           ),
         }
       : {}),
+    ...claudeInstructionsField(
+      mergeClaudeInstructions(
+        base.claudeInstructions,
+        local.claudeInstructions,
+        remote.claudeInstructions,
+      ),
+    ),
   };
 }
+// An absent value follows the default text, so it stays absent rather than undefined.
+const claudeInstructionsField = (value: string | undefined) =>
+  value === undefined ? {} : { claudeInstructions: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
   environmentId: string;

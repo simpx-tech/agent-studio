@@ -123,6 +123,10 @@
           current app’s text; an older conversation may have started with different wording. Your
           conversation instructions appear separately above.
         </p>
+        {#if settings.provider === 'claude'}<p>
+            Claude chat instructions from Settings are appended to the system prompt, so the
+            recorded snapshot above includes the text in use when it was captured.
+          </p>{/if}
         <pre aria-label="Current Agent Studio guidance">{snapshot.studioGuidance}</pre>
       </details>
     {/if}

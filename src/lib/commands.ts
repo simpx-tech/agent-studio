@@ -18,7 +18,7 @@ export const appCommands: ComposerCommand[] = [
   ['context', 'Inspect model context and available skills'],
   ['usage', 'Show usage and context limits'],
   ['connections', 'Manage computers and agent accounts'],
-  ['settings', 'Notifications, workspace administration, and data'],
+  ['settings', 'Notifications, Claude instructions, workspace administration, and data'],
 ].map(([name, detail]) => ({
   id: `app:${name}`,
   name: `/${name}`,

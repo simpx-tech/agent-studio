@@ -4,7 +4,7 @@ Open **Model context → Native prompt** in a conversation. The tab reads instru
 
 - Claude Code: displays the latest parent `prompt_snapshot` attachment's `systemPrompt` sections, preserving each section's exact text. Version and capture time come from that record. Older CLIs or sessions without prompt recording show an explicit unavailable state.
 - Codex: displays `session_meta.base_instructions.text` and unique text-only developer messages from the same native session, in recorded order. Base instructions are labelled as the session-start record. Developer messages may belong to earlier turns; model changes and compaction can change later input.
-- Agent Studio additions: separately displays the current build's app guidance from the same generator used for chat. It is user context, and is not presented as the recorded wording of an older conversation. User-supplied conversation instructions remain in their existing disclosure.
+- Agent Studio additions: separately displays the current build's app guidance from the same generator used for chat. It is user context, and is not presented as the recorded wording of an older conversation. User-supplied conversation instructions remain in their existing disclosure. Claude chat instructions from Settings are appended to Claude's system prompt, so a recorded Claude snapshot already contains the text in use when it was captured; the disclosure notes this instead of repeating the current setting.
 
 This view does not represent the entire model request. Tool definitions, project guidance, conversation history, dynamically loaded context, and provider-side additions can be separate. It describes the CLI session Agent Studio used, not every instruction a separate provider desktop application might add.
 

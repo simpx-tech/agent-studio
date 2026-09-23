@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Download, ShieldCheck } from '@lucide/svelte';
   import AppUpdates from './AppUpdates.svelte';
+  import ClaudeInstructions from './ClaudeInstructions.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
   import PushNotifications from './PushNotifications.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
@@ -11,12 +12,19 @@
     exportWorkspace,
     appUpdate,
     restartToUpdate,
+    claudeInstructions,
+    saveClaudeInstructions,
   }: {
     paired: boolean;
     workspaceSession?: number;
     exportWorkspace: () => Promise<void>;
     appUpdate?: AppUpdateStatus;
     restartToUpdate: () => Promise<void>;
+    claudeInstructions?: string;
+    saveClaudeInstructions: (
+      value: string | undefined,
+      previous: string | undefined,
+    ) => Promise<void>;
   } = $props();
   let busy = $state(false);
   let error = $state('');
@@ -41,8 +49,8 @@
         <h1>Settings</h1>
         <p>
           {desktop()
-            ? 'Notifications, app updates, workspace administration, and the data kept for this workspace.'
-            : 'Notifications, workspace administration, and the data kept for this workspace.'}
+            ? 'Notifications, app updates, Claude chat instructions, workspace administration, and the data kept for this workspace.'
+            : 'Notifications, Claude chat instructions, workspace administration, and the data kept for this workspace.'}
         </p>
       </div>
     </section>
@@ -53,6 +61,10 @@
           {workspaceSession}
         />{/if}
       {#if desktop()}<AppUpdates status={appUpdate} restart={restartToUpdate} />{/if}
+      {#key workspaceSession}<ClaudeInstructions
+          value={claudeInstructions}
+          save={saveClaudeInstructions}
+        />{/key}
       <WorkspaceAdministration {paired} {workspaceSession} />
       <section class="workspace-data" aria-labelledby="workspace-data-heading">
         <h2 id="workspace-data-heading"><ShieldCheck size={18} />Workspace data</h2>

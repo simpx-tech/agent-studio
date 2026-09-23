@@ -169,6 +169,7 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "fallbackModel": request.agent.fallback_model,
         "outputSchema": if request.agent.provider == "claude" && !request.compact { request.agent.output_schema.as_deref() } else { None },
         "planMode": request.agent.plan_mode,
+        "claudeInstructions": request.claude_instructions,
         "plugins": crate::plugins::for_run(request),
         "sharedContext": request.shared_context,
         "program": exe.program,
