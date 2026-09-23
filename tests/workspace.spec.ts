@@ -933,7 +933,12 @@ test('reported context stays exact while typing and survives reload', async ({ p
     '2,000 input tokens',
   );
   await expect(meter).toHaveAttribute('aria-valuenow', '10');
-  await expect(page.locator('.context-chip')).toContainText('10%');
+  await expect(page.locator('.context-chip strong')).toHaveText('2K / 20K');
+  await expect(page.locator('.context-chip')).not.toContainText('%');
+  await expect(page.locator('.context-chip')).toHaveAttribute(
+    'title',
+    /^2,000 of 20,000 tokens used \(10%\)\. Room available\./,
+  );
   await expect(page.locator('.context-chip')).not.toContainText('estimated');
   await expect(page.locator('.context-chip')).not.toContainText('reported');
   await expect(page.locator('.context-card .usage-card-heading')).toHaveText('Chat context');

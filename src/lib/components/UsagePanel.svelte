@@ -86,7 +86,7 @@
       ? 'Not measured yet'
       : context.percent == null
         ? `${compactTokens(context.reported)} tokens`
-        : percentage(context.percent),
+        : `${compactTokens(context.reported)} / ${compactTokens(context.capacity!)}`,
   );
   const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
 </script>
@@ -137,9 +137,9 @@
     <button
       class="usage-chip context-chip"
       class:usage-warning={(context.percent ?? 0) >= 80}
-      title={contextHealth.state !== 'unknown'
-        ? `${contextHealth.label}. ${contextHealth.advice}`
-        : context.unavailableReason}
+      title={context.percent == null
+        ? context.unavailableReason
+        : `${context.reported!.toLocaleString()} of ${context.capacity!.toLocaleString()} tokens used (${percentage(context.percent)}). ${contextHealth.label}. ${contextHealth.advice}`}
       onclick={() => (expanded = !expanded)}
       aria-expanded={expanded}
       aria-controls="usage-details"
