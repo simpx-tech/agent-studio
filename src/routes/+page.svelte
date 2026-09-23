@@ -189,6 +189,9 @@
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
   import '$lib/styles.css';
+  import { initAppearance } from '$lib/appearance.svelte';
+
+  initAppearance();
 
   type View = 'chat' | 'connections' | 'settings';
   let installation = $state<Installation>();
@@ -2535,7 +2538,7 @@
     </button>
     <div class="sidebar-section">
       <span class="sidebar-section-label"
-        >CONVERSATIONS
+        >Conversations
         <span role="status" aria-live="polite" aria-label={`${pendingChats} pending chats`}>
           {#if pendingChats > 0}<span
               class="pending-chat-count"
@@ -2802,7 +2805,7 @@
           <div class="chat-toolbar" aria-label="Conversation settings">
             <div class="chat-configuration">
               <div class="chat-setting computer-setting">
-                <span>Computer{selectedComputerOffline ? ' · Offline' : ''}</span><ChoicePicker
+                <ChoicePicker
                   label="Computer"
                   title={active
                     ? 'Fixed for this conversation. Start a new conversation to change it.'
@@ -2829,9 +2832,10 @@
                 >
                   {#snippet icon()}<Laptop size={16} />{/snippet}
                 </ChoicePicker>
+                {#if selectedComputerOffline}<span class="setting-badge">Offline</span>{/if}
               </div>
               <div class="chat-setting folder-setting">
-                <span>Folder</span><ChoicePicker
+                <ChoicePicker
                   label="Folder"
                   title={selectedLocation
                     ? selectedLocation.path || 'Standalone chat without a project folder'
@@ -2897,7 +2901,7 @@
                 </ChoicePicker>
               </div>
               <div class="chat-setting agent-setting">
-                <span>Agent</span><ChoicePicker
+                <ChoicePicker
                   label="Agent"
                   title={`${
                     active
@@ -2922,7 +2926,7 @@
                 </ChoicePicker>
               </div>
               <div class="chat-setting model-setting">
-                <span>Model</span><ChoicePicker
+                <ChoicePicker
                   bind:this={modelPicker}
                   label="Model"
                   value={selectedSettings.model}
@@ -2934,8 +2938,8 @@
                   {#snippet icon()}<Cpu size={16} />{/snippet}
                 </ChoicePicker>
               </div>
-              <div class="chat-setting">
-                <span>Reasoning</span><ChoicePicker
+              <div class="chat-setting reasoning-setting">
+                <ChoicePicker
                   bind:this={reasoningPicker}
                   label="Reasoning"
                   value={selectedSettings.reasoning}
@@ -3034,7 +3038,7 @@
                     style:--provider-color={providers[selectedAgent.provider].color}
                     >{providers[selectedAgent.provider].mark}</span
                   ><span class="eyebrow"
-                    >A CONVERSATION WITH {selectedAgent.name.toUpperCase()}</span
+                    >A conversation with {selectedAgent.name}</span
                   >
                   <h1>What’s on your mind?</h1>
                   <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>

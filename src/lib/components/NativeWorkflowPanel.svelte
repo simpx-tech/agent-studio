@@ -94,9 +94,9 @@
 
 <style>
   .native-workflow-panel {
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
     margin: 10px 0;
     overflow: hidden;
   }
@@ -104,22 +104,37 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 12px 14px;
+    min-height: 40px;
+    padding: 9px 12px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--text-sm);
     list-style: none;
+    transition: background-color var(--duration-fast) ease;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    background: var(--hover);
+  }
+  .native-workflow-panel > summary > :global(svg:first-child) {
+    color: var(--accent-strong);
+  }
+  summary > :global(svg:last-child) {
+    color: var(--text-faint);
   }
   summary strong {
     flex: 1;
     min-width: 0;
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
   summary > span {
-    color: var(--muted);
-    font-size: 11px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
   }
   .workflow-body {
-    padding: 0 14px 12px;
+    padding: 4px 12px 12px;
     max-height: 300px;
     overflow: auto;
   }
@@ -127,20 +142,29 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px 14px;
-    font-size: 11px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
   p {
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
     overflow-wrap: anywhere;
   }
   h3 {
-    font-size: 12px;
-    margin: 16px 0 6px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 16px 0 4px;
   }
   .workflow-agent > summary {
-    padding: 8px 0;
+    min-height: 0;
+    padding: 6px 8px;
+    margin: 0 -8px;
+    border-radius: var(--radius-md);
+  }
+  .workflow-agent > summary > :global(svg:first-child) {
+    color: var(--text-muted);
   }
   .agent-detail {
     padding: 6px 22px;
@@ -152,11 +176,12 @@
     margin-top: 12px;
   }
   .script-location summary {
+    min-height: 0;
     padding: 4px 0;
-    color: var(--muted);
+    color: var(--text-muted);
   }
   code {
-    font-size: 11px;
+    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   .compact {
@@ -167,7 +192,7 @@
       max-height: 200px;
     }
     summary {
-      padding: 10px;
+      padding: 9px 10px;
     }
   }
 </style>

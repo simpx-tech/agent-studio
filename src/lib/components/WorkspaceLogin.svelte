@@ -123,6 +123,8 @@
     overflow: auto;
     display: flex;
     padding: 40px 24px;
+    background:
+      radial-gradient(900px 420px at 50% -8%, var(--accent-soft), transparent 70%), var(--bg);
   }
   .login-content {
     width: 100%;
@@ -133,26 +135,35 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 40px;
-    font-family: 'Manrope Variable', sans-serif;
-    font-size: 19px;
-    font-weight: 750;
-    letter-spacing: -0.5px;
+    margin-bottom: 36px;
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: var(--tracking-tighter);
   }
   .login-heading h1 {
-    font-size: 29px;
-    letter-spacing: -1px;
-    line-height: 1.25;
-    margin-bottom: 12px;
+    font-size: 26px;
+    line-height: 1.2;
+    margin-bottom: 8px;
+  }
+  .login-heading p {
+    color: var(--text-muted);
+    font-size: var(--text-md);
   }
   .login-heading {
-    margin-bottom: 28px;
+    margin-bottom: 24px;
   }
   form {
     display: grid;
-    gap: 10px;
+    gap: 8px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    background: var(--surface-1);
+    box-shadow: var(--shadow-md);
   }
   label {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
     font-weight: 500;
   }
   .key-field {
@@ -160,16 +171,16 @@
   }
   .key-field > :global(svg) {
     position: absolute;
-    left: 14px;
-    top: 16px;
-    color: var(--muted);
+    left: 13px;
+    top: 13px;
+    color: var(--text-muted);
     pointer-events: none;
   }
   input {
-    min-height: 48px;
-    padding-left: 41px;
-    padding-right: 48px;
-    font-size: 16px;
+    min-height: 44px;
+    padding-left: 40px;
+    padding-right: 46px;
+    font-size: var(--text-md);
   }
   input::-ms-reveal {
     display: none;
@@ -178,53 +189,66 @@
     position: absolute;
     top: 2px;
     right: 2px;
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
     padding: 0;
     border: 0;
+    border-radius: var(--radius-md);
     background: transparent;
-    color: var(--muted);
+    color: var(--text-muted);
   }
   .key-visibility:hover:not(:disabled) {
+    background: var(--hover);
     color: var(--text);
   }
   #workspace-key-help,
   .login-note {
-    font-size: 12px;
-    color: var(--muted);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   .primary {
-    min-height: 46px;
-    margin-top: 10px;
+    min-height: 42px;
+    margin-top: 8px;
   }
   .login-note {
-    margin-top: 24px;
+    margin-top: 20px;
+    text-align: center;
   }
   .login-status {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 20px;
+    margin-bottom: 18px;
+    color: var(--text-secondary);
   }
   .login-error {
-    border-left: 2px solid var(--green);
-    padding-left: 14px;
-    margin-bottom: 20px;
+    padding: 10px 12px;
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius-lg);
+    background: var(--warning-soft);
+    margin-bottom: 18px;
     overflow-wrap: anywhere;
+  }
+  .login-error p {
+    color: var(--text);
   }
   .login-content :global(.browser-status) {
     padding: 16px 0 0;
     border: 0;
     background: transparent;
+    text-align: center;
   }
   @media (max-width: 650px) {
     .workspace-login {
       position: fixed;
       inset: var(--mobile-top, 0px) 0 auto;
-      padding: 28px 24px;
+      padding: 28px 20px;
     }
     .login-brand {
-      margin-bottom: 32px;
+      margin-bottom: 28px;
+    }
+    input {
+      font-size: 16px;
     }
   }
 </style>

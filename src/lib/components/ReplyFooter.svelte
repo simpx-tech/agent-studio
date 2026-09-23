@@ -184,48 +184,53 @@
 
 <style>
   .reply-footer {
-    margin-top: 10px;
+    margin-top: 12px;
     min-width: 0;
-    color: var(--text);
+    color: var(--text-muted);
     font-size: 11px;
   }
   .footer-controls {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0 16px;
+    gap: 2px 6px;
+    margin-left: -6px;
   }
   .footer-toggle {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
-    padding: 6px 0;
+    min-height: 26px;
+    padding: 3px 8px 3px 6px;
     cursor: pointer;
     border: 0;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: inherit;
+    color: var(--text-muted);
     font: inherit;
     min-width: 0;
     text-align: left;
   }
+  .footer-toggle:not(:disabled):hover,
+  .footer-toggle[aria-expanded='true'] {
+    background: var(--hover);
+    color: var(--text);
+  }
   .usage-toggle {
-    color: #8eaa76;
+    font-variant-numeric: tabular-nums;
   }
   .files-toggle {
-    color: var(--muted);
-    gap: 6px;
     white-space: nowrap;
   }
   .file-count {
     font-variant-numeric: tabular-nums;
-  }
-  .footer-toggle:focus-visible {
-    outline: 2px solid #b9ddcc;
-    outline-offset: 3px;
-    border-radius: 3px;
+    color: var(--text-secondary);
   }
   .footer-toggle :global(svg) {
     flex-shrink: 0;
+  }
+  .footer-toggle :global(.disclosure) {
+    color: var(--text-faint);
   }
   .footer-toggle[aria-expanded='true'] :global(.disclosure) {
     transform: rotate(180deg);
@@ -233,17 +238,24 @@
   .usage-summary {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px 12px;
+    gap: 4px 10px;
   }
   .usage-summary span {
     white-space: nowrap;
   }
+  .usage-summary span + span {
+    color: var(--text-faint);
+  }
   .usage-breakdown {
-    max-width: 440px;
-    padding: 8px 0 4px 21px;
-    color: #a8b69f;
+    max-width: 460px;
+    margin-top: 6px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-1);
+    color: var(--text-muted);
     font-size: 12px;
-    line-height: 1.6;
+    line-height: var(--leading-normal);
   }
   dl {
     margin: 0;
@@ -255,12 +267,17 @@
     gap: 4px 18px;
     padding: 3px 0;
   }
+  dl > div + div {
+    border-top: 1px solid var(--border);
+  }
   dd {
     margin: 0;
-    color: #d3dfca;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
   p {
     margin: 8px 0 0;
     font-size: 11px;
+    color: var(--text-muted);
   }
 </style>

@@ -41,12 +41,16 @@
     margin: 14px 0;
     padding: 14px 16px;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-left: 3px solid var(--accent-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-1);
     min-width: 0;
     overflow-wrap: anywhere;
   }
   h4 {
-    font-size: 13px;
-    margin: 0 0 10px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--accent-text);
+    margin: 0 0 8px;
   }
 </style>

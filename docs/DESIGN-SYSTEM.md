@@ -1,0 +1,60 @@
+# Design system
+
+Agent Studio's interface is built from one set of semantic design tokens in
+`src/lib/theme.css`, shared primitives in `src/lib/styles.css`, and component styles that read
+only those tokens. Raw colors belong in `theme.css`; components never hard-code hex, `rgb()` or
+named colors, so every surface follows the selected theme.
+
+## Principles
+
+- **Quiet chrome, readable content.** Neutral graphite surfaces, hairline borders and a single
+  lime accent. Chat prose is the most prominent text on screen.
+- **One accent.** `--accent` marks the primary action, selection, focus and live state. Status
+  colors (success, warning, danger, info) are reserved for meaning, never decoration.
+- **Readable sizes.** UI text is 12–13px, prose 14px. Nothing is smaller than 10px, and 10px is
+  only for counts and badges. No uppercase letter-spaced labels.
+- **Consistent geometry.** A 4px spacing rhythm, radii from `--radius-xs` to `--radius-2xl`, and
+  32px default controls (44px touch targets on phones).
+- **Motion is feedback.** Hover and state transitions use `--duration-fast`; overlays fade in
+  with opacity only, so measured layout never moves during an animation.
+
+## Tokens
+
+| Group        | Tokens                                                                                                                           | Use                                                         |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Surfaces     | `--bg`, `--bg-sidebar`, `--surface-1…3`, `--surface-overlay`, `--surface-sunken`                                                 | Canvas, cards, raised controls, popovers and dialogs, wells |
+| State layers | `--hover`, `--active`, `--selected`, `--input-bg`                                                                                | Translucent overlays that work on any surface               |
+| Lines        | `--border`, `--border-strong`, `--border-hover`                                                                                  | Dividers, control outlines, hover outlines                  |
+| Text         | `--text`, `--text-prose`, `--text-secondary`, `--text-muted`, `--text-faint`                                                     | Headings, chat prose, body, metadata, placeholders          |
+| Accent       | `--accent`, `--accent-hover`, `--accent-fg`, `--accent-text`, `--accent-soft`, `--accent-border`, `--focus-ring`, `--focus-glow` | Primary buttons, links, selection, focus                    |
+| Status       | `--success`, `--warning`, `--danger`, `--info` with `-soft`/`-border` variants, `--danger-solid`                                 | Meaningful states and destructive actions                   |
+| Usage        | `--pace-*`, `--meter-*`, `--quota-guide`, `--quota-guide-over`, `--quota-excess`                                                 | Limit bars and pace indicators                              |
+| Code         | `--code-*`, `--syntax-*`, `--diff-*`                                                                                             | Code blocks, highlighting and diffs                         |
+| Type         | `--font-sans` (Geist), `--font-mono` (Geist Mono), `--text-2xs…3xl`, `--leading-*`, `--tracking-*`                               | All text                                                    |
+| Shape        | `--radius-*`, `--control-*`, `--shadow-sm…xl`, `--backdrop`                                                                      | Corners, control heights, elevation                         |
+
+`--provider-color` is set per element from the provider catalog. Tint provider marks with
+`color-mix(… var(--provider-color) 11%, transparent)` and draw the glyph with
+`color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text))`, which keeps the
+mark legible in the light theme.
+
+## Themes
+
+Dark is the default. Settings → Appearance offers Dark, Light and System per device; the choice
+lives in local storage (`agent-studio.theme`) and sets `data-theme` on the root element, which
+selects the light token values. Visualization frames receive the same theme through
+`visualizationDocument()` so embedded visuals match the surrounding prose.
+
+## Primitives
+
+- **Buttons:** `.primary` (accent fill), `.secondary` (raised neutral), `.danger` (solid red for
+  confirmed destruction), `.text-button` (inline action), `.icon-button` (32px ghost).
+- **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,
+  hover and focus treatment. Checkboxes use `.checkbox`.
+- **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
+- **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
+  `--shadow-lg`/`--shadow-xl` for popovers and menus.
+- **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded
+  groups indent their children behind a hairline.
+- **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
+  them; avoid nesting more than one card level.

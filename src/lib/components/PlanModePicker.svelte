@@ -30,7 +30,7 @@
 
 <style>
   .mode-picker {
-    width: 105px;
-    min-width: 90px;
+    flex-shrink: 0;
+    min-width: 0;
   }
 </style>

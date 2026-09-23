@@ -37,11 +37,11 @@
   .running-reply-time {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    padding: 6px 0;
-    color: #8eaa76;
-    font-size: 11px;
+    gap: 7px;
+    margin-top: 12px;
+    padding: 4px 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
   }
 </style>

@@ -41,7 +41,7 @@
   {#if status}
     <p class="state">Current version {status.currentVersion}</p>
     <p role="status" title={checked?.toLocaleString()}>
-      {updateSummary(status)}{#if status.phase === 'current' && checked}
+      {updateSummary(status)}{#if status.phase === 'current' && checked}{' '}
         Checked {checked.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.{/if}
     </p>
     {#if status.notes && (status.phase === 'ready' || status.phase === 'downloading')}
@@ -73,35 +73,25 @@
 </section>
 
 <style>
-  section {
-    border-top: 1px solid var(--line);
-    padding-top: 24px;
-  }
   h2 {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 16px;
-    margin: 0 0 12px;
-  }
-  p {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.6;
-    margin: 8px 0;
-    max-width: 640px;
   }
   .state {
     color: var(--text);
+    font-weight: 500;
   }
   details {
     margin: 12px 0;
     max-width: 640px;
   }
   summary {
+    width: fit-content;
     cursor: pointer;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--text-base);
+    font-weight: 500;
   }
   .notes {
     white-space: pre-line;
@@ -112,13 +102,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin: 12px 0;
+    margin: 14px 0 0;
   }
   .hint {
-    color: var(--muted);
-    font-size: 12px;
-  }
-  [role='alert'] {
-    color: #e5a29b;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
   }
 </style>

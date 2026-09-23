@@ -41,10 +41,11 @@
 
 <style>
   section {
-    margin: 9px 0;
-    padding: 12px;
+    margin: 8px 0;
+    padding: 12px 13px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
+    background: var(--hover);
     min-width: 0;
   }
   .heading {
@@ -52,28 +53,36 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 6px;
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
   }
-  small,
+  small {
+    color: var(--warning);
+    font-size: var(--text-xs);
+  }
   p,
   dt {
-    color: var(--muted);
+    color: var(--text-muted);
   }
   dl {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px 16px;
     margin: 10px 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   dd {
     margin: 3px 0 0;
+    color: var(--text);
+    font-size: var(--text-base);
+    font-weight: 500;
     overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
   }
   p {
-    font-size: 11px;
-    line-height: 1.5;
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
     margin: 6px 0;
   }
 </style>

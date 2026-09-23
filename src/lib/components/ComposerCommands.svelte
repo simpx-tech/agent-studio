@@ -484,8 +484,8 @@
 
 <style>
   .command-notice {
-    margin: 6px 0;
-    color: var(--muted);
-    font-size: 12px;
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
   }
 </style>

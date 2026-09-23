@@ -4,6 +4,7 @@
   import { artifactPreviewUrl } from '$lib/transport';
   import type { Visualization } from '$lib/visualizations';
   import { visualizationPreview } from '$lib/visualization-preview';
+  import { appearance } from '$lib/appearance.svelte';
   import type { Artifact } from '$lib/artifacts';
   let {
     visual,
@@ -55,12 +56,17 @@
     if (frame.dataset.initialized) return;
     frame.dataset.initialized = 'true';
     sizeToken = crypto.randomUUID();
-    frame.contentWindow?.postMessage(visualizationPreview(visual.source, sizeToken), '*');
+    frame.contentWindow?.postMessage(
+      visualizationPreview(visual.source, sizeToken, appearance.resolved),
+      '*',
+    );
   }
 </script>
 
 <section class="visualization" aria-label={visual.title}>
-  {#if error}<p role="status">{error}</p>{:else if url}{#key `${visual.revision}:${restart}`}<iframe
+  {#if error}<p role="status">
+      {error}
+    </p>{:else if url}{#key `${visual.revision}:${restart}:${appearance.resolved}`}<iframe
         bind:this={frame}
         title={`${visual.title} visualization`}
         src={url}
@@ -96,7 +102,7 @@
   .visualization {
     min-width: 0;
     position: relative;
-    margin: 0 0 13px;
+    margin: 0 0 12px;
     padding-bottom: 22px;
   }
   .visualization-actions {
@@ -104,8 +110,9 @@
     bottom: 0;
     right: 0;
     display: flex;
+    gap: 2px;
     opacity: 0;
-    transition: opacity 0.15s;
+    transition: opacity var(--duration) ease;
   }
   .visualization:hover .visualization-actions,
   .visualization:focus-within .visualization-actions {
@@ -114,7 +121,8 @@
   .visualization-actions button {
     width: 26px;
     height: 22px;
-    color: var(--muted);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
   }
   @media (hover: none), (max-width: 700px) {
     .visualization-actions {
@@ -135,6 +143,6 @@
     background: transparent;
   }
   p {
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 </style>

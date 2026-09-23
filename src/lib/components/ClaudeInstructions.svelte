@@ -95,41 +95,24 @@
 </section>
 
 <style>
-  section {
-    border-top: 1px solid var(--line);
-    padding-top: 24px;
-  }
   h2 {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 16px;
-    margin: 0 0 12px;
-  }
-  p {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.6;
-    margin: 8px 0;
-    max-width: 640px;
   }
   textarea {
     font-family: inherit;
-    max-width: 720px;
     display: block;
     margin-top: 12px;
   }
   .state {
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin: 12px 0;
-  }
-  [role='alert'] {
-    color: #e5a29b;
+    margin: 12px 0 0;
   }
 </style>

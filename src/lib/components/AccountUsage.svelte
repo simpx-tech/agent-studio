@@ -165,17 +165,20 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 12px;
-    color: var(--muted);
-    font-size: 11px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
   }
   .reading-status {
     gap: 6px;
-    font-size: 10px;
+    font-size: var(--text-xs);
+    font-weight: 400;
+    color: var(--text-faint);
   }
   .account-limits {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 20px 28px;
+    gap: 18px 28px;
   }
   .account-limit {
     min-width: 0;
@@ -183,51 +186,45 @@
   .limit-heading {
     gap: 8px;
     margin-bottom: 8px;
-    font-size: 11px;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    font-weight: 500;
   }
   .limit-heading > span {
     flex: 1;
   }
   .limit-heading strong {
-    font-size: 12px;
+    color: var(--text);
+    font-size: var(--text-sm);
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
   .limit-meta {
     justify-content: space-between;
     gap: 5px 12px;
     flex-wrap: wrap;
     margin-top: 8px;
-    color: var(--muted);
-    font-size: 10px;
-    line-height: 1.5;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-snug);
   }
   .usage-note,
   .limit-advice {
-    font-size: 11px;
-    line-height: 1.6;
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
     margin: 8px 0 0;
   }
+  .limit-advice {
+    color: var(--pace-ink);
+  }
   .usage-note {
-    color: var(--muted);
+    color: var(--text-muted);
     overflow-wrap: anywhere;
-  }
-  .account-usage :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .account-usage :global(.spinning) {
-      animation: none;
-    }
   }
   @container (max-width: 450px) {
     .account-limits {
       grid-template-columns: minmax(0, 1fr);
-      gap: 18px;
+      gap: 16px;
     }
   }
 </style>

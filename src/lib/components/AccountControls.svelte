@@ -172,20 +172,32 @@
   }
   .account-note,
   .workspace-message {
-    font-size: 11px;
-    line-height: 1.6;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
     overflow-wrap: anywhere;
+  }
+  .workspace-message {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--hover);
+  }
+  .workspace-message strong {
+    color: var(--text-secondary);
+    font-weight: 600;
   }
   .workspace-message span {
     display: block;
+    margin-top: 2px;
     white-space: pre-wrap;
   }
   .actions {
     display: flex;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 8px;
     margin-top: 20px;
   }
 </style>

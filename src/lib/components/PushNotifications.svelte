@@ -234,37 +234,25 @@
 </section>
 
 <style>
-  .push-settings {
-    border-top: 1px solid var(--line);
-    padding-top: 24px;
-  }
   h2 {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 16px;
-    margin: 0 0 12px;
-  }
-  p {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.6;
-    margin: 8px 0;
   }
   .notification-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin: 12px 0;
+    margin: 14px 0 12px;
   }
   .notification-state {
     color: var(--text);
+    font-weight: 500;
   }
   .notification-privacy {
-    font-size: 12px;
-  }
-  [role='alert'] {
-    color: #e5a29b;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: var(--text-sm);
   }
 </style>

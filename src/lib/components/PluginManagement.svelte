@@ -286,17 +286,22 @@
 
 <style>
   .plugin-management {
-    font-size: 12px;
-    line-height: 1.6;
+    padding-top: 12px;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
   }
   .help,
   .title span {
-    color: var(--text-muted, #96ab86);
-    font-size: 11px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+  .title strong {
+    color: var(--text);
+    font-weight: 600;
   }
   article {
-    padding: 14px 0;
-    border-bottom: 1px solid #35472b;
+    padding: 12px 2px;
+    border-bottom: 1px solid var(--border);
     overflow-wrap: anywhere;
   }
   .title,
@@ -316,11 +321,15 @@
   }
   summary {
     cursor: pointer;
+    color: var(--text-secondary);
+    font-weight: 500;
   }
   label {
     display: grid;
     gap: 6px;
     margin: 10px 0;
+    color: var(--text-secondary);
+    font-weight: 500;
   }
   input,
   textarea {
@@ -330,9 +339,11 @@
   .trust {
     display: flex;
     align-items: center;
+    gap: 8px;
   }
   .trust input {
     width: auto;
+    accent-color: var(--accent);
   }
   button {
     justify-self: start;

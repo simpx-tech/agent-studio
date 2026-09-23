@@ -160,7 +160,12 @@
         {#if error}<p class="question-error" role="alert">{error}</p>{/if}
         <div class="question-actions">
           {#if step > 0}
-            <button type="button" disabled={busy} onclick={() => goToStep(step - 1)}>Back</button>
+            <button
+              type="button"
+              class="secondary"
+              disabled={busy}
+              onclick={() => goToStep(step - 1)}>Back</button
+            >
           {/if}
           <button
             class="primary"
@@ -186,9 +191,11 @@
 
 <style>
   .question-card {
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 16px;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+    padding: 16px 18px;
     margin: 16px 0;
     min-width: 0;
   }
@@ -198,38 +205,63 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    color: var(--text);
+    font-size: var(--text-base);
     font-weight: 600;
-    margin: 0 0 16px;
+    margin: 0 0 14px;
+  }
+  .question-status > span:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .question-status > span:first-child::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent-strong);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .question-count {
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 400;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
   .question-steps {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
     margin-bottom: 16px;
   }
   .question-steps button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-height: 36px;
-    padding: 6px 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    min-height: 32px;
+    min-width: 40px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .question-steps button:not(:disabled):hover {
+    border-color: var(--border-hover);
   }
   .question-steps button[aria-current='step'] {
-    border-color: var(--green);
-    color: var(--green);
-    box-shadow: inset 0 -2px var(--green);
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .step-answer {
     display: flex;
     visibility: hidden;
-    color: var(--green);
+    color: var(--success);
   }
   .step-answer.answered {
     visibility: visible;
@@ -237,46 +269,63 @@
   fieldset {
     border: 0;
     padding: 0;
-    margin: 0 0 20px;
+    margin: 0 0 16px;
     min-width: 0;
   }
   legend {
+    color: var(--text);
+    font-size: var(--text-md);
     font-weight: 600;
-    margin-bottom: 10px;
+    line-height: var(--leading-snug);
+    margin-bottom: 8px;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+  fieldset > .muted {
+    margin-bottom: 8px;
   }
   .question-option {
     display: flex;
     align-items: flex-start;
-    gap: 10px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    padding: 10px;
+    gap: 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--input-bg);
+    padding: 10px 12px;
     margin: 6px 0;
     cursor: pointer;
+    transition:
+      border-color var(--duration-fast) ease,
+      background-color var(--duration-fast) ease;
+  }
+  .question-option:hover {
+    border-color: var(--border-hover);
   }
   .question-option:has(input:checked) {
-    border-color: var(--green);
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
   }
   .question-option input {
     width: 16px;
     height: 16px;
     flex: 0 0 16px;
     margin: 2px 0;
-    accent-color: var(--green);
+    accent-color: var(--accent);
   }
   .question-option span {
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .question-option strong {
-    font-size: 13px;
+    color: var(--text);
+    font-size: var(--text-base);
+    font-weight: 500;
   }
   .question-option small {
     display: block;
-    color: var(--muted);
-    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    margin-top: 2px;
     white-space: pre-wrap;
   }
   .question-text {
@@ -285,9 +334,10 @@
   }
   .question-text span {
     display: block;
-    font-size: 12px;
+    font-size: var(--text-xs);
+    font-weight: 500;
     margin-bottom: 6px;
-    color: var(--muted);
+    color: var(--text-muted);
   }
   textarea {
     width: 100%;
@@ -298,19 +348,26 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
+  }
+  .question-actions .text-button {
+    margin-left: 4px;
+    color: var(--text-muted);
+  }
+  .question-actions .text-button:not(:disabled):hover {
+    color: var(--text);
   }
   .question-error {
-    color: #f0a295;
+    color: var(--danger);
   }
   summary {
     cursor: pointer;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
     font-weight: 500;
   }
   .saved-question {
     margin: 12px 0 4px;
-  }
-  .saved-question {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

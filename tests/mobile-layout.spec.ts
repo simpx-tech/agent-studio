@@ -200,7 +200,7 @@ test('installed app keeps full usage tracks inside the page when fullscreen metr
     expect(await tracks.count()).toBeGreaterThan(0);
     for (const track of await tracks.all()) {
       const box = (await track.boundingBox())!;
-      expect(box.height).toBe(6);
+      expect(box.height).toBe(4);
       expect(box.y + box.height).toBeLessThanOrEqual(visibleBottom - bottomInset);
       expect(
         await track.evaluate((node) => {

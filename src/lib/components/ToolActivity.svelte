@@ -307,9 +307,9 @@
 
 <style>
   .tool-activity {
-    margin: 14px 0;
+    margin: 10px 0 14px;
     display: grid;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
   }
   .tool-activity:not(.live-activity) {
@@ -317,7 +317,7 @@
   }
   .activity-timeline {
     display: grid;
-    gap: 12px;
+    gap: 8px;
     min-width: 0;
   }
   .activity-group {
@@ -327,18 +327,33 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 7px;
-    padding: 7px 0;
+    gap: 8px;
+    width: fit-content;
+    max-width: 100%;
+    padding: 4px 8px 4px 6px;
+    margin-left: -6px;
+    border-radius: var(--radius-md);
     list-style: none;
     cursor: pointer;
-    color: var(--muted);
-    font-size: 13px;
+    color: var(--text-secondary);
+    font-size: var(--text-base);
+    transition:
+      background-color var(--duration-fast) ease,
+      color var(--duration-fast) ease;
   }
   .activity-group > summary:hover {
+    background: var(--hover);
     color: var(--text);
   }
   .activity-group > summary > :global(svg) {
     flex-shrink: 0;
+    color: var(--text-muted);
+  }
+  .activity-group > summary > :global(.disclosure) {
+    color: var(--text-faint);
+  }
+  .activity-group[open] > summary {
+    width: 100%;
   }
   .group-label {
     min-width: 0;
@@ -350,13 +365,16 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 4px 8px;
-    font-size: 10px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .group-progress {
     margin-left: auto;
     justify-content: flex-end;
     text-align: right;
+  }
+  .activity-group:not([open]) .group-progress {
+    margin-left: 4px;
   }
   .tool-elapsed {
     font-variant-numeric: tabular-nums;
@@ -364,58 +382,74 @@
   }
   .group-tools {
     display: grid;
-    gap: 3px;
-    margin: 5px 0 7px 7px;
-    padding-left: 12px;
-    border-left: 1px solid var(--line);
+    gap: 2px;
+    margin: 4px 0 6px 8px;
+    padding-left: 14px;
+    border-left: 1px solid var(--border-strong);
     min-width: 0;
   }
   .activity-summary[open] {
-    border-bottom: 1px solid var(--line);
+    border-bottom: 1px solid var(--border);
     padding-bottom: 14px;
+    margin-bottom: 4px;
   }
   .activity-summary > summary {
     display: flex;
-    gap: 8px;
+    gap: 7px;
     align-items: center;
+    width: fit-content;
     cursor: pointer;
     list-style: none;
-    padding: 8px 0;
-    color: #a8b69f;
-    font-size: 12px;
+    padding: 4px 8px 4px 6px;
+    margin-left: -6px;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    transition:
+      background-color var(--duration-fast) ease,
+      color var(--duration-fast) ease;
+  }
+  .activity-summary > summary:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .activity-summary[open] > summary {
+    margin-bottom: 8px;
   }
   .history-title {
-    color: #d3dfca;
     white-space: nowrap;
   }
   .activity-summary > summary > :global(svg) {
     flex-shrink: 0;
   }
   .timeline-note {
-    font-size: 11px;
-    color: #87947d;
-    margin: 4px 0;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    margin: 2px 0;
   }
   .progress-message {
-    font-size: 13px;
+    color: var(--text-secondary);
   }
   .progress-message > :global(:last-child) {
     margin-bottom: 0;
   }
   .metadata-label,
   .tool-facts dt {
-    font-size: 10px;
-    color: #87947d;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
     margin-top: 8px;
   }
   .tool-facts {
     margin: 6px 0;
   }
   .tool-facts dd {
-    margin: 3px 0 8px;
+    margin: 2px 0 8px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    line-height: 1.6;
+    line-height: var(--leading-normal);
+    color: var(--text-secondary);
   }
   .tool-card {
     min-width: 0;
@@ -423,63 +457,78 @@
   }
   .tool-card > summary {
     display: flex;
-    gap: 8px;
+    gap: 9px;
     align-items: center;
-    padding: 7px 0;
+    padding: 5px 8px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     list-style: none;
-    color: #a8b69f;
+    color: var(--text-secondary);
+    transition: background-color var(--duration-fast) ease;
+  }
+  .tool-card > summary:hover {
+    background: var(--hover);
+  }
+  .tool-card > summary > :global(svg) {
+    color: var(--text-muted);
+  }
+  .tool-card > summary > :global(.disclosure) {
+    color: var(--text-faint);
   }
   summary::-webkit-details-marker {
     display: none;
   }
   summary:focus-visible {
-    outline: 2px solid #b9ddcc;
-    outline-offset: -2px;
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 0;
   }
   .tool-title {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--text-sm);
+    font-weight: 500;
     overflow-wrap: anywhere;
   }
   .tool-status {
     display: inline-flex;
     gap: 4px;
     align-items: center;
-    color: #9bac91;
-    font-size: 10px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
     flex-shrink: 0;
   }
   .tool-status.live {
-    color: #b9ddcc;
+    color: var(--accent-text);
   }
   .tool-status.failed {
-    color: #efa19b;
+    color: var(--danger);
   }
   .tool-body {
-    padding: 0 8px 11px 23px;
-    font-size: 12px;
-    color: #a8b69f;
+    padding: 2px 8px 10px 32px;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
   .tool-body p {
     margin: 6px 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    line-height: 1.6;
+    line-height: var(--leading-normal);
+    color: inherit;
   }
   .tool-query {
-    color: #d3dfca;
+    color: var(--text);
   }
   .tool-path {
     display: block;
-    font-size: 11px;
+    font-size: var(--text-xs);
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+    color: var(--text);
   }
-  .tool-note {
-    font-size: 11px;
-    color: #87947d;
+  .tool-note,
+  .tool-body .tool-note {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .tool-sources {
     padding: 0;
@@ -492,8 +541,9 @@
     display: inline-flex;
     gap: 6px;
     align-items: baseline;
-    color: #b9ddcc;
+    color: var(--accent-text);
     text-decoration: underline;
+    text-decoration-color: var(--accent-border);
     text-underline-offset: 3px;
   }
   .tool-sources a span {
@@ -504,16 +554,18 @@
   }
   .query-preview {
     display: block;
-    color: #8e9e85;
-    margin-top: 2px;
-    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 1px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 400;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .subagent {
     padding: 10px 0;
-    border-top: 1px solid #ffffff0d;
+    border-top: 1px solid var(--border);
   }
   .subagent:first-child {
     border-top: 0;
@@ -529,18 +581,24 @@
     min-width: 80px;
     font-weight: 500;
     overflow-wrap: anywhere;
-    color: #d3dfca;
+    color: var(--text);
   }
   .agent-task {
-    font-size: 11px;
+    font-size: var(--text-xs);
   }
   .agent-result > summary {
-    font-size: 11px;
+    font-size: var(--text-xs);
+    font-weight: 500;
     display: flex;
     align-items: center;
     gap: 5px;
+    width: fit-content;
     cursor: pointer;
     padding: 5px 0;
+    color: var(--text-muted);
+  }
+  .agent-result > summary:hover {
+    color: var(--text);
   }
   .agent-result p {
     max-height: 280px;
@@ -548,6 +606,9 @@
   }
   .nested {
     margin-top: 6px;
+  }
+  :global(.disclosure) {
+    transition: transform var(--duration) var(--ease-out);
   }
   details[open] > summary :global(.disclosure) {
     transform: rotate(180deg);

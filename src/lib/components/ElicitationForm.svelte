@@ -261,10 +261,12 @@
 
 <style>
   .elicitation {
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 14px;
-    margin: 12px 0;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+    padding: 16px 18px;
+    margin: 14px 0;
     max-width: 640px;
   }
   header,
@@ -274,21 +276,34 @@
     flex-wrap: wrap;
     align-items: center;
   }
+  header {
+    color: var(--text);
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
   header span,
   .hint,
   .elicitation-receipt {
-    color: var(--muted);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 400;
   }
   p {
     margin: 8px 0;
   }
   .request-message {
+    color: var(--text);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
   .destination {
-    font-size: 12px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--code-bg);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   fieldset {
@@ -298,8 +313,10 @@
     margin: 14px 0;
   }
   legend {
+    color: var(--text);
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--text-base);
+    margin-bottom: 6px;
   }
   input:not([type='checkbox']) {
     width: 100%;
@@ -307,22 +324,23 @@
   }
   .choice {
     display: flex;
-    gap: 8px;
+    gap: 9px;
     padding: 5px 0;
     align-items: center;
+    color: var(--text-secondary);
   }
   .choice input {
     width: 16px;
     height: 16px;
     flex: 0 0 16px;
     margin: 0;
-    accent-color: var(--green);
+    accent-color: var(--accent);
   }
   .actions {
-    margin-top: 10px;
+    margin-top: 12px;
   }
   [role='alert'] {
-    color: #f0a295;
-    font-size: 12px;
+    color: var(--danger);
+    font-size: var(--text-sm);
   }
 </style>

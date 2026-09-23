@@ -261,32 +261,43 @@
 <style>
   .compaction-history {
     margin: 8px 0;
-    font-size: 12px;
-    color: var(--muted);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   .compaction-history p {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin: 4px 0;
+    color: inherit;
+  }
+  .compaction-history p::before {
+    content: '';
+    flex: 0 0 14px;
+    height: 1px;
+    background: var(--border-strong);
   }
   .steering-history {
     margin-block: 10px;
   }
   .steering-message {
-    border-left: 2px solid var(--line);
-    padding: 4px 12px;
+    border-left: 2px solid var(--accent-border);
+    padding: 3px 12px;
     margin-block: 8px;
   }
   .steering-message p {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    margin: 3px 0;
-    font-size: 13px;
+    margin: 2px 0;
+    font-size: var(--text-base);
+    color: var(--text);
   }
   .response-extras {
     display: flex;
     flex-wrap: wrap;
     align-items: stretch;
     gap: 8px;
-    margin: 14px 0;
+    margin: 16px 0 4px;
   }
   .response-extras:has(> :global(details[open])) {
     align-items: flex-start;
@@ -312,22 +323,30 @@
   .artifact-open {
     flex: 1;
     min-width: 0;
+    justify-content: flex-start;
     text-align: left;
-    border-radius: 6px 0 0 6px;
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  }
+  .artifact-open > :global(svg) {
+    color: var(--accent-strong);
   }
   .artifact-side {
     flex-shrink: 0;
-    border-left: 0;
-    border-radius: 0 6px 6px 0;
+    margin-left: -1px;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
     padding-inline: 10px;
+    color: var(--text-muted);
   }
   .response-artifacts span {
     overflow-wrap: anywhere;
     min-width: 0;
   }
   small {
-    color: var(--muted);
-    font-size: 10px;
+    margin-left: auto;
+    padding-left: 8px;
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    font-weight: 500;
     white-space: nowrap;
   }
 </style>

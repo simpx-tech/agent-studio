@@ -57,7 +57,7 @@ test('visual explanations flow between paragraphs with matching typography and r
     await frame.locator('body').evaluate((el) => ({
       background: getComputedStyle(el).backgroundColor,
       padding: getComputedStyle(el).padding,
-      fontLoaded: document.fonts.check('13px "DM Sans Variable"'),
+      fontLoaded: document.fonts.check('14px "Geist Variable"'),
     })),
   ).toEqual({ background: 'rgba(0, 0, 0, 0)', padding: '0px', fontLoaded: true });
   await expect.poll(async () => (await iframe.boundingBox())!.height).toBeGreaterThan(190);
@@ -159,7 +159,7 @@ test('tool visuals render inline, update by revision, persist, expand and remain
   const expanded = page.frameLocator('iframe[title="Interactive counter preview"]');
   await expect(page.getByRole('tabpanel', { name: 'Artifact preview' })).toHaveCSS(
     'background-color',
-    'rgb(20, 22, 21)',
+    'rgb(17, 17, 19)',
   );
   await expect(expanded.locator('output')).toHaveText('0');
   await page.evaluate((visualization) => {

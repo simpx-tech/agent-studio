@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Download, ShieldCheck } from '@lucide/svelte';
   import AppUpdates from './AppUpdates.svelte';
+  import AppearanceSettings from './AppearanceSettings.svelte';
   import ClaudeInstructions from './ClaudeInstructions.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
   import PushNotifications from './PushNotifications.svelte';
@@ -49,13 +50,14 @@
         <h1>Settings</h1>
         <p>
           {desktop()
-            ? 'Notifications, app updates, Claude chat instructions, workspace administration, and the data kept for this workspace.'
-            : 'Notifications, Claude chat instructions, workspace administration, and the data kept for this workspace.'}
+            ? 'Appearance, notifications, app updates, Claude chat instructions, workspace administration, and the data kept for this workspace.'
+            : 'Appearance, notifications, Claude chat instructions, workspace administration, and the data kept for this workspace.'}
         </p>
       </div>
     </section>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
     <div class="settings-sections">
+      <AppearanceSettings />
       {#if desktop()}<DesktopNotifications />{:else}<PushNotifications
           {paired}
           {workspaceSession}
@@ -90,51 +92,51 @@
 
 <style>
   .settings-page {
-    padding-top: 32px;
-    padding-bottom: 28px;
-  }
-  .page-heading {
-    margin-bottom: 30px;
-  }
-  .page-heading h1 {
-    font-size: 30px;
-  }
-  .page-heading p {
-    font-size: 13px;
-    line-height: 1.6;
+    max-width: 800px;
+    padding-top: 36px;
+    padding-bottom: 32px;
   }
   .settings-sections {
     display: grid;
-    gap: 28px;
+    gap: 14px;
   }
-  .settings-sections > :global(section:first-child) {
-    border-top: 0;
-    padding-top: 0;
+  .settings-sections > :global(section) {
+    min-width: 0;
+    padding: 18px 20px 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
   }
-  .workspace-data {
-    border-top: 1px solid var(--line);
-    padding-top: 24px;
-  }
-  .workspace-data h2 {
+  :global(.settings-sections > section :where(h2)) {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 16px;
-    margin: 0 0 12px;
+    gap: 9px;
+    margin: 0 0 6px;
+    font-size: var(--text-md);
+    font-weight: 600;
+  }
+  .settings-sections > :global(section h2 svg) {
+    color: var(--text-muted);
+  }
+  :global(.settings-sections > section :where(p)) {
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    margin: 6px 0;
+    max-width: 640px;
+  }
+  :global(.settings-sections > section :where([role='alert'])) {
+    color: var(--danger);
   }
   .workspace-data p {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.6;
-    margin: 8px 0;
-    max-width: 640px;
+    color: var(--text-muted);
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin: 12px 0;
+    margin: 14px 0 0;
   }
   @media (max-width: 1190px) {
     .settings-page {
@@ -143,7 +145,10 @@
   }
   @media (max-width: 650px) {
     .settings-page {
-      padding-inline: 20px;
+      padding-inline: 18px;
+    }
+    .settings-sections > :global(section) {
+      padding: 16px;
     }
   }
 </style>

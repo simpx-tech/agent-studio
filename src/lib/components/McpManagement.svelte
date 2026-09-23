@@ -379,12 +379,13 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    font-size: 12px;
+    padding-top: 12px;
+    font-size: var(--text-sm);
   }
   p {
     margin: 0;
-    color: #a4b697;
-    line-height: 1.6;
+    color: var(--text-muted);
+    line-height: var(--leading-normal);
     overflow-wrap: anywhere;
   }
   .actions,
@@ -394,17 +395,22 @@
     align-items: center;
     gap: 10px;
   }
+  .heading strong {
+    color: var(--text);
+    font-weight: 600;
+  }
   .heading span,
   .hint {
-    color: #91a680;
-    font-size: 11px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
   }
   article,
   .editor,
   .operation {
-    padding: 12px;
-    border: 1px solid #334329;
-    border-radius: 8px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--hover);
   }
   article,
   form.editor,
@@ -416,8 +422,10 @@
   label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
     margin: 8px 0;
+    color: var(--text-secondary);
+    font-weight: 500;
   }
   input,
   textarea {
@@ -426,6 +434,8 @@
   }
   summary {
     cursor: pointer;
+    color: var(--text-secondary);
+    font-weight: 500;
     margin-bottom: 8px;
   }
 </style>

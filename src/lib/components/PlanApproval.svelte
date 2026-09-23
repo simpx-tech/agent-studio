@@ -54,7 +54,7 @@
       <button type="button" class="primary" disabled={busy} onclick={() => submit('Approve')}
         >{approval.action === 'enter' ? 'Enter plan mode' : 'Approve and implement'}</button
       >
-      <button type="button" disabled={busy} onclick={() => submit('Decline')}
+      <button type="button" class="secondary" disabled={busy} onclick={() => submit('Decline')}
         >{approval.action === 'enter' ? 'Decline' : 'Keep planning'}</button
       >
     </div>
@@ -75,11 +75,23 @@
 <style>
   .plan-approval {
     margin: 14px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius-xl);
+    background: var(--accent-soft);
+  }
+  .plan-approval > p:not(.muted) {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .plan-approval > :global(.proposed-plan) {
+    margin-top: 0;
+    background: var(--surface-1);
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-top: 10px;
+    margin-top: 12px;
   }
 </style>

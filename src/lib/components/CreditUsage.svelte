@@ -36,7 +36,7 @@
 <style>
   .credit-usage {
     min-width: 0;
-    font-size: 11px;
+    font-size: var(--text-xs);
   }
   .credit-heading,
   dl > div {
@@ -46,32 +46,40 @@
     gap: 4px 12px;
   }
   .credit-heading {
-    color: var(--muted);
-    margin-bottom: 8px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
   }
   strong {
-    font-size: 14px;
-    font-weight: 500;
+    color: var(--text);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    letter-spacing: var(--tracking-tight);
+    font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
   dl {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
     gap: 6px 28px;
-    margin: 12px 0 0;
+    margin: 10px 0 0;
   }
   dt,
-  p,
+  p {
+    color: var(--text-muted);
+  }
   small {
-    color: var(--muted);
+    color: var(--warning);
   }
   dd {
     margin: 0;
+    color: var(--text-secondary);
     overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
   }
   p {
     margin: 10px 0 0;
-    font-size: 10px;
-    line-height: 1.6;
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
   }
 </style>

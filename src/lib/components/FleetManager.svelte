@@ -1130,17 +1130,18 @@
   .cli-location {
     display: flex;
     align-items: baseline;
-    gap: 9px;
-    padding: 0 16px 16px;
-    font-size: 11px;
-    color: var(--muted);
+    gap: 8px;
+    padding: 0 16px 14px 60px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .cli-location span {
     flex-shrink: 0;
   }
   .cli-location code {
     min-width: 0;
-    font-size: 10px;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -1151,16 +1152,23 @@
   }
   .installation-status {
     flex-shrink: 0;
-    max-width: 104px;
-    text-align: right;
-    font-size: 11px;
-    line-height: 1.4;
+    max-width: 120px;
+    padding: 1px 8px;
+    border-radius: var(--radius-full);
+    background: var(--hover);
+    text-align: center;
+    font-size: var(--text-xs);
+    line-height: 1.5;
     font-weight: 500;
-    color: var(--muted);
+    color: var(--text-muted);
+  }
+  .installation-status.ready {
+    background: var(--success-soft);
+    color: var(--success);
   }
   .managed-connection {
-    border-top: 1px solid var(--line);
-    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
   }
   .shared-context-control {
     display: grid;
@@ -1168,39 +1176,31 @@
     margin-top: 12px;
   }
   .shared-context-control > span {
-    font-size: 12px;
+    color: var(--text);
+    font-size: var(--text-sm);
     font-weight: 600;
   }
   .managed-connection h3 {
-    font-size: 13px;
-    font-weight: 500;
-    margin: 0 0 7px;
+    font-size: var(--text-base);
+    font-weight: 600;
+    margin: 0 0 6px;
   }
   .managed-connect {
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--border);
     padding-top: 16px;
   }
   .remove-connection .fleet-actions {
     margin-top: 12px;
   }
   .management-context {
-    margin-top: -8px;
+    margin-top: -6px;
   }
   .fleet-page {
-    padding-top: 32px;
-    padding-bottom: 28px;
-  }
-  .page-heading {
-    margin-bottom: 30px;
-  }
-  .page-heading h1 {
-    font-size: 30px;
-  }
-  .page-heading p {
-    font-size: 13px;
-    line-height: 1.6;
+    padding-top: 36px;
+    padding-bottom: 32px;
   }
   .section-heading {
+    align-items: flex-end;
     margin: 0 0 18px;
     gap: 14px;
   }
@@ -1208,48 +1208,50 @@
     display: block;
   }
   .section-heading h2 {
-    margin: 0 0 7px;
-    font-size: 17px;
+    margin: 0 0 4px;
+    font-size: var(--text-md);
   }
   .section-heading > div > span {
     display: block;
-    background: none;
-    padding: 0;
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.6;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
   }
   .computer-count {
-    font-size: 11px;
-    color: var(--muted);
+    padding: 1px 9px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
     white-space: nowrap;
   }
   .fleet-computers {
     display: grid;
-    gap: 24px;
+    gap: 28px;
   }
   .fleet-computer {
-    border: 1px solid var(--line);
-    background: #181c19;
-    border-radius: 14px;
-    padding: 22px;
     min-width: 0;
+  }
+  .fleet-computer + .fleet-computer {
+    padding-top: 28px;
+    border-top: 1px solid var(--border);
   }
   .computer-heading {
     display: flex;
     align-items: center;
-    gap: 13px;
-    margin-bottom: 20px;
+    gap: 12px;
+    margin-bottom: 14px;
   }
   .computer-icon {
     display: grid;
     place-items: center;
-    width: 43px;
-    height: 43px;
-    border-radius: 10px;
-    border: 1px solid #3a4533;
-    background: #232b1f;
-    color: var(--green);
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    color: var(--text-secondary);
     flex-shrink: 0;
   }
   .computer-identity {
@@ -1257,77 +1259,90 @@
     min-width: 0;
   }
   .computer-identity h3 {
-    font-size: 18px;
-    margin: 0 0 5px;
+    font-size: var(--text-lg);
+    margin: 0 0 2px;
     overflow-wrap: anywhere;
   }
   .computer-state {
-    font-size: 11px;
-    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
   }
-  .ready {
-    color: #b7ce98;
+  .computer-state::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+  }
+  .computer-state.ready {
+    color: var(--success);
+  }
+  .computer-state.ready::before {
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-soft);
   }
   .computer-hint {
-    font-size: 11px;
-    line-height: 1.7;
-    color: var(--muted);
-    margin: 12px 0 0;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
+    margin: 10px 0 0;
   }
   .computer-providers {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
+    gap: 12px;
     align-items: start;
-    margin-top: 22px;
+    margin-top: 16px;
   }
   .provider-group {
     padding: 0;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--panel);
     overflow-wrap: anywhere;
     min-width: 0;
   }
   .provider-heading {
     display: flex;
     align-items: center;
-    gap: 11px;
-    padding: 17px 16px;
+    gap: 12px;
+    padding: 14px 16px;
   }
   .provider-heading h4 {
-    font-size: 15px;
-    margin: 0 0 4px;
+    font-size: var(--text-md);
+    margin: 0 0 1px;
     font-weight: 600;
   }
   .provider-heading .provider-icon {
-    width: 33px;
-    height: 33px;
-    font-size: 23px;
-    border-radius: 8px;
+    width: 32px;
+    height: 32px;
+    font-size: 18px;
+    border-radius: var(--radius-md);
     flex-shrink: 0;
   }
   .fleet-actions {
     display: flex;
-    gap: 11px;
+    gap: 10px;
     align-items: center;
     flex-wrap: wrap;
   }
   .fleet-actions .secondary {
-    font-size: 11px;
-    padding: 8px 11px;
+    font-size: var(--text-sm);
+    min-height: 30px;
+    padding: 4px 11px;
   }
   .fleet-actions .text-button {
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
   .current-login {
-    padding: 0 16px 16px;
+    padding: 0 16px 14px;
   }
   .current-login p {
-    font-size: 11px;
-    color: var(--muted);
-    margin: 6px 0 14px;
-    line-height: 1.6;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    margin: 4px 0 12px;
+    line-height: var(--leading-normal);
   }
   .current-login .fleet-actions {
     justify-content: flex-end;
@@ -1336,8 +1351,8 @@
     display: none;
   }
   .fleet-account {
-    border-top: 1px solid var(--line);
-    padding: 16px;
+    border-top: 1px solid var(--border);
+    padding: 14px 16px 16px;
   }
   .fleet-account-heading {
     display: flex;
@@ -1347,22 +1362,24 @@
   }
   .fleet-account-heading h4 {
     margin: 0;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: var(--text-base);
+    font-weight: 600;
   }
   .fleet-account-heading small {
-    font-size: 10px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .fleet-account-heading > .manage-account {
     flex-shrink: 0;
+    width: var(--control-sm);
+    height: var(--control-sm);
   }
   .account-connection {
     display: grid;
     grid-template-columns: minmax(160px, 0.7fr) minmax(0, 2fr);
     align-items: start;
     gap: 24px;
-    margin-top: 14px;
+    margin-top: 12px;
   }
   .connection-controls {
     min-width: 0;
@@ -1377,12 +1394,12 @@
     }
   }
   .connection-hint {
-    font-size: 11px;
-    color: var(--muted);
-    line-height: 1.7;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    line-height: var(--leading-normal);
   }
   .remote-empty {
-    padding: 0 16px 10px;
+    padding: 0 16px 12px;
   }
   .fleet-fields {
     display: grid;
@@ -1393,50 +1410,59 @@
   .fleet-field {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--muted);
+    gap: 7px;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-secondary);
     min-width: 0;
   }
   input {
     width: 100%;
   }
   .disconnect-connection {
-    font-size: 11px;
+    font-size: var(--text-sm);
     margin-top: 12px;
-    color: #d99f95;
+    color: var(--danger);
+  }
+  .disconnect-connection:not(:disabled):hover {
+    color: var(--danger);
+    text-decoration: underline;
   }
   .remove-connection {
-    font-size: 12px;
-    padding: 12px;
-    border: 1px solid #705044;
-    border-radius: 8px;
+    font-size: var(--text-sm);
+    padding: 12px 14px;
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-lg);
+    background: var(--danger-soft);
     margin-top: 12px;
   }
   .unassigned-accounts {
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
     margin-top: 24px;
-    padding: 16px;
+    padding: 14px 16px;
   }
   .unassigned-accounts > summary {
     cursor: pointer;
-    font-size: 12px;
-    color: var(--muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-secondary);
   }
   .unassigned-accounts > summary span {
     margin-left: 6px;
+    color: var(--text-muted);
   }
   .fleet-relay {
     display: grid;
     grid-template-columns: auto auto 1fr auto;
     align-items: center;
-    gap: 20px;
-    margin-top: 26px;
-    padding: 20px;
-    border: 1px solid var(--line);
-    background: var(--panel);
-    border-radius: 12px;
+    gap: 16px 20px;
+    margin-top: 32px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    background: var(--surface-1);
+    border-radius: var(--radius-xl);
   }
   .relay-title {
     display: flex;
@@ -1444,17 +1470,17 @@
     gap: 9px;
   }
   .relay-title :global(svg) {
-    color: var(--muted);
+    color: var(--text-muted);
   }
   .relay-title h2 {
-    font-size: 14px;
-    font-weight: 500;
+    font-size: var(--text-md);
+    font-weight: 600;
     margin: 0;
   }
   .fleet-relay p {
-    font-size: 11px;
-    line-height: 1.7;
-    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
     margin: 0;
   }
   .fleet-relay > .sync-error {
@@ -1462,8 +1488,12 @@
   }
   .sync-settings summary {
     cursor: pointer;
-    color: var(--muted);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
+  }
+  .sync-settings summary:hover {
+    color: var(--text);
   }
   .sync-settings[open] {
     grid-column: 1 / -1;
@@ -1472,28 +1502,15 @@
     margin: 12px 0;
   }
   .sync-error {
-    color: #efb18a !important;
-    font-size: 12px;
+    color: var(--warning) !important;
+    font-size: var(--text-sm);
     overflow-wrap: anywhere;
-    line-height: 1.7;
+    line-height: var(--leading-normal);
   }
   .account-progress {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    :global(.spinning) {
-      animation: none;
-    }
   }
   @media (max-width: 1190px) {
     .fleet-page {
@@ -1513,10 +1530,7 @@
   }
   @media (max-width: 650px) {
     .fleet-page {
-      padding-inline: 20px;
-    }
-    .fleet-computer {
-      padding: 15px;
+      padding-inline: 18px;
     }
     .computer-heading {
       flex-wrap: wrap;
@@ -1524,6 +1538,9 @@
     .computer-heading > .fleet-actions {
       width: 100%;
       justify-content: flex-end;
+    }
+    .cli-location {
+      padding-left: 16px;
     }
     .fleet-fields {
       grid-template-columns: 1fr;

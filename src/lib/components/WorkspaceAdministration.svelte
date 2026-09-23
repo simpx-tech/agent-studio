@@ -469,10 +469,6 @@
 {/snippet}
 
 <style>
-  .workspace-administration {
-    border-top: 1px solid var(--line);
-    padding-top: 24px;
-  }
   .administration-heading {
     display: flex;
     align-items: center;
@@ -483,42 +479,42 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 16px;
     margin: 0;
-  }
-  p {
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.7;
-    margin: 10px 0;
   }
   .workspace-admin-list {
     list-style: none;
-    margin: 16px 0;
+    margin: 14px 0 16px;
     padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
   }
   .workspace-admin-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    border-bottom: 1px solid var(--line);
-    padding: 12px 0;
+    padding: 10px 14px;
+    background: var(--hover);
+  }
+  .workspace-admin-row + .workspace-admin-row {
+    border-top: 1px solid var(--border);
   }
   .workspace-summary {
     display: grid;
-    gap: 5px;
+    gap: 2px;
     min-width: 0;
   }
   .workspace-summary strong {
     overflow-wrap: anywhere;
-    font-size: 13px;
+    color: var(--text);
+    font-size: var(--text-base);
     font-weight: 600;
   }
   .workspace-summary span {
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.5;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-snug);
   }
   .workspace-admin-row button {
     flex-shrink: 0;
@@ -527,7 +523,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--border);
     padding-top: 16px;
   }
   .workspace-key-actions p {
@@ -536,17 +532,17 @@
   .key-disclosure,
   .workspace-confirmation {
     display: grid;
-    gap: 18px;
+    gap: 16px;
   }
   .key-disclosure textarea {
     min-width: 0;
     width: 100%;
     resize: none;
-    font: 12px/1.6 var(--font-mono, monospace);
+    font: 12px/1.6 var(--font-mono);
     overflow-wrap: anywhere;
   }
   [role='alert'] {
-    color: #e5a29b;
+    color: var(--danger);
   }
   @media (max-width: 420px) {
     .workspace-admin-row {
@@ -554,9 +550,6 @@
     }
     .workspace-admin-row button span {
       display: none;
-    }
-    h2 {
-      font-size: 15px;
     }
   }
 </style>

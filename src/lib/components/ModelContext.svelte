@@ -333,13 +333,13 @@
 
 <style>
   .context-modal {
-    width: min(820px, 100%);
+    width: min(840px, 100%);
     height: min(800px, 100%);
     max-height: 100%;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    padding: 26px;
+    padding: 22px 24px 20px;
   }
   .context-modal > header,
   .context-modal > footer {
@@ -356,29 +356,30 @@
     flex-shrink: 0;
   }
   .context-modal header {
-    margin-bottom: 14px;
+    margin-bottom: 12px;
   }
   .context-intro {
-    font-size: 12px;
-    line-height: 1.7;
-    color: #a9ba9b;
-    margin: 0 0 16px;
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    color: var(--text-secondary);
+    margin: 0 0 14px;
   }
   .context-location {
     display: flex;
     flex-wrap: wrap;
-    gap: 7px 12px;
-    font-size: 11px;
-    padding: 13px 15px;
-    background: #15200f;
-    border: 1px solid #35472b;
-    border-radius: 8px;
+    gap: 4px 12px;
+    font-size: var(--text-sm);
+    padding: 10px 12px;
+    background: var(--hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
   }
   .context-location > strong {
-    color: #d5dfca;
+    color: var(--text);
+    font-weight: 600;
   }
   .context-location > span {
-    color: #97af80;
+    color: var(--text-muted);
   }
   .context-location > code,
   .context-profile {
@@ -387,64 +388,82 @@
   code {
     overflow-wrap: anywhere;
     white-space: pre-wrap;
-    font-size: 10px;
-    color: #a4b697;
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
   }
   .context-custom {
-    margin-top: 15px;
-    font-size: 11px;
+    margin-top: 14px;
+    font-size: var(--text-sm);
   }
   summary {
     cursor: pointer;
+    color: var(--text-secondary);
+    font-weight: 500;
   }
   summary span {
-    color: #91a680;
+    color: var(--text-muted);
+    font-weight: 400;
     margin-left: 10px;
   }
   pre {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font: inherit;
-    line-height: 1.7;
+    line-height: var(--leading-normal);
     padding: 12px;
-    background: #15200f;
+    margin: 8px 0 0;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     max-height: 180px;
     overflow: auto;
   }
   .context-categories {
     display: flex;
     flex-wrap: wrap;
-    margin-top: 20px;
-    gap: 8px;
-    border-bottom: 1px solid #35472b;
+    margin-top: 16px;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
   }
   .context-categories button {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 11px 12px;
-    font-size: 12px;
-    color: #96ab86;
+    gap: 6px;
+    margin-bottom: -1px;
+    padding: 9px 10px 10px;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-muted);
     border-bottom: 2px solid transparent;
+    border-radius: 0;
+  }
+  .context-categories button:not(:disabled):hover {
+    color: var(--text);
   }
   .context-categories button.active {
-    color: #d9e8cb;
-    border-bottom-color: #a8c68d;
+    color: var(--text);
+    border-bottom-color: var(--accent-strong);
   }
   .context-categories button span {
-    color: #839a71;
-    font-size: 10px;
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--hover);
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    line-height: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
   .context-search {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 15px 0 5px;
-    color: #94ab81;
+    margin: 14px 0 4px;
+    color: var(--text-muted);
   }
   .context-search input {
     width: 100%;
-    padding: 9px 10px;
   }
   .context-body > .context-entries {
     flex: 1;
@@ -453,79 +472,89 @@
     scrollbar-gutter: stable;
   }
   .context-entry {
-    border-bottom: 1px solid #334329;
-    padding: 13px 0;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 2px;
   }
   .context-entry-title {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
+    align-items: center;
+    gap: 8px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: var(--text-base);
   }
   .context-entry-title strong {
+    color: var(--text);
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
   .context-scope {
-    font-size: 10px;
-    color: #8fa47e;
+    padding: 0 7px;
+    border-radius: var(--radius-full);
+    background: var(--hover);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    line-height: 17px;
+    color: var(--text-muted);
   }
   .context-status {
     margin-left: auto;
-    font-size: 10px;
-    color: #a6b49a;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
   }
   .context-status.reported {
-    color: #afd88e;
+    color: var(--success);
   }
   .context-path {
     display: flex;
     gap: 8px;
     align-items: center;
-    margin-top: 5px;
+    margin-top: 4px;
   }
   .context-path code {
     flex: 1;
   }
   .context-path button {
     flex-shrink: 0;
+    width: var(--control-sm);
+    height: var(--control-sm);
   }
   .context-entry p {
-    margin: 4px 25px 0 0;
-    color: #8ba179;
-    font-size: 10px;
-    line-height: 1.6;
+    margin: 2px 25px 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
   }
   .context-empty {
-    padding: 30px 5px;
-    color: #9ab187;
-    font-size: 12px;
-    line-height: 1.7;
+    padding: 28px 4px;
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
   }
   .context-category-help {
-    color: #9ab187;
-    font-size: 11px;
-    line-height: 1.6;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
     margin: 10px 0;
   }
   .context-notes {
-    margin-top: 15px;
+    margin-top: 12px;
   }
   .context-notes p {
-    color: #9caf8b;
-    font-size: 10px;
-    line-height: 1.7;
-    margin: 5px 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    margin: 4px 0;
   }
   .context-modal footer {
     align-items: center;
-    padding-top: 13px;
+    padding-top: 14px;
     margin-top: 14px;
   }
   footer span {
     margin-right: auto;
-    font-size: 10px;
-    color: #8ba179;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   @media (max-width: 700px), (max-height: 700px) {
     .context-body {
@@ -545,15 +574,15 @@
       gap: 0;
     }
     .context-categories button {
-      padding: 10px 8px;
+      padding: 9px 8px 10px;
     }
   }
   @media (max-width: 360px) {
     .context-categories button {
       flex: 1;
       gap: 4px;
-      padding: 10px 4px;
-      font-size: 11px;
+      padding: 9px 4px 10px;
+      font-size: var(--text-xs);
     }
   }
 </style>

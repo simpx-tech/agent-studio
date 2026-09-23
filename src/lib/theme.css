@@ -1,0 +1,274 @@
+/*
+  Agent Studio design tokens.
+
+  Components read semantic tokens only (surfaces, text, borders, accent, status).
+  Raw hex values belong here, never in component styles. See docs/DESIGN-SYSTEM.md.
+*/
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
+:root {
+  /* Typography */
+  --font-sans:
+    'Geist Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-mono:
+    'Geist Mono Variable', ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --leading-tight: 1.25;
+  --leading-snug: 1.45;
+  --leading-normal: 1.6;
+  --leading-prose: 1.7;
+  --tracking-tight: -0.011em;
+  --tracking-tighter: -0.022em;
+
+  /* Shape */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-full: 999px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 120ms;
+  --duration: 180ms;
+
+  /* Layout */
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+  --chat-width: 820px;
+  --page-width: 960px;
+
+  /* Surfaces: app canvas, then raised layers */
+  --bg: #111113;
+  --bg-sidebar: #0c0c0e;
+  --surface-1: #161618;
+  --surface-2: #1c1c1f;
+  --surface-3: #232327;
+  --surface-overlay: #1a1a1d;
+  --surface-sunken: #0c0c0d;
+  --surface-inverse: #ededf0;
+  --hover: rgb(255 255 255 / 0.05);
+  --active: rgb(255 255 255 / 0.08);
+  --selected: rgb(255 255 255 / 0.075);
+  --input-bg: rgb(255 255 255 / 0.03);
+
+  /* Lines */
+  --border: rgb(255 255 255 / 0.075);
+  --border-strong: rgb(255 255 255 / 0.12);
+  --border-hover: rgb(255 255 255 / 0.2);
+
+  /* Text */
+  --text: #ececee;
+  --text-prose: #dadade;
+  --text-secondary: #b4b4bb;
+  --text-muted: #8b8b94;
+  --text-faint: #65656e;
+  --text-inverse: #111113;
+
+  /* Accent: the Agent Studio lime */
+  --accent: #c4e88c;
+  --accent-hover: #d5f0aa;
+  --accent-fg: #172107;
+  --accent-strong: #c4e88c;
+  --accent-text: #cbeb99;
+  --accent-soft: rgb(196 232 140 / 0.1);
+  --accent-soft-hover: rgb(196 232 140 / 0.16);
+  --accent-border: rgb(196 232 140 / 0.34);
+  --focus-ring: rgb(196 232 140 / 0.7);
+  --focus-glow: rgb(196 232 140 / 0.14);
+  --selection: rgb(196 232 140 / 0.28);
+
+  /* Status */
+  --success: #7ed6a2;
+  --success-soft: rgb(126 214 162 / 0.12);
+  --warning: #f2bd6b;
+  --warning-soft: rgb(242 189 107 / 0.12);
+  --warning-border: rgb(242 189 107 / 0.3);
+  --danger: #f4877d;
+  --danger-soft: rgb(244 135 125 / 0.11);
+  --danger-border: rgb(244 135 125 / 0.32);
+  --danger-solid: #d8453c;
+  --danger-solid-hover: #e5554b;
+  --on-solid: #ffffff;
+  --info: #8ebdf5;
+  --info-soft: rgb(142 189 245 / 0.12);
+  --notification: #e5484d;
+
+  /* Usage and pace */
+  --pace-good: #9bdc86;
+  --pace-steady: #8ec8fb;
+  --pace-watch: #f5c877;
+  --pace-danger: #f89f95;
+  --pace-muted: #9d9da6;
+  --meter-track: rgb(255 255 255 / 0.08);
+  --meter-unmeasured: rgb(255 255 255 / 0.1);
+  --quota-guide: #5b7845;
+  --quota-guide-over: #eeb168;
+  --quota-excess: #ee8276;
+
+  /* Code */
+  --code-bg: #0c0c0e;
+  --code-inline-bg: rgb(255 255 255 / 0.07);
+  --code-text: #dcdce0;
+  --syntax-comment: #7d7d88;
+  --syntax-keyword: #d0a8f0;
+  --syntax-string: #b9df86;
+  --syntax-number: #f0b77e;
+  --syntax-title: #8fc0f6;
+  --syntax-type: #7fd3c3;
+  --syntax-deletion: #f59d96;
+  --diff-add-bg: rgb(126 214 162 / 0.1);
+  --diff-add-text: #b3e6c4;
+  --diff-remove-bg: rgb(244 135 125 / 0.1);
+  --diff-remove-text: #f3bdb7;
+  --diff-hunk-bg: rgb(142 189 245 / 0.08);
+  --diff-hunk-text: #a9c6e8;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-md: 0 6px 16px rgb(0 0 0 / 0.28), 0 1px 3px rgb(0 0 0 / 0.24);
+  --shadow-lg: 0 18px 48px rgb(0 0 0 / 0.46), 0 2px 8px rgb(0 0 0 / 0.26);
+  --shadow-xl: 0 28px 90px rgb(0 0 0 / 0.58), 0 4px 16px rgb(0 0 0 / 0.3);
+  --shine: inset 0 1px 0 rgb(255 255 255 / 0.25);
+  --backdrop: rgb(5 5 7 / 0.62);
+  --scrollbar: rgb(255 255 255 / 0.1);
+  --scrollbar-hover: rgb(255 255 255 / 0.2);
+
+  /* Provider marks: share of the provider color in glyphs (the rest is --text) */
+  --provider-ink-mix: 100%;
+
+  /* Fixed palette swatches for theme previews; identical in every theme */
+  --palette-dark-canvas: #111113;
+  --palette-dark-sidebar: #0c0c0e;
+  --palette-dark-line: #3a3a41;
+  --palette-light-canvas: #ffffff;
+  --palette-light-sidebar: #f1f1f3;
+  --palette-light-line: #d4d4d9;
+  --palette-accent: #c4e88c;
+
+  /* Artifact previews render on their own light canvas in every theme */
+  --artifact-canvas: #ffffff;
+  --artifact-ink: #15191c;
+
+  /* Visualization series */
+  --viz-1: #c4e88c;
+  --viz-2: #85cfc4;
+  --viz-3: #ebb57c;
+  --viz-4: #b9a6e6;
+  --viz-5: #e5a1b1;
+  --viz-6: #8fbdf0;
+
+  color-scheme: dark;
+}
+
+/* Light theme: the same semantic tokens with light values. Selected per device in Settings. */
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-sidebar: #f6f6f7;
+  --surface-1: #ffffff;
+  --surface-2: #f4f4f5;
+  --surface-3: #eaeaec;
+  --surface-overlay: #ffffff;
+  --surface-sunken: #f7f7f8;
+  --surface-inverse: #18181b;
+  --hover: rgb(0 0 0 / 0.04);
+  --active: rgb(0 0 0 / 0.07);
+  --selected: rgb(0 0 0 / 0.06);
+  --input-bg: #ffffff;
+
+  --border: rgb(0 0 0 / 0.085);
+  --border-strong: rgb(0 0 0 / 0.13);
+  --border-hover: rgb(0 0 0 / 0.24);
+
+  --text: #18181b;
+  --text-prose: #27272a;
+  --text-secondary: #3f3f46;
+  --text-muted: #6b6b76;
+  --text-faint: #9d9da7;
+  --text-inverse: #ffffff;
+
+  --accent: #bde37c;
+  --accent-hover: #acd862;
+  --accent-fg: #1b2c06;
+  --accent-strong: #6ba32a;
+  --accent-text: #4b7a12;
+  --accent-soft: rgb(132 204 22 / 0.12);
+  --accent-soft-hover: rgb(132 204 22 / 0.2);
+  --accent-border: rgb(77 124 15 / 0.42);
+  --focus-ring: rgb(77 124 15 / 0.7);
+  --focus-glow: rgb(132 204 22 / 0.22);
+  --selection: rgb(132 204 22 / 0.28);
+
+  --success: #1d8a4b;
+  --success-soft: rgb(29 138 75 / 0.1);
+  --warning: #b35d05;
+  --warning-soft: rgb(217 119 6 / 0.1);
+  --warning-border: rgb(217 119 6 / 0.32);
+  --danger: #cf3a31;
+  --danger-soft: rgb(220 38 38 / 0.08);
+  --danger-border: rgb(220 38 38 / 0.3);
+  --danger-solid: #dc3a31;
+  --danger-solid-hover: #c22f27;
+  --info: #2764c9;
+  --info-soft: rgb(39 100 201 / 0.1);
+
+  --pace-good: #3d9a33;
+  --pace-steady: #2c7fd6;
+  --pace-watch: #c9820d;
+  --pace-danger: #d8483d;
+  --pace-muted: #8d8d97;
+  --meter-track: rgb(0 0 0 / 0.08);
+  --meter-unmeasured: rgb(0 0 0 / 0.12);
+  --quota-guide: #b5d49a;
+  --quota-guide-over: #f1ad5c;
+  --quota-excess: #e9695e;
+
+  --code-bg: #f6f6f8;
+  --code-inline-bg: rgb(0 0 0 / 0.05);
+  --code-text: #27272a;
+  --syntax-comment: #8a8a95;
+  --syntax-keyword: #8a3fd1;
+  --syntax-string: #3d7d19;
+  --syntax-number: #b4570d;
+  --syntax-title: #1f6ad0;
+  --syntax-type: #0f7d77;
+  --syntax-deletion: #c0392b;
+  --diff-add-bg: rgb(22 163 74 / 0.1);
+  --diff-add-text: #17603a;
+  --diff-remove-bg: rgb(220 38 38 / 0.08);
+  --diff-remove-text: #9a1f1f;
+  --diff-hunk-bg: rgb(39 100 201 / 0.07);
+  --diff-hunk-text: #2c5596;
+
+  --provider-ink-mix: 58%;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 14px rgb(0 0 0 / 0.07), 0 1px 3px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 16px 44px rgb(0 0 0 / 0.12), 0 2px 8px rgb(0 0 0 / 0.06);
+  --shadow-xl: 0 24px 70px rgb(0 0 0 / 0.18), 0 4px 16px rgb(0 0 0 / 0.08);
+  --backdrop: rgb(24 24 27 / 0.32);
+  --scrollbar: rgb(0 0 0 / 0.16);
+  --scrollbar-hover: rgb(0 0 0 / 0.3);
+
+  --viz-1: #5f9a1f;
+  --viz-2: #178f82;
+  --viz-3: #d27a22;
+  --viz-4: #7657c4;
+  --viz-5: #cc4a6e;
+  --viz-6: #3478d0;
+
+  color-scheme: light;
+}

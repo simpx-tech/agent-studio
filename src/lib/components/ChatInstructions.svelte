@@ -66,7 +66,7 @@
   >
     <header>
       <div>
-        <span class="eyebrow">JUST FOR THIS CONVERSATION</span>
+        <span class="eyebrow">Just for this conversation</span>
         <h2 id="instructions-title">Chat instructions</h2>
       </div>
       <button class="icon-button" onclick={close} aria-label="Close chat instructions"
@@ -192,19 +192,21 @@
   form {
     overflow-y: auto;
     min-height: 0;
+    margin: 0 -6px;
+    padding: 4px 6px;
   }
   textarea {
     font-family: inherit;
   }
   .fast-mode-field {
     display: grid;
-    gap: 8px;
-    font-size: 12px;
+    gap: 7px;
+    font-size: var(--text-sm);
     font-weight: 500;
-    color: var(--muted);
+    color: var(--text-secondary);
   }
   textarea[spellcheck='false'] {
-    font-family: monospace;
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
   }
 </style>

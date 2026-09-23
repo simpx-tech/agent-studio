@@ -111,34 +111,48 @@
     inset: auto;
     margin: 0;
     padding: 5px;
-    width: 204px;
+    width: 210px;
     max-width: calc(100vw - 16px);
-    border: 1px solid #3a4433;
-    border-radius: 8px;
-    background: #1b2119;
-    box-shadow: 0 12px 32px #0006;
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-lg);
   }
   button {
     width: 100%;
-    min-height: 36px;
-    padding: 8px 10px;
+    min-height: 32px;
+    padding: 6px 9px;
     justify-content: flex-start;
     gap: 9px;
-    border-radius: 5px;
-    font-size: 12px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-base);
     color: var(--text);
     white-space: nowrap;
   }
+  button :global(svg) {
+    color: var(--text-muted);
+  }
   button:hover:not(:disabled),
   button:focus-visible {
-    background: #2b3427;
+    background: var(--active);
+    outline: none;
   }
   button.danger {
-    color: #efaa96;
+    min-height: 32px;
+    padding: 6px 9px;
+    border: 0;
+    background: transparent;
+    color: var(--danger);
+    font-weight: 400;
   }
-  button.danger:hover,
+  button.danger :global(svg) {
+    color: currentColor;
+  }
+  button.danger:hover:not(:disabled),
   button.danger:focus-visible {
-    background: #392921;
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   @media (pointer: coarse) {
     button {

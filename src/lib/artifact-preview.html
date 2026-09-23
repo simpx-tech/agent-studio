@@ -12,7 +12,7 @@ window.addEventListener('message', function receive(event) {
   document.close();
   if (font) {
     const style = document.createElement('style');
-    style.textContent = '@font-face{font-family:"DM Sans Variable";font-style:normal;font-weight:100 1000;font-display:swap;src:url("' + font + '") format("woff2")}html,body{background:transparent!important;margin:0!important;padding:0!important;min-height:0!important;height:auto!important}body{display:flow-root}';
+    style.textContent = '@font-face{font-family:"Geist Variable";font-style:normal;font-weight:100 1000;font-display:swap;src:url("' + font + '") format("woff2")}html,body{background:transparent!important;margin:0!important;padding:0!important;min-height:0!important;height:auto!important}body{display:flow-root}';
     document.head.append(style);
   }
   if (token) {

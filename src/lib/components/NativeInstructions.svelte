@@ -135,8 +135,8 @@
 
 <style>
   .native-instructions {
-    font-size: 12px;
-    line-height: 1.7;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
     padding-top: 14px;
   }
   .native-heading {
@@ -146,37 +146,39 @@
     justify-content: space-between;
   }
   .native-heading strong {
-    font-size: 12px;
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-weight: 600;
   }
   p {
-    color: #a6b49a;
+    color: var(--text-muted);
     margin: 10px 0;
   }
   .native-meta {
-    color: #91a680;
-    font-size: 10px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   .native-block {
-    border-bottom: 1px solid #334329;
+    border-bottom: 1px solid var(--border);
     padding: 12px 0;
   }
   summary {
     cursor: pointer;
-    color: #d5dfca;
+    color: var(--text);
+    font-weight: 500;
     overflow-wrap: anywhere;
   }
   pre {
-    font:
-      11px/1.7 ui-monospace,
-      monospace;
+    font: 11.5px/1.7 var(--font-mono);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding: 12px;
     margin: 8px 0 0;
-    background: #15200f;
-    color: #cbd5c1;
-    border-radius: 6px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    color: var(--code-text);
+    border-radius: var(--radius-md);
   }
   .native-empty,
   .native-notice {

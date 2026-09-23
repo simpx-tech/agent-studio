@@ -136,7 +136,7 @@
   .artifact-resizer:hover::after,
   .artifact-resizer:focus-visible::after,
   .artifact-resizer.dragging::after {
-    background: var(--green);
+    background: var(--accent-border);
   }
   :global(.app-shell:has(.artifact-resizer.dragging)),
   :global(.app-shell:has(.artifact-resizer.dragging) *) {

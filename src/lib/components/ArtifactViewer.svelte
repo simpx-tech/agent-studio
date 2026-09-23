@@ -4,6 +4,7 @@
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
   import { visualizationPreview } from '$lib/visualization-preview';
+  import { appearance } from '$lib/appearance.svelte';
   import { highlightCode } from '$lib/markdown';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import ArtifactResize from './ArtifactResize.svelte';
@@ -78,7 +79,7 @@
     frame.dataset.initialized = 'true';
     frame.contentWindow?.postMessage(
       artifact.visualization
-        ? visualizationPreview(artifact.source)
+        ? visualizationPreview(artifact.source, undefined, appearance.resolved)
         : {
             type: 'studio-artifact',
             source: artifact.source,
@@ -116,7 +117,7 @@
     />{/if}
   <header>
     <div>
-      <span class="eyebrow">ARTIFACT</span>
+      <span class="eyebrow">Artifact</span>
       <h2 id="artifact-title">{artifact.title}</h2>
     </div>
     <div class="viewer-actions">
@@ -178,7 +179,7 @@
     {#if tab === 'preview'}
       {#if error}<p role="alert">
           {error}
-        </p>{:else if url}{#key `${artifact.id}:${artifact.revision ?? 0}:${revision}`}<iframe
+        </p>{:else if url}{#key `${artifact.id}:${artifact.revision ?? 0}:${revision}:${artifact.visualization ? appearance.resolved : ''}`}<iframe
             title={`${artifact.title} preview`}
             src={url}
             sandbox="allow-scripts"
@@ -199,9 +200,10 @@
 <style>
   dialog {
     color: var(--text);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 16px;
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-xl);
     padding: 0;
     width: min(1100px, calc(100vw - 32px));
     height: min(850px, calc(100dvh - 32px));
@@ -214,7 +216,8 @@
     flex-direction: column;
   }
   dialog::backdrop {
-    background: #080b0dcc;
+    background: var(--backdrop);
+    backdrop-filter: blur(4px);
   }
   dialog.side-panel {
     top: var(--mobile-top, 0px);
@@ -222,6 +225,7 @@
     width: min(620px, 100vw);
     height: var(--mobile-height, 100dvh);
     border-radius: 0;
+    border-width: 0 0 0 1px;
   }
   dialog.docked {
     position: relative;
@@ -234,59 +238,79 @@
     min-height: 0;
     margin: 0;
     border: 0;
-    border-left: 1px solid var(--line);
+    border-left: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--bg-sidebar);
   }
   .viewer-actions {
     display: flex;
-    gap: 4px;
+    gap: 2px;
     flex-shrink: 0;
   }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: 14px 14px 12px 20px;
     gap: 12px;
   }
   header > div {
     min-width: 0;
   }
   h2 {
-    font-size: 17px;
-    margin: 3px 0 0;
+    font-size: var(--text-lg);
+    margin: 2px 0 0;
     overflow-wrap: anywhere;
   }
   .artifact-toolbar {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
-    border-block: 1px solid var(--line);
-    padding: 9px 16px;
+    border-block: 1px solid var(--border);
+    padding: 8px 14px;
   }
   [role='tablist'] {
     display: flex;
-    gap: 4px;
+    gap: 2px;
     flex: 1;
   }
   [role='tab'] {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
-    border-radius: 7px;
+    padding: 5px 10px;
+    border-radius: var(--radius-md);
     background: transparent;
-    color: var(--muted);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
   }
-  [aria-selected='true'] {
-    background: #ffffff0d;
+  [role='tab']:not(:disabled):hover {
+    background: var(--hover);
+  }
+  [aria-selected='true'],
+  [aria-selected='true']:not(:disabled):hover {
+    background: var(--active);
+    color: var(--text);
+  }
+  .artifact-toolbar .text-button {
+    width: var(--control-md);
+    height: var(--control-md);
+    padding: 0;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+  }
+  .artifact-toolbar .text-button:not(:disabled):hover {
+    background: var(--hover);
     color: var(--text);
   }
   .artifact-content {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    background: white;
-    color: #15191c;
+    background: var(--artifact-canvas);
+    color: var(--artifact-ink);
   }
   iframe {
     width: 100%;
@@ -302,17 +326,18 @@
   pre {
     margin: 0;
     padding: 20px;
-    font-size: 12px;
+    font-size: 12.5px;
+    line-height: 1.65;
     tab-size: 2;
     min-height: 100%;
     box-sizing: border-box;
-    background: #111715;
-    color: #d9e2dc;
+    background: var(--code-bg);
+    color: var(--code-text);
   }
   footer {
-    padding: 10px 16px;
-    font-size: 10px;
-    color: var(--muted);
+    padding: 9px 16px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   footer > span:not(:empty) {
     display: block;
@@ -322,7 +347,7 @@
     dialog {
       width: calc(100vw - 12px);
       height: calc(100dvh - 12px);
-      border-radius: 10px;
+      border-radius: var(--radius-xl);
     }
     header {
       padding: 12px;

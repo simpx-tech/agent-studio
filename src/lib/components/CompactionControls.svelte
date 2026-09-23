@@ -86,15 +86,15 @@
   .compaction-controls {
     display: grid;
     gap: 8px;
-    margin-top: 12px;
   }
   .compaction-controls > button {
     justify-self: start;
   }
   .compaction-controls p {
     margin: 0;
-    font-size: 11px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
   }
   .custom-size {
     display: flex;

@@ -40,37 +40,48 @@
 
 <style>
   .reasoning-panel {
-    margin: 8px 0 12px;
+    margin: 2px 0 12px;
     min-width: 0;
-    color: var(--muted);
+    color: var(--text-muted);
   }
   summary {
     display: flex;
     align-items: center;
     gap: 7px;
     width: fit-content;
+    padding: 4px 8px 4px 6px;
+    margin-left: -6px;
+    border-radius: var(--radius-md);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--text-sm);
+    font-weight: 500;
     list-style: none;
+    transition:
+      background-color var(--duration-fast) ease,
+      color var(--duration-fast) ease;
   }
   summary::-webkit-details-marker {
     display: none;
   }
   summary:hover {
+    background: var(--hover);
     color: var(--text);
+  }
+  summary :global(.disclosure) {
+    color: var(--text-faint);
   }
   details[open] :global(.disclosure) {
     transform: rotate(180deg);
   }
   .reasoning-body {
-    margin-top: 10px;
-    padding-left: 12px;
-    border-left: 1px solid var(--line);
+    margin-top: 8px;
+    padding: 2px 0 2px 14px;
+    border-left: 2px solid var(--border-strong);
     overflow-wrap: anywhere;
   }
   .reasoning-text {
-    font-size: 13px;
-    color: var(--muted);
+    font-size: var(--text-base);
+    color: var(--text-muted);
   }
   .reasoning-text + .reasoning-text {
     margin-top: 12px;

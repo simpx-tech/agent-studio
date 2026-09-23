@@ -181,7 +181,7 @@
 
 <style>
   .file-changes {
-    font-size: 12px;
+    font-size: var(--text-sm);
     min-width: 0;
   }
   summary {
@@ -197,15 +197,17 @@
   }
   summary :global(.disclosure) {
     flex: 0 0 auto;
-    transition: transform 120ms;
+    color: var(--text-faint);
+    transition: transform var(--duration-fast) var(--ease-out);
   }
   details[open] > summary :global(.disclosure) {
     transform: rotate(90deg);
   }
   .changes-body {
     margin-top: 6px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-1);
     overflow: hidden;
   }
   .changes-toolbar {
@@ -214,30 +216,35 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--line);
+    padding: 6px 8px 6px 6px;
+    border-bottom: 1px solid var(--border);
   }
   .change-tabs {
     display: flex;
-    gap: 3px;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius-md);
+    background: var(--hover);
   }
   .change-tabs button {
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--muted);
-    font-size: 11px;
-    padding: 5px 7px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: 4px 9px;
   }
   .change-tabs button[aria-selected='true'] {
-    background: var(--panel);
+    background: var(--surface-3);
     color: var(--text);
+    box-shadow: var(--shadow-sm);
   }
   .change-totals {
     display: flex;
-    gap: 7px;
-    font-size: 11px;
-    color: var(--muted);
+    gap: 8px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
   .scope-note,
@@ -245,74 +252,87 @@
   .diff-unavailable {
     margin: 0;
     padding: 9px 12px;
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.6;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
   }
   .file-list {
-    padding: 10px 10px 2px;
+    padding: 8px 8px 2px;
   }
   .show-files {
-    margin: 0 10px 10px;
-    padding: 5px 8px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: transparent;
-    color: var(--muted);
-    font-size: 11px;
+    margin: 0 8px 8px;
+    padding: 5px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    font-weight: 500;
+  }
+  .show-files:not(:disabled):hover {
+    border-color: var(--border-hover);
   }
   .changed-file {
-    margin: 0 0 8px;
-    border: 1px solid var(--line);
-    border-radius: 5px;
+    margin: 0 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg);
     overflow: hidden;
   }
   .changed-file > summary {
-    padding: 9px 10px;
+    padding: 7px 10px;
     flex-wrap: wrap;
+    transition: background-color var(--duration-fast) ease;
+  }
+  .changed-file > summary:hover {
+    background: var(--hover);
   }
   .file-path {
     flex: 1 1 160px;
     overflow-wrap: anywhere;
     min-width: 0;
-    font-size: 12px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
   }
   .previous-path,
   .file-kind,
   .muted {
-    color: var(--muted);
+    color: var(--text-muted);
   }
   .file-kind {
-    font-size: 10px;
+    padding: 0 6px;
+    border-radius: var(--radius-full);
+    background: var(--hover);
+    font-size: var(--text-2xs);
     font-weight: 600;
+    line-height: 17px;
   }
   .file-kind.new-file {
-    color: #a9ce88;
+    background: var(--success-soft);
+    color: var(--success);
   }
   .add {
-    color: #a9ce88;
+    color: var(--success);
     font-variant-numeric: tabular-nums;
   }
   .remove {
-    color: #e29a9a;
+    color: var(--danger);
     font-variant-numeric: tabular-nums;
   }
   .diff-scroll {
     overflow: auto;
     max-height: 420px;
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--border);
+    background: var(--code-bg);
   }
   .diff-table {
     border-collapse: collapse;
     width: 100%;
-    font:
-      11px/1.7 ui-monospace,
-      SFMono-Regular,
-      Consolas,
-      monospace;
+    font: 11.5px/1.7 var(--font-mono);
   }
   .diff-table td {
-    padding: 0 7px;
+    padding: 0 8px;
     border: 0;
     vertical-align: top;
   }
@@ -320,11 +340,12 @@
     width: 36px;
     min-width: 30px;
     text-align: right;
-    color: var(--muted);
+    color: var(--text-faint);
     user-select: none;
   }
   .diff-code {
     white-space: pre;
+    color: var(--code-text);
   }
   .diff-code code {
     font: inherit;
@@ -332,23 +353,23 @@
     padding: 0;
   }
   .hunk {
-    background: #202a30;
-    color: #a9becb;
+    background: var(--diff-hunk-bg);
+    color: var(--diff-hunk-text);
   }
   .hunk td {
-    padding: 4px 10px;
+    padding: 3px 10px;
   }
   tr.added {
-    background: #263723;
+    background: var(--diff-add-bg);
   }
   tr.removed {
-    background: #382726;
+    background: var(--diff-remove-bg);
   }
   tr.added .diff-code {
-    color: #c9e6b6;
+    color: var(--diff-add-text);
   }
   tr.removed .diff-code {
-    color: #edc0ba;
+    color: var(--diff-remove-text);
   }
   .sr-only {
     position: absolute;

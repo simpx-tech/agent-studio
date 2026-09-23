@@ -129,7 +129,8 @@
   .sidebar-resizer:hover::after,
   .sidebar-resizer:focus-visible::after,
   .sidebar-resizer.dragging::after {
-    background: var(--green);
+    transition: background-color var(--duration) ease;
+    background: var(--accent-border);
   }
   :global(.app-shell:has(.sidebar-resizer.dragging)),
   :global(.app-shell:has(.sidebar-resizer.dragging) *) {

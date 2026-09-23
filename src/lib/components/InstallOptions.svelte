@@ -83,31 +83,31 @@
 <style>
   .install-options {
     display: grid;
-    gap: 24px;
+    gap: 22px;
   }
   section {
     display: grid;
     gap: 12px;
   }
   section + section {
-    padding-top: 24px;
-    border-top: 1px solid var(--line);
+    padding-top: 22px;
+    border-top: 1px solid var(--border);
   }
   h3 {
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 16px;
+    font-size: var(--text-md);
     font-weight: 600;
   }
   h3 span {
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 400;
-    color: var(--muted);
+    color: var(--text-muted);
   }
   .primary,
   .desktop-download {
-    min-height: 44px;
+    min-height: 40px;
     width: 100%;
   }
   .desktop-download {
@@ -115,15 +115,20 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
     text-decoration: none;
-    font-size: 13px;
+    font-size: var(--text-base);
+    font-weight: 500;
     color: var(--text);
+    transition:
+      background-color var(--duration-fast) ease,
+      border-color var(--duration-fast) ease;
   }
   .desktop-download:hover {
-    background: var(--panel);
-    border-color: var(--muted);
+    background: var(--surface-3);
+    border-color: var(--border-hover);
   }
   .download-detail {
     text-align: center;

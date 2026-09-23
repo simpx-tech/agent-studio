@@ -63,7 +63,7 @@ export async function checkNativeArtifact(port, explanation = false) {
         ]);
         const nativeIpcBlocked = await probe('plugin:app|identifier') && await probe('get_installation');
         await document.fonts.ready;
-        return {before, after:Number(document.querySelector('${explanation ? '#workers' : '#count'}').textContent), parentBlocked,storageBlocked,networkBlocked,bridgeHelpersPresent,nativeIpcBlocked,background:getComputedStyle(document.body).backgroundColor,fontLoaded:document.fonts.check('13px "DM Sans Variable"'),height:document.body.getBoundingClientRect().height};
+        return {before, after:Number(document.querySelector('${explanation ? '#workers' : '#count'}').textContent), parentBlocked,storageBlocked,networkBlocked,bridgeHelpersPresent,nativeIpcBlocked,background:getComputedStyle(document.body).backgroundColor,fontLoaded:document.fonts.check('14px "Geist Variable"'),height:document.body.getBoundingClientRect().height};
       })()`,
           },
         }),

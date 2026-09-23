@@ -275,6 +275,7 @@
         {#if settings.provider === 'claude' || settings.provider === 'codex'}<div
             class="usage-card"
           >
+            <div class="usage-card-heading"><span>Compaction</span></div>
             <CompactionControls
               {settings}
               {canCompact}

@@ -102,9 +102,9 @@
 
 <style>
   .plan-panel {
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface-1);
     margin: 10px 0;
     overflow: hidden;
   }
@@ -112,23 +112,43 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 12px 14px;
+    min-height: 40px;
+    padding: 9px 12px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--text-sm);
     list-style: none;
+    transition: background-color var(--duration-fast) ease;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    background: var(--hover);
+  }
+  summary > :global(svg:first-child) {
+    color: var(--accent-strong);
+  }
+  summary > :global(svg:last-child) {
+    color: var(--text-faint);
+    transition: transform var(--duration) var(--ease-out);
+  }
+  details[open] > summary > :global(svg:last-child) {
+    transform: rotate(180deg);
   }
   summary strong {
     flex: 1;
     min-width: 0;
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
   summary > span {
-    color: var(--muted);
+    color: var(--text-muted);
     white-space: nowrap;
-    font-size: 11px;
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
   }
   .plan-body {
-    padding: 0 14px 12px;
+    padding: 4px 12px 12px;
     max-height: 260px;
     overflow: auto;
   }
@@ -137,14 +157,21 @@
     margin: 0;
     list-style: none;
     display: grid;
-    gap: 10px;
+    gap: 8px;
   }
   li {
     display: flex;
     align-items: flex-start;
     gap: 9px;
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: var(--text-sm);
+    line-height: var(--leading-snug);
+    color: var(--text-secondary);
+  }
+  li.done > span:nth-child(2) {
+    color: var(--text-muted);
+  }
+  li.working > span:nth-child(2) {
+    color: var(--text);
   }
   li > span:nth-child(2) {
     flex: 1;
@@ -153,41 +180,42 @@
   }
   .step-icon {
     display: flex;
-    padding-top: 2px;
+    padding-top: 1px;
     flex-shrink: 0;
-    color: var(--muted);
+    color: var(--text-faint);
   }
   .done .step-icon {
-    color: #9bc9ac;
+    color: var(--success);
   }
   .working .step-icon {
-    color: #a9bff0;
+    color: var(--accent-strong);
   }
   small {
-    font-size: 10px;
-    color: var(--muted);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
     max-width: 110px;
     text-align: right;
   }
   .plan-explanation,
   .plan-note {
-    font-size: 11px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
     margin: 0 0 10px;
   }
   .plan-note {
     margin: 12px 0 0;
   }
   .agent-plan {
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--border);
     padding-top: 12px;
     margin-top: 14px;
   }
   .agent-plan > strong {
     display: block;
     margin-bottom: 10px;
-    font-size: 11px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
   }
   .compact {
     margin: 0 0 10px;
@@ -197,7 +225,7 @@
       max-height: 180px;
     }
     summary {
-      padding: 10px;
+      padding: 9px 10px;
     }
     small {
       max-width: 75px;

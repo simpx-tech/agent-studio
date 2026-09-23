@@ -33,15 +33,22 @@
 <style>
   details {
     margin-top: 10px;
-    font-size: 11px;
-    color: var(--muted);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   summary {
+    width: fit-content;
     cursor: pointer;
+    font-weight: 500;
+  }
+  summary:hover {
+    color: var(--text);
   }
   p {
     margin: 6px 0;
-    line-height: 1.5;
+    line-height: var(--leading-normal);
+    color: inherit;
+    font-size: inherit;
   }
   dl {
     margin: 6px 0;
@@ -56,5 +63,6 @@
   dd {
     margin: 0;
     color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
 </style>

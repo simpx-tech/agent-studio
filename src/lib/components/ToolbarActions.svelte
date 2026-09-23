@@ -31,7 +31,7 @@
   }
   .action-items {
     display: flex;
-    gap: 6px;
+    gap: 2px;
   }
   .mobile-actions-toggle {
     display: none;
@@ -58,11 +58,11 @@
       right: 0;
       top: 48px;
       z-index: 31;
-      padding: 8px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      box-shadow: 0 16px 40px #0006;
+      padding: 6px;
+      background: var(--surface-overlay);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-lg);
     }
     .action-items :global(.icon-button) {
       width: 44px;
