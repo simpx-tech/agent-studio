@@ -52,6 +52,9 @@ pub struct Process {
     pub reported_model: Option<String>,
     pub next_id: u64,
     pub turns: u64,
+    /// Claude's latest running cost total in this process. It continues while the process
+    /// lives; a fresh process starts at zero because parked processes never exit cleanly.
+    pub cost_total: f64,
 }
 
 impl Process {
@@ -118,6 +121,7 @@ impl Process {
             reported_model: None,
             next_id: 1,
             turns: 0,
+            cost_total: 0.0,
         })
     }
     pub fn alive(&mut self) -> bool {

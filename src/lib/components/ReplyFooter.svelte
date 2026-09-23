@@ -42,6 +42,10 @@
         ? '<$0.000001'
         : currency.format(usage.costUsd),
   );
+  // Claude replies saved before costs were reply-scoped hold the CLI's running total.
+  const runningTotal = $derived(
+    message.settings?.provider === 'claude' && cost != null && usage?.scope !== 'reply',
+  );
 </script>
 
 <div class="reply-footer">
@@ -123,7 +127,11 @@
           </div>{/if}
         <div>
           <dt>
-            {usage?.scope === 'session' ? 'Estimated chat cost (USD)' : 'Estimated cost (USD)'}
+            {usage?.scope === 'session'
+              ? 'Estimated chat cost (USD)'
+              : runningTotal
+                ? 'Chat cost so far (USD)'
+                : 'Estimated cost (USD)'}
           </dt>
           <dd>{cost ?? 'Not reported'}</dd>
         </div>
@@ -151,9 +159,11 @@
       <p>
         {usage?.scope === 'session'
           ? 'Cumulative native chat reading through this reply, not an additional per-reply charge. Estimates may differ from billing.'
-          : cost == null
-            ? 'No cost was reported for this reply. Older replies may not have a saved cost.'
-            : 'Estimate reported by the provider for this reply. Your plan determines actual billing.'}
+          : runningTotal
+            ? 'Saved before Agent Studio recorded per-reply Claude costs: the conversation’s running estimate through this reply, not an additional charge.'
+            : cost == null
+              ? 'No cost was reported for this reply. Older replies may not have a saved cost.'
+              : 'Estimate reported by the provider for this reply. Your plan determines actual billing.'}
       </p>
       <AccountChanges {message} />
       {#if message.settings?.provider === 'codex'}<p>

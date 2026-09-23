@@ -8,6 +8,12 @@ use std::process::Stdio;
 const FIXTURE: &str = r#"
 $ErrorActionPreference = 'Stop'
 $turn = 0
+# Like the real CLI, results report the process's running cost total.
+$total = 0d
+function Cost([decimal]$amount) {
+    $script:total += $amount
+    return $script:total.ToString([Globalization.CultureInfo]::InvariantCulture)
+}
 $open = $false
 while ($null -ne ($line = [Console]::ReadLine())) {
     $value = $line | ConvertFrom-Json
@@ -83,7 +89,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             if ($mode -eq 'Await replay') {
                 [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":"<task-notification>\n<task-id>tests</task-id>\n<status>completed</status>\n</task-notification>"}}')
             }
-            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Waiting for tests","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":0.001}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Waiting for tests","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":' + (Cost 0.001d) + '}')
             if ($mode -eq 'Await') {
                 Start-Sleep -Milliseconds 500
                 [Console]::WriteLine('{"type":"system","subtype":"task_updated","task_id":"tests","patch":{"status":"completed"}}')
@@ -93,7 +99,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 # The CLI re-invokes the model with the finished task.
                 [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
                 [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"report","content":[{"type":"text","text":"Tests passed"}]}}')
-                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Tests passed","usage":{"input_tokens":20,"output_tokens":3},"total_cost_usd":0.002,"origin":{"kind":"task-notification"}}')
+                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Tests passed","usage":{"input_tokens":20,"output_tokens":3},"total_cost_usd":' + (Cost 0.002d) + ',"origin":{"kind":"task-notification"}}')
             }
             continue
         }
@@ -115,7 +121,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             $open = $true
             continue
         }
-        [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Turn ' + $turn + '","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":0.001}')
+        [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Turn ' + $turn + '","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":' + (Cost 0.001d) + '}')
     }
 }
 "#;
@@ -227,22 +233,16 @@ async fn declared_background_tests_hold_the_reply_until_the_model_reports_them()
     ] {
         let root = tempfile::tempdir().unwrap();
         let conversation = uuid::Uuid::new_v4().to_string();
-        let request = request(
+        let first = request(
             root.path(),
             &conversation,
             serde_json::json!([{"role":"user","text":mode}]),
         );
-        let session = request.native_session.as_ref().unwrap().id().to_string();
+        let session = first.native_session.as_ref().unwrap().id().to_string();
         let mut process = fixture(root.path(), &session, false, false);
         let started = std::time::Instant::now();
-        let (result, events) = turn(
-            &mut process,
-            &request,
-            CancellationToken::new(),
-            false,
-            false,
-        )
-        .await;
+        let (result, events) =
+            turn(&mut process, &first, CancellationToken::new(), false, false).await;
         assert_eq!(result.unwrap(), ("complete".into(), text.into()), "{mode}");
         assert!(process.alive() && process.healthy, "{mode}");
         if mode == "Await lost" {
@@ -263,6 +263,32 @@ async fn declared_background_tests_hold_the_reply_until_the_model_reports_them()
             // The reply's token counts cover both of its CLI turns.
             assert!(events.iter().any(|e| matches!(e, RunEvent::Usage { usage } if usage.input == Some(30) && usage.output == Some(5))));
         }
+        let cost = |events: &[RunEvent], expected: f64| {
+            events.iter().any(|e| matches!(e, RunEvent::Usage { usage } if usage.cost_usd.is_some_and(|c| (c - expected).abs() < 1e-9)))
+        };
+        let charged = if text == "Tests passed" { 0.003 } else { 0.001 };
+        assert!(cost(&events, charged), "{mode}");
+        // A follow-up turn's init must not leave the delivered message unconfirmed, and
+        // the next reply pays only for itself although the CLI reports a running total.
+        drop(first);
+        process.turns += 1;
+        process.park();
+        process.claim();
+        let next = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":mode},{"role":"assistant","text":text},{"role":"user","text":"Next"}]),
+        );
+        let session = next.native_session.as_ref().unwrap();
+        assert!(
+            session.resumed && session.unconfirmed_message.is_none(),
+            "{mode}"
+        );
+        assert!(!session.instructions_changed, "{mode}");
+        let (result, events) =
+            turn(&mut process, &next, CancellationToken::new(), true, false).await;
+        assert!(result.is_ok(), "{mode}");
+        assert!(cost(&events, 0.001), "{mode}");
         process.kill().await;
     }
 }

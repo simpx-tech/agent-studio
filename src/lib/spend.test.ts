@@ -49,14 +49,25 @@ const observed = (runId: string): AccountUsage => ({
   },
 });
 describe('chat spend tracking', () => {
-  it('sums Claude query readings once, retaining zero and incomplete stopped replies', () => {
+  it('sums Claude reply costs once, retaining zero and incomplete stopped replies', () => {
     const c = chat('claude', [
-      reply({ input: 10, output: 2, costUsd: 0 }),
-      reply({ input: 20, output: 4, costUsd: 0.5 }),
+      reply({ input: 10, output: 2, costUsd: 0, scope: 'reply' }),
+      reply({ input: 20, output: 4, costUsd: 0.5, scope: 'reply' }),
       { ...reply(), status: 'cancelled' },
     ]);
     expect(chatSpend(c)).toMatchObject({ input: 30, output: 6, cost: 0.5, partial: true });
+    expect(chatSpend(c).detail).not.toContain('running cost total');
     expect(chatSpend(chat('claude', [reply()]))).toMatchObject({ input: null, cost: null });
+    // Older replies saved the session's running total: their tokens count, not their cost.
+    const older = chatSpend(
+      chat('claude', [
+        reply({ input: 10, output: 2, costUsd: 0.2 }),
+        reply({ input: 20, output: 4, costUsd: 0.5 }),
+        reply({ input: 5, output: 1, costUsd: 0.1, scope: 'reply' }),
+      ]),
+    );
+    expect(older).toMatchObject({ input: 35, output: 7, cost: 0.1, partial: true });
+    expect(older.detail).toContain('those readings are excluded');
     expect(money(0)).toBe('$0.00');
     expect(money(0.0000001)).toBe('<$0.000001');
     expect(money(null)).toBe('Not reported');

@@ -111,8 +111,10 @@ pub struct Decoder {
     pub completed: bool,
     items: Vec<(String, String)>,
     context_input: Option<u64>,
-    /// Claude input, output and cached input summed over this reply's results.
-    turn_usage: [Option<u64>; 3],
+    /// Claude input, output, cached input and reasoning summed over this reply's results.
+    turn_usage: [Option<u64>; 4],
+    /// Claude's running cost total in this process before the reply; the reply pays the change.
+    pub cost_baseline: f64,
     model: Option<String>,
     tools: activity::ToolDecoder,
     file_changes: file_changes::FileChangeDecoder,
@@ -454,31 +456,37 @@ impl Decoder {
                     }
                     let model_usage = self.model.as_ref().and_then(|m| v["modelUsage"].get(m));
                     // A reply spans several CLI turns while it waits for background work,
-                    // and each result reports token usage for its own turn only.
+                    // and each result reports token usage for its own turn only. modelUsage
+                    // and total_cost_usd are running totals for the CLI process.
                     let turn = [
                         input_with_cache(&v["usage"]),
                         v["usage"]["output_tokens"].as_u64(),
                         v["usage"]["cache_read_input_tokens"].as_u64(),
+                        v["usage"]["output_tokens_details"]["thinking_tokens"].as_u64(),
                     ];
                     for (total, turn) in self.turn_usage.iter_mut().zip(turn) {
                         if let Some(turn) = turn {
                             *total = Some(total.unwrap_or(0) + turn);
                         }
                     }
-                    let [input, output, cached_input] = self.turn_usage;
+                    let [input, output, cached_input, reasoning_output] = self.turn_usage;
+                    let total = v["total_cost_usd"]
+                        .as_f64()
+                        .filter(|cost| cost.is_finite() && *cost >= 0.0);
                     events.push(RunEvent::Usage {
                         usage: TokenUsage {
                             input,
                             output,
                             cached_input,
-                            reasoning_output: model_usage
-                                .and_then(|m| m["thinkingTokens"].as_u64()),
+                            reasoning_output,
                             context_input: self.context_input,
                             context_window: model_usage.and_then(|m| m["contextWindow"].as_u64()),
-                            cost_usd: v["total_cost_usd"]
-                                .as_f64()
-                                .filter(|cost| cost.is_finite() && *cost >= 0.0),
+                            // A lower total (a zeroed failure or a reset) leaves the cost unknown.
+                            cost_usd: total
+                                .filter(|total| *total >= self.cost_baseline)
+                                .map(|total| total - self.cost_baseline),
                             model: self.model.clone(),
+                            scope: Some("reply".into()),
                             ..Default::default()
                         },
                     });
@@ -731,12 +739,16 @@ mod tests {
         assert_eq!(usage.context_window, Some(1000000));
     }
     #[test]
-    fn claude_reply_tokens_cover_turns_after_background_work_finishes() {
-        let mut d = Decoder::default();
+    fn claude_reply_usage_covers_its_turns_and_subtracts_the_process_running_total() {
+        // The process had already reported 0.005 before this reply started.
+        let mut d = Decoder {
+            cost_baseline: 0.005,
+            ..Default::default()
+        };
         d.decode("claude",r#"{"type":"assistant","message":{"model":"claude-fable-5-1","content":[],"usage":{"input_tokens":10,"cache_read_input_tokens":90}}}"#);
-        d.decode("claude",r#"{"type":"result","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5},"total_cost_usd":0.01}"#);
+        d.decode("claude",r#"{"type":"result","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5,"output_tokens_details":{"thinking_tokens":3}},"total_cost_usd":0.01,"modelUsage":{"claude-fable-5-1":{"thinkingTokens":900}}}"#);
         d.decode("claude",r#"{"type":"assistant","message":{"model":"claude-fable-5-1","content":[],"usage":{"input_tokens":20,"cache_read_input_tokens":180}}}"#);
-        let events = d.decode("claude",r#"{"type":"result","usage":{"input_tokens":20,"cache_read_input_tokens":180,"output_tokens":7},"total_cost_usd":0.03}"#);
+        let events = d.decode("claude",r#"{"type":"result","usage":{"input_tokens":20,"cache_read_input_tokens":180,"output_tokens":7,"output_tokens_details":{"thinking_tokens":4}},"total_cost_usd":0.03,"modelUsage":{"claude-fable-5-1":{"thinkingTokens":907}}}"#);
         let RunEvent::Usage { usage } = events.last().unwrap() else {
             panic!("Missing usage")
         };
@@ -744,9 +756,22 @@ mod tests {
             (usage.input, usage.output, usage.cached_input),
             (Some(300), Some(12), Some(270))
         );
-        // The context reading and the CLI's running cost total stay the latest values.
+        // Reasoning comes from each turn, not modelUsage's running total.
+        assert_eq!(usage.reasoning_output, Some(7));
         assert_eq!(usage.context_input, Some(200));
-        assert_eq!(usage.cost_usd, Some(0.03));
+        assert!((usage.cost_usd.unwrap() - 0.025).abs() < 1e-12);
+        assert_eq!(usage.scope.as_deref(), Some("reply"));
+        // A lower total, such as a zeroed failure result, leaves the cost unknown.
+        let mut d = Decoder {
+            cost_baseline: 0.005,
+            ..Default::default()
+        };
+        let result = r#"{"type":"result","usage":{"output_tokens":1},"total_cost_usd":0.004}"#;
+        let RunEvent::Usage { usage } = d.decode("claude", result).pop().unwrap() else {
+            panic!("Missing usage")
+        };
+        assert_eq!(usage.cost_usd, None);
+        assert_eq!(usage.reasoning_output, None);
     }
     #[test]
     fn missing_last_claude_request_never_reuses_earlier_context_or_cumulative_totals() {

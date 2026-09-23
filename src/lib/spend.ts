@@ -45,9 +45,14 @@ export function chatSpend(conversation: Conversation) {
   // counters from unknown adapter versions. Billing estimates stay session-wide.
   const measured =
     provider === 'codex' ? replies.filter((m) => m.usage?.scope === 'reply') : replies;
+  // Claude replies saved before costs were reply-scoped hold the CLI's running total.
+  const priced = replies.filter((m) => m.usage?.scope === 'reply');
+  const runningTotals = replies.filter(
+    (m) => provider === 'claude' && m.usage?.costUsd != null && m.usage.scope !== 'reply',
+  ).length;
   const latest = replies.at(-1)?.usage;
-  const sum = (key: 'input' | 'output' | 'costUsd') => {
-    const values = measured.flatMap((m) => (m.usage?.[key] == null ? [] : [m.usage[key]!]));
+  const sum = (key: 'input' | 'output' | 'costUsd', from = measured) => {
+    const values = from.flatMap((m) => (m.usage?.[key] == null ? [] : [m.usage[key]!]));
     return values.length ? values.reduce((a, b) => a + b, 0) : null;
   };
   const missing = replies.filter(
@@ -55,14 +60,18 @@ export function chatSpend(conversation: Conversation) {
       m.usage?.input == null ||
       m.usage?.output == null ||
       (provider === 'codex' ? m.usage?.scope !== 'reply' : m.usage?.costUsd == null) ||
+      (provider === 'claude' && m.usage?.scope !== 'reply') ||
       m.status === 'running',
   ).length;
   return {
     input: sum('input'),
     output: sum('output'),
-    cost: provider === 'codex' ? (latest?.sessionCostUsd ?? null) : sum('costUsd'),
+    cost:
+      provider === 'codex'
+        ? (latest?.sessionCostUsd ?? null)
+        : sum('costUsd', provider === 'claude' ? priced : measured),
     credits: provider === 'codex' ? (latest?.sessionCredits ?? null) : null,
-    detail: `Sums saved per-reply token readings, including stopped and failed replies.${missing ? ` ${missing} ${missing === 1 ? 'reply has' : 'replies have'} incomplete readings; totals include reported values only.` : ''}${provider === 'codex' ? ' Older unscoped token readings are excluded. Credit and cost estimates cover the native session through the latest reply when reported.' : ''}`,
+    detail: `Sums saved per-reply token readings, including stopped and failed replies.${missing ? ` ${missing} ${missing === 1 ? 'reply has' : 'replies have'} incomplete readings; totals include reported values only.` : ''}${provider === 'codex' ? ' Older unscoped token readings are excluded. Credit and cost estimates cover the native session through the latest reply when reported.' : ''}${runningTotals ? ` Older Claude replies saved the conversation's running cost total instead of their own cost; ${runningTotals === 1 ? 'that reading is' : 'those readings are'} excluded.` : ''}`,
     partial: missing > 0,
   };
 }

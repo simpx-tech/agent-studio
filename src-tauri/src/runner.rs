@@ -501,6 +501,7 @@ async fn stream_turn(
         process.stdin.write_all(b"{\"type\":\"control_request\",\"request_id\":\"studio-init\",\"request\":{\"subtype\":\"initialize\",\"hooks\":null}}\n").await.map_err(|_| send_failed)?;
     }
     let mut decoder = Decoder::default();
+    decoder.cost_baseline = process.cost_total;
     decoder.expect_structured_output = request.agent.output_schema.is_some() && !request.compact;
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -653,7 +654,8 @@ async fn stream_turn(
                             }
                             if value["type"] == "system" && value["subtype"] == "init" && value["parent_tool_use_id"].is_null() {
                                 if let Some(session) = &request.native_session {
-                                    let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, false).map(|()| id.to_string()));
+                                    // A follow-up turn's init keeps this reply's confirmed input.
+                                    let result = value["session_id"].as_str().ok_or("Claude did not report a native session identity".to_string()).and_then(|id| session.bind(id, session_received).map(|()| id.to_string()));
                                     match result { Ok(id) => process.session_id = id, Err(error) => { process.healthy = false; break Err(error); } }
                                 }
                             }
@@ -716,6 +718,10 @@ async fn stream_turn(
                             // A zero-turn acknowledgement of injected history is not a reply.
                             if context_result { continue; }
                             let result = value["type"] == "result" && value["parent_tool_use_id"].is_null();
+                            // A failed result can carry a zeroed total; it never lowers the baseline.
+                            if let Some(total) = value["total_cost_usd"].as_f64().filter(|total| result && total.is_finite() && *total >= 0.0) {
+                                if value["is_error"] != true || total >= process.cost_total { process.cost_total = total; }
+                            }
                             if interrupting {
                                 // Stop ends the reply at the interrupted turn's result, even with
                                 // background work left. An idle CLI only acknowledges the requests.
@@ -855,8 +861,8 @@ mod claude_tests;
 mod elicitation_native_tests;
 
 #[cfg(test)]
-#[path = "background_native_tests.rs"]
-mod background_native_tests;
+#[path = "claude_native_tests.rs"]
+mod claude_native_tests;
 
 #[cfg(test)]
 mod tests {
