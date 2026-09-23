@@ -2,6 +2,7 @@ mod artifacts;
 mod badges;
 mod cli_queries;
 mod context;
+mod drafts;
 mod folders;
 mod live_usage;
 mod mcp;
@@ -642,6 +643,7 @@ pub fn run() {
         .manage(providers::questions::Questions::default())
         .manage(titles::Titles::default())
         .manage(Storage::default())
+        .manage(drafts::DraftStorage::default())
         .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
@@ -740,6 +742,8 @@ pub fn run() {
             read_native_instructions,
             load_workspace,
             save_workspace,
+            drafts::load_drafts,
+            drafts::save_drafts,
             run_agent,
             generate_title,
             cancel_title,

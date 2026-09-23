@@ -84,7 +84,13 @@ test('create, fill, preview and insert preserve the draft and attachments withou
   expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBeNull();
   expect(await page.evaluate(() => (window as any).templateExecuted)).toBeUndefined();
   await page.screenshot({ path: 'artifacts/input-templates-inserted-desktop.png' });
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('test-drafts')))
+    .toContain('Review Login flow');
   await page.reload();
+  // The unsent text returns after a restart; attached images stay only while the app is open.
+  await expect(input).toHaveValue(result);
+  await expect(page.getByRole('button', { name: /Remove pixel.png/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Templates', exact: true }).click();
   await page.getByRole('button', { name: 'Edit Review a change' }).click();
   await page.getByLabel('Template name').fill('Explain a topic');
@@ -94,7 +100,7 @@ test('create, fill, preview and insert preserve the draft and attachments withou
   await expect(page.getByLabel('topic', { exact: true })).toHaveValue('');
   await page.getByLabel('topic', { exact: true }).fill('Temporary value');
   await page.keyboard.press('Escape');
-  await expect(input).toHaveValue('');
+  await expect(input).toHaveValue(result);
   await page.getByRole('button', { name: 'Templates', exact: true }).click();
   await page.getByRole('button', { name: 'Delete Explain a topic' }).click();
   await page.getByRole('button', { name: 'Cancel deletion' }).click();

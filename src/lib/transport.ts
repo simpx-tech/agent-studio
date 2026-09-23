@@ -8,6 +8,7 @@ import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { FolderEntry, FolderPlace } from './folders';
+import type { SavedDrafts } from './drafts';
 import type { UsageSnapshot } from './usage';
 import {
   AccountUpdateGate,
@@ -1317,6 +1318,26 @@ export async function saveWorkspace(
     localStorage.setItem(scope, JSON.stringify(workspace));
   }
   updatePendingBadge(pendingChatCount(workspace.conversations));
+}
+// Unsent drafts stay on this device: never in the workspace, exports, or relay sync.
+export async function loadDrafts(scope = workspaceStorageScope()): Promise<unknown> {
+  if (desktop()) return invoke('load_drafts');
+  if (!scope) return null;
+  const saved = localStorage.getItem(`${scope}:drafts`);
+  return saved === null ? null : JSON.parse(saved);
+}
+export async function saveDrafts(
+  drafts: SavedDrafts,
+  scope = workspaceStorageScope(),
+): Promise<void> {
+  if (desktop()) {
+    await invoke('save_drafts', { drafts });
+    return;
+  }
+  // A save queued by a former session must never reach another workspace's storage.
+  if (!scope || scope !== workspaceStorageScope()) return;
+  if (drafts.drafts.length) localStorage.setItem(`${scope}:drafts`, JSON.stringify(drafts));
+  else localStorage.removeItem(`${scope}:drafts`);
 }
 export async function detectProviders(): Promise<ProviderStatus[]> {
   if (desktop()) return invoke('detect_providers');

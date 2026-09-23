@@ -140,6 +140,46 @@ test('Viewer forks persist only in their authenticated workspace and retain offl
   }
 });
 
+test('Viewer drafts stay in this browser for their workspace and leave with sign out', async ({
+  page,
+}) => {
+  const f = await hostedWorkspaces();
+  const [alice] = f.users;
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const stored = () => page.evaluate(() => JSON.stringify({ ...localStorage }));
+  try {
+    await page.goto(f.url);
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    const message = page.getByRole('textbox', { name: 'Message', exact: true });
+    await message.fill('Alice unsent reply');
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await expect(message).toHaveValue('');
+    await openPrivateChat(page, alice.name);
+    await expect(message).toHaveValue('Alice unsent reply');
+    await expect.poll(stored).toContain('Alice unsent reply');
+    await page.reload();
+    await openPrivateChat(page, alice.name);
+    await expect(message).toHaveValue('Alice unsent reply');
+    // Drafts never reach the server's copy of the workspace.
+    expect(JSON.stringify(await f.call(alice.token, 'GET', 'state'))).not.toContain(
+      'unsent reply',
+    );
+    await page.getByRole('button', { name: 'Connections', exact: true }).click();
+    await page.getByText('Sync settings', { exact: true }).click();
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    expect(await stored()).not.toContain('unsent reply');
+    await pair(page, alice.token);
+    await openPrivateChat(page, alice.name);
+    await expect(message).toHaveValue('');
+    expect(errors).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
 test('workspace login gates startup, authentication, restoration, and expired sessions', async ({
   page,
   context,

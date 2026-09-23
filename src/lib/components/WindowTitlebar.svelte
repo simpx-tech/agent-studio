@@ -7,12 +7,20 @@
     title,
     onerror,
     onmenu,
-  }: { title: string; onerror: (message: string) => void; onmenu?: () => void } = $props();
+    beforeclose,
+  }: {
+    title: string;
+    onerror: (message: string) => void;
+    onmenu?: () => void;
+    beforeclose?: () => Promise<void>;
+  } = $props();
   let native = $state(false);
   let maximized = $state(false);
 
   async function act(action: WindowAction) {
     try {
+      // Unsaved work, such as a draft typed a moment ago, is saved before the window closes.
+      if (action === 'close') await beforeclose?.();
       await controlWindow(action);
     } catch (error) {
       onerror(`Could not change the window: ${String(error)}`);

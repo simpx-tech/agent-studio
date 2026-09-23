@@ -62,6 +62,8 @@
   import {
     desktop,
     loadWorkspace,
+    loadDrafts,
+    saveDrafts,
     loadModels,
     readUsage,
     watchAccountUpdates,
@@ -178,6 +180,20 @@
     type QueuedMessage,
   } from '$lib/queue';
   import {
+    combineDrafts,
+    draftKey,
+    hasDraft,
+    mergeSavedDrafts,
+    readSavedDrafts,
+    restoredDraft,
+    sameDraft,
+    savedDraft,
+    type Draft,
+    type DraftChange,
+    type DraftContent,
+    type SavedDraft,
+  } from '$lib/drafts';
+  import {
     replySettingsChanged,
     replySwitches,
     selectedModelName,
@@ -259,8 +275,29 @@
     if (view !== 'chat') templatesOpen = false;
   });
   let attachedImages = $state<ChatImage[]>([]);
-  // Drafts displaced by opening a fork stay local until their source chat is reopened.
-  const forkDrafts = new Map<string, { text: string; images: ChatImage[] }>();
+  // Unsent composer content per chat, and per folder, Standalone location, or computer for new
+  // chats. Text is saved on this device only; attached images stay until the app closes.
+  const drafts = new Map<string, Draft>();
+  const changedDrafts = new Map<string, number>();
+  let composerDraftKey = '';
+  let draftsReady = false;
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  let draftSaves = Promise.resolve();
+  let draftSaveFailed = false;
+  $effect(() => {
+    const content = {
+      text: prompt,
+      images: $state.snapshot(attachedImages),
+      mentions: $state.snapshot(draftMentions),
+      staleMentions: $state.snapshot(staleMentionTokens),
+      mentionScope: mentionSelection,
+    };
+    untrack(() => {
+      if (!loaded) return;
+      composerDraftKey ||= currentDraftKey();
+      keepDraft(content);
+    });
+  });
   let forking = $state(false);
   let attachmentError = $state('');
   let imagesLoading = $state(false);
@@ -678,11 +715,8 @@
     if (!notificationTarget || !loaded) return;
     const conversation = workspace.conversations.find((c) => c.id === notificationTarget);
     if (!conversation) return; // A cold start may still be downloading the checkpoint.
-    if (activeId !== conversation.id && (prompt || attachedImages.length || imagesLoading)) {
-      notice =
-        'A reply is ready in another chat. Your draft is preserved; finish it before opening the notification.';
-      return;
-    }
+    // Unsent drafts stay with their own chat. Only an image still being read waits for it.
+    if (activeId !== conversation.id && imagesLoading) return;
     notificationTarget = undefined;
     if (activeId !== conversation.id) openConversation(conversation);
     else {
@@ -796,6 +830,14 @@
     window.addEventListener('focus', onReturn);
     window.addEventListener('online', onReturn);
     document.addEventListener('visibilitychange', onReturn);
+    // Save typed drafts right away when the window is left, hidden, or closed.
+    const saveDraftsOnLeave = () => void saveDraftsNow();
+    const saveDraftsWhenHidden = () => {
+      if (document.visibilityState === 'hidden') void saveDraftsNow();
+    };
+    window.addEventListener('blur', saveDraftsOnLeave);
+    window.addEventListener('pagehide', saveDraftsOnLeave);
+    document.addEventListener('visibilitychange', saveDraftsWhenHidden);
     const loginPoll = setInterval(() => {
       if (pendingSignIn && Date.now() < signInDeadline && !run) void refresh();
     }, 5000);
@@ -842,6 +884,7 @@
           (l) => locationConnections(workspace.fleet, l).length,
         );
         draftSettings = settingsFor(workspace.preferences);
+        await loadSavedDrafts();
         loaded = true;
         newChat();
         if (installation)
@@ -853,7 +896,7 @@
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
               queued = {};
-              forkDrafts.clear();
+              resetDrafts();
               forking = false;
               const previousView = view;
               workspace = value;
@@ -895,6 +938,7 @@
                 syncError = reason;
                 syncStatus = 'Pair with your private workspace to see its chats and computers.';
               }
+              await loadSavedDrafts();
               await persist();
             },
             checkpointRun: async (request, event, status, error) => {
@@ -925,6 +969,11 @@
                 }
                 return incoming;
               });
+              // A conversation deleted on another device takes its unsent draft along.
+              const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
+              for (const key of [...drafts.keys()])
+                if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
+                  forgetDraft(key);
               await persist();
               if (
                 workspace.fleet.connections.some(
@@ -967,6 +1016,9 @@
       window.removeEventListener('focus', onReturn);
       window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
+      window.removeEventListener('blur', saveDraftsOnLeave);
+      window.removeEventListener('pagehide', saveDraftsOnLeave);
+      document.removeEventListener('visibilitychange', saveDraftsWhenHidden);
     };
   });
   async function syncNow() {
@@ -1008,7 +1060,10 @@
       notificationTarget = notificationConversation(window.location.hash);
       followNotification();
     }
-    if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
+    if (!active && !draftComputerId) {
+      draftComputerId = computers[0]?.id ?? '';
+      moveDraft(currentDraftKey());
+    }
   }
   async function unpair() {
     ++relaySelectionVersion;
@@ -1039,7 +1094,8 @@
     void persist().catch(() => {});
   }
   async function restartToUpdate() {
-    // Finish saving this workspace before the installer closes the app.
+    // Finish saving this workspace and its drafts before the installer closes the app.
+    await saveDraftsNow();
     await persist();
     await installAppUpdate();
   }
@@ -1608,8 +1664,7 @@
         });
     }
     activeId = null;
-    prompt = '';
-    clearImages();
+    switchDraft(currentDraftKey());
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
@@ -1647,6 +1702,7 @@
     draftLocation = undefined;
     draftSettings = { ...draftSettings, connectionId: undefined };
     locationPending = true;
+    moveDraft(currentDraftKey());
   }
   function standaloneLocation(computerId: string): ChatLocation | undefined {
     const environment = computerViews(workspace.fleet).find((c) => c.id === computerId)?.environments[0];
@@ -1695,6 +1751,7 @@
       draftLocation = { ...location };
       locationPending = false;
       draftComputerId = locationComputerId(location);
+      moveDraft(currentDraftKey());
       rememberLocation(workspace, location);
       // Automatic computer defaults must not replace the user's remembered account elsewhere.
       changeSettings(settings, sameComputer);
@@ -1740,14 +1797,7 @@
     revealConversation(c);
     locationPending = false;
     activeId = c.id;
-    prompt = '';
-    clearImages();
-    const savedDraft = forkDrafts.get(c.id);
-    if (savedDraft) {
-      prompt = savedDraft.text;
-      attachedImages = savedDraft.images;
-      forkDrafts.delete(c.id);
-    }
+    switchDraft(draftKey.chat(c.id));
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
@@ -1784,11 +1834,7 @@
         notice = `“${fork.title}” was created in Active. Your current draft is unchanged.`;
         return;
       }
-      if (activeId && (prompt || attachedImages.length))
-        forkDrafts.set(activeId, {
-          text: prompt,
-          images: structuredClone($state.snapshot(attachedImages)),
-        });
+      // The source chat keeps its draft for when it is reopened.
       nearBottom = true;
       openConversation(fork);
       await tick();
@@ -1926,7 +1972,12 @@
       workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
       await persist();
       if (session !== workspaceSession) return;
-      if (activeId === target.id) newChat();
+      // Its unsent draft is deleted with the conversation.
+      forgetDraft(draftKey.chat(target.id));
+      if (activeId === target.id) {
+        composerDraftKey = '';
+        newChat();
+      }
       deletion = null;
     } catch (e) {
       if (session !== workspaceSession) return;
@@ -1944,6 +1995,142 @@
     attachedImages = [];
     attachmentError = '';
     imagesLoading = false;
+  }
+  function currentDraftKey() {
+    if (activeId) return draftKey.chat(activeId);
+    return !locationPending && draftLocation
+      ? draftKey.folder(draftLocation)
+      : draftKey.computer(draftComputerId);
+  }
+  function composerContent(): DraftContent {
+    return {
+      text: prompt,
+      images: $state.snapshot(attachedImages),
+      mentions: $state.snapshot(draftMentions),
+      staleMentions: $state.snapshot(staleMentionTokens),
+      mentionScope: mentionSelection,
+    };
+  }
+  function applyComposer(draft?: DraftContent) {
+    prompt = draft?.text ?? '';
+    attachedImages = [...(draft?.images ?? [])];
+    draftMentions = draft?.mentions.map((m) => ({ ...m })) ?? [];
+    staleMentionTokens = [...(draft?.staleMentions ?? [])];
+    // Restored mentions stay selected only while their chat, account, and folder still match.
+    if (draft?.mentions.length) mentionSelection = draft.mentionScope;
+  }
+  function keepDraft(content: DraftContent) {
+    const key = composerDraftKey;
+    if (!key) return;
+    const previous = drafts.get(key);
+    if (!hasDraft(content)) {
+      if (previous) forgetDraft(key);
+    } else if (!previous || !sameDraft(previous, content)) {
+      drafts.set(key, { ...content, updatedAt: Date.now() });
+      draftChanged(key);
+    }
+  }
+  function forgetDraft(key: string) {
+    if (drafts.delete(key)) draftChanged(key);
+  }
+  function draftChanged(key: string) {
+    changedDrafts.set(key, Date.now());
+    // Save a few times a second even while typing continues, so closing loses little.
+    if (draftsReady) draftTimer ??= setTimeout(() => void saveDraftsNow(), 300);
+  }
+  // Opening another chat, or a new chat elsewhere, keeps the current draft for its return.
+  function switchDraft(key: string) {
+    keepDraft(composerContent());
+    composerDraftKey = key;
+    clearImages();
+    applyComposer(drafts.get(key));
+  }
+  // A new chat takes its draft along when its folder or computer changes.
+  function moveDraft(key: string) {
+    if (key === composerDraftKey) return;
+    const carried = composerContent();
+    forgetDraft(composerDraftKey);
+    composerDraftKey = key;
+    carryDraft(carried);
+  }
+  // A draft already saved at the destination keeps its text first, so neither is lost.
+  function carryDraft(carried: DraftContent) {
+    const combined = combineDrafts(drafts.get(composerDraftKey), carried, maxImagesPerMessage);
+    applyComposer(combined.draft);
+    keepDraft(combined.draft);
+    if (combined.droppedImages)
+      attachmentError = `${combined.droppedImages} image${combined.droppedImages === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`;
+  }
+  function resetDrafts() {
+    clearTimeout(draftTimer);
+    draftTimer = undefined;
+    drafts.clear();
+    changedDrafts.clear();
+    composerDraftKey = '';
+    draftsReady = false;
+    draftSaveFailed = false;
+  }
+  async function loadSavedDrafts() {
+    const session = workspaceSession;
+    const scope = workspaceStorageScope();
+    if (!scope) return;
+    let saved = new Map<string, SavedDraft>();
+    try {
+      saved = readSavedDrafts(await loadDrafts(scope));
+    } catch (error) {
+      notice = `Saved drafts could not be read on this device. ${String(error).replace(/^Error: /, '')}`;
+    }
+    if (session !== workspaceSession || scope !== workspaceStorageScope()) return;
+    for (const [key, draft] of saved) if (!drafts.has(key)) drafts.set(key, restoredDraft(draft));
+    draftsReady = true;
+    // The open composer shows its saved draft unless something was typed meanwhile.
+    if (!hasDraft(composerContent())) applyComposer(drafts.get(composerDraftKey));
+    if (changedDrafts.size) void saveDraftsNow();
+  }
+  function saveDraftsNow(): Promise<void> {
+    clearTimeout(draftTimer);
+    draftTimer = undefined;
+    if (!draftsReady || !changedDrafts.size) return draftSaves;
+    const changes = new Map<string, DraftChange>();
+    for (const [key, at] of changedDrafts) {
+      const draft = savedDraft(key, drafts.get(key));
+      changes.set(key, draft ? { at: draft.updatedAt, draft } : { at });
+    }
+    changedDrafts.clear();
+    const session = workspaceSession;
+    const scope = workspaceStorageScope();
+    draftSaves = draftSaves
+      .catch(() => {})
+      .then(async () => {
+        if (session !== workspaceSession) return;
+        let saved: Map<string, SavedDraft>;
+        try {
+          saved = readSavedDrafts(await loadDrafts(scope));
+        } catch {
+          // Without a readable saved copy, this window's drafts are the best copy to keep.
+          saved = new Map(
+            [...drafts].flatMap(([key, draft]) => {
+              const value = savedDraft(key, draft);
+              return value ? [[key, value] as const] : [];
+            }),
+          );
+        }
+        await saveDrafts(mergeSavedDrafts(saved, changes), scope);
+      })
+      .then(
+        () => {
+          draftSaveFailed = false;
+        },
+        (error) => {
+          if (session !== workspaceSession) return;
+          for (const [key, change] of changes)
+            if (!changedDrafts.has(key)) changedDrafts.set(key, change.at);
+          if (!draftSaveFailed)
+            notice = `Unsent drafts could not be saved on this device. ${String(error).replace(/^Error: /, '')}`;
+          draftSaveFailed = true;
+        },
+      );
+    return draftSaves;
   }
   async function attachImages(files: File[]) {
     if (!files.length || imagesLoading) return;
@@ -1970,7 +2157,10 @@
     } catch (error) {
       if (generation === attachmentGeneration) attachmentError = (error as Error).message;
     } finally {
-      if (generation === attachmentGeneration) imagesLoading = false;
+      if (generation === attachmentGeneration) {
+        imagesLoading = false;
+        followNotification();
+      }
     }
   }
   function hasDraggedFiles(event: DragEvent) {
@@ -2130,6 +2320,7 @@
     nearBottom = true;
     const now = new Date().toISOString();
     const isNewConversation = !active;
+    const sentDraft = composerDraftKey;
     if (!active) {
       const c: Conversation = {
         id: crypto.randomUUID(),
@@ -2185,8 +2376,11 @@
       if (!queuedMessage && !compactRequest) {
         prompt = '';
         clearImages();
+        forgetDraft(sentDraft);
       }
     }
+    // A new conversation's composer continues as that conversation's draft.
+    if (isNewConversation) composerDraftKey = draftKey.chat(conversation.id);
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
     const responseSettings = structuredClone($state.snapshot(conversation.settings));
@@ -2748,6 +2942,7 @@
       title={viewTitle}
       onerror={(message) => (notice = message)}
       onmenu={() => toggleSidebar(true)}
+      beforeclose={saveDraftsNow}
     />
     {#if storageError}<div class="error-banner" role="alert">
         <CircleAlert size={17} />{storageError}
@@ -3205,16 +3400,19 @@
                   else if (name === 'connections') view = 'connections';
                   else if (name === 'settings') view = 'settings';
                   else if (name === 'new') {
-                    const remaining = prompt,
-                      images = attachedImages;
+                    const remaining = composerContent(),
+                      from = composerDraftKey;
                     newChat(
                       selectedSettings.provider,
                       selectedSettings.connectionId,
                       selectedLocation,
                       selectedComputerId,
                     );
-                    prompt = remaining;
-                    attachedImages = images;
+                    // The rest of the command moves into the new conversation's draft.
+                    if (composerDraftKey !== from) {
+                      forgetDraft(from);
+                      carryDraft(remaining);
+                    }
                   }
                 }}
               />

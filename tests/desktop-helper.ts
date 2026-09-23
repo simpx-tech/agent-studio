@@ -222,6 +222,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-workspace', JSON.stringify(args.workspace));
             return;
           }
+          if (command === 'load_drafts')
+            return JSON.parse(localStorage.getItem('test-drafts') ?? 'null');
+          if (command === 'save_drafts') {
+            localStorage.setItem('test-drafts', JSON.stringify(args.drafts));
+            return;
+          }
           if (command === 'list_models') {
             const model = (
               id: string,

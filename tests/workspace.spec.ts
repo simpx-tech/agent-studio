@@ -1672,7 +1672,7 @@ test('opening the app archives saved chats and sending from History restores the
   await expect(historyTab).toHaveText('History3');
 });
 
-test('computer and Standalone plus buttons start fresh scoped drafts from collapsed history groups', async ({
+test('computer and Standalone plus buttons open scoped drafts from collapsed history groups', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -1714,7 +1714,7 @@ test('computer and Standalone plus buttons start fresh scoped drafts from collap
   await expect(page.locator('.page-title')).toHaveText('New conversation');
   await expect(page.getByTestId('message')).toHaveCount(0);
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
-  await page.getByLabel('Message', { exact: true }).fill('Discard this draft for the next action');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this Standalone draft');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   await historyTab.click();
   await history.locator('.computer-group-toggle').click();
@@ -1725,7 +1725,10 @@ test('computer and Standalone plus buttons start fresh scoped drafts from collap
   await expect(picker('Folder')).toHaveText('Standalone');
   await expect(picker('Agent')).toBeEnabled();
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
-  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+  // Both actions open the same Standalone location, so its unsent draft is still there.
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Keep this Standalone draft',
+  );
   await expect(page.getByTestId('message')).toHaveCount(0);
   await page.getByRole('button', { name: 'Model context', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Model context' })).toBeVisible();

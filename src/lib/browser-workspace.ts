@@ -20,7 +20,7 @@ export const browserScopeKey = (scope: BrowserWorkspaceScope) =>
 
 export function clearBrowserWorkspace(storage: Storage, scope: BrowserWorkspaceScope) {
   const key = browserScopeKey(scope);
-  for (const suffix of ['', ':sync', ':backup']) storage.removeItem(`${key}${suffix}`);
+  for (const suffix of ['', ':sync', ':backup', ':drafts']) storage.removeItem(`${key}${suffix}`);
 }
 
 export function discardOtherBrowserWorkspaces(storage: Storage, scope: BrowserWorkspaceScope) {

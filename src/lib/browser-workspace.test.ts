@@ -51,18 +51,20 @@ it('migrates legacy browser data only for the authenticated owner on the same re
   expect(storage.getItem('agent-studio.browser-sync')).toBeNull();
 });
 
-it('clears previous private caches and backups without clearing browser installation identity', () => {
+it('clears previous private caches, backups and drafts without clearing browser installation identity', () => {
   const storage = memoryStorage();
   const other = { ...scope, workspaceId: crypto.randomUUID() };
   for (const current of [scope, other]) {
-    for (const suffix of ['', ':sync', ':backup'])
+    for (const suffix of ['', ':sync', ':backup', ':drafts'])
       storage.setItem(`${browserScopeKey(current)}${suffix}`, '{}');
   }
   storage.setItem('agent-studio.installation', 'installation');
   discardOtherBrowserWorkspaces(storage, other);
   expect(storage.getItem(browserScopeKey(scope))).toBeNull();
   expect(storage.getItem(`${browserScopeKey(scope)}:backup`)).toBeNull();
+  expect(storage.getItem(`${browserScopeKey(scope)}:drafts`)).toBeNull();
   expect(storage.getItem(browserScopeKey(other))).toBe('{}');
+  expect(storage.getItem(`${browserScopeKey(other)}:drafts`)).toBe('{}');
   clearBrowserWorkspace(storage, other);
   expect(storage.length).toBe(1);
   expect(storage.getItem('agent-studio.installation')).toBe('installation');

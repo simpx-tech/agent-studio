@@ -308,10 +308,12 @@ test('mobile opts in, receives a real worker push without an app page, opens its
       }))
         client.postMessage({ type: 'studio-notification-open', hash: `#conversation=${id}` });
     }, other.id);
-    await expect(page.getByText(/Your draft is preserved; finish it/)).toBeVisible();
-    await expect(composer).toHaveValue('Keep this draft');
-    await composer.fill('');
+    // The notification opens its chat; the unsent draft stays with its own chat.
     await expect(page.getByText('Another notification chat', { exact: true }).last()).toBeVisible();
+    await expect(composer).toHaveValue('');
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Notification test chat', exact: true }).click();
+    await expect(composer).toHaveValue('Keep this draft');
     await page.getByRole('button', { name: 'Open conversations' }).click();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByText('Enabled on this device', { exact: true })).toBeVisible();
