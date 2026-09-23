@@ -37,7 +37,9 @@ Every push to `main`, including a merge, also builds these downloadable artifact
 | --- | --- | --- |
 | Windows | x64 | NSIS `.exe` and `.msi` installers |
 | Linux | x64 | `.deb` and `.AppImage` |
-| macOS | Universal, Intel and Apple Silicon | `.dmg` |
+| macOS | Universal, Intel and Apple Silicon | `.dmg` and the `.app.tar.gz` update archive |
+
+NSIS, MSI, AppImage, and macOS update packages include `.sig` updater signatures.
 
 Open **Actions → Desktop builds → the completed run → Artifacts** to download
 them. Artifact names include the complete commit SHA and are retained for 30
@@ -47,14 +49,25 @@ not cancel the others. **Run workflow** on `main` rebuilds it manually.
 Runs on `development` and pull requests verify only.
 
 The workflow uses Node 24, Rust stable, the npm/Cargo lockfiles, and pinned action
-revisions. It needs no deployment credentials. Windows packages are unsigned;
-macOS packages use ad-hoc signing and are not Apple notarized. Trusted publisher
+revisions. Builds need the `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets to sign update packages;
+the build job fails with an explanation without them. Windows packages are not
+Authenticode-signed; macOS packages use ad-hoc signing and are not Apple
+notarized. Trusted publisher
 signing requires a separate certificate setup. Building an installer does not
 verify provider sign-in or desktop runtime behavior on that platform.
 
-The workflow stores packages in GitHub Actions; it does not create GitHub
-Releases, update the VPS, or replace the public Windows download automatically.
-Follow [production operations](DEPLOYMENT.md) to publish a tested release while
+After verification and every platform build succeed on `main`, the **Publish
+release** job verifies each updater signature and its signed version, then
+creates the GitHub Release `v<version>` with the installers, signatures, and the
+updater's `latest.json`. Installed apps update from it. A version that already
+has a release is never replaced: the job only warns. Bump the version on
+`development` with `npm run release:version -- patch` (or `minor`, `major`, or
+`x.y.z`) before merging a release. See [automatic updates](UPDATES.md) for the
+signing key, local `--no-sign` builds, and the release format.
+
+Publishing does not update the VPS or replace its public Windows download. Follow
+[production operations](DEPLOYMENT.md) to publish a tested release while
 preserving private workspaces, pairing keys, and browser sessions.
 
 Before pushing changes, run the full local verification in `CLAUDE.md`. Native

@@ -10,7 +10,11 @@
     watchDesktopNotifications,
     watchNotificationView,
     publishNotificationView,
+    watchAppUpdates,
+    installAppUpdate,
+    type AppUpdateStatus,
   } from '$lib/transport';
+  import { restartBlocked } from '$lib/app-updates';
   import {
     ArrowUp,
     ArrowUpRight,
@@ -218,6 +222,8 @@
   let loaded = $state(false);
   let storageError = $state('');
   let notice = $state('');
+  let appUpdate = $state<AppUpdateStatus>();
+  let restartingForUpdate = $state(false);
   let statuses = $state<ProviderStatus[]>([]);
   let refreshing = $state(false);
   let pendingSignIn = $state<{ provider: ProviderId; connectionId?: string } | null>(null);
@@ -712,6 +718,11 @@
       if (disposed) stop();
       else stopNotifications = stop;
     });
+    let stopAppUpdates = () => {};
+    void watchAppUpdates((status) => (appUpdate = status)).then((stop) => {
+      if (disposed) stop();
+      else stopAppUpdates = stop;
+    });
     const notificationHash = () => {
       notificationTarget = notificationConversation(window.location.hash);
       followNotification();
@@ -906,6 +917,7 @@
       stopUsageRefresh();
       stopNotificationView();
       stopNotifications();
+      stopAppUpdates();
       stopBrowserSession();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
@@ -991,6 +1003,22 @@
   }
   function saveSoon() {
     void persist().catch(() => {});
+  }
+  async function restartToUpdate() {
+    // Finish saving this workspace before the installer closes the app.
+    await persist();
+    await installAppUpdate();
+  }
+  async function restartFromSidebar() {
+    if (restartingForUpdate) return;
+    restartingForUpdate = true;
+    try {
+      await restartToUpdate();
+    } catch (e) {
+      notice = String(e);
+    } finally {
+      restartingForUpdate = false;
+    }
   }
   async function updateInputTemplate(
     template: InputTemplate | undefined,
@@ -2619,6 +2647,18 @@
       {/each}
     </div>
     <div class="sidebar-tools">
+      {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
+          class="update-button"
+          disabled={restartingForUpdate || !!restartBlocked(appUpdate)}
+          title={restartBlocked(appUpdate) ??
+            `Version ${appUpdate.version} is ready. Restart Agent Studio to finish updating.`}
+          onclick={restartFromSidebar}
+          ><RefreshCw size={14} aria-hidden="true" /><span
+            >{restartingForUpdate || appUpdate.phase === 'installing'
+              ? 'Restarting…'
+              : 'Restart to update'}</span
+          ></button
+        >{/if}
       <button
         class="icon-button connections-button"
         class:active={view === 'connections'}
@@ -3237,7 +3277,7 @@
       {/key}
     {:else if view === 'settings'}
       {#key workspaceSession}
-        <SettingsPage {paired} {workspaceSession} {exportWorkspace} />
+        <SettingsPage {paired} {workspaceSession} {exportWorkspace} {appUpdate} {restartToUpdate} />
       {/key}
     {/if}
   </main>

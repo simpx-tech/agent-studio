@@ -1,6 +1,6 @@
 {
   "name": "agent-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local workspace for your AI agents, powered by your existing CLI subscriptions.",
   "type": "module",
   "scripts": {
@@ -16,7 +16,8 @@
     "verify": "npm run check && npm run test && npm run build && npm run test:e2e",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:version": "node scripts/release.ts version"
   },
   "license": "MIT",
   "overrides": {
@@ -39,7 +40,7 @@
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.65.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^24.0.0",
     "@types/web-push": "^3.6.4",
     "prettier": "^3.9.6",

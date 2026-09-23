@@ -1,17 +1,22 @@
 <script lang="ts">
   import { Download, ShieldCheck } from '@lucide/svelte';
+  import AppUpdates from './AppUpdates.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
   import PushNotifications from './PushNotifications.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
-  import { desktop } from '$lib/transport';
+  import { desktop, type AppUpdateStatus } from '$lib/transport';
   let {
     paired,
     workspaceSession = 0,
     exportWorkspace,
+    appUpdate,
+    restartToUpdate,
   }: {
     paired: boolean;
     workspaceSession?: number;
     exportWorkspace: () => Promise<void>;
+    appUpdate?: AppUpdateStatus;
+    restartToUpdate: () => Promise<void>;
   } = $props();
   let busy = $state(false);
   let error = $state('');
@@ -34,7 +39,11 @@
     <section class="page-heading">
       <div>
         <h1>Settings</h1>
-        <p>Notifications, workspace administration, and the data kept for this workspace.</p>
+        <p>
+          {desktop()
+            ? 'Notifications, app updates, workspace administration, and the data kept for this workspace.'
+            : 'Notifications, workspace administration, and the data kept for this workspace.'}
+        </p>
       </div>
     </section>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
@@ -43,6 +52,7 @@
           {paired}
           {workspaceSession}
         />{/if}
+      {#if desktop()}<AppUpdates status={appUpdate} restart={restartToUpdate} />{/if}
       <WorkspaceAdministration {paired} {workspaceSession} />
       <section class="workspace-data" aria-labelledby="workspace-data-heading">
         <h2 id="workspace-data-heading"><ShieldCheck size={18} />Workspace data</h2>

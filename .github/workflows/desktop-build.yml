@@ -82,7 +82,8 @@ jobs:
             runner: macos-latest
             target: universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            bundles: dmg
+            # The app bundle produces the signed .app.tar.gz the updater installs.
+            bundles: app,dmg
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -104,12 +105,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libfuse2 xdg-utils
       - run: npm ci
+      - name: Require the update signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secrets. See docs/UPDATES.md."
+            exit 1
+          fi
       - name: Build installers
         env:
           # Build without mounting AppImages on hosted Linux runners.
           APPIMAGE_EXTRACT_AND_RUN: '1'
           # Ad-hoc signing supports Apple Silicon without a developer certificate.
           APPLE_SIGNING_IDENTITY: '-'
+          # Signs updater packages; installed apps accept only this key's signatures.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
       - name: Upload installers
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -117,10 +130,74 @@ jobs:
           name: agent-studio-${{ matrix.target }}-${{ github.sha }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  release:
+    name: Publish release
+    # Publish only after verification and every platform build succeed.
+    needs: [verify, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Release notes list commits since the previous release tag.
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Check the release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node scripts/release.ts version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Never replace a published release; installed apps may already have it.
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "::warning::v$version is already released. Run npm run release:version -- patch before merging to publish an update."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download installers
+        if: steps.version.outputs.publish == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: agent-studio-*-${{ github.sha }}
+          path: packages
+      - name: Verify signatures and stage assets
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          {
+            if [ -n "$previous" ]; then
+              echo "Changes since $previous:"
+              echo
+              git log --no-merges --format='- %s' "$previous..HEAD" | head -n 40
+            else
+              echo "The first Agent Studio release with automatic updates."
+            fi
+          } > notes.md
+          node scripts/release.ts assets --input packages --output release --repo "$GITHUB_REPOSITORY" --notes notes.md
+      - name: Publish release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        # With assets, gh publishes the release only after every upload finishes.
+        run: gh release create "v$VERSION" release/* --target "$GITHUB_SHA" --title "Agent Studio $VERSION" --notes-file notes.md --latest

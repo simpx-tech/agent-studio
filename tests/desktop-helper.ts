@@ -42,6 +42,17 @@ export async function mockDesktop(page: Page, mode = 'success') {
             }
             return;
           }
+          if (['app_update_status', 'check_app_update', 'install_app_update'].includes(command)) {
+            const status = JSON.parse(
+              localStorage.getItem('test-app-update') ??
+                '{"currentVersion":"0.2.0","phase":"current","checkedAt":1790000000000,"repliesRunning":false}',
+            );
+            if (command !== 'install_app_update') return status;
+            const error = localStorage.getItem('test-app-update-error');
+            if (error) throw error;
+            localStorage.setItem('test-app-update-installed', 'true');
+            return;
+          }
           if (command === 'save_artifact') {
             (window as any).savedArtifact = args;
             return 'C:/Downloads/' + args.filename;

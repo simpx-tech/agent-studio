@@ -3,6 +3,7 @@ import { mentionRequestSchema, mentionResultSchema, type MentionResult } from '.
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 
+import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
@@ -104,6 +105,47 @@ export async function watchDesktopNotifications(
 ): Promise<() => void> {
   if (!desktop()) return () => {};
   return listen<string>('studio-notification-open', ({ payload }) => open(payload));
+}
+export type { AppUpdateStatus } from './app-updates';
+export const checkForAppUpdate = async (): Promise<AppUpdateStatus> =>
+  appUpdateStatusSchema.parse(await invoke('check_app_update'));
+/** Replaces this app with the downloaded update; the installer closes and reopens it. */
+export const installAppUpdate = (): Promise<void> => invoke('install_app_update');
+export async function watchAppUpdates(
+  onChange: (status: AppUpdateStatus) => void,
+): Promise<() => void> {
+  if (!desktop()) return () => {};
+  let latest: AppUpdateStatus | undefined;
+  let revision = 0;
+  const apply = (value: unknown) => {
+    const status = appUpdateStatusSchema.safeParse(value);
+    if (!status.success) return;
+    latest = status.data;
+    onChange(status.data);
+  };
+  const refresh = async () => {
+    const current = ++revision;
+    try {
+      const value = await invoke<unknown>('app_update_status');
+      // A native event that arrived meanwhile is newer than this reading.
+      if (current === revision) apply(value);
+    } catch {
+      // Update status is informational; chat and saving continue without it.
+    }
+  };
+  const unlisten = await listen<unknown>('studio-app-update', ({ payload }) => {
+    ++revision;
+    apply(payload);
+  });
+  await refresh();
+  // Running replies change without an update event; keep Restart to update accurate.
+  const timer = setInterval(() => {
+    if (latest?.phase === 'ready') void refresh();
+  }, 5000);
+  return () => {
+    clearInterval(timer);
+    unlisten();
+  };
 }
 const desktopNotices = createDesktopNotificationTracker();
 let notificationConversationId: () => string | undefined = () => undefined;

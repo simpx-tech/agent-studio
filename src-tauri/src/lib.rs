@@ -22,6 +22,7 @@ mod standalone;
 mod startup;
 mod structured_output;
 mod titles;
+mod updates;
 mod usage;
 mod wsl;
 use std::io::Write;
@@ -562,9 +563,58 @@ fn export_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Resu
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Cancellation tokens of work this app owns: replies, titles, usage reads, and plugin evaluations.
+fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
+    let mut tokens = app
+        .state::<runner::Runs>()
+        .0
+        .lock()
+        .map(|active| active.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    tokens.extend(
+        app.state::<titles::Titles>()
+            .0
+            .lock()
+            .map(|active| active.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    tokens.extend(
+        app.state::<usage::UsageState>()
+            .active
+            .lock()
+            .map(|a| a.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    tokens.extend(plugins::active_tokens());
+    tokens
+}
+
+fn has_owned_work(app: &tauri::AppHandle) -> bool {
+    !owned_tokens(app).is_empty()
+        || app.state::<pool::Pool>().len() > 0
+        || app.state::<mcp::Management>().has_work()
+}
+
+/// Cancel all owned work, release parked CLIs, and wait until owned processes have stopped.
+async fn release_owned_work(app: &tauri::AppHandle) {
+    for token in owned_tokens(app) {
+        token.cancel();
+    }
+    app.state::<mcp::Management>().sweep(app, true).await;
+    app.state::<pool::Pool>().shutdown().await;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if owned_tokens(app).is_empty() {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
+    let version = context.package_info().version.to_string();
     let check_only = std::env::args_os()
         .skip(1)
         .any(|arg| arg == "--check-startup");
@@ -584,6 +634,8 @@ pub fn run() {
             artifacts::response(request.uri().path())
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Updates::new(version))
         .manage(runner::Runs::default())
         .manage(pool::Pool::default())
         .manage(mcp::Management::default())
@@ -607,6 +659,7 @@ pub fn run() {
                         .await;
                 }
             });
+            updates::start(app.handle());
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -625,72 +678,33 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let mut tokens = window
-                    .state::<runner::Runs>()
-                    .0
-                    .lock()
-                    .map(|active| active.values().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                tokens.extend(
-                    window
-                        .state::<titles::Titles>()
-                        .0
-                        .lock()
-                        .map(|active| active.values().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default(),
-                );
-                tokens.extend(
-                    window
-                        .state::<usage::UsageState>()
-                        .active
-                        .lock()
-                        .map(|a| a.values().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default(),
-                );
-                let parked = window.state::<pool::Pool>().len() > 0;
-                tokens.extend(plugins::active_tokens());
-                if !tokens.is_empty() || parked || window.state::<mcp::Management>().has_work() {
-                    // Cancel all owned work and release parked CLIs before closing the window.
-                    for token in tokens {
-                        token.cancel();
-                    }
+                let app = window.app_handle().clone();
+                // Restart to update is already stopping work; its installer ends the app.
+                if updates::installing(&app) {
                     api.prevent_close();
-                    let window = window.clone();
-                    tauri::async_runtime::spawn(async move {
-                        window
-                            .state::<mcp::Management>()
-                            .sweep(window.app_handle(), true)
-                            .await;
-                        window.state::<pool::Pool>().shutdown().await;
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                            if window
-                                .state::<runner::Runs>()
-                                .0
-                                .lock()
-                                .map(|r| r.is_empty())
-                                .unwrap_or(true)
-                                && window
-                                    .state::<titles::Titles>()
-                                    .0
-                                    .lock()
-                                    .map(|r| r.is_empty())
-                                    .unwrap_or(true)
-                                && window
-                                    .state::<usage::UsageState>()
-                                    .active
-                                    .lock()
-                                    .map(|r| r.is_empty())
-                                    .unwrap_or(true)
-                                && plugins::active_tokens().is_empty()
-                            {
-                                break;
-                            }
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let _ = window.close();
-                    });
+                    return;
                 }
+                // An idle app installs a downloaded update as it closes, without relaunching.
+                let update = updates::take_for_close(&app);
+                if update.is_none() && !has_owned_work(&app) {
+                    return;
+                }
+                // Cancel all owned work and release parked CLIs before closing the window.
+                for token in owned_tokens(&app) {
+                    token.cancel();
+                }
+                api.prevent_close();
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    release_owned_work(&app).await;
+                    if let Some(update) = update {
+                        if updates::install_on_close(&app, update) {
+                            app.exit(0);
+                            return;
+                        }
+                    }
+                    let _ = window.close();
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -698,6 +712,9 @@ pub fn run() {
             notifications::desktop_notification_settings,
             notifications::set_desktop_notifications,
             notifications::desktop_notification,
+            updates::app_update_status,
+            updates::check_app_update,
+            updates::install_app_update,
             artifacts::save_artifact,
             get_installation,
             discover_wsl,
