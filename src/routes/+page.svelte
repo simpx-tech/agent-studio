@@ -185,6 +185,7 @@
   } from '$lib/replies';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
+  import BrandMark from '$lib/components/BrandMark.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
@@ -2532,7 +2533,7 @@
       aria-label="Back to conversation"
       title="Back to conversation"
     >
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <BrandMark />
       <span>agent<span class="brand-light">studio</span></span>
       {#if !desktop()}<span class="viewer-label">Viewer</span>{/if}
     </button>

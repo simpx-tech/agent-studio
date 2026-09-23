@@ -459,22 +459,6 @@ pre {
   cursor: default;
   user-select: none;
 }
-.brand-mark {
-  width: 18px;
-  height: 18px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2.5px;
-  transform: rotate(-5deg);
-}
-.brand-mark i {
-  border: 1.5px solid var(--accent-strong);
-  border-radius: 2.5px;
-}
-.brand-mark i:nth-child(2),
-.brand-mark i:nth-child(3) {
-  background: var(--accent-strong);
-}
 .sidebar-section {
   display: flex;
   justify-content: space-between;

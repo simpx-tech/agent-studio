@@ -67,7 +67,7 @@ try {
   const initiallyMaximized = await page.invoke('plugin:window|is_maximized');
   for (const [selector, maximized] of [
     ['.brand-light', !initiallyMaximized],
-    ['.brand-mark i', initiallyMaximized],
+    ['.brand-mark circle', initiallyMaximized],
   ]) {
     await page.evaluate(
       (selector) =>

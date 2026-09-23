@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ArrowRight, Eye, EyeOff, KeyRound, LoaderCircle, WifiOff } from '@lucide/svelte';
+  import BrandMark from './BrandMark.svelte';
   import BrowserStatus from './BrowserStatus.svelte';
 
   let {
@@ -42,7 +43,7 @@
 <main class="workspace-login" aria-labelledby="workspace-login-title">
   <div class="login-content">
     <div class="login-brand">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <BrandMark size={20} />
       <span>Agent <span class="brand-light">Studio</span></span>
       <span class="viewer-label">Viewer</span>
     </div>

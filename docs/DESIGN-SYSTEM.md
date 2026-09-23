@@ -45,6 +45,15 @@ lives in local storage (`agent-studio.theme`) and sets `data-theme` on the root 
 selects the light token values. Visualization frames receive the same theme through
 `visualizationDocument()` so embedded visuals match the surrounding prose.
 
+## Brand
+
+The Agent A mark is an A-frame in the text color with a lime head (the agent) and crossbar, drawn
+on a 64-unit grid in `BrandMark.svelte`. App icons place it on a graphite tile with a soft lime
+glow. Icons at 16–32px use a heavier variant, and 16px drops the crossbar so the figure stays
+legible. `node scripts/brand-icons.mjs` regenerates `static/agent-studio.svg`,
+`static/favicon.svg`, the web and PWA PNGs, and the Tauri icon set from that geometry; change the
+mark in the script and `BrandMark.svelte` together.
+
 ## Primitives
 
 - **Buttons:** `.primary` (accent fill), `.secondary` (raised neutral), `.danger` (solid red for
