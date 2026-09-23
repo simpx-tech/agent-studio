@@ -572,6 +572,11 @@ test('sidebar divider resizes with pointer and keyboard, remembers width, and ke
   const divider = page.getByRole('separator', { name: 'Resize sidebar' });
   const width = () =>
     sidebar.evaluate((element) => Math.round(element.getBoundingClientRect().width));
+  // The whole window shows the resize cursor only while a drag is in progress.
+  const cursor = () =>
+    page
+      .getByLabel('Message', { exact: true })
+      .evaluate((element) => getComputedStyle(element).cursor);
   const dragTo = async (targetWidth: number) => {
     const bounds = (await divider.boundingBox())!;
     const before = await width();
@@ -584,8 +589,10 @@ test('sidebar divider resizes with pointer and keyboard, remembers width, and ke
   await expect.poll(width).toBe(236);
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft while resizing');
   await dragTo(350);
+  expect(await cursor()).toBe('col-resize');
   await page.mouse.up();
   await expect.poll(width).toBe(350);
+  await expect.poll(cursor).not.toBe('col-resize');
   await expect(divider).toHaveAttribute('aria-valuenow', '350');
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
     'Keep this draft while resizing',
@@ -593,7 +600,9 @@ test('sidebar divider resizes with pointer and keyboard, remembers width, and ke
   await divider.press('ArrowLeft');
   await expect.poll(width).toBe(340);
   await dragTo(400);
+  expect(await cursor()).toBe('col-resize');
   await page.keyboard.press('Escape');
+  await expect.poll(cursor).not.toBe('col-resize');
   await page.mouse.up();
   await expect.poll(width).toBe(340);
   await page.reload();

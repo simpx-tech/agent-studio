@@ -17,6 +17,10 @@ named colors, so every surface follows the selected theme.
   32px default controls (44px touch targets on phones).
 - **Motion is feedback.** Hover and state transitions use `--duration-fast`; overlays fade in
   with opacity only, so measured layout never moves during an animation.
+- **Cheap selectors.** Every hover change and transition frame restyles elements, so never pair
+  `:has()` with a universal selector such as `.app-shell:has(…) *`: Chromium would search the
+  whole app again on each recalculation. Mark app-wide states, such as the resize cursor while a
+  divider is dragged, with a class on the root element.
 
 ## Tokens
 

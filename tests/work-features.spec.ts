@@ -178,7 +178,19 @@ test('artifacts dock beside chat and switch to a modal without resetting the pre
   await page.mouse.move(handle.x + 4, handle.y + 160);
   await page.mouse.down();
   await page.mouse.move(handle.x - 116, handle.y + 160, { steps: 6 });
+  // While dragging, the preview cannot take the pointer and the window keeps the resize cursor.
+  const preview = page.locator('iframe[title="Panel counter preview"]');
+  const pointerEvents = () =>
+    preview.evaluate((element) => getComputedStyle(element).pointerEvents);
+  const cursor = () =>
+    page
+      .getByLabel('Message', { exact: true })
+      .evaluate((element) => getComputedStyle(element).cursor);
+  expect(await pointerEvents()).toBe('none');
+  expect(await cursor()).toBe('col-resize');
   await page.mouse.up();
+  await expect.poll(pointerEvents).toBe('auto');
+  await expect.poll(cursor).not.toBe('col-resize');
   await expect(resizer).toHaveAttribute('aria-valuenow', String(initialWidth + 120));
   await resizer.press('ArrowRight');
   const resizedWidth = initialWidth + 110;

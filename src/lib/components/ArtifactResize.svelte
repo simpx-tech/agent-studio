@@ -23,6 +23,13 @@
   const width = $derived(Math.max(minWidth, Math.min(maxWidth, preferredWidth ?? defaultWidth)));
 
   $effect(() => onresize(width));
+  // A root class keeps the drag cursor rule cheap for every other style recalculation.
+  $effect(() => {
+    if (!drag) return;
+    const root = document.documentElement;
+    root.classList.add('artifact-resizing');
+    return () => root.classList.remove('artifact-resizing');
+  });
 
   onMount(() => {
     try {
@@ -138,12 +145,12 @@
   .artifact-resizer.dragging::after {
     background: var(--accent-border);
   }
-  :global(.app-shell:has(.artifact-resizer.dragging)),
-  :global(.app-shell:has(.artifact-resizer.dragging) *) {
+  :global(:root.artifact-resizing),
+  :global(:root.artifact-resizing *) {
     cursor: col-resize !important;
     user-select: none !important;
   }
-  :global(.app-shell:has(.artifact-resizer.dragging) iframe) {
+  :global(:root.artifact-resizing iframe) {
     pointer-events: none;
   }
 </style>

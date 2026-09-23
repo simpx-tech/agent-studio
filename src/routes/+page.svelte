@@ -417,6 +417,16 @@
     void activeId;
     untrack(() => virtualSpace?.clear());
   });
+  $effect(() => {
+    const scroll = chatScroll;
+    if (!scroll) return;
+    // Passive, so a busy main thread never delays the start of a scroll.
+    const wheel = (event: WheelEvent) => {
+      if (event.deltaY < 0 && !event.ctrlKey) nearBottom = false;
+    };
+    scroll.addEventListener('wheel', wheel, { passive: true });
+    return () => scroll.removeEventListener('wheel', wheel);
+  });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
   const selectedSettings = $derived(active?.settings ?? draftSettings);
@@ -3331,9 +3341,6 @@
           <div
             class="chat-scroll"
             bind:this={chatScroll}
-            onwheel={(event) => {
-              if (event.deltaY < 0 && !event.ctrlKey) nearBottom = false;
-            }}
             onscroll={readingPosition}
           >
             <div

@@ -20,6 +20,13 @@
   $effect(() => {
     onresize(width);
   });
+  // A root class keeps the drag cursor rule cheap for every other style recalculation.
+  $effect(() => {
+    if (!drag) return;
+    const root = document.documentElement;
+    root.classList.add('sidebar-resizing');
+    return () => root.classList.remove('sidebar-resizing');
+  });
 
   onMount(() => {
     try {
@@ -132,8 +139,8 @@
     transition: background-color var(--duration) ease;
     background: var(--accent-border);
   }
-  :global(.app-shell:has(.sidebar-resizer.dragging)),
-  :global(.app-shell:has(.sidebar-resizer.dragging) *) {
+  :global(:root.sidebar-resizing),
+  :global(:root.sidebar-resizing *) {
     cursor: col-resize !important;
     user-select: none !important;
   }
