@@ -657,6 +657,13 @@ impl ToolDecoder {
                     fact(&mut tool, "File filter", glob);
                 }
             }
+            "mcp__agent_studio__await_background_tasks" => {
+                tool.name = "Wait for background tasks".into();
+                if let Some(ids) = input["task_ids"].as_array() {
+                    let ids: Vec<_> = ids.iter().filter_map(Value::as_str).take(8).collect();
+                    fact(&mut tool, "Tasks", ids.join(", "));
+                }
+            }
             "ToolSearch" => {
                 tool.name = "Find tools".into();
                 tool.operation = Some("toolSearch".into());
@@ -1197,6 +1204,9 @@ mod tests {
         assert!(!serde_json::to_string(&done)
             .unwrap()
             .contains("DO_NOT_OPEN"));
+        let wait = d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"wait1","name":"mcp__agent_studio__await_background_tasks","input":{"task_ids":["task2","task3"]}}]}}));
+        assert_eq!(wait[0].name, "Wait for background tasks");
+        assert_eq!(wait[0].facts[0].value, "task2, task3");
     }
     #[test]
     fn claude_agent_result_uses_content_without_harness_usage_or_continuation_instructions() {

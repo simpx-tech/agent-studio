@@ -176,7 +176,8 @@ impl Visualizer {
             }
             "notifications/initialized" | "ping" => response["result"] = json!({}),
             "tools/list" => {
-                response["result"] = json!({"tools":[tool(), super::questions::tool()]})
+                response["result"] =
+                    json!({"tools":[tool(), super::questions::tool(), super::background::tool()]})
             }
             "tools/call" if m["params"]["name"] == "visualize" => {
                 let args = &m["params"]["arguments"];
@@ -216,12 +217,14 @@ fn placement(id: &str) -> String {
 pub struct ClaudeInputLifetime {
     tasks: HashSet<String>,
     context_pending: bool,
+    pub awaited: super::background::AwaitedTasks,
 }
 impl Default for ClaudeInputLifetime {
     fn default() -> Self {
         Self {
             tasks: HashSet::new(),
             context_pending: true,
+            awaited: Default::default(),
         }
     }
 }
@@ -252,6 +255,7 @@ impl ClaudeInputLifetime {
         if value["type"] == "assistant" && value["parent_tool_use_id"].is_null() {
             self.context_pending = false;
         }
+        self.awaited.observe(value);
         if value["type"] == "system" {
             if let Some(id) = value["task_id"].as_str() {
                 match value["subtype"].as_str().unwrap_or_default() {
@@ -278,7 +282,19 @@ impl ClaudeInputLifetime {
                 }
             }
         }
-        value["type"] == "result" && value["parent_tool_use_id"].is_null() && self.tasks.is_empty()
+        value["type"] == "result"
+            && value["parent_tool_use_id"].is_null()
+            && self.tasks.is_empty()
+            && !self.awaited.holds_reply()
+    }
+    /// Delegated and declared work that Stop ends with the reply.
+    pub fn stoppable(&self) -> Vec<String> {
+        let mut tasks: Vec<_> = self.tasks.iter().cloned().collect();
+        tasks.extend(self.awaited.running().map(String::from));
+        tasks
+    }
+    pub fn expects_follow_up(&self) -> bool {
+        self.tasks.is_empty() && self.awaited.expects_follow_up()
     }
 }
 
@@ -389,5 +405,29 @@ mod tests {
         life.ended(&json!({"type":"system","subtype":"task_updated","task_id":"workflow","patch":{"status":"completed"}}));
         life.ended(&json!({"type":"system","subtype":"task_started","task_type":"local_bash","task_id":"dev-server"}));
         assert!(life.ended(&json!({"type":"result"})));
+    }
+    #[test]
+    fn claude_waits_for_declared_shell_tasks_until_the_model_receives_them() {
+        let mut life = ClaudeInputLifetime::with_context(false);
+        for (task, call) in [("server", "server-call"), ("tests", "tests-call")] {
+            life.ended(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":call,"name":"Bash","input":{}}]}}));
+            life.ended(&json!({"type":"system","subtype":"task_started","task_type":"local_bash","task_id":task,"tool_use_id":call}));
+            life.ended(&json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":call,"content":"running"}]}}));
+        }
+        let input = json!({"task_ids":["tests"]});
+        life.ended(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"await","name":"mcp__agent_studio__await_background_tasks","input":input}]}}));
+        let response = life.awaited.claude_response(&json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"await_background_tasks","arguments":input}}}})).unwrap();
+        assert_eq!(
+            response["response"]["response"]["mcp_response"]["result"]["isError"],
+            false
+        );
+        assert!(!life.ended(&json!({"type":"result","parent_tool_use_id":null})));
+        assert_eq!(life.stoppable(), ["tests"]);
+        assert!(!life.expects_follow_up());
+        life.ended(&json!({"type":"system","subtype":"task_notification","task_id":"tests","status":"completed"}));
+        assert!(life.expects_follow_up());
+        life.ended(&json!({"type":"system","subtype":"init","parent_tool_use_id":null}));
+        assert!(!life.expects_follow_up() && life.stoppable().is_empty());
+        assert!(life.ended(&json!({"type":"result","parent_tool_use_id":null})));
     }
 }

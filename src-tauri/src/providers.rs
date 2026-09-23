@@ -7,6 +7,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+pub mod background;
 pub mod claude_settings;
 pub mod codex_chat;
 pub mod defaults;

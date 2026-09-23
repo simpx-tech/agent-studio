@@ -29,6 +29,12 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         [Console]::WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"' + $value.request_id + '"}}')
         continue
     }
+    if ($value.type -eq 'control_request' -and $value.request.subtype -eq 'stop_task') {
+        [Console]::WriteLine('{"type":"system","subtype":"task_updated","task_id":"' + $value.request.task_id + '","patch":{"status":"killed"}}')
+        [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"' + $value.request.task_id + '","status":"stopped"}')
+        [Console]::WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"' + $value.request_id + '","response":{}}}')
+        continue
+    }
     if ($value.type -eq 'control_request' -and $value.request.subtype -eq 'interrupt') {
         [Console]::WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"' + $value.request_id + '"}}')
         if ($open -and $env:STUDIO_TEST_SILENT_INTERRUPT -ne 'true') {
@@ -57,6 +63,40 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             continue
         }
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+        $mode = $value.message.content[0].text
+        if ($mode -like 'Await*') {
+            # A dev server and a test run go to the background; only the tests are declared.
+            foreach ($task in @('server', 'tests')) {
+                [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"' + $task + '","content":[{"type":"tool_use","id":"' + $task + '-call","name":"Bash","input":{"run_in_background":true}}]}}')
+                [Console]::WriteLine('{"type":"system","subtype":"task_started","task_id":"' + $task + '","tool_use_id":"' + $task + '-call","task_type":"local_bash"}')
+                [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"' + $task + '-call","content":"Running in background"}]},"tool_use_result":{"backgroundTaskId":"' + $task + '"}}')
+            }
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"await","content":[{"type":"tool_use","id":"await-call","name":"mcp__agent_studio__await_background_tasks","input":{"task_ids":["tests"]}}]}}')
+            [Console]::WriteLine('{"type":"control_request","request_id":"await-request","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"await_background_tasks","arguments":{"task_ids":["tests"]}}}}}')
+            Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"await-call","content":"Registered"}]}}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"waiting","content":[{"type":"text","text":"Waiting for tests"}]}}')
+            if ($mode -in @('Await race', 'Await replay', 'Await lost')) {
+                # The tests finish after the model's last request of this turn.
+                [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"tests","status":"completed"}')
+            }
+            if ($mode -eq 'Await replay') {
+                [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":"<task-notification>\n<task-id>tests</task-id>\n<status>completed</status>\n</task-notification>"}}')
+            }
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Waiting for tests","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":0.001}')
+            if ($mode -eq 'Await') {
+                Start-Sleep -Milliseconds 500
+                [Console]::WriteLine('{"type":"system","subtype":"task_updated","task_id":"tests","patch":{"status":"completed"}}')
+                [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"tests","status":"completed"}')
+            }
+            if ($mode -in @('Await', 'Await race')) {
+                # The CLI re-invokes the model with the finished task.
+                [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+                [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"report","content":[{"type":"text","text":"Tests passed"}]}}')
+                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Tests passed","usage":{"input_tokens":20,"output_tokens":3},"total_cost_usd":0.002,"origin":{"kind":"task-notification"}}')
+            }
+            continue
+        }
         if (Test-Path -LiteralPath (Join-Path (Split-Path $PSCommandPath) 'tool-progress')) {
             [Console]::WriteLine('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cmd","name":"Bash","input":{}}]}}')
             [Console]::WriteLine('{"type":"tool_progress","tool_use_id":"cmd","parent_tool_use_id":null,"tool_name":"Bash","elapsed_time_seconds":12.5,"message":"PRIVATE_OUTPUT"}')
@@ -175,6 +215,111 @@ async fn steering_requires_the_human_echo_and_kills_unconfirmed_input_at_complet
         assert_eq!(healthy, text == "Correction");
         assert_eq!(result.unwrap().0, "complete");
     }
+}
+
+#[tokio::test]
+async fn declared_background_tests_hold_the_reply_until_the_model_reports_them() {
+    for (mode, text) in [
+        ("Await", "Tests passed"),
+        ("Await race", "Tests passed"),
+        ("Await replay", "Waiting for tests"),
+        ("Await lost", "Waiting for tests"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let request = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":mode}]),
+        );
+        let session = request.native_session.as_ref().unwrap().id().to_string();
+        let mut process = fixture(root.path(), &session, false, false);
+        let started = std::time::Instant::now();
+        let (result, events) = turn(
+            &mut process,
+            &request,
+            CancellationToken::new(),
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(result.unwrap(), ("complete".into(), text.into()), "{mode}");
+        assert!(process.alive() && process.healthy, "{mode}");
+        if mode == "Await lost" {
+            // The CLI started no turn for the finished tests, so the reply ends after the grace.
+            assert!(started.elapsed() >= FOLLOW_UP_GRACE);
+        }
+        let waiting = events.iter().any(|e| {
+            matches!(e, RunEvent::Activity { text } if text == "Waiting for background work to finish")
+        });
+        assert_eq!(waiting, mode != "Await replay", "{mode}");
+        let accepted = settings_input(root.path())
+            .into_iter()
+            .find(|v| v["response"]["request_id"] == "await-request")
+            .unwrap();
+        let result = &accepted["response"]["response"]["mcp_response"]["result"];
+        assert_eq!(result["isError"], false, "{mode}");
+        if text == "Tests passed" {
+            // The reply's token counts cover both of its CLI turns.
+            assert!(events.iter().any(|e| matches!(e, RunEvent::Usage { usage } if usage.input == Some(30) && usage.output == Some(5))));
+        }
+        process.kill().await;
+    }
+}
+
+#[tokio::test]
+async fn stop_while_waiting_stops_only_declared_work_and_keeps_the_process() {
+    let root = tempfile::tempdir().unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Await stop"}]),
+    );
+    let session = request.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let channel = EventSink::new(move |event| {
+        // The CLI is idle between turns: an interrupt alone produces no result.
+        if matches!(&event, RunEvent::Activity { text } if text == "Waiting for background work to finish")
+        {
+            stop.cancel();
+        }
+        Ok(())
+    });
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            cancel,
+            None,
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.unwrap(),
+        ("cancelled".into(), "Waiting for tests".into())
+    );
+    assert!(
+        process.alive() && process.healthy,
+        "acknowledged stops park the process without the kill fallback"
+    );
+    let stopped: Vec<_> = settings_input(root.path())
+        .into_iter()
+        .filter(|v| v["request"]["subtype"] == "stop_task")
+        .map(|v| v["request"]["task_id"].clone())
+        .collect();
+    assert_eq!(stopped, ["tests"], "the dev server keeps running");
+    process.kill().await;
 }
 
 /// The real CLI is launched with the binding's --session-id, so the fixture echoes it.

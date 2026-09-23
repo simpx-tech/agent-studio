@@ -3,7 +3,7 @@ use crate::{
     providers::{chat_command, RunRequest},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -444,6 +444,13 @@ pub(crate) async fn execute(
     }
     result
 }
+/// How long a Claude reply waits for the turn that reports finished background tasks the
+/// model declared. The CLI starts that turn right after its previous result.
+const FOLLOW_UP_GRACE: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(15)
+};
 /// One reply over a stream-json process: Claude chats (persistent), Claude background
 /// queries, and Antigravity (one prompt, then input closes).
 async fn stream_turn(
@@ -508,6 +515,12 @@ async fn stream_turn(
     let interrupt_deadline = tokio::time::sleep(crate::pool::INTERRUPT_GRACE);
     tokio::pin!(interrupt_deadline);
     let mut interrupting = false;
+    // An idle CLI answers Stop with acknowledgements only, never a result.
+    let mut stopping = HashSet::new();
+    let mut stopped_idle = false;
+    let follow_up_deadline = tokio::time::sleep(FOLLOW_UP_GRACE);
+    tokio::pin!(follow_up_deadline);
+    let mut awaiting_follow_up = false;
     let mut steering: HashMap<String, crate::providers::steering::Delivery> = HashMap::new();
     let output_limit = request.output_line_limit();
     let mut diagnostics = String::new();
@@ -522,6 +535,7 @@ async fn stream_turn(
             ),
             None => (None, None, None),
         };
+        let mut turn_ended = false;
         tokio::select! {
             biased;
             _ = tool_tick.tick() => {
@@ -535,9 +549,18 @@ async fn stream_turn(
                 if let Some(q) = &questions { q.steering.ready(false); }
                 if persistent && prompt_sent && stdin_open {
                     // Ask the CLI to end this turn in-band so it stays usable for the next reply.
-                    let interrupt = format!("{{\"type\":\"control_request\",\"request_id\":\"studio-interrupt-{}\",\"request\":{{\"subtype\":\"interrupt\"}}}}\n", process.turns + 1);
+                    let id = format!("studio-interrupt-{}", process.turns + 1);
+                    let interrupt = format!("{{\"type\":\"control_request\",\"request_id\":\"{id}\",\"request\":{{\"subtype\":\"interrupt\"}}}}\n");
                     if process.stdin.write_all(interrupt.as_bytes()).await.is_ok() {
                         interrupting = true;
+                        stopping.insert(id);
+                        // Background work this reply waits for would otherwise start an unobserved
+                        // turn in the parked process. Servers left for the user keep running.
+                        for (index, task) in input_lifetime.stoppable().into_iter().enumerate() {
+                            let id = format!("studio-stop-{}-{index}", process.turns + 1);
+                            let stop = serde_json::json!({"type":"control_request","request_id":id,"request":{"subtype":"stop_task","task_id":task}});
+                            if process.stdin.write_all(format!("{stop}\n").as_bytes()).await.is_ok() { stopping.insert(id); }
+                        }
                         interrupt_deadline.as_mut().reset(tokio::time::Instant::now() + crate::pool::INTERRUPT_GRACE);
                         continue;
                     }
@@ -550,6 +573,12 @@ async fn stream_turn(
                 process.healthy = false;
                 process.kill().await;
                 break Ok(("cancelled".to_string(), decoder.text));
+            }
+            _ = &mut follow_up_deadline, if awaiting_follow_up && !interrupting => {
+                // No turn came to report the finished tasks, so the model already has them.
+                awaiting_follow_up = false;
+                input_lifetime.awaited.release();
+                turn_ended = true;
             }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             _ = &mut settings_deadline, if claude_visualizer && initialized && !prompt_sent => { process.healthy = false; break Err("Claude did not acknowledge the next-reply settings within 30 seconds. No message was sent. Retry to resume with a fresh process.".into()); }
@@ -592,7 +621,6 @@ async fn stream_turn(
                 }
                 Some(Line::Out(line)) => {
                     if line.len() > output_limit { process.healthy = false; break Err("Provider output exceeded the message limit".into()); }
-                    let mut turn_ended = false;
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                             if initialized && !prompt_sent {
@@ -675,6 +703,10 @@ async fn stream_turn(
                                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
                                     continue;
                                 }
+                                if let Some(response) = input_lifetime.awaited.claude_response(&value) {
+                                    process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                    continue;
+                                }
                                 let response = visualizer.claude_response(&value);
                                 let _ = process.stdin.write_all(format!("{response}\n").as_bytes()).await;
                                 continue;
@@ -683,41 +715,25 @@ async fn stream_turn(
                             turn_ended = input_lifetime.ended(&value);
                             // A zero-turn acknowledgement of injected history is not a reply.
                             if context_result { continue; }
+                            let result = value["type"] == "result" && value["parent_tool_use_id"].is_null();
+                            if interrupting {
+                                // Stop ends the reply at the interrupted turn's result, even with
+                                // background work left. An idle CLI only acknowledges the requests.
+                                turn_ended |= result;
+                                if let Some(id) = value["response"]["request_id"].as_str().filter(|_| value["type"] == "control_response") {
+                                    if stopping.remove(id) && id.starts_with("studio-stop-") && value["response"]["subtype"] != "success" { process.healthy = false; }
+                                    if stopping.is_empty() && !input_lifetime.awaited.turn_active() { turn_ended = true; stopped_idle = true; }
+                                }
+                            } else if result && !turn_ended {
+                                if let Some(channel) = channel { let _ = channel.send(RunEvent::Activity { text: "Waiting for background work to finish".into() }); }
+                            }
+                            let expecting = !interrupting && input_lifetime.expects_follow_up();
+                            if expecting && !awaiting_follow_up { follow_up_deadline.as_mut().reset(tokio::time::Instant::now() + FOLLOW_UP_GRACE); }
+                            awaiting_follow_up = expecting;
                         }
                     }
                     for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
-                    if turn_ended {
-                        if let Some(q) = &questions { q.close(); }
-                        if let Some(q) = &questions { q.elicitation.close(); }
-                        if let Some(q) = &questions { q.steering.ready(false); }
-                        if !steering.is_empty() {
-                            // A late input can become Claude's next turn. Stop the owned process
-                            // before parking to avoid an unobserved follow-up and uncertain billing.
-                            process.healthy = false;
-                            process.kill().await;
-                        }
-                        if persistent {
-                            if interrupting {
-                                // An interrupted turn reports an execution error; the CLI stays usable.
-                                break Ok((if decoder.failure.is_some() { "cancelled" } else { "complete" }.to_string(), decoder.text));
-                            }
-                            if let Some(failure) = decoder.failure.take() {
-                                process.healthy = false;
-                                break Err(provider_error(&format!("{diagnostics} {failure}")).into());
-                            }
-                            if request.compact {
-                                if !decoder.compactions.completed() { process.healthy = false; break Err("Claude ended without confirming compaction. The conversation was preserved.".into()); }
-                                if let Some(channel) = channel { let _ = channel.send(RunEvent::Text { text: "Context compacted.".into() }); }
-                                break Ok(("complete".into(), "Context compacted.".into()));
-                            }
-                            if decoder.text.trim().is_empty() && !visualizer.has_visuals() { process.healthy = false; break Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
-                            break Ok(("complete".to_string(), decoder.text));
-                        }
-                        // Chats without a conversation identity still end with their process.
-                        stdin_open = false;
-                        let _ = process.stdin.shutdown().await;
-                    }
                 }
                 None => {
                     process.healthy = false;
@@ -732,6 +748,57 @@ async fn stream_turn(
                     break Ok(("complete".to_string(), decoder.text));
                 }
             }
+        }
+        if turn_ended {
+            if let Some(q) = &questions {
+                q.close();
+                q.elicitation.close();
+                q.steering.ready(false);
+            }
+            if !steering.is_empty() {
+                // A late input can become Claude's next turn. Stop the owned process
+                // before parking to avoid an unobserved follow-up and uncertain billing.
+                process.healthy = false;
+                process.kill().await;
+            }
+            if persistent {
+                if interrupting {
+                    // An interrupted turn reports an execution error; the CLI stays usable.
+                    break Ok((
+                        if decoder.failure.is_some() || stopped_idle {
+                            "cancelled"
+                        } else {
+                            "complete"
+                        }
+                        .to_string(),
+                        decoder.text,
+                    ));
+                }
+                if let Some(failure) = decoder.failure.take() {
+                    process.healthy = false;
+                    break Err(provider_error(&format!("{diagnostics} {failure}")).into());
+                }
+                if request.compact {
+                    if !decoder.compactions.completed() {
+                        process.healthy = false;
+                        break Err("Claude ended without confirming compaction. The conversation was preserved.".into());
+                    }
+                    if let Some(channel) = channel {
+                        let _ = channel.send(RunEvent::Text {
+                            text: "Context compacted.".into(),
+                        });
+                    }
+                    break Ok(("complete".into(), "Context compacted.".into()));
+                }
+                if decoder.text.trim().is_empty() && !visualizer.has_visuals() {
+                    process.healthy = false;
+                    break Err("The CLI finished without a text response. Check Connections or try another model.".into());
+                }
+                break Ok(("complete".to_string(), decoder.text));
+            }
+            // Chats without a conversation identity still end with their process.
+            stdin_open = false;
+            let _ = process.stdin.shutdown().await;
         }
     }
 }
@@ -786,6 +853,10 @@ mod claude_tests;
 #[cfg(test)]
 #[path = "elicitation_native_tests.rs"]
 mod elicitation_native_tests;
+
+#[cfg(test)]
+#[path = "background_native_tests.rs"]
+mod background_native_tests;
 
 #[cfg(test)]
 mod tests {

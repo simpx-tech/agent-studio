@@ -111,6 +111,8 @@ pub struct Decoder {
     pub completed: bool,
     items: Vec<(String, String)>,
     context_input: Option<u64>,
+    /// Claude input, output and cached input summed over this reply's results.
+    turn_usage: [Option<u64>; 3],
     model: Option<String>,
     tools: activity::ToolDecoder,
     file_changes: file_changes::FileChangeDecoder,
@@ -451,11 +453,24 @@ impl Decoder {
                         }
                     }
                     let model_usage = self.model.as_ref().and_then(|m| v["modelUsage"].get(m));
+                    // A reply spans several CLI turns while it waits for background work,
+                    // and each result reports token usage for its own turn only.
+                    let turn = [
+                        input_with_cache(&v["usage"]),
+                        v["usage"]["output_tokens"].as_u64(),
+                        v["usage"]["cache_read_input_tokens"].as_u64(),
+                    ];
+                    for (total, turn) in self.turn_usage.iter_mut().zip(turn) {
+                        if let Some(turn) = turn {
+                            *total = Some(total.unwrap_or(0) + turn);
+                        }
+                    }
+                    let [input, output, cached_input] = self.turn_usage;
                     events.push(RunEvent::Usage {
                         usage: TokenUsage {
-                            input: input_with_cache(&v["usage"]),
-                            output: v["usage"]["output_tokens"].as_u64(),
-                            cached_input: v["usage"]["cache_read_input_tokens"].as_u64(),
+                            input,
+                            output,
+                            cached_input,
                             reasoning_output: model_usage
                                 .and_then(|m| m["thinkingTokens"].as_u64()),
                             context_input: self.context_input,
@@ -714,6 +729,24 @@ mod tests {
         assert_eq!(usage.context_input, Some(1200));
         assert_eq!(usage.cached_input, Some(1900));
         assert_eq!(usage.context_window, Some(1000000));
+    }
+    #[test]
+    fn claude_reply_tokens_cover_turns_after_background_work_finishes() {
+        let mut d = Decoder::default();
+        d.decode("claude",r#"{"type":"assistant","message":{"model":"claude-fable-5-1","content":[],"usage":{"input_tokens":10,"cache_read_input_tokens":90}}}"#);
+        d.decode("claude",r#"{"type":"result","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5},"total_cost_usd":0.01}"#);
+        d.decode("claude",r#"{"type":"assistant","message":{"model":"claude-fable-5-1","content":[],"usage":{"input_tokens":20,"cache_read_input_tokens":180}}}"#);
+        let events = d.decode("claude",r#"{"type":"result","usage":{"input_tokens":20,"cache_read_input_tokens":180,"output_tokens":7},"total_cost_usd":0.03}"#);
+        let RunEvent::Usage { usage } = events.last().unwrap() else {
+            panic!("Missing usage")
+        };
+        assert_eq!(
+            (usage.input, usage.output, usage.cached_input),
+            (Some(300), Some(12), Some(270))
+        );
+        // The context reading and the CLI's running cost total stay the latest values.
+        assert_eq!(usage.context_input, Some(200));
+        assert_eq!(usage.cost_usd, Some(0.03));
     }
     #[test]
     fn missing_last_claude_request_never_reuses_earlier_context_or_cumulative_totals() {
