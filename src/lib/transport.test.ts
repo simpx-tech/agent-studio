@@ -45,6 +45,7 @@ it('invalidates host skill inventories after Viewer plugin mutations, including 
   transport.configureRuntime({
     installation: { id: host, computerId, name: 'QA', platform: 'windows' },
     workspace: () => workspace,
+    fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async () => {},
@@ -243,6 +244,7 @@ async function restartedDevice(ownsRun: boolean) {
       platform: 'windows',
     },
     workspace: () => restored,
+    fleet: () => restored.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async (value) => {
@@ -326,6 +328,7 @@ it('saves a host Undo receipt into the live workspace once, including requests f
       platform: 'windows',
     },
     workspace: () => workspace,
+    fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply,
@@ -381,6 +384,7 @@ async function fixture(remoteConnection?: string) {
       platform: 'windows',
     },
     workspace: () => workspace,
+    fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async () => {},
@@ -478,6 +482,7 @@ it('keeps a pending question when an older relay drops it from a successful save
       platform: 'windows',
     },
     workspace: () => current,
+    fleet: () => current.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async (value) => {
@@ -518,28 +523,54 @@ async function settledRelay(revisionEndpoint = true) {
     settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
     messages: [],
   });
+  // A Codex account connected here and on another computer.
+  const installation = {
+    id: crypto.randomUUID(),
+    computerId: crypto.randomUUID(),
+    name: 'QA',
+    platform: 'windows' as const,
+  };
+  const peer = crypto.randomUUID(),
+    peerComputer = crypto.randomUUID(),
+    account = crypto.randomUUID(),
+    here = crypto.randomUUID(),
+    there = crypto.randomUUID();
+  workspace.fleet.computers.push(
+    { id: installation.computerId, name: 'QA' },
+    { id: peerComputer, name: 'Peer' },
+  );
+  workspace.fleet.environments.push(
+    { id: installation.id, computerId: installation.computerId, name: 'QA', platform: 'windows' },
+    { id: peer, computerId: peerComputer, name: 'Peer', platform: 'linux' },
+  );
+  workspace.fleet.accounts.push({
+    id: account,
+    provider: 'codex',
+    name: 'Codex',
+    purpose: 'personal',
+  });
+  workspace.fleet.connections.push(
+    { id: here, accountId: account, environmentId: installation.id, profile: 'existing' },
+    { id: there, accountId: account, environmentId: peer, profile: 'existing' },
+  );
   const local = { changes: 0, reads: 0, runs: [] as string[] };
   const apply = vi.fn(async (value: SharedWorkspace) => {
     Object.assign(workspace, value);
   });
   transport.configureRuntime({
-    installation: {
-      id: crypto.randomUUID(),
-      computerId: crypto.randomUUID(),
-      name: 'QA',
-      platform: 'windows',
-    },
+    installation,
     workspace: () => {
       local.reads++;
       return workspace;
     },
+    fleet: () => workspace.fleet,
     revision: () => local.changes,
     statuses: () => ({}),
     localRuns: () => local.runs,
     apply,
     checkpointRun: async () => {},
   });
-  const relay = { revision: 5, workspace: sharedWorkspace(workspace) };
+  const relay = { revision: 5, workspace: sharedWorkspace(workspace), presence: [] as unknown[] };
   const requests: string[] = [];
   native.invoke.mockImplementation(async (command, args) => {
     if (command === 'relay_resume') return 'https://relay.example.com/';
@@ -561,7 +592,7 @@ async function settledRelay(revisionEndpoint = true) {
         status: 200,
         body: { instanceId: 'same-relay', revision: relay.revision, workspace: relay.workspace },
       };
-    return { status: 200, body: [] };
+    return { status: 200, body: args.path === 'v1/heartbeat' ? relay.presence : [] };
   });
   expect(await transport.resumeRelay()).toBe(true);
   // The first poll syncs the whole workspace and finds both sides equal.
@@ -575,10 +606,10 @@ async function settledRelay(revisionEndpoint = true) {
   const polls = async (count: number) => {
     const reads = local.reads;
     requests.length = 0;
-    for (let i = 0; i < count; i++) expect(await transport.pollRelay()).toEqual([]);
+    for (let i = 0; i < count; i++) expect(await transport.pollRelay()).not.toBeNull();
     return { state: requests.filter((r) => r.includes('state')), reads: local.reads - reads };
   };
-  return { transport, workspace, relay, local, apply, requests, polls };
+  return { transport, workspace, relay, local, apply, requests, polls, here, there, peer };
 }
 
 it('polls after an unchanged sync only ask the relay for its revision', async () => {
@@ -631,6 +662,44 @@ it('settles after sending a new chat that the relay lists in another order', asy
   expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
   expect(apply).not.toHaveBeenCalled();
   expect(workspace.conversations.map((c) => c.title)).toEqual(['New chat', 'Settled chat']);
+  await transport.disconnectRelay();
+});
+
+it('routes requests and account updates with the fleet alone, never a workspace copy', async () => {
+  const { transport, relay, local, polls, here, there, peer } = await settledRelay();
+  const reads = local.reads;
+  await transport.readUsage('codex', '', false, here);
+  expect(local.reads).toBe(reads);
+  // Every heartbeat can carry other computers' live account usage.
+  relay.presence = [
+    {
+      environmentId: peer,
+      online: true,
+      seenAt: Date.now(),
+      connections: [],
+      accountUpdates: [
+        {
+          connectionId: there,
+          epoch: crypto.randomUUID(),
+          revision: 1,
+          accountChanged: 0,
+          authMode: null,
+          planType: null,
+          creditsCheckedAt: null,
+          limitStatus: null,
+          snapshot: {
+            provider: 'codex',
+            checkedAt: Math.floor(Date.now() / 1000),
+            windows: [],
+            credits: null,
+            context: null,
+            detail: '',
+          },
+        },
+      ],
+    },
+  ];
+  expect((await polls(2)).reads).toBe(0);
   await transport.disconnectRelay();
 });
 

@@ -292,7 +292,10 @@ export async function watchWindowMaximized(
 
 type RuntimeContext = {
   installation: Installation;
+  /** A copy of the whole workspace, which is slow for a large one. */
   workspace: () => Workspace;
+  /** A copy of the computer and account registry alone, for routing and ownership checks. */
+  fleet: () => Fleet;
   /**
    * Counts changes made on this device to the shared workspace, excluding what `apply`
    * receives from the relay. Without it, every poll syncs the whole workspace.
@@ -434,7 +437,7 @@ function receiveAccountUpdate(value: unknown, host: string, local = false) {
   const parsed = accountUpdateSchema.safeParse(value);
   if (!parsed.success || !runtime) return;
   const update = parsed.data;
-  const fleet = runtime.workspace().fleet;
+  const fleet = runtime.fleet();
   const connection = fleet.connections.find((c) => c.id === update.connectionId);
   const account = fleet.accounts.find((a) => a.id === connection?.accountId);
   if (
@@ -474,16 +477,14 @@ function accountHeartbeat() {
   if (!desktop() || !runtime) return [];
   const updates: AccountUpdate[] = [];
   let bytes = 0;
+  const fleet = runtime.fleet();
   for (const update of [...localAccountUpdates.values()].sort(
     (a, b) => b.snapshot.checkedAt - a.snapshot.checkedAt,
   )) {
-    const connection = runtime
-      .workspace()
-      .fleet.connections.find((c) => c.id === update.connectionId);
+    const connection = fleet.connections.find((c) => c.id === update.connectionId);
     if (
       !connection ||
-      executionHost(runtime.workspace().fleet, connection.environmentId) !==
-        runtime.installation.id ||
+      executionHost(fleet, connection.environmentId) !== runtime.installation.id ||
       Date.now() - update.snapshot.checkedAt * 1000 > 180_000
     )
       continue;
@@ -602,17 +603,18 @@ export async function inspectEnvironmentClis(environmentId: string): Promise<Cli
 }
 function remoteTarget(connectionId?: string, environmentId?: string) {
   if (environmentId) {
-    const fleet = runtime?.workspace().fleet;
+    const fleet = runtime?.fleet();
     if (!fleet?.environments.some((e) => e.id === environmentId))
       throw new Error('This environment no longer exists.');
     const host = executionHost(fleet, environmentId);
     return host === runtime?.installation.id ? undefined : host;
   }
   if (!connectionId) return undefined;
-  const connection = runtime?.workspace().fleet.connections.find((c) => c.id === connectionId);
-  if (!connection)
+  const fleet = runtime?.fleet();
+  const connection = fleet?.connections.find((c) => c.id === connectionId);
+  if (!fleet || !connection)
     throw new Error('This connection no longer exists. Choose an account in Connections.');
-  const host = executionHost(runtime!.workspace().fleet, connection.environmentId);
+  const host = executionHost(fleet, connection.environmentId);
   return host === runtime?.installation.id ? undefined : host;
 }
 // Only the execution host can declare a run dead. After it restarts, an unfinished reply it
@@ -1249,22 +1251,15 @@ async function executeJob(job: RelayJob) {
   };
   try {
     const connectionId = job.args.connectionId;
-    const connection = runtime
-      ?.workspace()
-      .fleet.connections.find(
-        (c) =>
-          c.id === connectionId &&
-          executionHost(runtime!.workspace().fleet, c.environmentId) === runtime?.installation.id,
-      );
+    const fleet = runtime?.fleet();
+    const owned = (environmentId: string) =>
+      !!fleet && executionHost(fleet, environmentId) === runtime?.installation.id;
+    const connection = fleet?.connections.find(
+      (c) => c.id === connectionId && owned(c.environmentId),
+    );
     const folderEnvironment =
       job.method === 'folders' &&
-      runtime
-        ?.workspace()
-        .fleet.environments.find(
-          (e) =>
-            e.id === job.args.environmentId &&
-            executionHost(runtime!.workspace().fleet, e.id) === runtime?.installation.id,
-        );
+      fleet?.environments.find((e) => e.id === job.args.environmentId && owned(e.id));
     if (
       job.method === 'folders'
         ? !folderEnvironment
@@ -1331,9 +1326,7 @@ export async function readContext(
 }
 function makeContextCache() {
   return createContextCache(readContext, () =>
-    JSON.stringify(
-      runtime?.workspace().fleet.connections.map((c) => [c.id, sharedContextChoice(c)]) ?? [],
-    ),
+    JSON.stringify(runtime?.fleet().connections.map((c) => [c.id, sharedContextChoice(c)]) ?? []),
   );
 }
 export let contextCache = makeContextCache();

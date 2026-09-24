@@ -978,6 +978,7 @@
           configureRuntime({
             installation,
             workspace: () => $state.snapshot(workspace),
+            fleet: () => $state.snapshot(workspace.fleet),
             revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),
             localRuns: () => (run ? [run.id] : []),

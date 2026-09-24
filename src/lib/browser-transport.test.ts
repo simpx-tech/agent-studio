@@ -106,6 +106,7 @@ async function fixture() {
   transport.configureRuntime({
     installation,
     workspace: () => workspace,
+    fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
     apply: async (shared) => {
