@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -35,10 +35,11 @@ pub enum Line {
 
 pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// The CLI's input pipe. Tokio's `ChildStdin::shutdown` neither closes the pipe nor, on
-/// Windows, waits for a pending write, and a one-shot run (background titles, Antigravity
-/// replies) ends only when the CLI reads the end of its input. Shutting this down flushes
-/// and then releases the handle; later writes fail as they would on a closed pipe.
+/// The CLI's input pipe. Tokio's `ChildStdin::shutdown` leaves the pipe open, and a one-shot
+/// run (background titles, Antigravity replies) ends only when the CLI reads the end of its
+/// input. Shutting this down releases the handle without waiting for the CLI to read, so Stop
+/// and deadlines still apply: a write in flight keeps its own handle until it completes, and
+/// later writes fail as they would on a closed pipe.
 pub struct Input(Option<ChildStdin>);
 
 impl AsyncWrite for Input {
@@ -58,13 +59,9 @@ impl AsyncWrite for Input {
             None => Poll::Ready(Ok(())),
         }
     }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let flushed = match &mut self.0 {
-            Some(stdin) => ready!(Pin::new(stdin).poll_flush(cx)),
-            None => Ok(()),
-        };
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.0 = None;
-        Poll::Ready(flushed)
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -411,9 +408,15 @@ mod tests {
     async fn shutting_down_input_ends_it_so_a_one_shot_cli_exits() {
         use tokio::io::AsyncWriteExt;
         let mut process = process("one-shot");
-        process.stdin.write_all(b"prompt\n").await.unwrap();
+        // Larger than the pipe buffer: the write is still in flight when the input closes.
+        let prompt = "x".repeat(200_000);
+        process
+            .stdin
+            .write_all(format!("{prompt}\n").as_bytes())
+            .await
+            .unwrap();
         process.stdin.shutdown().await.unwrap();
-        // The child answers and exits at the end of its input, which ends its output.
+        // The child reads all of it, answers and exits at the end of its input.
         let mut output = vec![];
         while let Some(line) = tokio::time::timeout(Duration::from_secs(10), process.lines.recv())
             .await
@@ -423,7 +426,7 @@ mod tests {
                 output.push(text);
             }
         }
-        assert_eq!(output, ["prompt"]);
+        assert!(output == [prompt], "the whole input arrives before it ends");
         assert!(process.stdin.write_all(b"late\n").await.is_err());
         process.kill().await;
     }
