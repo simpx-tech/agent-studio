@@ -769,3 +769,35 @@ async fn a_completed_turn_leaves_the_process_waiting_for_input() {
     );
     process.kill().await;
 }
+
+#[tokio::test]
+async fn one_shot_runs_end_the_input_so_the_cli_exits_with_its_answer() {
+    // Titles and chats without a conversation identity read until the CLI exits, which a
+    // stream-json CLI does only at the end of its input.
+    for conversation_only in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut request: RunRequest = serde_json::from_value(serde_json::json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Name this"}]})).unwrap();
+        request.conversation_only = conversation_only;
+        let mut process = fixture(root.path(), "", false, false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            stream_turn(
+                &mut process,
+                &request,
+                None,
+                CancellationToken::new(),
+                Some(Duration::from_secs(20)),
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("the run must end with the CLI");
+        process.kill().await;
+        assert_eq!(
+            result.unwrap(),
+            ("complete".to_string(), "Turn 1".to_string()),
+            "conversation_only: {conversation_only}"
+        );
+    }
+}

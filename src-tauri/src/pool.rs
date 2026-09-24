@@ -5,14 +5,17 @@
 use crate::providers::{Executable, RunRequest};
 use std::{
     collections::HashMap,
+    io,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    task::{ready, Context, Poll},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWrite, BufReader},
     process::{Child, ChildStdin},
     sync::mpsc,
     time::Instant,
@@ -32,10 +35,43 @@ pub enum Line {
 
 pub type OutputObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The CLI's input pipe. Tokio's `ChildStdin::shutdown` neither closes the pipe nor, on
+/// Windows, waits for a pending write, and a one-shot run (background titles, Antigravity
+/// replies) ends only when the CLI reads the end of its input. Shutting this down flushes
+/// and then releases the handle; later writes fail as they would on a closed pipe.
+pub struct Input(Option<ChildStdin>);
+
+impl AsyncWrite for Input {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut self.0 {
+            Some(stdin) => Pin::new(stdin).poll_write(cx, buf),
+            None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+        }
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.0 {
+            Some(stdin) => Pin::new(stdin).poll_flush(cx),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let flushed = match &mut self.0 {
+            Some(stdin) => ready!(Pin::new(stdin).poll_flush(cx)),
+            None => Ok(()),
+        };
+        self.0 = None;
+        Poll::Ready(flushed)
+    }
+}
+
 pub struct Process {
     pub exe: Executable,
     pub child: Child,
-    pub stdin: ChildStdin,
+    pub stdin: Input,
     pub lines: mpsc::Receiver<Line>,
     idle: Arc<AtomicBool>,
     /// Launch identity: provider, account/profile, computer, folder, executable,
@@ -112,7 +148,7 @@ impl Process {
         Ok(Self {
             exe,
             child,
-            stdin,
+            stdin: Input(Some(stdin)),
             lines,
             idle,
             fingerprint,
@@ -369,6 +405,27 @@ mod tests {
         assert!(process.alive());
         process.kill().await;
         assert!(!process.alive());
+    }
+
+    #[tokio::test]
+    async fn shutting_down_input_ends_it_so_a_one_shot_cli_exits() {
+        use tokio::io::AsyncWriteExt;
+        let mut process = process("one-shot");
+        process.stdin.write_all(b"prompt\n").await.unwrap();
+        process.stdin.shutdown().await.unwrap();
+        // The child answers and exits at the end of its input, which ends its output.
+        let mut output = vec![];
+        while let Some(line) = tokio::time::timeout(Duration::from_secs(10), process.lines.recv())
+            .await
+            .expect("the child must see the end of its input")
+        {
+            if let Line::Out(text) = line {
+                output.push(text);
+            }
+        }
+        assert_eq!(output, ["prompt"]);
+        assert!(process.stdin.write_all(b"late\n").await.is_err());
+        process.kill().await;
     }
 
     fn running(pid: u32) -> bool {
