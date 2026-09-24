@@ -518,6 +518,16 @@ describe('real HTTP relay', () => {
     const restarted = createRelay({ token: f.token, directory: f.directory });
     restarted.close();
   });
+  it('reports the state revision to pollers without the workspace', async () => {
+    const f = await fixture();
+    expect((await f.call('GET', 'state/revision', undefined, f.source, 'wrong')).status).toBe(401);
+    const { instanceId } = (await f.call('GET', 'state')).body;
+    expect((await f.call('GET', 'state/revision')).body).toEqual({ instanceId, revision: 0 });
+    const workspace = emptyShared();
+    workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Desktop' });
+    expect((await f.call('PUT', 'state', { revision: 0, workspace })).status).toBe(200);
+    expect((await f.call('GET', 'state/revision')).body).toEqual({ instanceId, revision: 1 });
+  });
   it('routes work to the exact environment, claims once, streams progress, cancels and deduplicates submissions', async () => {
     const f = await fixture();
     const id = crypto.randomUUID();

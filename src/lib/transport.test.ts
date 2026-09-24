@@ -506,6 +506,154 @@ it('keeps a pending question when an older relay drops it from a successful save
   }
 });
 
+// A paired desktop whose relay keeps revisions like the real one.
+async function settledRelay(revisionEndpoint = true) {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Settled chat',
+    createdAt: '2026-09-24',
+    updatedAt: '2026-09-24',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    messages: [],
+  });
+  const local = { changes: 0, reads: 0, runs: [] as string[] };
+  const apply = vi.fn(async (value: SharedWorkspace) => {
+    Object.assign(workspace, value);
+  });
+  transport.configureRuntime({
+    installation: {
+      id: crypto.randomUUID(),
+      computerId: crypto.randomUUID(),
+      name: 'QA',
+      platform: 'windows',
+    },
+    workspace: () => {
+      local.reads++;
+      return workspace;
+    },
+    revision: () => local.changes,
+    statuses: () => ({}),
+    localRuns: () => local.runs,
+    apply,
+    checkpointRun: async () => {},
+  });
+  const relay = { revision: 5, workspace: sharedWorkspace(workspace) };
+  const requests: string[] = [];
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_resume') return 'https://relay.example.com/';
+    if (command === 'load_sync_state')
+      return { url: 'https://relay.example.com', instanceId: 'same-relay', base: relay.workspace };
+    if (command === 'save_sync_state') requests.push('save_sync_state');
+    if (command !== 'relay_request') return null;
+    requests.push(`${args.method} ${args.path}`);
+    if (args.path === 'v1/state/revision')
+      return revisionEndpoint
+        ? { status: 200, body: { instanceId: 'same-relay', revision: relay.revision } }
+        : { status: 404, body: { error: 'Unknown relay operation.' } };
+    if (args.path === 'v1/state' && args.method === 'PUT') {
+      relay.revision++;
+      relay.workspace = args.body.workspace;
+    }
+    if (args.path === 'v1/state')
+      return {
+        status: 200,
+        body: { instanceId: 'same-relay', revision: relay.revision, workspace: relay.workspace },
+      };
+    return { status: 200, body: [] };
+  });
+  expect(await transport.resumeRelay()).toBe(true);
+  // The first poll syncs the whole workspace and finds both sides equal.
+  expect(await transport.pollRelay()).toEqual([]);
+  expect(requests.filter((r) => r.includes('state'))).toEqual([
+    'GET v1/state',
+    'GET v1/state',
+    'save_sync_state',
+  ]);
+  requests.length = 0;
+  const polls = async (count: number) => {
+    const reads = local.reads;
+    requests.length = 0;
+    for (let i = 0; i < count; i++) expect(await transport.pollRelay()).toEqual([]);
+    return { state: requests.filter((r) => r.includes('state')), reads: local.reads - reads };
+  };
+  return { transport, workspace, relay, local, apply, requests, polls };
+}
+
+it('polls after an unchanged sync only ask the relay for its revision', async () => {
+  const { transport, apply, requests, polls } = await settledRelay();
+  expect(await polls(3)).toEqual({ state: Array(3).fill('GET v1/state/revision'), reads: 0 });
+  // Presence and jobs still run every poll.
+  expect(requests.filter((r) => r === 'POST v1/heartbeat')).toHaveLength(3);
+  expect(requests.filter((r) => r === 'GET v1/jobs')).toHaveLength(3);
+  expect(apply).not.toHaveBeenCalled();
+  await transport.disconnectRelay();
+});
+
+it('syncs a change from either side, then returns to revision checks', async () => {
+  const { transport, workspace, relay, local, apply, polls } = await settledRelay();
+  workspace.conversations[0].title = 'Renamed here';
+  local.changes++;
+  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect(relay.workspace.conversations[0].title).toBe('Renamed here');
+  expect(apply).not.toHaveBeenCalled();
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  // Another device renames the chat.
+  relay.workspace = structuredClone(relay.workspace);
+  relay.workspace.conversations[0].title = 'Renamed elsewhere';
+  relay.revision++;
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'GET v1/state',
+    'save_sync_state',
+  ]);
+  expect(apply).toHaveBeenCalledOnce();
+  expect(workspace.conversations[0].title).toBe('Renamed elsewhere');
+  // One more sync confirms both sides are equal; the checkpoint is already saved.
+  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  expect(apply).toHaveBeenCalledOnce();
+  await transport.disconnectRelay();
+});
+
+it('settles after sending a new chat that the relay lists in another order', async () => {
+  const { transport, workspace, relay, local, apply, polls } = await settledRelay();
+  // This device lists a new chat first; the merge appends it after the relay's chats.
+  workspace.conversations.unshift({
+    ...workspace.conversations[0],
+    id: crypto.randomUUID(),
+    title: 'New chat',
+  });
+  local.changes++;
+  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect(relay.workspace.conversations.map((c) => c.title)).toEqual(['Settled chat', 'New chat']);
+  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
+  expect(apply).not.toHaveBeenCalled();
+  expect(workspace.conversations.map((c) => c.title)).toEqual(['New chat', 'Settled chat']);
+  await transport.disconnectRelay();
+});
+
+it('gets the state from relays without the revision endpoint without syncing it again', async () => {
+  const { transport, apply, polls } = await settledRelay(false);
+  expect(await polls(3)).toEqual({
+    state: ['GET v1/state/revision', ...Array(3).fill('GET v1/state')],
+    reads: 0,
+  });
+  expect(apply).not.toHaveBeenCalled();
+  await transport.disconnectRelay();
+});
+
+it('syncs every poll while this computer runs a reply', async () => {
+  const { transport, local, polls } = await settledRelay();
+  local.runs.push(crypto.randomUUID());
+  const { state, reads } = await polls(2);
+  expect(state).toEqual(Array(2).fill('GET v1/state'));
+  expect(reads).toBe(2);
+  local.runs.length = 0;
+  await transport.disconnectRelay();
+});
+
 it('deletion waits for the remote response to stop and merges its final checkpoint', async () => {
   const connection = crypto.randomUUID(),
     runId = crypto.randomUUID();

@@ -39,6 +39,25 @@ export type MergeOptions = {
 };
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+/**
+ * Whether two shared workspaces hold the same data. Lists compare by item id: this device
+ * adds new chats at the front, while a merge keeps its base order and appends them.
+ */
+export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
+  const byId = <T extends { id: string }>(items: T[] = []) =>
+    [...items].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const same = <T extends { id: string }>(x?: T[], y?: T[]) => equal(byId(x), byId(y));
+  return (
+    same(a.conversations, b.conversations) &&
+    same(a.fleet.computers, b.fleet.computers) &&
+    same(a.fleet.environments, b.fleet.environments) &&
+    same(a.fleet.accounts, b.fleet.accounts) &&
+    same(a.fleet.connections, b.fleet.connections) &&
+    same(a.workflows, b.workflows) &&
+    same(a.inputTemplates, b.inputTemplates) &&
+    a.claudeInstructions === b.claudeInstructions
+  );
+}
 
 // Questions are revisioned run history, not deletable conversation settings.
 // Older relays/clients can omit them even from a successful save response.

@@ -6,7 +6,7 @@ import {
   settingsFor,
   type Conversation,
 } from './domain';
-import { emptyShared, mergeShared, sharedWorkspace } from './sync';
+import { emptyShared, mergeShared, sameShared, sharedWorkspace } from './sync';
 import { registerInstallation } from './fleet';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
@@ -19,6 +19,19 @@ const chat = (): Conversation => ({
   messages: [],
 });
 describe('workspace replication', () => {
+  it('compares shared workspaces by item, whatever order each device keeps', () => {
+    const first = chat(),
+      second = chat();
+    const local = { ...emptyShared(), conversations: [second, first] };
+    const merged = { ...emptyShared(), conversations: [first, second] };
+    expect(sameShared(local, merged)).toBe(true);
+    expect(sameShared(local, { ...merged, conversations: [first] })).toBe(false);
+    expect(sameShared(local, { ...merged, conversations: [first, first] })).toBe(false);
+    expect(
+      sameShared(local, { ...merged, conversations: [first, { ...second, title: 'Renamed' }] }),
+    ).toBe(false);
+    expect(sameShared(local, { ...merged, claudeInstructions: '' })).toBe(false);
+  });
   it('migrates v2 and registers only this installation without inventing remote machines or accounts', () => {
     const old = {
       version: 2,

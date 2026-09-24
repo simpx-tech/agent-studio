@@ -430,6 +430,11 @@ export function createRelay({
           send(200, { ...state, workspaceId: workspace.id });
           return;
         }
+        // Pollers holding the current revision skip downloading the whole workspace.
+        if (url.pathname === '/v1/state/revision' && req.method === 'GET') {
+          send(200, { instanceId: state.instanceId, revision: state.revision });
+          return;
+        }
         if (url.pathname === '/v1/state' && req.method === 'PUT') {
           const value = z
             .object({ revision: z.number().int().nonnegative(), workspace: sharedSchema })

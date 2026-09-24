@@ -295,7 +295,9 @@ test('a delayed administrator response cannot reveal its key after this browser 
       () => JSON.parse(localStorage.getItem('agent-studio.installation')!).id,
     );
     const mismatch = page.waitForResponse(
-      (response) => response.url().endsWith('/v1/state') && response.status() === 409,
+      (response) =>
+        ['/v1/state', '/v1/state/revision'].includes(new URL(response.url()).pathname) &&
+        response.status() === 409,
     );
     const switched = await context.request.post(`${f.url}/v1/browser-session`, {
       headers: { origin: f.url },

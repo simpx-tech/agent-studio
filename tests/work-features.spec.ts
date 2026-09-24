@@ -48,8 +48,11 @@ test('the production PWA renders and downloads artifacts through the real relay 
     await page.getByRole('button', { name: /PWA artifact fixture/ }).click();
     await page.getByRole('button', { name: 'PWA Counter Open HTML' }).click();
     const frame = page.frameLocator('iframe');
-    await frame.getByRole('button', { name: 'Add one' }).click();
-    await expect(frame.locator('output')).toHaveText('1');
+    // A sandboxed preview can miss a click in the first frames after it renders.
+    await expect(async () => {
+      await frame.getByRole('button', { name: 'Add one' }).click();
+      await expect(frame.locator('output')).toHaveText('1', { timeout: 500 });
+    }).toPass();
     expect(await page.locator('iframe').getAttribute('src')).toBe('/artifact-preview');
     await page.getByRole('tab', { name: 'Source', exact: true }).click();
     const sourceCode = page.getByRole('tabpanel', { name: 'Artifact source' }).locator('code');

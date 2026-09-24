@@ -978,6 +978,7 @@
           configureRuntime({
             installation,
             workspace: () => $state.snapshot(workspace),
+            revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),
             localRuns: () => (run ? [run.id] : []),
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
@@ -1061,7 +1062,8 @@
               for (const key of [...drafts.keys()])
                 if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
                   forgetDraft(key);
-              await persist();
+              // Received from the relay, so nothing new to send back.
+              await persist(false);
               if (
                 workspace.fleet.connections.some(
                   (c) =>
@@ -1164,8 +1166,12 @@
       ? 'Disconnected. Changes continue to save on this environment.'
       : 'Disconnected. Pair with your private workspace to see its chats and computers.';
   }
-  async function persist() {
+  // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
+  // changed. Streamed reply events count too, because they update messages before a save.
+  let localChanges = 0;
+  async function persist(local = true) {
     if (!loaded) return;
+    if (local) localChanges++;
     const snapshot = $state.snapshot(workspace);
     const scope = workspaceStorageScope();
     const next = saveQueue.catch(() => {}).then(() => saveWorkspace(snapshot, scope));
@@ -2637,6 +2643,7 @@
               const m = message();
               const hadQuestion = requestsAttention(m);
               applyRunEvent(m, event);
+              localChanges++;
               if (
                 event.kind === 'nativeworkflow' ||
                 event.kind === 'plan' ||

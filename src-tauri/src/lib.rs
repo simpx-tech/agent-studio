@@ -32,8 +32,10 @@ use std::io::Write;
 use std::sync::Mutex;
 use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
+/// Serializes workspace and sync checkpoint writes. Holds whether `workspace.json` is known to
+/// be current, which spares later saves a check for a pre-migration file to back up.
 #[derive(Default)]
-struct Storage(Mutex<()>);
+struct Storage(Mutex<bool>);
 
 #[tauri::command]
 async fn manage_plugins(
@@ -345,15 +347,24 @@ fn load_sync_state(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, S
         Err(_) => Err("Cannot read sync checkpoint".into()),
     }
 }
+// Workspace and checkpoint saves write megabytes. Keep them off the UI thread: it also
+// handles window input, so a blocked save made text selection and typing stall.
 #[tauri::command]
-fn save_sync_state(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
+async fn save_sync_state(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_sync_state(&app, &value))
+        .await
+        .map_err(|_| "Cannot save sync checkpoint")?
+}
+fn write_sync_state(app: &tauri::AppHandle, value: &serde_json::Value) -> Result<(), String> {
+    let storage = app.state::<Storage>();
+    let _lock = storage.0.lock().map_err(|_| "Storage lock failed")?;
     let root = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
     let mut file =
         tempfile::NamedTempFile::new_in(&root).map_err(|_| "Cannot prepare sync checkpoint")?;
-    file.write_all(&serde_json::to_vec(&value).map_err(|_| "Cannot encode sync checkpoint")?)
+    file.write_all(&serde_json::to_vec(value).map_err(|_| "Cannot encode sync checkpoint")?)
         .map_err(|_| "Cannot write sync checkpoint")?;
     file.as_file()
         .sync_all()
@@ -388,19 +399,21 @@ fn load_workspace(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, St
     }
 }
 #[tauri::command]
-fn save_workspace(
-    app: tauri::AppHandle,
-    storage: State<Storage>,
-    workspace: serde_json::Value,
-) -> Result<(), String> {
-    let _lock = storage.0.lock().map_err(|_| "Storage lock failed")?;
+async fn save_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_workspace(&app, &workspace))
+        .await
+        .map_err(|_| "Cannot save the workspace")?
+}
+fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result<(), String> {
+    let storage = app.state::<Storage>();
+    let mut current = storage.0.lock().map_err(|_| "Storage lock failed")?;
     if workspace["version"] != 3
         || !workspace["preferences"].is_object()
         || !workspace["conversations"].is_array()
     {
         return Err("Invalid workspace".into());
     }
-    let bytes = serde_json::to_vec(&workspace).map_err(|_| "Cannot serialize workspace")?;
+    let bytes = serde_json::to_vec(workspace).map_err(|_| "Cannot serialize workspace")?;
     if bytes.len() > 20_000_000 {
         return Err("Workspace exceeds 20 MB. Export and remove older conversations.".into());
     }
@@ -417,8 +430,9 @@ fn save_workspace(
         .sync_all()
         .map_err(|_| "Cannot flush workspace")?;
     let path = root.join("workspace.json");
-    // Keep the original pre-migration workspace once, without rewriting its data.
-    if path.is_file() {
+    // Keep the original pre-migration workspace once, without rewriting its data. Only the
+    // file found at launch can be older, since this app writes the current version.
+    if !*current && path.is_file() {
         if let Ok(old) = std::fs::read(&path) {
             if let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&old) {
                 if let Some(version @ (1 | 2)) = previous["version"].as_u64() {
@@ -433,6 +447,7 @@ fn save_workspace(
     }
     file.persist(path)
         .map_err(|_| "Cannot finish workspace save. The previous file was preserved.")?;
+    *current = true;
     Ok(())
 }
 #[tauri::command]

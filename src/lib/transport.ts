@@ -50,6 +50,7 @@ import {
 import {
   emptyShared,
   mergeShared,
+  sameShared,
   sharedSchema,
   sharedWorkspace,
   type SharedWorkspace,
@@ -292,6 +293,11 @@ export async function watchWindowMaximized(
 type RuntimeContext = {
   installation: Installation;
   workspace: () => Workspace;
+  /**
+   * Counts changes made on this device to the shared workspace, excluding what `apply`
+   * receives from the relay. Without it, every poll syncs the whole workspace.
+   */
+  revision?: () => number;
   statuses: () => Record<string, ProviderStatus>;
   localRuns: () => string[];
   apply: (value: SharedWorkspace) => Promise<void>;
@@ -307,10 +313,21 @@ type RuntimeContext = {
     error?: string,
   ) => Promise<void>;
 };
+type RelayState = { instanceId: string; revision: number; workspace: SharedWorkspace };
 let runtime: RuntimeContext | undefined;
 let relayUrl = '';
 let relayInstance = '';
 let baseline = emptyShared();
+// The relay revision `baseline` came from, and the local revision whose data it matched when
+// a poll left both sides equal. Later polls then only ask whether the relay moved.
+let baselineRevision: number | undefined;
+let settledRevision: number | undefined;
+// The checkpoint saved during this connection, so unchanged polls skip rewriting it.
+let checkpointJson = '';
+// Relays before v1/state/revision answer it with 404; they get the full state each poll.
+let revisionEndpoint = true;
+const relayReplaced =
+  'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.';
 let relayBusy = false;
 let relayConnected = false;
 let relayGeneration = 0;
@@ -333,6 +350,14 @@ function hasBlockingRemoteWork() {
 export function configureRuntime(context: RuntimeContext) {
   runtime = context;
   void startAccountUpdates();
+}
+// A new or restored relay connection starts with a full sync.
+function resetBaseline(next: SharedWorkspace) {
+  baseline = next;
+  baselineRevision = undefined;
+  settledRevision = undefined;
+  checkpointJson = '';
+  revisionEndpoint = true;
 }
 const accountUpdateGate = new AccountUpdateGate();
 const localAccountUpdates = new Map<string, AccountUpdate>();
@@ -509,7 +534,7 @@ async function endBrowserSession(reason: string) {
   const previousScope = browserScope;
   browserScope = undefined;
   notifyRelayConnection(false);
-  baseline = emptyShared();
+  resetBaseline(emptyShared());
   contextCache = makeContextCache();
   updatePendingBadge(0);
   await runtime?.replaceBrowserWorkspace?.(initialWorkspace(), reason);
@@ -814,7 +839,7 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     }
     if (!current()) return false;
     browserScope = scope;
-    baseline = saved?.base ?? remote;
+    resetBaseline(saved?.base ?? remote);
     relayInstance = state.instanceId;
     relayUrl = url;
     relayConnected = true;
@@ -830,15 +855,13 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
   } | null>('load_sync_state');
   if (generation !== relayGeneration) return false;
   if (restoring && checkpoint?.url === url && checkpoint.instanceId !== state.instanceId)
-    throw new Error(
-      'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.',
-    );
+    throw new Error(relayReplaced);
   const nextBaseline =
     checkpoint?.url === url && checkpoint.instanceId === state.instanceId
       ? sharedSchema.parse(checkpoint.base)
       : emptyShared();
   if (generation !== relayGeneration) return false;
-  baseline = nextBaseline;
+  resetBaseline(nextBaseline);
   relayInstance = state.instanceId;
   relayUrl = url;
   relayConnected = true;
@@ -898,59 +921,105 @@ export async function pollRelay(): Promise<Presence[] | null> {
       if (!(await resumeBrowserRelay()))
         throw new Error('Pair this device again to restore its server connection.');
     }
-    const start = sharedWorkspace(runtime.workspace());
-    let remote = await relayApi<{
-      instanceId: string;
-      revision: number;
-      workspace: SharedWorkspace;
-    }>('GET', 'v1/state');
-    if (remote.instanceId !== relayInstance)
-      throw new Error(
-        'Relay data was replaced. Restore the original relay data, or use a separate installation for a new private workspace.',
-      );
+    // Syncing copies, compares and saves the whole workspace, which stalls the page, so once a
+    // poll leaves both sides equal, later ones only ask whether the relay moved. Replies
+    // running here still sync every poll, since other devices follow their progress.
+    const revision = runtime.revision?.();
+    const settled =
+      revision !== undefined &&
+      revision === settledRevision &&
+      baselineRevision !== undefined &&
+      !runtime.localRuns().length &&
+      !workerRuns.size;
+    let unchanged = false;
+    if (settled && revisionEndpoint) {
+      const probe = await relayRaw('GET', 'v1/state/revision');
+      if (probe.status !== 200 && probe.status !== 404)
+        throw new Error(probe.body?.error ?? `Relay request failed (${probe.status}).`);
+      if (
+        probe.status === 200 &&
+        typeof probe.body?.instanceId === 'string' &&
+        typeof probe.body.revision === 'number'
+      ) {
+        if (probe.body.instanceId !== relayInstance) throw new Error(relayReplaced);
+        unchanged = probe.body.revision === baselineRevision && runtime.revision?.() === revision;
+      } else revisionEndpoint = false;
+    }
+    let fetched: RelayState | undefined;
+    if (!unchanged) {
+      fetched = await relayApi<RelayState>('GET', 'v1/state');
+      if (fetched.instanceId !== relayInstance) throw new Error(relayReplaced);
+      // Relays without v1/state/revision send the revision with the whole state.
+      unchanged =
+        settled && fetched.revision === baselineRevision && runtime.revision?.() === revision;
+    }
     // Verify the workspace first, then publish the viewed chat before a
     // completion checkpoint can enqueue push.
     await publishNotificationView();
     if (generation !== relayGeneration) return null;
-    const options = desktop()
-      ? { deadRun: (c: Conversation, m: Message) => deadRunHere(start.fleet, c, m) }
-      : undefined;
-    let accepted: SharedWorkspace | undefined;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace), options);
-      if (JSON.stringify(merged) === JSON.stringify(remote.workspace)) {
-        accepted = merged;
+    if (fetched && !unchanged) {
+      let remote = fetched;
+      const before = runtime.revision?.();
+      const start = sharedWorkspace(runtime.workspace());
+      const options = desktop()
+        ? { deadRun: (c: Conversation, m: Message) => deadRunHere(start.fleet, c, m) }
+        : undefined;
+      let accepted: SharedWorkspace | undefined;
+      let acceptedJson = '';
+      let acceptedRevision: number | undefined;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace), options);
+        const mergedJson = JSON.stringify(merged);
+        if (mergedJson === JSON.stringify(remote.workspace)) {
+          accepted = merged;
+          acceptedJson = mergedJson;
+          acceptedRevision = remote.revision;
+          break;
+        }
+        const response = await relayRaw('PUT', 'v1/state', {
+          revision: remote.revision,
+          workspace: merged,
+        });
+        if (response.status === 409 && response.body?.code !== 'workspace_changed') {
+          remote = response.body;
+          continue;
+        }
+        if (response.status !== 200)
+          throw new Error(response.body?.error ?? 'Workspace sync failed.');
+        accepted = sharedSchema.parse(response.body.workspace);
+        acceptedJson = JSON.stringify(accepted);
+        acceptedRevision = response.body.revision;
         break;
       }
-      const response = await relayRaw('PUT', 'v1/state', {
-        revision: remote.revision,
-        workspace: merged,
-      });
-      if (response.status === 409 && response.body?.code !== 'workspace_changed') {
-        remote = response.body;
-        continue;
-      }
-      if (response.status !== 200)
-        throw new Error(response.body?.error ?? 'Workspace sync failed.');
-      accepted = sharedSchema.parse(response.body.workspace);
-      break;
-    }
-    if (!accepted) throw new Error('Workspace is changing quickly. Sync will retry shortly.');
-    if (generation !== relayGeneration) return null;
-    const current = sharedWorkspace(runtime.workspace());
-    const combined = mergeShared(start, current, accepted, options);
-    await runtime.apply(combined);
-    if (generation !== relayGeneration) return null;
-    // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
-    const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
-    if (desktop()) await invoke('save_sync_state', { value: checkpoint });
-    else if (browserScope) {
-      const key = `${browserScopeKey(browserScope)}:sync`;
-      const store = await workspaceStore();
-      await store.put([[key, JSON.stringify(checkpoint)]], () => generation === relayGeneration);
+      if (!accepted) throw new Error('Workspace is changing quickly. Sync will retry shortly.');
       if (generation !== relayGeneration) return null;
+      // Nothing arrives when the relay holds exactly what this poll sent.
+      const sent = sameShared(accepted, start);
+      if (!sent) {
+        const current = sharedWorkspace(runtime.workspace());
+        await runtime.apply(mergeShared(start, current, accepted, options));
+        if (generation !== relayGeneration) return null;
+      }
+      // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
+      if (acceptedJson !== checkpointJson) {
+        const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
+        if (desktop()) await invoke('save_sync_state', { value: checkpoint });
+        else if (browserScope) {
+          const key = `${browserScopeKey(browserScope)}:sync`;
+          const store = await workspaceStore();
+          await store.put(
+            [[key, JSON.stringify(checkpoint)]],
+            () => generation === relayGeneration,
+          );
+          if (generation !== relayGeneration) return null;
+        }
+        checkpointJson = acceptedJson;
+      }
+      baseline = accepted;
+      baselineRevision = acceptedRevision;
+      // Both sides are equal when the relay holds what was sent and nothing changed since.
+      settledRevision = sent && runtime.revision?.() === before ? before : undefined;
     }
-    baseline = accepted;
     const connections = Object.entries(runtime.statuses()).map(([connectionId, s]) => ({
       connectionId,
       installed: s.installed,
@@ -1012,6 +1081,8 @@ export async function resolveRelaySettings(): Promise<string> {
       ...sharedWorkspace(runtime.workspace()),
       fleet: sharedSchema.parse(remote.workspace).fleet,
     });
+    // The resolved workspace still has to reach the relay.
+    settledRevision = undefined;
     return backup;
   } finally {
     relayBusy = false;
