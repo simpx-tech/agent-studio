@@ -2,7 +2,7 @@ FROM node:24-alpine AS frontend
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
-COPY svelte.config.js vite.config.js tsconfig.json ./
+COPY svelte.config.js vite.config.js tsconfig.json CHANGELOG.md ./
 COPY src ./src
 COPY relay/artifact-preview.ts ./relay/
 COPY static ./static

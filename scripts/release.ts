@@ -2,10 +2,15 @@
 //
 //   node scripts/release.ts version                 Print the app version; fail if files disagree.
 //   node scripts/release.ts version <x.y.z|patch|minor|major>
-//                                                   Set the version in every manifest.
+//                                                   Set the version in every manifest and add its
+//                                                   CHANGELOG.md section from the commit subjects
+//                                                   since the previous release tag.
+//   node scripts/release.ts notes                   Print the current version's release notes
+//                                                   from CHANGELOG.md.
 //   node scripts/release.ts assets --input <dir> --output <dir> --repo <owner/name> [--notes <file>]
 //                                                   Verify built packages and stage release assets
 //                                                   with the updater's latest.json.
+import { execFileSync } from 'node:child_process';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -261,15 +266,62 @@ export function stageAssets(options: {
   return manifest;
 }
 
-function main(argv: string[]) {
+// The VPS updater installs this file without the app's source, so only the commands that use
+// the changelog load it.
+const changelog = () => import('../src/lib/changelog.ts');
+
+/** The local date, as CHANGELOG.md writes it. */
+function today(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/** Commit subjects since the latest release tag, oldest last. */
+function commitSubjects(root: string): string[] {
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  let tag: string;
+  try {
+    tag = git('describe', '--tags', '--abbrev=0', '--match', 'v*');
+  } catch {
+    throw new Error(
+      'Cannot find the previous release tag. Run git fetch --tags, or add the new version to CHANGELOG.md first.',
+    );
+  }
+  return git('log', '--no-merges', '--format=%s', `${tag}..HEAD`).split('\n').filter(Boolean);
+}
+
+async function main(argv: string[]) {
   const root = resolve(import.meta.dirname, '..');
   const [command, ...rest] = argv;
   if (command === 'version') {
     const current = currentVersion(root);
     if (!rest[0]) return console.log(current);
     const next = nextVersion(current, rest[0]);
+    const path = join(root, 'CHANGELOG.md');
+    const text = readFileSync(path, 'utf8');
+    // Prepared first, so a changelog problem leaves every file unchanged.
+    const updated = (await changelog()).withRelease(text, next, today(), () =>
+      commitSubjects(root),
+    );
     setVersion(root, next);
-    return console.log(next);
+    if (updated !== text) writeFileSync(path, updated);
+    console.log(next);
+    return console.log(
+      updated === text
+        ? `CHANGELOG.md already lists ${next}.`
+        : `Added ${next} to CHANGELOG.md from the commits since the last release. Edit it before committing.`,
+    );
+  }
+  if (command === 'notes') {
+    const version = currentVersion(root);
+    const { parseChangelog, releaseNotes } = await changelog();
+    const release = parseChangelog(readFileSync(join(root, 'CHANGELOG.md'), 'utf8')).find(
+      (entry) => entry.version === version,
+    );
+    if (!release) throw new Error(`CHANGELOG.md has no section for ${version}.`);
+    return console.log(releaseNotes(release));
   }
   if (command === 'assets') {
     const { values } = parseArgs({
@@ -294,14 +346,14 @@ function main(argv: string[]) {
     });
     return console.log(`Staged ${Object.keys(manifest.platforms).length} updater targets.`);
   }
-  throw new Error('Usage: node scripts/release.ts version [x.y.z|patch|minor|major] | assets …');
+  throw new Error(
+    'Usage: node scripts/release.ts version [x.y.z|patch|minor|major] | notes | assets …',
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  try {
-    main(process.argv.slice(2));
-  } catch (error) {
+  main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
-  }
+  });
 }

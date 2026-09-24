@@ -32,6 +32,10 @@ public, so no GitHub token is involved.
 - **Data.** Updates keep the identifier `com.vinicius.agentstudio`, so the workspace, accounts,
   profiles, and settings stay in place. Update status is transient and never synced; the web
   viewer has no update controls. Release notes appear as plain text.
+- **Version and changelog.** **Settings → About**, at the end of Settings, shows the running
+  version and the changelog bundled with it, with that version's release open and marked
+  **Current**. The desktop app reports its native version; the Viewer reports the version it
+  was built from, so a stale cached Viewer shows its own version.
 
 ## Security
 
@@ -74,13 +78,23 @@ with the old key that contains the new public key, and switch the secret afterwa
    `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json` together.
    `npm run release:version` prints the current version and fails if the files disagree. Versions
    are plain `x.y.z` (at most 255.255.65535) because MSI packages require it.
-2. Run the local pipeline, commit, and merge to `main`.
-3. The [Desktop builds workflow](../.github/workflows/desktop-build.yml) verifies the app, builds
+2. The bump also adds the version's section to [`CHANGELOG.md`](../CHANGELOG.md), dated today,
+   from the commit subjects since the previous release tag: `feat:` under **Added**, `fix:`
+   under **Fixed**, and `perf:` and any other subject under **Changed**, except `build`,
+   `chore`, `ci`, `docs`, `refactor`, `style`, and `test` commits, which are left out. Edit the
+   section into user-facing wording before committing; a section written before the bump is
+   kept. Sections use `## x.y.z - YYYY-MM-DD`, an optional summary paragraph, `### Added`,
+   `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security` groups, and `- ` items, newest
+   first. Unit tests reject any other format and require the newest section to match the app
+   version.
+3. Run the local pipeline, commit, and merge to `main`.
+4. The [Desktop builds workflow](../.github/workflows/desktop-build.yml) verifies the app, builds
    and signs every platform, then the **Publish release** job checks signatures and versions and
    creates the release `v<version>` with the installers, their `.sig` files, and `latest.json`.
-   Release notes list the commit subjects since the previous release tag. `gh` keeps the release
+   The release notes, on GitHub and in the app's update details, are the version's
+   `CHANGELOG.md` section as plain text (`node scripts/release.ts notes`). `gh` keeps the release
    a draft until every asset is uploaded.
-4. The production VPS installs the published release by itself and replaces its public Windows
+5. The production VPS installs the published release by itself and replaces its public Windows
    download. It deploys only releases whose NSIS installer carries this key's signature for their
    version. See [automatic VPS updates](DEPLOYMENT.md#automatic-updates).
 
@@ -114,6 +128,11 @@ To sign locally, set `TAURI_SIGNING_PRIVATE_KEY` to the key file path and
   controls in the web viewer.
 - `src/lib/release.test.ts` covers version bumps across every manifest, verification of real
   Tauri CLI signatures (including tampered data and trusted comments), and release staging.
+- `src/lib/changelog.test.ts` checks that the bundled `CHANGELOG.md` parses and starts with the
+  app version, and covers format errors, sections generated from commit subjects with both line
+  endings, release notes, and inert code spans. `tests/about.spec.ts` covers **Settings →
+  About** on desktop (the native version, its release open and marked Current) and in the Viewer
+  (the build version, at phone width).
 - `node scripts/updates-native-smoke.mjs` (after `npm run build`) is the Windows end-to-end check.
   It builds three signed NSIS releases of **Agent Studio Update QA** with a throwaway key, serves
   their manifest on `127.0.0.1:1471`, and installs through an unpackaged scheduled task. It then

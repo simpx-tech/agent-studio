@@ -27,7 +27,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 
 ## Included
 
-- One **Connections** page for agent setup, computers, account profiles, and the relay, with a separate **Settings** page for notifications, app updates, workspace administration, and workspace export. Each WSL distribution appears as a separate computer managed by Windows. The selected computer supplies the CLI and account, with no fallback; Desktop agents can also work in WSL folders.
+- One **Connections** page for agent setup, computers, account profiles, and the relay, with a separate **Settings** page for notifications, app updates, workspace administration, workspace export, and the app version with its changelog. Each WSL distribution appears as a separate computer managed by Windows. The selected computer supplies the CLI and account, with no fallback; Desktop agents can also work in WSL folders.
 - Separate Claude/Codex CLI login profiles and a self-hosted relay for app chat synchronization, presence, remote progress, and cancellation. See the [setup and VPS deployment guide](docs/MULTI-COMPUTER.md).
 - Share one VPS with separate users through private workspace keys. Each workspace has its own chats, computers, environments, and notifications. One designated admin workspace creates and manages access from Settings; administration can be transferred to another workspace. See [private workspace setup](docs/PRIVATE-WORKSPACES.md).
 
@@ -41,7 +41,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Provider-reported chat context where available (currently Claude), saved reply token counts, live 5-hour/weekly subscription meters, and a Fable-specific meter when Fable is selected. Compact colored arrows show pace, with full meanings on hover. See [usage details and data sources](docs/USAGE.md).
 - Colored arrows show quota pace and remaining allowance. Context guidance highlights limited room and rapid growth using measured readings; hover an arrow for its full meaning.
 - Provider installation/login status and workspace export to JSON in Downloads.
-- Automatic, signed desktop updates from GitHub Releases that never interrupt a running reply. See [automatic updates](docs/UPDATES.md).
+- Automatic, signed desktop updates from GitHub Releases that never interrupt a running reply. See [automatic updates](docs/UPDATES.md). **Settings → About** shows the running version and the [changelog](CHANGELOG.md).
 - Explicit browser-preview, missing-CLI, login, quota, timeout, and storage error states.
 
 The first version runs one response at a time. You can navigate while it runs. Choose the computer, folder, and agent before sending the first message; those choices are fixed for the existing conversation. Change its model, reasoning, or instructions between replies; the next request uses that configuration. Earlier replies retain their original settings. New chats start with your latest choices and allow a different computer, folder, or agent, while reopening a saved chat restores its own configuration. Custom instructions belong only to their conversation.

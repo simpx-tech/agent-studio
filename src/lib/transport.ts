@@ -1,7 +1,9 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
+import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
+import { version as packageVersion } from '../../package.json';
 
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
 import { createDesktopNotificationTracker } from './desktop-notifications';
@@ -69,6 +71,20 @@ import {
 } from './domain';
 
 export const desktop = () => isTauri();
+
+/** The version this frontend was built from. */
+export const buildVersion: string = packageVersion;
+/** The running app's version: the desktop app's native version, or this build's in the Viewer. */
+export async function appVersion(): Promise<string> {
+  if (!desktop()) return buildVersion;
+  try {
+    const version: unknown = await getVersion();
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+\S{0,40}$/.test(version)) return version;
+  } catch {
+    // The desktop app bundles this frontend, so the build's version describes it too.
+  }
+  return buildVersion;
+}
 
 export async function desktopInstallerAvailable(): Promise<boolean> {
   const response = await fetch('/downloads/manifest.json', {

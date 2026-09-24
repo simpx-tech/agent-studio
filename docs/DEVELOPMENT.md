@@ -63,8 +63,11 @@ creates the GitHub Release `v<version>` with the installers, signatures, and the
 updater's `latest.json`. Installed apps update from it. A version that already
 has a release is never replaced: the job only warns. Bump the version on
 `development` with `npm run release:version -- patch` (or `minor`, `major`, or
-`x.y.z`) before merging a release. See [automatic updates](UPDATES.md) for the
-signing key, local `--no-sign` builds, and the release format.
+`x.y.z`) before merging a release. The bump adds the version's `CHANGELOG.md`
+section from the commits since the previous release; edit it before committing,
+because it becomes the release notes and the changelog in Settings → About. See
+[automatic updates](UPDATES.md) for the signing key, local `--no-sign` builds,
+and the release format.
 
 The production VPS then installs the release by itself, usually within fifteen
 minutes, and replaces its public Windows download. It authenticates the release

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Download, ShieldCheck } from '@lucide/svelte';
+  import AboutSettings from './AboutSettings.svelte';
   import AppUpdates from './AppUpdates.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import ClaudeInstructions from './ClaudeInstructions.svelte';
@@ -50,8 +51,8 @@
         <h1>Settings</h1>
         <p>
           {desktop()
-            ? 'Appearance, notifications, app updates, Claude chat instructions, workspace administration, and the data kept for this workspace.'
-            : 'Appearance, notifications, Claude chat instructions, workspace administration, and the data kept for this workspace.'}
+            ? 'Appearance, notifications, app updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
+            : 'Appearance, notifications, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'}
         </p>
       </div>
     </section>
@@ -86,6 +87,7 @@
           >
         </div>
       </section>
+      <AboutSettings />
     </div>
   </div>
 </div>

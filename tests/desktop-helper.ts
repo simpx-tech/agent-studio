@@ -53,6 +53,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-app-update-installed', 'true');
             return;
           }
+          // The native version deliberately differs from package.json's.
+          if (command === 'plugin:app|version') return '0.2.0';
           if (command === 'save_artifact') {
             (window as any).savedArtifact = args;
             return 'C:/Downloads/' + args.filename;

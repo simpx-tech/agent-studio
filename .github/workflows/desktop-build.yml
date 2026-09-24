@@ -155,9 +155,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          # Release notes list commits since the previous release tag.
-          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
@@ -184,16 +181,8 @@ jobs:
       - name: Verify signatures and stage assets
         if: steps.version.outputs.publish == 'true'
         run: |
-          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-          {
-            if [ -n "$previous" ]; then
-              echo "Changes since $previous:"
-              echo
-              git log --no-merges --format='- %s' "$previous..HEAD" | head -n 40
-            else
-              echo "The first Agent Studio release with automatic updates."
-            fi
-          } > notes.md
+          # The version's CHANGELOG.md section, also shown in Settings → About.
+          node scripts/release.ts notes > notes.md
           node scripts/release.ts assets --input packages --output release --repo "$GITHUB_REPOSITORY" --notes notes.md
       - name: Publish release
         if: steps.version.outputs.publish == 'true'
