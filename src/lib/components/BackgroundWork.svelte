@@ -1,17 +1,21 @@
 <script lang="ts">
   import { ChevronDown, Layers, LoaderCircle } from '@lucide/svelte';
   import { toolElapsed } from '$lib/activity';
-  import { runningBackgroundWork } from '$lib/background-work';
-  import type { Message } from '$lib/domain';
-  let { message }: { message: Message } = $props();
-  const runs = $derived(
-    message.status === 'running'
-      ? runningBackgroundWork(
-          message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
-        )
-      : [],
-  );
+  import type { BackgroundRun } from '$lib/background-work';
+  let { runs }: { runs: BackgroundRun[] } = $props();
   const kinds = { command: 'Command', monitor: 'Monitor', agent: 'Sub-agent' };
+  let now = $state(Date.now());
+  // Host lists arrive when work starts or ends; advance their times in between.
+  $effect(() => {
+    if (!runs.some((run) => run.since != null)) return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const elapsed = (run: BackgroundRun) =>
+    run.elapsedMs == null
+      ? undefined
+      : run.elapsedMs + (run.since == null ? 0 : Math.max(0, now - run.since));
 </script>
 
 {#if runs.length}
@@ -23,13 +27,13 @@
     >
     <ul aria-label="Running in the background">
       {#each runs as run (run.id)}
+        {@const time = elapsed(run)}
         <li>
           <LoaderCircle size={14} class="spinning" aria-hidden="true" />
           <span class="run-label" title={run.label}>{run.label}</span>
           <small
-            >{kinds[run.kind]}{#if run.elapsedMs != null}<span
-                title="Elapsed time recorded on the execution computer"
-                >{toolElapsed(run.elapsedMs)}</span
+            >{kinds[run.kind]}{#if time != null}<span
+                title="Elapsed time recorded on the execution computer">{toolElapsed(time)}</span
               >{/if}</small
           >
         </li>

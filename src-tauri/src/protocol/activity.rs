@@ -67,6 +67,15 @@ pub struct ToolActivity {
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
 }
+impl ToolActivity {
+    /// The reported description of the call, never its command.
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+    pub fn is_monitor(&self) -> bool {
+        self.operation.as_deref() == Some("monitor")
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivityFact {
     label: String,
@@ -99,7 +108,7 @@ fn field(v: &Value, key: &str, limit: usize) -> Option<String> {
         .map(|s| clean(s, limit))
         .filter(|s| !s.is_empty())
 }
-fn status(value: &str) -> &'static str {
+pub(crate) fn status(value: &str) -> &'static str {
     match value {
         "in_progress" | "inProgress" | "running" | "started" | "pending_init" | "pendingInit" => {
             "running"

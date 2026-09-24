@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
-mod activity;
+pub(crate) mod activity;
 pub mod compaction;
 pub mod file_changes;
 pub(crate) mod hooks;

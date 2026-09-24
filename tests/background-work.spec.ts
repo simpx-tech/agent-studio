@@ -200,3 +200,143 @@ test('a stopped reply leaves background work unconfirmed and removes the card', 
   await heading.click();
   await expect(page.locator('.tool-card summary').last()).toContainText('Outcome unconfirmed');
 });
+
+test('work left running stays listed after its reply and reports its outcome to history', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript(() => {
+    const state = window as any,
+      native = state.__TAURI_INTERNALS__;
+    const invoke = native.invoke,
+      transform = native.transformCallback;
+    const callbacks = new Map<number, (value: unknown) => void>();
+    let listener = 0;
+    native.transformCallback = (fn: (value: unknown) => void) => {
+      const id = transform(fn);
+      callbacks.set(id, fn);
+      return id;
+    };
+    native.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:event|listen' && args.event === 'studio-background-work')
+        listener = args.handler;
+      if (command === 'background_work')
+        return JSON.parse(localStorage.getItem('test-background-work') ?? '[]');
+      return invoke(command, args);
+    };
+    state.hostBackground = (payload: unknown) =>
+      callbacks.get(listener)!({ event: 'studio-background-work', id: 1, payload });
+  });
+  await page.goto('/');
+  await page.getByLabel('Message', { exact: true }).fill('Start a preview server for me');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  const server = {
+    id: 'claude:server',
+    name: 'Run command',
+    category: 'tool',
+    operation: 'command',
+    commandRun: true,
+    detail: 'Start the preview server',
+    background: true,
+    revision: 1,
+    status: 'running',
+    elapsedMs: 5000,
+    facts: [],
+    sources: [],
+    agents: [],
+  };
+  await page.evaluate((tool) => {
+    (window as any).emitCapability({ kind: 'tool', tool });
+    (window as any).emitCapability({ kind: 'text', text: 'The preview server is running.' });
+    (window as any).finishCapabilities('complete');
+  }, server);
+  const ids = () =>
+    page.evaluate(() => {
+      const chat = JSON.parse(localStorage.getItem('test-workspace')!).conversations[0];
+      return { conversationId: chat.id, runId: chat.messages.at(-1).runId };
+    });
+  await expect.poll(async () => (await ids()).runId).toBeTruthy();
+  const { conversationId, runId } = await ids();
+  const card = page.locator('.background-work');
+  await expect(card).toHaveCount(0);
+  // The host keeps the server listed after the reply ended, and its time keeps advancing.
+  await page.evaluate((payload) => (window as any).hostBackground(payload), {
+    kind: 'snapshot',
+    conversationId,
+    runs: [
+      {
+        id: server.id,
+        runId,
+        kind: 'command',
+        label: server.detail,
+        elapsedMs: 65_000,
+        command: 'PRIVATE_COMMAND',
+      },
+    ],
+  });
+  await expect(card.locator('summary')).toHaveText(/Background work\s*1 running/);
+  await expect(card.locator('li')).toHaveText([/Start the preview server\s*Command\s*1m 5s/]);
+  await expect(card.locator('li')).toContainText('1m 6s', { timeout: 3000 });
+  await page.getByLabel('Work history', { exact: true }).click();
+  await page.locator('.activity-group > summary').first().click();
+  const call = page.locator('.tool-card').first();
+  await expect(call.locator('summary')).toContainText('Left running');
+  // Another chat's list never appears here, and malformed events are ignored.
+  await page.evaluate((payload) => (window as any).hostBackground(payload), {
+    kind: 'snapshot',
+    conversationId: crypto.randomUUID(),
+    runs: [{ id: 'other', runId: 'other', kind: 'command', label: 'Other chat', elapsedMs: 1 }],
+  });
+  await page.evaluate((payload) => (window as any).hostBackground(payload), {
+    kind: 'snapshot',
+    conversationId,
+    runs: [{ id: 'bad' }],
+  });
+  await expect(card.locator('li')).toHaveCount(1);
+  await expect(card).not.toContainText('Other chat');
+  // The CLI reports the outcome after the reply: history records it and the list empties.
+  await page.evaluate(
+    ({ tool, conversationId, runId }) => {
+      const host = (window as any).hostBackground;
+      host({
+        kind: 'tool',
+        conversationId,
+        runId,
+        tool: { ...tool, revision: 2, status: 'complete', elapsedMs: 70_000 },
+      });
+      host({ kind: 'snapshot', conversationId, runs: [] });
+    },
+    { tool: server, conversationId, runId },
+  );
+  await expect(card).toHaveCount(0);
+  await expect(call.locator('summary')).toContainText('Completed');
+  await expect(call.locator('summary')).toContainText('1m 10s');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem('test-workspace')!)
+            .conversations[0].messages.at(-1)
+            .blocks.find((b: any) => b.tool)?.tool.status,
+      ),
+    )
+    .toBe('complete');
+  expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).not.toContain(
+    'PRIVATE_',
+  );
+  // A window that loads later asks the host for its current lists.
+  await page.evaluate(
+    (snapshot) => localStorage.setItem('test-background-work', JSON.stringify([snapshot])),
+    {
+      conversationId,
+      runs: [
+        { id: 'claude:watch', runId, kind: 'monitor', label: 'Build failures', elapsedMs: 1000 },
+      ],
+    },
+  );
+  await page.reload();
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.locator('.conversation-item').first().click();
+  await expect(card.locator('li')).toHaveText([/Build failures\s*Monitor\s*\d+s/]);
+});

@@ -1,4 +1,5 @@
 mod artifacts;
+mod background_work;
 mod badges;
 mod cli_queries;
 mod context;
@@ -154,6 +155,11 @@ async fn read_usage(
 
 #[tauri::command]
 fn live_account_updates(state: State<'_, live_usage::LiveUsage>) -> Vec<live_usage::Update> {
+    state.snapshots()
+}
+
+#[tauri::command]
+fn background_work(state: State<'_, background_work::Registry>) -> Vec<background_work::Snapshot> {
     state.snapshots()
 }
 
@@ -799,6 +805,7 @@ pub fn run() {
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
         .manage(live_usage::LiveUsage::default())
+        .manage(background_work::Registry::default())
         .setup(|app| {
             // Release parked CLI processes that stayed idle past their limit.
             let handle = app.handle().clone();
@@ -885,6 +892,7 @@ pub fn run() {
             list_models,
             read_usage,
             live_account_updates,
+            background_work,
             manage_account,
             read_context,
             search_mentions,

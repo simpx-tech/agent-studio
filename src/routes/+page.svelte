@@ -71,6 +71,7 @@
     loadModels,
     readUsage,
     watchAccountUpdates,
+    watchBackgroundWork,
     watchUsageRefresh,
     accountUsageRevision,
     generateTitle,
@@ -112,6 +113,12 @@
   import { forkConversation, forkPoint, forkFitsWorkspace } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
+  import {
+    combineBackgroundWork,
+    replyBackgroundWork,
+    type BackgroundWorkEvent,
+    type HostBackgroundWork,
+  } from '$lib/background-work';
   import WindowTitlebar from '$lib/components/WindowTitlebar.svelte';
   import BrowserStatus from '$lib/components/BrowserStatus.svelte';
   import WorkspaceLogin from '$lib/components/WorkspaceLogin.svelte';
@@ -655,6 +662,29 @@
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
   );
   const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
+  // Background work this computer still runs for each chat, including after its reply.
+  let hostBackground = $state<Record<string, HostBackgroundWork>>({});
+  const activeBackground = $derived(
+    combineBackgroundWork(
+      replyBackgroundWork(observedReply),
+      activeId ? hostBackground[activeId] : undefined,
+    ),
+  );
+  function applyBackgroundWork(event: BackgroundWorkEvent) {
+    if (event.kind === 'snapshot') {
+      if (event.runs.length)
+        hostBackground[event.conversationId] = { runs: event.runs, at: Date.now() };
+      else delete hostBackground[event.conversationId];
+      return;
+    }
+    // A task that finished after its reply ended records its outcome in that reply.
+    const reply = workspace.conversations
+      .find((c) => c.id === event.conversationId)
+      ?.messages.find((m) => m.role === 'assistant' && m.runId === event.runId);
+    if (!reply) return;
+    applyRunEvent(reply, { kind: 'tool', tool: event.tool });
+    saveSoon();
+  }
   const switchNotices = $derived(
     replySwitches(active?.messages ?? [], (id) => accountName(workspace.fleet, id)),
   );
@@ -837,6 +867,7 @@
   onMount(() => {
     let disposed = false;
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
+    const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
       () => (loaded && view === 'chat' ? activeId || undefined : undefined),
@@ -1062,6 +1093,7 @@
     return () => {
       disposed = true;
       stopAccountUpdates();
+      stopBackgroundWork();
       stopUsageRefresh();
       stopNotificationView();
       stopNotifications();
@@ -3424,10 +3456,8 @@
                 >
               </div>{/if}
             {#if historyError}<p class="attachment-notice" role="alert">{historyError}</p>{/if}
-            {#if observedReply && activeRunning}<PlanPanel
-                message={observedReply}
-                compact
-              /><BackgroundWork message={observedReply} />{/if}
+            {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
+            <BackgroundWork runs={activeBackground} />
             {#if selectedComputerOffline}<div class="setup-hint">
                 <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
                   ? selectedComputer.hostName

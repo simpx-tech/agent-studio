@@ -55,6 +55,8 @@ pub struct Process {
     /// Claude's latest running cost total in this process. It continues while the process
     /// lives; a fresh process starts at zero because parked processes never exit cleanly.
     pub cost_total: f64,
+    /// Claude background work this process keeps running after the replies that started it.
+    pub background: Option<Arc<crate::background_work::Watch>>,
 }
 
 impl Process {
@@ -122,6 +124,7 @@ impl Process {
             next_id: 1,
             turns: 0,
             cost_total: 0.0,
+            background: None,
         })
     }
     pub fn alive(&mut self) -> bool {
@@ -156,6 +159,10 @@ impl Process {
     }
     pub async fn kill(&mut self) {
         self.exe.kill(&mut self.child).await;
+        // Background work belongs to the terminated process tree.
+        if let Some(watch) = self.background.take() {
+            watch.ended();
+        }
     }
 }
 

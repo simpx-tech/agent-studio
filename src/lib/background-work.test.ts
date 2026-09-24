@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolActivity } from './activity';
-import { runningBackgroundWork } from './background-work';
+import type { Message } from './domain';
+import {
+  backgroundWorkEventSchema,
+  combineBackgroundWork,
+  replyBackgroundWork,
+  runningBackgroundWork,
+} from './background-work';
 
 const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
   id,
@@ -44,5 +50,66 @@ describe('background work', () => {
       { id: 'unnamed', kind: 'command', label: 'Background command' },
     ]);
     expect(runningBackgroundWork([tool('plain')])).toEqual([]);
+  });
+
+  it('adds what the host still runs after the reply, advancing its time from receipt', () => {
+    const reply = {
+      role: 'assistant',
+      status: 'running',
+      blocks: [
+        {
+          type: 'activity',
+          text: 'Run command',
+          tool: tool('build', { background: true, detail: 'Build', elapsedMs: 4000 }),
+        },
+      ],
+    } as unknown as Message;
+    const own = replyBackgroundWork(reply);
+    expect(own).toEqual([{ id: 'build', kind: 'command', label: 'Build', elapsedMs: 4000 }]);
+    expect(replyBackgroundWork({ ...reply, status: 'complete' })).toEqual([]);
+    expect(replyBackgroundWork(undefined)).toEqual([]);
+    const host = {
+      at: 1000,
+      runs: [
+        { id: 'build', runId: 'run-2', kind: 'command' as const, label: 'Build', elapsedMs: 3000 },
+        {
+          id: 'server',
+          runId: 'run-1',
+          kind: 'command' as const,
+          label: 'Server',
+          elapsedMs: 9000,
+        },
+      ],
+    };
+    // The running reply reports its own call; the host adds the earlier reply's server.
+    expect(combineBackgroundWork(own, host)).toEqual([
+      own[0],
+      { id: 'server', kind: 'command', label: 'Server', elapsedMs: 9000, since: 1000 },
+    ]);
+    expect(combineBackgroundWork([], undefined)).toEqual([]);
+  });
+
+  it('accepts only bounded host lists and outcomes', () => {
+    const snapshot = {
+      kind: 'snapshot',
+      conversationId: 'chat',
+      runs: [{ id: 'claude:a', runId: 'run', kind: 'monitor', label: 'Watch', elapsedMs: 5 }],
+    };
+    expect(backgroundWorkEventSchema.safeParse(snapshot).success).toBe(true);
+    for (const invalid of [
+      { ...snapshot, runs: [{ ...snapshot.runs[0], kind: 'agent' }] },
+      { ...snapshot, runs: [{ ...snapshot.runs[0], elapsedMs: -1 }] },
+      { ...snapshot, conversationId: '' },
+      { ...snapshot, runs: Array(33).fill(snapshot.runs[0]) },
+      { kind: 'tool', conversationId: 'chat', runId: 'run', tool: { id: 'claude:a' } },
+    ])
+      expect(backgroundWorkEventSchema.safeParse(invalid).success).toBe(false);
+    const outcome = backgroundWorkEventSchema.parse({
+      kind: 'tool',
+      conversationId: 'chat',
+      runId: 'run',
+      tool: { ...tool('claude:a', { status: 'complete', background: true }), stdout: 'PRIVATE' },
+    });
+    expect(JSON.stringify(outcome)).not.toContain('PRIVATE');
   });
 });

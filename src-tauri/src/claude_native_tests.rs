@@ -126,6 +126,102 @@ async fn installed_claude_stop_ends_a_waiting_reply_and_keeps_the_process() {
     assert!(started.elapsed() < Duration::from_secs(200));
 }
 
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_background_work_outlives_its_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":"This is an Agent Studio integration test in a disposable folder. Start two things in the background and do not wait for either: a stand-in dev server for me to try, node -e \"setInterval(()=>{},1000)\" , and a short job, sleep 15 && echo JOB_DONE . Reply right away that both started; I will check the job myself later."}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let (tx, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let watch = crate::background_work::Watch::new(
+        "conversation",
+        Box::new(move |event| {
+            let _ = tx.send(event);
+        }),
+    );
+    let mut process = crate::pool::Process::new_observed(
+        exe,
+        command.spawn().unwrap(),
+        "real-background-work-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+        crate::background_work::observer(None, Some(watch.clone())),
+    )
+    .unwrap();
+    process.background = Some(watch.clone());
+    let channel = EventSink::new(|_| Ok(()));
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(180),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    assert_eq!(result.expect("Installed CLI failed").0, "complete");
+    // As after a production reply: the watch takes over and the process waits, parked.
+    watch.detach(&request.run_id);
+    process.park();
+    let listed = watch.snapshot().runs;
+    let outcome = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match reported.recv().await {
+                Some(crate::background_work::Event::Tool(outcome)) => break Some(outcome),
+                Some(_) => {}
+                None => break None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let left = watch.snapshot().runs;
+    // Releasing the process stops the server it still ran. Release it before asserting,
+    // so a failure never leaves the stand-in server running.
+    process.kill().await;
+    let mut stopped = vec![];
+    while let Ok(event) = reported.try_recv() {
+        if let crate::background_work::Event::Tool(outcome) = event {
+            stopped.push((outcome.tool.id.clone(), outcome.tool.status.clone()));
+        }
+    }
+    assert_eq!(
+        listed.len(),
+        2,
+        "both launches outlive the reply: {listed:?}"
+    );
+    let outcome = outcome.expect("The parked process never reported the job's outcome");
+    assert_eq!(outcome.tool.status, "complete");
+    assert!(outcome.tool.background);
+    // Within a second of the 15-second job: the launch returns just after it starts.
+    let elapsed = outcome.tool.elapsed_ms.unwrap();
+    assert!((14_000..60_000).contains(&elapsed), "{elapsed}");
+    assert_eq!(left.len(), 1, "the server keeps running: {left:?}");
+    assert_eq!(
+        stopped,
+        [(left[0].id.clone(), "cancelled".to_string())],
+        "{stopped:?}"
+    );
+    assert!(watch.snapshot().runs.is_empty());
+    eprintln!("Listed {listed:?}; the job finished after {elapsed} ms while parked.");
+}
+
 async fn reply_cost(
     process: &mut crate::pool::Process,
     request: &RunRequest,

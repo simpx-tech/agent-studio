@@ -372,15 +372,26 @@ pub(crate) async fn execute(
                 .as_ref()
                 .map(|s| s.id().to_string())
                 .unwrap_or_default();
-            crate::pool::Process::new_observed(
+            // Work a chat leaves running in the background outlives its reply.
+            let watch = request
+                .conversation_id
+                .as_deref()
+                .filter(|_| parkable && channel.is_some() && request.agent.provider == "claude")
+                .map(|conversation| crate::background_work::watch(&app, conversation));
+            let mut process = crate::pool::Process::new_observed(
                 exe.clone(),
                 child,
                 fingerprint,
                 session_id,
-                channel
-                    .as_ref()
-                    .and_then(|_| crate::live_usage::observer(&app, &request.agent.provider)),
-            )?
+                crate::background_work::observer(
+                    channel
+                        .as_ref()
+                        .and_then(|_| crate::live_usage::observer(&app, &request.agent.provider)),
+                    watch.clone(),
+                ),
+            )?;
+            process.background = watch;
+            process
         }
     };
     let reused = process.turns > 0;
@@ -451,6 +462,9 @@ pub(crate) async fn execute(
         .await
     };
     process.turns += 1;
+    if let Some(watch) = &process.background {
+        watch.detach(&request.run_id);
+    }
     // A finished or cleanly interrupted turn leaves the CLI waiting for the next reply.
     let park = parkable
         && process.healthy
@@ -561,6 +575,7 @@ async fn stream_turn(
             biased;
             _ = tool_tick.tick() => {
                 for event in decoder.tool_tick() {
+                    if let (Some(watch), RunEvent::Tool { tool }) = (&process.background, &event) { watch.tool(&request.run_id, tool); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
             }
@@ -758,7 +773,10 @@ async fn stream_turn(
                             awaiting_follow_up = expecting;
                         }
                     }
-                    for event in decoder.decode(&request.agent.provider, &line) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                    for event in decoder.decode(&request.agent.provider, &line) {
+                        if let (Some(watch), RunEvent::Tool { tool }) = (&process.background, &event) { watch.tool(&request.run_id, tool); }
+                        if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                    }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
                 }
                 None => {

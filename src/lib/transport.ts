@@ -20,6 +20,7 @@ import {
   type AccountAction,
 } from './live-usage';
 import { retainRunEvent } from './activity';
+import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
@@ -364,6 +365,34 @@ export async function redeemResetCredit(connectionId: string) {
   resetAttempts.delete(scope);
   requestUsageRefresh(connectionId);
   return result.outcome!;
+}
+// Background work this computer's chat processes keep running, including after their
+// replies ended. Viewers have no host process of their own and see saved outcomes only.
+export function watchBackgroundWork(listener: (event: BackgroundWorkEvent) => void) {
+  if (!desktop()) return () => {};
+  let stopped = false;
+  let unlisten = () => {};
+  const receive = (value: unknown) => {
+    const parsed = backgroundWorkEventSchema.safeParse(value);
+    if (parsed.success && !stopped) listener(parsed.data);
+  };
+  void (async () => {
+    try {
+      const stop = await listen<unknown>('studio-background-work', ({ payload }) =>
+        receive(payload),
+      );
+      if (stopped) stop();
+      else unlisten = stop;
+      for (const snapshot of await invoke<unknown[]>('background_work'))
+        receive({ ...(snapshot as object), kind: 'snapshot' });
+    } catch {
+      /* Older hosts report background work only while its reply runs. */
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten();
+  };
 }
 let accountUpdatesStarted = false;
 export const accountUsageRevision = (connection?: string) =>
