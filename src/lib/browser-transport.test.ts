@@ -8,6 +8,24 @@ vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => false,
   Channel: class {},
 }));
+// Stands in for the Viewer's IndexedDB workspace store.
+const cache = vi.hoisted(() => new Map<string, string>());
+vi.mock('./browser-store', () => ({
+  browserWorkspaceStore: {
+    get: async (keys: string[]) => keys.map((key) => cache.get(key)),
+    put: async (entries: [string, string][], current = () => true) => {
+      await Promise.resolve();
+      if (!current()) return false;
+      for (const [key, value] of entries) cache.set(key, value);
+      return true;
+    },
+    update: async (change: (keys: string[]) => { put?: [string, string][]; remove?: string[] }) => {
+      const { put = [], remove = [] } = change([...cache.keys()]);
+      for (const key of remove) cache.delete(key);
+      for (const [key, value] of put) cache.set(key, value);
+    },
+  },
+}));
 
 function memoryStorage(): Storage {
   const data = new Map<string, string>();
@@ -29,6 +47,7 @@ function memoryStorage(): Storage {
 
 beforeEach(() => {
   vi.resetModules();
+  cache.clear();
   vi.stubGlobal('localStorage', memoryStorage());
   vi.stubGlobal('navigator', {});
   vi.stubGlobal(
@@ -124,6 +143,7 @@ it('pins browser requests to the authenticated workspace and switches without me
   await transport.pollRelay();
   await transport.saveWorkspace(workspace());
   const oldScope = transport.workspaceStorageScope()!;
+  expect([...cache.keys()]).toEqual([`${oldScope}:sync`, oldScope]);
   const oldWorkspace = structuredClone(workspace());
   await transport.connectRelay(window.location.origin, 'bob');
   await transport.saveWorkspace(oldWorkspace, oldScope);
@@ -134,7 +154,7 @@ it('pins browser requests to the authenticated workspace and switches without me
   expect(data.bob.fleet.computers.map((computer) => computer.name)).toEqual([
     'bob private computer',
   ]);
-  expect(localStorage.getItem(oldScope)).toBeNull();
+  expect([...cache.keys()].filter((key) => key.startsWith(oldScope))).toEqual([]);
   for (const [path, options] of fetcher.mock.calls) {
     if (path !== '/v1/browser-session')
       expect((options.headers as Record<string, string>)['X-Workspace-Id']).toMatch(/alice|bob/);

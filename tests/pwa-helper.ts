@@ -14,6 +14,37 @@ export async function seedAndPairPwa(page: Page, url: string, token: string, wor
   await signInPwa(page, token);
 }
 
+// Reads the Viewer's private workspace cache from IndexedDB without creating the database.
+export function viewerCache(page: Page): Promise<Record<string, string>> {
+  return page.evaluate(
+    () =>
+      new Promise<Record<string, string>>((resolve, reject) => {
+        const request = indexedDB.open('agent-studio');
+        request.onupgradeneeded = () => request.transaction!.abort();
+        request.onerror = () =>
+          request.error?.name === 'AbortError' ? resolve({}) : reject(request.error);
+        request.onsuccess = () => {
+          const database = request.result;
+          const entries: Record<string, string> = {};
+          const cursor = database
+            .transaction('private-workspaces')
+            .objectStore('private-workspaces')
+            .openCursor();
+          cursor.onerror = () => reject(cursor.error);
+          cursor.onsuccess = () => {
+            if (!cursor.result) {
+              database.close();
+              resolve(entries);
+              return;
+            }
+            entries[String(cursor.result.key)] = cursor.result.value;
+            cursor.result.continue();
+          };
+        };
+      }),
+  );
+}
+
 export async function signInPwa(page: Page, token: string) {
   await expect(page.getByRole('heading', { name: 'Sign in to your workspace' })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0);

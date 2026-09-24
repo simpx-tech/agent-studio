@@ -26,6 +26,7 @@ import { createContextCache, type ContextSnapshot, type NativeInstructions } fro
 import { mcpActionSchema, type McpAction, type McpResult } from './mcp';
 import { pluginActionSchema, type PluginAction, type PluginResult } from './plugins';
 import {
+  adoptBrowserStorage,
   browserScopeKey,
   browserSessionSignal,
   browserWorkspaceFromServer,
@@ -34,6 +35,7 @@ import {
   readBrowserWorkspace,
   type BrowserWorkspaceScope,
 } from './browser-workspace';
+import { browserWorkspaceStore } from './browser-store';
 import {
   executionHost,
   sharedContextChoice,
@@ -424,6 +426,18 @@ function accountHeartbeat() {
 }
 export const workspaceStorageScope = () =>
   desktop() ? 'desktop' : browserScope ? browserScopeKey(browserScope) : null;
+let browserStorageAdopted: Promise<void> | undefined;
+// Earlier releases saved the Viewer's cache in localStorage; move it once per page.
+async function workspaceStore() {
+  browserStorageAdopted ??= adoptBrowserStorage(browserWorkspaceStore, localStorage).catch(
+    (error) => {
+      browserStorageAdopted = undefined;
+      throw error;
+    },
+  );
+  await browserStorageAdopted;
+  return browserWorkspaceStore;
+}
 export const relayConnectionGeneration = () => (relayConnected ? relayGeneration : null);
 export function watchRelayConnection(listener: (ready: boolean) => void): () => void {
   relayConnectionListeners.add(listener);
@@ -454,7 +468,8 @@ async function endBrowserSession(reason: string) {
   contextCache = makeContextCache();
   updatePendingBadge(0);
   await runtime?.replaceBrowserWorkspace?.(initialWorkspace(), reason);
-  if (previousScope) clearBrowserWorkspace(localStorage, previousScope);
+  if (previousScope)
+    await clearBrowserWorkspace(await workspaceStore(), localStorage, previousScope);
 }
 export function watchBrowserSession(): () => void {
   if (desktop()) return () => {};
@@ -467,9 +482,10 @@ export function watchBrowserSession(): () => void {
       /* clear safely */
     }
     if (workspaceId === browserWorkspaceId) return;
+    // The other tab's sign-in discards this workspace's cache if clearing it fails here.
     void endBrowserSession(
       'This browser’s workspace changed in another tab. Reload or pair again to continue.',
-    );
+    ).catch(() => {});
   };
   window.addEventListener('storage', changed);
   return () => window.removeEventListener('storage', changed);
@@ -727,21 +743,31 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
       throw new Error('The relay returned a different private workspace.');
     const preserveInitialNotification = restoring && !browserScope;
     const scope = { url, workspaceId: browserWorkspaceId, instanceId: state.instanceId };
-    const saved = readBrowserWorkspace(localStorage, scope);
-    discardOtherBrowserWorkspaces(localStorage, scope);
+    const current = () => generation === relayGeneration;
+    const store = await workspaceStore();
+    if (!current()) return false;
+    const saved = await readBrowserWorkspace(store, scope);
+    if (!current()) return false;
+    await discardOtherBrowserWorkspaces(store, localStorage, scope);
     const remote = sharedSchema.parse(state.workspace);
     if (!saved) {
       // Write the authenticated baseline first. If the page closes before its first
       // poll, a saved snapshot can still be merged against a verified checkpoint.
-      localStorage.setItem(
-        `${browserScopeKey(scope)}:sync`,
-        JSON.stringify({
-          url,
-          instanceId: state.instanceId,
-          base: remote,
-        }),
+      await store.put(
+        [
+          [
+            `${browserScopeKey(scope)}:sync`,
+            JSON.stringify({
+              url,
+              instanceId: state.instanceId,
+              base: remote,
+            }),
+          ],
+        ],
+        current,
       );
     }
+    if (!current()) return false;
     browserScope = scope;
     baseline = saved?.base ?? remote;
     relayInstance = state.instanceId;
@@ -873,8 +899,12 @@ export async function pollRelay(): Promise<Presence[] | null> {
     // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
     const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
     if (desktop()) await invoke('save_sync_state', { value: checkpoint });
-    else if (browserScope)
-      localStorage.setItem(`${browserScopeKey(browserScope)}:sync`, JSON.stringify(checkpoint));
+    else if (browserScope) {
+      const key = `${browserScopeKey(browserScope)}:sync`;
+      const store = await workspaceStore();
+      await store.put([[key, JSON.stringify(checkpoint)]], () => generation === relayGeneration);
+      if (generation !== relayGeneration) return null;
+    }
     baseline = accepted;
     const connections = Object.entries(runtime.statuses()).map(([connectionId, s]) => ({
       connectionId,
@@ -922,9 +952,11 @@ export async function resolveRelaySettings(): Promise<string> {
       backup = await invoke<string>('export_workspace', { workspace: runtime.workspace() });
     else {
       if (!browserScope) throw new Error('Pair this device with your private workspace first.');
-      localStorage.setItem(
-        `${browserScopeKey(browserScope)}:backup`,
-        JSON.stringify(runtime.workspace()),
+      const key = `${browserScopeKey(browserScope)}:backup`;
+      const store = await workspaceStore();
+      await store.put(
+        [[key, JSON.stringify(runtime.workspace())]],
+        () => generation === relayGeneration && relayConnected,
       );
       backup = 'this browser’s local backup';
     }
@@ -1332,7 +1364,8 @@ export async function saveWorkspace(
   } else {
     // A queued save from a former session must never be written to the new user's cache.
     if (!scope || scope !== workspaceStorageScope()) return;
-    localStorage.setItem(scope, JSON.stringify(workspace));
+    const store = await workspaceStore();
+    await store.put([[scope, JSON.stringify(workspace)]], () => scope === workspaceStorageScope());
   }
   updatePendingBadge(pendingChatCount(workspace.conversations));
 }

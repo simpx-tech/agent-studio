@@ -7,7 +7,7 @@ import { createWorkspace } from '../relay/workspaces';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { seedAndPairPwa, signInPwa } from './pwa-helper';
+import { seedAndPairPwa, signInPwa, viewerCache } from './pwa-helper';
 
 async function createTemplate(
   page: Page,
@@ -261,16 +261,11 @@ test('production relay sync shares templates across devices, rejects stale edits
     await page.getByRole('button', { name: 'Save template' }).click();
     await expect
       .poll(
-        async () =>
-          second.evaluate(() => {
-            const key = Object.keys(localStorage).find(
-              (key) =>
-                key.startsWith('agent-studio.private-workspace.v1:') &&
-                !key.endsWith(':sync') &&
-                !key.endsWith(':backup'),
-            );
-            return key ? JSON.parse(localStorage.getItem(key)!).inputTemplates?.[0]?.body : '';
-          }),
+        async () => {
+          const cache = await viewerCache(second);
+          const key = Object.keys(cache).find((key) => !/:(sync|backup)$/.test(key));
+          return key ? JSON.parse(cache[key]).inputTemplates?.[0]?.body : '';
+        },
         { timeout: 15000 },
       )
       .toBe('New version {{topic}}');
