@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronDown, FileCode2, GitBranch, Layers, ListChecks } from '@lucide/svelte';
+  import { ChevronDown, FileCode2, Layers, ListChecks, Workflow } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import type { Message } from '$lib/domain';
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
@@ -109,7 +109,7 @@
         onclick={() => toggle(`workflow:${run.id}`)}
       >
         <ChevronDown size={13} class="disclosure" aria-hidden="true" />
-        <GitBranch size={13} aria-hidden="true" />
+        <Workflow size={13} aria-hidden="true" />
         <span class="progress-label">{run.name || 'Claude workflow'}</span><span class="count"
           >{nativeWorkflowStatus(run.status, message.status)}</span
         >
