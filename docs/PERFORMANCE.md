@@ -1,0 +1,48 @@
+# Performance
+
+The app freezes whenever one of two threads stays busy: the page's main thread, which runs the Svelte app and Chromium's style and layout, or the native UI thread, which runs synchronous Tauri commands and also handles the window's input. Three freezes found on 2026-09-24 show the patterns to avoid (details in [VERIFICATION.md](VERIFICATION.md)):
+
+- **Selecting text in long chats.** Collapsed Work history and diffs stayed in the page. Chromium hides closed `<details>` content with `content-visibility: hidden`, and a selection that crossed it restyled all of it at once, for seconds in the largest chat.
+- **Relay polls.** Every 2.5 seconds, whatever chat was open, the poll copied, validated, merged, applied and saved the whole workspace, and the native side wrote two 2.5 MB files on the UI thread. Idle chats stalled for hundreds of milliseconds per poll.
+- **Opening Connections.** Every request routed to an account copied the whole workspace just to read the computer and account registry, about nine times in one task.
+
+## Rules
+
+- **Hot paths never touch the whole workspace.** Relay polls and other timers, `$effect` and `$derived`, streamed run events, navigation (opening a chat, Connections or Settings), typing, scrolling and selection must not copy, validate, serialize, merge or save everything. Read what they need: `runtime.fleet()` for computers, environments, accounts and connections, one conversation by id, or `runtime.revision()` to tell whether anything changed. `runtime.workspace()`, `$state.snapshot(workspace)`, `JSON.stringify(workspace)` and `structuredClone(workspace)` copy every conversation, about 100 ms for a 2.4 MB workspace in a development build. They belong to saves, a relay sync after either side changed, conflict resolution, forks, exports and other explicit actions.
+- **Nothing is sent or saved without a change.** Relay polls only ask for the revision while both sides hold the same data, a poll whose relay holds exactly what it sent applies nothing, and the sync checkpoint is written only when it changes. Compare workspaces with `sameShared`, which ignores list order, never with whole-JSON equality.
+- **Native commands are async.** A synchronous `#[tauri::command] fn` runs on the UI thread. Declare commands `async` and move file, process, network and lock waits into `tauri::async_runtime::spawn_blocking` or async I/O. Only commands that return from memory in constant time stay synchronous.
+- **Collapsed content stays out of the page.** Work history, tool groups and calls, sub-agent details, Files edited and each file diff render on first expansion through `revealedDisclosures` (`src/lib/disclosures.ts`), and `styles.css` keeps closed `<details>` content `display: none` through `::details-content`.
+- **Selectors stay local.** Never pair `:has()` with a universal selector such as `.app-shell:has(…) *`; see [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md).
+
+## Guards
+
+`src/lib/performance-guards.test.ts` runs with the unit tests:
+
+- **Whole-workspace copies.** It parses every `.ts` module and Svelte `<script>` block under `src` with the TypeScript compiler and finds each zero-argument `.workspace()` call (the runtime's whole-workspace getter) and each `$state.snapshot`, `JSON.stringify` or `structuredClone` of `workspace`. Each copy is named by its file and enclosing functions, such as `src/lib/transport.ts › pollRelay` or `src/routes/+page.svelte › $effect callback`, and the list must equal `allowedWorkspaceCopies`, which records why each copy is acceptable. A new copy fails, and so does a removed one until its entry goes, so an allowance never passes to new code.
+- **Synchronous commands.** It reads every `#[tauri::command]` function under `src-tauri/src`, checks that the scan found each command registered in `generate_handler!`, and requires the synchronous ones to equal `synchronousCommands`, again with a reason for each.
+- **Closed disclosures.** `styles.css` must keep the `::details-content` rule.
+- Self-checks run the detectors on synthetic code, so a broken detector fails too.
+
+`src/lib/style-selectors.test.ts` rejects `:has()` with universal selectors, `src/lib/transport.test.ts` counts whole-workspace reads for routed requests and relay polls, and `tests/work-history.spec.ts` checks that collapsed activity renders nothing until opened.
+
+`tests/performance.spec.ts` loads `tests/large-workspace.ts`, a 2.4 MB workspace shaped like the heaviest local one: 24 chats (the longest has 34 messages), 64 replies with tool activity, progress comments, reasoning and recorded file diffs, and 12 ready connections on this computer. A real in-process relay serves it, and the desktop mock serializes each save as native IPC does.
+
+- **Idle relay**, on every run including CI: after the first sync, eight seconds of polls send heartbeats and revision probes but never download or upload `v1/state`, and save neither the workspace nor its checkpoint.
+- **Responsiveness**: Connections shows all 12 accounts, the longest chat keeps fewer than 500 elements inside collapsed disclosures, and the selection covers the chat. Local runs also hold the longest main-thread task within these budgets on the development server; CI skips them because hosted runners share CPUs unpredictably:
+
+| Interaction | Budget | Current code | Regression it catches |
+| --- | --- | --- | --- |
+| Eight idle seconds | 100 ms | no task over 50 ms | polls that merge and save everything: 370–440 ms each |
+| Opening Connections | 250 ms | about 60 ms | fleet lookups copying the workspace: 1.9 s |
+| Dragging a selection, then Ctrl+A | 150 ms | no task over 50 ms | a general safety net |
+
+Rendering collapsed content up front put about 8,500 elements inside closed disclosures. The element count catches that regression, because current style rules keep even that selection under 50 ms. Tighten a budget when the code gets faster, and keep them loose enough for a full parallel run.
+
+## Profiling
+
+- Reproduce in headless Edge (`channel: 'msedge'`), the engine of the installed WebView2 runtime, with the fixture or the real workspace (`%LOCALAPPDATA%\com.vinicius.agentstudio\workspace.json`) loaded through a desktop mock. Print only timings and counts, never workspace content.
+- Pair the page with a relay as `tests/performance.spec.ts` does. The plain desktop mock has none, which hides the cost of relay polls.
+- Page main thread: a `longtask` PerformanceObserver; CDP `Performance.getMetrics` (`TaskDuration`, `RecalcStyleDuration`, `RecalcStyleCount`); the CDP profiler for scripts; a trace with `disabled-by-default-blink.debug` for per-selector `SelectorStats`. Compare main-thread time rather than frame gaps, which drift between runs.
+- Native UI thread: from PowerShell, time `SendMessageTimeout(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1000, …)` to the app's `MainWindowHandle` every 20 ms while the page runs. A page stall still answers within milliseconds; a busy UI thread does not. Watching `workspace.json` and `sync-state.json` modification times every second shows steady-state saves.
+- Native builds: use an isolated debug build with its own identifier and a scratch `CARGO_TARGET_DIR`, launched with `npm run start:windows -- -Executable <exe>` ([WINDOWS-STARTUP.md](WINDOWS-STARTUP.md)).
+- Comparing commits or reintroducing a regression: export each with `git archive` into a scratch directory, link `node_modules` to the checkout, and give the copy's `vite.config.js` its own `cacheDir` (and `server.fs.allow` for the linked `node_modules`). A second Vite server in the same checkout shares `node_modules/.vite` and re-optimizes its dependencies while another server may be serving the app. Run its browser tests with `STUDIO_TEST_PORT` set to a free port.

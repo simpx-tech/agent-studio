@@ -233,8 +233,10 @@ async fn list_models(
 }
 
 #[tauri::command]
-fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, String> {
-    profiles::installation(&app)
+async fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, String> {
+    tauri::async_runtime::spawn_blocking(move || profiles::installation(&app))
+        .await
+        .map_err(|_| "Cannot read the installation identity")?
 }
 #[tauri::command]
 async fn discover_wsl(app: tauri::AppHandle) -> Result<wsl::Discovery, String> {
@@ -333,8 +335,16 @@ async fn relay_request(
 ) -> Result<serde_json::Value, String> {
     relay::request(&state, &method, &path, body).await
 }
+// File commands read and write megabytes. Keep them off the UI thread: it also handles window
+// input, so a blocked save made text selection and typing stall. performance-guards.test.ts
+// fails when a new command runs synchronously; see docs/PERFORMANCE.md.
 #[tauri::command]
-fn load_sync_state(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+async fn load_sync_state(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_sync_state(&app))
+        .await
+        .map_err(|_| "Cannot read sync checkpoint")?
+}
+fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
     let path = app
         .path()
         .app_local_data_dir()
@@ -348,8 +358,6 @@ fn load_sync_state(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, S
         Err(_) => Err("Cannot read sync checkpoint".into()),
     }
 }
-// Workspace and checkpoint saves write megabytes. Keep them off the UI thread: it also
-// handles window input, so a blocked save made text selection and typing stall.
 #[tauri::command]
 async fn save_sync_state(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || write_sync_state(&app, &value))
@@ -385,7 +393,12 @@ async fn detect_providers() -> Vec<providers::ProviderStatus> {
     vec![a, b, c]
 }
 #[tauri::command]
-fn load_workspace(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+async fn load_workspace(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_workspace(&app))
+        .await
+        .map_err(|_| "Cannot read the saved workspace. Check your app data permissions.")?
+}
+fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
     let path = app
         .path()
         .app_local_data_dir()
@@ -717,7 +730,15 @@ async fn sign_in(
 }
 
 #[tauri::command]
-fn export_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<String, String> {
+async fn export_workspace(
+    app: tauri::AppHandle,
+    workspace: serde_json::Value,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || write_export(&app, &workspace))
+        .await
+        .map_err(|_| "Cannot write workspace export")?
+}
+fn write_export(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result<String, String> {
     if workspace["version"] != 3 {
         return Err("Invalid workspace".into());
     }
@@ -727,7 +748,7 @@ fn export_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Resu
         .map_err(|_| "Cannot locate Downloads")?;
     std::fs::create_dir_all(&root).map_err(|_| "Cannot create Downloads directory")?;
     let path = root.join(format!("agent-studio-{}.json", uuid::Uuid::new_v4()));
-    let bytes = serde_json::to_vec_pretty(&workspace).map_err(|_| "Cannot encode export")?;
+    let bytes = serde_json::to_vec_pretty(workspace).map_err(|_| "Cannot encode export")?;
     std::fs::write(&path, bytes).map_err(|_| "Cannot write workspace export")?;
     Ok(path.to_string_lossy().into_owned())
 }

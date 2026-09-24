@@ -2,13 +2,25 @@ use std::io::Write;
 use tauri::Manager;
 
 #[tauri::command]
-pub fn save_artifact(
+pub async fn save_artifact(
     app: tauri::AppHandle,
     source: String,
     filename: String,
     language: String,
 ) -> Result<String, String> {
-    if source.len() > 512_000 || !matches!(language.as_str(), "html" | "svg") {
+    // File work stays off the UI thread, which also handles the window's input.
+    tauri::async_runtime::spawn_blocking(move || write(&app, &source, &filename, &language))
+        .await
+        .map_err(|_| "Could not finish saving the artifact")?
+}
+
+fn write(
+    app: &tauri::AppHandle,
+    source: &str,
+    filename: &str,
+    language: &str,
+) -> Result<String, String> {
+    if source.len() > 512_000 || !matches!(language, "html" | "svg") {
         return Err("Artifact exceeds the supported size or format".into());
     }
     let name: String = filename
