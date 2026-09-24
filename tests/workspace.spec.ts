@@ -2536,8 +2536,8 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await page.locator('.conversation-item').first().click();
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
   await page.getByLabel('Work history', { exact: true }).click();
-  await expect(page.locator('[data-category="search"]')).toHaveCount(2);
   await page.locator('.activity-group > summary').click();
+  await expect(page.locator('[data-category="search"]')).toHaveCount(2);
   await page.locator('[data-category="agent"] > summary').click();
   await expect(page.getByRole('region', { name: 'Sub-agent: Source checker' })).toContainText(
     'Failed',
@@ -2613,9 +2613,9 @@ test('tool targets stream inline and finish as expandable work history below the
       });
   }
   await expect(page.locator('.activity-summary')).toHaveCount(0);
-  await expect(page.locator('.live-activity')).toContainText('/fixture/src/app.ts');
   await expect(page.getByText('Lines read', { exact: true })).not.toBeVisible();
   await page.locator('.activity-group > summary').first().click();
+  await expect(page.locator('.live-activity')).toContainText('/fixture/src/app.ts');
   await page.locator('.tool-card > summary').first().click();
   await expect(page.getByText('Lines read', { exact: true })).toBeVisible();
   expect(
@@ -2646,6 +2646,12 @@ test('tool targets stream inline and finish as expandable work history below the
       .evaluateAll((elements) =>
         elements.map((el) => (el.querySelector('.tool-title') ?? el).textContent?.trim()),
       );
+  // Groups render their calls when expanded, so compare with every group open.
+  const openGroups = async () => {
+    const closed = page.locator('.activity-group:not([open]) > summary');
+    while (await closed.count()) await closed.first().click();
+  };
+  await openGroups();
   const liveSequence = await historySequence();
   await page.screenshot({ path: 'artifacts/activity-inline-browser.png' });
   for (const tool of tools)
@@ -2705,10 +2711,10 @@ test('tool targets stream inline and finish as expandable work history below the
   await summary.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByText('I will inspect the source files.', { exact: true })).toBeVisible();
+  await openGroups();
   expect(await historySequence()).toEqual(liveSequence);
   await expect(page.getByLabel('Filter activity')).toHaveCount(0);
   await expect(page.locator('.tool-card')).toHaveCount(5);
-  await page.locator('.activity-group > summary').last().click();
   await page
     .locator('.tool-card')
     .filter({ hasText: 'Run the fixture tests' })
@@ -2748,6 +2754,7 @@ test('tool targets stream inline and finish as expandable work history below the
   await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
   await expect(usageSummary).toHaveAttribute('aria-expanded', 'false');
   await summary.click();
+  await openGroups();
   expect(await historySequence()).toEqual(liveSequence);
   await expect(
     page.getByText('The file is readable. I will find the components next.', { exact: true }),

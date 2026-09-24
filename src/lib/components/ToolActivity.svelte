@@ -35,6 +35,7 @@
   import type { Message, ContentBlock } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
   import { openLink } from '$lib/transport';
+  import { revealedDisclosures } from '$lib/disclosures';
   let {
     tools,
     replyStatus,
@@ -79,6 +80,7 @@
   };
   const entries = $derived(activityEntries(blocks, tools, finalText));
   const groups = $derived(groupActivityEntries(entries));
+  const disclosures = revealedDisclosures();
   function topLevel(tool: ToolActivity) {
     return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
   }
@@ -124,8 +126,13 @@
     tool.category === 'hook'
       ? tool.path || tool.facts?.find((fact) => fact.label === 'Hook')?.value
       : tool.query || tool.path || tool.detail}
-  <details class="tool-card" class:nested data-category={tool.category}>
-    <summary>
+  <details
+    class="tool-card"
+    class:nested
+    data-category={tool.category}
+    ontoggle={disclosures.opened(`tool:${tool.id}`)}
+  >
+    <summary onclick={disclosures.reveal(`tool:${tool.id}`)}>
       <Icon size={15} aria-hidden="true" />
       <span class="tool-title"
         >{tool.name}{#if preview}<span class="query-preview" title={preview}>{preview}</span
@@ -143,95 +150,107 @@
       </span>
       <ChevronDown size={13} class="disclosure" />
     </summary>
-    <div class="tool-body">
-      {#if tool.progress}<p
-          class="tool-progress"
-          title="Only progress metadata is recorded. Tool output and terminal input remain private."
-        >
-          {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
-        </p>{/if}
-      {#if tool.parentId && !nested}<p class="tool-note">
-          By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
-            'sub-agent'}
-        </p>{/if}
-      {#if tool.query}<div class="metadata-label">
-          {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
-        </div>
-        <p class="tool-query">{tool.query}</p>{/if}
-      {#if tool.path}<div class="metadata-label">
-          {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
-        </div>
-        <code class="tool-path">{tool.path}</code>{/if}
-      {#if tool.detail}<p>{tool.detail}</p>{/if}
-      {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
-      {#if tool.facts?.length}<dl class="tool-facts">
-          {#each tool.facts as fact}<div>
-              <dt>{fact.label}</dt>
-              <dd>{fact.value}</dd>
-            </div>{/each}
-        </dl>{/if}
-      {#if !tool.query && !tool.path && !tool.detail && !tool.background && !tool.facts?.length && !tool.sources.length && !tool.agents.length}
-        <p class="tool-note">
-          {tool.status === 'running' && replyStatus === 'running'
-            ? 'Waiting for tool details…'
-            : 'No details were recorded for this tool call.'}
-        </p>
-      {/if}
-      {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
-        <p class="tool-note">The provider did not include source links in this activity.</p>
-      {/if}
-      {#if tool.sources.length}<ul class="tool-sources">
-          {#each tool.sources.filter((s) => safeSourceUrl(s.url)) as source}
-            <li>
-              <a
-                href={safeSourceUrl(source.url)}
-                onclick={(event) => visit(event, source.url)}
-                title={source.url}
-              >
-                <span>{source.title || source.url}</span><ExternalLink
-                  size={12}
-                  aria-hidden="true"
-                />
-              </a>
-            </li>
-          {/each}
-        </ul>{/if}
-      {#each tool.agents as agent (agent.id)}
-        <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
-          <div class="agent-heading">
-            <GitBranch size={14} /><strong>{agent.name}</strong>{@render statusMark(
-              activityDisplayStatus(agent, replyStatus),
-            )}
+    {#if disclosures.has(`tool:${tool.id}`)}<div class="tool-body">
+        {#if tool.progress}<p
+            class="tool-progress"
+            title="Only progress metadata is recorded. Tool output and terminal input remain private."
+          >
+            {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
+          </p>{/if}
+        {#if tool.parentId && !nested}<p class="tool-note">
+            By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
+              'sub-agent'}
+          </p>{/if}
+        {#if tool.query}<div class="metadata-label">
+            {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
           </div>
-          {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
-            <p class="tool-note">
-              Delegated by {tool.agents.find((a) => a.id === agent.parentId)?.name}
-            </p>
-          {/if}
-          {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
-          {#if agent.messages?.length}<details class="agent-result">
-              <summary><ChevronDown size={12} />Messages</summary>
-              {#each agent.messages as message (message.id)}
-                <p>{message.text}</p>
-                {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
-                    Message incomplete
-                  </p>{/if}
-              {/each}
-              {#if agent.messagesTruncated}<p class="tool-note">
-                  Additional child text was omitted at the activity limit.
-                </p>{/if}
-            </details>{/if}
-          {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
-              child,
-              true,
-            )}{/each}
-          {#if agent.result}<details class="agent-result">
-              <summary><ChevronDown size={12} />Result</summary>
-              <p>{agent.result}</p>
-            </details>{/if}
-        </section>
-      {/each}
-    </div>
+          <p class="tool-query">{tool.query}</p>{/if}
+        {#if tool.path}<div class="metadata-label">
+            {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
+          </div>
+          <code class="tool-path">{tool.path}</code>{/if}
+        {#if tool.detail}<p>{tool.detail}</p>{/if}
+        {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
+        {#if tool.facts?.length}<dl class="tool-facts">
+            {#each tool.facts as fact}<div>
+                <dt>{fact.label}</dt>
+                <dd>{fact.value}</dd>
+              </div>{/each}
+          </dl>{/if}
+        {#if !tool.query && !tool.path && !tool.detail && !tool.background && !tool.facts?.length && !tool.sources.length && !tool.agents.length}
+          <p class="tool-note">
+            {tool.status === 'running' && replyStatus === 'running'
+              ? 'Waiting for tool details…'
+              : 'No details were recorded for this tool call.'}
+          </p>
+        {/if}
+        {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
+          <p class="tool-note">The provider did not include source links in this activity.</p>
+        {/if}
+        {#if tool.sources.length}<ul class="tool-sources">
+            {#each tool.sources.filter((s) => safeSourceUrl(s.url)) as source}
+              <li>
+                <a
+                  href={safeSourceUrl(source.url)}
+                  onclick={(event) => visit(event, source.url)}
+                  title={source.url}
+                >
+                  <span>{source.title || source.url}</span><ExternalLink
+                    size={12}
+                    aria-hidden="true"
+                  />
+                </a>
+              </li>
+            {/each}
+          </ul>{/if}
+        {#each tool.agents as agent (agent.id)}
+          <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
+            <div class="agent-heading">
+              <GitBranch size={14} /><strong>{agent.name}</strong>{@render statusMark(
+                activityDisplayStatus(agent, replyStatus),
+              )}
+            </div>
+            {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
+              <p class="tool-note">
+                Delegated by {tool.agents.find((a) => a.id === agent.parentId)?.name}
+              </p>
+            {/if}
+            {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
+            {#if agent.messages?.length}<details
+                class="agent-result"
+                ontoggle={disclosures.opened(`messages:${agent.id}`)}
+              >
+                <summary onclick={disclosures.reveal(`messages:${agent.id}`)}
+                  ><ChevronDown size={12} />Messages</summary
+                >
+                {#if disclosures.has(`messages:${agent.id}`)}
+                  {#each agent.messages as message (message.id)}
+                    <p>{message.text}</p>
+                    {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
+                        Message incomplete
+                      </p>{/if}
+                  {/each}
+                  {#if agent.messagesTruncated}<p class="tool-note">
+                      Additional child text was omitted at the activity limit.
+                    </p>{/if}
+                {/if}
+              </details>{/if}
+            {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
+                child,
+                true,
+              )}{/each}
+            {#if agent.result}<details
+                class="agent-result"
+                ontoggle={disclosures.opened(`result:${agent.id}`)}
+              >
+                <summary onclick={disclosures.reveal(`result:${agent.id}`)}
+                  ><ChevronDown size={12} />Result</summary
+                >
+                {#if disclosures.has(`result:${agent.id}`)}<p>{agent.result}</p>{/if}
+              </details>{/if}
+          </section>
+        {/each}
+      </div>{/if}
   </details>
 {/snippet}
 
@@ -248,8 +267,8 @@
           )}
           {@const elapsed = Math.max(-1, ...active.map((tool) => tool.elapsedMs ?? -1))}
           {@const progressTool = active.findLast((tool) => tool.progress)}
-          <details class="activity-group">
-            <summary title="Expand for tool details">
+          <details class="activity-group" ontoggle={disclosures.opened(group.key)}>
+            <summary title="Expand for tool details" onclick={disclosures.reveal(group.key)}>
               {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
               {:else}<Icon size={16} aria-hidden="true" />{/if}
               <span class="group-label">{summary.label}</span>
@@ -265,9 +284,9 @@
               {#if summary.issue}{@render statusMark(summary.issue)}{/if}
               <ChevronDown size={13} class="disclosure" aria-hidden="true" />
             </summary>
-            <div class="group-tools">
-              {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
-            </div>
+            {#if disclosures.has(group.key)}<div class="group-tools">
+                {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
+              </div>{/if}
           </details>
         {/if}
       {:else if group.kind === 'reasoning'}
@@ -308,14 +327,14 @@
   >
     {#if replyStatus === 'running'}{@render timeline()}
     {:else}
-      <details class="activity-summary">
-        <summary aria-label="Work history">
+      <details class="activity-summary" ontoggle={disclosures.opened('history')}>
+        <summary aria-label="Work history" onclick={disclosures.reveal('history')}>
           <ChevronDown size={14} class="disclosure" />
           <span class="history-title">Work history</span>
           {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
             >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
         </summary>
-        {@render timeline()}
+        {#if disclosures.has('history')}{@render timeline()}{/if}
       </details>
     {/if}
     {#if linkError}<p role="alert">{linkError}</p>{/if}

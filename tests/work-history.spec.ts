@@ -244,3 +244,65 @@ for (const mobile of [false, true])
     await expect(history.locator('.progress-message')).toHaveCount(2);
     await expect(history).toHaveCSS('border-bottom-width', '1px');
   });
+
+test('collapsed disclosures render on first expansion and keep nested expansion', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await page.getByLabel('Message', { exact: true }).fill('Check the source');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  const emit = (event: unknown) => page.evaluate((e) => (window as any).emitCapability(e), event);
+  await emit({ kind: 'progress', id: 'plan', revision: 1, text: 'I will read the source.' });
+  for (const [id, path] of [
+    ['read1', '/fixture/app.ts'],
+    ['read2', '/fixture/menu.ts'],
+  ])
+    await emit({
+      kind: 'tool',
+      tool: {
+        id,
+        operation: 'read',
+        name: 'Read',
+        category: 'tool',
+        revision: 1,
+        status: 'complete',
+        path,
+        facts: [{ label: 'Lines read', value: '8' }],
+        sources: [],
+        agents: [],
+      },
+    });
+  // A collapsed group has no calls in the page while the reply runs.
+  const group = page.locator('.activity-group');
+  await expect(group.locator(':scope > summary')).toHaveText('Read 2 files');
+  await expect(group.locator('.tool-card')).toHaveCount(0);
+  await emit({ kind: 'text', text: 'The source is fine.' });
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  const history = page.locator('.activity-summary');
+  await expect(history).not.toHaveAttribute('open', '');
+  await expect(history.locator('.activity-timeline')).toHaveCount(0);
+  // Closed content is out of rendering rather than Chromium's content-visibility: hidden,
+  // which a text selection across it restyles all at once.
+  const content = () => history.evaluate((el) => getComputedStyle(el, '::details-content').display);
+  expect(await content()).toBe('none');
+  await history.locator(':scope > summary').click();
+  await expect(history.getByText('I will read the source.', { exact: true })).toBeVisible();
+  expect(await content()).toBe('block');
+  await expect(group.locator('.tool-card')).toHaveCount(0);
+  await group.locator(':scope > summary').click();
+  await expect(group.locator('.tool-card')).toHaveCount(2);
+  const card = group.locator('.tool-card').first();
+  await expect(card.locator('.tool-body')).toHaveCount(0);
+  await card.locator(':scope > summary').click();
+  await expect(card.getByText('Lines read', { exact: true })).toBeVisible();
+  // Collapsing keeps what was rendered, so reopening restores the nested expansion.
+  await history.locator(':scope > summary').click();
+  await expect(history).not.toHaveAttribute('open', '');
+  expect(await content()).toBe('none');
+  await history.locator(':scope > summary').click();
+  await expect(group).toHaveAttribute('open', '');
+  await expect(card).toHaveAttribute('open', '');
+  await expect(card.getByText('Lines read', { exact: true })).toBeVisible();
+});

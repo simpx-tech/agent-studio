@@ -291,13 +291,13 @@ for (const mobile of [false, true])
     if (mobile) await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
     await page.getByRole('tab', { name: /^History/ }).click();
     await page.locator('.conversation-item').first().click();
-    await expect(page.locator('.file-changes')).toHaveCount(2);
+    // Each reply renders its file changes when Files edited first opens.
+    const filesToggles = page.getByRole('button', { name: /Files edited/ });
+    await expect(filesToggles).toHaveCount(2);
+    await expect(page.locator('.file-changes')).toHaveCount(0);
+    await filesToggles.first().click();
+    await expect(page.locator('.file-changes')).toHaveCount(1);
     const first = page.locator('.file-changes').first();
-    await expect(first.locator('.changes-toolbar')).not.toBeVisible();
-    await page
-      .getByRole('button', { name: /Files edited/ })
-      .first()
-      .click();
     await expect(first.locator('.changes-toolbar')).toBeVisible();
     await first.getByRole('tab', { name: 'All chat changes', exact: true }).click();
     await expect(first.locator('.changed-file')).toHaveCount(5);

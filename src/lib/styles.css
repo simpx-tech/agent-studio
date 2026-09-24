@@ -56,6 +56,12 @@ button:not(:disabled):hover {
 summary {
   border-radius: var(--radius-sm);
 }
+/* Chromium hides closed disclosure content with content-visibility: hidden, so a text
+   selection that crosses it restyles all of it at once, freezing long chats for seconds.
+   Take it out of rendering instead, as other engines do. */
+details:not([open])::details-content {
+  display: none;
+}
 input:where(:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'])),
 textarea,
 select {

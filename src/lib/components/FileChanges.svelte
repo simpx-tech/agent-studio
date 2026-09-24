@@ -6,6 +6,7 @@
     relativeFilePath,
     type ChangeSummary,
   } from '$lib/file-changes';
+  import { revealedDisclosures } from '$lib/disclosures';
   let {
     response,
     chat,
@@ -37,6 +38,10 @@
     ),
   );
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
+  // Diffs render when their file is first expanded.
+  const diffs = revealedDisclosures();
+  const fileKey = (file: ChangeSummary['files'][number]) =>
+    `${mode}:${file.previousPath ?? ''}:${file.path}`;
   function displayPath(path: string) {
     return relativeFilePath(path, base);
   }
@@ -100,9 +105,10 @@
               ? 'No net file changes recorded.'
               : 'File changes were not recorded for this response.'}
           </p>{/if}
-        {#each visibleFiles as file (`${mode}:${file.previousPath ?? ''}:${file.path}`)}
-          <details class="changed-file">
-            <summary title={file.path}>
+        {#each visibleFiles as file (fileKey(file))}
+          {@const key = fileKey(file)}
+          <details class="changed-file" ontoggle={diffs.opened(key)}>
+            <summary title={file.path} onclick={diffs.reveal(key)}>
               <ChevronRight size={13} class="disclosure" />
               <span class="file-path"
                 >{#if file.previousPath}<span class="previous-path"
@@ -121,44 +127,46 @@
                   class="muted">Diff unavailable</span
                 >{/if}
             </summary>
-            {#if file.unavailable}<p class="diff-unavailable">{file.unavailable}</p>
-            {:else if !file.hunks?.length}<p class="diff-unavailable">
-                {file.kind === 'renamed'
-                  ? 'File renamed without recorded text changes.'
-                  : 'Empty file; no text diff.'}
-              </p>
-            {:else}
-              <!-- The scrollable diff needs keyboard access on narrow screens. -->
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-              <div
-                class="diff-scroll"
-                role="region"
-                aria-label={`Diff for ${file.path}`}
-                tabindex="0"
-              >
-                <table class="diff-table" aria-label={`Changes in ${file.path}`}>
-                  <thead class="sr-only"
-                    ><tr><th>Original line</th><th>Updated line</th><th>Change</th></tr></thead
-                  >
-                  <tbody
-                    >{#each file.hunks as hunk}
-                      {#if file.kind !== 'added'}<tr class="hunk"
-                          ><td colspan="3"
-                            >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
-                          ></tr
-                        >{/if}
-                      {#each diffRows(hunk) as row}<tr
-                          class:added={row.text.startsWith('+')}
-                          class:removed={row.text.startsWith('-')}
-                        >
-                          <td class="line-number">{row.old ?? ''}</td><td class="line-number"
-                            >{row.next ?? ''}</td
-                          ><td class="diff-code"><code>{row.text}</code></td>
-                        </tr>{/each}
-                    {/each}</tbody
-                  >
-                </table>
-              </div>
+            {#if diffs.has(key)}
+              {#if file.unavailable}<p class="diff-unavailable">{file.unavailable}</p>
+              {:else if !file.hunks?.length}<p class="diff-unavailable">
+                  {file.kind === 'renamed'
+                    ? 'File renamed without recorded text changes.'
+                    : 'Empty file; no text diff.'}
+                </p>
+              {:else}
+                <!-- The scrollable diff needs keyboard access on narrow screens. -->
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+                <div
+                  class="diff-scroll"
+                  role="region"
+                  aria-label={`Diff for ${file.path}`}
+                  tabindex="0"
+                >
+                  <table class="diff-table" aria-label={`Changes in ${file.path}`}>
+                    <thead class="sr-only"
+                      ><tr><th>Original line</th><th>Updated line</th><th>Change</th></tr></thead
+                    >
+                    <tbody
+                      >{#each file.hunks as hunk}
+                        {#if file.kind !== 'added'}<tr class="hunk"
+                            ><td colspan="3"
+                              >@@ −{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@</td
+                            ></tr
+                          >{/if}
+                        {#each diffRows(hunk) as row}<tr
+                            class:added={row.text.startsWith('+')}
+                            class:removed={row.text.startsWith('-')}
+                          >
+                            <td class="line-number">{row.old ?? ''}</td><td class="line-number"
+                              >{row.next ?? ''}</td
+                            ><td class="diff-code"><code>{row.text}</code></td>
+                          </tr>{/each}
+                      {/each}</tbody
+                    >
+                  </table>
+                </div>
+              {/if}
             {/if}
           </details>
         {/each}

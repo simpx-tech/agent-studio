@@ -68,6 +68,9 @@ mark in the script and `BrandMark.svelte` together.
 - **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
   `--shadow-lg`/`--shadow-xl` for popovers and menus.
 - **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded
-  groups indent their children behind a hairline.
+  groups indent their children behind a hairline. Closed `<details>` content is `display: none`
+  rather than Chromium's `content-visibility: hidden`, which a text selection across it restyles
+  all at once. Chat disclosures render their contents on first expansion (`revealedDisclosures`
+  in `src/lib/disclosures.ts`) and keep them afterwards.
 - **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
   them; avoid nesting more than one card level.

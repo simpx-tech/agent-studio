@@ -100,7 +100,9 @@ for (const mobile of [false, true])
     await expect(buildCard.locator('summary')).not.toContainText('13m');
     await buildCard.locator('summary').click();
     await expect(buildCard).toContainText('Background work above the message box tracks it.');
-    await expect(group.locator('.subagent')).toContainText('In background');
+    const agentsCard = group.locator('.tool-card', { hasText: 'Sub-agents' });
+    await agentsCard.locator(':scope > summary').click();
+    await expect(agentsCard.locator('.subagent')).toContainText('In background');
     await page.screenshot({
       path: `artifacts/background-work/live-${mobile ? 'mobile' : 'desktop'}.png`,
     });

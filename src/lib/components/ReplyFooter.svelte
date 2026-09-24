@@ -20,8 +20,12 @@
     folder?: string;
   } = $props();
   let expanded = $state<'usage' | 'files' | null>(null);
+  // File changes render when first opened and then stay, keeping their scope and list
+  // expansion across panel switches. Unopened diffs stay out of the page.
+  let filesOpened = $state(false);
   function toggle(section: 'usage' | 'files') {
     expanded = expanded === section ? null : section;
+    if (section === 'files') filesOpened = true;
   }
   const usage = $derived(message.usage);
   const elapsed = $derived(
@@ -177,7 +181,9 @@
     aria-labelledby={message.id + '-files-toggle'}
     hidden={expanded !== 'files'}
   >
-    <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {folder} />
+    {#if filesOpened}
+      <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {folder} />
+    {/if}
   </div>
 </div>
 

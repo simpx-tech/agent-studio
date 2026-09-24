@@ -69,7 +69,7 @@ for (const mobile of [false, true]) {
     await emit(1, false);
     const group = page.locator('.activity-group').last();
     await group.locator(':scope > summary').click();
-    const card = group.locator('.tool-card').filter({ has: page.locator('.subagent') });
+    const card = group.locator('.tool-card').filter({ hasText: 'Sub-agents' });
     await card.locator(':scope > summary').click();
     const child = page.getByRole('region', { name: 'Sub-agent: Fixture reader', exact: true });
     const messages = child.locator('.agent-result').filter({ hasText: 'Messages' });
