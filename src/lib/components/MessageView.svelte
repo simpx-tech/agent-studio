@@ -20,6 +20,8 @@
   import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import PlanPanel from './PlanPanel.svelte';
+  import BackgroundWork from './BackgroundWork.svelte';
+  import type { BackgroundRun } from '$lib/background-work';
   import VisualizationView from './VisualizationView.svelte';
   import QuestionForm from './QuestionForm.svelte';
   import PlanApproval from './PlanApproval.svelte';
@@ -42,6 +44,7 @@
     openArtifact,
     fork,
     forkDisabled = false,
+    background = [],
   }: {
     message: Message;
     agent: ChatSettings;
@@ -58,6 +61,8 @@
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
     fork?: () => void;
     forkDisabled?: boolean;
+    /** Background work this reply started that still runs. */
+    background?: BackgroundRun[];
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
@@ -77,9 +82,10 @@
   const content = $derived(replyContent(text, message.visualizations));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
-  const savedProgress = $derived(
+  // Plans, workflows and background work are one-line summaries at the end of their reply,
+  // while it runs and afterwards; each expands for details.
+  const progress = $derived(
     message.role === 'assistant' &&
-      message.status !== 'running' &&
       (message.plan ||
         message.workflow ||
         message.nativeWorkflows?.runs.length ||
@@ -212,8 +218,9 @@
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
           Response stopped. Partial text has been kept.
         </p>{/if}
-      {#if artifacts.length || savedProgress}<div class="response-extras">
-          {#if savedProgress}<PlanPanel {message} compact />{/if}
+      {#if artifacts.length || progress || background.length}<div class="response-extras">
+          {#if progress}<PlanPanel {message} compact />{/if}
+          <BackgroundWork runs={background} />
           {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
               {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
                   <button
@@ -335,7 +342,8 @@
     align-items: flex-start;
   }
   .response-extras > :global(.plan-panel),
-  .response-extras > :global(.native-workflow-panel) {
+  .response-extras > :global(.native-workflow-panel),
+  .response-extras > :global(.background-work) {
     flex: 1 1 240px;
     min-width: 0;
     margin: 0;

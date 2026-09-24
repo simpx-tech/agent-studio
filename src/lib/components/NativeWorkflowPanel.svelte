@@ -1,8 +1,11 @@
 <script lang="ts">
   import { GitBranch, ChevronDown, Check, LoaderCircle, Circle } from '@lucide/svelte';
   import type { Message } from '$lib/domain';
+  import { revealedDisclosures } from '$lib/disclosures';
   import { formatReplyTime } from '$lib/replies';
   let { message, compact = false }: { message: Message; compact?: boolean } = $props();
+  // A one-line summary per run in its reply; phases and agents render when first expanded.
+  const disclosures = revealedDisclosures();
   function label(status: string) {
     if (['running', 'pending', 'paused'].includes(status) && message.status !== 'running')
       return message.status === 'cancelled' ? 'Stopped' : 'Unconfirmed';
@@ -23,70 +26,72 @@
 </script>
 
 {#each message.nativeWorkflows?.runs ?? [] as run (run.id)}
-  <details class="native-workflow-panel" class:compact open={message.status === 'running'}>
-    <summary
-      ><GitBranch size={16} /><strong>{run.name || 'Claude workflow'}</strong><span
-        >{label(run.status)}</span
-      ><ChevronDown size={14} /></summary
+  <details class="native-workflow-panel" class:compact ontoggle={disclosures.opened(run.id)}>
+    <summary onclick={disclosures.reveal(run.id)}
+      ><GitBranch size={16} /><strong title={run.name || 'Claude workflow'}
+        >{run.name || 'Claude workflow'}</strong
+      ><span>{label(run.status)}</span><ChevronDown size={14} /></summary
     >
-    <div class="workflow-body">
-      <div class="workflow-meta">
-        <span>Native Claude workflow</span><span
-          >{run.agents.filter((a) => a.status === 'complete').length}/{run.agents.length} agents complete</span
-        >
-        {#if run.tokens !== null}<span>{run.tokens.toLocaleString()} tokens</span>{/if}
-        {#if run.durationMs !== null}<span>{formatReplyTime(run.durationMs)}</span>{/if}
-      </div>
-      {#if run.description}<p>{run.description}</p>{/if}
-      {#each [...run.phases, ...(run.agents.some((a) => !run.phases.some((p) => p.index === a.phaseIndex)) ? [{ index: -1, title: 'Agents' }] : [])] as phase (phase.index)}
-        <section aria-label={phase.title}>
-          <h3>{phase.title}</h3>
-          {#each run.agents.filter( (a) => (phase.index === -1 ? !run.phases.some((p) => p.index === a.phaseIndex) : a.phaseIndex === phase.index) ) as agent (agent.index)}
-            <details class="workflow-agent">
-              <summary>
-                {#if label(agent.status) === 'Complete'}<Check
-                    size={14}
-                  />{:else if label(agent.status) === 'Running'}<LoaderCircle
-                    size={14}
-                    class="spinning"
-                  />{:else}<Circle size={14} />{/if}
-                <strong>{agent.label || `Agent ${agent.index}`}</strong><span
-                  >{label(agent.status)}</span
-                ><ChevronDown size={12} />
-              </summary>
-              <div class="agent-detail">
-                <div class="workflow-meta">
-                  {#if agent.model}<span>{agent.model}</span>{/if}
-                  {#if agent.tokens !== null}<span>{agent.tokens.toLocaleString()} tokens</span
-                    >{/if}
-                  {#if agent.durationMs !== null}<span>{formatReplyTime(agent.durationMs)}</span
-                    >{/if}
+    {#if disclosures.has(run.id)}<div class="workflow-body">
+        <div class="workflow-meta">
+          <span>Native Claude workflow</span><span
+            >{run.agents.filter((a) => a.status === 'complete').length}/{run.agents.length} agents complete</span
+          >
+          {#if run.tokens !== null}<span>{run.tokens.toLocaleString()} tokens</span>{/if}
+          {#if run.durationMs !== null}<span>{formatReplyTime(run.durationMs)}</span>{/if}
+        </div>
+        {#if run.description}<p>{run.description}</p>{/if}
+        {#each [...run.phases, ...(run.agents.some((a) => !run.phases.some((p) => p.index === a.phaseIndex)) ? [{ index: -1, title: 'Agents' }] : [])] as phase (phase.index)}
+          <section aria-label={phase.title}>
+            <h3>{phase.title}</h3>
+            {#each run.agents.filter( (a) => (phase.index === -1 ? !run.phases.some((p) => p.index === a.phaseIndex) : a.phaseIndex === phase.index) ) as agent (agent.index)}
+              <details class="workflow-agent">
+                <summary>
+                  {#if label(agent.status) === 'Complete'}<Check
+                      size={14}
+                    />{:else if label(agent.status) === 'Running'}<LoaderCircle
+                      size={14}
+                      class="spinning"
+                    />{:else}<Circle size={14} />{/if}
+                  <strong>{agent.label || `Agent ${agent.index}`}</strong><span
+                    >{label(agent.status)}</span
+                  ><ChevronDown size={12} />
+                </summary>
+                <div class="agent-detail">
+                  <div class="workflow-meta">
+                    {#if agent.model}<span>{agent.model}</span>{/if}
+                    {#if agent.tokens !== null}<span>{agent.tokens.toLocaleString()} tokens</span
+                      >{/if}
+                    {#if agent.durationMs !== null}<span>{formatReplyTime(agent.durationMs)}</span
+                      >{/if}
+                  </div>
+                  {#if agent.result}<p class="agent-result">{agent.result}</p>{:else}<p
+                      class="muted"
+                    >
+                      Claude has not reported a result preview for this agent.
+                    </p>{/if}
                 </div>
-                {#if agent.result}<p class="agent-result">{agent.result}</p>{:else}<p class="muted">
-                    Claude has not reported a result preview for this agent.
-                  </p>{/if}
-              </div>
-            </details>
-          {/each}
-        </section>
-      {/each}
-      {#if !run.phases.length && !run.agents.length}<p class="muted">
-          {message.status === 'running' && ['pending', 'running'].includes(run.status)
-            ? 'Waiting for Claude’s phase and agent updates.'
-            : 'Claude did not report phase or agent details.'}
-        </p>{/if}
-      {#if run.error}<p role="alert">{run.error}</p>{/if}
-      {#if run.limited}<p class="muted">
-          The display limit was reached. Claude may have additional phases or agents.
-        </p>{/if}
-      {#if run.scriptPath}<details class="script-location">
-          <summary>Workflow script</summary><code>{run.scriptPath}</code>
-          <p class="muted">
-            Ask Claude to save this script as a project or personal workflow to run it again by
-            name.
-          </p>
-        </details>{/if}
-    </div>
+              </details>
+            {/each}
+          </section>
+        {/each}
+        {#if !run.phases.length && !run.agents.length}<p class="muted">
+            {message.status === 'running' && ['pending', 'running'].includes(run.status)
+              ? 'Waiting for Claude’s phase and agent updates.'
+              : 'Claude did not report phase or agent details.'}
+          </p>{/if}
+        {#if run.error}<p role="alert">{run.error}</p>{/if}
+        {#if run.limited}<p class="muted">
+            The display limit was reached. Claude may have additional phases or agents.
+          </p>{/if}
+        {#if run.scriptPath}<details class="script-location">
+            <summary>Workflow script</summary><code>{run.scriptPath}</code>
+            <p class="muted">
+              Ask Claude to save this script as a project or personal workflow to run it again by
+              name.
+            </p>
+          </details>{/if}
+      </div>{/if}
   </details>
 {/each}
 {#if message.nativeWorkflows?.limited}<p class="muted">
@@ -128,7 +133,9 @@
     flex: 1;
     min-width: 0;
     font-weight: 600;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   summary > span {
     color: var(--text-muted);

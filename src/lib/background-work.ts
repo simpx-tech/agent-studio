@@ -68,22 +68,31 @@ export const backgroundWorkEventSchema = z.discriminatedUnion('kind', [
 export type BackgroundWorkEvent = z.infer<typeof backgroundWorkEventSchema>;
 export type HostBackgroundWork = { runs: z.infer<typeof hostRunSchema>[]; at: number };
 
-/** A running reply's own work first, then what the host still runs for the chat. */
-export function combineBackgroundWork(
-  reply: BackgroundRun[],
+const none: BackgroundRun[] = [];
+
+/**
+ * Background work a reply started: its own calls while it runs, then what the host still
+ * runs for it, including after the reply ended.
+ */
+export function messageBackgroundWork(
+  message: Message,
   host?: HostBackgroundWork,
 ): BackgroundRun[] {
-  const listed = new Set(reply.map((run) => run.id));
+  if (message.role !== 'assistant') return none;
+  const own = replyBackgroundWork(message);
+  const listed = new Set(own.map((run) => run.id));
+  const later = (host?.runs ?? []).filter(
+    (run) => message.runId && run.runId === message.runId && !listed.has(run.id),
+  );
+  if (!own.length && !later.length) return none;
   return [
-    ...reply,
-    ...(host?.runs ?? [])
-      .filter((run) => !listed.has(run.id))
-      .map((run) => ({
-        id: run.id,
-        kind: run.kind,
-        label: run.label,
-        elapsedMs: run.elapsedMs,
-        since: host!.at,
-      })),
+    ...own,
+    ...later.map((run) => ({
+      id: run.id,
+      kind: run.kind,
+      label: run.label,
+      elapsedMs: run.elapsedMs,
+      since: host!.at,
+    })),
   ];
 }

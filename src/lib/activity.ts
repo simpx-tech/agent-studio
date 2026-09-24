@@ -290,7 +290,7 @@ export function visibleActivityStatus(
 
 /**
  * The timeline status of a call or sub-agent. Work the CLI moved to the background returned
- * to the model, so it never reads as running there: Background work above the composer
+ * to the model, so it never reads as running there: Background work at the end of its reply
  * shows it instead. A completed reply leaves it running; after a stop or failure its
  * outcome is unknown.
  */

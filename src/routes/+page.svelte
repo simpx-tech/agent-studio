@@ -114,8 +114,7 @@
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
   import {
-    combineBackgroundWork,
-    replyBackgroundWork,
+    messageBackgroundWork,
     type BackgroundWorkEvent,
     type HostBackgroundWork,
   } from '$lib/background-work';
@@ -171,8 +170,6 @@
   let preparingCommand = false;
   import { summarizeFileChanges } from '$lib/file-changes';
   import MessageView from '$lib/components/MessageView.svelte';
-  import PlanPanel from '$lib/components/PlanPanel.svelte';
-  import BackgroundWork from '$lib/components/BackgroundWork.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -664,12 +661,6 @@
   const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
   // Background work this computer still runs for each chat, including after its reply.
   let hostBackground = $state<Record<string, HostBackgroundWork>>({});
-  const activeBackground = $derived(
-    combineBackgroundWork(
-      replyBackgroundWork(observedReply),
-      activeId ? hostBackground[activeId] : undefined,
-    ),
-  );
   function applyBackgroundWork(event: BackgroundWorkEvent) {
     if (event.kind === 'snapshot') {
       if (event.runs.length)
@@ -3406,6 +3397,7 @@
               {#if active?.messages.length}
                 {#each active.messages as m, i (m.id)}<MessageView
                     message={m}
+                    background={messageBackgroundWork(m, hostBackground[active.id])}
                     {chatChanges}
                     folder={active.location?.path}
                     timeTotal={timeTotals.get(m.id)}
@@ -3456,8 +3448,6 @@
                 >
               </div>{/if}
             {#if historyError}<p class="attachment-notice" role="alert">{historyError}</p>{/if}
-            {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
-            <BackgroundWork runs={activeBackground} />
             {#if selectedComputerOffline}<div class="setup-hint">
                 <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
                   ? selectedComputer.hostName

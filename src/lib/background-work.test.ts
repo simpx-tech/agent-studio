@@ -3,7 +3,7 @@ import type { ToolActivity } from './activity';
 import type { Message } from './domain';
 import {
   backgroundWorkEventSchema,
-  combineBackgroundWork,
+  messageBackgroundWork,
   replyBackgroundWork,
   runningBackgroundWork,
 } from './background-work';
@@ -52,9 +52,10 @@ describe('background work', () => {
     expect(runningBackgroundWork([tool('plain')])).toEqual([]);
   });
 
-  it('adds what the host still runs after the reply, advancing its time from receipt', () => {
+  it('shows each reply the work it started, then what the host still runs for it', () => {
     const reply = {
       role: 'assistant',
+      runId: 'run-2',
       status: 'running',
       blocks: [
         {
@@ -72,21 +73,23 @@ describe('background work', () => {
       at: 1000,
       runs: [
         { id: 'build', runId: 'run-2', kind: 'command' as const, label: 'Build', elapsedMs: 3000 },
-        {
-          id: 'server',
-          runId: 'run-1',
-          kind: 'command' as const,
-          label: 'Server',
-          elapsedMs: 9000,
-        },
+        { id: 'watch', runId: 'run-2', kind: 'monitor' as const, label: 'Watch', elapsedMs: 50 },
+        { id: 'server', runId: 'run-1', kind: 'command' as const, label: 'Server', elapsedMs: 9 },
       ],
     };
-    // The running reply reports its own call; the host adds the earlier reply's server.
-    expect(combineBackgroundWork(own, host)).toEqual([
+    // The running reply reports its own call; the host adds its other work, never another reply's.
+    expect(messageBackgroundWork(reply, host)).toEqual([
       own[0],
-      { id: 'server', kind: 'command', label: 'Server', elapsedMs: 9000, since: 1000 },
+      { id: 'watch', kind: 'monitor', label: 'Watch', elapsedMs: 50, since: 1000 },
     ]);
-    expect(combineBackgroundWork([], undefined)).toEqual([]);
+    const earlier = { ...reply, runId: 'run-1', status: 'complete' } as Message;
+    expect(messageBackgroundWork(earlier, host)).toEqual([
+      { id: 'server', kind: 'command', label: 'Server', elapsedMs: 9, since: 1000 },
+    ]);
+    // Replies without work share one empty list, and user messages never have any.
+    const idle = { ...earlier, runId: 'run-0' } as Message;
+    expect(messageBackgroundWork(idle, host)).toBe(messageBackgroundWork(idle, undefined));
+    expect(messageBackgroundWork({ ...earlier, role: 'user' } as Message, host)).toEqual([]);
   });
 
   it('accepts only bounded host lists and outcomes', () => {

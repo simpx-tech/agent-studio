@@ -292,18 +292,28 @@ test('native workflow commands in chat retain reported phases and agents through
       plan: { revision: 2, steps: [{ id: 'a', title: 'Verify sources', status: 'running' }] },
     });
   }, nativeWorkflowFixture());
-  const panel = page.locator('.composer-area .native-workflow-panel');
+  // Workflow and plan progress are one-line summaries at the end of the running reply.
+  const panel = page.locator('.message .native-workflow-panel');
+  await expect(page.locator('.composer-area :is(.native-workflow-panel, .plan-panel)')).toHaveCount(
+    0,
+  );
+  await expect(panel.locator(':scope > summary')).toContainText('Running');
+  await expect(panel).not.toHaveAttribute('open', '');
+  await expect(panel.locator('.workflow-body')).toHaveCount(0);
+  await panel.locator(':scope > summary').click();
   await expect(panel).toContainText('1/2 agents complete');
   await expect(panel).toContainText('Review');
   await panel.locator('.workflow-agent summary').first().click();
   await expect(panel).toContainText('Route verified');
-  await expect(page.locator('.composer-area .plan-panel')).toContainText('Verify sources');
+  // The plan summary names the step in progress.
+  await expect(page.locator('.message .plan-panel > summary')).toContainText('Verify sources');
   await page.screenshot({ path: 'artifacts/native-workflow-progress-browser.png' });
   await page.getByRole('button', { name: 'Stop response' }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  // The same summary stays with the stopped reply, keeping its expansion.
   const saved = page.locator('.message .native-workflow-panel').last();
-  await expect(saved).toContainText('Stopped');
-  await saved.locator(':scope > summary').click();
+  await expect(saved.locator(':scope > summary')).toContainText('Stopped');
+  await expect(saved).toHaveAttribute('open', '');
   await expect(saved).toContainText('1/2 agents complete');
   await page.reload();
   await page.getByRole('tab', { name: /History/ }).click();
@@ -339,12 +349,16 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
     });
     (window as any).emitCapability({ kind: 'plan', plan: { revision: 1, steps: [] } });
   });
-  await expect(page.locator('.composer-area .plan-panel')).toContainText('1/2 complete');
+  const summary = page.locator('.message .plan-panel > summary');
+  await expect(summary).toContainText('1/2 complete');
+  await expect(summary).toContainText('Run checks');
   await page.evaluate(() => {
     (window as any).emitCapability({ kind: 'text', text: 'I could not run the checks.' });
     (window as any).finishCapabilities('complete');
   });
   const panel = page.locator('.message .plan-panel');
+  // A finished reply no longer names a step in progress.
+  await expect(summary).not.toContainText('Run checks');
   await panel.locator('summary').click();
   await expect(panel).toContainText('Not confirmed complete');
   await expect(panel).toContainText('Run checks');

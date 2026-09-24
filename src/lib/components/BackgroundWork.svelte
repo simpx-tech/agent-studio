@@ -2,12 +2,16 @@
   import { ChevronDown, Layers, LoaderCircle } from '@lucide/svelte';
   import { toolElapsed } from '$lib/activity';
   import type { BackgroundRun } from '$lib/background-work';
+  import { revealedDisclosures } from '$lib/disclosures';
   let { runs }: { runs: BackgroundRun[] } = $props();
   const kinds = { command: 'Command', monitor: 'Monitor', agent: 'Sub-agent' };
+  // A one-line summary in its reply; the list renders when first expanded.
+  const disclosures = revealedDisclosures();
+  let open = $state(false);
   let now = $state(Date.now());
   // Host lists arrive when work starts or ends; advance their times in between.
   $effect(() => {
-    if (!runs.some((run) => run.since != null)) return;
+    if (!open || !runs.some((run) => run.since != null)) return;
     now = Date.now();
     const timer = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(timer);
@@ -19,26 +23,28 @@
 </script>
 
 {#if runs.length}
-  <details class="background-work" open>
-    <summary
+  <details class="background-work" bind:open ontoggle={disclosures.opened('runs')}>
+    <summary onclick={disclosures.reveal('runs')}
       ><Layers size={16} aria-hidden="true" /><strong>Background work</strong><span
         >{runs.length} running</span
       ><ChevronDown size={14} aria-hidden="true" /></summary
     >
-    <ul aria-label="Running in the background">
-      {#each runs as run (run.id)}
-        {@const time = elapsed(run)}
-        <li>
-          <LoaderCircle size={14} class="spinning" aria-hidden="true" />
-          <span class="run-label" title={run.label}>{run.label}</span>
-          <small
-            >{kinds[run.kind]}{#if time != null}<span
-                title="Elapsed time recorded on the execution computer">{toolElapsed(time)}</span
-              >{/if}</small
-          >
-        </li>
-      {/each}
-    </ul>
+    {#if disclosures.has('runs')}
+      <ul aria-label="Running in the background">
+        {#each runs as run (run.id)}
+          {@const time = elapsed(run)}
+          <li>
+            <LoaderCircle size={14} class="spinning" aria-hidden="true" />
+            <span class="run-label" title={run.label}>{run.label}</span>
+            <small
+              >{kinds[run.kind]}{#if time != null}<span
+                  title="Elapsed time recorded on the execution computer">{toolElapsed(time)}</span
+                >{/if}</small
+            >
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </details>
 {/if}
 
@@ -47,7 +53,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     background: var(--surface-1);
-    margin: 0 0 10px;
+    margin: 0;
     overflow: hidden;
   }
   summary {
@@ -81,6 +87,9 @@
     flex: 1;
     min-width: 0;
     font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   summary > span {
     color: var(--text-muted);
