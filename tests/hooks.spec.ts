@@ -72,7 +72,7 @@ for (const mobile of [false, true]) {
     });
     await emit(hook(1, 'running'));
     const group = page.locator('.activity-group').last();
-    await expect(group.locator(':scope > summary')).toContainText('Running hooks');
+    await expect(group.locator(':scope > summary')).toContainText('Running 1 hook');
     await group.locator(':scope > summary').click();
     await group.locator('.tool-card > summary').click();
     await emit(hook(2, 'blocked'));

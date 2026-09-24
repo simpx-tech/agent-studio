@@ -65,11 +65,11 @@ it('retains hook revisions and blocked outcomes through checkpoint, sync and exp
   expect(checkpoint).toHaveLength(1);
   expect(checkpoint[0].tool?.status).toBe('blocked');
   expect(activityGroupSummary([hook(3, 'blocked')], 'complete')).toMatchObject({
-    label: 'Hooks',
+    label: '1 hook',
     issue: 'blocked',
   });
-  expect(activityGroupSummary([hook(1, 'running')], 'running').label).toBe('Running hooks');
-  expect(activityGroupSummary([hook(2, 'complete')], 'complete').label).toBe('Ran hooks');
+  expect(activityGroupSummary([hook(1, 'running')], 'running').label).toBe('Running 1 hook');
+  expect(activityGroupSummary([hook(2, 'complete')], 'complete').label).toBe('Ran 1 hook');
   expect(visibleActivityStatus('running', 'complete')).toBe('unknown');
   expect(visibleActivityStatus('running', 'cancelled')).toBe('cancelled');
 });

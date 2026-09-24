@@ -36,7 +36,7 @@ for (const mobile of [false, true])
     await emit(tool('read2', 'read', 'Read', { path: '/fixture/menu.ts' }));
     const groups = page.locator('.activity-group');
     await expect(groups).toHaveCount(1);
-    await expect(groups.first().locator(':scope > summary')).toHaveText('Read files');
+    await expect(groups.first().locator(':scope > summary')).toHaveText('Read 2 files');
     await expect(groups.first()).not.toHaveAttribute('open', '');
     await expect(page.locator('.tool-card').first()).not.toBeVisible();
     await groups.first().locator(':scope > summary').focus();
@@ -51,8 +51,11 @@ for (const mobile of [false, true])
       }),
     );
     await emit(tool('read3', 'read', 'Read', { path: '/fixture/tests.ts' }));
+    // Reading a file again adds a call but not another file.
+    await emit(tool('read4', 'read', 'Read', { path: '/fixture/app.ts' }));
     await expect(groups.first()).toHaveAttribute('open', '');
-    await expect(groups.first().locator('.tool-card')).toHaveCount(3);
+    await expect(groups.first().locator('.tool-card')).toHaveCount(4);
+    await expect(groups.first().locator(':scope > summary')).toHaveText('Read 3 files');
     await groups.first().locator('.tool-card > summary').nth(1).click();
     await expect(page.getByText('Lines read', { exact: true })).toBeVisible();
     await groups.first().locator(':scope > summary').focus();
@@ -73,7 +76,7 @@ for (const mobile of [false, true])
     );
     await expect(groups).toHaveCount(2);
     await expect(groups.last().locator(':scope > summary')).toContainText(
-      'Editing files and running commands',
+      'Editing 1 file and running 1 command',
     );
     await expect(groups.last()).not.toHaveAttribute('open', '');
     await page.getByLabel('Message', { exact: true }).fill('Keep my next message');
@@ -90,7 +93,7 @@ for (const mobile of [false, true])
       }),
     );
     await expect(groups.last().locator(':scope > summary')).toContainText('Failed');
-    await expect(groups.last().locator(':scope > summary')).not.toContainText('Edited files');
+    await expect(groups.last().locator(':scope > summary')).not.toContainText('Edited');
     await emit({ kind: 'text', text: 'The update is ready, but a check failed.' });
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
     const history = page.locator('.activity-summary');
@@ -100,8 +103,8 @@ for (const mobile of [false, true])
     await expect(history.getByLabel('Filter activity')).toHaveCount(0);
     await expect(groups).toHaveCount(2);
     await expect(groups.locator(':scope > summary')).toHaveText([
-      'Read files',
-      'File edits and commands Failed',
+      'Read 3 files',
+      'Edits to 1 file and 1 command Failed',
     ]);
     await expect(page.locator('.activity-group[open], .tool-card[open]')).toHaveCount(0);
     const sequence = () =>
@@ -118,9 +121,9 @@ for (const mobile of [false, true])
     expect(savedSequence).toEqual([
       'Connected',
       'I will check the source files.',
-      'Read files',
+      'Read 3 files',
       'The source is ready. I will update it and run the checks.',
-      'File edits and commands Failed',
+      'Edits to 1 file and 1 command Failed',
     ]);
     await page
       .locator('.chat-scroll')

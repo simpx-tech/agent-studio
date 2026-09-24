@@ -63,9 +63,12 @@
     search: Globe,
     browse: Globe,
     agent: GitBranch,
+    message: GitBranch,
+    directory: GitBranch,
     skill: Sparkles,
     image: Images,
     tool: Wrench,
+    limit: Wrench,
   };
   const entries = $derived(activityEntries(blocks, tools, finalText));
   const groups = $derived(groupActivityEntries(entries));

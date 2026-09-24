@@ -1329,7 +1329,7 @@ test('two app environments pair, share accounts, route chats, retain progress an
     await expect(desktop.locator('[data-category="search"]')).toHaveCount(2);
     await expect(desktop.locator('.activity-group')).toHaveCount(1);
     await expect(desktop.locator('.activity-group')).not.toHaveAttribute('open', '');
-    await expect(desktop.locator('.activity-group > summary')).toHaveText('Searched the web');
+    await expect(desktop.locator('.activity-group > summary')).toHaveText('Ran 2 web searches');
     await desktop.locator('.activity-group > summary').click();
     await expect(desktop.locator('[data-category="search"]').first()).toBeVisible();
     for (const card of await desktop.locator('[data-category="search"]').all())

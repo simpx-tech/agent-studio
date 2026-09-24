@@ -103,7 +103,8 @@ export function relativeFilePath(path: string, base?: string): string {
 
 type Token = number | string;
 const maxSpan = 100_000;
-const key = (path: string) => {
+// Matches reported paths across separators, and Windows paths regardless of case.
+export const filePathKey = (path: string) => {
   const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '');
   return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//')
     ? normalized.toLowerCase()
@@ -186,7 +187,7 @@ function combine(patches: FilePatch[], budget: { remaining: number }): FileSumma
         : 'A complete diff was not recorded for this file.';
   }
   const previousPath = first.previousPath ?? first.path;
-  const renamed = key(previousPath) !== key(last.path);
+  const renamed = filePathKey(previousPath) !== filePathKey(last.path);
   const kind = !existed ? 'added' : !exists ? 'deleted' : renamed ? 'renamed' : 'modified';
   const file: FileSummary = { path: last.path, kind, ...(renamed ? { previousPath } : {}) };
   if (unavailable) return { ...file, unavailable };
@@ -288,8 +289,8 @@ export function summarizeFileChanges(
         });
     for (const edit of message.fileChanges?.edits ?? [{ files: legacyFiles }])
       for (const file of edit.files) {
-        const oldKey = key(file.previousPath ?? file.path),
-          newKey = key(file.path);
+        const oldKey = filePathKey(file.previousPath ?? file.path),
+          newKey = filePathKey(file.path);
         const chain = chains.get(oldKey) ?? [];
         if (oldKey !== newKey) chains.delete(oldKey);
         // An ambiguous rename must not overwrite another file's history.
@@ -305,7 +306,7 @@ export function summarizeFileChanges(
       .slice(0, 200)
       .map((patches) => combine(patches, budget))
       .filter((f): f is FileSummary => !!f)
-      .sort((a, b) => key(a.path).localeCompare(key(b.path))),
+      .sort((a, b) => filePathKey(a.path).localeCompare(filePathKey(b.path))),
     limited,
     recorded,
   };

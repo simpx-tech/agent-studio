@@ -1,5 +1,6 @@
 import { visibleActivityStatus, type ToolActivity } from './activity';
 import type { ContentBlock, Message } from './domain';
+import { filePathKey } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
 
 type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
@@ -62,6 +63,7 @@ export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] 
 
 // Use only reported operation/category/name metadata, never infer actions from output or paths.
 function action(tool: ToolActivity): keyof typeof phrases {
+  if (tool.id === 'activity-limit') return 'limit';
   if (tool.category === 'hook') return tool.operation === 'hookContext' ? 'hookContext' : 'hook';
   if (tool.operation === 'read' || ['Read', 'Read file', 'Read skill file'].includes(tool.name))
     return 'read';
@@ -85,33 +87,75 @@ function action(tool: ToolActivity): keyof typeof phrases {
     return 'command';
   if (tool.category === 'search') return tool.name === 'Open web page' ? 'browse' : 'search';
   if (tool.category === 'agent') return 'agent';
-  if (['sendMessage', 'listAgents'].includes(tool.operation ?? '')) return 'agent';
+  if (tool.operation === 'sendMessage') return 'message';
+  if (tool.operation === 'listAgents') return 'directory';
   if (tool.category === 'skill') return 'skill';
   if (['View image', 'view_image'].includes(tool.name)) return 'image';
   return 'tool';
 }
 
+// Singular and plural nouns, then the past, running and noun forms; # becomes the counted noun.
 const phrases = {
-  hook: ['ran hooks', 'running hooks', 'hooks'],
-  hookContext: ['received hook context', 'receiving hook context', 'hook context'],
-  read: ['read files', 'reading files', 'file reads'],
-  edit: ['edited files', 'editing files', 'file edits'],
-  files: ['searched files', 'searching files', 'file searches'],
-  command: ['ran commands', 'running commands', 'commands'],
-  search: ['searched the web', 'searching the web', 'web searches'],
-  browse: ['opened web pages', 'opening web pages', 'web pages'],
-  agent: ['worked with sub-agents', 'working with sub-agents', 'sub-agent work'],
-  skill: ['used skills', 'using skills', 'skill calls'],
-  image: ['viewed images', 'viewing images', 'image views'],
-  tool: ['used tools', 'using tools', 'tool calls'],
-};
+  hook: ['hook', 'hooks', 'ran #', 'running #', '#'],
+  hookContext: [
+    'hook',
+    'hooks',
+    'received context from #',
+    'receiving context from #',
+    'context from #',
+  ],
+  read: ['file', 'files', 'read #', 'reading #', 'reads of #'],
+  edit: ['file', 'files', 'edited #', 'editing #', 'edits to #'],
+  files: ['file search', 'file searches', 'ran #', 'running #', '#'],
+  command: ['command', 'commands', 'ran #', 'running #', '#'],
+  search: ['web search', 'web searches', 'ran #', 'running #', '#'],
+  browse: ['web page', 'web pages', 'opened #', 'opening #', '#'],
+  agent: ['sub-agent', 'sub-agents', 'worked with #', 'working with #', '#'],
+  message: ['agent message', 'agent messages', 'sent #', 'sending #', '#'],
+  directory: ['agent list', 'agent lists', 'checked #', 'checking #', '#'],
+  skill: ['skill', 'skills', 'used #', 'using #', '#'],
+  image: ['image', 'images', 'viewed #', 'viewing #', '#'],
+  tool: ['tool', 'tools', 'used #', 'using #', '#'],
+  // The activity limit notice stands for calls that were never recorded, so none can be counted.
+  limit: ['', '', 'later calls not shown', 'later calls not shown', 'later calls not shown'],
+} as const;
+
+// A file counts once however often it was read or edited, and a resumed sub-agent counts once.
+// Every other call counts once.
+function count(kind: keyof typeof phrases, tools: ToolActivity[]) {
+  if (kind === 'agent')
+    return new Set(
+      tools.flatMap((tool) =>
+        tool.agents.length ? tool.agents.map((agent) => agent.agentId ?? agent.id) : [tool.id],
+      ),
+    ).size;
+  if (kind !== 'read' && kind !== 'edit') return tools.length;
+  const files = new Set<string>();
+  let unnamed = 0;
+  for (const tool of tools) {
+    // Codex file changes and combined skill reads report their other paths as facts.
+    const paths = [
+      tool.path,
+      ...(tool.facts ?? [])
+        .filter((fact) => fact.label === 'Files' || fact.label === 'Also read')
+        .flatMap((fact) => fact.value.split('\n')),
+    ].filter((path): path is string => !!path?.trim());
+    for (const path of paths) files.add(filePathKey(path.trim()));
+    if (!paths.length) unnamed++;
+  }
+  return files.size + unnamed;
+}
 
 export function activityGroupSummary(
   tools: ToolActivity[],
   replyStatus: Message['status'],
   allTools: ToolActivity[] = tools,
 ) {
-  const actions = [...new Set(tools.map(action))];
+  const kinds = new Map<keyof typeof phrases, ToolActivity[]>();
+  for (const tool of tools) {
+    const kind = action(tool);
+    kinds.set(kind, [...(kinds.get(kind) ?? []), tool]);
+  }
   const children = new Set(tools.flatMap((tool) => tool.agents.map((agent) => agent.id)));
   const statuses = [
     ...tools,
@@ -125,14 +169,18 @@ export function activityGroupSummary(
   );
   // Nouns avoid claiming success for failed, stopped, or unconfirmed operations.
   const tense = issue ? 2 : running ? 1 : 0;
-  const descriptions = actions.map((kind) => phrases[kind][tense]);
+  const descriptions = [...kinds].map(([kind, calls]) => {
+    const [one, many, ...forms] = phrases[kind];
+    const total = count(kind, calls);
+    return forms[tense].replace('#', `${total} ${total === 1 ? one : many}`);
+  });
   const text =
     descriptions.length > 2
-      ? `${descriptions.slice(0, 2).join(', ')}, and more`
+      ? `${descriptions.slice(0, -1).join(', ')}, and ${descriptions.at(-1)}`
       : descriptions.join(' and ');
   return {
     label: text.charAt(0).toUpperCase() + text.slice(1),
-    icon: actions[0] ?? 'tool',
+    icon: [...kinds.keys()][0] ?? 'tool',
     running,
     issue,
   };

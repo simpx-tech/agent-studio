@@ -74,9 +74,9 @@ for (const status of ['complete', 'cancelled', 'error'] as const)
     const sequence = [
       'Connected',
       'I will compare the options.',
-      'Read files',
+      'Read 1 file',
       'Reasoning: Compare options.',
-      'Ran commands',
+      'Ran 1 command',
       'Reasoning: Second reasoning item.',
     ];
     await expect.poll(() => timeline(page)).toEqual(sequence);
