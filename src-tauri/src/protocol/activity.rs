@@ -32,6 +32,9 @@ pub struct AgentActivity {
     messages: Vec<subagents::AgentMessage>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     messages_truncated: bool,
+    /// Claude reported the launch as asynchronous: the child works on in the background.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    background: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +59,10 @@ pub struct ToolActivity {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation: Option<String>,
     command_run: bool,
+    /// The launching call returned while its task kept running. The status then follows
+    /// the task, which the CLI reports once it completes, fails, or is stopped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
     facts: Vec<ActivityFact>,
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
@@ -118,6 +125,7 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         path: None,
         operation: None,
         command_run: false,
+        background: false,
         facts: vec![],
         sources: vec![],
         agents: vec![],
@@ -380,6 +388,7 @@ impl ToolDecoder {
             result: None,
             messages: vec![],
             messages_truncated: false,
+            background: false,
         });
         group.agents.last_mut()
     }
@@ -664,6 +673,13 @@ impl ToolDecoder {
                     fact(&mut tool, "Tasks", ids.join(", "));
                 }
             }
+            "Monitor" => {
+                // A background watch over a shell command. The command stays private.
+                tool.operation = Some("monitor".into());
+                if let Some(description) = field(input, "description", 2048) {
+                    tool.detail = Some(description);
+                }
+            }
             "ToolSearch" => {
                 tool.name = "Find tools".into();
                 tool.operation = Some("toolSearch".into());
@@ -783,15 +799,15 @@ impl ToolDecoder {
                             if let Some(agent_id) = field(&v["tool_use_result"], "agentId", 240) {
                                 agent.agent_id = Some(agent_id);
                             }
-                            let background = v["tool_use_result"]["isAsync"] == true;
-                            agent.status = if block["is_error"] == true {
-                                "error"
-                            } else if background {
-                                "running"
+                            let failed = block["is_error"] == true;
+                            let background = !failed && v["tool_use_result"]["isAsync"] == true;
+                            if background {
+                                // The child works on after its launch returned. Its task
+                                // reports the outcome, which may already have arrived.
+                                agent.background = true;
                             } else {
-                                "complete"
+                                agent.status = if failed { "error" } else { "complete" }.into();
                             }
-                            .into();
                             if !background {
                                 let result = text_content(&v["tool_use_result"]["content"], 8000);
                                 agent.result = Some(if result.is_empty() {
@@ -805,24 +821,28 @@ impl ToolDecoder {
                             if tool.parent_id != parent {
                                 continue;
                             }
-                            tool.status = if block["is_error"] == true
-                                || block["content"]["type"] == "web_search_tool_result_error"
-                            {
-                                "error"
-                            } else if tool.command_run
-                                && (v["tool_use_result"]["isAsync"] == true
-                                    || v["tool_use_result"]["backgroundTaskId"].is_string())
-                            {
-                                "running"
+                            let result = &v["tool_use_result"];
+                            let failed = block["is_error"] == true
+                                || block["content"]["type"] == "web_search_tool_result_error";
+                            // A launch that returns while its task keeps running moved that
+                            // task to the background: a shell, or a Monitor watching one.
+                            let background = !failed
+                                && ((tool.command_run
+                                    && (result["isAsync"] == true
+                                        || result["backgroundTaskId"].is_string()))
+                                    || (tool.operation.as_deref() == Some("monitor")
+                                        && result["taskId"].is_string()));
+                            if background {
+                                // The status follows the task: running, or the outcome it
+                                // reported before this result arrived.
+                                tool.background = true;
                             } else {
-                                "complete"
+                                tool.status = if failed { "error" } else { "complete" }.into();
                             }
-                            .into();
                             if tool.category == "search" {
                                 sources(&block["content"], &mut tool.sources, 0);
-                                sources(&v["tool_use_result"], &mut tool.sources, 0);
+                                sources(result, &mut tool.sources, 0);
                             }
-                            let result = &v["tool_use_result"];
                             if tool.operation.as_deref() == Some("listAgents") {
                                 Self::claude_agent_list(&mut tool, result);
                             }
@@ -1194,9 +1214,11 @@ mod tests {
         assert_eq!(child[0].parent_id.as_deref(), Some("agent1"));
         d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"agent1","content":"Started"}]},"tool_use_result":{"isAsync":true}}));
         assert_eq!(d.group("claude").agents[0].status, "running");
+        assert!(d.group("claude").agents[0].background);
         d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"task1","tool_use_id":"agent1","description":"Fixture reader"}));
         let done = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"task1","status":"completed","summary":"Fixture verified","output_file":"DO_NOT_OPEN"}));
         assert_eq!(done[0].agents[0].status, "complete");
+        assert!(done[0].agents[0].background);
         assert_eq!(
             done[0].agents[0].result.as_deref(),
             Some("Fixture verified")
@@ -1207,6 +1229,59 @@ mod tests {
         let wait = d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"wait1","name":"mcp__agent_studio__await_background_tasks","input":{"task_ids":["task2","task3"]}}]}}));
         assert_eq!(wait[0].name, "Wait for background tasks");
         assert_eq!(wait[0].facts[0].value, "task2, task3");
+    }
+    #[test]
+    fn background_launches_follow_their_task_without_reviving_or_exposing_it() {
+        let mut d = ToolDecoder::default();
+        // A Monitor keeps its description and hides the watched command.
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"watch","name":"Monitor","input":{"description":"Build failures","command":"PRIVATE_COMMAND","timeout_ms":900000}}]}}));
+        d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"watch","task_type":"local_bash","description":"Build failures"}));
+        let started = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"watch","content":"Monitor started (task b1)"}]},"tool_use_result":{"taskId":"b1","timeoutMs":900000,"persistent":false}}));
+        assert_eq!(started[0].name, "Monitor");
+        assert_eq!(started[0].detail.as_deref(), Some("Build failures"));
+        assert_eq!(started[0].status, "running");
+        assert!(started[0].background);
+        assert!(!serde_json::to_string(&started)
+            .unwrap()
+            .contains("PRIVATE_COMMAND"));
+        let stopped = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"stopped"}));
+        assert_eq!(stopped[0].status, "cancelled");
+        assert!(stopped[0].background);
+        // A task that finished before its launch returned keeps the reported outcome.
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"fast","name":"Bash","input":{"description":"Quick check","run_in_background":true}}]}}));
+        d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"b2","tool_use_id":"fast","task_type":"local_bash"}));
+        d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"b2","status":"failed"}));
+        let late = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fast","content":"Command running in background"}]},"tool_use_result":{"backgroundTaskId":"b2"}}));
+        assert_eq!(late[0].status, "error");
+        assert!(late[0].background);
+        assert!(d.tick().is_empty());
+        // A failed launch, an ordinary result, and a Monitor without a task stay foreground.
+        for (id, name, result) in [
+            ("broken", "Bash", json!({"backgroundTaskId":"b3"})),
+            ("plain", "Bash", json!({"stdout":"PRIVATE_OUTPUT"})),
+            ("unwatched", "Monitor", json!({})),
+        ] {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":{}}]}}));
+            let error = id == "broken";
+            let events = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error,"content":"PRIVATE_OUTPUT"}]},"tool_use_result":result}));
+            assert_eq!(events[0].status, if error { "error" } else { "complete" });
+            assert!(!events[0].background);
+            assert!(!serde_json::to_string(&events)
+                .unwrap()
+                .contains("background"));
+        }
+        // A synchronous or failed agent launch is not background work.
+        for (id, error, result) in [
+            ("sync", false, json!({"status":"completed"})),
+            ("failed", true, json!({"isAsync":true})),
+        ] {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Agent","input":{"description":id}}]}}));
+            d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error,"content":"Done"}]},"tool_use_result":result}));
+        }
+        let group = d.group("claude");
+        assert_eq!(group.agents[0].status, "complete");
+        assert_eq!(group.agents[1].status, "error");
+        assert!(group.agents.iter().all(|agent| !agent.background));
     }
     #[test]
     fn claude_agent_result_uses_content_without_harness_usage_or_continuation_instructions() {

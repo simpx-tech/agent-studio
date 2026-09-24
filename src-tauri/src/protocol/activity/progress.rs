@@ -311,11 +311,16 @@ mod tests {
             assert_eq!(events[0].name, "Run command");
             d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"shell","task_type":"local_bash","description":"PRIVATE_DESCRIPTION"}));
             d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","content":"PRIVATE_OUTPUT"}]},"tool_use_result":{"backgroundTaskId":"task"}}));
-            assert_eq!(d.existing("claude:shell").unwrap().status, "running");
+            let launched = d.existing("claude:shell").unwrap();
+            assert_eq!(launched.status, "running");
+            assert!(launched.background);
             d.clocks.get_mut("claude:shell").unwrap().at -= Duration::from_secs(7);
+            // The host keeps timing the task after its launch returned.
+            assert_eq!(d.tick()[0].elapsed_ms, Some(7000));
             let events = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"task","status":"completed","summary":"PRIVATE_STDOUT","output_file":"PRIVATE_PATH"}));
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].status, "complete");
+            assert!(events[0].background);
             assert!(events[0].elapsed_ms.unwrap() >= 7000);
             assert!(d.group("claude").agents.is_empty());
             assert!(!serde_json::to_string(&d.tools).unwrap().contains("PRIVATE"));

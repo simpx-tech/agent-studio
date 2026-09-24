@@ -16,12 +16,15 @@
     Terminal,
     Images,
     Webhook,
+    Layers,
   } from '@lucide/svelte';
   import {
     safeSourceUrl,
-    visibleActivityStatus,
+    activityDisplayStatus,
+    toolDisplayStatus,
     toolElapsed,
     toolProgressLabel,
+    type ActivityDisplayStatus,
     type ToolActivity,
   } from '$lib/activity';
   import {
@@ -51,6 +54,8 @@
     blocked: 'Blocked',
     cancelled: 'Stopped',
     unknown: 'Outcome unconfirmed',
+    background: 'In background',
+    left: 'Left running',
   };
   const icons = { skill: Sparkles, search: Globe, agent: GitBranch, tool: Wrench, hook: Webhook };
   const groupIcons = {
@@ -63,6 +68,8 @@
     search: Globe,
     browse: Globe,
     agent: GitBranch,
+    background: Layers,
+    backgroundAgent: GitBranch,
     message: GitBranch,
     directory: GitBranch,
     skill: Sparkles,
@@ -74,6 +81,12 @@
   const groups = $derived(groupActivityEntries(entries));
   function topLevel(tool: ToolActivity) {
     return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
+  }
+  function backgroundNote(tool: ToolActivity) {
+    if (tool.status !== 'running') return 'Ran in the background.';
+    return replyStatus === 'running'
+      ? 'Running in the background while the reply continues. Background work above the message box tracks it.'
+      : 'Still running in the background when this reply ended. Its later outcome was not recorded.';
   }
   function progressLink(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
@@ -91,8 +104,7 @@
   }
 </script>
 
-{#snippet statusMark(status: ToolActivity['status'])}
-  {@const current = visibleActivityStatus(status, replyStatus)}
+{#snippet statusMark(current: ActivityDisplayStatus)}
   <span
     class="tool-status"
     class:failed={current === 'error' || current === 'blocked'}
@@ -100,12 +112,14 @@
   >
     {#if current === 'running'}<LoaderCircle size={13} class="spinning" />
     {:else if current === 'complete'}<Check size={13} />
+    {:else if current === 'background' || current === 'left'}<Layers size={13} />
     {:else}<CircleAlert size={13} />{/if}{labels[current]}
   </span>
 {/snippet}
 
 {#snippet toolCard(tool: ToolActivity, nested = false)}
   {@const Icon = icons[tool.category]}
+  {@const status = toolDisplayStatus(tool, replyStatus)}
   {@const preview =
     tool.category === 'hook'
       ? tool.path || tool.facts?.find((fact) => fact.label === 'Hook')?.value
@@ -118,13 +132,14 @@
           >{/if}</span
       >
       <span class="tool-state">
-        {#if tool.elapsedMs != null}<span
+        <!-- Background work shows its running time above the message box, not here. -->
+        {#if tool.elapsedMs != null && status !== 'background' && status !== 'left'}<span
             class="tool-elapsed"
             title="Elapsed time recorded on the execution computer"
             aria-label={`Tool elapsed time: ${toolElapsed(tool.elapsedMs)}`}
             >{toolElapsed(tool.elapsedMs)}</span
           >{/if}
-        {@render statusMark(tool.status)}
+        {@render statusMark(status)}
       </span>
       <ChevronDown size={13} class="disclosure" />
     </summary>
@@ -148,13 +163,14 @@
         </div>
         <code class="tool-path">{tool.path}</code>{/if}
       {#if tool.detail}<p>{tool.detail}</p>{/if}
+      {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
       {#if tool.facts?.length}<dl class="tool-facts">
           {#each tool.facts as fact}<div>
               <dt>{fact.label}</dt>
               <dd>{fact.value}</dd>
             </div>{/each}
         </dl>{/if}
-      {#if !tool.query && !tool.path && !tool.detail && !tool.facts?.length && !tool.sources.length && !tool.agents.length}
+      {#if !tool.query && !tool.path && !tool.detail && !tool.background && !tool.facts?.length && !tool.sources.length && !tool.agents.length}
         <p class="tool-note">
           {tool.status === 'running' && replyStatus === 'running'
             ? 'Waiting for tool details…'
@@ -183,7 +199,9 @@
       {#each tool.agents as agent (agent.id)}
         <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
           <div class="agent-heading">
-            <GitBranch size={14} /><strong>{agent.name}</strong>{@render statusMark(agent.status)}
+            <GitBranch size={14} /><strong>{agent.name}</strong>{@render statusMark(
+              activityDisplayStatus(agent, replyStatus),
+            )}
           </div>
           {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
             <p class="tool-note">
@@ -225,7 +243,9 @@
         {#if visible.length}
           {@const summary = activityGroupSummary(visible, replyStatus, tools)}
           {@const Icon = groupIcons[summary.icon]}
-          {@const active = group.tools.filter((tool) => tool.status === 'running')}
+          {@const active = group.tools.filter(
+            (tool) => tool.status === 'running' && !tool.background,
+          )}
           {@const elapsed = Math.max(-1, ...active.map((tool) => tool.elapsedMs ?? -1))}
           {@const progressTool = active.findLast((tool) => tool.progress)}
           <details class="activity-group">
@@ -323,7 +343,8 @@
   .activity-group > summary {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    /* A long label wraps its text beside the icon and chevron instead of taking a line alone. */
+    flex-wrap: nowrap;
     gap: 8px;
     width: fit-content;
     max-width: 100%;
@@ -366,6 +387,8 @@
     color: var(--text-muted);
   }
   .group-progress {
+    /* Progress takes the space left beside the label and wraps first on narrow screens. */
+    flex: 1 0 0;
     margin-left: auto;
     justify-content: flex-end;
     text-align: right;

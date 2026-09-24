@@ -165,6 +165,7 @@
   import { summarizeFileChanges } from '$lib/file-changes';
   import MessageView from '$lib/components/MessageView.svelte';
   import PlanPanel from '$lib/components/PlanPanel.svelte';
+  import BackgroundWork from '$lib/components/BackgroundWork.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -3423,7 +3424,10 @@
                 >
               </div>{/if}
             {#if historyError}<p class="attachment-notice" role="alert">{historyError}</p>{/if}
-            {#if observedReply && activeRunning}<PlanPanel message={observedReply} compact />{/if}
+            {#if observedReply && activeRunning}<PlanPanel
+                message={observedReply}
+                compact
+              /><BackgroundWork message={observedReply} />{/if}
             {#if selectedComputerOffline}<div class="setup-hint">
                 <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
                   ? selectedComputer.hostName

@@ -83,22 +83,28 @@ async fn installed_claude_reply_waits_for_declared_tests_but_not_servers() {
     assert!(started.elapsed() >= Duration::from_secs(20));
     assert!(waited(&events));
     assert!(parkable);
-    // Activity shows commands by description only; keep the final status of each.
+    // Activity shows commands by description only; keep the final state of each.
     let mut commands = std::collections::HashMap::new();
     for event in &events {
         if let RunEvent::Tool { tool } = event {
             let tool = serde_json::to_value(tool).unwrap();
             if tool["operation"] == "command" {
-                commands.insert(tool["id"].to_string(), tool["status"].clone());
+                commands.insert(
+                    tool["id"].to_string(),
+                    (tool["status"].clone(), tool["background"] == true),
+                );
             }
         }
     }
-    let statuses: Vec<_> = commands.values().collect();
+    let states: Vec<_> = commands.values().collect();
     assert!(
-        statuses.contains(&&json!("running")),
-        "the server outlives the reply: {statuses:?}"
+        states.contains(&&(json!("running"), true)),
+        "the server outlives the reply in the background: {states:?}"
     );
-    assert!(statuses.contains(&&json!("complete")), "{statuses:?}");
+    assert!(
+        states.contains(&&(json!("complete"), true)),
+        "the declared tests finished in the background: {states:?}"
+    );
     eprintln!(
         "Reply waited {:?} for the declared tests: {text}",
         started.elapsed()

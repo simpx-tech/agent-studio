@@ -254,6 +254,69 @@ describe('activity groups', () => {
     });
   });
 
+  it('reads background launches as started work that never spins the group', () => {
+    const build = tool('build', {
+      name: 'Run command',
+      commandRun: true,
+      status: 'running',
+      background: true,
+    });
+    const edit = tool('edit', { name: 'Edit', operation: 'edit' });
+    expect(activityGroupSummary([edit, build], 'running')).toMatchObject({
+      label: 'Edited 1 file and started 1 background task',
+      running: false,
+      issue: undefined,
+    });
+    const tests = tool('tests', { name: 'Run command', commandRun: true, status: 'running' });
+    expect(activityGroupSummary([build, tests], 'running')).toMatchObject({
+      label: 'Started 1 background task and running 1 command',
+      icon: 'background',
+      running: true,
+    });
+    // Work left running for the user is not an issue; a stop leaves its outcome unknown.
+    expect(activityGroupSummary([build], 'complete')).toMatchObject({
+      label: 'Started 1 background task',
+      issue: undefined,
+    });
+    expect(activityGroupSummary([build], 'cancelled')).toMatchObject({
+      label: '1 background task',
+      issue: 'unknown',
+    });
+    expect(activityGroupSummary([{ ...build, status: 'error' }], 'complete')).toMatchObject({
+      label: '1 background task',
+      issue: 'error',
+    });
+    const monitor = tool('watch', {
+      name: 'Monitor',
+      operation: 'monitor',
+      status: 'complete',
+      background: true,
+    });
+    expect(activityGroupSummary([build, monitor], 'complete').label).toBe(
+      'Started 2 background tasks',
+    );
+    const agents = tool('agents', {
+      category: 'agent',
+      name: 'Sub-agents',
+      status: 'running',
+      agents: [{ id: 'reader', name: 'Reader', status: 'running', background: true }],
+    });
+    const childRead = tool('child-read', { parentId: 'reader', status: 'running' });
+    expect(activityGroupSummary([agents], 'running', [agents, childRead])).toMatchObject({
+      label: 'Started 1 background sub-agent',
+      icon: 'backgroundAgent',
+      running: false,
+    });
+    const mixed = {
+      ...agents,
+      agents: [...agents.agents, { id: 'writer', name: 'Writer', status: 'running' as const }],
+    };
+    expect(activityGroupSummary([mixed], 'running')).toMatchObject({
+      label: 'Working with 2 sub-agents',
+      running: true,
+    });
+  });
+
   it('surfaces incomplete child status in the collapsed sub-agent group', () => {
     const parent = tool('parent', {
       category: 'agent',

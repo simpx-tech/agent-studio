@@ -1,0 +1,202 @@
+import { test, expect } from '@playwright/test';
+import { mockDesktop } from './desktop-helper';
+
+for (const mobile of [false, true])
+  test(`background work runs above the composer, never in history ${mobile ? 'mobile' : 'desktop'}`, async ({
+    page,
+  }) => {
+    if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+    await mockDesktop(page, 'capabilities');
+    await page.goto('/');
+    await page.getByLabel('Message', { exact: true }).fill('Build the image and test it');
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+    const emit = (event: unknown) => page.evaluate((e) => (window as any).emitCapability(e), event);
+    const command = (id: string, extra: Record<string, unknown>) =>
+      emit({
+        kind: 'tool',
+        tool: {
+          id,
+          name: 'Run command',
+          category: 'tool',
+          operation: 'command',
+          commandRun: true,
+          revision: 1,
+          status: 'complete',
+          sources: [],
+          agents: [],
+          command: 'PRIVATE_COMMAND',
+          ...extra,
+        },
+      });
+    const build = (revision: number, status: string, elapsedMs: number) =>
+      command('build', {
+        detail: 'Build the Docker image',
+        background: true,
+        revision,
+        status,
+        elapsedMs,
+      });
+    await command('edit', {
+      name: 'Edit',
+      operation: 'edit',
+      commandRun: false,
+      path: '/fixture/Dockerfile',
+    });
+    await build(1, 'running', 793_000);
+    await command('server', {
+      detail: 'Start the preview server',
+      background: true,
+      status: 'running',
+      elapsedMs: 5_000,
+    });
+    await emit({
+      kind: 'tool',
+      tool: {
+        id: 'agents',
+        name: 'Sub-agents',
+        category: 'agent',
+        revision: 1,
+        status: 'running',
+        sources: [],
+        agents: [
+          { id: 'reader', name: 'Review the Dockerfile', status: 'running', background: true },
+        ],
+      },
+    });
+    await emit({
+      kind: 'progress',
+      id: 'moved-on',
+      revision: 1,
+      text: 'The build runs in the background, so I will check the tests meanwhile.',
+    });
+    await command('tests', { detail: 'Run unit tests' });
+
+    const work = page.locator('.background-work');
+    await expect(work).toHaveAttribute('open', '');
+    await expect(work.locator('summary')).toHaveText(/Background work\s*3 running/);
+    const runs = work.locator('li');
+    await expect(runs).toHaveText([
+      /Build the Docker image\s*Command\s*13m 13s/,
+      /Start the preview server\s*Command\s*5s/,
+      /Review the Dockerfile\s*Sub-agent/,
+    ]);
+    const composer = await page.getByRole('form', { name: 'Message composer' }).boundingBox();
+    const card = await work.boundingBox();
+    expect(card!.y + card!.height).toBeLessThanOrEqual(composer!.y);
+    expect(await work.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+
+    // History shows the launches as started work, without a spinner or a running clock.
+    const group = page.locator('.activity-group').first();
+    const heading = group.locator(':scope > summary');
+    await expect(heading).toHaveText(
+      'Edited 1 file, started 2 background tasks, and started 1 background sub-agent',
+    );
+    await expect(group.locator('.spinning')).toHaveCount(0);
+    await expect(group.locator('.group-progress')).toHaveCount(0);
+    await heading.click();
+    const buildCard = group.locator('.tool-card', { hasText: 'Build the Docker image' });
+    await expect(buildCard.locator('summary')).toContainText('In background');
+    await expect(buildCard.locator('summary')).not.toContainText('13m');
+    await buildCard.locator('summary').click();
+    await expect(buildCard).toContainText('Background work above the message box tracks it.');
+    await expect(group.locator('.subagent')).toContainText('In background');
+    await page.screenshot({
+      path: `artifacts/background-work/live-${mobile ? 'mobile' : 'desktop'}.png`,
+    });
+
+    // The host's clock advances in Background work; the outcome returns to history.
+    await build(2, 'running', 794_000);
+    await expect(runs.first()).toContainText('13m 14s');
+    await build(3, 'complete', 800_000);
+    await emit({
+      kind: 'tool',
+      tool: {
+        id: 'agents',
+        name: 'Sub-agents',
+        category: 'agent',
+        revision: 2,
+        status: 'complete',
+        sources: [],
+        agents: [
+          { id: 'reader', name: 'Review the Dockerfile', status: 'complete', background: true },
+        ],
+      },
+    });
+    await expect(work.locator('summary')).toHaveText(/Background work\s*1 running/);
+    await expect(runs).toHaveText([/Start the preview server\s*Command\s*5s/]);
+    await expect(buildCard.locator('summary')).toContainText('13m 20s');
+    await expect(buildCard.locator('summary')).toContainText('Completed');
+    await expect(buildCard).toContainText('Ran in the background.');
+
+    // A server left for the user ends with the reply as Left running.
+    await emit({ kind: 'text', text: 'The image builds and the preview server is running.' });
+    await page.evaluate(() => (window as any).finishCapabilities('complete'));
+    await expect(work).toHaveCount(0);
+    await page.getByLabel('Work history', { exact: true }).click();
+    await heading.click();
+    await expect(heading).toHaveText(
+      'Edited 1 file, started 2 background tasks, and started 1 background sub-agent',
+    );
+    const server = group.locator('.tool-card', { hasText: 'Start the preview server' });
+    await expect(server.locator('summary')).toContainText('Left running');
+    await expect(server.locator('summary')).not.toContainText('5s');
+    await server.locator('summary').click();
+    await expect(server).toContainText(
+      'Still running in the background when this reply ended. Its later outcome was not recorded.',
+    );
+    await page.screenshot({
+      path: `artifacts/background-work/history-${mobile ? 'mobile' : 'desktop'}.png`,
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].messages.at(-1)
+              .status,
+        ),
+      )
+      .toBe('complete');
+    expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).not.toContain(
+      'PRIVATE_',
+    );
+  });
+
+test('a stopped reply leaves background work unconfirmed and removes the card', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await page.getByLabel('Message', { exact: true }).fill('Start the build');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  await page.evaluate(() =>
+    (window as any).emitCapability({
+      kind: 'tool',
+      tool: {
+        id: 'build',
+        name: 'Run command',
+        category: 'tool',
+        commandRun: true,
+        detail: 'Build the Docker image',
+        background: true,
+        revision: 1,
+        status: 'running',
+        elapsedMs: 9000,
+        sources: [],
+        agents: [],
+      },
+    }),
+  );
+  await expect(page.locator('.background-work li')).toHaveText([
+    /Build the Docker image\s*Command\s*9s/,
+  ]);
+  await page.evaluate(() => (window as any).finishCapabilities('cancelled'));
+  await expect(page.locator('.background-work')).toHaveCount(0);
+  await page.getByLabel('Work history', { exact: true }).click();
+  const heading = page.locator('.activity-group > summary').last();
+  await expect(heading).toContainText('1 background task');
+  await expect(heading).toContainText('Outcome unconfirmed');
+  await heading.click();
+  await expect(page.locator('.tool-card summary').last()).toContainText('Outcome unconfirmed');
+});

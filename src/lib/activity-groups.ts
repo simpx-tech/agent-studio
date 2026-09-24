@@ -1,4 +1,4 @@
-import { visibleActivityStatus, type ToolActivity } from './activity';
+import { activityDisplayStatus, type ToolActivity } from './activity';
 import type { ContentBlock, Message } from './domain';
 import { filePathKey } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
@@ -65,6 +65,10 @@ export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] 
 function action(tool: ToolActivity): keyof typeof phrases {
   if (tool.id === 'activity-limit') return 'limit';
   if (tool.category === 'hook') return tool.operation === 'hookContext' ? 'hookContext' : 'hook';
+  // Launches that returned while their work continued, shown running in Background work.
+  if (tool.background) return 'background';
+  if (tool.category === 'agent' && tool.agents.length && tool.agents.every((a) => a.background))
+    return 'backgroundAgent';
   if (tool.operation === 'read' || ['Read', 'Read file', 'Read skill file'].includes(tool.name))
     return 'read';
   if (
@@ -111,6 +115,9 @@ const phrases = {
   search: ['web search', 'web searches', 'ran #', 'running #', '#'],
   browse: ['web page', 'web pages', 'opened #', 'opening #', '#'],
   agent: ['sub-agent', 'sub-agents', 'worked with #', 'working with #', '#'],
+  // A background launch has started even while other calls in its group still run.
+  background: ['background task', 'background tasks', 'started #', 'started #', '#'],
+  backgroundAgent: ['background sub-agent', 'background sub-agents', 'started #', 'started #', '#'],
   message: ['agent message', 'agent messages', 'sent #', 'sending #', '#'],
   directory: ['agent list', 'agent lists', 'checked #', 'checking #', '#'],
   skill: ['skill', 'skills', 'used #', 'using #', '#'],
@@ -123,7 +130,7 @@ const phrases = {
 // A file counts once however often it was read or edited, and a resumed sub-agent counts once.
 // Every other call counts once.
 function count(kind: keyof typeof phrases, tools: ToolActivity[]) {
-  if (kind === 'agent')
+  if (kind === 'agent' || kind === 'backgroundAgent')
     return new Set(
       tools.flatMap((tool) =>
         tool.agents.length ? tool.agents.map((agent) => agent.agentId ?? agent.id) : [tool.id],
@@ -157,12 +164,22 @@ export function activityGroupSummary(
     kinds.set(kind, [...(kinds.get(kind) ?? []), tool]);
   }
   const children = new Set(tools.flatMap((tool) => tool.agents.map((agent) => agent.id)));
+  // A background sub-agent's own calls run in the background with it.
+  const background = new Set(
+    tools.flatMap((tool) => tool.agents.filter((a) => a.background).map((a) => a.id)),
+  );
   const statuses = [
     ...tools,
-    ...allTools.filter((tool) => tool.parentId && children.has(tool.parentId)),
+    ...allTools
+      .filter((tool) => tool.parentId && children.has(tool.parentId))
+      .map((tool) => ({ ...tool, background: tool.background || background.has(tool.parentId!) })),
   ]
-    .flatMap((tool) => [tool.status, ...tool.agents.map((a) => a.status)])
-    .map((status) => visibleActivityStatus(status, replyStatus));
+    .flatMap((tool) => [
+      // A sub-agent group's own status only summarizes its agents.
+      ...(tool.agents.length ? [] : [tool]),
+      ...tool.agents,
+    ])
+    .map((item) => activityDisplayStatus(item, replyStatus));
   const running = statuses.includes('running');
   const issue = (['error', 'blocked', 'cancelled', 'unknown'] as const).find((status) =>
     statuses.includes(status),

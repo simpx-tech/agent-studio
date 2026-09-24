@@ -39,6 +39,8 @@ export const toolActivitySchema = z.object({
   path: z.string().max(4096).optional(),
   operation: z.string().max(40).optional(),
   commandRun: z.boolean().optional(),
+  // The launch returned while its task kept running; the status then follows that task.
+  background: z.boolean().optional(),
   facts: z
     .array(z.object({ label: z.string().max(80), value: z.string().max(4096) }))
     .max(12)
@@ -69,6 +71,7 @@ export const toolActivitySchema = z.object({
           .refine((messages) => messages.reduce((sum, m) => sum + m.text.length, 0) <= 16000)
           .optional(),
         messagesTruncated: z.boolean().optional(),
+        background: z.boolean().optional(),
       }),
     )
     .max(64)
@@ -283,6 +286,32 @@ export function visibleActivityStatus(
       ? 'cancelled'
       : 'unknown'
     : status;
+}
+
+/**
+ * The timeline status of a call or sub-agent. Work the CLI moved to the background returned
+ * to the model, so it never reads as running there: Background work above the composer
+ * shows it instead. A completed reply leaves it running; after a stop or failure its
+ * outcome is unknown.
+ */
+export function activityDisplayStatus(
+  item: { status: ToolActivity['status']; background?: boolean },
+  replyStatus: Message['status'],
+) {
+  if (!item.background || item.status !== 'running')
+    return visibleActivityStatus(item.status, replyStatus);
+  return replyStatus === 'running' ? 'background' : replyStatus === 'complete' ? 'left' : 'unknown';
+}
+export type ActivityDisplayStatus = ReturnType<typeof activityDisplayStatus>;
+
+/** A sub-agent group runs only while one of its agents runs outside the background. */
+export function toolDisplayStatus(tool: ToolActivity, replyStatus: Message['status']) {
+  const background =
+    tool.agents.length > 0 && tool.agents.every((a) => a.status !== 'running' || a.background);
+  return activityDisplayStatus(
+    { status: tool.status, background: tool.background || background },
+    replyStatus,
+  );
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {

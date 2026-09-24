@@ -3,6 +3,8 @@ import {
   applyRunEvent,
   retainRunEvent,
   visibleActivityStatus,
+  activityDisplayStatus,
+  toolDisplayStatus,
   safeSourceUrl,
   activityCounts,
   toolActivitySchema,
@@ -323,6 +325,54 @@ describe('structured tool activity', () => {
     expect(events).toHaveLength(201);
     expect(events[0].tool?.status).toBe('error');
     expect(events.at(-1)?.text).toBe('Answer');
+  });
+  it('keeps background launches through restore and reads them by reply state', () => {
+    const m = message();
+    const launched: ToolActivity = {
+      ...tool('build'),
+      category: 'tool',
+      name: 'Run command',
+      commandRun: true,
+      background: true,
+      agents: [{ id: 'reader', name: 'Reader', status: 'running', background: true }],
+    };
+    applyRunEvent(m, { kind: 'tool', tool: launched });
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(w.preferences),
+      title: 'Background',
+      createdAt: '',
+      updatedAt: '',
+      messages: [m],
+    });
+    const [block] = restoreWorkspace(JSON.parse(JSON.stringify(w))).conversations[0].messages[0]
+      .blocks;
+    expect(block.type === 'activity' && block.tool).toMatchObject({
+      background: true,
+      agents: [{ background: true }],
+    });
+    expect(
+      (['running', 'complete', 'cancelled', 'error'] as const).map((reply) =>
+        activityDisplayStatus(launched, reply),
+      ),
+    ).toEqual(['background', 'left', 'unknown', 'unknown']);
+    expect(activityDisplayStatus({ ...launched, status: 'error' }, 'complete')).toBe('error');
+    expect(activityDisplayStatus({ ...launched, background: false }, 'running')).toBe('running');
+    expect(activityDisplayStatus({ status: 'running' }, 'cancelled')).toBe('cancelled');
+    const group: ToolActivity = {
+      ...tool('agents'),
+      category: 'agent',
+      name: 'Sub-agents',
+      agents: [
+        { id: 'reader', name: 'Reader', status: 'running', background: true },
+        { id: 'done', name: 'Done', status: 'complete' },
+      ],
+    };
+    expect(toolDisplayStatus(group, 'running')).toBe('background');
+    group.agents.push({ id: 'writer', name: 'Writer', status: 'running' });
+    expect(toolDisplayStatus(group, 'running')).toBe('running');
+    expect(toolDisplayStatus({ ...launched, agents: [] }, 'complete')).toBe('left');
   });
   it('rejects malformed activity and unsafe source links', () => {
     const m = message();
