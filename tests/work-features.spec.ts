@@ -292,38 +292,39 @@ test('native workflow commands in chat retain reported phases and agents through
       plan: { revision: 2, steps: [{ id: 'a', title: 'Verify sources', status: 'running' }] },
     });
   }, nativeWorkflowFixture());
-  // Workflow and plan progress are one-line summaries at the end of the running reply.
-  const panel = page.locator('.message .native-workflow-panel');
-  await expect(page.locator('.composer-area :is(.native-workflow-panel, .plan-panel)')).toHaveCount(
-    0,
-  );
-  await expect(panel.locator(':scope > summary')).toContainText('Running');
-  await expect(panel).not.toHaveAttribute('open', '');
-  await expect(panel.locator('.workflow-body')).toHaveCount(0);
-  await panel.locator(':scope > summary').click();
+  // Workflow and plan progress are compact toggles in the running reply's elapsed-time row.
+  const toggle = page.locator('.reply-footer .progress-toggle', { hasText: 'audit-routes' });
+  const panel = page.locator('.native-workflow-panel');
+  await expect(toggle).toContainText('Running');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(panel).toHaveCount(0);
+  await expect(page.locator('.composer-area .plan-panel')).toHaveCount(0);
+  await toggle.click();
   await expect(panel).toContainText('1/2 agents complete');
   await expect(panel).toContainText('Review');
   await panel.locator('.workflow-agent summary').first().click();
   await expect(panel).toContainText('Route verified');
-  // The plan summary names the step in progress.
-  await expect(page.locator('.message .plan-panel > summary')).toContainText('Verify sources');
+  // The plan toggle names the step in progress.
+  await expect(
+    page.locator('.reply-footer .progress-toggle', { hasText: /^\s*Plan/ }),
+  ).toContainText('Verify sources');
   await page.screenshot({ path: 'artifacts/native-workflow-progress-browser.png' });
   await page.getByRole('button', { name: 'Stop response' }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
-  // The same summary stays with the stopped reply, keeping its expansion.
-  const saved = page.locator('.message .native-workflow-panel').last();
-  await expect(saved.locator(':scope > summary')).toContainText('Stopped');
-  await expect(saved).toHaveAttribute('open', '');
-  await expect(saved).toContainText('1/2 agents complete');
+  // The same toggle stays in the stopped reply's footer, keeping its panel open.
+  await expect(toggle).toContainText('Stopped');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel).toContainText('1/2 agents complete');
   await page.reload();
   await page.getByRole('tab', { name: /History/ }).click();
   await page.locator('.conversation-item').first().click();
-  await expect(page.locator('.message .native-workflow-panel')).toContainText('audit-routes');
+  await expect(toggle).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
     page.getByRole('button', { name: 'Claude workflows', exact: true, includeHidden: true }),
   ).toHaveCount(0);
-  await page.locator('.message .native-workflow-panel > summary').click();
+  await toggle.click();
+  await expect(panel).toContainText('1/2 agents complete');
   await page.screenshot({ path: 'artifacts/native-workflow-progress-mobile.png' });
 });
 
@@ -349,17 +350,17 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
     });
     (window as any).emitCapability({ kind: 'plan', plan: { revision: 1, steps: [] } });
   });
-  const summary = page.locator('.message .plan-panel > summary');
-  await expect(summary).toContainText('1/2 complete');
+  const summary = page.locator('.reply-footer .progress-toggle', { hasText: /^\s*Plan/ });
+  await expect(summary).toContainText('1/2');
   await expect(summary).toContainText('Run checks');
   await page.evaluate(() => {
     (window as any).emitCapability({ kind: 'text', text: 'I could not run the checks.' });
     (window as any).finishCapabilities('complete');
   });
-  const panel = page.locator('.message .plan-panel');
+  const panel = page.locator('.plan-panel');
   // A finished reply no longer names a step in progress.
   await expect(summary).not.toContainText('Run checks');
-  await panel.locator('summary').click();
+  await summary.click();
   await expect(panel).toContainText('Not confirmed complete');
   await expect(panel).toContainText('Run checks');
 });

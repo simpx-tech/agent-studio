@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 
 for (const mobile of [false, true])
-  test(`background work is a summary at the end of its reply, never running in history ${mobile ? 'mobile' : 'desktop'}`, async ({
+  test(`background work is a toggle in its reply footer, never running in history ${mobile ? 'mobile' : 'desktop'}`, async ({
     page,
   }) => {
     if (mobile) await page.setViewportSize({ width: 390, height: 844 });
@@ -72,15 +72,19 @@ for (const mobile of [false, true])
     });
     await command('tests', { detail: 'Run unit tests' });
 
-    // A one-line summary at the end of the running reply; the composer stays uncluttered.
-    const work = page.locator('.message .response-extras .background-work');
-    await expect(work.locator('summary')).toHaveText(/Background work\s*3 running/);
-    await expect(work).not.toHaveAttribute('open', '');
-    await expect(work.locator('li')).toHaveCount(0);
-    await expect(page.locator('.composer-area .background-work')).toHaveCount(0);
-    const summary = await work.boundingBox();
-    expect(summary!.height).toBeLessThan(48);
-    await work.locator('summary').click();
+    // A compact toggle beside the running reply's elapsed time; the composer stays uncluttered.
+    const toggle = page.locator('.reply-footer .progress-toggle', { hasText: 'Background work' });
+    await expect(toggle).toHaveText(/Background work\s*3/);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('.background-work')).toHaveCount(0);
+    await expect(page.locator('.response-extras')).toHaveCount(0);
+    const timer = await page.locator('.reply-footer .running-reply-time').boundingBox();
+    const button = await toggle.boundingBox();
+    expect(Math.abs(timer!.y + timer!.height / 2 - (button!.y + button!.height / 2))).toBeLessThan(
+      4,
+    );
+    await toggle.click();
+    const work = page.getByRole('region', { name: /Background work/ });
     const runs = work.locator('li');
     await expect(runs).toHaveText([
       /Build the Docker image\s*Command\s*13m 13s/,
@@ -102,7 +106,7 @@ for (const mobile of [false, true])
     await expect(buildCard.locator('summary')).toContainText('In background');
     await expect(buildCard.locator('summary')).not.toContainText('13m');
     await buildCard.locator('summary').click();
-    await expect(buildCard).toContainText('Background work at the end of this reply tracks it.');
+    await expect(buildCard).toContainText('Background work below this reply tracks it.');
     const agentsCard = group.locator('.tool-card', { hasText: 'Sub-agents' });
     await agentsCard.locator(':scope > summary').click();
     await expect(agentsCard.locator('.subagent')).toContainText('In background');
@@ -128,7 +132,7 @@ for (const mobile of [false, true])
         ],
       },
     });
-    await expect(work.locator('summary')).toHaveText(/Background work\s*1 running/);
+    await expect(toggle).toHaveText(/Background work\s*1/);
     await expect(runs).toHaveText([/Start the preview server\s*Command\s*5s/]);
     await expect(buildCard.locator('summary')).toContainText('13m 20s');
     await expect(buildCard.locator('summary')).toContainText('Completed');
@@ -137,6 +141,7 @@ for (const mobile of [false, true])
     // A server left for the user ends with the reply as Left running.
     await emit({ kind: 'text', text: 'The image builds and the preview server is running.' });
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
+    await expect(toggle).toHaveCount(0);
     await expect(work).toHaveCount(0);
     await page.getByLabel('Work history', { exact: true }).click();
     await heading.click();
@@ -193,7 +198,7 @@ test('a stopped reply leaves background work unconfirmed and removes the card', 
       },
     }),
   );
-  await page.locator('.background-work summary').click();
+  await page.locator('.reply-footer .progress-toggle', { hasText: 'Background work' }).click();
   await expect(page.locator('.background-work li')).toHaveText([
     /Build the Docker image\s*Command\s*9s/,
   ]);
@@ -264,8 +269,9 @@ test('work left running stays listed after its reply and reports its outcome to 
     });
   await expect.poll(async () => (await ids()).runId).toBeTruthy();
   const { conversationId, runId } = await ids();
+  const toggle = page.locator('.reply-footer .progress-toggle', { hasText: 'Background work' });
   const card = page.locator('.background-work');
-  await expect(card).toHaveCount(0);
+  await expect(toggle).toHaveCount(0);
   // The host keeps the server listed after the reply ended, and its time keeps advancing.
   await page.evaluate((payload) => (window as any).hostBackground(payload), {
     kind: 'snapshot',
@@ -281,10 +287,12 @@ test('work left running stays listed after its reply and reports its outcome to 
       },
     ],
   });
-  // The finished reply keeps a one-line summary of the work it left running.
-  await expect(page.locator('.message').last().locator('.background-work')).toHaveCount(1);
-  await expect(card.locator('summary')).toHaveText(/Background work\s*1 running/);
-  await card.locator('summary').click();
+  // The finished reply's footer row keeps a toggle for the work it left running.
+  await expect(page.locator('.message').last().locator('.reply-footer')).toContainText(
+    'Background work',
+  );
+  await expect(toggle).toHaveText(/Background work\s*1/);
+  await toggle.click();
   await expect(card.locator('li')).toHaveText([/Start the preview server\s*Command\s*1m 5s/]);
   await expect(card.locator('li')).toContainText('1m 6s', { timeout: 3000 });
   await page.getByLabel('Work history', { exact: true }).click();
@@ -318,6 +326,7 @@ test('work left running stays listed after its reply and reports its outcome to 
     },
     { tool: server, conversationId, runId },
   );
+  await expect(toggle).toHaveCount(0);
   await expect(card).toHaveCount(0);
   await expect(call.locator('summary')).toContainText('Completed');
   await expect(call.locator('summary')).toContainText('1m 10s');
@@ -347,7 +356,7 @@ test('work left running stays listed after its reply and reports its outcome to 
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('.conversation-item').first().click();
-  await expect(card.locator('summary')).toHaveText(/Background work\s*1 running/);
-  await card.locator('summary').click();
+  await expect(toggle).toHaveText(/Background work\s*1/);
+  await toggle.click();
   await expect(card.locator('li')).toHaveText([/Build failures\s*Monitor\s*\d+s/]);
 });

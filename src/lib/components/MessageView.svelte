@@ -17,10 +17,7 @@
   import ToolActivity from './ToolActivity.svelte';
   import { compactionLabel } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
-  import RunningReplyTime from './RunningReplyTime.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
-  import PlanPanel from './PlanPanel.svelte';
-  import BackgroundWork from './BackgroundWork.svelte';
   import type { BackgroundRun } from '$lib/background-work';
   import VisualizationView from './VisualizationView.svelte';
   import QuestionForm from './QuestionForm.svelte';
@@ -82,15 +79,6 @@
   const content = $derived(replyContent(text, message.visualizations));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
-  // Plans, workflows and background work are one-line summaries at the end of their reply,
-  // while it runs and afterwards; each expands for details.
-  const progress = $derived(
-    message.role === 'assistant' &&
-      (message.plan ||
-        message.workflow ||
-        message.nativeWorkflows?.runs.length ||
-        message.nativeWorkflows?.limited),
-  );
   function linkClick(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) {
@@ -218,38 +206,34 @@
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
           Response stopped. Partial text has been kept.
         </p>{/if}
-      {#if artifacts.length || progress || background.length}<div class="response-extras">
-          {#if progress}<PlanPanel {message} compact />{/if}
-          <BackgroundWork runs={background} />
-          {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
-              {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
-                  <button
-                    class="secondary artifact-open"
-                    onclick={() => openArtifact(artifact, 'modal')}
-                    ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                      >Open {artifact.language.toUpperCase()}</small
-                    ></button
-                  ><button
-                    class="secondary artifact-side"
-                    aria-label={`Open ${artifact.title} in side panel`}
-                    title="Open in side panel"
-                    onclick={() => openArtifact(artifact, 'panel')}
-                    ><PanelRightOpen size={16} /></button
-                  >
-                </div>{/each}
-            </div>{/if}
+      {#if artifacts.length}<div class="response-extras">
+          <div class="response-artifacts" aria-label="Response artifacts">
+            {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
+                <button
+                  class="secondary artifact-open"
+                  onclick={() => openArtifact(artifact, 'modal')}
+                  ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                    >Open {artifact.language.toUpperCase()}</small
+                  ></button
+                ><button
+                  class="secondary artifact-side"
+                  aria-label={`Open ${artifact.title} in side panel`}
+                  title="Open in side panel"
+                  onclick={() => openArtifact(artifact, 'panel')}
+                  ><PanelRightOpen size={16} /></button
+                >
+              </div>{/each}
+          </div>
         </div>{/if}
-      {#if message.status === 'running'}
-        <RunningReplyTime createdAt={message.createdAt} />
-      {:else}
-        <ReplyFooter
-          {message}
-          {timeTotal}
-          {responseChanges}
-          chatChanges={chatChanges ?? responseChanges}
-          {folder}
-        />
-      {/if}
+      <!-- Elapsed time, then plan, workflow and background work toggles in the same row. -->
+      <ReplyFooter
+        {message}
+        {timeTotal}
+        {responseChanges}
+        chatChanges={chatChanges ?? responseChanges}
+        {folder}
+        {background}
+      />
       {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError || undoEdits || message.filesUndone)}<div
           class="message-actions"
         >
@@ -337,16 +321,6 @@
     align-items: stretch;
     gap: 8px;
     margin: 16px 0 4px;
-  }
-  .response-extras:has(> :global(details[open])) {
-    align-items: flex-start;
-  }
-  .response-extras > :global(.plan-panel),
-  .response-extras > :global(.native-workflow-panel),
-  .response-extras > :global(.background-work) {
-    flex: 1 1 240px;
-    min-width: 0;
-    margin: 0;
   }
   .response-artifacts {
     display: flex;

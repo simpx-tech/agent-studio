@@ -7,8 +7,8 @@ import {
 } from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
 import { applyRunEvent, retainRunEvent } from './activity';
-import { planStepLabel } from './plans';
-import { workflowSchema } from './workflows';
+import { planProgress, planStepLabel } from './plans';
+import { nativeWorkflowStatus, workflowSchema } from './workflows';
 import { mergeShared, sharedWorkspace } from './sync';
 import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
 
@@ -87,6 +87,45 @@ describe('artifacts and portable progress', () => {
     const merged = mergeShared(base, left, right);
     expect(merged.conversations).toHaveLength(1);
     expect(merged.conversations[0].messages[0].plan!.revision).toBe(3);
+  });
+  it('summarizes plans and workflow runs for the footer without claiming unfinished work', () => {
+    const reply = {
+      role: 'assistant',
+      status: 'running',
+      plan: {
+        revision: 1,
+        steps: [
+          { id: 'a', title: 'Write the Dockerfile', status: 'complete' },
+          {
+            id: 'b',
+            title: 'Build the image',
+            activeForm: 'Building the image',
+            status: 'running',
+          },
+          { id: 'c', title: 'Test the image', status: 'pending' },
+        ],
+      },
+    } as Message;
+    expect(planProgress(reply)).toEqual({
+      title: 'Plan',
+      complete: 1,
+      total: 3,
+      current: 'Building the image',
+    });
+    // A finished reply names no step in progress; a legacy sequence keeps its own name.
+    expect(planProgress({ ...reply, status: 'complete' })?.current).toBeUndefined();
+    const legacy = {
+      ...reply,
+      plan: undefined,
+      workflow: { revision: 1, name: 'Release', steps: [{ title: 'Tag', status: 'running' }] },
+    } as Message;
+    expect(planProgress(legacy)).toMatchObject({ title: 'Release', current: 'Tag' });
+    expect(planProgress({ ...reply, plan: undefined })).toBeUndefined();
+    expect(nativeWorkflowStatus('running', 'running')).toBe('Running');
+    expect(nativeWorkflowStatus('running', 'cancelled')).toBe('Stopped');
+    expect(nativeWorkflowStatus('paused', 'complete')).toBe('Unconfirmed');
+    expect(nativeWorkflowStatus('error', 'complete')).toBe('Failed');
+    expect(nativeWorkflowStatus('arbitrary', 'running')).toBe('Unknown');
   });
   it('retains legacy definitions for export without converting them to native scripts', () => {
     const workflow = {

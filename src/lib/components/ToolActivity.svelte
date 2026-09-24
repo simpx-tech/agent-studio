@@ -87,7 +87,7 @@
   function backgroundNote(tool: ToolActivity) {
     if (tool.status !== 'running') return 'Ran in the background.';
     return replyStatus === 'running'
-      ? 'Running in the background while the reply continues. Background work at the end of this reply tracks it.'
+      ? 'Running in the background while the reply continues. Background work below this reply tracks it.'
       : 'Still running in the background when this reply ended. Its later outcome was not recorded.';
   }
   function progressLink(event: MouseEvent) {
@@ -139,7 +139,7 @@
           >{/if}</span
       >
       <span class="tool-state">
-        <!-- Background work at the end of the reply shows its running time, not here. -->
+        <!-- The Background work toggle below the reply shows its running time, not here. -->
         {#if tool.elapsedMs != null && status !== 'background' && status !== 'left'}<span
             class="tool-elapsed"
             title="Elapsed time recorded on the execution computer"

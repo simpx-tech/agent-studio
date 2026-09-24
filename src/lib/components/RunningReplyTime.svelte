@@ -34,14 +34,15 @@
 </div>
 
 <style>
+  /* The first item of a running reply's footer row, aligned with its toggles. */
   .running-reply-time {
     display: flex;
     align-items: center;
-    gap: 7px;
-    margin-top: 12px;
-    padding: 4px 0;
+    gap: 6px;
+    min-height: 26px;
+    padding: 3px 8px 3px 6px;
     color: var(--text-muted);
-    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 </style>

@@ -82,3 +82,19 @@ export const nativeWorkflowsSchema = z.object({
     .max(16),
 });
 export type NativeWorkflows = z.infer<typeof nativeWorkflowsSchema>;
+
+const nativeWorkflowLabels: Record<string, string> = {
+  pending: 'Pending',
+  running: 'Running',
+  paused: 'Paused',
+  complete: 'Complete',
+  error: 'Failed',
+  cancelled: 'Stopped',
+  unknown: 'Unknown',
+};
+/** A native workflow run or agent status. Work left unfinished when its reply ended never reads as running. */
+export function nativeWorkflowStatus(status: string, reply: string) {
+  if (['running', 'pending', 'paused'].includes(status) && reply !== 'running')
+    return reply === 'cancelled' ? 'Stopped' : 'Unconfirmed';
+  return nativeWorkflowLabels[status] ?? 'Unknown';
+}

@@ -1,10 +1,18 @@
 <script lang="ts">
-  import { ChevronDown, FileCode2 } from '@lucide/svelte';
+  import { ChevronDown, FileCode2, GitBranch, Layers, ListChecks } from '@lucide/svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import type { Message } from '$lib/domain';
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
   import type { ChangeSummary } from '$lib/file-changes';
+  import type { BackgroundRun } from '$lib/background-work';
+  import { planProgress } from '$lib/plans';
+  import { nativeWorkflowStatus } from '$lib/workflows';
   import FileChanges from './FileChanges.svelte';
   import AccountChanges from './AccountChanges.svelte';
+  import PlanPanel from './PlanPanel.svelte';
+  import NativeWorkflowPanel from './NativeWorkflowPanel.svelte';
+  import BackgroundWork from './BackgroundWork.svelte';
+  import RunningReplyTime from './RunningReplyTime.svelte';
   import { money } from '$lib/spend';
   let {
     message,
@@ -12,21 +20,39 @@
     responseChanges,
     chatChanges,
     folder,
+    background = [],
   }: {
     message: Message;
     timeTotal?: ReplyTimeTotal;
     responseChanges: ChangeSummary;
     chatChanges: ChangeSummary;
     folder?: string;
+    /** Background work this reply started that still runs. */
+    background?: BackgroundRun[];
   } = $props();
-  let expanded = $state<'usage' | 'files' | null>(null);
-  // File changes render when first opened and then stay, keeping their scope and list
-  // expansion across panel switches. Unopened diffs stay out of the page.
-  let filesOpened = $state(false);
-  function toggle(section: 'usage' | 'files') {
+  // A running reply's row starts with its live elapsed time; a finished reply's with its
+  // timing and files. Plans, workflows and background work follow as compact toggles.
+  const running = $derived(message.status === 'running');
+  const plan = $derived(planProgress(message));
+  const workflows = $derived(message.nativeWorkflows?.runs ?? []);
+  // One panel opens below the row at a time. Each renders when first opened and then stays,
+  // keeping file scope, list expansion and nested disclosures across panel switches.
+  let expanded = $state<string | null>(null);
+  const opened = new SvelteSet<string>();
+  function toggle(section: string) {
     expanded = expanded === section ? null : section;
-    if (section === 'files') filesOpened = true;
+    opened.add(section);
   }
+  // Close a panel whose toggle is gone, such as background work that has finished.
+  $effect(() => {
+    const sections = [
+      ...(running ? [] : ['usage', 'files']),
+      ...(plan ? ['plan'] : []),
+      ...workflows.map((run) => `workflow:${run.id}`),
+      ...(background.length ? ['background'] : []),
+    ];
+    if (expanded && !sections.includes(expanded)) expanded = null;
+  });
   const usage = $derived(message.usage);
   const elapsed = $derived(
     message.durationMs == null ? 'Time not recorded' : formatReplyTime(message.durationMs),
@@ -57,38 +83,121 @@
 
 <div class="reply-footer">
   <div class="footer-controls">
-    <button
-      type="button"
-      class="footer-toggle usage-toggle"
-      id={message.id + '-usage-toggle'}
-      aria-label="Reply usage and cost"
-      aria-expanded={expanded === 'usage'}
-      aria-controls={message.id + '-usage'}
-      onclick={() => toggle('usage')}
-    >
-      <ChevronDown size={13} class="disclosure" aria-hidden="true" />
-      <span class="usage-summary">
-        <span>{elapsed}</span>
-        {#if timeTotal}<span title="Recorded AI time in this conversation through this reply"
-            >{timeTotal.durationMs == null ? 'Total time not recorded' : `${totalTime} total`}</span
-          >{/if}
-      </span>
-    </button>
-    <button
-      type="button"
-      class="footer-toggle files-toggle"
-      id={message.id + '-files-toggle'}
-      aria-expanded={expanded === 'files'}
-      aria-controls={message.id + '-files'}
-      onclick={() => toggle('files')}
-    >
-      <ChevronDown size={13} class="disclosure" aria-hidden="true" />
-      <FileCode2 size={13} aria-hidden="true" />
-      <span>Files edited</span><span class="file-count"
-        >{responseChanges.files.length || (responseChanges.recorded ? '0' : '—')}</span
+    {#if running}<RunningReplyTime createdAt={message.createdAt} />{:else}{@render finished()}{/if}
+    {#if plan}<button
+        type="button"
+        class="footer-toggle progress-toggle"
+        id={message.id + '-plan-toggle'}
+        aria-expanded={expanded === 'plan'}
+        aria-controls={message.id + '-plan'}
+        title={`${plan.complete} of ${plan.total} steps complete${plan.current ? `. In progress: ${plan.current}` : ''}`}
+        onclick={() => toggle('plan')}
       >
-    </button>
+        <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+        <ListChecks size={13} aria-hidden="true" />
+        <span class="progress-label">{plan.title}</span><span class="count"
+          >{plan.complete}/{plan.total}</span
+        >{#if plan.current}<span class="current">{plan.current}</span>{/if}
+      </button>{/if}
+    {#each workflows as run, i (run.id)}<button
+        type="button"
+        class="footer-toggle progress-toggle"
+        id={`${message.id}-workflow-${i}-toggle`}
+        aria-expanded={expanded === `workflow:${run.id}`}
+        aria-controls={`${message.id}-workflow-${i}`}
+        title="Native Claude workflow"
+        onclick={() => toggle(`workflow:${run.id}`)}
+      >
+        <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+        <GitBranch size={13} aria-hidden="true" />
+        <span class="progress-label">{run.name || 'Claude workflow'}</span><span class="count"
+          >{nativeWorkflowStatus(run.status, message.status)}</span
+        >
+      </button>{/each}
+    {#if background.length}<button
+        type="button"
+        class="footer-toggle progress-toggle"
+        id={message.id + '-background-toggle'}
+        aria-expanded={expanded === 'background'}
+        aria-controls={message.id + '-background'}
+        title={`${background.length} running in the background`}
+        onclick={() => toggle('background')}
+      >
+        <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+        <Layers size={13} aria-hidden="true" />
+        <span class="progress-label">Background work</span><span class="count"
+          >{background.length}</span
+        >
+      </button>{/if}
   </div>
+  {#if !running}{@render finishedPanels()}{/if}
+  {#if plan}<div
+      class="progress-panel"
+      id={message.id + '-plan'}
+      role="region"
+      aria-labelledby={message.id + '-plan-toggle'}
+      hidden={expanded !== 'plan'}
+    >
+      {#if opened.has('plan')}<PlanPanel {message} />{/if}
+    </div>{/if}
+  {#each workflows as run, i (run.id)}<div
+      class="progress-panel"
+      id={`${message.id}-workflow-${i}`}
+      role="region"
+      aria-labelledby={`${message.id}-workflow-${i}-toggle`}
+      hidden={expanded !== `workflow:${run.id}`}
+    >
+      {#if opened.has(`workflow:${run.id}`)}<NativeWorkflowPanel {message} {run} />{/if}
+    </div>{/each}
+  {#if background.length}<div
+      class="progress-panel"
+      id={message.id + '-background'}
+      role="region"
+      aria-labelledby={message.id + '-background-toggle'}
+      hidden={expanded !== 'background'}
+    >
+      {#if opened.has('background')}<BackgroundWork
+          runs={background}
+          live={expanded === 'background'}
+        />{/if}
+    </div>{/if}
+</div>
+
+{#snippet finished()}
+  <button
+    type="button"
+    class="footer-toggle usage-toggle"
+    id={message.id + '-usage-toggle'}
+    aria-label="Reply usage and cost"
+    aria-expanded={expanded === 'usage'}
+    aria-controls={message.id + '-usage'}
+    onclick={() => toggle('usage')}
+  >
+    <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+    <span class="usage-summary">
+      <span>{elapsed}</span>
+      {#if timeTotal}<span title="Recorded AI time in this conversation through this reply"
+          >{timeTotal.durationMs == null ? 'Total time not recorded' : `${totalTime} total`}</span
+        >{/if}
+    </span>
+  </button>
+  <button
+    type="button"
+    class="footer-toggle files-toggle"
+    id={message.id + '-files-toggle'}
+    aria-expanded={expanded === 'files'}
+    aria-controls={message.id + '-files'}
+    onclick={() => toggle('files')}
+  >
+    <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+    <FileCode2 size={13} aria-hidden="true" />
+    <span>Files edited</span><span class="count"
+      >{responseChanges.files.length || (responseChanges.recorded ? '0' : '—')}</span
+    >
+  </button>
+{/snippet}
+
+{#snippet finishedPanels()}
   <div
     class="reply-usage"
     id={message.id + '-usage'}
@@ -181,11 +290,11 @@
     aria-labelledby={message.id + '-files-toggle'}
     hidden={expanded !== 'files'}
   >
-    {#if filesOpened}
+    {#if opened.has('files')}
       <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {folder} />
     {/if}
   </div>
-</div>
+{/snippet}
 
 <style>
   .reply-footer {
@@ -224,12 +333,49 @@
   .usage-toggle {
     font-variant-numeric: tabular-nums;
   }
-  .files-toggle {
+  .files-toggle,
+  .progress-toggle {
     white-space: nowrap;
   }
-  .file-count {
+  .progress-toggle {
+    max-width: 100%;
+  }
+  .count {
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
+  }
+  .progress-label {
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* A running plan names its current step, truncated to keep the row compact. */
+  .current {
+    min-width: 0;
+    max-width: 22em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-faint);
+  }
+  .progress-panel {
+    max-width: 640px;
+    max-height: 300px;
+    overflow: auto;
+    margin-top: 6px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-1);
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  @media (max-width: 600px) {
+    .progress-panel {
+      max-height: 220px;
+    }
+    .current {
+      display: none;
+    }
   }
   .footer-toggle :global(svg) {
     flex-shrink: 0;
