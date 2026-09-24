@@ -67,10 +67,10 @@ pub async fn read(
     if bytes.len() > 20_000_000 {
         return Err("The saved workspace exceeds its size limit".into());
     }
-    let workspace: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Cannot read the saved conversation")?;
+    let conversations =
+        crate::saved::conversations(&bytes).ok_or("Cannot read the saved conversation")?;
     let location = conversation_location(
-        &workspace,
+        &conversations,
         &conversation_id,
         &provider,
         connection_id.as_deref(),
@@ -113,28 +113,28 @@ pub async fn read(
 }
 
 fn conversation_location(
-    workspace: &Value,
+    conversations: &[crate::saved::Conversation],
     id: &str,
     provider: &str,
     connection: Option<&str>,
 ) -> Result<Option<crate::folders::ChatLocation>, String> {
-    let conversation = workspace["conversations"]
-        .as_array()
-        .and_then(|list| list.iter().find(|c| c["id"] == id))
+    let conversation = conversations
+        .iter()
+        .find(|c| c.id == id)
         .ok_or("This conversation is not in the current workspace")?;
-    if conversation["settings"]["provider"] != provider
-        || conversation["settings"]["connectionId"].as_str() != connection
+    if conversation.settings["provider"] != provider
+        || conversation.settings["connectionId"].as_str() != connection
     {
         return Err("The selected account does not match this conversation".into());
     }
     // RunRequest omits the standalone path, retaining its execution identity in the connection.
-    if conversation["location"]["path"]
+    if conversation.location["path"]
         .as_str()
         .is_none_or(str::is_empty)
     {
         return Ok(None);
     }
-    serde_json::from_value(conversation["location"].clone())
+    serde_json::from_value(conversation.location.clone())
         .map(Some)
         .map_err(|_| "The saved conversation location is invalid".into())
 }
@@ -482,25 +482,23 @@ mod tests {
     }
     #[test]
     fn saved_conversation_pins_provider_connection_and_folder() {
-        let workspace = json!({"conversations":[{"id":"chat","settings":{"provider":"claude","connectionId":"account"},"location":{"computerId":"host","environmentId":"env","path":"/project"}}]});
+        let mut workspace = json!({"conversations":[{"id":"chat","settings":{"provider":"claude","connectionId":"account"},"location":{"computerId":"host","environmentId":"env","path":"/project"}}]});
+        let saved = crate::saved::conversations(workspace.to_string().as_bytes()).unwrap();
         assert_eq!(
-            conversation_location(&workspace, "chat", "claude", Some("account"))
+            conversation_location(&saved, "chat", "claude", Some("account"))
                 .unwrap()
                 .unwrap()
                 .path,
             "/project"
         );
-        assert!(conversation_location(&workspace, "chat", "codex", Some("account")).is_err());
-        assert!(conversation_location(&workspace, "chat", "claude", Some("other")).is_err());
-        assert!(conversation_location(
-            &workspace,
-            "other-workspace-chat",
-            "claude",
-            Some("account")
-        )
-        .is_err());
-        let mut standalone = workspace;
-        standalone["conversations"][0]["location"]["path"] = json!("");
+        assert!(conversation_location(&saved, "chat", "codex", Some("account")).is_err());
+        assert!(conversation_location(&saved, "chat", "claude", Some("other")).is_err());
+        assert!(
+            conversation_location(&saved, "other-workspace-chat", "claude", Some("account"))
+                .is_err()
+        );
+        workspace["conversations"][0]["location"]["path"] = json!("");
+        let standalone = crate::saved::conversations(workspace.to_string().as_bytes()).unwrap();
         assert!(
             conversation_location(&standalone, "chat", "claude", Some("account"))
                 .unwrap()

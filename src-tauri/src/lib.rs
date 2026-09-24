@@ -18,6 +18,7 @@ mod protocol;
 mod providers;
 mod relay;
 mod runner;
+mod saved;
 mod shared_context;
 mod spend;
 mod standalone;
@@ -467,16 +468,11 @@ async fn run_agent(
             .app_local_data_dir()
             .map_err(|_| "Cannot locate app data")?;
         if let Ok(bytes) = std::fs::read(root.join("workspace.json")) {
-            if let Ok(workspace) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(conversation) = workspace["conversations"]
-                    .as_array()
-                    .and_then(|list| list.iter().find(|c| c["id"] == *id))
-                {
-                    if conversation["historyRevision"].as_u64().unwrap_or(0)
-                        > request.history_revision
-                    {
-                        return Err(providers::sessions::STALE_HISTORY.into());
-                    }
+            if let Some(conversation) =
+                saved::conversations(&bytes).and_then(|list| list.into_iter().find(|c| c.id == *id))
+            {
+                if conversation.history_revision.as_u64().unwrap_or(0) > request.history_revision {
+                    return Err(providers::sessions::STALE_HISTORY.into());
                 }
             }
         }
@@ -559,41 +555,41 @@ async fn undo_files(
             .path()
             .app_local_data_dir()
             .map_err(|_| "Cannot locate app data")?;
-        let workspace: serde_json::Value = serde_json::from_slice(
+        let conversation = saved::conversations(
             &std::fs::read(root.join("workspace.json"))
                 .map_err(|_| "Save the conversation before Undo")?,
         )
-        .map_err(|_| "Cannot read the saved conversation")?;
-        let conversation = workspace["conversations"]
-            .as_array()
-            .and_then(|list| list.iter().find(|c| c["id"] == conversation_id))
-            .ok_or("Conversation is unavailable")?;
-        if conversation["settings"]["connectionId"].as_str() != connection_id.as_deref() {
+        .ok_or("Cannot read the saved conversation")?
+        .into_iter()
+        .find(|c| c.id == conversation_id)
+        .ok_or("Conversation is unavailable")?;
+        if conversation.settings["connectionId"].as_str() != connection_id.as_deref() {
             return Err("The selected account changed. Reopen Undo.".into());
         }
-        let messages = conversation["messages"]
-            .as_array()
+        let messages = conversation
+            .messages
+            .as_ref()
             .ok_or("Invalid conversation")?;
-        if messages.iter().any(|m| m["status"] == "running") {
+        if messages.iter().any(|m| m.status == "running") {
             return Err("Wait for the response to finish before Undo".into());
         }
         if !messages
             .iter()
-            .any(|m| m["role"] == "assistant" && m["runId"] == run_id)
+            .any(|m| m.role == "assistant" && m.run_id == run_id)
         {
             return Err("The response is no longer in this conversation".into());
         }
-        let provider = conversation["settings"]["provider"]
+        let provider = conversation.settings["provider"]
             .as_str()
             .ok_or("Invalid provider")?;
-        let location: Option<folders::ChatLocation> = if conversation["location"]["path"]
+        let location: Option<folders::ChatLocation> = if conversation.location["path"]
             .as_str()
             .is_none_or(str::is_empty)
         {
             None
         } else {
             Some(
-                serde_json::from_value(conversation["location"].clone())
+                serde_json::from_value(conversation.location.clone())
                     .map_err(|_| "Invalid conversation folder")?,
             )
         };

@@ -1,7 +1,10 @@
 //! Local installation identity and per-connection CLI configuration. Never read credentials.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{future::Future, path::PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 use tauri::Manager;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -103,21 +106,39 @@ pub fn resolve(
     };
     uuid::Uuid::parse_str(id).map_err(|_| "Invalid connection id")?;
     let local = installation(app)?;
-    let (data, workspace) = read_workspace(app)?;
-    let connection = workspace["fleet"]["connections"]
+    let (data, fleet) = read_fleet(app)?;
+    resolve_in(
+        &app.config().identifier,
+        &local,
+        &data,
+        &fleet,
+        provider,
+        id,
+    )
+}
+// A connection and its context source resolve from the same registry read.
+fn resolve_in(
+    namespace: &str,
+    local: &Installation,
+    data: &Path,
+    fleet: &Value,
+    provider: &str,
+    id: &str,
+) -> Result<Profile, String> {
+    let connection = fleet["connections"]
         .as_array()
         .and_then(|v| v.iter().find(|v| v["id"] == id))
         .ok_or("Connection no longer exists")?;
     let distribution = if connection["environmentId"] == local.id {
         None
     } else {
-        let environment = workspace["fleet"]["environments"]
+        let environment = fleet["environments"]
             .as_array()
             .and_then(|list| list.iter().find(|e| e["id"] == connection["environmentId"]))
             .ok_or("Connection environment no longer exists")?;
-        Some(managed_distribution(&local, environment, provider)?)
+        Some(managed_distribution(local, environment, provider)?)
     };
-    let account = workspace["fleet"]["accounts"]
+    let account = fleet["accounts"]
         .as_array()
         .and_then(|v| v.iter().find(|v| v["id"] == connection["accountId"]))
         .ok_or("Account no longer exists")?;
@@ -139,18 +160,20 @@ pub fn resolve(
     };
     // A broken context source must not break sign-in, account usage, or credential management.
     let shared = match shared_source_kind(connection) {
-        SharedSource::Connection(source_id) => {
-            validate_shared_source(&workspace["fleet"], id, &source_id)
-                .and_then(|()| resolve(app, provider, Some(&source_id)))
-                .map(|source| Some(Box::new(source)))
-        }
+        SharedSource::Connection(source_id) => validate_shared_source(fleet, id, &source_id)
+            .and_then(|()| {
+                // Like a requested connection, the source names a profile directory.
+                uuid::Uuid::parse_str(&source_id).map_err(|_| "Invalid connection id")?;
+                resolve_in(namespace, local, data, fleet, provider, &source_id)
+            })
+            .map(|source| Some(Box::new(source))),
         // This computer's own CLI context: the same directory the terminal uses, with no
         // connection record required and no credentials involved.
         SharedSource::Computer => Ok(Some(Box::new(Profile {
             id: COMPUTER_SOURCE.into(),
             provider: provider.into(),
             distribution: distribution.clone(),
-            namespace: app.config().identifier.clone(),
+            namespace: namespace.into(),
             ..Profile::default()
         }))),
         SharedSource::None => Ok(None),
@@ -165,7 +188,7 @@ pub fn resolve(
         root,
         distribution,
         folder_distribution: None,
-        namespace: app.config().identifier.clone(),
+        namespace: namespace.into(),
         isolated: connection["profile"] == "isolated",
         shared_source,
         shared_error,
@@ -186,8 +209,8 @@ pub fn environment_profile(
     let distribution = if environment_id == local.id {
         None
     } else {
-        let (_, workspace) = read_workspace(app)?;
-        let environment = workspace["fleet"]["environments"]
+        let (_, fleet) = read_fleet(app)?;
+        let environment = fleet["environments"]
             .as_array()
             .and_then(|list| list.iter().find(|e| e["id"] == environment_id))
             .ok_or("Environment no longer exists")?;
@@ -200,17 +223,17 @@ pub fn environment_profile(
         ..Profile::default()
     })
 }
-fn read_workspace(app: &tauri::AppHandle) -> Result<(PathBuf, Value), String> {
+fn read_fleet(app: &tauri::AppHandle) -> Result<(PathBuf, Value), String> {
     let data = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    let workspace: Value = serde_json::from_slice(
-        &std::fs::read(data.join("workspace.json"))
-            .map_err(|_| "Save Connections before using an account")?,
-    )
-    .map_err(|_| "Cannot read connection registry")?;
-    Ok((data, workspace))
+    let fleet = crate::saved::fleet(
+        &data,
+        "Save Connections before using an account",
+        "Cannot read connection registry",
+    )?;
+    Ok((data, fleet))
 }
 // Only a WSL distribution discovered by this Windows host runs through wsl.exe; every other
 // environment belongs to its own relay host.
@@ -356,6 +379,49 @@ mod tests {
             .remove("sharedContextConnectionId");
         fleet["accounts"][1]["provider"] = "claude".into();
         assert!(validate_shared_source(&fleet, "one", "two").is_err());
+    }
+    #[test]
+    fn account_context_sources_resolve_from_the_same_registry_with_checked_ids() {
+        let data = tempfile::tempdir().unwrap();
+        let local = Installation {
+            id: "desktop".into(),
+            computer_id: "host".into(),
+            name: "Host".into(),
+            platform: "windows".into(),
+            distribution: None,
+        };
+        let target = uuid::Uuid::new_v4().to_string();
+        let source = uuid::Uuid::new_v4().to_string();
+        let mut fleet = serde_json::json!({
+            "accounts": [{"id": "a", "provider": "claude"}, {"id": "b", "provider": "claude"}],
+            "connections": [
+                {"id": target, "accountId": "a", "environmentId": "desktop", "profile": "isolated",
+                 "sharedContextConnectionId": source},
+                {"id": source, "accountId": "b", "environmentId": "desktop", "profile": "isolated"}
+            ],
+            "environments": [{"id": "desktop", "computerId": "host", "platform": "windows"}]
+        });
+        let claude = data.path().join("profiles").join("claude");
+        let profile = resolve_in("app", &local, data.path(), &fleet, "claude", &target).unwrap();
+        assert_eq!(profile.root, Some(claude.join(&target)));
+        assert!(profile.shared_error.is_none());
+        let shared = profile.shared_source.unwrap();
+        assert_eq!(
+            (shared.id.as_str(), shared.namespace.as_str()),
+            (source.as_str(), "app")
+        );
+        assert_eq!(shared.root, Some(claude.join(&source)));
+        assert_eq!(shared.shared_source.unwrap().id, COMPUTER_SOURCE);
+        // A saved source that is not a connection id never names a profile directory.
+        fleet["connections"][0]["sharedContextConnectionId"] = "../escape".into();
+        fleet["connections"][1]["id"] = "../escape".into();
+        let profile = resolve_in("app", &local, data.path(), &fleet, "claude", &target).unwrap();
+        assert!(profile.shared_source.is_none());
+        assert_eq!(
+            profile.shared_error.as_deref(),
+            Some("Invalid connection id")
+        );
+        assert!(!data.path().join("profiles").join("escape").exists());
     }
     #[tokio::test]
     async fn concurrent_profile_scopes_do_not_cross_accounts_or_providers() {

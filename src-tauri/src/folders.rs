@@ -20,30 +20,30 @@ pub fn validate_chat(
     let Some(location) = location else {
         return Ok(());
     };
-    let file = app
+    let root = app
         .path()
         .app_local_data_dir()
-        .map_err(|_| "Cannot locate app data")?
-        .join("workspace.json");
-    let workspace: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(file).map_err(|_| "Save the folder selection before chatting")?,
-    )
-    .map_err(|_| "Cannot read the folder selection")?;
-    validate_connection(&workspace, location, connection_id)
+        .map_err(|_| "Cannot locate app data")?;
+    let fleet = crate::saved::fleet(
+        &root,
+        "Save the folder selection before chatting",
+        "Cannot read the folder selection",
+    )?;
+    validate_connection(&fleet, location, connection_id)
 }
 fn validate_connection(
-    workspace: &serde_json::Value,
+    fleet: &serde_json::Value,
     location: &ChatLocation,
     connection_id: Option<&str>,
 ) -> Result<(), String> {
-    let connection = workspace["fleet"]["connections"]
+    let connection = fleet["connections"]
         .as_array()
         .and_then(|list| {
             list.iter()
                 .find(|c| c["id"].as_str() == connection_id && connection_id.is_some())
         })
         .ok_or("Choose a CLI connection for this folder")?;
-    let environment = workspace["fleet"]["environments"]
+    let environment = fleet["environments"]
         .as_array()
         .and_then(|list| {
             list.iter().find(|e| {
@@ -55,7 +55,7 @@ fn validate_connection(
         .execution_environment_id
         .as_deref()
         .unwrap_or(&location.environment_id);
-    let execution = workspace["fleet"]["environments"]
+    let execution = fleet["environments"]
         .as_array()
         .and_then(|list| {
             list.iter()
@@ -121,16 +121,16 @@ pub fn environment_distribution(
     if environment_id == local.id {
         return Ok(None);
     }
-    let file = app
+    let root = app
         .path()
         .app_local_data_dir()
-        .map_err(|_| "Cannot locate app data")?
-        .join("workspace.json");
-    let workspace: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(file).map_err(|_| "Save the workspace before browsing folders")?,
-    )
-    .map_err(|_| "Cannot read environments")?;
-    let environment = workspace["fleet"]["environments"]
+        .map_err(|_| "Cannot locate app data")?;
+    let fleet = crate::saved::fleet(
+        &root,
+        "Save the workspace before browsing folders",
+        "Cannot read environments",
+    )?;
+    let environment = fleet["environments"]
         .as_array()
         .and_then(|list| list.iter().find(|e| e["id"] == environment_id))
         .ok_or("Folder environment no longer exists")?;
@@ -535,20 +535,20 @@ mod tests {
     }
     #[test]
     fn folder_routing_rejects_other_environments_and_missing_connections() {
-        let workspace = serde_json::json!({"fleet":{"environments":[{"id":"linux", "computerId":"desktop", "platform":"wsl"}],"connections":[{"id":"correct", "environmentId":"linux"},{"id":"wrong", "environmentId":"windows"}]}});
+        let fleet = serde_json::json!({"environments":[{"id":"linux", "computerId":"desktop", "platform":"wsl"}],"connections":[{"id":"correct", "environmentId":"linux"},{"id":"wrong", "environmentId":"windows"}]});
         let location = ChatLocation {
             computer_id: "desktop".into(),
             environment_id: "linux".into(),
             execution_environment_id: None,
             path: "/home/project".into(),
         };
-        assert!(validate_connection(&workspace, &location, Some("correct")).is_ok());
-        assert!(validate_connection(&workspace, &location, Some("wrong")).is_err());
-        assert!(validate_connection(&workspace, &location, None).is_err());
+        assert!(validate_connection(&fleet, &location, Some("correct")).is_ok());
+        assert!(validate_connection(&fleet, &location, Some("wrong")).is_err());
+        assert!(validate_connection(&fleet, &location, None).is_err());
     }
     #[test]
     fn desktop_can_open_its_wsl_folder_without_switching_the_connection() {
-        let workspace = serde_json::json!({"fleet":{
+        let fleet = serde_json::json!({
             "environments":[
                 {"id":"windows","computerId":"desktop","platform":"windows"},
                 {"id":"ubuntu","computerId":"desktop","platform":"wsl","discoveredOn":"windows"},
@@ -556,22 +556,22 @@ mod tests {
                 {"id":"remote","computerId":"laptop","platform":"windows"}
             ],
             "connections":[{"id":"native","environmentId":"windows"},{"id":"linux","environmentId":"ubuntu"},{"id":"sibling","environmentId":"debian"},{"id":"other","environmentId":"remote"}]
-        }});
+        });
         let mut location = ChatLocation {
             computer_id: "desktop".into(),
             environment_id: "ubuntu".into(),
             execution_environment_id: Some("windows".into()),
             path: "/home/project".into(),
         };
-        assert!(validate_connection(&workspace, &location, Some("native")).is_ok());
-        assert!(validate_connection(&workspace, &location, Some("linux")).is_err());
-        assert!(validate_connection(&workspace, &location, Some("other")).is_err());
+        assert!(validate_connection(&fleet, &location, Some("native")).is_ok());
+        assert!(validate_connection(&fleet, &location, Some("linux")).is_err());
+        assert!(validate_connection(&fleet, &location, Some("other")).is_err());
         location.execution_environment_id = None;
-        assert!(validate_connection(&workspace, &location, Some("linux")).is_ok());
-        assert!(validate_connection(&workspace, &location, Some("native")).is_err());
+        assert!(validate_connection(&fleet, &location, Some("linux")).is_ok());
+        assert!(validate_connection(&fleet, &location, Some("native")).is_err());
         location.execution_environment_id = Some("debian".into());
-        assert!(validate_connection(&workspace, &location, Some("sibling")).is_err());
+        assert!(validate_connection(&fleet, &location, Some("sibling")).is_err());
         location.execution_environment_id = Some("remote".into());
-        assert!(validate_connection(&workspace, &location, Some("other")).is_err());
+        assert!(validate_connection(&fleet, &location, Some("other")).is_err());
     }
 }
