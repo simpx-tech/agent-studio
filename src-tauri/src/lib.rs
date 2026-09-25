@@ -265,6 +265,27 @@ async fn list_models(
     .await)
 }
 
+/// The app session this process opened: History groups the chats used until the next start of
+/// the app under it. Page reloads keep it.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSession {
+    id: String,
+    started_at: u64,
+}
+static APP_SESSION: std::sync::OnceLock<AppSession> = std::sync::OnceLock::new();
+fn app_session_started() -> &'static AppSession {
+    APP_SESSION.get_or_init(|| AppSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        started_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64),
+    })
+}
+#[tauri::command]
+async fn app_session() -> AppSession {
+    app_session_started().clone()
+}
 #[tauri::command]
 async fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, String> {
     tauri::async_runtime::spawn_blocking(move || profiles::installation(&app))
@@ -873,6 +894,7 @@ pub fn run() {
         println!("Agent Studio startup storage verified.");
         return;
     }
+    app_session_started();
     tauri::Builder::default()
         .register_uri_scheme_protocol("studio-artifact", |_context, request| {
             artifacts::response(request.uri().path())
@@ -978,6 +1000,7 @@ pub fn run() {
             updates::check_app_update,
             updates::install_app_update,
             artifacts::save_artifact,
+            app_session,
             get_installation,
             discover_wsl,
             inspect_environment_clis,
@@ -1040,5 +1063,18 @@ mod workspace_file_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"saved");
         // The written file became the workspace; no temporary file is left behind.
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod app_session_tests {
+    #[test]
+    fn keeps_one_app_session_per_process() {
+        let started = super::app_session_started();
+        assert_eq!(super::app_session_started().id, started.id);
+        assert!(uuid::Uuid::parse_str(&started.id).is_ok());
+        assert!(started.started_at > 1_700_000_000_000);
+        let value = serde_json::to_value(started).unwrap();
+        assert_eq!(value["startedAt"], started.started_at);
     }
 }

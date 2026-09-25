@@ -46,6 +46,8 @@
     GitFork,
     Rewind,
     PenLine,
+    RotateCcwClock,
+    CalendarDays,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -86,6 +88,7 @@
     signIn,
     openLink,
     getInstallation,
+    appSession,
     discoverWsl,
     inspectEnvironmentClis,
     configureRuntime,
@@ -141,9 +144,16 @@
     knownLocations,
     conversationLocation,
     groupConversations,
+    historySectionId,
     nextActiveConversation,
     scratchLocation,
   } from '$lib/locations';
+  import {
+    appSessionSchema,
+    recordAppSession,
+    sessionTimeline,
+    startOfDay,
+  } from '$lib/app-sessions';
   import {
     registerInstallation,
     registerWslEnvironments,
@@ -709,8 +719,17 @@
       )
       .sort((a, b) => b.createdAt - a.createdAt);
   });
+  // History names session days from today, which the minute timer moves on at midnight.
+  let today = $state(startOfDay(Date.now()));
   const conversationGroups = $derived(
-    groupConversations(recent, workspace.fleet, installation, sidebarScratches),
+    groupConversations(
+      recent,
+      workspace.fleet,
+      installation,
+      sidebarScratches,
+      workspace.appSessions,
+      today,
+    ),
   );
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
   const observedReply = $derived(
@@ -976,6 +995,7 @@
       if (pendingSignIn && Date.now() < signInDeadline && !localRunning) void refresh();
     }, 5000);
     const usagePoll = setInterval(() => {
+      today = startOfDay(Date.now());
       if (loaded && document.visibilityState !== 'hidden') {
         if (view === 'chat') void refreshUsage();
         if (view === 'connections') void refreshAccountUsage();
@@ -1010,6 +1030,15 @@
               installation,
             );
         }
+        // History lists the chats used from this start of the app until the next one under it.
+        const started = desktop() ? await appSession().catch(() => undefined) : undefined;
+        const session = started && installation && { ...started, environmentId: installation.id };
+        if (session && appSessionSchema.safeParse(session).success)
+          workspace.appSessions = recordAppSession(
+            workspace.appSessions,
+            session,
+            workspace.conversations,
+          );
         draftComputerId =
           workspace.fleet.environments.find((e) => e.id === installation?.id)?.computerId ??
           installation?.computerId ??
@@ -1098,6 +1127,7 @@
               workspace.workflows = value.workflows;
               workspace.inputTemplates = value.inputTemplates;
               workspace.claudeInstructions = value.claudeInstructions;
+              workspace.appSessions = value.appSessions;
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
@@ -2205,9 +2235,16 @@
   function revealConversation(c: Conversation) {
     conversationScope = c.archived ? 'history' : 'active';
     const location = conversationLocation(c, workspace.fleet, installation);
-    const computerKey = `${conversationScope}/${location ? locationComputerId(location) : 'unassigned'}`;
-    collapsedGroups[computerKey] = false;
-    collapsedGroups[`${computerKey}/${location ? locationKey(location) : 'unassigned'}`] = false;
+    // Active lists chats by computer, History by the app session they were last used in.
+    const sectionKey = `${conversationScope}/${
+      c.archived
+        ? historySectionId(c, sessionTimeline(workspace.appSessions))
+        : location
+          ? locationComputerId(location)
+          : 'unassigned'
+    }`;
+    collapsedGroups[sectionKey] = false;
+    collapsedGroups[`${sectionKey}/${location ? locationKey(location) : 'unassigned'}`] = false;
   }
   async function conversationTabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -3389,38 +3426,57 @@
           aria-labelledby={`conversation-tab-${group.id}`}
           hidden={conversationScope !== group.id}
         >
-          {#each group.computers as computer}
-            {@const computerKey = `${group.id}/${computer.id}`}
+          {#each group.sections as section}
+            {@const sectionKey = `${group.id}/${section.id}`}
             <div
-              class="conversation-computer"
-              aria-label={`${computer.name} ${group.name.toLowerCase()} chats`}
+              class={section.kind === 'computer' ? 'conversation-computer' : 'conversation-session'}
+              aria-label={section.kind === 'computer'
+                ? `${section.name} ${group.name.toLowerCase()} chats`
+                : section.detail}
             >
-              <div class="computer-group-row">
-                <button
-                  class="computer-group-toggle"
-                  title={computer.name}
-                  aria-expanded={!collapsedGroups[computerKey]}
-                  onclick={() => (collapsedGroups[computerKey] = !collapsedGroups[computerKey])}
-                  ><Laptop size={13} /><span>{computer.name}</span
-                  >{#if !computerOnline(computer.id)}<small class="computer-offline">Offline</small
-                    >{/if}<ChevronRight
-                    size={12}
-                    class={!collapsedGroups[computerKey] ? 'expanded-chevron' : ''}
-                  /></button
-                >
-                <button
-                  class="computer-new-chat"
-                  title={`New conversation on ${computer.name}`}
-                  aria-label={`New conversation on ${computer.name}`}
-                  disabled={!loaded ||
-                    selectingLocation ||
-                    !computers.some((c) => c.id === computer.id)}
-                  onclick={() => newChat(undefined, undefined, undefined, computer.id)}
-                  ><Plus size={14} /></button
-                >
-              </div>
-              {#if !collapsedGroups[computerKey]}{#each computer.folders as folder}
-                  {@const folderKey = `${computerKey}/${folder.id}`}
+              {#if section.kind === 'computer'}<div class="computer-group-row">
+                  <button
+                    class="computer-group-toggle"
+                    title={section.name}
+                    aria-expanded={!collapsedGroups[sectionKey]}
+                    onclick={() => (collapsedGroups[sectionKey] = !collapsedGroups[sectionKey])}
+                    ><Laptop size={13} /><span>{section.name}</span
+                    >{#if !computerOnline(section.id)}<small class="computer-offline">Offline</small
+                      >{/if}<ChevronRight
+                      size={12}
+                      class={!collapsedGroups[sectionKey] ? 'expanded-chevron' : ''}
+                    /></button
+                  >
+                  <button
+                    class="computer-new-chat"
+                    title={`New conversation on ${section.name}`}
+                    aria-label={`New conversation on ${section.name}`}
+                    disabled={!loaded ||
+                      selectingLocation ||
+                      !computers.some((c) => c.id === section.id)}
+                    onclick={() => newChat(undefined, undefined, undefined, section.id)}
+                    ><Plus size={14} /></button
+                  >
+                </div>
+              {:else}<div class="session-group-row">
+                  <button
+                    class="session-group-toggle"
+                    title={section.detail}
+                    aria-expanded={!collapsedGroups[sectionKey]}
+                    onclick={() => (collapsedGroups[sectionKey] = !collapsedGroups[sectionKey])}
+                    >{#if section.kind === 'session'}<RotateCcwClock
+                        size={13}
+                        aria-hidden="true"
+                      />{:else}<CalendarDays size={13} aria-hidden="true" />{/if}<span
+                      >{section.name}</span
+                    ><ChevronRight
+                      size={12}
+                      class={!collapsedGroups[sectionKey] ? 'expanded-chevron' : ''}
+                    /></button
+                  >
+                </div>{/if}
+              {#if !collapsedGroups[sectionKey]}{#each section.folders as folder}
+                  {@const folderKey = `${sectionKey}/${folder.id}`}
                   <div class="conversation-folder" aria-label={folder.detail}>
                     <div class="folder-group-row">
                       <button
@@ -3430,7 +3486,10 @@
                         onclick={() => (collapsedGroups[folderKey] = !collapsedGroups[folderKey])}
                         >{#if folder.location?.path}<Folder size={14} />{:else}<MessageCircle
                             size={14}
-                          />{/if}<span>{folder.name}</span><ChevronRight
+                          />{/if}<span>{folder.name}</span
+                        >{#if section.kind !== 'computer' && section.computers > 1}<small
+                            class="folder-computer">{folder.computerName}</small
+                          >{/if}<ChevronRight
                           size={12}
                           class={!collapsedGroups[folderKey] ? 'expanded-chevron' : ''}
                         /></button
@@ -3441,8 +3500,8 @@
                           ? `New conversation in ${folder.name}`
                           : 'New standalone conversation'}
                         aria-label={folder.location?.path
-                          ? `New conversation in ${folder.name} on ${computer.name}`
-                          : `New standalone conversation on ${computer.name}`}
+                          ? `New conversation in ${folder.name} on ${folder.computerName}`
+                          : `New standalone conversation on ${folder.computerName}`}
                         disabled={!loaded || selectingLocation || !folder.location}
                         onclick={() => newChat(undefined, undefined, folder.location)}
                         ><Plus size={14} /></button

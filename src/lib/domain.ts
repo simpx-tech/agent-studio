@@ -17,6 +17,7 @@ import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitatio
 import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
+import { appSessionsSchema } from './app-sessions.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -272,6 +273,8 @@ export const workspaceSchema = z.object({
   workflows: z.array(workflowSchema).max(100).optional(),
   inputTemplates: inputTemplatesSchema.optional(),
   claudeInstructions: claudeInstructionsSchema.optional(),
+  // Starts of the desktop app, which History groups chats by.
+  appSessions: appSessionsSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

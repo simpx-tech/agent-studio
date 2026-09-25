@@ -583,16 +583,19 @@ pre {
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-.conversation-computer + .conversation-computer {
+.conversation-computer + .conversation-computer,
+.conversation-session + .conversation-session {
   margin-top: 14px;
 }
 .computer-group-row,
+.session-group-row,
 .folder-group-row {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 .computer-group-toggle,
+.session-group-toggle,
 .folder-group-toggle {
   flex: 1;
   width: 100%;
@@ -603,6 +606,7 @@ pre {
   border-radius: var(--radius-sm);
 }
 .computer-group-toggle span,
+.session-group-toggle span,
 .folder-group-toggle span,
 .conversation-item > span,
 .scratch-item > span {
@@ -612,14 +616,16 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.computer-group-toggle {
+.computer-group-toggle,
+.session-group-toggle {
   min-height: 28px;
   padding: 4px 8px;
   font-size: var(--text-xs);
   font-weight: 500;
   color: var(--text-faint);
 }
-.computer-group-toggle > svg:first-child {
+.computer-group-toggle > svg:first-child,
+.session-group-toggle > svg:first-child {
   color: var(--text-faint);
 }
 .computer-group-toggle .computer-offline {
@@ -633,6 +639,7 @@ pre {
   line-height: 16px;
 }
 .computer-group-toggle > svg:last-child,
+.session-group-toggle > svg:last-child,
 .folder-group-toggle > svg:last-child {
   color: var(--text-faint);
   opacity: 0;
@@ -641,10 +648,13 @@ pre {
     transform var(--duration) var(--ease-out);
 }
 .computer-group-row:hover .computer-group-toggle > svg:last-child,
+.session-group-row:hover .session-group-toggle > svg:last-child,
 .folder-group-row:hover .folder-group-toggle > svg:last-child,
 .computer-group-toggle:focus-visible > svg:last-child,
+.session-group-toggle:focus-visible > svg:last-child,
 .folder-group-toggle:focus-visible > svg:last-child,
 .computer-group-toggle[aria-expanded='false'] > svg:last-child,
+.session-group-toggle[aria-expanded='false'] > svg:last-child,
 .folder-group-toggle[aria-expanded='false'] > svg:last-child {
   opacity: 1;
 }
@@ -658,11 +668,20 @@ pre {
 .folder-group-toggle > svg:first-child {
   color: var(--text-muted);
 }
+/* History folders name their computer when a session holds chats of several. */
+.folder-group-toggle .folder-computer {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
 .computer-group-toggle:not(:disabled):hover,
+.session-group-toggle:not(:disabled):hover,
 .folder-group-toggle:not(:disabled):hover {
   background: var(--hover);
 }
-.computer-group-toggle:not(:disabled):hover {
+.computer-group-toggle:not(:disabled):hover,
+.session-group-toggle:not(:disabled):hover {
   color: var(--text-secondary);
 }
 .computer-new-chat,
@@ -692,6 +711,7 @@ pre {
   .computer-new-chat,
   .folder-new-chat,
   .computer-group-toggle > svg:last-child,
+  .session-group-toggle > svg:last-child,
   .folder-group-toggle > svg:last-child {
     opacity: 1;
   }

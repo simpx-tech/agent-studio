@@ -6,7 +6,7 @@ import {
   settingsFor,
   type Conversation,
 } from './domain';
-import { emptyShared, mergeShared, sameShared, sharedWorkspace } from './sync';
+import { emptyShared, mergeShared, sameShared, sharedSchema, sharedWorkspace } from './sync';
 import { registerInstallation } from './fleet';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
@@ -31,6 +31,29 @@ describe('workspace replication', () => {
       sameShared(local, { ...merged, conversations: [first, { ...second, title: 'Renamed' }] }),
     ).toBe(false);
     expect(sameShared(local, { ...merged, claudeInstructions: '' })).toBe(false);
+  });
+  it('syncs app sessions and keeps them when the relay predates them', () => {
+    const session = (hour: number) => ({
+      id: crypto.randomUUID(),
+      environmentId: crypto.randomUUID(),
+      startedAt: new Date(2026, 8, 25, hour).toISOString(),
+    });
+    const [kept, ours, theirs] = [session(8), session(9), session(10)];
+    const base = { ...emptyShared(), appSessions: [kept] };
+    const local = { ...base, appSessions: [kept, ours] };
+    const remote = { ...base, appSessions: [kept, theirs] };
+    expect(mergeShared(base, local, remote).appSessions).toEqual([kept, ours, theirs]);
+    // An older relay drops the list; this device keeps its own and sees no difference.
+    const older = emptyShared();
+    expect(sharedSchema.parse(local).appSessions).toEqual(local.appSessions);
+    expect(mergeShared(base, local, older).appSessions).toEqual(local.appSessions);
+    expect(sameShared(older, local)).toBe(true);
+    // A relay that holds sessions this device lacks, or other ones, differs.
+    expect(sameShared(remote, emptyShared())).toBe(false);
+    expect(sameShared(remote, local)).toBe(false);
+    expect(sameShared(local, { ...local, appSessions: [ours, kept] })).toBe(true);
+    // No list stays absent, as older relays store it.
+    expect('appSessions' in mergeShared(emptyShared(), emptyShared(), older)).toBe(false);
   });
   it('migrates v2 and registers only this installation without inventing remote machines or accounts', () => {
     const old = {

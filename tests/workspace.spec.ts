@@ -879,8 +879,13 @@ test('context growth indicators survive reload and stay independent of drafts', 
   await page.getByRole('button', { name: 'Growing context fixture', exact: true }).click();
   await page.locator('.context-chip').click();
   await expect(guidance).toContainText('~2 similar exchanges to 80%');
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!))).toEqual({
+  const reloaded = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  // Only the new start of the app, which replaces the start without chats, and archiving change.
+  expect(reloaded.appSessions).toHaveLength(1);
+  expect(reloaded.appSessions[0].id).not.toBe(JSON.parse(saved!).appSessions[0].id);
+  expect(reloaded).toEqual({
     ...JSON.parse(saved!),
+    appSessions: reloaded.appSessions,
     conversations: JSON.parse(saved!).conversations.map((c: object) => ({ ...c, archived: true })),
   });
   await expect(page.getByTestId('forecast-pace')).toHaveCount(0);
@@ -1716,7 +1721,7 @@ test('opening the app archives saved chats and sending from History restores the
   await expect(historyTab).toHaveText('History3');
 });
 
-test('computer and Standalone plus buttons open scoped drafts from collapsed history groups', async ({
+test('computer and Standalone plus buttons open scoped drafts from collapsed groups', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -1748,9 +1753,16 @@ test('computer and Standalone plus buttons open scoped drafts from collapsed his
   const historyTab = page.getByRole('tab', { name: /^History/ });
   await historyTab.click();
   await history.getByRole('button', { name: 'Old general conversation', exact: true }).click();
-  await history.locator('.computer-group-toggle').click();
+  // History lists app sessions, which collapse but start no conversation of their own.
+  await history.locator('.session-group-toggle').click();
+  await expect(
+    history.getByRole('button', { name: 'Old general conversation', exact: true }),
+  ).toHaveCount(0);
+  await expect(history.locator('.computer-group-toggle, .computer-new-chat')).toHaveCount(0);
+  await history.locator('.session-group-toggle').click();
+  await history.getByRole('button', { name: 'Standalone', exact: true }).click();
   await history
-    .getByRole('button', { name: 'New conversation on Desktop', exact: true })
+    .getByRole('button', { name: 'New standalone conversation on Desktop', exact: true })
     .press('Enter');
   await expect(page.getByRole('tab', { name: /^Active/ })).toHaveAttribute('aria-selected', 'true');
   await expect(picker('Computer')).toHaveText('Desktop');
@@ -1760,12 +1772,8 @@ test('computer and Standalone plus buttons open scoped drafts from collapsed his
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
   await page.getByLabel('Message', { exact: true }).fill('Keep this Standalone draft');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
-  await historyTab.click();
-  await history.locator('.computer-group-toggle').click();
-  await history.getByRole('button', { name: 'Standalone', exact: true }).click();
-  await history
-    .getByRole('button', { name: 'New standalone conversation on Desktop', exact: true })
-    .click();
+  await active.locator('.computer-group-toggle').click();
+  await active.getByRole('button', { name: 'New conversation on Desktop', exact: true }).click();
   await expect(picker('Folder')).toHaveText('Standalone');
   await expect(picker('Agent')).toBeEnabled();
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();

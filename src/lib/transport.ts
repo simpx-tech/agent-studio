@@ -982,9 +982,15 @@ export async function pollRelay(): Promise<Presence[] | null> {
       let acceptedRevision: number | undefined;
       for (let attempt = 0; attempt < 4; attempt++) {
         const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace), options);
-        const mergedJson = JSON.stringify(merged);
+        // An older relay or app drops app sessions. This device keeps its own and sends them
+        // with its next other change, instead of writing them back after every write there.
+        const unsent =
+          !remote.workspace.appSessions && merged.appSessions
+            ? { ...merged, appSessions: undefined }
+            : merged;
+        const mergedJson = JSON.stringify(unsent);
         if (mergedJson === JSON.stringify(remote.workspace)) {
-          accepted = merged;
+          accepted = unsent;
           acceptedJson = mergedJson;
           acceptedRevision = remote.revision;
           break;
@@ -1500,6 +1506,14 @@ export async function loadModels(
 export async function loadWorkspace(): Promise<Workspace> {
   const value = desktop() ? await invoke<unknown>('load_workspace') : null;
   return value ? restoreWorkspace(value) : initialWorkspace();
+}
+/** The app session this desktop process opened when it started; page reloads keep it. */
+export async function appSession(): Promise<{ id: string; startedAt: string } | undefined> {
+  if (!desktop()) return undefined;
+  const value = await invoke<{ id?: unknown; startedAt?: unknown } | null>('app_session');
+  const startedAt = new Date(typeof value?.startedAt === 'number' ? value.startedAt : NaN);
+  if (typeof value?.id !== 'string' || Number.isNaN(startedAt.getTime())) return undefined;
+  return { id: value.id, startedAt: startedAt.toISOString() };
 }
 export async function saveWorkspace(
   workspace: Workspace,

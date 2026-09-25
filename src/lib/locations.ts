@@ -12,6 +12,16 @@ import {
   type Fleet,
   type Installation,
 } from './fleet';
+import {
+  dayLabel,
+  lastUsed,
+  sessionAt,
+  sessionLabel,
+  sessionTimeline,
+  startOfDay,
+  type AppSession,
+  type SessionTimeline,
+} from './app-sessions';
 
 export const locationKey = (location: ChatLocation) =>
   `${location.computerId}/${locationExecutionId(location)}/${location.environmentId}/${location.path}`;
@@ -204,76 +214,175 @@ export function scratchLocation(
     ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
     : undefined;
 }
-// Active and History conversations by computer and folder. Scratch chats, new conversations not
-// sent yet, are listed in Active only: first in their folder, and in folders of their own after
-// the folders that hold conversations.
+type FolderGroup<S> = {
+  id: string;
+  name: string;
+  detail: string;
+  computerId: string;
+  computerName: string;
+  location?: ChatLocation;
+  conversations: Conversation[];
+  scratches: S[];
+};
+export type ConversationSection<S> =
+  | { kind: 'computer'; id: string; name: string; folders: FolderGroup<S>[] }
+  // History: an app session, or a day for chats last used before sessions were recorded.
+  | {
+      kind: 'session' | 'day';
+      id: string;
+      name: string;
+      detail: string;
+      // Computers of its folders; the folders name theirs when there is more than one.
+      computers: number;
+      folders: FolderGroup<S>[];
+    };
+// The History section of a chat: the app session it was last used in, else the day.
+export function historySectionId(conversation: Conversation, timeline: SessionTimeline) {
+  const used = lastUsed(conversation);
+  const session = sessionAt(timeline, used);
+  if (session) return session.id;
+  if (!Number.isFinite(used)) return 'earlier';
+  const day = new Date(used);
+  return `day:${day.getFullYear()}-${day.getMonth() + 1}-${day.getDate()}`;
+}
+// Active conversations by computer and folder, and History ones by app session and folder.
+// Scratch chats, new conversations not sent yet, are listed in Active only: first in their
+// folder, and in folders of their own after the folders that hold conversations.
 export function groupConversations<S extends { computerId: string; location?: ChatLocation }>(
   conversations: Conversation[],
   fleet: Fleet,
   installation?: Installation,
   scratches: S[] = [],
+  appSessions: AppSession[] = [],
+  now = Date.now(),
 ) {
-  return ([false, true] as const).map((archived) => {
-    const computers = new Map<
-      string,
-      {
-        id: string;
-        name: string;
-        folders: Map<
-          string,
-          {
-            id: string;
-            name: string;
-            detail: string;
-            location?: ChatLocation;
-            conversations: Conversation[];
-            scratches: S[];
-          }
-        >;
-      }
-    >();
-    const folderOf = (location: ChatLocation | undefined) => {
+  const views = computerViews(fleet);
+  const computerName = (id: string) =>
+    views.find((c) => c.id === id)?.name ?? 'Unavailable computer';
+  const computerOf = (location: ChatLocation | undefined) => {
+    const execution = location ? locationExecutionEnvironment(fleet, location) : undefined;
+    return execution ? computerViewId(execution) : (location?.computerId ?? 'unassigned');
+  };
+  const folderIn = (folders: Map<string, FolderGroup<S>>, location: ChatLocation | undefined) => {
+    const key = location ? locationKey(location) : 'unassigned';
+    let folder = folders.get(key);
+    if (!folder) {
       const environment = fleet.environments.find(
         (e) => e.id === location?.environmentId && e.computerId === location?.computerId,
       );
-      const execution = location ? locationExecutionEnvironment(fleet, location) : undefined;
-      const computerId = execution
-        ? computerViewId(execution)
-        : (location?.computerId ?? 'unassigned');
-      if (!computers.has(computerId))
-        computers.set(computerId, {
-          id: computerId,
-          name:
-            computerViews(fleet).find((c) => c.id === computerId)?.name ?? 'Unavailable computer',
-          folders: new Map(),
-        });
-      const computer = computers.get(computerId)!;
-      const key = location ? locationKey(location) : 'unassigned';
-      if (!computer.folders.has(key))
-        computer.folders.set(key, {
-          id: key,
-          name: location?.path ? folderName(location.path) : 'Standalone',
-          detail: `${environment?.name ?? 'Unavailable environment'} · ${location?.path || 'Standalone chats without a project folder'}`,
-          location: location ? { ...location } : undefined,
-          conversations: [],
-          scratches: [],
-        });
-      return computer.folders.get(key)!;
-    };
-    for (const conversation of conversations.filter((c) => !!c.archived === archived))
-      folderOf(conversationLocation(conversation, fleet, installation)).conversations.push(
-        conversation,
-      );
-    if (!archived)
-      for (const scratch of scratches)
-        folderOf(scratchLocation(fleet, scratch)).scratches.push(scratch);
-    return {
-      id: archived ? 'history' : 'active',
-      name: archived ? 'History' : 'Active',
-      count: conversations.filter((c) => !!c.archived === archived).length,
-      computers: [...computers.values()].map((c) => ({ ...c, folders: [...c.folders.values()] })),
-    };
-  });
+      const computerId = computerOf(location);
+      folder = {
+        id: key,
+        name: location?.path ? folderName(location.path) : 'Standalone',
+        detail: `${environment?.name ?? 'Unavailable environment'} · ${location?.path || 'Standalone chats without a project folder'}`,
+        computerId,
+        computerName: computerName(computerId),
+        location: location ? { ...location } : undefined,
+        conversations: [],
+        scratches: [],
+      };
+      folders.set(key, folder);
+    }
+    return folder;
+  };
+  const computers = new Map<
+    string,
+    { id: string; name: string; folders: Map<string, FolderGroup<S>> }
+  >();
+  const activeFolder = (location: ChatLocation | undefined) => {
+    const id = computerOf(location);
+    let computer = computers.get(id);
+    if (!computer)
+      computers.set(id, (computer = { id, name: computerName(id), folders: new Map() }));
+    return folderIn(computer.folders, location);
+  };
+  const active = conversations.filter((c) => !c.archived);
+  for (const conversation of active)
+    activeFolder(conversationLocation(conversation, fleet, installation)).conversations.push(
+      conversation,
+    );
+  for (const scratch of scratches)
+    activeFolder(scratchLocation(fleet, scratch)).scratches.push(scratch);
+  const timeline = sessionTimeline(appSessions);
+  const recorders = new Set(appSessions.map((s) => s.environmentId));
+  const sections = new Map<
+    string,
+    {
+      kind: 'session' | 'day';
+      id: string;
+      name: string;
+      detail: string;
+      at: number;
+      folders: Map<string, FolderGroup<S>>;
+    }
+  >();
+  const sectionOf = (conversation: Conversation) => {
+    const id = historySectionId(conversation, timeline);
+    let section = sections.get(id);
+    if (section) return section;
+    const session = timeline.find((entry) => entry.session.id === id);
+    if (session) {
+      const environment = fleet.environments.find((e) => e.id === session.session.environmentId);
+      const computer = environment && computerName(computerViewId(environment));
+      section = {
+        kind: 'session',
+        id,
+        name: `${sessionLabel(session.at, now)}${computer && recorders.size > 1 ? ` · ${computer}` : ''}`,
+        detail: `App session started ${new Date(session.at).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })}${computer ? ` on ${computer}` : ''}`,
+        at: session.at,
+        folders: new Map(),
+      };
+    } else {
+      const used = lastUsed(conversation);
+      const day = Number.isFinite(used) ? startOfDay(used) : -Infinity;
+      section = {
+        kind: 'day',
+        id,
+        name: Number.isFinite(day) ? dayLabel(day, now) : 'Earlier',
+        detail: Number.isFinite(day)
+          ? `Last used ${new Date(day).toLocaleDateString([], { dateStyle: 'full' })}, before app sessions were recorded`
+          : 'Chats without a recorded time',
+        at: day,
+        folders: new Map(),
+      };
+    }
+    sections.set(id, section);
+    return section;
+  };
+  const archived = conversations.filter((c) => c.archived);
+  for (const conversation of archived)
+    folderIn(
+      sectionOf(conversation).folders,
+      conversationLocation(conversation, fleet, installation),
+    ).conversations.push(conversation);
+  return [
+    {
+      id: 'active',
+      name: 'Active',
+      count: active.length,
+      sections: [...computers.values()].map((c): ConversationSection<S> => ({
+        kind: 'computer',
+        id: c.id,
+        name: c.name,
+        folders: [...c.folders.values()],
+      })),
+    },
+    {
+      id: 'history',
+      name: 'History',
+      count: archived.length,
+      sections: [...sections.values()]
+        .sort((a, b) => b.at - a.at)
+        .map(({ at, folders, ...section }): ConversationSection<S> => {
+          const listed = [...folders.values()];
+          return {
+            ...section,
+            computers: new Set(listed.map((f) => f.computerId)).size,
+            folders: listed,
+          };
+        }),
+    },
+  ];
 }
 // The Active conversation listed below `id`, else the one above it, to open when `id` leaves
 // Active. Scratch chats are unsent drafts, not conversations, and are skipped.
@@ -283,7 +392,7 @@ export function nextActiveConversation(
 ): Conversation | undefined {
   const listed = groups
     .filter((group) => group.id === 'active')
-    .flatMap((group) => group.computers.flatMap((c) => c.folders.flatMap((f) => f.conversations)));
+    .flatMap((group) => group.sections.flatMap((s) => s.folders.flatMap((f) => f.conversations)));
   const index = listed.findIndex((c) => c.id === id);
   return index < 0 ? undefined : (listed[index + 1] ?? listed[index - 1]);
 }

@@ -665,6 +665,76 @@ it('settles after sending a new chat that the relay lists in another order', asy
   await transport.disconnectRelay();
 });
 
+const appSession = (hour: number) => ({
+  id: crypto.randomUUID(),
+  environmentId: crypto.randomUUID(),
+  startedAt: new Date(2026, 8, 25, hour).toISOString(),
+});
+
+it('keeps app sessions that an older relay drops without sending them after every sync', async () => {
+  const { transport, workspace, relay, local, apply, polls } = await settledRelay();
+  const keeps = native.invoke.getMockImplementation()!;
+  // An older relay's schema drops the list from every save.
+  native.invoke.mockImplementation(async (command, args) =>
+    keeps(
+      command,
+      command === 'relay_request' && args.path === 'v1/state' && args.method === 'PUT'
+        ? {
+            ...args,
+            body: { ...args.body, workspace: { ...args.body.workspace, appSessions: undefined } },
+          }
+        : args,
+    ),
+  );
+  const session = appSession(9);
+  workspace.appSessions = [session];
+  local.changes++;
+  // With only the list changed, there is nothing to send to a relay without one.
+  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
+  // The next change carries it, and the relay drops it again.
+  workspace.conversations[0].title = 'Renamed here';
+  local.changes++;
+  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect(relay.workspace.conversations[0].title).toBe('Renamed here');
+  expect(relay.workspace.appSessions).toBeUndefined();
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  // A change from another device leaves the list here.
+  relay.workspace = structuredClone(relay.workspace);
+  relay.workspace.conversations[0].title = 'Renamed elsewhere';
+  relay.revision++;
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'GET v1/state',
+    'save_sync_state',
+  ]);
+  expect(workspace.conversations[0].title).toBe('Renamed elsewhere');
+  expect(workspace.appSessions).toEqual([session]);
+  expect(apply).toHaveBeenCalledOnce();
+  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  await transport.disconnectRelay();
+});
+
+it('sends app sessions to a relay that keeps them', async () => {
+  const { transport, workspace, relay, local, apply, polls } = await settledRelay();
+  const [first, second] = [appSession(9), appSession(14)];
+  workspace.appSessions = [first];
+  workspace.conversations[0].title = 'Renamed here';
+  local.changes++;
+  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect(relay.workspace.appSessions).toEqual([first]);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  // Once the relay holds the list, another start of the app is sent by itself.
+  workspace.appSessions = [first, second];
+  local.changes++;
+  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect(relay.workspace.appSessions).toEqual([first, second]);
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  expect(apply).not.toHaveBeenCalled();
+  await transport.disconnectRelay();
+});
+
 it('routes requests and account updates with the fleet alone, never a workspace copy', async () => {
   const { transport, relay, local, polls, here, there, peer } = await settledRelay();
   const reads = local.reads;

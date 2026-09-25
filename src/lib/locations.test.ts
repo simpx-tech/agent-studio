@@ -5,6 +5,7 @@ import {
   conversationLocation,
   ensureLocationConnections,
   groupConversations,
+  historySectionId,
   knownLocations,
   locationConnections,
   loginIdentity,
@@ -15,6 +16,7 @@ import {
   type LoginIdentity,
 } from './locations';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
+import { sessionTimeline } from './app-sessions';
 
 function fixture() {
   const workspace = initialWorkspace();
@@ -81,7 +83,7 @@ describe('computer and folder chat scope', () => {
         .location,
     ).toEqual(desktopFolder);
     expect(
-      groupConversations(restored.conversations, restored.fleet)[0].computers.map((c) => c.name),
+      groupConversations(restored.conversations, restored.fleet)[0].sections.map((c) => c.name),
     ).toEqual(['Desktop', 'WSL · Ubuntu']);
     const sibling = crypto.randomUUID();
     registerWslEnvironments(workspace.fleet, installation, {
@@ -286,9 +288,9 @@ describe('computer and folder chat scope', () => {
     const restored = restoreWorkspace(workspace);
     expect(restored.conversations[1].archived).toBe(true);
     const groups = groupConversations(restored.conversations, restored.fleet, installation);
-    expect(groups[0].computers.map((c) => c.name)).toEqual(['WSL · Ubuntu', 'Laptop']);
+    expect(groups[0].sections.map((c) => c.name)).toEqual(['WSL · Ubuntu', 'Laptop']);
     expect(restored.conversations[0].location).toEqual(location);
-    expect(groups[0].computers[0].folders[0].name).toBe('project');
+    expect(groups[0].sections[0].folders[0].name).toBe('project');
     expect(groups[1].count).toBe(1);
     const legacy = { ...conversation, location: undefined };
     expect(conversationLocation(legacy, workspace.fleet, installation)?.path).toBe('');
@@ -325,7 +327,7 @@ describe('computer and folder chat scope', () => {
       scratches,
     );
     expect(
-      active.computers.map((c) => [
+      active.sections.map((c) => [
         c.name,
         c.folders.map((f) => [f.name, f.scratches.map((s) => s.id), f.conversations.length]),
       ]),
@@ -336,7 +338,7 @@ describe('computer and folder chat scope', () => {
     ]);
     // Scratch chats are not conversations: they are not counted and never join History.
     expect(active.count).toBe(1);
-    expect(history.computers.flatMap((c) => c.folders.flatMap((f) => f.scratches))).toEqual([]);
+    expect(history.sections.flatMap((c) => c.folders.flatMap((f) => f.scratches))).toEqual([]);
     expect(scratchLocation(workspace.fleet, scratches[1])).toEqual({
       computerId: installation.computerId,
       environmentId: installation.id,
@@ -344,6 +346,125 @@ describe('computer and folder chat scope', () => {
     });
     expect(scratchLocation(workspace.fleet, scratches[0])).toBe(location);
     expect(scratchLocation(workspace.fleet, scratches[2])).toBeUndefined();
+  });
+  it('groups History by the app session each chat was last used in, else by day', () => {
+    const { workspace, installation, location } = fixture();
+    ensureLocationConnections(workspace.fleet, location);
+    const laptop = {
+      id: crypto.randomUUID(),
+      computerId: crypto.randomUUID(),
+      name: 'Laptop',
+      platform: 'linux' as const,
+    };
+    registerInstallation(workspace.fleet, laptop);
+    const standalone = {
+      computerId: installation.computerId,
+      environmentId: installation.id,
+      path: '',
+    };
+    const time = (day: number, hour: number, minute = 0) =>
+      new Date(2026, 8, day, hour, minute).getTime();
+    const chat = (title: string, used: number, place = location, archived = true) =>
+      ({
+        id: title,
+        settings: settingsFor(workspace.preferences),
+        location: place,
+        title,
+        createdAt: new Date(used - 60_000).toISOString(),
+        updatedAt: new Date(used).toISOString(),
+        messages: [{ createdAt: new Date(used).toISOString() }],
+        ...(archived ? { archived } : {}),
+      }) as unknown as Conversation;
+    const session = (environmentId: string, startedAt: number) => ({
+      id: crypto.randomUUID(),
+      environmentId,
+      startedAt: new Date(startedAt).toISOString(),
+    });
+    const morning = session(installation.id, time(24, 9));
+    const evening = session(installation.id, time(24, 20));
+    const away = session(laptop.id, time(25, 8));
+    const conversations = [
+      chat('laptop', time(25, 8, 30), {
+        computerId: laptop.computerId,
+        environmentId: laptop.id,
+        path: '/srv/app',
+      }),
+      chat('open', time(25, 9), location, false),
+      chat('late project', time(24, 21, 30)),
+      chat('late question', time(24, 21), standalone),
+      chat('morning', time(24, 9, 30)),
+      chat('legacy', time(20, 10)),
+    ];
+    const now = time(25, 12);
+    const [active, history] = groupConversations(
+      conversations,
+      workspace.fleet,
+      installation,
+      [],
+      [away, evening, morning],
+      now,
+    );
+    expect(active.sections.flatMap((s) => s.folders.flatMap((f) => f.conversations))).toEqual([
+      conversations[1],
+    ]);
+    expect(history.count).toBe(5);
+    const clock = (value: string) =>
+      new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    expect(
+      history.sections.map((s) => [
+        s.kind,
+        s.name,
+        s.folders.map((f) => [f.name, f.computerName, f.conversations.map((c) => c.id)]),
+      ]),
+    ).toEqual([
+      ['session', `Today, ${clock(away.startedAt)} · Laptop`, [['app', 'Laptop', ['laptop']]]],
+      [
+        'session',
+        `Yesterday, ${clock(evening.startedAt)} · Desktop`,
+        [
+          ['project', 'WSL · Ubuntu', ['late project']],
+          ['Standalone', 'Desktop', ['late question']],
+        ],
+      ],
+      [
+        'session',
+        `Yesterday, ${clock(morning.startedAt)} · Desktop`,
+        [['project', 'WSL · Ubuntu', ['morning']]],
+      ],
+      // Chats last used before the first recorded start are listed by day.
+      [
+        'day',
+        new Date(time(20, 10)).toLocaleDateString([], { weekday: 'long' }),
+        [['project', 'WSL · Ubuntu', ['legacy']]],
+      ],
+    ]);
+    const [, evenings, mornings, days] = history.sections;
+    // Folders name their computer only in sessions with chats of several.
+    expect([evenings, mornings, days].map((s) => s.kind !== 'computer' && s.computers)).toEqual([
+      2, 1, 1,
+    ]);
+    expect(mornings.kind !== 'computer' && mornings.detail).toBe(
+      `App session started ${new Date(morning.startedAt).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })} on Desktop`,
+    );
+    expect(days.kind !== 'computer' && days.detail).toMatch(/before app sessions were recorded$/);
+    const timeline = sessionTimeline([away, evening, morning]);
+    for (const section of history.sections)
+      for (const folder of section.folders)
+        for (const c of folder.conversations)
+          expect(historySectionId(c, timeline)).toBe(section.id);
+    // With starts of one computer only, headings name no computer.
+    const [, alone] = groupConversations(
+      conversations.slice(2),
+      workspace.fleet,
+      installation,
+      [],
+      [morning, evening],
+      now,
+    );
+    expect(alone.sections.map((s) => s.name).slice(0, 2)).toEqual([
+      `Yesterday, ${clock(evening.startedAt)}`,
+      `Yesterday, ${clock(morning.startedAt)}`,
+    ]);
   });
   it('moves on to the Active conversation listed below a chat leaving Active, else the one above', () => {
     const { workspace, installation, location } = fixture();

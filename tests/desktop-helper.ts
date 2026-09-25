@@ -4,6 +4,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
     ({ mode }) => {
       if (window.top !== window) return;
       (window as any).isTauri = true;
+      // Each page load starts the app again unless a test pins its app session.
+      const started = { id: crypto.randomUUID(), startedAt: Date.now() };
       const callbacks = new Map<number, (value: unknown) => void>();
       let next = 0;
       let pending: (() => void) | undefined;
@@ -71,6 +73,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
                 (state.pendingCli ??= []).push({ command, ...args, resolve });
               });
           }
+          if (command === 'app_session')
+            return JSON.parse(localStorage.getItem('test-app-session') ?? 'null') ?? started;
           if (command === 'get_installation')
             return {
               id: '11111111-1111-4111-8111-111111111111',

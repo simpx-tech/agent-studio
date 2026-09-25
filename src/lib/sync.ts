@@ -17,10 +17,11 @@ import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 import { mergeClaudeInstructions } from './claude-instructions.ts';
+import { mergeAppSessions } from './app-sessions.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
-  'fleet' | 'conversations' | 'workflows' | 'inputTemplates' | 'claudeInstructions'
+  'fleet' | 'conversations' | 'workflows' | 'inputTemplates' | 'claudeInstructions' | 'appSessions'
 >;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
@@ -28,6 +29,7 @@ export const sharedSchema = workspaceSchema.pick({
   workflows: true,
   inputTemplates: true,
   claudeInstructions: true,
+  appSessions: true,
 });
 export type MergeOptions = {
   /**
@@ -41,7 +43,9 @@ export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conver
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 /**
  * Whether two shared workspaces hold the same data. Lists compare by item id: this device
- * adds new chats at the front, while a merge keeps its base order and appends them.
+ * adds new chats at the front, while a merge keeps its base order and appends them. App sessions
+ * compare only when `a`, the relay's copy, holds them: an older relay drops them, and this
+ * device keeps its own.
  */
 export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
   const byId = <T extends { id: string }>(items: T[] = []) =>
@@ -55,7 +59,8 @@ export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
     same(a.fleet.connections, b.fleet.connections) &&
     same(a.workflows, b.workflows) &&
     same(a.inputTemplates, b.inputTemplates) &&
-    a.claudeInstructions === b.claudeInstructions
+    a.claudeInstructions === b.claudeInstructions &&
+    (!a.appSessions || same(a.appSessions, b.appSessions))
   );
 }
 
@@ -429,11 +434,14 @@ export function mergeShared(
         remote.claudeInstructions,
       ),
     ),
+    ...appSessionsField(mergeAppSessions(base.appSessions, local.appSessions, remote.appSessions)),
   };
 }
 // An absent value follows the default text, so it stays absent rather than undefined.
 const claudeInstructionsField = (value: string | undefined) =>
   value === undefined ? {} : { claudeInstructions: value };
+const appSessionsField = (value: SharedWorkspace['appSessions']) =>
+  value === undefined ? {} : { appSessions: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
   environmentId: string;
