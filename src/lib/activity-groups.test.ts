@@ -4,6 +4,10 @@ import {
   activityGroupSummary,
   groupActivityEntries,
   groupIcon,
+  liveAction,
+  liveGroupItems,
+  liveMemory,
+  type LiveGroupItem,
 } from './activity-groups';
 import type { ToolActivity } from './activity';
 import type { ContentBlock } from './domain';
@@ -335,6 +339,194 @@ describe('activity groups', () => {
     expect(activityGroupSummary([mixed], 'running')).toMatchObject({
       label: 'Working with 2 sub-agents',
       running: true,
+    });
+  });
+
+  it('keeps running calls and the latest call in rows while the rest fold into the summary', () => {
+    const memory = liveMemory();
+    const read = (id: string, status: ToolActivity['status'] = 'complete') =>
+      tool(id, { operation: 'read', path: `/src/${id}.ts`, status });
+    const shape = (items: LiveGroupItem[]) =>
+      items.map((item) =>
+        item.kind === 'summary'
+          ? `${item.key} [${item.tools.map((t) => t.id)}]`
+          : item.kind === 'call'
+            ? item.key
+            : `${item.key} +${item.count}`,
+      );
+    // A finished call stays in view until the next one starts.
+    expect(shape(liveGroupItems('g', [read('a')], true, 'running', memory))).toEqual(['call:a']);
+    // It then becomes the summary in place, keeping its item's identity.
+    expect(
+      shape(liveGroupItems('g', [read('a'), read('b', 'running')], true, 'running', memory)),
+    ).toEqual(['call:a [a]', 'call:b']);
+    // Parallel calls keep their rows while they run; finished ones fold except the latest.
+    const parallel = [read('a'), read('b'), read('c', 'running'), read('d'), read('e', 'running')];
+    expect(shape(liveGroupItems('g', parallel, true, 'running', memory))).toEqual([
+      'call:a [a,b,d]',
+      'call:c',
+      'call:e',
+    ]);
+    // Moving on folds the latest call too, and a folded call never gets its row back.
+    const done = parallel.map((t) => ({ ...t, status: 'complete' as const }));
+    expect(shape(liveGroupItems('g', done, false, 'running', memory))).toEqual([
+      'call:a [a,b,c,d,e]',
+    ]);
+    expect(shape(liveGroupItems('g', done, true, 'running', memory))).toEqual([
+      'call:a [a,b,c,d,e]',
+    ]);
+    // A row the reader opened stays until they close it.
+    const opened = new Set(['x']);
+    const fresh = liveMemory();
+    const calls = [read('x'), read('y', 'running')];
+    expect(shape(liveGroupItems('h', calls, true, 'running', fresh, opened))).toEqual([
+      'call:x',
+      'call:y',
+    ]);
+    opened.delete('x');
+    expect(shape(liveGroupItems('h', calls, true, 'running', fresh, opened))).toEqual([
+      'call:x [x]',
+      'call:y',
+    ]);
+  });
+
+  it('gives a folded sub-agent record that runs again a row of its own', () => {
+    const memory = liveMemory();
+    const agents = (status: ToolActivity['status']) =>
+      tool('agents', {
+        category: 'agent',
+        name: 'Sub-agents',
+        status,
+        revision: status === 'running' ? 2 : 1,
+        agents: [{ id: 'a1', name: 'Reader', status }],
+      });
+    const next = tool('next', { name: 'Run command', commandRun: true });
+    expect(
+      liveGroupItems('g', [agents('complete'), next], true, 'running', memory).map((i) => i.key),
+    ).toEqual(['call:agents', 'call:next']);
+    // The record keeps its place in the summary and gets a row under another key.
+    expect(
+      liveGroupItems('g', [agents('running'), next], true, 'running', memory).map((i) => i.key),
+    ).toEqual(['call:agents', 'again:agents', 'call:next']);
+  });
+
+  it('returns the same items while a group’s calls stay the same', () => {
+    const memory = liveMemory();
+    const calls = [tool('a'), tool('b', { status: 'running' })];
+    const first = liveGroupItems('g', calls, true, 'running', memory);
+    expect(liveGroupItems('g', [...calls], true, 'running', memory)).toBe(first);
+    const finished = { ...calls[1], revision: 2, status: 'complete' as const };
+    expect(liveGroupItems('g', [calls[0], finished], true, 'running', memory)).not.toBe(first);
+    expect(liveGroupItems('g', [calls[0], finished], false, 'running', memory)).toEqual([
+      { kind: 'summary', key: 'call:a', tools: [calls[0], finished] },
+    ]);
+  });
+
+  it('limits rows to the latest running calls', () => {
+    const calls = Array.from({ length: 9 }, (_, i) => tool(`r${i}`, { status: 'running' }));
+    const items = liveGroupItems('g', calls, true, 'running', liveMemory(), new Set(), 6);
+    expect(items[0]).toEqual({ kind: 'more', key: 'more:g', count: 3 });
+    expect(items.slice(1).map((i) => i.key)).toEqual(
+      ['r3', 'r4', 'r5', 'r6', 'r7', 'r8'].map((id) => `call:${id}`),
+    );
+  });
+
+  it('says what a call does, did, or was from its reported metadata', () => {
+    const command = tool('run', {
+      name: 'Run command',
+      commandRun: true,
+      operation: 'command',
+      command: 'npm test -- --run\necho done',
+      detail: 'Run the tests',
+    });
+    // The command's first line, marked when more lines follow.
+    expect(liveAction(command, 'running')).toEqual({
+      icon: 'test',
+      verb: 'Running',
+      target: 'npm test -- --run …',
+      code: true,
+      hint: 'npm test -- --run\necho done',
+    });
+    expect(liveAction(command, 'complete').verb).toBe('Ran');
+    // An unfinished call is named without claiming it ran.
+    expect(liveAction(command, 'error').verb).toBe('Command');
+    const image = tool('shot', {
+      name: 'View image',
+      operation: 'viewImage',
+      path: '/repo/screens/home.png',
+    });
+    expect(liveAction(image, 'running', { folder: '/repo' })).toMatchObject({
+      icon: 'image',
+      verb: 'Viewing',
+      target: 'screens/home.png',
+      code: true,
+    });
+    const read = tool('read', { operation: 'read', path: '/repo/src/app.ts' });
+    expect(liveAction(read, 'running', { folder: '/repo' })).toMatchObject({
+      icon: 'code',
+      verb: 'Reading',
+      target: 'src/app.ts',
+    });
+    expect(
+      liveAction(tool('write', { name: 'Write', operation: 'edit', path: '/a.ts' }), 'complete')
+        .verb,
+    ).toBe('Wrote');
+    expect(
+      liveAction(
+        tool('grep', { name: 'Search file contents', operation: 'grep', query: 'TODO' }),
+        'running',
+      ),
+    ).toMatchObject({ verb: 'Searching for', target: 'TODO', code: true });
+    expect(
+      liveAction(
+        tool('glob', { name: 'Find files', operation: 'glob', query: '**/*.ts' }),
+        'running',
+      ),
+    ).toMatchObject({ verb: 'Finding files matching', target: '**/*.ts' });
+    expect(
+      liveAction(
+        tool('web', { category: 'search', name: 'Web search', query: 'svelte' }),
+        'running',
+      ),
+    ).toMatchObject({ verb: 'Searching the web for', target: 'svelte' });
+    const agents = tool('agents', {
+      category: 'agent',
+      name: 'Sub-agents',
+      status: 'running',
+      agents: [
+        { id: 'a', name: 'Reader', status: 'complete' },
+        { id: 'b', name: 'Writer', status: 'running' },
+      ],
+    });
+    expect(liveAction(agents, 'running')).toMatchObject({ verb: 'Working with', target: 'Writer' });
+    expect(
+      liveAction(tool('skill', { category: 'skill', name: 'Skill: review' }), 'complete'),
+    ).toMatchObject({ verb: 'Used skill', target: 'review' });
+    expect(
+      liveAction(tool('hook', { category: 'hook', name: 'PreToolUse hook' }), 'running'),
+    ).toMatchObject({ verb: 'Running', target: 'PreToolUse hook' });
+    expect(liveAction(tool('mcp', { name: 'mcp__docs__search' }), 'running')).toMatchObject({
+      verb: 'Using',
+      target: 'search',
+      hint: 'docs',
+    });
+    expect(liveAction(tool('plan', { name: 'TodoWrite' }), 'running')).toEqual({
+      icon: 'plan',
+      verb: 'Updating the plan',
+    });
+    expect(liveAction(tool('ask', { name: 'AskUserQuestion' }), 'running').verb).toBe(
+      'Waiting for your answer',
+    );
+    const server = tool('dev', {
+      name: 'Run command',
+      commandRun: true,
+      command: 'npm run dev',
+      status: 'running',
+      background: true,
+    });
+    expect(liveAction(server, 'background')).toMatchObject({
+      verb: 'Started in the background',
+      target: 'npm run dev',
     });
   });
 

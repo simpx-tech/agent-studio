@@ -1,8 +1,19 @@
-import { activityDisplayStatus, type ToolActivity } from './activity';
+import {
+  activityDisplayStatus,
+  toolDisplayStatus,
+  type ActivityDisplayStatus,
+  type ToolActivity,
+} from './activity';
 import type { ContentBlock, Message } from './domain';
-import { filePathKey } from './file-changes';
+import { filePathKey, relativeFilePath } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
-import { toolVisual, type ToolIconKey } from './tool-presentation';
+import {
+  connectedTool,
+  primaryCommand,
+  toolVisual,
+  type ToolIconKey,
+  type ToolVisual,
+} from './tool-presentation';
 
 type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
   tool?: ToolActivity;
@@ -240,4 +251,211 @@ export function activityGroupSummary(
     running,
     issue,
   };
+}
+
+/** A running reply's group of calls: its summary of folded calls, then rows of their own. */
+export type LiveGroupItem =
+  | { kind: 'summary'; key: string; tools: ToolActivity[] }
+  | { kind: 'call'; key: string; tool: ToolActivity }
+  | { kind: 'more'; key: string; count: number };
+
+/**
+ * Calls a running reply has folded into their groups, the identity of each summary, and each
+ * group's latest items with the calls they came from.
+ */
+export type LiveMemory = {
+  folded: Set<string>;
+  summaries: Map<string, string>;
+  items: Map<string, { calls: string; items: LiveGroupItem[] }>;
+};
+export const liveMemory = (): LiveMemory => ({
+  folded: new Set(),
+  summaries: new Map(),
+  items: new Map(),
+});
+
+/**
+ * The items of a running reply's group of calls. Each running call keeps a row of its own, and
+ * so does the latest call of the reply's last group until the agent starts another call or
+ * moves on. A row the reader `opened` stays until they close it. Every other call folds into
+ * the group's summary and stays there. The summary takes over the row of the first call it
+ * folded, which turns into the summary in place.
+ *
+ * A group whose calls did not change gets its previous items back, so the page does not measure
+ * its rows again for every update of the reply.
+ */
+export function liveGroupItems(
+  groupKey: string,
+  tools: ToolActivity[],
+  last: boolean,
+  replyStatus: Message['status'],
+  memory: LiveMemory,
+  opened: { has(id: string): boolean } = new Set(),
+  limit = 6,
+): LiveGroupItem[] {
+  const calls = [
+    `${replyStatus} ${last} ${limit}`,
+    ...tools.map((tool) => `${tool.id} ${tool.revision} ${opened.has(tool.id)}`),
+  ].join('\n');
+  const previous = memory.items.get(groupKey);
+  if (previous?.calls === calls) return previous.items;
+  const running = (tool: ToolActivity) => toolDisplayStatus(tool, replyStatus) === 'running';
+  const latest = tools.at(-1);
+  const current = (tool: ToolActivity) =>
+    !memory.folded.has(tool.id) &&
+    ((last && tool === latest && tool.id !== 'activity-limit') || opened.has(tool.id));
+  const folded = tools.filter(
+    (tool) => memory.folded.has(tool.id) || (!running(tool) && !current(tool)),
+  );
+  for (const tool of folded) memory.folded.add(tool.id);
+  let summary = memory.summaries.get(groupKey);
+  if (!summary && folded.length) memory.summaries.set(groupKey, (summary = folded[0].id));
+  // A folded call runs again when a later sub-agent joins its record; it gets a row as well,
+  // which stays while the reader has it open.
+  const rows = tools.filter((tool) => running(tool) || current(tool) || opened.has(tool.id));
+  const items: LiveGroupItem[] = [];
+  if (folded.length) items.push({ kind: 'summary', key: `call:${summary}`, tools: folded });
+  if (rows.length > limit)
+    items.push({ kind: 'more', key: `more:${groupKey}`, count: rows.length - limit });
+  for (const tool of rows.slice(-limit))
+    items.push({
+      kind: 'call',
+      key: `${tool.id === summary ? 'again' : 'call'}:${tool.id}`,
+      tool,
+    });
+  memory.items.set(groupKey, { calls, items });
+  return items;
+}
+
+/** What a live row says a call is doing or did: a verb for its state and what it acts on. */
+export type LiveAction = {
+  icon: ToolIconKey;
+  verb: string;
+  target?: string;
+  /** The target is a command, path or pattern. */
+  code?: boolean;
+  /** The whole target, for hover. */
+  hint?: string;
+};
+// Running, done, and unfinished forms. An unfinished call failed, stopped or has an unconfirmed
+// outcome, and its form names it without claiming it happened.
+type Forms = readonly [string, string, string];
+const liveForms: Record<keyof typeof phrases, Forms> = {
+  hook: ['Running', 'Ran', ''],
+  hookContext: ['Receiving hook context', 'Received hook context', 'Hook context'],
+  read: ['Reading', 'Read', 'Read of'],
+  edit: ['Editing', 'Edited', 'Edit to'],
+  files: ['Searching for', 'Searched for', 'Search for'],
+  command: ['Running', 'Ran', 'Command'],
+  search: ['Searching the web for', 'Searched the web for', 'Web search for'],
+  browse: ['Opening', 'Opened', 'Web page'],
+  agent: ['Working with', 'Worked with', 'Sub-agent'],
+  background: ['Starting in the background', 'Started in the background', 'Background task'],
+  backgroundAgent: [
+    'Starting in the background',
+    'Started in the background',
+    'Background sub-agent',
+  ],
+  message: ['Messaging', 'Messaged', 'Message to'],
+  directory: ['Listing agents', 'Listed agents', 'Agent list'],
+  skill: ['Using skill', 'Used skill', 'Skill'],
+  image: ['Viewing', 'Viewed', 'Image'],
+  tool: ['Using', 'Used', ''],
+  limit: ['', '', ''],
+};
+const namedForms: Record<string, Forms> = {
+  Write: ['Writing', 'Wrote', 'Write to'],
+  'Find files': ['Finding files matching', 'Found files matching', 'File search for'],
+  'List files': ['Listing', 'Listed', 'Listing of'],
+  EnterPlanMode: ['Entering plan mode', 'Entered plan mode', 'Plan mode'],
+  ExitPlanMode: ['Presenting the plan', 'Presented the plan', 'Plan'],
+};
+const iconForms: Partial<Record<ToolIconKey, Forms>> = {
+  monitor: ['Watching', 'Watched', 'Watch'],
+  plan: ['Updating the plan', 'Updated the plan', 'Plan update'],
+  question: ['Waiting for your answer', 'Received your answer', 'Question'],
+  chart: ['Drawing a visual', 'Drew a visual', 'Visual'],
+  waitTasks: [
+    'Waiting for background tasks',
+    'Waited for background tasks',
+    'Wait for background tasks',
+  ],
+  workflow: ['Running workflow', 'Ran workflow', 'Workflow'],
+  toolSearch: ['Searching tools for', 'Searched tools for', 'Tool search for'],
+};
+
+/** A call's live row, from its reported metadata only. */
+export function liveAction(
+  tool: ToolActivity,
+  status: ActivityDisplayStatus,
+  options: { folder?: string; newFile?: boolean } = {},
+): LiveAction {
+  const visual = toolVisual(tool, options);
+  const kind = action(tool);
+  const forms =
+    kind === 'background' || kind === 'backgroundAgent'
+      ? liveForms[kind]
+      : (namedForms[tool.name] ??
+        (visual.icon === 'newFile' ? namedForms.Write : undefined) ??
+        (kind === 'tool' || visual.icon === 'monitor' ? iconForms[visual.icon] : undefined) ??
+        liveForms[kind]);
+  const form =
+    status === 'running' ? 0 : ['complete', 'background', 'left'].includes(status) ? 1 : 2;
+  return {
+    icon: visual.icon,
+    verb: forms[form],
+    ...liveTarget(tool, kind, visual, options.folder),
+  };
+}
+
+function liveTarget(
+  tool: ToolActivity,
+  kind: keyof typeof phrases,
+  visual: ToolVisual,
+  folder?: string,
+): Pick<LiveAction, 'target' | 'code' | 'hint'> {
+  switch (kind) {
+    case 'command':
+    case 'background': {
+      if (!tool.command) return { target: tool.detail };
+      const { line, more } = primaryCommand(tool.command);
+      return { target: line + (more ? ' …' : ''), code: true, hint: tool.command };
+    }
+    case 'read':
+    case 'edit':
+    case 'image':
+      return { target: visual.detail, code: true, hint: visual.hint };
+    case 'files':
+      return tool.query
+        ? { target: tool.query, code: true, hint: visual.hint }
+        : { target: tool.path && relativeFilePath(tool.path, folder), code: true, hint: tool.path };
+    case 'search':
+      return { target: tool.query };
+    case 'browse':
+      return { target: visual.detail, hint: visual.detail };
+    case 'agent':
+    case 'backgroundAgent': {
+      const running = tool.agents.filter((agent) => agent.status === 'running');
+      return {
+        target: (running.length ? running : tool.agents).map((agent) => agent.name).join(', '),
+      };
+    }
+    case 'message':
+      return { target: tool.detail };
+    case 'skill':
+      return { target: tool.name.startsWith('Skill: ') ? tool.name.slice(7) : undefined };
+    case 'hook':
+      return { target: tool.name };
+    case 'hookContext':
+      return { target: visual.detail, code: true };
+    case 'tool': {
+      const connected = connectedTool(tool);
+      if (connected) return { target: connected.name, hint: connected.server };
+      if (visual.icon === 'workflow') return { target: tool.detail };
+      if (visual.icon === 'toolSearch') return { target: tool.query };
+      return iconForms[visual.icon] || namedForms[tool.name] ? {} : { target: visual.title };
+    }
+    default:
+      return {};
+  }
 }

@@ -35,13 +35,17 @@ for (const mobile of [false, true])
     await emit(tool('read1', 'read', 'Read', { path: '/fixture/app.ts' }));
     await emit(tool('read2', 'read', 'Read', { path: '/fixture/menu.ts' }));
     const groups = page.locator('.activity-group');
+    const rows = page.locator('.live-row');
     await expect(groups).toHaveCount(1);
-    await expect(groups.first().locator(':scope > summary')).toHaveText('Read 2 files');
+    // The latest call keeps a row of its own until the agent moves on.
+    await expect(groups.first().locator(':scope > summary')).toHaveText('Read 1 file');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first().locator(':scope > summary')).toContainText('menu.ts');
     await expect(groups.first()).not.toHaveAttribute('open', '');
     await expect(page.locator('.tool-card').first()).not.toBeVisible();
     await groups.first().locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
-    await expect(groups.first().locator('.tool-card')).toHaveCount(2);
+    await expect(groups.first().locator('.tool-card')).toHaveCount(1);
     await expect(groups.first().locator('.tool-card').first()).not.toHaveAttribute('open', '');
     await emit(
       tool('read2', 'read', 'Read', {
@@ -54,8 +58,9 @@ for (const mobile of [false, true])
     // Reading a file again adds a call but not another file.
     await emit(tool('read4', 'read', 'Read', { path: '/fixture/app.ts' }));
     await expect(groups.first()).toHaveAttribute('open', '');
-    await expect(groups.first().locator('.tool-card')).toHaveCount(4);
+    await expect(groups.first().locator('.tool-card')).toHaveCount(3);
     await expect(groups.first().locator(':scope > summary')).toHaveText('Read 3 files');
+    await expect(rows.first().locator(':scope > summary')).toContainText('app.ts');
     await groups.first().locator('.tool-card > summary').nth(1).click();
     await expect(page.getByText('Lines read', { exact: true })).toBeVisible();
     await groups.first().locator(':scope > summary').focus();
@@ -75,10 +80,13 @@ for (const mobile of [false, true])
       }),
     );
     await expect(groups).toHaveCount(2);
-    await expect(groups.last().locator(':scope > summary')).toContainText(
-      'Editing 1 file and running 1 command',
-    );
+    await expect(groups.first().locator(':scope > summary')).toHaveText('Read 3 files');
+    await expect(groups.last().locator(':scope > summary')).toHaveText('Edited 1 file');
     await expect(groups.last()).not.toHaveAttribute('open', '');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first().locator(':scope > summary')).toContainText(
+      'Running Run the fixture tests',
+    );
     await page.getByLabel('Message', { exact: true }).fill('Keep my next message');
     await page.screenshot({
       path: `artifacts/grouped-activity-running-${mobile ? 'mobile' : 'desktop'}.png`,
@@ -92,8 +100,9 @@ for (const mobile of [false, true])
         facts: [{ label: 'Exit code', value: '1' }],
       }),
     );
-    await expect(groups.last().locator(':scope > summary')).toContainText('Failed');
-    await expect(groups.last().locator(':scope > summary')).not.toContainText('Edited');
+    await expect(rows.first()).toHaveAttribute('data-status', 'error');
+    await expect(rows.first().locator(':scope > summary')).toContainText('Failed');
+    await expect(rows.first().locator(':scope > summary')).not.toContainText('Ran');
     await emit({ kind: 'text', text: 'The update is ready, but a check failed.' });
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
     const history = page.locator('.activity-summary');
@@ -274,10 +283,13 @@ test('collapsed disclosures render on first expansion and keep nested expansion'
         agents: [],
       },
     });
-  // A collapsed group has no calls in the page while the reply runs.
+  // A collapsed group has no calls in the page while the reply runs, and the latest call's own
+  // row renders its details only when opened.
   const group = page.locator('.activity-group');
-  await expect(group.locator(':scope > summary')).toHaveText('Read 2 files');
+  await expect(group.locator(':scope > summary')).toHaveText('Read 1 file');
+  await expect(page.locator('.live-row')).toHaveCount(1);
   await expect(group.locator('.tool-card')).toHaveCount(0);
+  await expect(page.locator('.tool-body')).toHaveCount(0);
   await emit({ kind: 'text', text: 'The source is fine.' });
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
   const history = page.locator('.activity-summary');

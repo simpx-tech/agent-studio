@@ -132,9 +132,14 @@ async function emitCalls(page: Page) {
       kind: 'tool',
       tool: tool({ ...call, revision: 2, status: 'complete', output: summaries[call.id] }),
     });
+  // Moving on folds the latest call into its group with the others.
+  await emit(page, { kind: 'progress', id: 'after', revision: 1, text: 'Reading the results.' });
 }
 const card = (page: Page, text: string) =>
   page.locator('.tool-card').filter({ has: page.locator('summary', { hasText: text }) });
+// A running reply's call that has not folded into its group yet.
+const row = (page: Page, text: string) =>
+  page.locator('.live-row').filter({ has: page.locator('summary', { hasText: text }) });
 const outputCalls = (page: Page) =>
   page.evaluate(() => ((window as any).toolOutputCalls ?? []).map((c: any) => c.toolId));
 
@@ -313,8 +318,7 @@ test('a result is loaded once, waits while the host reads it, and missing result
 }) => {
   await startReply(page);
   await emit(page, { kind: 'tool', tool: tool({ ...calls[0], status: 'running' }) });
-  await page.locator('.activity-group > summary').click();
-  const status = card(page, 'Show working tree status');
+  const status = row(page, 'git status --short');
   await status.locator('summary').click();
   // While the command runs there is nothing to read yet.
   await expect(status.getByTestId('tool-result')).toContainText(
@@ -353,7 +357,9 @@ test('a result is loaded once, waits while the host reads it, and missing result
       id: 'claude:pruned',
     }),
   });
-  const pruned = card(page, 'git diff --stat');
+  // The opened call stays in its row; the new one has a row of its own.
+  await expect(page.locator('.live-row')).toHaveCount(2);
+  const pruned = row(page, 'git diff --stat');
   await pruned.locator('summary').click();
   await expect(pruned.getByRole('alert')).toContainText('was not kept on the computer that ran it');
 });

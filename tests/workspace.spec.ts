@@ -2458,7 +2458,7 @@ test('skills, web searches, and child agents keep progress, results, and saved h
     }),
   );
   await emit(tool('read', 'tool', 'Read', { parentId: 'child1' }));
-  await page.locator('.activity-group > summary').click();
+  // Running calls have rows of their own, which open like calls.
   await page.locator('[data-category="agent"] > summary').click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
   await expect(page.getByRole('region', { name: 'Sub-agent: Fixture reader' })).toContainText(
@@ -2621,9 +2621,13 @@ test('tool targets stream inline and finish as expandable work history below the
   }
   await expect(page.locator('.activity-summary')).toHaveCount(0);
   await expect(page.getByText('Lines read', { exact: true })).not.toBeVisible();
-  await page.locator('.activity-group > summary').first().click();
+  // Running calls show their targets inline, each in a row of its own that opens for details.
+  const rows = page.locator('.live-row');
+  await expect(rows).toHaveCount(5);
+  await expect(rows.first().locator(':scope > summary')).toContainText('Reading');
+  await expect(rows.first().locator(':scope > summary')).toContainText('src/app.ts');
+  await rows.first().locator(':scope > summary').click();
   await expect(page.locator('.live-activity')).toContainText('/fixture/src/app.ts');
-  await page.locator('.tool-card > summary').first().click();
   await expect(page.getByText('Lines read', { exact: true })).toBeVisible();
   expect(
     await page
@@ -2648,7 +2652,7 @@ test('tool targets stream inline and finish as expandable work history below the
   const historySequence = () =>
     page
       .locator(
-        '.activity-timeline > .progress-message, .activity-timeline > .activity-group .tool-title',
+        '.activity-timeline > .progress-message, .activity-timeline .activity-group .tool-title',
       )
       .evaluateAll((elements) =>
         elements.map((el) => (el.querySelector('.tool-title') ?? el).textContent?.trim()),
@@ -2658,8 +2662,6 @@ test('tool targets stream inline and finish as expandable work history below the
     const closed = page.locator('.activity-group:not([open]) > summary');
     while (await closed.count()) await closed.first().click();
   };
-  await openGroups();
-  const liveSequence = await historySequence();
   await page.screenshot({ path: 'artifacts/activity-inline-browser.png' });
   for (const tool of tools)
     await emit({
@@ -2672,6 +2674,15 @@ test('tool targets stream inline and finish as expandable work history below the
     revision: 1,
     text: 'The source files passed verification.',
   });
+  // Finished calls fold into their groups once the agent moves on; the opened row waits for
+  // the reader to close it.
+  await expect(rows).toHaveCount(1);
+  await rows.first().locator(':scope > summary').click();
+  await expect(rows).toHaveCount(0);
+  await openGroups();
+  const liveSequence = await historySequence();
+  // The last progress comment becomes the answer, which history shows below it.
+  expect(liveSequence.pop()).toBe('The source files passed verification.');
   await emit({ kind: 'text', text: 'The source files passed verification.' });
   await emit({ kind: 'usage', input: 2400, output: 50, cachedInput: 1900, costUsd: 0.012345 });
   await page.evaluate(() => (window as any).finishCapabilities('complete'));

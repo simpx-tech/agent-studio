@@ -24,6 +24,12 @@ export interface VirtualSpace {
   scrolled(): ScrollHold;
   /** Consumes the space that new content or a smaller viewport now covers. */
   trim(): void;
+  /**
+   * Adds space for content that just got shorter at the end of a chat the reader follows, such
+   * as a running reply folding finished calls into their group. The chat keeps its place until
+   * new content fills the space.
+   */
+  pad(amount: number): void;
   /** Removes the space and any pending adjustment, for example for another conversation. */
   clear(): void;
   destroy(): void;
@@ -136,6 +142,10 @@ export function createVirtualSpace(
       return height ? 'held' : 'free';
     },
     trim,
+    pad(amount) {
+      // A disclosure being held measures the same change itself.
+      if (!pending && amount > 0) resize(height + amount);
+    },
     clear,
     destroy() {
       clear();

@@ -158,9 +158,10 @@ test('expanding at the end of a running reply stops following it', async ({ page
     return end.max - end.top;
   };
   expect(await atEnd()).toBeLessThan(2);
-  // Expanding and collapsing again returns to the end, where following continues.
+  // Expanding and collapsing again returns to the end, where following continues. The latest
+  // call keeps a row of its own until the next step, so the group lists the other 29.
   await page.locator(summary).click();
-  await expect(page.locator('.tool-card')).toHaveCount(30);
+  await expect(page.locator('.tool-card')).toHaveCount(29);
   await frames(page);
   await page.locator(summary).click();
   await expect(page.locator('.activity-group')).not.toHaveAttribute('open', '');
@@ -201,7 +202,8 @@ test('collapsing while following fills the space with new content before followi
 }) => {
   await start(page);
   await page.evaluate(() => {
-    for (let i = 0; i < 7; i++)
+    // Eight fold into the group; the latest keeps a row of its own.
+    for (let i = 0; i < 9; i++)
       (window as any).emitCapability({
         kind: 'tool',
         tool: {

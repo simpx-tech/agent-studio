@@ -6,9 +6,13 @@
     Check,
     CircleAlert,
     ChevronDown,
+    CornerDownRight,
     ExternalLink,
     Layers,
   } from '@lucide/svelte';
+  import { cubicOut } from 'svelte/easing';
+  import type { TransitionConfig } from 'svelte/transition';
+  import { SvelteSet } from 'svelte/reactivity';
   import {
     safeSourceUrl,
     activityDisplayStatus,
@@ -23,6 +27,10 @@
     activityGroupSummary,
     groupActivityEntries,
     groupIcon,
+    liveAction,
+    liveGroupItems,
+    liveMemory,
+    type LiveGroupItem,
   } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
   import { relativeFilePath, type FileChanges } from '$lib/file-changes';
@@ -71,6 +79,107 @@
   function topLevel(tool: ToolActivity) {
     return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
   }
+  // While the reply runs, each call shows what it is doing in a row of its own until it folds
+  // into its group's summary.
+  const live = $derived(replyStatus === 'running');
+  const memory = liveMemory();
+  // The latest entry showing anything; its latest call keeps its row until the agent moves on.
+  const lastKey = $derived(
+    groups.findLast((group) => group.kind !== 'tools' || group.tools.some(topLevel))?.key,
+  );
+  // What a running sub-agent is doing: its latest call.
+  function latestChild(tool: ToolActivity) {
+    const running = new Set(tool.agents.filter((a) => a.status === 'running').map((a) => a.id));
+    return running.size
+      ? tools.findLast((t) => !!t.parentId && running.has(t.parentId))
+      : undefined;
+  }
+  // A row the reader opened stays until they close it, even after its call would fold.
+  const opened = new SvelteSet<string>();
+  function liveToggle(id: string) {
+    const reveal = disclosures.opened(`tool:${id}`);
+    return (event: Event) => {
+      reveal(event);
+      if ((event.currentTarget as HTMLDetailsElement).open) opened.add(id);
+      else opened.delete(id);
+    };
+  }
+  // Each group's summary and rows while the reply runs.
+  const liveItems = $derived.by(() => {
+    const items = new Map<string, LiveGroupItem[]>();
+    if (live)
+      for (const group of groups) {
+        const visible = group.kind === 'tools' ? group.tools.filter(topLevel) : [];
+        if (visible.length)
+          items.set(
+            group.key,
+            liveGroupItems(group.key, visible, group.key === lastKey, replyStatus, memory, opened),
+          );
+      }
+    return items;
+  });
+  const newFile = (tool: ToolActivity) => {
+    const edit = editOf(tool);
+    return edit?.files.length === 1 && edit.files[0].kind === 'added';
+  };
+  const reducedMotion = () =>
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let root = $state<HTMLElement>();
+  // Where each row sat in its group before an update that folds rows away, relative to the
+  // group so that scrolling in between does not matter.
+  const places = new WeakMap<Element, { x: number; y: number }>();
+  const place = (item: Element) => {
+    const box = item.getBoundingClientRect(),
+      group = item.parentElement!.getBoundingClientRect();
+    return { x: box.left - group.left, y: box.top - group.top };
+  };
+  let shown = new Map<string, LiveGroupItem[]>();
+  let folding = false;
+  // Only updates that fold rows measure them, never every update of the reply.
+  $effect.pre(() => {
+    const next = liveItems;
+    const leaving = [...shown].some(([key, items]) => {
+      const now = next.get(key);
+      return !!now && now !== items && items.some((item) => !now.some((n) => n.key === item.key));
+    });
+    shown = next;
+    if (!leaving || !root) return;
+    for (const item of root.querySelectorAll('.live-item')) places.set(item, place(item));
+    folding = true;
+  });
+  // Rows below a folded call slide up to close its gap.
+  $effect(() => {
+    void liveItems;
+    if (!folding || !root) return;
+    folding = false;
+    if (reducedMotion()) return;
+    for (const item of root.querySelectorAll<HTMLElement>('.live-item')) {
+      const was = places.get(item);
+      if (item.inert || !was) continue;
+      const moved = was.y - place(item).y;
+      if (Math.abs(moved) >= 0.5)
+        item.animate([{ transform: `translateY(${moved}px)` }, { transform: 'none' }], {
+          duration: 260,
+          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+        });
+    }
+  });
+  // A folded call's row leaves the flow and fades where it was, over its successor, rising
+  // toward the summary. Svelte places a leaving row after the rows that replace it.
+  function fold(node: HTMLElement): TransitionConfig {
+    if (reducedMotion()) return { duration: 0 };
+    for (const animation of node.getAnimations()) animation.cancel();
+    const { width, height } = getComputedStyle(node);
+    Object.assign(node.style, { position: 'absolute', width, height });
+    const was = places.get(node);
+    const now = place(node);
+    const base = was ? `translate(${was.x - now.x}px, ${was.y - now.y}px)` : '';
+    return {
+      duration: 260,
+      easing: cubicOut,
+      css: (t, u) => `opacity: ${t * t}; transform: ${base} translateY(${-10 * u}px)`,
+    };
+  }
   function backgroundNote(tool: ToolActivity) {
     if (tool.status !== 'running') return 'Ran in the background.';
     return replyStatus === 'running'
@@ -116,14 +225,7 @@
 
 {#snippet toolCard(tool: ToolActivity, nested = false)}
   {@const status = toolDisplayStatus(tool, replyStatus)}
-  {@const edit = editOf(tool)}
-  {@const visual = toolVisual(tool, {
-    folder,
-    newFile: edit?.files.length === 1 && edit.files[0].kind === 'added',
-  })}
-  <!-- A description the row already shows is not repeated. -->
-  {@const showDetail =
-    !!tool.detail && visual.title !== tool.detail && visual.detail !== tool.detail}
+  {@const visual = toolVisual(tool, { folder, newFile: newFile(tool) })}
   <details
     class="tool-card"
     class:nested
@@ -153,174 +255,269 @@
       </span>
       <ChevronDown size={13} class="disclosure" />
     </summary>
-    {#if disclosures.has(`tool:${tool.id}`)}<div class="tool-body">
-        {#if tool.progress}<p
-            class="tool-progress"
-            title="Progress signals carry no output; the result is shown when the call finishes."
-          >
-            {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
-          </p>{/if}
-        {#if tool.parentId && !nested}<p class="tool-note">
-            By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
-              'sub-agent'}
-          </p>{/if}
-        {#if showDetail}<p class="tool-detail">{tool.detail}</p>{/if}
-        {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
-        {#if tool.query || tool.path || facts(tool).length}<dl class="tool-facts">
-            {#if tool.query}<div>
-                <dt class="metadata-label">
-                  {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
-                </dt>
-                <dd class="tool-query">{tool.query}</dd>
+    {@render toolBody(tool, nested)}
+  </details>
+{/snippet}
+
+<!-- A call's recorded details, rendered once its row is first expanded. -->
+{#snippet toolBody(tool: ToolActivity, nested = false)}
+  {@const edit = editOf(tool)}
+  {@const visual = toolVisual(tool, { folder, newFile: newFile(tool) })}
+  <!-- A description the row already shows is not repeated. -->
+  {@const showDetail =
+    !!tool.detail && visual.title !== tool.detail && visual.detail !== tool.detail}
+  {#if disclosures.has(`tool:${tool.id}`)}<div class="tool-body">
+      {#if tool.progress}<p
+          class="tool-progress"
+          title="Progress signals carry no output; the result is shown when the call finishes."
+        >
+          {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
+        </p>{/if}
+      {#if tool.parentId && !nested}<p class="tool-note">
+          By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
+            'sub-agent'}
+        </p>{/if}
+      {#if showDetail}<p class="tool-detail">{tool.detail}</p>{/if}
+      {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
+      {#if tool.query || tool.path || facts(tool).length}<dl class="tool-facts">
+          {#if tool.query}<div>
+              <dt class="metadata-label">
+                {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
+              </dt>
+              <dd class="tool-query">{tool.query}</dd>
+            </div>{/if}
+          {#if tool.path}<div>
+              <dt class="metadata-label">
+                {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
+              </dt>
+              <dd><code class="tool-path">{tool.path}</code></dd>
+            </div>{/if}
+          {#each facts(tool) as fact}<div>
+              <dt>{fact.label}</dt>
+              <dd>{fact.value}</dd>
+            </div>{/each}
+        </dl>{/if}
+      {#if edit}
+        {#each edit.files as file (file.path)}
+          <section class="tool-diff" aria-label={`Changes in ${file.path}`}>
+            {#if edit.files.length > 1 || !tool.path}<div class="diff-heading">
+                <span class="diff-path" title={file.path}
+                  >{relativeFilePath(file.path, folder)}</span
+                ><span class="diff-kind">{kindLabels[file.kind]}</span>
               </div>{/if}
-            {#if tool.path}<div>
-                <dt class="metadata-label">
-                  {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
-                </dt>
-                <dd><code class="tool-path">{tool.path}</code></dd>
-              </div>{/if}
-            {#each facts(tool) as fact}<div>
-                <dt>{fact.label}</dt>
-                <dd>{fact.value}</dd>
-              </div>{/each}
-          </dl>{/if}
-        {#if edit}
-          {#each edit.files as file (file.path)}
-            <section class="tool-diff" aria-label={`Changes in ${file.path}`}>
-              {#if edit.files.length > 1 || !tool.path}<div class="diff-heading">
-                  <span class="diff-path" title={file.path}
-                    >{relativeFilePath(file.path, folder)}</span
-                  ><span class="diff-kind">{kindLabels[file.kind]}</span>
-                </div>{/if}
-              {#if file.hunks?.length}<DiffTable {file} />{:else}<p class="tool-note">
-                  {file.kind === 'renamed'
-                    ? 'File renamed without recorded text changes.'
-                    : file.kind === 'deleted'
-                      ? 'File deleted.'
-                      : 'No text diff was recorded for this file.'}
-                </p>{/if}
-            </section>
-          {/each}
-        {/if}
-        {#if tool.command || tool.input || tool.output}<ToolResult
-            {tool}
-            {runId}
-            {connectionId}
-            {replyStatus}
-          />{/if}
-        {#if !tool.query && !tool.path && !showDetail && !tool.command && !tool.input && !tool.output && !edit && !tool.background && !facts(tool).length && !tool.sources.length && !tool.agents.length}
-          <p class="tool-note">
-            {tool.status === 'running' && replyStatus === 'running'
-              ? 'Waiting for tool details…'
-              : tool.commandRun || tool.operation === 'command'
-                ? 'The command and its output were not recorded for this call.'
-                : 'No details were recorded for this tool call.'}
-          </p>
-        {/if}
-        {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
-          <p class="tool-note">The provider did not include source links in this activity.</p>
-        {/if}
-        {#if tool.sources.length}<ul class="tool-sources">
-            {#each tool.sources.filter((s) => safeSourceUrl(s.url)) as source}
-              <li>
-                <a
-                  href={safeSourceUrl(source.url)}
-                  onclick={(event) => visit(event, source.url)}
-                  title={source.url}
-                >
-                  <span>{source.title || source.url}</span><ExternalLink
-                    size={12}
-                    aria-hidden="true"
-                  />
-                </a>
-              </li>
-            {/each}
-          </ul>{/if}
-        {#each tool.agents as agent (agent.id)}
-          <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
-            <div class="agent-heading">
-              <Bot size={14} /><strong>{agent.name}</strong>{@render statusMark(
-                activityDisplayStatus(agent, replyStatus),
-              )}
-            </div>
-            {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
-              <p class="tool-note">
-                Delegated by {tool.agents.find((a) => a.id === agent.parentId)?.name}
-              </p>
-            {/if}
-            {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
-            {#if agent.messages?.length}<details
-                class="agent-result"
-                ontoggle={disclosures.opened(`messages:${agent.id}`)}
-              >
-                <summary onclick={disclosures.reveal(`messages:${agent.id}`)}
-                  ><ChevronDown size={12} />Messages</summary
-                >
-                {#if disclosures.has(`messages:${agent.id}`)}
-                  {#each agent.messages as message (message.id)}
-                    <p>{message.text}</p>
-                    {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
-                        Message incomplete
-                      </p>{/if}
-                  {/each}
-                  {#if agent.messagesTruncated}<p class="tool-note">
-                      Additional child text was omitted at the activity limit.
-                    </p>{/if}
-                {/if}
-              </details>{/if}
-            {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
-                child,
-                true,
-              )}{/each}
-            {#if agent.result}<details
-                class="agent-result"
-                ontoggle={disclosures.opened(`result:${agent.id}`)}
-              >
-                <summary onclick={disclosures.reveal(`result:${agent.id}`)}
-                  ><ChevronDown size={12} />Result</summary
-                >
-                {#if disclosures.has(`result:${agent.id}`)}<p>{agent.result}</p>{/if}
-              </details>{/if}
+            {#if file.hunks?.length}<DiffTable {file} />{:else}<p class="tool-note">
+                {file.kind === 'renamed'
+                  ? 'File renamed without recorded text changes.'
+                  : file.kind === 'deleted'
+                    ? 'File deleted.'
+                    : 'No text diff was recorded for this file.'}
+              </p>{/if}
           </section>
         {/each}
+      {/if}
+      {#if tool.command || tool.input || tool.output}<ToolResult
+          {tool}
+          {runId}
+          {connectionId}
+          {replyStatus}
+        />{/if}
+      {#if !tool.query && !tool.path && !showDetail && !tool.command && !tool.input && !tool.output && !edit && !tool.background && !facts(tool).length && !tool.sources.length && !tool.agents.length}
+        <p class="tool-note">
+          {tool.status === 'running' && replyStatus === 'running'
+            ? 'Waiting for tool details…'
+            : tool.commandRun || tool.operation === 'command'
+              ? 'The command and its output were not recorded for this call.'
+              : 'No details were recorded for this tool call.'}
+        </p>
+      {/if}
+      {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
+        <p class="tool-note">The provider did not include source links in this activity.</p>
+      {/if}
+      {#if tool.sources.length}<ul class="tool-sources">
+          {#each tool.sources.filter((s) => safeSourceUrl(s.url)) as source}
+            <li>
+              <a
+                href={safeSourceUrl(source.url)}
+                onclick={(event) => visit(event, source.url)}
+                title={source.url}
+              >
+                <span>{source.title || source.url}</span><ExternalLink
+                  size={12}
+                  aria-hidden="true"
+                />
+              </a>
+            </li>
+          {/each}
+        </ul>{/if}
+      {#each tool.agents as agent (agent.id)}
+        <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
+          <div class="agent-heading">
+            <Bot size={14} /><strong>{agent.name}</strong>{@render statusMark(
+              activityDisplayStatus(agent, replyStatus),
+            )}
+          </div>
+          {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
+            <p class="tool-note">
+              Delegated by {tool.agents.find((a) => a.id === agent.parentId)?.name}
+            </p>
+          {/if}
+          {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
+          {#if agent.messages?.length}<details
+              class="agent-result"
+              ontoggle={disclosures.opened(`messages:${agent.id}`)}
+            >
+              <summary onclick={disclosures.reveal(`messages:${agent.id}`)}
+                ><ChevronDown size={12} />Messages</summary
+              >
+              {#if disclosures.has(`messages:${agent.id}`)}
+                {#each agent.messages as message (message.id)}
+                  <p>{message.text}</p>
+                  {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
+                      Message incomplete
+                    </p>{/if}
+                {/each}
+                {#if agent.messagesTruncated}<p class="tool-note">
+                    Additional child text was omitted at the activity limit.
+                  </p>{/if}
+              {/if}
+            </details>{/if}
+          {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
+              child,
+              true,
+            )}{/each}
+          {#if agent.result}<details
+              class="agent-result"
+              ontoggle={disclosures.opened(`result:${agent.id}`)}
+            >
+              <summary onclick={disclosures.reveal(`result:${agent.id}`)}
+                ><ChevronDown size={12} />Result</summary
+              >
+              {#if disclosures.has(`result:${agent.id}`)}<p>{agent.result}</p>{/if}
+            </details>{/if}
+        </section>
+      {/each}
+    </div>{/if}
+{/snippet}
+
+<!-- `calls` are the group's own calls and those of its sub-agents; `counted` animates the label. -->
+{#snippet groupRow(key: string, visible: ToolActivity[], calls: ToolActivity[], counted = false)}
+  {@const summary = activityGroupSummary(visible, replyStatus, tools)}
+  {@const active = calls.filter((tool) => tool.status === 'running' && !tool.background)}
+  {@const elapsed = Math.max(-1, ...active.map((tool) => tool.elapsedMs ?? -1))}
+  {@const progressTool = active.findLast((tool) => tool.progress)}
+  <details class="activity-group" ontoggle={disclosures.opened(key)}>
+    <summary title="Expand for tool details" onclick={disclosures.reveal(key)}>
+      {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
+      {:else}<ToolIcon icon={groupIcon(visible)} size={16} />{/if}
+      {#if counted}{#key summary.label}<span class="group-label counted">{summary.label}</span
+          >{/key}
+      {:else}<span class="group-label">{summary.label}</span>{/if}
+      {#if summary.running && elapsed >= 0}<span class="group-progress">
+          {#if progressTool}<span>{toolProgressLabel(progressTool)}</span>{/if}
+          <span
+            class="tool-elapsed"
+            title="Longest currently running tool; parallel times are not added"
+            aria-label={`Longest running tool: ${toolElapsed(elapsed)}`}
+            >{toolElapsed(elapsed)}</span
+          >
+        </span>{/if}
+      {#if summary.issue}{@render statusMark(summary.issue)}{/if}
+      <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+    </summary>
+    {#if disclosures.has(key)}<div class="group-tools">
+        {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
       </div>{/if}
   </details>
+{/snippet}
+
+{#snippet liveMark(current: ActivityDisplayStatus)}
+  <span
+    class="live-status"
+    class:live={current === 'running'}
+    class:failed={current === 'error' || current === 'blocked'}
+    class:unfinished={current === 'cancelled' || current === 'unknown'}
+  >
+    {#if current === 'complete'}<Check size={13} />
+    {:else if current === 'background' || current === 'left'}<Layers size={13} />
+    {:else if current !== 'running'}<CircleAlert size={13} />{/if}<span
+      class:sr-only={!['error', 'blocked', 'cancelled', 'unknown'].includes(current)}
+      >{labels[current]}</span
+    >
+  </span>
+{/snippet}
+
+<!-- What a call is doing now, or has just done, before it folds into its group. -->
+{#snippet liveRow(tool: ToolActivity)}
+  {@const status = toolDisplayStatus(tool, replyStatus)}
+  {@const act = liveAction(tool, status, { folder, newFile: newFile(tool) })}
+  {@const child = tool.category === 'agent' && status === 'running' ? latestChild(tool) : undefined}
+  <details
+    class="live-row"
+    class:running={status === 'running'}
+    data-status={status}
+    data-category={tool.category}
+    ontoggle={liveToggle(tool.id)}
+  >
+    <summary onclick={disclosures.reveal(`tool:${tool.id}`)}>
+      <ToolIcon icon={act.icon} size={16} />
+      <span class="live-line" title={act.hint}>
+        {#if act.verb}<span class="live-verb"
+            >{act.verb}{#if status === 'running'}<span
+                class="live-sheen"
+                data-text={act.verb}
+                aria-hidden="true"
+              ></span>{/if}</span
+          >{/if}
+        {#if act.target}<span class="live-target" class:code={act.code}>{act.target}</span>{/if}
+      </span>
+      <span class="live-meta">
+        {#if status === 'running' && tool.progress}<span>{toolProgressLabel(tool)}</span>{/if}
+        <!-- The Background work toggle below the reply shows its running time, not here. -->
+        {#if tool.elapsedMs != null && tool.elapsedMs >= 1000 && status !== 'background' && status !== 'left'}<span
+            class="tool-elapsed"
+            title="Elapsed time recorded on the execution computer"
+            aria-label={`Tool elapsed time: ${toolElapsed(tool.elapsedMs)}`}
+            >{toolElapsed(tool.elapsedMs)}</span
+          >{/if}
+        {#key status}{@render liveMark(status)}{/key}
+      </span>
+      <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+      {#if child}
+        {@const doing = liveAction(child, toolDisplayStatus(child, replyStatus), { folder })}
+        {#key child.id}<span class="live-child" title={doing.hint}
+            ><CornerDownRight size={12} aria-hidden="true" />{#if doing.verb}<span
+                >{doing.verb}</span
+              >{/if}{#if doing.target}<span class="live-target" class:code={doing.code}
+                >{doing.target}</span
+              >{/if}</span
+          >{/key}
+      {/if}
+    </summary>
+    {@render toolBody(tool)}
+  </details>
+{/snippet}
+
+{#snippet liveGroup(key: string, items: LiveGroupItem[])}
+  <div class="live-group">
+    {#each items as item (item.key)}
+      <div class="live-item" out:fold>
+        {#if item.kind === 'summary'}{@render groupRow(key, item.tools, item.tools, true)}
+        {:else if item.kind === 'call'}{@render liveRow(item.tool)}
+        {:else}<p class="live-more">{item.count} more running</p>{/if}
+      </div>
+    {/each}
+  </div>
 {/snippet}
 
 {#snippet timeline()}
   <div class="activity-timeline">
     {#each groups as group (group.key)}
-      {#if group.kind === 'tools'}
+      {#if group.kind === 'tools' && live}
+        {@const items = liveItems.get(group.key)}
+        {#if items}{@render liveGroup(group.key, items)}{/if}
+      {:else if group.kind === 'tools'}
         {@const visible = group.tools.filter(topLevel)}
-        {#if visible.length}
-          {@const summary = activityGroupSummary(visible, replyStatus, tools)}
-          {@const active = group.tools.filter(
-            (tool) => tool.status === 'running' && !tool.background,
-          )}
-          {@const elapsed = Math.max(-1, ...active.map((tool) => tool.elapsedMs ?? -1))}
-          {@const progressTool = active.findLast((tool) => tool.progress)}
-          <details class="activity-group" ontoggle={disclosures.opened(group.key)}>
-            <summary title="Expand for tool details" onclick={disclosures.reveal(group.key)}>
-              {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
-              {:else}<ToolIcon icon={groupIcon(visible)} size={16} />{/if}
-              <span class="group-label">{summary.label}</span>
-              {#if summary.running && elapsed >= 0}<span class="group-progress">
-                  {#if progressTool}<span>{toolProgressLabel(progressTool)}</span>{/if}
-                  <span
-                    class="tool-elapsed"
-                    title="Longest currently running tool; parallel times are not added"
-                    aria-label={`Longest running tool: ${toolElapsed(elapsed)}`}
-                    >{toolElapsed(elapsed)}</span
-                  >
-                </span>{/if}
-              {#if summary.issue}{@render statusMark(summary.issue)}{/if}
-              <ChevronDown size={13} class="disclosure" aria-hidden="true" />
-            </summary>
-            {#if disclosures.has(group.key)}<div class="group-tools">
-                {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
-              </div>{/if}
-          </details>
-        {/if}
+        {#if visible.length}{@render groupRow(group.key, visible, group.tools)}{/if}
       {:else if group.kind === 'reasoning'}
         <div class="reasoning-entry" role="group" aria-label="Reasoning">
           <span class="reasoning-mark" title="Reasoning reported by the provider"
@@ -356,6 +553,7 @@
     class="tool-activity"
     class:live-activity={replyStatus === 'running'}
     aria-label="Tools, hooks and sub-agents"
+    bind:this={root}
   >
     {#if replyStatus === 'running'}{@render timeline()}
     {:else}
@@ -458,6 +656,190 @@
     padding-left: 14px;
     border-left: 1px solid var(--border-strong);
     min-width: 0;
+  }
+  /* A running reply's group: its summary, then calls in rows of their own. Rows move with
+     opacity and transforms only; a folded row leaves the flow at once and fades above it. */
+  .live-group {
+    position: relative;
+    min-width: 0;
+  }
+  .live-item {
+    min-width: 0;
+  }
+  .live-item + .live-item {
+    margin-top: 2px;
+  }
+  .live-item > .activity-group,
+  .live-row,
+  .live-activity .reasoning-entry,
+  .live-activity .progress-message,
+  .live-activity .timeline-note {
+    animation: live-in var(--duration-slow) var(--ease-out);
+  }
+  .counted {
+    animation: live-count var(--duration-slow) var(--ease-out);
+  }
+  .live-row {
+    min-width: 0;
+  }
+  .live-row > summary {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto 13px;
+    align-items: center;
+    column-gap: 8px;
+    min-height: 28px;
+    padding: 4px 8px 4px 6px;
+    margin-left: -6px;
+    border-radius: var(--radius-md);
+    list-style: none;
+    cursor: pointer;
+    font-size: var(--text-base);
+    color: var(--text-muted);
+    transition: background-color var(--duration-fast) ease;
+  }
+  .live-row > summary:hover {
+    background: var(--hover);
+  }
+  .live-row > summary > :global(.disclosure) {
+    color: var(--text-faint);
+  }
+  .live-row.running > summary > :global(.tool-icon) {
+    color: var(--text-secondary);
+  }
+  .live-row > .tool-body {
+    padding-left: 24px;
+  }
+  .live-line,
+  .live-child {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .live-verb {
+    position: relative;
+    flex: none;
+  }
+  .running > summary .live-verb {
+    color: var(--text-secondary);
+  }
+  .live-target {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-secondary);
+  }
+  .running > summary > .live-line > .live-target {
+    color: var(--text);
+  }
+  .live-target.code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+  .live-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+  .live-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-faint);
+  }
+  /* A finished call's mark pops in; a running call shows its sheen instead. */
+  .live-status:not(.live) {
+    animation: live-mark var(--duration) var(--ease-out);
+  }
+  .live-status.unfinished {
+    color: var(--text-muted);
+  }
+  .live-status.failed {
+    color: var(--danger);
+  }
+  .live-child {
+    grid-column: 2 / -1;
+    align-items: center;
+    padding-top: 1px;
+    font-size: var(--text-xs);
+    animation: live-in var(--duration) var(--ease-out);
+  }
+  .live-child > :global(svg) {
+    flex: none;
+    color: var(--text-faint);
+  }
+  .live-child .live-target {
+    color: var(--text-secondary);
+  }
+  .live-more {
+    margin: 0;
+    padding: 2px 0 2px 24px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+  /* A band of brighter text sweeps across a running call's verb. The band and its copy of the
+     verb move in opposite directions with transforms, so the sweep runs without repainting
+     the chat, and the copy stays out of the page's text. */
+  .live-sheen {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 60%;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    user-select: none;
+    mask-image: linear-gradient(90deg, transparent, var(--text) 50%, transparent);
+    animation: sheen-band 2.4s ease-in-out infinite;
+  }
+  .live-sheen::before {
+    content: attr(data-text);
+    display: block;
+    width: calc(100% / 0.6);
+    color: var(--text);
+    white-space: nowrap;
+    animation: sheen-text 2.4s ease-in-out infinite;
+  }
+  @keyframes live-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @keyframes live-count {
+    from {
+      opacity: 0.35;
+      transform: translateY(4px);
+    }
+  }
+  @keyframes live-mark {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+  }
+  /* The band crosses the verb in the first 60% of each cycle, then rests past its end. */
+  @keyframes sheen-band {
+    0% {
+      opacity: 1;
+      transform: translateX(-100%);
+    }
+    60%,
+    100% {
+      opacity: 1;
+      transform: translateX(166.667%);
+    }
+  }
+  @keyframes sheen-text {
+    0% {
+      transform: translateX(60%);
+    }
+    60%,
+    100% {
+      transform: translateX(-100%);
+    }
   }
   .activity-summary[open] {
     border-bottom: 1px solid var(--border);

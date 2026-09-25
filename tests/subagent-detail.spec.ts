@@ -67,10 +67,10 @@ for (const mobile of [false, true]) {
         { revision, complete },
       );
     await emit(1, false);
-    const group = page.locator('.activity-group').last();
-    await group.locator(':scope > summary').click();
-    const card = group.locator('.tool-card').filter({ hasText: 'Sub-agents' });
-    await card.locator(':scope > summary').click();
+    // A running sub-agent has a row of its own, which opens like a call and stays open.
+    const row = page.locator('.live-row[data-category="agent"]');
+    await expect(row.locator(':scope > summary')).toContainText('Working with');
+    await row.locator(':scope > summary').click();
     const child = page.getByRole('region', { name: 'Sub-agent: Fixture reader', exact: true });
     const messages = child.locator('.agent-result').filter({ hasText: 'Messages' });
     await expect(messages).not.toHaveAttribute('open', '');
@@ -86,7 +86,7 @@ for (const mobile of [false, true]) {
     await expect(messages).toContainText('Found the marker.');
     await expect(messages).toContainText('Additional child text was omitted');
     expect(await page.evaluate(() => (window as any).childExecuted)).toBeUndefined();
-    expect(await card.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.screenshot({
       path: `artifacts/subagent-detail/live-${mobile ? 'mobile' : 'desktop'}.png`,
     });
@@ -109,6 +109,8 @@ for (const mobile of [false, true]) {
     await page.getByRole('tab', { name: /^History/ }).click();
     await page.locator('.conversation-item').first().click();
     await page.getByLabel('Work history', { exact: true }).click();
+    const group = page.locator('.activity-group').last();
+    const card = group.locator('.tool-card').filter({ hasText: 'Sub-agents' });
     await group.locator(':scope > summary').click();
     await card.locator(':scope > summary').click();
     await expect(messages).not.toHaveAttribute('open', '');

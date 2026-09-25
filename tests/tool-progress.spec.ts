@@ -45,25 +45,23 @@ for (const mobile of [false, true]) {
         { revision, elapsedMs, kind, status },
       );
     await emit(1, 0);
-    const group = page.locator('.activity-group').last();
-    await expect(group).not.toHaveAttribute('open', '');
-    await expect(group.locator(':scope > summary')).toContainText('0s');
+    // The running command has a row of its own showing its time and latest progress signal.
+    const row = page.locator('.live-row').last();
+    await expect(row).not.toHaveAttribute('open', '');
+    await expect(row.locator(':scope > summary')).toContainText('Running');
     await emit(2, 12000, 'output');
-    await expect(group.locator(':scope > summary')).toContainText('Output received');
-    await expect(group.locator(':scope > summary')).toContainText('12s');
-    await group.locator(':scope > summary').click();
-    const card = group.locator('.tool-card');
-    await card.locator('summary').click();
-    await expect(card.locator('.tool-progress')).toHaveText('Output received at 12s');
+    await expect(row.locator(':scope > summary')).toContainText('Output received');
+    await expect(row.locator(':scope > summary')).toContainText('12s');
+    await row.locator(':scope > summary').click();
+    await expect(row.locator('.tool-progress')).toHaveText('Output received at 12s');
     await page.getByLabel('Message', { exact: true }).fill('Preserve this draft');
     await emit(4, 14000, 'terminal');
     await emit(3, 13000, 'heartbeat');
-    await expect(group).toHaveAttribute('open', '');
-    await expect(card).toHaveAttribute('open', '');
-    await expect(card.locator('.tool-progress')).toHaveText('Terminal interaction at 12s');
-    await expect(card.locator('summary')).toContainText('14s');
+    await expect(row).toHaveAttribute('open', '');
+    await expect(row.locator('.tool-progress')).toHaveText('Terminal interaction at 12s');
+    await expect(row.locator(':scope > summary')).toContainText('14s');
     await expect(page.locator('body')).not.toContainText('PRIVATE_');
-    expect(await group.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.screenshot({
       path: `artifacts/tool-progress/live-${mobile ? 'mobile' : 'desktop'}.png`,
     });
@@ -73,6 +71,8 @@ for (const mobile of [false, true]) {
       (window as any).finishCapabilities('complete');
     });
     await page.getByLabel('Work history', { exact: true }).click();
+    const group = page.locator('.activity-group').last();
+    const card = group.locator('.tool-card');
     await group.locator(':scope > summary').click();
     await card.locator('summary').click();
     await expect(card.locator('summary')).toContainText('15s');

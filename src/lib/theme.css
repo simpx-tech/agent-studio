@@ -43,6 +43,7 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --duration-fast: 120ms;
   --duration: 180ms;
+  --duration-slow: 260ms;
 
   /* Layout */
   --control-sm: 28px;

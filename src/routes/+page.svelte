@@ -440,6 +440,8 @@
   let composerArea = $state<HTMLDivElement>();
   let virtualSpace: VirtualSpace | undefined;
   let nearBottom = true;
+  // The conversation's height when the chat last followed its end or the reader moved.
+  let followedHeight = 0;
   // Runs after the reader scrolls, expands, or collapses content.
   function readingPosition() {
     const hold = virtualSpace?.scrolled() ?? 'free';
@@ -449,6 +451,7 @@
     else if (hold === 'free' && chatScroll)
       // Only follow at the end. A reading position just above it is still deliberate.
       nearBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 2;
+    followedHeight = chatColumn?.getBoundingClientRect().height ?? 0;
   }
   $effect(() => {
     if (!chatScroll || !chatColumn || !chatSpace) return;
@@ -463,6 +466,7 @@
   $effect(() => {
     void activeId;
     untrack(() => virtualSpace?.clear());
+    followedHeight = 0;
   });
   $effect(() => {
     const scroll = chatScroll;
@@ -2220,12 +2224,21 @@
     await tick();
     tablist?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
   }
-  async function scrollToEnd() {
+  /** `live` marks an update of a running reply, whose activity can fold into less space. */
+  async function scrollToEnd(live = false) {
     await tick();
     if (nearBottom && chatScroll) {
-      // New content fills any held space before the chat follows it.
-      virtualSpace?.trim();
+      const height = chatColumn?.getBoundingClientRect().height ?? 0;
+      if (height >= followedHeight)
+        // New content fills any held space before the chat follows it.
+        virtualSpace?.trim();
+      // Finished calls folded into their groups: space keeps the chat in place until new
+      // content fills it, instead of pulling everything down.
+      else if (live) virtualSpace?.pad(followedHeight - height);
+      // The conversation now ends elsewhere, as when a reply's activity becomes Work history.
+      else virtualSpace?.clear();
       chatScroll.scrollTop = chatScroll.scrollHeight;
+      followedHeight = height;
     }
   }
   function conversationRunning(conversation: Conversation) {
@@ -3037,7 +3050,7 @@
                 if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
                 saveSoon();
               }
-              if (activeId === conversation.id) void scrollToEnd();
+              if (activeId === conversation.id) void scrollToEnd(true);
             },
           );
       if (session !== workspaceSession) return;

@@ -71,18 +71,21 @@ for (const mobile of [false, true]) {
       },
     });
     await emit(hook(1, 'running'));
-    const group = page.locator('.activity-group').last();
-    await expect(group.locator(':scope > summary')).toContainText('Running 1 hook');
-    await group.locator(':scope > summary').click();
-    await group.locator('.tool-card > summary').click();
+    // A running hook shows what it does in a row of its own, which opens like a call.
+    const row = page.locator('.live-row').last();
+    await expect(row.locator(':scope > summary')).toContainText('Running');
+    await expect(row.locator(':scope > summary')).toContainText('PreToolUse hook');
+    await row.locator(':scope > summary').click();
     await emit(hook(2, 'blocked'));
     await emit(hook(1, 'running'));
-    await expect(group.locator('.tool-card')).toHaveCount(1);
-    await expect(group.locator('.tool-card')).toHaveAttribute('open', '');
-    await expect(group.locator(':scope > summary')).toContainText('Blocked');
+    await expect(page.locator('.live-row')).toHaveCount(1);
+    await expect(row).toHaveAttribute('open', '');
+    await expect(row.locator(':scope > summary')).toContainText('Blocked');
+    await expect(row.getByText('Command', { exact: true })).toBeVisible();
     await emit({ kind: 'text', text: 'Hook verification complete.' });
     await page.evaluate(() => (window as any).finishCapabilities('complete'));
     await page.getByLabel('Work history', { exact: true }).click();
+    const group = page.locator('.activity-group').last();
     await group.locator(':scope > summary').click();
     await group.locator('.tool-card > summary').click();
     await expect(group.getByText('Command', { exact: true })).toBeVisible();
