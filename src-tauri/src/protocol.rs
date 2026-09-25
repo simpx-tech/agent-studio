@@ -94,7 +94,7 @@ pub enum RunEvent {
         text: String,
     },
     Tool {
-        tool: activity::ToolActivity,
+        tool: Box<activity::ToolActivity>,
     },
     Usage {
         #[serde(flatten)]
@@ -170,7 +170,9 @@ impl Decoder {
             .tools
             .codex_server(value, root)
             .into_iter()
-            .map(|tool| RunEvent::Tool { tool })
+            .map(|tool| RunEvent::Tool {
+                tool: Box::new(tool),
+            })
             .collect();
         let params = &value["params"];
         if self
@@ -259,11 +261,17 @@ impl Decoder {
         }
         events
     }
+    /// Tool results decoded since the last call, for the executing computer's store.
+    pub fn take_tool_outputs(&mut self) -> Vec<activity::CapturedOutput> {
+        self.tools.take_outputs()
+    }
     pub fn tool_tick(&mut self) -> Vec<RunEvent> {
         self.tools
             .tick()
             .into_iter()
-            .map(|tool| RunEvent::Tool { tool })
+            .map(|tool| RunEvent::Tool {
+                tool: Box::new(tool),
+            })
             .collect()
     }
     pub fn decode(&mut self, provider: &str, line: &str) -> Vec<RunEvent> {
@@ -275,7 +283,9 @@ impl Decoder {
             .tools
             .decode(provider, &v)
             .into_iter()
-            .map(|tool| RunEvent::Tool { tool })
+            .map(|tool| RunEvent::Tool {
+                tool: Box::new(tool),
+            })
             .collect();
         if let Some(file_changes) = self.file_changes.decode(provider, &v) {
             events.push(RunEvent::FileChanges { file_changes });

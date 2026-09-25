@@ -20,6 +20,7 @@ import {
   type AccountAction,
 } from './live-usage';
 import { retainRunEvent } from './activity';
+import { toolOutputSchema, type ToolOutput } from './tool-output';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
@@ -341,8 +342,12 @@ let browserSessionBlocked = false;
 const relayConnectionListeners = new Set<(ready: boolean) => void>();
 const remoteRuns = new Map<string, boolean>();
 const workerRuns = new Map<string, RelayJob>();
+// Optional reads never keep this device from disconnecting; late results are discarded.
 function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, unknown>) {
-  return method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages';
+  return (
+    method === 'toolOutput' ||
+    (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
+  );
 }
 function hasBlockingRemoteWork() {
   return (
@@ -1129,6 +1134,7 @@ async function localCall(
     mcp: 'manage_mcp',
     plugins: 'manage_plugins',
     nativeInstructions: 'read_native_instructions',
+    toolOutput: 'read_tool_output',
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
     steer: 'steer_run',
@@ -1186,9 +1192,11 @@ async function routed<T>(
         ? 660_000
         : method === 'folders'
           ? 30_000
-          : runTimeoutMs(
-              method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
-            ) + 10_000);
+          : method === 'toolOutput'
+            ? 45_000
+            : runTimeoutMs(
+                method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
+              ) + 10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
       currentSession();
@@ -1408,6 +1416,19 @@ export async function readNativeInstructions(
       connectionId: settings.connectionId,
     },
     settings.connectionId,
+  );
+}
+/**
+ * A finished tool call's result, read from the computer that ran it: through native
+ * commands here, or the owning host through the relay. It is never synced or exported.
+ */
+export async function readToolOutput(
+  runId: string,
+  toolId: string,
+  connectionId?: string,
+): Promise<ToolOutput> {
+  return toolOutputSchema.parse(
+    await routed('toolOutput', { runId, toolId, connectionId }, connectionId),
   );
 }
 export type FolderListing = {

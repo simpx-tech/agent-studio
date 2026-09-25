@@ -441,6 +441,46 @@ describe('real HTTP relay', () => {
     f.advance(600_001);
     expect((await f.call('GET', `jobs/${job.id}`)).status).toBe(404);
   });
+  it('routes tool output reads as transient jobs that never reach the workspace', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const args = {
+      runId: crypto.randomUUID(),
+      toolId: 'claude:toolu_01',
+      connectionId: crypto.randomUUID(),
+    };
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'toolOutput',
+      args,
+    };
+    for (const invalid of [
+      { ...args, path: '/elsewhere/output.json' },
+      { ...args, runId: '../run' },
+      { ...args, toolId: '' },
+      { ...args, toolId: 'a\nb' },
+      { ...args, toolId: 'x'.repeat(241) },
+    ])
+      expect((await f.call('POST', 'jobs', { ...job, args: invalid })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    await f.call('GET', 'jobs', undefined, f.target);
+    const result = { version: 1, toolId: args.toolId, stdout: 'Synthetic tool output\n' };
+    expect(
+      (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result }, f.target))
+        .status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${job.id}`)).body.result).toEqual(result);
+    expect(JSON.stringify((await f.call('GET', 'workspace')).body)).not.toContain(
+      'Synthetic tool output',
+    );
+  });
   it('keeps healthy native workflows past one reply deadline while expiring abandoned work', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();

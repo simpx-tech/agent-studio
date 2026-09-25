@@ -1,0 +1,115 @@
+<script lang="ts">
+  import {
+    Activity,
+    AppWindow,
+    Bot,
+    Camera,
+    ChartColumn,
+    Clock,
+    Container,
+    Copy,
+    Cpu,
+    Download,
+    FileCode,
+    FilePen,
+    FilePlus,
+    FileText,
+    FlaskConical,
+    FolderPlus,
+    FolderSearch,
+    FolderTree,
+    GitPullRequest,
+    Globe,
+    Hammer,
+    Hourglass,
+    Image,
+    Layers,
+    Link,
+    ListTodo,
+    MessageCircleQuestionMark,
+    MonitorPlay,
+    NotebookPen,
+    Package,
+    PackageSearch,
+    Play,
+    Plug,
+    Send,
+    Server,
+    Sparkles,
+    SquareTerminal,
+    TextSearch,
+    Trash2,
+    Users,
+    WandSparkles,
+    Webhook,
+    Workflow,
+    Wrench,
+  } from '@lucide/svelte';
+  import GitIcon from './GitIcon.svelte';
+  import type { ToolIconKey } from '$lib/tool-presentation';
+  let { icon, size = 15 }: { icon: ToolIconKey; size?: number } = $props();
+  const icons = {
+    git: GitIcon,
+    pullRequest: GitPullRequest,
+    package: Package,
+    test: FlaskConical,
+    build: Hammer,
+    lint: WandSparkles,
+    server: MonitorPlay,
+    script: Play,
+    container: Container,
+    network: Download,
+    remote: Server,
+    list: FolderTree,
+    read: FileText,
+    search: TextSearch,
+    delete: Trash2,
+    create: FolderPlus,
+    move: Copy,
+    process: Cpu,
+    wait: Clock,
+    write: FilePen,
+    agentCli: Bot,
+    terminal: SquareTerminal,
+    file: FileText,
+    code: FileCode,
+    image: Image,
+    edit: FilePen,
+    newFile: FilePlus,
+    notebook: NotebookPen,
+    findFiles: FolderSearch,
+    grep: TextSearch,
+    web: Globe,
+    page: Link,
+    skill: Sparkles,
+    agent: Bot,
+    message: Send,
+    directory: Users,
+    toolSearch: PackageSearch,
+    plug: Plug,
+    browser: AppWindow,
+    screenshot: Camera,
+    monitor: Activity,
+    waitTasks: Hourglass,
+    plan: ListTodo,
+    question: MessageCircleQuestionMark,
+    workflow: Workflow,
+    chart: ChartColumn,
+    hook: Webhook,
+    background: Layers,
+    tool: Wrench,
+  } satisfies Record<ToolIconKey, unknown>;
+  const Icon = $derived(icons[icon] ?? Wrench);
+</script>
+
+<span class="tool-icon" data-icon={icon}><Icon {size} aria-hidden="true" /></span>
+
+<style>
+  .tool-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+  }
+</style>

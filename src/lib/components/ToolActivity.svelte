@@ -1,21 +1,12 @@
 <script lang="ts">
   import {
     Brain,
-    Sparkles,
-    Globe,
-    GitBranch,
-    Wrench,
+    Bot,
     LoaderCircle,
     Check,
     CircleAlert,
     ChevronDown,
     ExternalLink,
-    FileText,
-    Pencil,
-    Search,
-    Terminal,
-    Images,
-    Webhook,
     Layers,
   } from '@lucide/svelte';
   import {
@@ -31,21 +22,36 @@
     activityEntries,
     activityGroupSummary,
     groupActivityEntries,
+    groupIcon,
   } from '$lib/activity-groups';
   import type { Message, ContentBlock } from '$lib/domain';
+  import { relativeFilePath, type FileChanges } from '$lib/file-changes';
   import { renderMarkdown } from '$lib/markdown';
+  import { toolVisual } from '$lib/tool-presentation';
   import { openLink } from '$lib/transport';
   import { revealedDisclosures } from '$lib/disclosures';
+  import DiffTable from './DiffTable.svelte';
+  import ToolIcon from './ToolIcon.svelte';
+  import ToolResult from './ToolResult.svelte';
   let {
     tools,
     replyStatus,
     blocks = [],
     finalText = '',
+    runId,
+    connectionId,
+    folder,
+    fileChanges,
   }: {
     tools: ToolActivity[];
     replyStatus: Message['status'];
     blocks?: ContentBlock[];
     finalText?: string;
+    /** The reply's run, which finds results kept on the computer that ran it. */
+    runId?: string;
+    connectionId?: string;
+    folder?: string;
+    fileChanges?: FileChanges;
   } = $props();
   let linkError = $state('');
   const labels = {
@@ -58,26 +64,7 @@
     background: 'In background',
     left: 'Left running',
   };
-  const icons = { skill: Sparkles, search: Globe, agent: GitBranch, tool: Wrench, hook: Webhook };
-  const groupIcons = {
-    hook: Webhook,
-    hookContext: Webhook,
-    read: FileText,
-    edit: Pencil,
-    files: Search,
-    command: Terminal,
-    search: Globe,
-    browse: Globe,
-    agent: GitBranch,
-    background: Layers,
-    backgroundAgent: GitBranch,
-    message: GitBranch,
-    directory: GitBranch,
-    skill: Sparkles,
-    image: Images,
-    tool: Wrench,
-    limit: Wrench,
-  };
+  const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
   const entries = $derived(activityEntries(blocks, tools, finalText));
   const groups = $derived(groupActivityEntries(entries));
   const disclosures = revealedDisclosures();
@@ -90,6 +77,10 @@
       ? 'Running in the background while the reply continues. Background work below this reply tracks it.'
       : 'Still running in the background when this reply ended. Its later outcome was not recorded.';
   }
+  const editOf = (tool: ToolActivity) => fileChanges?.edits.find((edit) => edit.id === tool.id);
+  // The command's exit code now travels with its output; older calls kept it as a fact.
+  const facts = (tool: ToolActivity) =>
+    (tool.facts ?? []).filter((fact) => !(fact.label === 'Exit code' && tool.output));
   function progressLink(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) void visit(event, link.href);
@@ -111,21 +102,28 @@
     class="tool-status"
     class:failed={current === 'error' || current === 'blocked'}
     class:live={current === 'running'}
+    class:done={current === 'complete'}
+    title={current === 'complete' ? labels.complete : undefined}
   >
     {#if current === 'running'}<LoaderCircle size={13} class="spinning" />
     {:else if current === 'complete'}<Check size={13} />
     {:else if current === 'background' || current === 'left'}<Layers size={13} />
-    {:else}<CircleAlert size={13} />{/if}{labels[current]}
+    {:else}<CircleAlert size={13} />{/if}<span class:sr-only={current === 'complete'}
+      >{labels[current]}</span
+    >
   </span>
 {/snippet}
 
 {#snippet toolCard(tool: ToolActivity, nested = false)}
-  {@const Icon = icons[tool.category]}
   {@const status = toolDisplayStatus(tool, replyStatus)}
-  {@const preview =
-    tool.category === 'hook'
-      ? tool.path || tool.facts?.find((fact) => fact.label === 'Hook')?.value
-      : tool.query || tool.path || tool.detail}
+  {@const edit = editOf(tool)}
+  {@const visual = toolVisual(tool, {
+    folder,
+    newFile: edit?.files.length === 1 && edit.files[0].kind === 'added',
+  })}
+  <!-- A description the row already shows is not repeated. -->
+  {@const showDetail =
+    !!tool.detail && visual.title !== tool.detail && visual.detail !== tool.detail}
   <details
     class="tool-card"
     class:nested
@@ -133,9 +131,14 @@
     ontoggle={disclosures.opened(`tool:${tool.id}`)}
   >
     <summary onclick={disclosures.reveal(`tool:${tool.id}`)}>
-      <Icon size={15} aria-hidden="true" />
+      <ToolIcon icon={visual.icon} />
       <span class="tool-title"
-        >{tool.name}{#if preview}<span class="query-preview" title={preview}>{preview}</span
+        ><span
+          class="tool-label"
+          class:code={visual.code}
+          title={visual.code ? visual.hint : undefined}>{visual.title}</span
+        >{#if visual.detail}<span class="query-preview" title={visual.hint ?? visual.detail}
+            >{visual.detail}</span
           >{/if}</span
       >
       <span class="tool-state">
@@ -153,7 +156,7 @@
     {#if disclosures.has(`tool:${tool.id}`)}<div class="tool-body">
         {#if tool.progress}<p
             class="tool-progress"
-            title="Only progress metadata is recorded. Tool output and terminal input remain private."
+            title="Progress signals carry no output; the result is shown when the call finishes."
           >
             {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
           </p>{/if}
@@ -161,27 +164,57 @@
             By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
               'sub-agent'}
           </p>{/if}
-        {#if tool.query}<div class="metadata-label">
-            {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
-          </div>
-          <p class="tool-query">{tool.query}</p>{/if}
-        {#if tool.path}<div class="metadata-label">
-            {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
-          </div>
-          <code class="tool-path">{tool.path}</code>{/if}
-        {#if tool.detail}<p>{tool.detail}</p>{/if}
+        {#if showDetail}<p class="tool-detail">{tool.detail}</p>{/if}
         {#if tool.background}<p class="tool-note">{backgroundNote(tool)}</p>{/if}
-        {#if tool.facts?.length}<dl class="tool-facts">
-            {#each tool.facts as fact}<div>
+        {#if tool.query || tool.path || facts(tool).length}<dl class="tool-facts">
+            {#if tool.query}<div>
+                <dt class="metadata-label">
+                  {tool.operation === 'glob' || tool.operation === 'grep' ? 'Pattern' : 'Query'}
+                </dt>
+                <dd class="tool-query">{tool.query}</dd>
+              </div>{/if}
+            {#if tool.path}<div>
+                <dt class="metadata-label">
+                  {tool.operation === 'glob' || tool.operation === 'grep' ? 'Folder' : 'Path'}
+                </dt>
+                <dd><code class="tool-path">{tool.path}</code></dd>
+              </div>{/if}
+            {#each facts(tool) as fact}<div>
                 <dt>{fact.label}</dt>
                 <dd>{fact.value}</dd>
               </div>{/each}
           </dl>{/if}
-        {#if !tool.query && !tool.path && !tool.detail && !tool.background && !tool.facts?.length && !tool.sources.length && !tool.agents.length}
+        {#if edit}
+          {#each edit.files as file (file.path)}
+            <section class="tool-diff" aria-label={`Changes in ${file.path}`}>
+              {#if edit.files.length > 1 || !tool.path}<div class="diff-heading">
+                  <span class="diff-path" title={file.path}
+                    >{relativeFilePath(file.path, folder)}</span
+                  ><span class="diff-kind">{kindLabels[file.kind]}</span>
+                </div>{/if}
+              {#if file.hunks?.length}<DiffTable {file} />{:else}<p class="tool-note">
+                  {file.kind === 'renamed'
+                    ? 'File renamed without recorded text changes.'
+                    : file.kind === 'deleted'
+                      ? 'File deleted.'
+                      : 'No text diff was recorded for this file.'}
+                </p>{/if}
+            </section>
+          {/each}
+        {/if}
+        {#if tool.command || tool.input || tool.output}<ToolResult
+            {tool}
+            {runId}
+            {connectionId}
+            {replyStatus}
+          />{/if}
+        {#if !tool.query && !tool.path && !showDetail && !tool.command && !tool.input && !tool.output && !edit && !tool.background && !facts(tool).length && !tool.sources.length && !tool.agents.length}
           <p class="tool-note">
             {tool.status === 'running' && replyStatus === 'running'
               ? 'Waiting for tool details…'
-              : 'No details were recorded for this tool call.'}
+              : tool.commandRun || tool.operation === 'command'
+                ? 'The command and its output were not recorded for this call.'
+                : 'No details were recorded for this tool call.'}
           </p>
         {/if}
         {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
@@ -206,7 +239,7 @@
         {#each tool.agents as agent (agent.id)}
           <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
             <div class="agent-heading">
-              <GitBranch size={14} /><strong>{agent.name}</strong>{@render statusMark(
+              <Bot size={14} /><strong>{agent.name}</strong>{@render statusMark(
                 activityDisplayStatus(agent, replyStatus),
               )}
             </div>
@@ -261,7 +294,6 @@
         {@const visible = group.tools.filter(topLevel)}
         {#if visible.length}
           {@const summary = activityGroupSummary(visible, replyStatus, tools)}
-          {@const Icon = groupIcons[summary.icon]}
           {@const active = group.tools.filter(
             (tool) => tool.status === 'running' && !tool.background,
           )}
@@ -270,7 +302,7 @@
           <details class="activity-group" ontoggle={disclosures.opened(group.key)}>
             <summary title="Expand for tool details" onclick={disclosures.reveal(group.key)}>
               {#if summary.running}<LoaderCircle size={16} class="spinning" aria-label="Running" />
-              {:else}<Icon size={16} aria-hidden="true" />{/if}
+              {:else}<ToolIcon icon={groupIcon(visible)} size={16} />{/if}
               <span class="group-label">{summary.label}</span>
               {#if summary.running && elapsed >= 0}<span class="group-progress">
                   {#if progressTool}<span>{toolProgressLabel(progressTool)}</span>{/if}
@@ -501,18 +533,25 @@
   .reasoning-text > :global(:last-child) {
     margin-bottom: 0;
   }
-  .metadata-label,
+  /* Targets and reported facts: a label column beside their values. */
+  .tool-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 4px 14px;
+    margin: 6px 0;
+  }
+  .tool-facts > div {
+    display: contents;
+  }
   .tool-facts dt {
     font-size: var(--text-xs);
     font-weight: 500;
+    line-height: var(--leading-normal);
     color: var(--text-muted);
-    margin-top: 8px;
-  }
-  .tool-facts {
-    margin: 6px 0;
   }
   .tool-facts dd {
-    margin: 2px 0 8px;
+    margin: 0;
+    min-width: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     line-height: var(--leading-normal);
@@ -556,6 +595,16 @@
     font-weight: 500;
     overflow-wrap: anywhere;
   }
+  .tool-label.code {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 400;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .tool-status {
     display: inline-flex;
     gap: 4px;
@@ -564,16 +613,28 @@
     font-size: var(--text-xs);
     flex-shrink: 0;
   }
+  .tool-status.done {
+    color: var(--text-faint);
+  }
   .tool-status.live {
     color: var(--accent-text);
   }
   .tool-status.failed {
     color: var(--danger);
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .tool-body {
     padding: 2px 8px 10px 32px;
     font-size: var(--text-sm);
     color: var(--text-secondary);
+    min-width: 0;
   }
   .tool-body p {
     margin: 6px 0;
@@ -582,11 +643,13 @@
     line-height: var(--leading-normal);
     color: inherit;
   }
+  .tool-detail {
+    color: var(--text);
+  }
   .tool-query {
     color: var(--text);
   }
   .tool-path {
-    display: block;
     font-size: var(--text-xs);
     overflow-wrap: anywhere;
     white-space: pre-wrap;
@@ -595,6 +658,44 @@
   .tool-note,
   .tool-body .tool-note {
     font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+  .tool-diff {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .tool-diff > :global(.diff-scroll:first-child) {
+    border-top: 0;
+  }
+  .tool-diff .tool-note {
+    margin: 0;
+    padding: 8px 12px;
+  }
+  .diff-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: var(--surface-1);
+  }
+  .diff-path {
+    flex: 1 1 160px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text);
+  }
+  .diff-kind {
+    padding: 0 6px;
+    border-radius: var(--radius-full);
+    background: var(--hover);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    line-height: 17px;
     color: var(--text-muted);
   }
   .tool-sources {

@@ -2,6 +2,7 @@ import { activityDisplayStatus, type ToolActivity } from './activity';
 import type { ContentBlock, Message } from './domain';
 import { filePathKey } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
+import { toolVisual, type ToolIconKey } from './tool-presentation';
 
 type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
   tool?: ToolActivity;
@@ -61,6 +62,43 @@ export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] 
   return groups;
 }
 
+// The icon of each kind of action when its calls differ in detail.
+const kindIcons: Record<keyof typeof phrases, ToolIconKey> = {
+  hook: 'hook',
+  hookContext: 'hook',
+  read: 'file',
+  edit: 'edit',
+  files: 'findFiles',
+  command: 'terminal',
+  search: 'web',
+  browse: 'page',
+  agent: 'agent',
+  background: 'background',
+  backgroundAgent: 'agent',
+  message: 'message',
+  directory: 'directory',
+  skill: 'skill',
+  image: 'image',
+  tool: 'tool',
+  limit: 'tool',
+};
+
+/**
+ * A group's icon: the specific icon its first kind of action shares, such as Git for a run
+ * of git commands, or that kind's general icon when its calls differ.
+ */
+export function groupIcon(tools: ToolActivity[]): ToolIconKey {
+  const first = tools[0];
+  if (!first) return 'tool';
+  const kind = action(first);
+  if (kind === 'background' || kind === 'backgroundAgent' || kind === 'limit')
+    return kindIcons[kind];
+  const icons = new Set(
+    tools.filter((tool) => action(tool) === kind).map((tool) => toolVisual(tool).icon),
+  );
+  return icons.size === 1 ? [...icons][0] : kindIcons[kind];
+}
+
 // Use only reported operation/category/name metadata, never infer actions from output or paths.
 function action(tool: ToolActivity): keyof typeof phrases {
   if (tool.id === 'activity-limit') return 'limit';
@@ -69,6 +107,7 @@ function action(tool: ToolActivity): keyof typeof phrases {
   if (tool.background) return 'background';
   if (tool.category === 'agent' && tool.agents.length && tool.agents.every((a) => a.background))
     return 'backgroundAgent';
+  if (tool.operation === 'viewImage') return 'image';
   if (tool.operation === 'read' || ['Read', 'Read file', 'Read skill file'].includes(tool.name))
     return 'read';
   if (

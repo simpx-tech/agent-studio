@@ -43,6 +43,7 @@ const jobInput = z
       'context',
       'mentions',
       'nativeInstructions',
+      'toolOutput',
       'mcp',
       'plugins',
       'undoFiles',
@@ -103,6 +104,22 @@ const jobInput = z
     ) {
       ctx.addIssue({ code: 'custom', message: 'Invalid native instruction request' });
     }
+    if (
+      job.method === 'toolOutput' &&
+      !z
+        .object({
+          runId: uuid,
+          toolId: z
+            .string()
+            .min(1)
+            .max(240)
+            .refine((id) => !/[\u0000-\u001f\u007f]/.test(id)),
+          connectionId: uuid,
+        })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output request' });
     if (
       job.method === 'answer' &&
       !z

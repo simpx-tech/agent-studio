@@ -462,6 +462,7 @@ export type RelayJob = {
     | 'context'
     | 'mentions'
     | 'nativeInstructions'
+    | 'toolOutput'
     | 'mcp'
     | 'plugins'
     | 'undoFiles'

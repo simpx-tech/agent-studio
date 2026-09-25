@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { activityEntries, activityGroupSummary, groupActivityEntries } from './activity-groups';
+import {
+  activityEntries,
+  activityGroupSummary,
+  groupActivityEntries,
+  groupIcon,
+} from './activity-groups';
 import type { ToolActivity } from './activity';
 import type { ContentBlock } from './domain';
 
@@ -200,6 +205,22 @@ describe('activity groups', () => {
     expect(activityGroupSummary(hooks, 'complete').label).toBe(
       'Ran 1 hook and received context from 1 hook',
     );
+  });
+
+  it('counts image reads as viewed images and picks the icon a group shares', () => {
+    const shot = (id: string) =>
+      tool(id, { name: 'View image', operation: 'viewImage', path: `/tmp/${id}.png` });
+    expect(activityGroupSummary([shot('a'), shot('b')], 'complete').label).toBe('Viewed 2 images');
+    const command = (id: string, text: string) =>
+      tool(id, { name: 'Run command', commandRun: true, operation: 'command', command: text });
+    expect(groupIcon([command('a', 'git status'), command('b', 'git diff')])).toBe('git');
+    // Different commands share only the general command icon.
+    expect(groupIcon([command('a', 'git status'), command('b', 'npm test')])).toBe('terminal');
+    // Later kinds of action do not change the first kind's icon.
+    expect(groupIcon([command('a', 'npm test'), shot('b')])).toBe('test');
+    expect(groupIcon([shot('a'), shot('b')])).toBe('image');
+    expect(groupIcon([tool('r', { path: '/a.ts' }), tool('s', { path: '/b.md' })])).toBe('file');
+    expect(groupIcon([])).toBe('tool');
   });
 
   it('counts sub-agents by identity, apart from messages and directory checks', () => {

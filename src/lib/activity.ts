@@ -20,12 +20,29 @@ export const activityStatusSchema = z.enum([
   'cancelled',
   'unknown',
 ]);
+/** The size of a tool result kept on the computer that ran it; its content is read on demand. */
+export const toolOutputSummarySchema = z.object({
+  lines: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  images: z.number().int().nonnegative().max(64).optional(),
+  stderr: z.boolean().optional(),
+  exitCode: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
+  truncated: z.boolean().optional(),
+});
+export type ToolOutputSummary = z.infer<typeof toolOutputSummarySchema>;
 export const toolActivitySchema = z.object({
   id: z.string().max(240),
   revision: z.number().int().nonnegative(),
   category: z.enum(['skill', 'search', 'agent', 'tool', 'hook']),
   name: z.string().max(200),
   status: activityStatusSchema,
+  // Limits are UTF-16 units: twice the executing computer's limit in characters.
+  command: z.string().max(16_000).optional(),
+  commandTruncated: z.boolean().optional(),
+  shell: z.enum(['bash', 'sh', 'zsh', 'powershell', 'cmd']).optional(),
+  input: z.string().max(8_000).optional(),
+  inputTruncated: z.boolean().optional(),
+  output: toolOutputSummarySchema.optional(),
   elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
   progress: z
     .object({

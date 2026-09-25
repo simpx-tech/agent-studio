@@ -306,9 +306,10 @@ mod tests {
     fn claude_shell_tasks_update_the_tool_without_creating_raw_agent_results() {
         for name in ["Bash", "PowerShell"] {
             let mut d = ToolDecoder::default();
-            let events = d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"shell","name":name,"input":{"command":"PRIVATE_COMMAND"}}]}}));
+            let events = d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"shell","name":name,"input":{"command":"npm run dev"}}]}}));
             assert!(events[0].command_run);
             assert_eq!(events[0].name, "Run command");
+            assert_eq!(events[0].command.as_deref(), Some("npm run dev"));
             d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"shell","task_type":"local_bash","description":"PRIVATE_DESCRIPTION"}));
             d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","content":"PRIVATE_OUTPUT"}]},"tool_use_result":{"backgroundTaskId":"task"}}));
             let launched = d.existing("claude:shell").unwrap();

@@ -25,13 +25,13 @@ for (const mobile of [false, true])
           status: 'complete',
           sources: [],
           agents: [],
-          command: 'PRIVATE_COMMAND',
           ...extra,
         },
       });
     const build = (revision: number, status: string, elapsedMs: number) =>
       command('build', {
         detail: 'Build the Docker image',
+        command: 'docker build -t studio .',
         background: true,
         revision,
         status,
@@ -46,6 +46,7 @@ for (const mobile of [false, true])
     await build(1, 'running', 793_000);
     await command('server', {
       detail: 'Start the preview server',
+      command: 'npm run preview',
       background: true,
       status: 'running',
       elapsedMs: 5_000,
@@ -70,7 +71,7 @@ for (const mobile of [false, true])
       revision: 1,
       text: 'The build runs in the background, so I will check the tests meanwhile.',
     });
-    await command('tests', { detail: 'Run unit tests' });
+    await command('tests', { detail: 'Run unit tests', command: 'npm test' });
 
     // A compact toggle beside the running reply's elapsed time; the composer stays uncluttered.
     const toggle = page.locator('.reply-footer .progress-toggle', { hasText: 'Background work' });
@@ -91,6 +92,8 @@ for (const mobile of [false, true])
       /Start the preview server\s*Command\s*5s/,
       /Review the Dockerfile\s*Sub-agent/,
     ]);
+    // The list names work by its description; the call in history shows the command.
+    await expect(work).not.toContainText('docker build');
     expect(await work.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
 
     // History shows the launches as started work, without a spinner or a running clock.
@@ -105,8 +108,11 @@ for (const mobile of [false, true])
     const buildCard = group.locator('.tool-card', { hasText: 'Build the Docker image' });
     await expect(buildCard.locator('summary')).toContainText('In background');
     await expect(buildCard.locator('summary')).not.toContainText('13m');
+    await expect(buildCard.locator('.query-preview')).toHaveText('docker build -t studio .');
     await buildCard.locator('summary').click();
     await expect(buildCard).toContainText('Background work below this reply tracks it.');
+    // A launch that moved to the background has no output to wait for.
+    await expect(buildCard).not.toContainText('The output appears when the command finishes.');
     const agentsCard = group.locator('.tool-card', { hasText: 'Sub-agents' });
     await agentsCard.locator(':scope > summary').click();
     await expect(agentsCard.locator('.subagent')).toContainText('In background');
@@ -167,8 +173,8 @@ for (const mobile of [false, true])
         ),
       )
       .toBe('complete');
-    expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).not.toContain(
-      'PRIVATE_',
+    expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).toContain(
+      'docker build -t studio .',
     );
   });
 

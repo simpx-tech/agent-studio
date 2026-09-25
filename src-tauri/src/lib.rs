@@ -25,6 +25,7 @@ mod standalone;
 mod startup;
 mod structured_output;
 mod titles;
+mod tool_output;
 mod undo;
 mod updates;
 mod usage;
@@ -88,6 +89,17 @@ async fn read_native_instructions(
     native_instructions::read(app, conversation_id, provider, connection_id).await
 }
 
+/// A finished tool call's result, kept on this computer by the run that made it.
+#[tauri::command]
+async fn read_tool_output(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+) -> Result<tool_output::Stored, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read(root, pending.inner().clone(), run_id, tool_id).await
+}
 #[tauri::command]
 async fn search_mentions(
     app: tauri::AppHandle,
@@ -838,7 +850,23 @@ pub fn run() {
         .manage(usage::UsageState::default())
         .manage(live_usage::LiveUsage::default())
         .manage(background_work::Registry::default())
+        .manage(std::sync::Arc::new(tool_output::Pending::default()))
         .setup(|app| {
+            // Remove kept tool results of deleted chats and old runs once startup settles.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let pending = handle
+                    .state::<std::sync::Arc<tool_output::Pending>>()
+                    .inner()
+                    .clone();
+                if let Ok(root) = tool_output::root(&handle) {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        tool_output::prune(&root, &pending)
+                    })
+                    .await;
+                }
+            });
             // Release parked CLI processes that stayed idle past their limit.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -931,6 +959,7 @@ pub fn run() {
             manage_mcp,
             manage_plugins,
             read_native_instructions,
+            read_tool_output,
             load_workspace,
             save_workspace,
             drafts::load_drafts,

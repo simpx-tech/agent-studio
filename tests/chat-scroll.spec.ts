@@ -23,6 +23,8 @@ for (const mobile of [false, true])
             name: 'Run command',
             status: 'complete',
             detail: `Read project context ${i}`,
+            commandRun: true,
+            command: `cat docs/context-${i}.md`,
             sources: [],
             agents: [],
           },

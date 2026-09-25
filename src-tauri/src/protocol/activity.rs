@@ -1,11 +1,18 @@
-//! Bounded, allowlisted presentation data from provider tool events. Never forwards
-//! command output, configuration, skill bodies, or arbitrary tool arguments.
+//! Bounded presentation data from provider tool events: targets, commands, bounded inputs
+//! and result sizes. Results themselves leave through `ToolDecoder::take_outputs` for the
+//! executing computer's store; configuration and skill bodies are never forwarded.
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 mod hooks;
+mod output;
 mod progress;
 mod subagents;
+use output::{
+    capped, claude_error_text, claude_exit_code, input_text, result_parts, shortened, unwrap_shell,
+    COMMAND_LIMIT,
+};
+pub use output::{CapturedOutput, ImageSource, OutputSummary, IMAGE_LIMIT};
 use progress::{ToolClock, ToolProgress};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -59,6 +66,21 @@ pub struct ToolActivity {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation: Option<String>,
     command_run: bool,
+    /// The script a shell call ran, unwrapped from the shell's own command line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    command_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell: Option<&'static str>,
+    /// Arguments of a connected or unrecognized tool, as bounded JSON text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    input_truncated: bool,
+    /// The size of a result kept on the executing computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<OutputSummary>,
     /// The launching call returned while its task kept running. The status then follows
     /// the task, which the CLI reports once it completes, fails, or is stopped.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -68,7 +90,7 @@ pub struct ToolActivity {
     agents: Vec<AgentActivity>,
 }
 impl ToolActivity {
-    /// The reported description of the call, never its command.
+    /// The reported description of the call.
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }
@@ -134,11 +156,78 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         path: None,
         operation: None,
         command_run: false,
+        command: None,
+        command_truncated: false,
+        shell: None,
+        input: None,
+        input_truncated: false,
+        output: None,
         background: false,
         facts: vec![],
         sources: vec![],
         agents: vec![],
     }
+}
+fn set_command(tool: &mut ToolActivity, command: &str, shell: Option<&'static str>) {
+    let (command, truncated) = shortened(command, COMMAND_LIMIT);
+    if command.trim().is_empty() {
+        return;
+    }
+    tool.command = Some(command);
+    tool.command_truncated = truncated;
+    tool.shell = shell;
+}
+fn set_input(tool: &mut ToolActivity, value: &Value) {
+    if let Some((input, truncated)) = input_text(value) {
+        tool.input = Some(input);
+        tool.input_truncated = truncated;
+    }
+}
+fn is_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+/// Agent Studio's own tools, whose arguments and results other panels already show.
+fn studio_tool(name: &str) -> bool {
+    name.starts_with("mcp__agent_studio__")
+        || matches!(name, "studio_ask_user" | "studio_update_plan" | "visualize")
+}
+/// Claude tools whose inputs other panels show or that carry file bodies.
+fn claude_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Agent"
+            | "Task"
+            | "Skill"
+            | "Read"
+            | "Glob"
+            | "Grep"
+            | "Monitor"
+            | "ToolSearch"
+            | "Bash"
+            | "PowerShell"
+            | "Write"
+            | "Edit"
+            | "MultiEdit"
+            | "NotebookEdit"
+            | "WebSearch"
+            | "WebFetch"
+            | "TodoWrite"
+            | "TaskCreate"
+            | "TaskUpdate"
+            | "TaskGet"
+            | "TaskList"
+            | "TaskOutput"
+            | "TaskStop"
+            | "AskUserQuestion"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "Workflow"
+            | "SendMessage"
+            | "ListAgents"
+    )
 }
 fn text_content(value: &Value, limit: usize) -> String {
     if let Some(text) = value.as_str() {
@@ -224,6 +313,8 @@ pub struct ToolDecoder {
     progress_bindings: HashMap<String, (String, String)>,
     child_turns: HashMap<String, String>,
     agent_lifecycle: std::collections::HashSet<String>,
+    /// Results waiting for `take_outputs`.
+    captured: Vec<CapturedOutput>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -257,11 +348,8 @@ impl ToolDecoder {
         }
         if matches!(method, "item/started" | "item/completed") && kind == "dynamicToolCall" {
             if let Some(id) = field(item, "id", 220) {
-                let mut tool = fresh(
-                    format!("codex:{thread}:{id}"),
-                    "tool",
-                    &field(item, "tool", 200).unwrap_or_else(|| "Application tool".into()),
-                );
+                let name = field(item, "tool", 200).unwrap_or_else(|| "Application tool".into());
+                let mut tool = fresh(format!("codex:{thread}:{id}"), "tool", &name);
                 tool.status = if method == "item/started" {
                     "running"
                 } else if item["success"] == false {
@@ -270,10 +358,22 @@ impl ToolDecoder {
                     status(item["status"].as_str().unwrap_or_default())
                 }
                 .into();
-                tool.detail = Some("Application tool call reported by Codex. Arguments and returned content are not displayed.".into());
                 tool.elapsed_ms = progress::duration_ms(&item["durationMs"]);
                 if thread != root {
                     tool.parent_id = Some(thread.into());
+                }
+                // Agent Studio's own tools show their arguments and results in other panels.
+                if studio_tool(&name) {
+                    tool.detail = Some("Application tool call reported by Codex.".into());
+                } else {
+                    set_input(&mut tool, &item["arguments"]);
+                    if method == "item/completed" {
+                        let (text, images) = result_parts(&item["contentItems"]);
+                        let mut output = CapturedOutput::new(&tool.id);
+                        output.stdout = text;
+                        output.images = images;
+                        self.capture(&mut tool, output);
+                    }
                 }
                 self.publish(tool, &mut out);
             }
@@ -284,6 +384,7 @@ impl ToolDecoder {
                 "mcpToolCall" => "mcp_tool_call",
                 "collabAgentToolCall" => "collab_tool_call",
                 "webSearch" => "web_search",
+                "imageView" => "image_view",
                 _ => return out,
             };
             let mut item = item.clone();
@@ -474,6 +575,7 @@ impl ToolDecoder {
             "command_execution" => ("tool", "Run command"),
             "file_change" => ("tool", "Edit files"),
             "mcp_tool_call" => ("tool", "Connected tool"),
+            "image_view" => ("tool", "View image"),
             _ => return,
         };
         let id = format!("codex:{id}");
@@ -503,9 +605,23 @@ impl ToolDecoder {
                 }
             }
             sources(item, &mut tool.sources, 0);
+        } else if kind == "image_view" {
+            tool.operation = Some("viewImage".into());
+            tool.path = field(item, "path", 4096);
+            if event == "item.completed" {
+                if let Some(path) = tool.path.clone() {
+                    let mut output = CapturedOutput::new(&tool.id);
+                    output.images = vec![ImageSource::File { path }];
+                    self.capture(&mut tool, output);
+                }
+            }
         } else if kind == "command_execution" {
             tool.command_run = true;
             tool.operation = Some("command".into());
+            if let Some(command) = item["command"].as_str() {
+                let (shell, script) = unwrap_shell(command);
+                set_command(&mut tool, &script, shell);
+            }
             if let Some(path) = item["command"].as_str().and_then(direct_read_path) {
                 tool.name = "Read file".into();
                 tool.operation = Some("read".into());
@@ -514,11 +630,18 @@ impl ToolDecoder {
             if let Some(cwd) = field(item, "cwd", 4096) {
                 fact(&mut tool, "Folder", cwd);
             }
-            if let Some(code) = item["exitCode"]
+            let exit_code = item["exitCode"]
                 .as_i64()
-                .or_else(|| item["exit_code"].as_i64())
-            {
-                fact(&mut tool, "Exit code", code);
+                .or_else(|| item["exit_code"].as_i64());
+            if event == "item.completed" {
+                let text = item["aggregatedOutput"]
+                    .as_str()
+                    .or_else(|| item["aggregated_output"].as_str())
+                    .unwrap_or_default();
+                let mut output = CapturedOutput::new(&tool.id);
+                output.stdout = capped(text);
+                output.exit_code = exit_code;
+                self.capture(&mut tool, output);
             }
             for action in item["commandActions"]
                 .as_array()
@@ -575,6 +698,22 @@ impl ToolDecoder {
             }
             if let Some(server) = field(item, "server", 200) {
                 fact(&mut tool, "Connection", server);
+            }
+            set_input(&mut tool, &item["arguments"]);
+            if event == "item.completed" {
+                let result = &item["result"];
+                let (mut text, images) = result_parts(&result["content"]);
+                if text.is_empty() && !result["structuredContent"].is_null() {
+                    text = serde_json::to_string_pretty(&result["structuredContent"])
+                        .unwrap_or_default();
+                }
+                let mut output = CapturedOutput::new(&tool.id);
+                output.stdout = text;
+                output.images = images;
+                if let Some(error) = item["error"]["message"].as_str() {
+                    output.stderr = error.into();
+                }
+                self.capture(&mut tool, output);
             }
         } else if kind == "file_change" {
             tool.operation = Some("edit".into());
@@ -638,6 +777,9 @@ impl ToolDecoder {
                     .map(|s| format!("Skill: {s}"))
                     .unwrap_or_else(|| "Load skill".into());
                 tool.detail = Some("Skill invocation reported by Claude.".into());
+                if let Some(args) = field(input, "args", 2000) {
+                    fact(&mut tool, "Arguments", args);
+                }
             }
             "Read" => {
                 tool.operation = Some("read".into());
@@ -645,6 +787,9 @@ impl ToolDecoder {
                     if is_skill_path(&path) {
                         tool.category = "skill".into();
                         tool.name = "Read skill file".into();
+                    } else if is_image_path(&path) {
+                        tool.name = "View image".into();
+                        tool.operation = Some("viewImage".into());
                     }
                     tool.path = Some(path);
                 }
@@ -683,10 +828,13 @@ impl ToolDecoder {
                 }
             }
             "Monitor" => {
-                // A background watch over a shell command. The command stays private.
+                // A background watch over a shell command.
                 tool.operation = Some("monitor".into());
                 if let Some(description) = field(input, "description", 2048) {
                     tool.detail = Some(description);
+                }
+                if let Some(command) = input["command"].as_str() {
+                    set_command(&mut tool, command, None);
                 }
             }
             "ToolSearch" => {
@@ -702,6 +850,10 @@ impl ToolDecoder {
                 tool.operation = Some("command".into());
                 if let Some(description) = field(input, "description", 2048) {
                     tool.detail = Some(description);
+                }
+                if let Some(command) = input["command"].as_str() {
+                    let shell = if name == "Bash" { "bash" } else { "powershell" };
+                    set_command(&mut tool, command, Some(shell));
                 }
             }
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
@@ -722,10 +874,111 @@ impl ToolDecoder {
                         tool.sources = vec![link];
                     }
                 }
+                if let Some(prompt) = field(input, "prompt", 2000) {
+                    fact(&mut tool, "Prompt", prompt);
+                }
             }
+            // Connected (MCP) and unrecognized tools show the arguments they were sent.
+            _ if !claude_builtin(name) && !studio_tool(name) => set_input(&mut tool, input),
             _ => {}
         }
         self.publish(tool, out);
+    }
+    /// The result of a finished Claude call, kept on the executing computer.
+    fn claude_output(&mut self, tool: &mut ToolActivity, block: &Value, result: &Value) {
+        if studio_tool(&tool.name)
+            || tool.name == "Wait for background tasks"
+            || matches!(tool.operation.as_deref(), Some("toolSearch" | "listAgents"))
+            || tool.category == "skill" && tool.operation.as_deref() != Some("read")
+        {
+            return;
+        }
+        let failed = block["is_error"] == true;
+        let (text, images) = result_parts(&block["content"]);
+        // Edits show their diff; only a failure's message is worth keeping.
+        if tool.operation.as_deref() == Some("edit") && !failed {
+            return;
+        }
+        let mut output = CapturedOutput::new(&tool.id);
+        output.images = images;
+        match tool.operation.as_deref() {
+            Some("command") if failed => {
+                let text = claude_error_text(&text);
+                match claude_exit_code(text) {
+                    Some((code, rest)) => {
+                        output.exit_code = Some(code);
+                        output.stdout = rest.into();
+                    }
+                    None => output.stdout = text.into(),
+                }
+            }
+            Some("command") if result.is_object() => {
+                output.stdout = result["stdout"].as_str().unwrap_or_default().into();
+                output.stderr = result["stderr"].as_str().unwrap_or_default().into();
+                // A launch that moved to the background has no exit status yet.
+                if !tool.background {
+                    if let Some(meaning) = field(result, "returnCodeInterpretation", 200) {
+                        fact(tool, "Result", meaning);
+                    } else if result["interrupted"] != true {
+                        output.exit_code = Some(0);
+                    }
+                }
+                if result["interrupted"] == true {
+                    fact(tool, "Interrupted", "Yes");
+                }
+                if let Some(summary) = git_operation(&result["gitOperation"]) {
+                    fact(tool, "Git", summary);
+                }
+                if output.stdout.is_empty() && output.stderr.is_empty() {
+                    output.stdout = text;
+                }
+            }
+            Some("read" | "viewImage") if result["file"]["content"].is_string() => {
+                output.stdout = result["file"]["content"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or(text);
+                output.start_line = result["file"]["startLine"].as_u64();
+            }
+            Some("glob" | "grep") if result.is_object() && !failed => {
+                output.stdout = match result["content"].as_str() {
+                    Some(content) if !content.is_empty() => content.into(),
+                    _ => result["filenames"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .take(10_000)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                output.truncated = result["truncated"] == true;
+                if output.stdout.is_empty() {
+                    output.stdout = text;
+                }
+            }
+            _ if tool.category == "search" && tool.name == "Open web page" && !failed => {
+                output.stdout = result["result"].as_str().map(str::to_owned).unwrap_or(text);
+                if let Some(code) = result["code"].as_u64() {
+                    let label = field(result, "codeText", 60).unwrap_or_default();
+                    fact(tool, "HTTP status", format!("{code} {label}").trim());
+                }
+            }
+            _ if tool.category == "search" && !failed => {
+                // Source links are shown separately; keep the summary text.
+                output.stdout = text
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("Links: "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            _ => output.stdout = claude_error_text(&text).into(),
+        }
+        if tool.operation.as_deref() == Some("read") && !output.images.is_empty() {
+            tool.name = "View image".into();
+            tool.operation = Some("viewImage".into());
+        }
+        self.capture(tool, output);
     }
     fn claude(&mut self, v: &Value, out: &mut Vec<ToolActivity>) {
         if self.claude_progress(v, out) {
@@ -903,7 +1156,11 @@ impl ToolDecoder {
                                 }
                                 _ => {}
                             }
-                            if tool.status == "error" {
+                            self.claude_output(&mut tool, block, result);
+                            if tool.status == "error"
+                                && tool.detail.is_none()
+                                && tool.output.as_ref().is_none_or(|o| o.bytes == 0)
+                            {
                                 tool.detail = Some(
                                     "The provider reported that this operation failed.".into(),
                                 );
@@ -999,6 +1256,28 @@ impl ToolDecoder {
             }
         }
     }
+}
+/// A short description of the git operation Claude Code reports for a shell call.
+fn git_operation(value: &Value) -> Option<String> {
+    if let Some(push) = value.get("push") {
+        return Some(match field(push, "branch", 200) {
+            Some(branch) => format!("Pushed {branch}"),
+            None => "Pushed".into(),
+        });
+    }
+    if let Some(commit) = value.get("commit") {
+        let sha: String = field(commit, "sha", 64)?.chars().take(7).collect();
+        return Some(match field(commit, "branch", 200) {
+            Some(branch) => format!("Committed {sha} on {branch}"),
+            None => format!("Committed {sha}"),
+        });
+    }
+    let branch = value.get("branch")?;
+    let name = field(branch, "ref", 200)?;
+    let action = field(branch, "action", 40).unwrap_or_else(|| "Changed".into());
+    let mut action = action.chars();
+    let first = action.next()?.to_uppercase().collect::<String>();
+    Some(format!("{first}{} branch {name}", action.as_str()))
 }
 fn is_skill_path(path: &str) -> bool {
     path.replace('\\', "/")
@@ -1122,14 +1401,26 @@ mod tests {
             (
                 "cmd",
                 "Bash",
-                json!({"description":"Run unit tests","command":"PRIVATE_COMMAND"}),
+                json!({"description":"Run unit tests","command":"npm test -- --run"}),
             ),
         ] {
             d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}));
         }
-        d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","content":"PRIVATE_BODY"}]},"tool_use_result":{"file":{"numLines":8,"startLine":12,"totalLines":50,"content":"PRIVATE_BODY"}}}));
+        d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","content":"    12\tPRIVATE_BODY"}]},"tool_use_result":{"type":"text","file":{"numLines":8,"startLine":12,"totalLines":50,"content":"PRIVATE_BODY"}}}));
         d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"glob"}]},"tool_use_result":{"numFiles":2,"filenames":["/fixture/src/App.svelte","/fixture/src/Menu.svelte"]}}));
         d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"find","content":[{"type":"tool_reference","tool_name":"WebSearch"},{"type":"text","text":"PRIVATE_SCHEMA"}]}]}}));
+        // File bodies and results stay out of the synced record, in the captured queue.
+        let outputs = d.take_outputs();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].tool_id, "claude:read");
+        assert_eq!(outputs[0].stdout, "PRIVATE_BODY");
+        assert_eq!(outputs[0].start_line, Some(12));
+        assert_eq!(
+            outputs[1].stdout,
+            "/fixture/src/App.svelte\n/fixture/src/Menu.svelte"
+        );
+        assert_eq!(d.tools[0].output.as_ref().map(|o| o.lines), Some(1));
+        assert!(d.tools[3].output.is_none());
         assert_eq!(d.tools[0].path.as_deref(), Some("/fixture/README.md"));
         assert!(d.tools[0]
             .facts
@@ -1144,16 +1435,17 @@ mod tests {
         assert!(d.tools[3].facts.iter().any(|f| f.value == "WebSearch"));
         assert!(d.tools[4].command_run);
         assert_eq!(d.tools[4].detail.as_deref(), Some("Run unit tests"));
+        assert_eq!(d.tools[4].command.as_deref(), Some("npm test -- --run"));
+        assert_eq!(d.tools[4].shell, Some("bash"));
         assert!(!serde_json::to_string(&d.tools)
             .unwrap()
             .contains("PRIVATE_"));
-        let codex = d.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","item":{"id":"read","type":"commandExecution","command":"Get-Content -Raw -LiteralPath '/fixture/README.md'","cwd":"/fixture","exitCode":0,"status":"completed"}}}), "root");
+        let codex = d.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","item":{"id":"read","type":"commandExecution","command":"Get-Content -Raw -LiteralPath '/fixture/README.md'","cwd":"/fixture","exitCode":0,"status":"completed","aggregatedOutput":"PRIVATE_BODY\r\n"}}}), "root");
         assert_eq!(codex[0].path.as_deref(), Some("/fixture/README.md"));
         assert!(codex[0].command_run);
-        assert!(codex[0]
-            .facts
-            .iter()
-            .any(|f| f.label == "Exit code" && f.value == "0"));
+        assert_eq!(codex[0].output.as_ref().unwrap().exit_code, Some(0));
+        assert!(!serde_json::to_string(&codex).unwrap().contains("PRIVATE_"));
+        assert_eq!(d.take_outputs()[0].stdout, "PRIVATE_BODY\n");
     }
     #[test]
     fn claude_partial_inputs_require_real_results_and_keep_repeated_calls_separate() {
@@ -1161,7 +1453,7 @@ mod tests {
         let start = json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"s1","name":"Skill","input":{}}}});
         let first = d.decode("claude", &start);
         assert_eq!(first[0].status, "running");
-        d.decode("claude", &json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"skill\":\"fixture\",\"args\":\"DO_NOT_EXPORT\"}"}}}));
+        d.decode("claude", &json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"skill\":\"fixture\",\"args\":\"--fixture-arguments\"}"}}}));
         let ready = d.decode(
             "claude",
             &json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
@@ -1169,14 +1461,17 @@ mod tests {
         assert_eq!(ready[0].name, "Skill: fixture");
         assert_eq!(ready[0].status, "running");
         assert!(ready[0].revision > first[0].revision);
+        assert!(ready[0]
+            .facts
+            .iter()
+            .any(|f| f.label == "Arguments" && f.value == "--fixture-arguments"));
         let result = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s1","content":"PRIVATE_SKILL_BODY"}]}}));
         assert_eq!(result[0].status, "complete");
+        // A skill's launch message is neither shown nor kept.
         assert!(!serde_json::to_string(&d.tools)
             .unwrap()
             .contains("PRIVATE_SKILL_BODY"));
-        assert!(!serde_json::to_string(&d.tools)
-            .unwrap()
-            .contains("DO_NOT_EXPORT"));
+        assert!(d.take_outputs().is_empty());
         assert!(d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s1","name":"Skill","input":{"skill":"fixture"}}]}})).is_empty());
         d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s2","name":"Skill","input":{"skill":"fixture"}}]}}));
         assert_eq!(d.tools.len(), 2);
@@ -1242,17 +1537,15 @@ mod tests {
     #[test]
     fn background_launches_follow_their_task_without_reviving_or_exposing_it() {
         let mut d = ToolDecoder::default();
-        // A Monitor keeps its description and hides the watched command.
-        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"watch","name":"Monitor","input":{"description":"Build failures","command":"PRIVATE_COMMAND","timeout_ms":900000}}]}}));
+        // A Monitor keeps its description and the command it watches.
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"watch","name":"Monitor","input":{"description":"Build failures","command":"tail -f build.log","timeout_ms":900000}}]}}));
         d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"watch","task_type":"local_bash","description":"Build failures"}));
         let started = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"watch","content":"Monitor started (task b1)"}]},"tool_use_result":{"taskId":"b1","timeoutMs":900000,"persistent":false}}));
         assert_eq!(started[0].name, "Monitor");
         assert_eq!(started[0].detail.as_deref(), Some("Build failures"));
+        assert_eq!(started[0].command.as_deref(), Some("tail -f build.log"));
         assert_eq!(started[0].status, "running");
         assert!(started[0].background);
-        assert!(!serde_json::to_string(&started)
-            .unwrap()
-            .contains("PRIVATE_COMMAND"));
         let stopped = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"stopped"}));
         assert_eq!(stopped[0].status, "cancelled");
         assert!(stopped[0].background);

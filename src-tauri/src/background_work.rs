@@ -375,14 +375,14 @@ mod tests {
             &mut decoder,
             "server",
             "Bash",
-            json!({"description":"Start the preview server","command":"PRIVATE_COMMAND","run_in_background":true}),
+            json!({"description":"Start the preview server","command":"npm run preview","run_in_background":true}),
             json!({"backgroundTaskId":"b1"}),
         );
         let monitor = launch(
             &mut decoder,
             "watch",
             "Monitor",
-            json!({"description":"Build failures","command":"PRIVATE_COMMAND"}),
+            json!({"description":"Build failures","command":"tail -f build.log"}),
             json!({"taskId":"b2"}),
         );
         watch.tool("run-1", &server);
@@ -395,6 +395,10 @@ mod tests {
                 ("claude:watch", "monitor", "Build failures")
             ]
         );
+        // The list names work by its description; the call record keeps the command.
+        assert!(!serde_json::to_string(&listed)
+            .unwrap()
+            .contains("npm run preview"));
         // Revisions from the running reply refresh the timer without another list.
         watch.tool("run-1", &server);
         assert!(taken(&events).is_empty());

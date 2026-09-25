@@ -310,6 +310,17 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   ],
             };
           }
+          if (command === 'read_tool_output') {
+            const state = window as any;
+            (state.toolOutputCalls ??= []).push(args);
+            if (state.holdToolOutput)
+              await new Promise<void>((resolve) => (state.releaseToolOutput = resolve));
+            if (state.failToolOutput) throw state.failToolOutput;
+            const output = state.toolOutputs?.[args.toolId];
+            if (!output)
+              throw 'This output is no longer kept on the computer that ran it. Outputs are kept for 30 days, up to 2 GB.';
+            return { version: 1, toolId: args.toolId, ...output };
+          }
           if (command === 'search_mentions') {
             const state = window as any;
             (state.mentionCalls ??= []).push(args);

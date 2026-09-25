@@ -123,7 +123,16 @@
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}
     {:else}
-      <ToolActivity {tools} replyStatus={message.status} blocks={message.blocks} finalText={text} />
+      <ToolActivity
+        {tools}
+        replyStatus={message.status}
+        blocks={message.blocks}
+        finalText={text}
+        runId={message.runId}
+        connectionId={author.connectionId}
+        {folder}
+        fileChanges={message.fileChanges}
+      />
       {#if message.compactions?.length}
         <div class="compaction-history" aria-label="Context compaction">
           {#each message.compactions as item (item.id)}

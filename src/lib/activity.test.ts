@@ -157,6 +157,55 @@ describe('structured tool activity', () => {
     ).toBe(false);
     expect([0, 12000, 65000, 3_660_000].map(toolElapsed)).toEqual(['0s', '12s', '1m 5s', '1h 1m']);
   });
+  it('keeps commands, inputs and output sizes through relay and restore, never prompts', () => {
+    const m = message();
+    const events: RunEvent[] = [];
+    const command = {
+      ...tool('cmd', 2, 'complete'),
+      category: 'tool' as const,
+      name: 'Run command',
+      commandRun: true,
+      command: 'git status --short # PRIVATE_COMMAND',
+      shell: 'bash' as const,
+      input: '{\n  "q": "PRIVATE_INPUT"\n}',
+      output: { lines: 3, bytes: 42, stderr: true, exitCode: 1, truncated: true },
+    };
+    for (const event of [
+      { kind: 'tool' as const, tool: { ...command, revision: 1, output: undefined } },
+      { kind: 'tool' as const, tool: command },
+    ]) {
+      applyRunEvent(m, event);
+      retainRunEvent(events, event);
+    }
+    expect(events).toHaveLength(1);
+    expect(m.blocks[0].type === 'activity' && m.blocks[0].tool).toMatchObject({
+      command: command.command,
+      shell: 'bash',
+      output: command.output,
+    });
+    m.status = 'complete';
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(w.preferences),
+      title: 'Commands',
+      createdAt: '',
+      updatedAt: '',
+      messages: [m],
+    });
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(w)));
+    expect(restored.conversations[0].messages[0].blocks).toEqual(m.blocks);
+    expect(JSON.stringify(historyFor(restored.conversations[0]))).not.toContain('PRIVATE');
+    for (const invalid of [
+      { shell: 'fish' },
+      { command: 'x'.repeat(16_001) },
+      { input: 'x'.repeat(8_001) },
+      { output: { lines: -1, bytes: 0 } },
+      { output: { lines: 1, bytes: 1, images: 65 } },
+      { output: { lines: 1, bytes: 1, exitCode: 1.5 } },
+    ])
+      expect(toolActivitySchema.safeParse({ ...command, ...invalid }).success).toBe(false);
+  });
   it('keeps progress revisions in sequence, restores them, and excludes them from final history', () => {
     const m = message();
     const events: RunEvent[] = [];

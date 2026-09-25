@@ -58,13 +58,28 @@ impl Runs {
     }
 }
 #[derive(Clone)]
-pub struct EventSink(Arc<dyn Fn(RunEvent) -> Result<(), String> + Send + Sync>);
+pub struct EventSink {
+    send: Arc<dyn Fn(RunEvent) -> Result<(), String> + Send + Sync>,
+    /// Keeps finished tool results on this computer for a conversation's run.
+    outputs: Option<crate::tool_output::Recorder>,
+}
 impl EventSink {
     pub fn new(f: impl Fn(RunEvent) -> Result<(), String> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
+        Self {
+            send: Arc::new(f),
+            outputs: None,
+        }
     }
     pub fn send(&self, event: RunEvent) -> Result<(), String> {
-        (self.0)(event)
+        (self.send)(event)
+    }
+    /// Stores tool results the decoder captured, when this run keeps them.
+    pub fn outputs(&self, outputs: Vec<crate::protocol::activity::CapturedOutput>) {
+        if let Some(recorder) = &self.outputs {
+            for output in outputs {
+                recorder.record(output);
+            }
+        }
     }
 }
 pub async fn kill_tree(child: &mut tokio::process::Child) {
@@ -238,6 +253,18 @@ pub(crate) async fn execute(
     std::fs::create_dir_all(&root)
         .map_err(|_| "Cannot create the conversation runtime directory")?;
     let exe = crate::providers::resolve(&request.agent.provider).await?;
+    // Conversation replies keep their tool results on this computer; titles and other
+    // restricted runs have no tools to record.
+    let channel = channel.map(|mut channel| {
+        if let (Some(conversation), true) = (&request.conversation_id, request.tools_enabled()) {
+            channel.outputs =
+                crate::tool_output::Recorder::new(&app, conversation, &request.run_id);
+            if let Some(recorder) = &channel.outputs {
+                recorder.distribution(exe.wsl.as_ref().map(|w| w.distribution.clone()));
+            }
+        }
+        channel
+    });
     if request.agent.provider == "gemini" {
         let login = crate::providers::require_gemini_login(&exe, &cancel).await;
         if !cancel.is_cancelled() {
@@ -777,6 +804,8 @@ async fn stream_turn(
                         if let (Some(watch), RunEvent::Tool { tool }) = (&process.background, &event) { watch.tool(&request.run_id, tool); }
                         if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                     }
+                    let outputs = decoder.take_tool_outputs();
+                    if let Some(channel) = channel { channel.outputs(outputs); }
                     if channel.is_none() && decoder.text.len() > 4000 { process.healthy = false; break Err("Title response exceeded the limit".into()); }
                 }
                 None => {

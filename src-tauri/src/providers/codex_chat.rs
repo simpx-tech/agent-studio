@@ -460,6 +460,8 @@ pub async fn run(
                     if let crate::protocol::RunEvent::Usage { usage } = &event { last_usage = usage.clone(); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
+                let outputs = decoder.take_tool_outputs();
+                if let Some(channel) = channel { channel.outputs(outputs); }
                 if value["method"] == "turn/completed" && value["params"]["threadId"] == thread {
                     if value["params"]["turn"]["id"] != turn { continue; }
                     questions.close();
