@@ -35,7 +35,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Rich Markdown messages, selectable code blocks, tables, copy actions, and structured activity.
 - Agent/provider, model, and reasoning controls directly in every chat, plus optional chat instructions.
 - Reusable [input templates](docs/CAPABILITIES.md#input-templates) with custom fields, a message preview, and insertion into the composer for review before sending.
-- Last model remembered per provider; last reasoning level remembered independently per provider and model.
+- Last model remembered per provider; last reasoning level remembered independently per provider and model. New chats start with the agent and account you last chose, even after replying in older chats on another account.
 - Saved conversations with search, multi-turn context, retry, stop, and deletion.
 - Automatic conversation titles from the first message, generated once in the background with a small model.
 - Provider-reported chat context where available (currently Claude), saved reply token counts, live 5-hour/weekly subscription meters, and a Fable-specific meter when Fable is selected. Compact colored arrows show pace, with full meanings on hover. See [usage details and data sources](docs/USAGE.md).

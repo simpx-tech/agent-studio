@@ -418,11 +418,15 @@ export function restoreWorkspace(value: unknown): Workspace {
         })),
       };
     });
-    for (const agent of old.agents) rememberSettings(data.preferences, migrateSettings(agent));
+    const remember = (settings: ChatSettings) => {
+      rememberSettings(data.preferences, settings);
+      rememberAgent(data.preferences, settings);
+    };
+    for (const agent of old.agents) remember(migrateSettings(agent));
     for (const conversation of [...data.conversations].sort((a, b) =>
       a.updatedAt.localeCompare(b.updatedAt),
     ))
-      rememberSettings(data.preferences, conversation.settings);
+      remember(conversation.settings);
   } else if ((value as { version?: number } | null)?.version === 2) {
     const old = workspaceSchema
       .omit({ version: true, fleet: true })
@@ -452,20 +456,27 @@ function migrateSettings(agent: Agent): ChatSettings {
   return { provider: agent.provider, model, reasoning, instructions: agent.instructions };
 }
 
+// The model per provider and the reasoning per provider and model, from any chat's settings.
 export function rememberSettings(preferences: Preferences, settings: ChatSettings) {
-  if (settings.connectionId)
-    preferences.connectionByProvider = {
-      ...preferences.connectionByProvider,
-      [settings.provider]: settings.connectionId,
-    };
-  else if (preferences.connectionByProvider)
-    delete preferences.connectionByProvider[settings.provider];
-  preferences.lastProvider = settings.provider;
   preferences.modelByProvider[settings.provider] = settings.model;
   preferences.reasoningByProvider[settings.provider] = {
     ...preferences.reasoningByProvider[settings.provider],
     [settings.model]: settings.reasoning,
   };
+}
+// The agent and account the user last chose, which new chats start with. Replies and other
+// settings of existing chats never replace it; a choice without an account keeps the one
+// remembered for that agent.
+export function rememberAgent(
+  preferences: Preferences,
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
+) {
+  preferences.lastProvider = settings.provider;
+  if (settings.connectionId)
+    preferences.connectionByProvider = {
+      ...preferences.connectionByProvider,
+      [settings.provider]: settings.connectionId,
+    };
 }
 
 export function settingsFor(

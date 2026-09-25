@@ -4,6 +4,7 @@ import {
   initialWorkspace,
   restoreWorkspace,
   chatSettingsSchema,
+  rememberAgent,
   rememberSettings,
   settingsFor,
   type Conversation,
@@ -101,14 +102,38 @@ describe('portable conversation state', () => {
       model: 'model-b',
       reasoning: 'low',
     });
-    expect(settingsFor(restored.preferences)).toMatchObject({
+    expect(settingsFor(restored.preferences, 'claude')).toMatchObject({
       provider: 'claude',
       model: 'model-a',
       reasoning: 'max',
     });
+    // Remembered settings never choose the agent that new chats start with.
+    expect(restored.preferences.lastProvider).toBe('codex');
     expect(restored.preferences.reasoningByProvider.codex?.['model-a']).toBe('high');
     expect(settings.model).toBe('');
     expect(settings.reasoning).toBe('');
+  });
+  it('starts new chats with the agent and account last chosen', () => {
+    const workspace = initialWorkspace();
+    const chosen = crypto.randomUUID();
+    const other = crypto.randomUUID();
+    rememberAgent(workspace.preferences, { provider: 'codex', connectionId: other });
+    rememberAgent(workspace.preferences, { provider: 'claude', connectionId: chosen });
+    // A reply or a model change in a chat on another account keeps that choice.
+    rememberSettings(workspace.preferences, {
+      ...settingsFor(workspace.preferences, 'claude'),
+      connectionId: crypto.randomUUID(),
+      model: 'sonnet',
+    });
+    // Choosing an agent without an account keeps the account remembered for it.
+    rememberAgent(workspace.preferences, { provider: 'claude' });
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(workspace)));
+    expect(settingsFor(restored.preferences)).toMatchObject({
+      provider: 'claude',
+      connectionId: chosen,
+      model: 'sonnet',
+    });
+    expect(settingsFor(restored.preferences, 'codex').connectionId).toBe(other);
   });
   it('migrates saved agents and conversations without losing instructions, messages, or attribution', () => {
     const agent = {

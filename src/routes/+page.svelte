@@ -54,6 +54,7 @@
     historyFor,
     settingsFor,
     rememberSettings,
+    rememberAgent,
     type ChatSettings,
     type Reasoning,
     type Conversation,
@@ -1752,7 +1753,8 @@
   async function refreshAccountUsage(force = false) {
     await Promise.all(accountUsageTargets.map((settings) => refreshUsage(settings, force)));
   }
-  function changeSettings(settings: ChatSettings, remember = true) {
+  // `chosen` marks an agent or account the user picked, which new chats then start with.
+  function changeSettings(settings: ChatSettings, remember = true, chosen = false) {
     if (!loaded) return;
     // Only the next request's model/reasoning may change while a reply is running.
     if (
@@ -1781,6 +1783,7 @@
       active.updatedAt = new Date().toISOString();
     } else draftSettings = settings;
     if (remember) rememberSettings(workspace.preferences, settings);
+    if (chosen) rememberAgent(workspace.preferences, settings);
     saveSoon();
   }
   function chooseProvider(value: string) {
@@ -1796,11 +1799,15 @@
       model
     )
       settings.reasoning = model.defaultReasoning;
-    changeSettings({
-      ...settings,
-      instructions: selectedSettings.instructions,
-      outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
-    });
+    changeSettings(
+      {
+        ...settings,
+        instructions: selectedSettings.instructions,
+        outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
+      },
+      true,
+      true,
+    );
   }
   function chooseAgent(value: string) {
     const option = agentOptions.find((option) => option.id === value);
@@ -1813,7 +1820,7 @@
         !switchableConnections.some((c) => c.id === option.connectionId)
       )
         return;
-      changeSettings({ ...selectedSettings, connectionId: option.connectionId });
+      changeSettings({ ...selectedSettings, connectionId: option.connectionId }, true, true);
       return;
     }
     if (!value.startsWith('connection:')) {
@@ -1825,12 +1832,16 @@
       option.provider === selectedSettings.provider
         ? selectedSettings
         : settingsFor(workspace.preferences, option.provider);
-    changeSettings({
-      ...settings,
-      connectionId: option.connectionId,
-      instructions: selectedSettings.instructions,
-      outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
-    });
+    changeSettings(
+      {
+        ...settings,
+        connectionId: option.connectionId,
+        instructions: selectedSettings.instructions,
+        outputSchema: settings.provider === 'gemini' ? undefined : selectedSettings.outputSchema,
+      },
+      true,
+      true,
+    );
   }
   function chooseModel(model: string) {
     const reasoning =
@@ -1916,8 +1927,10 @@
       if (location) collapsedGroups[`${computerKey}/${locationKey(location)}`] = false;
       void tick().then(() => composerInput?.focus());
     }
+    // Chat from Connections and `/new` name the agent and account to start with.
     if (provider) {
       rememberSettings(workspace.preferences, draftSettings);
+      rememberAgent(workspace.preferences, draftSettings);
       saveSoon();
     }
   }
