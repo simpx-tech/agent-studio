@@ -1630,16 +1630,6 @@ pre {
   object-fit: contain;
   border-radius: var(--radius-sm);
 }
-.image-thumbnail span {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-2xs);
-  padding: 4px 3px 1px;
-  color: var(--text-muted);
-}
 .image-remove {
   position: absolute;
   right: -6px;

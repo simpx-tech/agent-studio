@@ -113,6 +113,12 @@ test('pasting and dropping images preserves drafts and supports removal at compa
     'Please explain this diagram.',
   );
   await expect(page.getByRole('button', { name: 'Remove pasted.png' })).toBeVisible();
+  // Thumbnails show no file names; the name stays in the hover title and alt text.
+  await expect(page.locator('.composer').getByText('pasted.png')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Preview pasted.png' })).toHaveAttribute(
+    'title',
+    'pasted.png',
+  );
   await page.setViewportSize({ width: 840, height: 640 });
   await page.screenshot({ path: 'artifacts/images-composer-compact.png' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -130,6 +136,7 @@ test('pasting and dropping images preserves drafts and supports removal at compa
   const sentImage = await sent.getByRole('img', { name: 'dropped.png' }).boundingBox();
   const bubbleBox = await bubble.boundingBox();
   expect(sentImage!.y + sentImage!.height).toBeLessThanOrEqual(bubbleBox!.y);
+  await expect(sent.getByText('dropped.png')).toHaveCount(0);
   await page.getByLabel('Message', { exact: true }).fill('And what shape is it?');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');

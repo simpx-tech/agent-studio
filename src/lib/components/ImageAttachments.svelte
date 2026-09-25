@@ -26,7 +26,6 @@
         }}
       >
         <img src={imageUrl(image)} alt={image.name} />
-        <span>{image.name}</span>
       </button>
       {#if remove}<button
           type="button"
