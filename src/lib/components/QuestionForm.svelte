@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { Check } from '@lucide/svelte';
+  import { Check, MessageCircleQuestionMark } from '@lucide/svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { answerQuestion } from '$lib/transport';
   import type { QuestionRequest, QuestionAnswer } from '$lib/questions';
@@ -82,7 +82,7 @@
 </script>
 
 {#if request.status !== 'answered' && !sent}
-  <section class="question-card" aria-label="Agent questions">
+  <section class="question-card" class:active aria-label="Agent questions">
     {#if active}
       <form
         onsubmit={(e) => {
@@ -92,7 +92,8 @@
         }}
       >
         <p class="question-status" role="status">
-          <span>Your input is needed</span>
+          <span><MessageCircleQuestionMark size={16} aria-hidden="true" />Your input is needed</span
+          >
           {#if request.questions.length > 1}
             <span class="question-count">Question {step + 1} of {request.questions.length}</span>
           {/if}
@@ -199,6 +200,11 @@
     margin: 16px 0;
     min-width: 0;
   }
+  /* A question waiting for your answer asks for attention in orange. */
+  .question-card.active {
+    border-color: var(--warning);
+    box-shadow: 0 0 0 4px var(--warning-soft);
+  }
   .question-status {
     display: flex;
     flex-wrap: wrap;
@@ -215,13 +221,8 @@
     align-items: center;
     gap: 8px;
   }
-  .question-status > span:first-child::before {
-    content: '';
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent-strong);
-    box-shadow: 0 0 0 3px var(--accent-soft);
+  .question-status > span:first-child > :global(svg) {
+    color: var(--warning);
   }
   .question-count {
     color: var(--text-muted);

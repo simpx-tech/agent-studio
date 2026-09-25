@@ -75,8 +75,10 @@ mark in the script and `BrandMark.svelte` together.
   accent bar at its left edge.
 - **Live state:** a running reply shows the accent `LoaderCircle` spinner, like running calls and
   plan steps: at the end of its sidebar row and beside Responding or Compacting context in its
-  heading. While it waits for your answer to a question or form, both show
-  `MessageCircleQuestionMark` instead.
+  heading. While it waits for your answer to a question or form, it asks for attention in
+  orange (`--warning`): both show `MessageCircleQuestionMark` instead, the heading reads Waiting
+  for you, and the waiting question, plan approval or MCP form card has an orange border. Choices
+  inside the card and its primary action keep the accent.
 - **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
   `--shadow-lg`/`--shadow-xl` for popovers and menus.
 - **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded

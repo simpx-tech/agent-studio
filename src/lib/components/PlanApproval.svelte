@@ -37,7 +37,7 @@
   }
 </script>
 
-<section class="plan-approval" aria-label="Plan mode approval">
+<section class="plan-approval" class:active aria-label="Plan mode approval">
   {#if approval.text}<ProposedPlan text={approval.text} />{/if}
   {#if active}
     <p>
@@ -79,6 +79,11 @@
     border: 1px solid var(--accent-border);
     border-radius: var(--radius-xl);
     background: var(--accent-soft);
+  }
+  /* An approval waiting for your decision asks for attention in orange. */
+  .plan-approval.active {
+    border-color: var(--warning);
+    background: var(--warning-soft);
   }
   .plan-approval > p:not(.muted) {
     color: var(--text);

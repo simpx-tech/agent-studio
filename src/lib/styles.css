@@ -773,11 +773,13 @@ pre {
   border-radius: var(--radius-full);
   background: var(--accent-strong);
 }
-/* A running reply spins like running calls and plan steps, and shows a question instead while
-   it waits for your answer. */
-.conversation-item .conversation-running,
-.conversation-item .conversation-waiting {
+/* A running reply spins like running calls and plan steps, and shows an orange question
+   instead while it waits for your answer. */
+.conversation-item .conversation-running {
   color: var(--accent-strong);
+}
+.conversation-item .conversation-waiting {
+  color: var(--warning);
 }
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch
    screens. The title makes room for it while it shows. */
@@ -1225,6 +1227,10 @@ pre {
   font-size: var(--text-xs);
   font-weight: 500;
   color: var(--accent-text);
+}
+/* A reply waiting for your answer asks for attention in orange. */
+.message-heading > .live-label.waiting {
+  color: var(--warning);
 }
 /* Your messages read as right-aligned bubbles with their images above them; the heading stays
    for assistive technology. */

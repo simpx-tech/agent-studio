@@ -82,6 +82,7 @@
   const content = $derived(replyContent(text, message.visualizations));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
+  const waiting = $derived(awaitingAnswer(message));
   function linkClick(event: MouseEvent) {
     const link = (event.target as Element).closest('a');
     if (link) {
@@ -112,11 +113,8 @@
           hour: '2-digit',
           minute: '2-digit',
         })}</span
-      >{#if message.status === 'running'}<span class="live-label"
-          >{#if awaitingAnswer(message)}<MessageCircleQuestionMark
-              size={13}
-              aria-hidden="true"
-            />Waiting for you{:else}<LoaderCircle
+      >{#if message.status === 'running'}<span class="live-label" class:waiting
+          >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else}<LoaderCircle
               size={13}
               class="spinning"
               aria-hidden="true"

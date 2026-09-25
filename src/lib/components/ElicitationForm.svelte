@@ -260,11 +260,12 @@
 {/if}
 
 <style>
+  /* Shown only while the request waits for you, so it asks for attention in orange. */
   .elicitation {
-    border: 1px solid var(--accent-border);
+    border: 1px solid var(--warning);
     border-radius: var(--radius-xl);
     background: var(--surface-1);
-    box-shadow: 0 0 0 4px var(--accent-soft);
+    box-shadow: 0 0 0 4px var(--warning-soft);
     padding: 16px 18px;
     margin: 14px 0;
     max-width: 640px;

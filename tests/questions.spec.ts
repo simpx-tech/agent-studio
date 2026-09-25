@@ -93,6 +93,17 @@ test('desktop keeps an unanswered question and its draft across older relay sync
   const sidebarRow = page.locator('.conversation-item[aria-current="page"]');
   await expect(sidebarRow.locator('.conversation-waiting')).toHaveCount(1);
   await expect(sidebarRow.locator('.conversation-running')).toHaveCount(0);
+  // The ask is orange so it gets attention: the heading label, the sidebar icon and the card.
+  const orange = await page.evaluate(() => {
+    const probe = document.body.appendChild(document.createElement('span'));
+    probe.style.color = 'var(--warning)';
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  await expect(page.locator('.live-label')).toHaveCSS('color', orange);
+  await expect(sidebarRow.locator('.conversation-waiting')).toHaveCSS('color', orange);
+  await expect(form).toHaveCSS('border-top-color', orange);
   await form.getByRole('button', { name: 'Send answers' }).click();
   await expect(form).toHaveCount(0);
   await expect(sidebarRow.locator('.conversation-running')).toHaveCount(1);
