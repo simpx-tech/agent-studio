@@ -604,7 +604,8 @@ pre {
 }
 .computer-group-toggle span,
 .folder-group-toggle span,
-.conversation-item > span {
+.conversation-item > span,
+.scratch-item > span {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -707,7 +708,8 @@ pre {
   gap: 1px;
   margin: 1px 0 4px;
 }
-.conversation-list .conversation-item {
+.conversation-list .conversation-item,
+.conversation-list .scratch-item {
   user-select: none;
   -webkit-touch-callout: none;
   position: relative;
@@ -722,14 +724,30 @@ pre {
   border-radius: var(--radius-sm);
   gap: 8px;
 }
-.conversation-list .conversation-item:hover {
+.conversation-list .conversation-item:hover,
+.conversation-list .scratch-item:hover {
   background: var(--hover);
   color: var(--text);
 }
-.conversation-list .conversation-item.current {
+.conversation-list .conversation-item.current,
+.conversation-list .scratch-item.current {
   background: var(--selected);
   color: var(--text);
   font-weight: 500;
+}
+/* Scratch chats, new conversations not sent yet, are quieter rows marked by a pen. */
+.conversation-list .scratch-item:not(.current, :hover) {
+  color: var(--text-muted);
+}
+.scratch-item > svg {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  margin-top: -6.5px;
+  color: var(--text-faint);
+}
+.scratch-item.current > svg {
+  color: var(--accent-strong);
 }
 .conversation-item.current::before {
   content: '';
@@ -2247,7 +2265,8 @@ pre {
   .sidebar .brand {
     padding-right: 40px;
   }
-  .sidebar .conversation-item {
+  .sidebar .conversation-item,
+  .sidebar .scratch-item {
     min-height: 44px;
   }
   .sidebar .search {

@@ -1,14 +1,12 @@
 import { z } from 'zod';
-import type { ChatLocation } from './domain';
+import { chatSettingsSchema, locationSchema, type ChatLocation, type ChatSettings } from './domain';
 import type { ChatImage } from './images';
-import { locationKey } from './locations';
 import { hasMention, maxMentions, mentionSchema, retainMentions, type Mention } from './mentions';
 
 /**
- * Unsent composer content for one conversation, or for a new conversation in one folder,
- * Standalone location, or computer. Drafts belong to this device: they are saved in its local
- * storage only, never added to the workspace, exported, or relayed. Attached images stay with a
- * draft while the app is open but are not saved.
+ * Unsent composer content for one conversation, or for one scratch chat. Drafts belong to this
+ * device: they are saved in its local storage only, never added to the workspace, exported, or
+ * relayed. Attached images stay with a draft while the app is open but are not saved.
  */
 export type Draft = {
   text: string;
@@ -20,11 +18,26 @@ export type Draft = {
 };
 export type DraftContent = Omit<Draft, 'updatedAt'>;
 
+/**
+ * A new conversation before its first message is sent. Every new chat opens its own scratch
+ * chat, so a folder can hold several. Its text is the draft under `scratch:<id>`, saved with the
+ * computer, folder and chat settings chosen for it: account connection IDs, never credentials.
+ */
+export type ScratchChat = {
+  id: string;
+  computerId: string;
+  location?: ChatLocation;
+  settings?: ChatSettings;
+  createdAt: number;
+};
+export type SavedScratch = Omit<ScratchChat, 'id'>;
+
 export const draftKey = {
   chat: (conversationId: string) => `chat:${conversationId}`,
-  folder: (location: ChatLocation) => `folder:${locationKey(location)}`,
-  computer: (computerId: string) => `computer:${computerId}`,
+  scratch: (scratchId: string) => `scratch:${scratchId}`,
 };
+export const scratchIdOf = (key: string) =>
+  key.startsWith('scratch:') ? key.slice('scratch:'.length) : undefined;
 
 export const hasDraft = (draft?: Pick<Draft, 'text' | 'images'>) =>
   !!draft && (draft.text !== '' || draft.images.length > 0);
@@ -40,20 +53,37 @@ export function sameDraft(a: DraftContent, b: DraftContent) {
   );
 }
 
+/** A scratch chat's name in the sidebar: the first line of its text. */
+export function scratchTitle(content: Pick<DraftContent, 'text' | 'images'>) {
+  const line = content.text
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  return line ? line.slice(0, 120) : content.images.length ? 'Image conversation' : '';
+}
+
 export const maxSavedDrafts = 100;
 export const maxSavedDraftText = 300_000;
 export const maxSavedDraftBytes = 2_000_000;
 const maxStaleMentions = 64;
 
+const savedScratchSchema = z.object({
+  computerId: z.string().max(100),
+  location: locationSchema.optional(),
+  settings: chatSettingsSchema.optional(),
+  createdAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
 const savedDraftSchema = z.object({
   key: z
     .string()
     .max(5000)
-    .regex(/^(?:chat|folder|computer):/),
+    // `folder:` and `computer:` are the new-chat drafts of earlier releases.
+    .regex(/^(?:chat|scratch|folder|computer):/),
   text: z.string().min(1).max(maxSavedDraftText),
   mentions: z.array(mentionSchema).min(1).max(maxMentions).optional(),
   staleMentions: z.array(z.string().min(1).max(4100)).min(1).max(maxStaleMentions).optional(),
   mentionScope: z.string().min(1).max(10_000).optional(),
+  scratch: savedScratchSchema.optional(),
   updatedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 });
 export type SavedDraft = z.infer<typeof savedDraftSchema>;
@@ -61,12 +91,26 @@ export type SavedDrafts = { version: 1; drafts: SavedDraft[] };
 /** A draft set or cleared in this window, applied over the copy saved on this device. */
 export type DraftChange = { at: number; draft?: SavedDraft };
 
+function parseScratch(value: unknown): SavedScratch | undefined {
+  const parsed = savedScratchSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  // Settings another release cannot read must not move the scratch chat out of its folder.
+  const { settings: _settings, ...place } = (value ?? {}) as Record<string, unknown>;
+  const placed = savedScratchSchema.safeParse(place);
+  return placed.success ? placed.data : undefined;
+}
+
 function parseSavedDraft(value: unknown): SavedDraft | undefined {
   const parsed = savedDraftSchema.safeParse(value);
   if (parsed.success) return parsed.data;
-  // Unreadable mention metadata must not discard the text itself.
-  const { key, text, updatedAt } = (value ?? {}) as Record<string, unknown>;
-  const textOnly = savedDraftSchema.safeParse({ key, text, updatedAt });
+  // Unreadable mention metadata or settings must not discard the text itself.
+  const { key, text, updatedAt, scratch } = (value ?? {}) as Record<string, unknown>;
+  const textOnly = savedDraftSchema.safeParse({
+    key,
+    text,
+    updatedAt,
+    scratch: parseScratch(scratch),
+  });
   return textOnly.success ? textOnly.data : undefined;
 }
 
@@ -94,8 +138,51 @@ export function restoredDraft(saved: SavedDraft): Draft {
   };
 }
 
+/**
+ * The scratch chat a saved draft belongs to. Earlier releases kept one new-chat draft per folder
+ * or Standalone location (`folder:`) and per computer without one (`computer:`); each becomes a
+ * scratch chat in the same place, under a new id.
+ */
+export function savedScratch(saved: SavedDraft): ScratchChat | undefined {
+  const id = scratchIdOf(saved.key);
+  if (id !== undefined)
+    return z.string().uuid().safeParse(id).success
+      ? { computerId: '', createdAt: saved.updatedAt, ...saved.scratch, id }
+      : undefined;
+  if (saved.key.startsWith('computer:'))
+    return {
+      id: crypto.randomUUID(),
+      computerId: saved.key.slice('computer:'.length).slice(0, 100),
+      createdAt: saved.updatedAt,
+    };
+  if (!saved.key.startsWith('folder:')) return;
+  // The key is `locationKey()`: computer, execution environment and folder environment IDs,
+  // then the path, which may itself contain slashes.
+  const [computerId, executionId, environmentId, ...path] = saved.key
+    .slice('folder:'.length)
+    .split('/');
+  const location = locationSchema.safeParse({
+    computerId,
+    environmentId,
+    ...(executionId !== environmentId ? { executionEnvironmentId: executionId } : {}),
+    path: path.join('/'),
+  });
+  return location.success
+    ? {
+        id: crypto.randomUUID(),
+        computerId: location.data.computerId,
+        location: location.data,
+        createdAt: saved.updatedAt,
+      }
+    : undefined;
+}
+
 /** The saved form of a draft: its text and mention identity, without images. */
-export function savedDraft(key: string, draft?: Draft): SavedDraft | undefined {
+export function savedDraft(
+  key: string,
+  draft?: Draft,
+  scratch?: SavedScratch,
+): SavedDraft | undefined {
   if (!draft?.text || draft.text.length > maxSavedDraftText) return;
   const mentions = retainMentions(draft.text, draft.mentions).slice(0, maxMentions);
   const staleMentions = [...new Set(draft.staleMentions)]
@@ -107,6 +194,7 @@ export function savedDraft(key: string, draft?: Draft): SavedDraft | undefined {
     ...(mentions.length ? { mentions } : {}),
     ...(staleMentions.length ? { staleMentions } : {}),
     ...(mentions.length && draft.mentionScope ? { mentionScope: draft.mentionScope } : {}),
+    ...(scratch && scratchIdOf(key) !== undefined ? { scratch } : {}),
     updatedAt: draft.updatedAt,
   });
 }
@@ -141,40 +229,4 @@ export function mergeSavedDrafts(
     else next.delete(key);
   }
   return savedDraftsFile(next.values());
-}
-
-/**
- * Carries composer content into a draft that may already exist, keeping the saved text first.
- * When both have content, their mentions must be chosen again, as after any other folder change.
- */
-export function combineDrafts(
-  existing: DraftContent | undefined,
-  carried: DraftContent,
-  maxImages: number,
-): { draft: DraftContent; droppedImages: number } {
-  if (!existing || !hasDraft(existing)) return { draft: carried, droppedImages: 0 };
-  if (!hasDraft(carried)) return { draft: existing, droppedImages: 0 };
-  const texts = [...new Set([existing.text.trim(), carried.text.trim()])].filter(Boolean);
-  const images = [
-    ...existing.images,
-    ...carried.images.filter((image) => !existing.images.some((i) => i.id === image.id)),
-  ];
-  const kept = images.slice(0, Math.max(0, maxImages));
-  return {
-    draft: {
-      text: texts.join('\n\n'),
-      images: kept,
-      mentions: [],
-      staleMentions: [
-        ...new Set(
-          [existing, carried].flatMap((d) => [
-            ...d.staleMentions,
-            ...d.mentions.map((m) => m.token),
-          ]),
-        ),
-      ],
-      mentionScope: '',
-    },
-    droppedImages: images.length - kept.length,
-  };
 }

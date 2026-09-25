@@ -1766,10 +1766,11 @@ test('computer and Standalone plus buttons open scoped drafts from collapsed his
   await expect(picker('Folder')).toHaveText('Standalone');
   await expect(picker('Agent')).toBeEnabled();
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
-  // Both actions open the same Standalone location, so its unsent draft is still there.
-  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
-    'Keep this Standalone draft',
-  );
+  // Each action starts its own scratch chat; the first waits in Active Standalone with its text.
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+  await expect(
+    active.getByRole('button', { name: 'Unsent draft: Keep this Standalone draft', exact: true }),
+  ).toBeVisible();
   await expect(page.getByTestId('message')).toHaveCount(0);
   await page.getByRole('button', { name: 'Model context', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Model context' })).toBeVisible();

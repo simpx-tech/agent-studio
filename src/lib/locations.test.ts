@@ -10,6 +10,7 @@ import {
   loginIdentity,
   rememberLocation,
   computerFolderEnvironments,
+  scratchLocation,
   type LoginIdentity,
 } from './locations';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
@@ -298,6 +299,52 @@ describe('computer and folder chat scope', () => {
       ),
     ).toBeUndefined();
   });
+  it('lists scratch chats first in their Active folder and in folders of their own afterwards', () => {
+    const { workspace, installation, location } = fixture();
+    ensureLocationConnections(workspace.fleet, location);
+    const conversation: Conversation = {
+      id: crypto.randomUUID(),
+      settings: settingsFor(workspace.preferences),
+      location,
+      title: 'Chat',
+      createdAt: '',
+      updatedAt: '',
+      messages: [],
+    };
+    const scratches = [
+      { id: 'same folder', computerId: location.environmentId, location },
+      // Without a folder yet, a scratch chat waits in its computer's Standalone group.
+      { id: 'no folder', computerId: installation.computerId },
+      { id: 'unknown computer', computerId: crypto.randomUUID() },
+    ];
+    const [active, history] = groupConversations(
+      [conversation, { ...conversation, id: crypto.randomUUID(), archived: true }],
+      workspace.fleet,
+      installation,
+      scratches,
+    );
+    expect(
+      active.computers.map((c) => [
+        c.name,
+        c.folders.map((f) => [f.name, f.scratches.map((s) => s.id), f.conversations.length]),
+      ]),
+    ).toEqual([
+      ['WSL · Ubuntu', [['project', ['same folder'], 1]]],
+      ['Desktop', [['Standalone', ['no folder'], 0]]],
+      ['Unavailable computer', [['Standalone', ['unknown computer'], 0]]],
+    ]);
+    // Scratch chats are not conversations: they are not counted and never join History.
+    expect(active.count).toBe(1);
+    expect(history.computers.flatMap((c) => c.folders.flatMap((f) => f.scratches))).toEqual([]);
+    expect(scratchLocation(workspace.fleet, scratches[1])).toEqual({
+      computerId: installation.computerId,
+      environmentId: installation.id,
+      path: '',
+    });
+    expect(scratchLocation(workspace.fleet, scratches[0])).toBe(location);
+    expect(scratchLocation(workspace.fleet, scratches[2])).toBeUndefined();
+  });
+
   it('syncs archiving and never loses a concurrent location or history edit during run reconciliation', () => {
     const { workspace, installation, location } = fixture();
     const conversation: Conversation = {

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  combineDrafts,
   draftKey,
   hasDraft,
   maxSavedDraftBytes,
@@ -12,11 +11,16 @@ import {
   sameDraft,
   savedDraft,
   savedDraftsFile,
+  savedScratch,
+  scratchIdOf,
+  scratchTitle,
   type Draft,
   type DraftChange,
   type SavedDraft,
+  type SavedScratch,
 } from './drafts';
 import type { ChatImage } from './images';
+import { locationKey } from './locations';
 import type { Mention } from './mentions';
 
 const image = (name: string): ChatImage => ({
@@ -51,29 +55,34 @@ const location = {
   environmentId: '11111111-1111-4111-8111-111111111111',
   path: 'C:\\Projects\\studio',
 };
+const place: SavedScratch = {
+  computerId: location.computerId,
+  location,
+  settings: {
+    provider: 'claude',
+    model: 'claude-opus-5-5',
+    reasoning: 'high',
+    instructions: 'Answer briefly.',
+    connectionId: '55555555-5555-4555-8555-555555555555',
+  },
+  createdAt: 5,
+};
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 describe('composer drafts', () => {
-  it('keys chats, folders, Standalone locations, and computers separately', () => {
+  it('keys chats and scratch chats separately and names scratch chats by their first line', () => {
     const id = crypto.randomUUID();
     expect(draftKey.chat(id)).toBe(`chat:${id}`);
-    const folder = draftKey.folder(location);
-    const standalone = draftKey.folder({ ...location, path: '' });
-    expect(folder).toMatch(/^folder:/);
-    expect(folder).toContain('C:\\Projects\\studio');
-    expect(standalone).not.toBe(folder);
-    expect(
-      draftKey.folder({ ...location, computerId: '44444444-4444-4444-8444-444444444444' }),
-    ).not.toBe(folder);
-    expect(
-      draftKey.folder({
-        ...location,
-        executionEnvironmentId: '33333333-3333-4333-8333-333333333333',
-      }),
-    ).not.toBe(folder);
-    expect(draftKey.computer(location.computerId)).toBe(`computer:${location.computerId}`);
+    expect(draftKey.scratch(id)).toBe(`scratch:${id}`);
+    expect(scratchIdOf(draftKey.scratch(id))).toBe(id);
+    expect(scratchIdOf(draftKey.chat(id))).toBeUndefined();
     expect(hasDraft(draft(''))).toBe(false);
     expect(hasDraft(draft(' '))).toBe(true);
     expect(hasDraft(draft('', { images: [image('only.png')] }))).toBe(true);
+    expect(scratchTitle(draft('\n  Plan the release  \nThen ship it'))).toBe('Plan the release');
+    expect(scratchTitle(draft('x'.repeat(200)))).toHaveLength(120);
+    expect(scratchTitle(draft(' \n', { images: [image('only.png')] }))).toBe('Image conversation');
+    expect(scratchTitle(draft(''))).toBe('');
   });
 
   it('saves text and current mention identity without images', () => {
@@ -99,6 +108,15 @@ describe('composer drafts', () => {
     expect(savedDraft('chat:a', undefined)).toBeUndefined();
     expect(savedDraft('chat:a', draft('x'.repeat(maxSavedDraftText + 1)))).toBeUndefined();
     expect(savedDraft('other:a', draft('Unknown key'))).toBeUndefined();
+    // A scratch chat's draft also records its computer, folder and settings; a chat's never does.
+    const id = crypto.randomUUID();
+    expect(savedDraft(draftKey.scratch(id), draft('Idea'), place)).toEqual({
+      key: `scratch:${id}`,
+      text: 'Idea',
+      scratch: place,
+      updatedAt: 1000,
+    });
+    expect(savedDraft('chat:a', draft('Plain'), place)).toEqual(saved('chat:a', 'Plain', 1000));
   });
 
   it('reads saved drafts leniently and restores them without images', () => {
@@ -116,11 +134,21 @@ describe('composer drafts', () => {
         { key: 'chat:c', text: '', updatedAt: 2 },
         { key: 'unknown:d', text: 'Wrong key', updatedAt: 2 },
         'not a draft',
+        {
+          key: 'scratch:e',
+          text: 'Keeps its place',
+          scratch: { ...place, settings: { provider: 'future' } },
+          updatedAt: 2,
+        },
+        { key: 'scratch:f', text: 'Keeps its text', scratch: { computerId: 5 }, updatedAt: 2 },
       ],
     });
-    expect([...drafts.keys()]).toEqual(['chat:a', 'chat:b']);
+    expect([...drafts.keys()]).toEqual(['chat:a', 'chat:b', 'scratch:e', 'scratch:f']);
     expect(drafts.get('chat:a')?.text).toBe('Newer');
     expect(drafts.get('chat:b')).toEqual(saved('chat:b', 'Keeps its text', 2));
+    const { settings: _settings, ...placed } = place;
+    expect(drafts.get('scratch:e')?.scratch).toEqual(placed);
+    expect(drafts.get('scratch:f')).toEqual(saved('scratch:f', 'Keeps its text', 2));
     const withMentions = savedDraft(
       'chat:m',
       draft(file.token, { mentions: [file], mentionScope: 'scope' }),
@@ -167,32 +195,53 @@ describe('composer drafts', () => {
     expect(merged.drafts.map((d) => d.updatedAt)).toEqual([90, 90, 60, 50]);
   });
 
-  it('carries composer content into an existing draft without losing either', () => {
-    const [one, two, three, four] = ['1', '2', '3', '4'].map((n) => image(`${n}.png`));
-    const existing = draft('Saved for this folder\n', {
-      images: [one, two],
-      mentions: [file],
-      mentionScope: 'folder',
+  it('restores scratch chats and turns earlier per-folder drafts into scratch chats in place', () => {
+    const id = crypto.randomUUID();
+    expect(savedScratch({ ...saved(draftKey.scratch(id), 'Idea', 9), scratch: place })).toEqual({
+      id,
+      ...place,
     });
-    const carried = draft('  Typed before switching', {
-      images: [two, three, four],
-      mentions: [app],
-      staleMentions: ['$old'],
-      mentionScope: 'other',
+    // Without its saved place, a scratch chat still keeps its text.
+    expect(savedScratch(saved(draftKey.scratch(id), 'Idea', 9))).toEqual({
+      id,
+      computerId: '',
+      createdAt: 9,
     });
-    const { draft: combined, droppedImages } = combineDrafts(existing, carried, 3);
-    expect(combined.text).toBe('Saved for this folder\n\nTyped before switching');
-    expect(combined.images).toEqual([one, two, three]);
-    expect(droppedImages).toBe(1);
-    expect(combined.mentions).toEqual([]);
-    expect(combined.staleMentions).toEqual([file.token, '$old', app.token]);
-    expect(combined.mentionScope).toBe('');
-    expect(combineDrafts(draft('Same'), draft(' Same '), 4).draft.text).toBe('Same');
-    expect(combineDrafts(undefined, carried, 4)).toEqual({ draft: carried, droppedImages: 0 });
-    expect(combineDrafts(draft(''), carried, 4)).toEqual({ draft: carried, droppedImages: 0 });
-    expect(combineDrafts(existing, draft(''), 4)).toEqual({ draft: existing, droppedImages: 0 });
-    expect(sameDraft(combined, { ...combined, images: [...combined.images] })).toBe(true);
-    expect(sameDraft(combined, { ...combined, text: 'changed' })).toBe(false);
-    expect(sameDraft(combined, { ...combined, images: [one, two, four] })).toBe(false);
+    expect(savedScratch(saved('scratch:not-an-id', 'Idea', 9))).toBeUndefined();
+    expect(savedScratch(saved('chat:a', 'A reply', 9))).toBeUndefined();
+    // Earlier releases keyed one new-chat draft by folder, with `locationKey`, or by computer.
+    const legacy = (key: string) => savedScratch(saved(key, 'Earlier idea', 7));
+    const folder = legacy(`folder:${locationKey(location)}`);
+    expect(folder).toEqual({
+      id: expect.stringMatching(uuid),
+      computerId: location.computerId,
+      location,
+      createdAt: 7,
+    });
+    expect(legacy(`folder:${locationKey(location)}`)?.id).not.toBe(folder?.id);
+    const wsl = {
+      ...location,
+      environmentId: '33333333-3333-4333-8333-333333333333',
+      executionEnvironmentId: location.environmentId,
+      path: '/home/test/studio',
+    };
+    expect(legacy(`folder:${locationKey(wsl)}`)?.location).toEqual(wsl);
+    const standalone = { ...location, path: '' };
+    expect(legacy(`folder:${locationKey(standalone)}`)?.location).toEqual(standalone);
+    expect(legacy(`computer:${location.computerId}`)).toEqual({
+      id: expect.stringMatching(uuid),
+      computerId: location.computerId,
+      createdAt: 7,
+    });
+    expect(legacy('folder:not/a/location')).toBeUndefined();
+  });
+
+  it('compares drafts by content and image identity', () => {
+    const [one, two, three] = ['1', '2', '3'].map((n) => image(`${n}.png`));
+    const value = draft('Text', { images: [one, two], mentions: [file], mentionScope: 'scope' });
+    expect(sameDraft(value, { ...value, images: [...value.images] })).toBe(true);
+    expect(sameDraft(value, { ...value, text: 'changed' })).toBe(false);
+    expect(sameDraft(value, { ...value, images: [one, three] })).toBe(false);
+    expect(sameDraft(value, { ...value, mentions: [app] })).toBe(false);
   });
 });

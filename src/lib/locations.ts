@@ -192,10 +192,26 @@ export function conversationLocation(
     ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
     : undefined;
 }
-export function groupConversations(
+// A scratch chat's folder, or its computer's Standalone location while it has none.
+export function scratchLocation(
+  fleet: Fleet,
+  scratch: { computerId: string; location?: ChatLocation },
+): ChatLocation | undefined {
+  if (scratch.location) return scratch.location;
+  const environment = computerViews(fleet).find((c) => c.id === scratch.computerId)
+    ?.environments[0];
+  return environment
+    ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
+    : undefined;
+}
+// Active and History conversations by computer and folder. Scratch chats, new conversations not
+// sent yet, are listed in Active only: first in their folder, and in folders of their own after
+// the folders that hold conversations.
+export function groupConversations<S extends { computerId: string; location?: ChatLocation }>(
   conversations: Conversation[],
   fleet: Fleet,
   installation?: Installation,
+  scratches: S[] = [],
 ) {
   return ([false, true] as const).map((archived) => {
     const computers = new Map<
@@ -211,12 +227,12 @@ export function groupConversations(
             detail: string;
             location?: ChatLocation;
             conversations: Conversation[];
+            scratches: S[];
           }
         >;
       }
     >();
-    for (const conversation of conversations.filter((c) => !!c.archived === archived)) {
-      const location = conversationLocation(conversation, fleet, installation);
+    const folderOf = (location: ChatLocation | undefined) => {
       const environment = fleet.environments.find(
         (e) => e.id === location?.environmentId && e.computerId === location?.computerId,
       );
@@ -240,9 +256,17 @@ export function groupConversations(
           detail: `${environment?.name ?? 'Unavailable environment'} · ${location?.path || 'Standalone chats without a project folder'}`,
           location: location ? { ...location } : undefined,
           conversations: [],
+          scratches: [],
         });
-      computer.folders.get(key)!.conversations.push(conversation);
-    }
+      return computer.folders.get(key)!;
+    };
+    for (const conversation of conversations.filter((c) => !!c.archived === archived))
+      folderOf(conversationLocation(conversation, fleet, installation)).conversations.push(
+        conversation,
+      );
+    if (!archived)
+      for (const scratch of scratches)
+        folderOf(scratchLocation(fleet, scratch)).scratches.push(scratch);
     return {
       id: archived ? 'history' : 'active',
       name: archived ? 'History' : 'Active',

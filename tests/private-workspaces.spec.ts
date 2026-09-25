@@ -159,7 +159,15 @@ test('Viewer drafts stay in this browser for their workspace and leave with sign
     await openPrivateChat(page, alice.name);
     await expect(message).toHaveValue('Alice unsent reply');
     await expect.poll(stored).toContain('Alice unsent reply');
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await message.fill('Alice scratch idea');
+    await expect.poll(stored).toContain('Alice scratch idea');
     await page.reload();
+    // The Viewer continues the scratch chat edited last, and keeps each chat's own draft.
+    await expect(message).toHaveValue('Alice scratch idea');
+    await expect(
+      page.getByRole('button', { name: 'Unsent draft: Alice scratch idea', exact: true }),
+    ).toHaveAttribute('aria-current', 'page');
     await openPrivateChat(page, alice.name);
     await expect(message).toHaveValue('Alice unsent reply');
     // Drafts never reach the server's copy of the workspace.
@@ -171,7 +179,9 @@ test('Viewer drafts stay in this browser for their workspace and leave with sign
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
     expect(await stored()).not.toContain('unsent reply');
+    expect(await stored()).not.toContain('scratch idea');
     await pair(page, alice.token);
+    await expect(page.locator('.scratch-item')).toHaveCount(0);
     await openPrivateChat(page, alice.name);
     await expect(message).toHaveValue('');
     expect(errors).toEqual([]);

@@ -45,6 +45,7 @@
     FileText,
     GitFork,
     Rewind,
+    PenLine,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -139,6 +140,7 @@
     knownLocations,
     conversationLocation,
     groupConversations,
+    scratchLocation,
   } from '$lib/locations';
   import {
     registerInstallation,
@@ -188,7 +190,6 @@
     type QueuedMessage,
   } from '$lib/queue';
   import {
-    combineDrafts,
     draftKey,
     hasDraft,
     mergeSavedDrafts,
@@ -196,10 +197,15 @@
     restoredDraft,
     sameDraft,
     savedDraft,
+    savedScratch,
+    scratchIdOf,
+    scratchTitle,
     type Draft,
     type DraftChange,
     type DraftContent,
     type SavedDraft,
+    type SavedScratch,
+    type ScratchChat,
   } from '$lib/drafts';
   import {
     replySettingsChanged,
@@ -307,8 +313,8 @@
     if (view !== 'chat') templatesOpen = false;
   });
   let attachedImages = $state<ChatImage[]>([]);
-  // Unsent composer content per chat, and per folder, Standalone location, or computer for new
-  // chats. Text is saved on this device only; attached images stay until the app closes.
+  // Unsent composer content per chat and per scratch chat. Text is saved on this device only;
+  // attached images stay until the app closes.
   const drafts = new Map<string, Draft>();
   const changedDrafts = new Map<string, number>();
   let composerDraftKey = '';
@@ -316,6 +322,11 @@
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let draftSaves = Promise.resolve();
   let draftSaveFailed = false;
+  // New conversations not sent yet. Every new chat opens its own scratch chat, and those with
+  // unsent content stay in the sidebar until they are sent or discarded.
+  type Scratch = ScratchChat & { title: string; filled: boolean };
+  let scratches = $state<Scratch[]>([]);
+  let scratchId = $state('');
   $effect(() => {
     const content = {
       text: prompt,
@@ -328,6 +339,19 @@
       if (!loaded) return;
       composerDraftKey ||= currentDraftKey();
       keepDraft(content);
+    });
+  });
+  // The open scratch chat keeps the computer, folder and settings chosen for it.
+  $effect(() => {
+    const id = scratchId,
+      open = loaded && !activeId;
+    const place = {
+      computerId: draftComputerId,
+      location: locationPending ? undefined : $state.snapshot(draftLocation),
+      settings: $state.snapshot(draftSettings),
+    };
+    untrack(() => {
+      if (open && id) placeScratch(id, place);
     });
   });
   let forking = $state(false);
@@ -377,7 +401,7 @@
   let editorOpen = $state(false);
   let contextOpen = $state(false);
   let deletion = $state<{
-    type: 'conversation';
+    type: 'conversation' | 'draft';
     id: string;
     name: string;
     trigger: HTMLButtonElement;
@@ -386,14 +410,24 @@
   let deletionError = $state('');
   let conversationMenu = $state<{
     id: string;
+    scratch?: boolean;
     trigger: HTMLButtonElement;
     x: number;
     y: number;
   } | null>(null);
   const menuConversation = $derived(
-    workspace.conversations.find((c) => c.id === conversationMenu?.id),
+    conversationMenu?.scratch
+      ? undefined
+      : workspace.conversations.find((c) => c.id === conversationMenu?.id),
   );
-  const deletingConversation = $derived(workspace.conversations.find((c) => c.id === deletion?.id));
+  const menuScratch = $derived(
+    conversationMenu?.scratch ? scratches.find((s) => s.id === conversationMenu?.id) : undefined,
+  );
+  const deletingConversation = $derived(
+    deletion?.type === 'conversation'
+      ? workspace.conversations.find((c) => c.id === deletion?.id)
+      : undefined,
+  );
   let touchMenuTimer: ReturnType<typeof setTimeout> | undefined;
   let touchMenuOrigin: { x: number; y: number } | undefined;
   let longPressedConversation: string | undefined;
@@ -655,7 +689,23 @@
       )
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
   );
-  const conversationGroups = $derived(groupConversations(recent, workspace.fleet, installation));
+  // Scratch chats with unsent content, newest first. Typing reads their titles only while searching.
+  const sidebarScratches = $derived.by(() => {
+    const search = query.toLowerCase();
+    return scratches
+      .filter(
+        (s) =>
+          s.filled &&
+          (!search ||
+            `${s.title} ${s.location?.path ?? ''} ${computers.find((computer) => computer.id === (s.location ? locationComputerId(s.location) : s.computerId))?.name ?? ''}`
+              .toLowerCase()
+              .includes(search)),
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+  });
+  const conversationGroups = $derived(
+    groupConversations(recent, workspace.fleet, installation, sidebarScratches),
+  );
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
   const observedReply = $derived(
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
@@ -964,7 +1014,7 @@
         draftSettings = settingsFor(workspace.preferences);
         await loadSavedDrafts();
         loaded = true;
-        newChat();
+        if (!continueScratch()) newChat();
         if (installation)
           configureRuntime({
             installation,
@@ -1144,10 +1194,7 @@
       notificationTarget = notificationConversation(window.location.hash);
       followNotification();
     }
-    if (!active && !draftComputerId) {
-      draftComputerId = computers[0]?.id ?? '';
-      moveDraft(currentDraftKey());
-    }
+    if (!active && !draftComputerId) draftComputerId = computers[0]?.id ?? '';
   }
   async function unpair() {
     ++relaySelectionVersion;
@@ -1847,6 +1894,17 @@
         });
     }
     activeId = null;
+    // Each new chat is a scratch chat of its own; the one left behind stays if it has content.
+    scratchId = crypto.randomUUID();
+    scratches.push({
+      id: scratchId,
+      computerId: draftComputerId,
+      location: draftLocation && $state.snapshot(draftLocation),
+      settings: $state.snapshot(draftSettings),
+      createdAt: Date.now(),
+      title: '',
+      filled: false,
+    });
     switchDraft(currentDraftKey());
     editorOpen = false;
     contextOpen = false;
@@ -1885,7 +1943,6 @@
     draftLocation = undefined;
     draftSettings = { ...draftSettings, connectionId: undefined };
     locationPending = true;
-    moveDraft(currentDraftKey());
   }
   function standaloneLocation(computerId: string): ChatLocation | undefined {
     const environment = computerViews(workspace.fleet).find((c) => c.id === computerId)?.environments[0];
@@ -1934,7 +1991,6 @@
       draftLocation = { ...location };
       locationPending = false;
       draftComputerId = locationComputerId(location);
-      moveDraft(currentDraftKey());
       rememberLocation(workspace, location);
       // Automatic computer defaults must not replace the user's remembered account elsewhere.
       changeSettings(settings, sameComputer);
@@ -1986,6 +2042,42 @@
     contextOpen = false;
     view = 'chat';
     void scrollToEnd();
+  }
+  // Returns to a scratch chat with the computer, folder and settings chosen for it.
+  function openScratch(scratch: Scratch, focus = true) {
+    if (!loaded || selectingLocation) return;
+    templatesOpen = false;
+    sidebarOpen = false;
+    folderBrowserOpen = false;
+    editorOpen = false;
+    contextOpen = false;
+    view = 'chat';
+    if (!activeId && scratchId === scratch.id) return;
+    locationGeneration++;
+    conversationScope = 'active';
+    locationPending = false;
+    const location = scratchLocation(workspace.fleet, scratch);
+    const available = !!location && !!locationExecutionEnvironment(workspace.fleet, location);
+    draftLocation = location && { ...location };
+    draftComputerId = location ? locationComputerId(location) : scratch.computerId;
+    const settings = $state.snapshot(scratch.settings) ?? settingsFor(workspace.preferences);
+    if (!location) delete settings.connectionId;
+    draftSettings =
+      !available ||
+      locationConnections(workspace.fleet, location).some((c) => c.id === settings.connectionId)
+        ? settings
+        : settingsAtLocation(settings, location);
+    activeId = null;
+    scratchId = scratch.id;
+    switchDraft(draftKey.scratch(scratch.id));
+    if (focus) void tick().then(() => composerInput?.focus());
+    if (!available) return;
+    const connections = workspace.fleet.connections.length;
+    ensureLocationConnections(workspace.fleet, location, loginIdentities());
+    if (workspace.fleet.connections.length !== connections) saveSoon();
+    void refreshConnections(location, true).catch((e) => {
+      notice = String(e);
+    });
   }
   async function forkChat(id: string, messageId?: string) {
     if (!loaded || forking || deleting || imagesLoading) return;
@@ -2071,16 +2163,17 @@
     conversationMenu = null;
     if (restoreFocus) void tick().then(() => trigger?.focus({ preventScroll: true }));
   }
-  function openConversationMenu(event: MouseEvent | KeyboardEvent, conversation: Conversation) {
+  // The actions of a sidebar row: a conversation, or a scratch chat when `scratch` is set.
+  function openConversationMenu(event: MouseEvent | KeyboardEvent, id: string, scratch = false) {
     event.preventDefault();
     cancelTouchMenu();
-    if ('pointerType' in event && event.pointerType === 'touch')
-      longPressedConversation = conversation.id;
+    if ('pointerType' in event && event.pointerType === 'touch') longPressedConversation = id;
     const trigger = event.currentTarget as HTMLButtonElement;
     const bounds = trigger.getBoundingClientRect();
     const pointer = 'clientX' in event && (event.clientX !== 0 || event.clientY !== 0);
     conversationMenu = {
-      id: conversation.id,
+      id,
+      ...(scratch ? { scratch } : {}),
       trigger,
       x: pointer ? event.clientX : bounds.left + 12,
       y: pointer ? event.clientY : bounds.bottom,
@@ -2090,7 +2183,14 @@
     clearTimeout(touchMenuTimer);
     touchMenuOrigin = undefined;
   }
-  function startTouchMenu(event: PointerEvent, conversation: Conversation) {
+  function moveTouchMenu(event: PointerEvent) {
+    if (
+      touchMenuOrigin &&
+      Math.hypot(event.clientX - touchMenuOrigin.x, event.clientY - touchMenuOrigin.y) > 8
+    )
+      cancelTouchMenu();
+  }
+  function startTouchMenu(event: PointerEvent, id: string, scratch = false) {
     cancelTouchMenu();
     longPressedConversation = undefined;
     if (event.pointerType !== 'touch') return;
@@ -2101,8 +2201,8 @@
     touchMenuTimer = setTimeout(() => {
       touchMenuOrigin = undefined;
       if (!trigger.isConnected || !trigger.getClientRects().length) return;
-      longPressedConversation = conversation.id;
-      conversationMenu = { id: conversation.id, trigger, x, y };
+      longPressedConversation = id;
+      conversationMenu = { id, ...(scratch ? { scratch } : {}), trigger, x, y };
     }, 500);
   }
   function requestConversationDeletion() {
@@ -2115,6 +2215,27 @@
       trigger: conversationMenu.trigger,
     };
     closeConversationMenu();
+  }
+  function requestScratchDiscard() {
+    if (!conversationMenu || !menuScratch || deleting) return;
+    deletionError = '';
+    deletion = {
+      type: 'draft',
+      id: menuScratch.id,
+      name: menuScratch.title,
+      trigger: conversationMenu.trigger,
+    };
+    closeConversationMenu();
+  }
+  // Discarding the open scratch chat empties it, which also takes it out of the sidebar.
+  function discardScratch(id: string) {
+    if (activeId || scratchId !== id) {
+      dropScratch(draftKey.scratch(id));
+      return;
+    }
+    clearImages();
+    applyComposer(undefined);
+    keepDraft(composerContent());
   }
   function focusDeletionDialog(node: HTMLElement) {
     const trigger = deletion?.trigger;
@@ -2134,6 +2255,11 @@
     };
   }
   async function remove() {
+    if (deletion?.type === 'draft' && !deleting) {
+      discardScratch(deletion.id);
+      deletion = null;
+      return;
+    }
     if (!deletion || !deletingConversation || deleting) return;
     const session = workspaceSession;
     const target = deletingConversation;
@@ -2181,9 +2307,7 @@
   }
   function currentDraftKey() {
     if (activeId) return draftKey.chat(activeId);
-    return !locationPending && draftLocation
-      ? draftKey.folder(draftLocation)
-      : draftKey.computer(draftComputerId);
+    return scratchId ? draftKey.scratch(scratchId) : '';
   }
   function composerContent(): DraftContent {
     return {
@@ -2212,6 +2336,13 @@
       drafts.set(key, { ...content, updatedAt: Date.now() });
       draftChanged(key);
     }
+    // A scratch chat is listed in the sidebar by its first line while it has content.
+    const scratch = scratchFor(key);
+    if (!scratch) return;
+    const title = scratchTitle(content),
+      filled = hasDraft(content);
+    if (scratch.title !== title) scratch.title = title;
+    if (scratch.filled !== filled) scratch.filled = filled;
   }
   function forgetDraft(key: string) {
     if (drafts.delete(key)) draftChanged(key);
@@ -2221,28 +2352,82 @@
     // Save a few times a second even while typing continues, so closing loses little.
     if (draftsReady) draftTimer ??= setTimeout(() => void saveDraftsNow(), 300);
   }
-  // Opening another chat, or a new chat elsewhere, keeps the current draft for its return.
+  function scratchFor(key: string) {
+    const id = scratchIdOf(key);
+    return id === undefined ? undefined : scratches.find((s) => s.id === id);
+  }
+  // A saved scratch chat is saved again when its computer, folder or settings change.
+  function placeScratch(id: string, place: Omit<SavedScratch, 'createdAt'>) {
+    const scratch = scratches.find((s) => s.id === id);
+    if (
+      !scratch ||
+      (scratch.computerId === place.computerId &&
+        JSON.stringify(scratch.location) === JSON.stringify(place.location) &&
+        JSON.stringify(scratch.settings) === JSON.stringify(place.settings))
+    )
+      return;
+    scratch.computerId = place.computerId;
+    scratch.location = place.location;
+    scratch.settings = place.settings;
+    const key = draftKey.scratch(id);
+    const draft = drafts.get(key);
+    if (!draft) return;
+    draft.updatedAt = Date.now();
+    draftChanged(key);
+  }
+  // What a scratch chat's saved draft records besides its text.
+  function scratchPlace(key: string): SavedScratch | undefined {
+    const scratch = scratchFor(key);
+    if (!scratch) return;
+    const { computerId, location, settings, createdAt } = $state.snapshot(scratch);
+    return {
+      computerId,
+      ...(location ? { location } : {}),
+      ...(settings ? { settings } : {}),
+      createdAt,
+    };
+  }
+  // A new session continues the scratch chat edited last, until another chat opens or text is
+  // typed. The view stays, so a workspace loaded from Connections does not leave it.
+  function continueScratch() {
+    let latest: Scratch | undefined;
+    let at = -1;
+    for (const scratch of scratches) {
+      const updatedAt = drafts.get(draftKey.scratch(scratch.id))?.updatedAt ?? -1;
+      if (updatedAt > at) {
+        latest = scratch;
+        at = updatedAt;
+      }
+    }
+    if (!latest || activeId || hasDraft(composerContent())) return false;
+    const shown = view;
+    openScratch(latest, false);
+    view = shown;
+    return true;
+  }
+  // Removes a scratch chat that was sent or discarded or, when `left`, one left without content.
+  function dropScratch(key: string, left = false) {
+    const id = scratchIdOf(key);
+    if (id === undefined || (left && hasDraft(drafts.get(key)))) return;
+    forgetDraft(key);
+    const index = scratches.findIndex((s) => s.id === id);
+    if (index >= 0) scratches.splice(index, 1);
+  }
+  // Opening another chat or scratch chat keeps the current draft for its return.
   function switchDraft(key: string) {
     keepDraft(composerContent());
+    const left = composerDraftKey;
     composerDraftKey = key;
+    if (left !== key) dropScratch(left, true);
     clearImages();
     applyComposer(drafts.get(key));
   }
-  // A new chat takes its draft along when its folder or computer changes.
-  function moveDraft(key: string) {
-    if (key === composerDraftKey) return;
-    const carried = composerContent();
-    forgetDraft(composerDraftKey);
-    composerDraftKey = key;
-    carryDraft(carried);
-  }
-  // A draft already saved at the destination keeps its text first, so neither is lost.
-  function carryDraft(carried: DraftContent) {
-    const combined = combineDrafts(drafts.get(composerDraftKey), carried, maxImagesPerMessage);
-    applyComposer(combined.draft);
-    keepDraft(combined.draft);
-    if (combined.droppedImages)
-      attachmentError = `${combined.droppedImages} image${combined.droppedImages === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`;
+  // `/new` moves the rest of the command into the new scratch chat.
+  function carryDraft(from: string, carried: DraftContent) {
+    forgetDraft(from);
+    dropScratch(from);
+    applyComposer(carried);
+    keepDraft(carried);
   }
   function resetDrafts() {
     clearTimeout(draftTimer);
@@ -2252,6 +2437,8 @@
     composerDraftKey = '';
     draftsReady = false;
     draftSaveFailed = false;
+    scratches = [];
+    scratchId = '';
   }
   async function loadSavedDrafts() {
     const session = workspaceSession;
@@ -2264,10 +2451,28 @@
       notice = `Saved drafts could not be read on this device. ${String(error).replace(/^Error: /, '')}`;
     }
     if (session !== workspaceSession || scope !== workspaceStorageScope()) return;
-    for (const [key, draft] of saved) if (!drafts.has(key)) drafts.set(key, restoredDraft(draft));
+    for (const [key, draft] of saved) {
+      if (key.startsWith('chat:')) {
+        if (!drafts.has(key)) drafts.set(key, restoredDraft(draft));
+        continue;
+      }
+      const scratch = savedScratch(draft);
+      if (!scratch || scratches.some((s) => s.id === scratch.id)) continue;
+      const next = draftKey.scratch(scratch.id);
+      // An earlier release's new-chat draft for a folder or computer becomes a scratch chat.
+      if (next !== key) {
+        draftChanged(key);
+        draftChanged(next);
+      }
+      drafts.set(next, restoredDraft(draft));
+      scratches.push({
+        ...scratch,
+        title: scratchTitle({ text: draft.text, images: [] }),
+        filled: true,
+      });
+    }
     draftsReady = true;
-    // The open composer shows its saved draft unless something was typed meanwhile.
-    if (!hasDraft(composerContent())) applyComposer(drafts.get(composerDraftKey));
+    if (loaded) continueScratch();
     if (changedDrafts.size) void saveDraftsNow();
   }
   function saveDraftsNow(): Promise<void> {
@@ -2276,7 +2481,7 @@
     if (!draftsReady || !changedDrafts.size) return draftSaves;
     const changes = new Map<string, DraftChange>();
     for (const [key, at] of changedDrafts) {
-      const draft = savedDraft(key, drafts.get(key));
+      const draft = savedDraft(key, drafts.get(key), scratchPlace(key));
       changes.set(key, draft ? { at: draft.updatedAt, draft } : { at });
     }
     changedDrafts.clear();
@@ -2293,7 +2498,7 @@
           // Without a readable saved copy, this window's drafts are the best copy to keep.
           saved = new Map(
             [...drafts].flatMap(([key, draft]) => {
-              const value = savedDraft(key, draft);
+              const value = savedDraft(key, draft, scratchPlace(key));
               return value ? [[key, value] as const] : [];
             }),
           );
@@ -2616,8 +2821,11 @@
         forgetDraft(sentDraft);
       }
     }
-    // A new conversation's composer continues as that conversation's draft.
-    if (isNewConversation) composerDraftKey = draftKey.chat(conversation.id);
+    // The scratch chat is now this conversation, whose composer continues as its draft.
+    if (isNewConversation) {
+      composerDraftKey = draftKey.chat(conversation.id);
+      dropScratch(sentDraft);
+    }
     await startReply(conversation, {
       now,
       modelName: selectedModelName(conversation.settings.model, availableModels),
@@ -3153,30 +3361,49 @@
                       >
                     </div>
                     {#if !collapsedGroups[folderKey]}<div class="folder-conversations">
-                        {#each folder.conversations as c}<button
-                            class="conversation-item"
-                            class:current={activeId === c.id && view === 'chat'}
-                            aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
+                        {#each folder.scratches as s (s.id)}{@const current =
+                            !activeId && scratchId === s.id && view === 'chat'}<button
+                            class="scratch-item"
+                            class:current
+                            aria-current={current ? 'page' : undefined}
                             aria-haspopup="menu"
-                            oncontextmenu={(event) => openConversationMenu(event, c)}
+                            aria-label={`Unsent draft: ${s.title}`}
+                            oncontextmenu={(event) => openConversationMenu(event, s.id, true)}
                             onkeydown={(event) => {
                               if (
                                 event.key === 'ContextMenu' ||
                                 (event.shiftKey && event.key === 'F10')
                               )
-                                openConversationMenu(event, c);
+                                openConversationMenu(event, s.id, true);
                             }}
-                            onpointerdown={(event) => startTouchMenu(event, c)}
-                            onpointermove={(event) => {
+                            onpointerdown={(event) => startTouchMenu(event, s.id, true)}
+                            onpointermove={moveTouchMenu}
+                            onpointerup={cancelTouchMenu}
+                            onpointercancel={cancelTouchMenu}
+                            onclick={(event) => {
+                              if (longPressedConversation === s.id) {
+                                event.preventDefault();
+                                longPressedConversation = undefined;
+                              } else openScratch(s);
+                            }}
+                            title={`Unsent draft · ${s.title}`}
+                            ><PenLine size={13} aria-hidden="true" /><span>{s.title}</span></button
+                          >{/each}
+                        {#each folder.conversations as c}<button
+                            class="conversation-item"
+                            class:current={activeId === c.id && view === 'chat'}
+                            aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
+                            aria-haspopup="menu"
+                            oncontextmenu={(event) => openConversationMenu(event, c.id)}
+                            onkeydown={(event) => {
                               if (
-                                touchMenuOrigin &&
-                                Math.hypot(
-                                  event.clientX - touchMenuOrigin.x,
-                                  event.clientY - touchMenuOrigin.y,
-                                ) > 8
+                                event.key === 'ContextMenu' ||
+                                (event.shiftKey && event.key === 'F10')
                               )
-                                cancelTouchMenu();
+                                openConversationMenu(event, c.id);
                             }}
+                            onpointerdown={(event) => startTouchMenu(event, c.id)}
+                            onpointermove={moveTouchMenu}
                             onpointerup={cancelTouchMenu}
                             onpointercancel={cancelTouchMenu}
                             onclick={(event) => {
@@ -3686,7 +3913,7 @@
                   !!selectedStatus?.installed &&
                   selectedStatus.auth === 'ready'}
                 busy={activeRunning}
-                scope={activeId ?? 'draft'}
+                scope={activeId ?? draftKey.scratch(scratchId)}
                 oncommand={(name) => {
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
                   else if (name === 'reasoning')
@@ -3720,10 +3947,7 @@
                       selectedComputerId,
                     );
                     // The rest of the command moves into the new conversation's draft.
-                    if (composerDraftKey !== from) {
-                      forgetDraft(from);
-                      carryDraft(remaining);
-                    }
+                    if (composerDraftKey !== from) carryDraft(from, remaining);
                   }
                 }}
               />
@@ -3937,6 +4161,18 @@
       forkDisabled={forking || imagesLoading || forkPoint(menuConversation) < 0}
     />
   {/key}
+{:else if conversationMenu && menuScratch}
+  {#key conversationMenu}
+    <ConversationContextMenu
+      x={conversationMenu.x}
+      y={conversationMenu.y}
+      name={`Unsent draft: ${menuScratch.title}`}
+      trigger={conversationMenu.trigger}
+      close={closeConversationMenu}
+      remove={requestScratchDiscard}
+      removeLabel="Discard draft"
+    />
+  {/key}
 {/if}
 {#if historyAction && active?.id === historyAction.conversationId}
   {@const action = historyAction}
@@ -3975,10 +4211,15 @@
       tabindex="-1"
       use:focusDeletionDialog
     >
-      <h2 id="delete-title">Delete {deletion.type}?</h2>
-      <p>
-        “{deletion.name}” will be removed from this workspace. This cannot be undone.
-      </p>
+      {#if deletion.type === 'draft'}<h2 id="delete-title">Discard draft?</h2>
+        <p>
+          “{deletion.name}” was never sent. Its text will be removed from this device. This cannot
+          be undone.
+        </p>
+      {:else}<h2 id="delete-title">Delete {deletion.type}?</h2>
+        <p>
+          “{deletion.name}” will be removed from this workspace. This cannot be undone.
+        </p>{/if}
       {#if deletingConversation && conversationRunning(deletingConversation)}<p>
           The running response will be stopped before this conversation is deleted.
         </p>{/if}
@@ -3986,8 +4227,15 @@
       <footer>
         <button class="secondary" disabled={deleting} onclick={() => (deletion = null)}
           >Cancel</button
-        ><button class="danger" disabled={!deletingConversation || deleting} onclick={remove}
-          >{deleting ? 'Deleting…' : `Delete ${deletion.type}`}</button
+        ><button
+          class="danger"
+          disabled={(deletion.type === 'conversation' && !deletingConversation) || deleting}
+          onclick={remove}
+          >{deleting
+            ? 'Deleting…'
+            : deletion.type === 'draft'
+              ? 'Discard draft'
+              : `Delete ${deletion.type}`}</button
         >
       </footer>
     </div>

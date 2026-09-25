@@ -161,7 +161,7 @@ try {
     if (shown) break;
     assert(attempt < 2, 'The seeded chat did not load.');
   }
-  // The startup composer is a new chat; its draft belongs to its location.
+  // The startup composer is a new chat, whose draft becomes a scratch chat.
   await fill(page, newChatDraft);
   await openChat(page);
   await fill(page, chatDraft);
@@ -171,7 +171,9 @@ try {
   const afterClose = await savedDrafts();
   assert.deepEqual(afterClose.map((draft) => draft.text).sort(), [chatDraft, newChatDraft].sort());
   assert(afterClose.find((draft) => draft.text === chatDraft).key.startsWith('chat:'));
-  assert(afterClose.find((draft) => draft.text === newChatDraft).key.startsWith('folder:'));
+  const scratch = afterClose.find((draft) => draft.text === newChatDraft);
+  assert(scratch.key.startsWith('scratch:'));
+  assert.equal(typeof scratch.scratch?.computerId, 'string');
   assert(
     !(await readFile(join(data, 'workspace.json'), 'utf8')).includes(nonce),
     'Drafts must stay out of the portable workspace.',
@@ -179,10 +181,15 @@ try {
 
   launch();
   page = await open();
+  // A relaunch continues the scratch chat edited last, listed in the Active sidebar.
   await page.waitFor(
-    (text) => document.querySelector('[aria-label="Message"]')?.value === text,
+    (text) =>
+      document.querySelector('[aria-label="Message"]')?.value === text &&
+      document.querySelector('.scratch-item[aria-current="page"]')?.textContent.trim() === text,
     newChatDraft,
   );
+  const scratchShot = await page.cdp('Page.captureScreenshot', { format: 'png' });
+  await writeFile(join(output, 'native-scratch.png'), Buffer.from(scratchShot.data, 'base64'));
   await fill(page, '');
   await openChat(page);
   await page.waitFor(
@@ -204,7 +211,7 @@ try {
         checkedAt: new Date().toISOString(),
         identifier,
         savedOnClose: afterClose.map(({ key, text }) => ({ key: key.split(':')[0], text })),
-        restoredAfterRelaunch: { newChat: true, chat: true },
+        restoredAfterRelaunch: { scratchChat: true, chat: true },
         workspaceExcludesDrafts: true,
         clearedDraftsRemoved: true,
         runtimeErrors: errors,
@@ -214,7 +221,7 @@ try {
     ),
   );
   console.log(
-    'DRAFTS_NATIVE_PASSED: drafts saved on title-bar close, restored after relaunch per chat and new-chat location, kept out of workspace.json, and removed when cleared.',
+    'DRAFTS_NATIVE_PASSED: drafts saved on title-bar close, restored after relaunch per chat and scratch chat, kept out of workspace.json, and removed when cleared.',
   );
 } finally {
   page.close();

@@ -9,6 +9,7 @@
     trigger,
     close,
     remove,
+    removeLabel = 'Delete conversation',
     fork,
     forkDisabled = false,
   }: {
@@ -18,7 +19,9 @@
     trigger: HTMLElement;
     close: (restoreFocus?: boolean) => void;
     remove: () => void;
-    fork: () => void;
+    removeLabel?: string;
+    // Scratch chats have nothing to fork.
+    fork?: () => void;
     forkDisabled?: boolean;
   } = $props();
   let menu: HTMLDivElement;
@@ -89,19 +92,19 @@
   onkeydown={keyboard}
   oncontextmenu={(event) => event.preventDefault()}
 >
-  <button
-    type="button"
-    role="menuitem"
-    tabindex="-1"
-    onclick={fork}
-    disabled={forkDisabled}
-    title={forkDisabled
-      ? 'A finished reply is needed to fork this conversation'
-      : 'Start a separate chat from the finished replies'}
-    ><GitFork size={15} aria-hidden="true" />Fork conversation</button
-  >
+  {#if fork}<button
+      type="button"
+      role="menuitem"
+      tabindex="-1"
+      onclick={fork}
+      disabled={forkDisabled}
+      title={forkDisabled
+        ? 'A finished reply is needed to fork this conversation'
+        : 'Start a separate chat from the finished replies'}
+      ><GitFork size={15} aria-hidden="true" />Fork conversation</button
+    >{/if}
   <button class="danger" type="button" role="menuitem" tabindex="-1" onclick={remove}
-    ><Trash2 size={15} aria-hidden="true" />Delete conversation</button
+    ><Trash2 size={15} aria-hidden="true" />{removeLabel}</button
   >
 </div>
 
