@@ -1715,14 +1715,6 @@ pre {
 .setup-hint .text-button {
   margin-left: auto;
 }
-button.setup-hint {
-  justify-content: flex-start;
-  border-color: var(--accent-border);
-  background: var(--accent-soft);
-}
-button.setup-hint:not(:disabled):hover {
-  background: var(--accent-soft-hover);
-}
 /* Informational state, such as a rewound conversation that can still be restored. */
 .setup-hint.neutral {
   border-color: var(--border-strong);

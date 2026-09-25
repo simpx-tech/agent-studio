@@ -532,7 +532,12 @@ async fn run_agent(
         .transpose()?
         .flatten();
     let cancel = CancellationToken::new();
-    runs.begin(&request.run_id, cancel.clone()).await?;
+    runs.begin(
+        &request.run_id,
+        request.conversation_id.as_deref(),
+        cancel.clone(),
+    )
+    .await?;
     let id = request.run_id.clone();
     let _ = on_event.send(protocol::RunEvent::Activity {
         text: "Starting the provider CLI".into(),
@@ -555,8 +560,8 @@ async fn cancel_run(
 ) -> Result<(), String> {
     {
         let active = runs.0.lock().map_err(|_| "Run registry lock failed")?;
-        if let Some(token) = active.get(&run_id) {
-            token.cancel();
+        if let Some(run) = active.get(&run_id) {
+            run.cancel.cancel();
         }
     }
     if wait_for_completion.unwrap_or(false) {
@@ -595,7 +600,8 @@ async fn undo_files(
     commit: bool,
 ) -> Result<undo::Preview, String> {
     let operation = uuid::Uuid::new_v4().to_string();
-    runs.begin(&operation, CancellationToken::new()).await?;
+    runs.begin(&operation, Some(&conversation_id), CancellationToken::new())
+        .await?;
     let result = async {
         let root = app
             .path()
@@ -792,7 +798,12 @@ fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
         .state::<runner::Runs>()
         .0
         .lock()
-        .map(|active| active.values().cloned().collect::<Vec<_>>())
+        .map(|active| {
+            active
+                .values()
+                .map(|run| run.cancel.clone())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     tokens.extend(
         app.state::<titles::Titles>()

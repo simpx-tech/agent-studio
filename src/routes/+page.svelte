@@ -20,7 +20,6 @@
   import { restartBlocked } from '$lib/app-updates';
   import {
     ArrowUp,
-    ArrowUpRight,
     ArrowRight,
     Plus,
     Bot,
@@ -338,10 +337,13 @@
   let attachmentGeneration = 0;
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
-  let run = $state<{ id: string; conversationId: string } | null>(null);
+  // Replies this window started, by conversation. Each conversation runs one reply at a time;
+  // different conversations run side by side.
+  let runs = $state<Record<string, string>>({});
   // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
   let queued = $state<Record<string, QueuedMessage[]>>({});
-  let steeringPending = $state<string | null>(null);
+  // Steering inputs still being delivered, by run.
+  let steeringPending = $state<Record<string, boolean>>({});
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
   let selectedArtifact = $state<Artifact | null>(null);
   let artifactMode = $state<'modal' | 'panel'>('modal');
@@ -368,7 +370,8 @@
     artifactConversationId = activeId;
     selectedArtifact = artifact;
   }
-  let stopping = $state(false);
+  // Conversations whose reply this window is stopping.
+  let stopping = $state<Record<string, boolean>>({});
   let editorOpen = $state(false);
   let contextOpen = $state(false);
   let deletion = $state<{
@@ -658,7 +661,13 @@
   const observedReply = $derived(
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
   );
-  const activeRunning = $derived(run?.conversationId === activeId || !!observedReply);
+  const activeRunning = $derived((!!activeId && !!runs[activeId]) || !!observedReply);
+  const activeStopping = $derived(!!activeId && !!stopping[activeId]);
+  const activeSteering = $derived(
+    !!observedReply?.runId && !!steeringPending[observedReply.runId],
+  );
+  // A reply this window started is running in any conversation.
+  const localRunning = $derived(Object.keys(runs).length > 0);
   // Background work this computer still runs for each chat, including after its reply.
   let hostBackground = $state<Record<string, HostBackgroundWork>>({});
   function applyBackgroundWork(event: BackgroundWorkEvent) {
@@ -710,21 +719,6 @@
   const nextReplyChanged = $derived(
     !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),
   );
-  const hostBusy = $derived(
-    workspace.conversations.some((c) =>
-      c.messages.some(
-        (m) =>
-          m.status === 'running' &&
-          m.settings?.connectionId &&
-          executionHost(
-            workspace.fleet,
-            workspace.fleet.connections.find(
-              (connection) => connection.id === m.settings?.connectionId,
-            )?.environmentId ?? '',
-          ) === installation?.id,
-      ),
-    ),
-  );
   const canSend = $derived(
     loaded &&
       !historyBusy &&
@@ -740,9 +734,7 @@
       (!selectedLocation ||
         (!!active && !selectedLocation.path) ||
         scopedConnections.some((c) => c.id === selectedSettings.connectionId)) &&
-      !run &&
       !activeRunning &&
-      (selectedRemote || !hostBusy) &&
       (desktop() || paired) &&
       (desktop() || online) &&
       (!selectedRemote || (paired && !syncError)) &&
@@ -762,8 +754,8 @@
       steeringSupported &&
       !observedReply?.compact &&
       !!observedReply?.runId &&
-      !stopping &&
-      !steeringPending &&
+      !activeStopping &&
+      !activeSteering &&
       !imagesLoading &&
       !attachedImages.length &&
       !hasComposerMentions &&
@@ -777,8 +769,8 @@
     loaded &&
       !!active &&
       activeRunning &&
-      !steeringPending &&
-      !stopping &&
+      !activeSteering &&
+      !activeStopping &&
       !imagesLoading &&
       (!attachedImages.length || imagesSupported) &&
       !selectingLocation &&
@@ -907,7 +899,7 @@
       if (!loaded || document.visibilityState === 'hidden') return;
       if (paired) void syncNow();
       else void restoreRelayConnection();
-      if (run) return;
+      if (localRunning) return;
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
         void refresh();
@@ -926,7 +918,7 @@
     window.addEventListener('pagehide', saveDraftsOnLeave);
     document.addEventListener('visibilitychange', saveDraftsWhenHidden);
     const loginPoll = setInterval(() => {
-      if (pendingSignIn && Date.now() < signInDeadline && !run) void refresh();
+      if (pendingSignIn && Date.now() < signInDeadline && !localRunning) void refresh();
     }, 5000);
     const usagePoll = setInterval(() => {
       if (loaded && document.visibilityState !== 'hidden') {
@@ -981,7 +973,7 @@
             fleet: () => $state.snapshot(workspace.fleet),
             revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),
-            localRuns: () => (run ? [run.id] : []),
+            localRuns: () => Object.values(runs),
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
               queued = {};
@@ -1002,8 +994,9 @@
               draftComputerId = '';
               selectingLocation = false;
               preparingCommand = false;
-              run = null;
-              stopping = false;
+              runs = {};
+              stopping = {};
+              steeringPending = {};
               selectedArtifact = null;
               sidebarOpen = false;
               folderBrowserOpen = false;
@@ -1210,7 +1203,7 @@
       historyError = 'There are no messages to rewind.';
       return;
     }
-    if (activeRunning || run || historyBusy || activeQueue.length) {
+    if (activeRunning || historyBusy || activeQueue.length) {
       historyError = 'Wait for the response and queued messages to finish before rewinding.';
       return;
     }
@@ -1223,7 +1216,7 @@
     };
   }
   function openUndoFiles(runId?: string) {
-    if (!active || activeRunning || run || historyBusy || activeQueue.length) {
+    if (!active || activeRunning || historyBusy || activeQueue.length) {
       historyError = 'Open an idle conversation before Undo.';
       return;
     }
@@ -1245,7 +1238,7 @@
     };
   }
   async function changeHistory(messageId?: string) {
-    if (!active || activeRunning || run || historyBusy || activeQueue.length)
+    if (!active || activeRunning || historyBusy || activeQueue.length)
       throw new Error('Wait for the response to finish before rewinding.');
     const before = $state.snapshot(active),
       session = workspaceSession;
@@ -1284,8 +1277,7 @@
       session !== workspaceSession ||
       !active ||
       active.id !== conversationId ||
-      activeRunning ||
-      run
+      activeRunning
     )
       throw new Error('The conversation changed. Reopen Undo.');
     await persist();
@@ -1717,7 +1709,7 @@
     if (!loaded) return;
     // Only the next request's model/reasoning may change while a reply is running.
     if (
-      (run || activeRunning) &&
+      activeRunning &&
       (settings.provider !== selectedSettings.provider ||
         settings.connectionId !== selectedSettings.connectionId ||
         !!settings.planMode !== !!selectedSettings.planMode ||
@@ -1769,7 +1761,6 @@
     if (active) {
       // Only another account of the same agent may take over an existing conversation.
       if (
-        run ||
         activeRunning ||
         !option.connectionId ||
         !switchableConnections.some((c) => c.id === option.connectionId)
@@ -1882,7 +1873,7 @@
     );
   }
   function chooseComputer(id: string) {
-    if (active || run || activeRunning || selectingLocation || id === selectedComputerId) return;
+    if (active || activeRunning || selectingLocation || id === selectedComputerId) return;
     const location = standaloneLocation(id);
     folderBrowserOpen = false;
     if (location) {
@@ -1924,7 +1915,7 @@
     };
   }
   async function chooseLocation(location: ChatLocation, verified = false) {
-    if (active || run || activeRunning || selectingLocation) return;
+    if (active || activeRunning || selectingLocation) return;
     if (selectedLocation && locationKey(location) === locationKey(selectedLocation)) return;
     const generation = ++locationGeneration;
     const conversationId = activeId;
@@ -2071,8 +2062,7 @@
   }
   function conversationRunning(conversation: Conversation) {
     return (
-      run?.conversationId === conversation.id ||
-      conversation.messages.some((m) => m.status === 'running')
+      !!runs[conversation.id] || conversation.messages.some((m) => m.status === 'running')
     );
   }
   function closeConversationMenu(restoreFocus = false) {
@@ -2146,13 +2136,13 @@
     if (!deletion || !deletingConversation || deleting) return;
     const session = workspaceSession;
     const target = deletingConversation;
-    const ownedRun = run?.conversationId === target.id ? run : null;
+    const ownedRun = runs[target.id];
     const reply = target.messages.find((m) => m.status === 'running');
-    const runId = ownedRun?.id ?? reply?.runId;
+    const runId = ownedRun ?? reply?.runId;
     deleting = true;
     deletionError = '';
     try {
-      if (ownedRun) stopping = true;
+      if (ownedRun) stopping[target.id] = true;
       if (runId)
         await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
       if (session !== workspaceSession) return;
@@ -2176,7 +2166,7 @@
       if (!workspace.conversations.some((c) => c.id === target.id))
         workspace.conversations.unshift(target);
       deletionError = `Could not delete this conversation: ${String(e)}`;
-      if (ownedRun && run?.id === ownedRun.id) stopping = false;
+      if (ownedRun && runs[target.id] === ownedRun) delete stopping[target.id];
     } finally {
       if (session === workspaceSession) deleting = false;
     }
@@ -2403,7 +2393,7 @@
   $effect(() => {
     const id = activeId;
     const items = id ? queued[id] : undefined;
-    const busy = activeRunning || !!run || stopping || !!steeringPending;
+    const busy = activeRunning || activeStopping || activeSteering;
     if (!id || !items?.length || busy) return;
     const last = active?.messages.at(-1);
     const ready = last?.role === 'assistant' && last.status === 'complete';
@@ -2430,7 +2420,7 @@
     if (steeringAttempt?.runId !== runId || steeringAttempt.text !== text)
       steeringAttempt = { runId, text, id: crypto.randomUUID() };
     const input = { id: steeringAttempt.id, text };
-    steeringPending = runId;
+    steeringPending[runId] = true;
     attachmentError = '';
     try {
       await steerRun(runId, input, reply.settings?.connectionId);
@@ -2441,11 +2431,11 @@
     } catch (error) {
       if (session === workspaceSession && activeId === selected) attachmentError = String(error);
     } finally {
-      if (steeringPending === runId) steeringPending = null;
+      delete steeringPending[runId];
     }
   }
   async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
-    if (steeringPending) return;
+    if (activeSteering) return;
     if (preparingCommand) return;
     if (queuedMessage?.mentions?.length && queuedMessage.mentionConnectionId !== selectedSettings.connectionId) {
       const restored = restoreToDraft([queuedMessage], prompt, attachedImages, maxImagesPerMessage);
@@ -2606,7 +2596,7 @@
     });
     conversation.updatedAt = now;
     const message = () => conversation.messages.find((m) => m.id === assistantId)!;
-    run = { id: runId, conversationId: conversation.id };
+    runs[conversation.id] = runId;
     const started = performance.now();
     let reasoningSavedAt = 0;
     try {
@@ -2622,7 +2612,7 @@
         );
       const instructions =
         responseSettings.provider === 'claude' ? claudeInstructions(workspace) : '';
-      const result = stopping
+      const result = stopping[conversation.id]
         ? 'cancelled'
         : await runAgent(
             {
@@ -2640,7 +2630,7 @@
             },
             (event) => {
               if (session !== workspaceSession) return;
-              if (stopping) void cancelRun(runId).catch(() => {});
+              if (stopping[conversation.id]) void cancelRun(runId).catch(() => {});
               const m = message();
               const hadQuestion = requestsAttention(m);
               applyRunEvent(m, event);
@@ -2697,8 +2687,10 @@
       if (session === workspaceSession) {
         message().durationMs = message().accountUsage?.runDurationMs ?? performance.now() - started;
         conversation.updatedAt = new Date().toISOString();
-        run = null;
-        stopping = false;
+        if (runs[conversation.id] === runId) {
+          delete runs[conversation.id];
+          delete stopping[conversation.id];
+        }
         saveSoon();
         void scrollToEnd();
         void refreshUsage(responseSettings, true);
@@ -2714,7 +2706,23 @@
   ) {
     const session = workspaceSession;
     try {
-      const result = await generateTitle(id, provider, firstMessage, connectionId);
+      let result: Awaited<ReturnType<typeof generateTitle>> | undefined;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          result = await generateTitle(id, provider, firstMessage, connectionId);
+          break;
+        } catch (error) {
+          // A computer names two new chats at a time; chats started together wait their turn.
+          if (attempt >= 40 || !String(error).includes('Title generation is already busy'))
+            throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (
+          session !== workspaceSession ||
+          workspace.conversations.find((c) => c.id === id)?.titleStatus !== 'pending'
+        )
+          return;
+      }
       if (session !== workspaceSession) return;
       const conversation = workspace.conversations.find((c) => c.id === id);
       if (
@@ -2739,9 +2747,10 @@
     }
   }
   async function stop() {
-    const ownedRun = run?.conversationId === activeId ? run : null;
-    const id = ownedRun?.id ?? observedReply?.runId;
-    if (!id || stopping) return;
+    const conversationId = activeId;
+    const ownedRun = conversationId ? runs[conversationId] : undefined;
+    const id = ownedRun ?? observedReply?.runId;
+    if (!conversationId || !id || stopping[conversationId]) return;
     if (!ownedRun) {
       try {
         await cancelRun(id, observedReply?.settings?.connectionId);
@@ -2750,12 +2759,12 @@
       }
       return;
     }
-    stopping = true;
+    stopping[conversationId] = true;
     try {
       await cancelRun(id, observedReply?.settings?.connectionId);
     } catch (e) {
       notice = String(e);
-      stopping = false;
+      if (runs[conversationId] === ownedRun) delete stopping[conversationId];
     }
   }
   async function login(id: ProviderId, connectionId?: string) {
@@ -3219,7 +3228,7 @@
                       ? [{ id: selectedComputerId, name: 'Unavailable computer' }]
                       : []),
                   ]}
-                  disabled={!loaded || !!run || activeRunning || selectingLocation || !!active}
+                  disabled={!loaded || activeRunning || selectingLocation || !!active}
                   onchange={chooseComputer}
                 >
                   {#snippet icon()}<Laptop size={16} />{/snippet}
@@ -3270,7 +3279,6 @@
                   ]}
                   disabled={!loaded ||
                     !selectedComputer ||
-                    !!run ||
                     activeRunning ||
                     selectingLocation ||
                     !!active}
@@ -3307,7 +3315,6 @@
                   fallbackToFirst={false}
                   placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                   disabled={!loaded ||
-                    !!run ||
                     activeRunning ||
                     selectingLocation ||
                     (desktop() && !selectedLocation && !active) ||
@@ -3374,7 +3381,7 @@
               <button
                 class="icon-button"
                 onclick={() => (editorOpen = true)}
-                disabled={!loaded || !!run || activeRunning}
+                disabled={!loaded || activeRunning}
                 title="Chat instructions"
                 aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
               >
@@ -3413,17 +3420,14 @@
                     agent={active.settings}
                     canRetry={i === active.messages.length - 1 &&
                       (m.status === 'error' || m.status === 'cancelled') &&
-                      !run}
+                      !activeRunning}
                     retry={() => void send(true)}
                     retryDisabled={!canSend}
                     rewind={m.role === 'user' ? () => openRewind(m.id) : undefined}
                     undoEdits={m.runId && m.fileChanges?.edits.length
                       ? () => openUndoFiles(m.runId)
                       : undefined}
-                    historyDisabled={!!run ||
-                      activeRunning ||
-                      historyBusy ||
-                      !!activeQueue.length}
+                    historyDisabled={activeRunning || historyBusy || !!activeQueue.length}
                     fork={m.role === 'assistant' && m.status !== 'running'
                       ? () => active && void forkChat(active.id, m.id)
                       : undefined}
@@ -3450,7 +3454,7 @@
                   >Conversation rewound. Send a new message to continue from here.</span
                 ><button
                   class="text-button"
-                  disabled={historyBusy || activeRunning || !!run}
+                  disabled={historyBusy || activeRunning}
                   onclick={() => void changeHistory().catch((e) => (historyError = String(e)))}
                   >Undo rewind</button
                 >
@@ -3493,16 +3497,6 @@
                   >Open Connections<ArrowRight size={13} /></button
                 >
               </div>{/if}
-            {#if run && !activeRunning}<button
-                class="setup-hint"
-                onclick={() => {
-                  const c = workspace.conversations.find((c) => c.id === run?.conversationId);
-                  if (c) openConversation(c);
-                }}
-                ><i class="pulse-dot"></i>An agent is responding in another conversation. View it<ArrowUpRight
-                  size={14}
-                /></button
-              >{/if}
             <form
               class="composer"
               aria-label="Message composer"
@@ -3588,7 +3582,7 @@
                 available={selectedConnectionAvailable &&
                   !!selectedStatus?.installed &&
                   selectedStatus.auth === 'ready'}
-                busy={!!run || activeRunning}
+                busy={activeRunning}
                 scope={activeId ?? 'draft'}
                 oncommand={(name) => {
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
@@ -3640,7 +3634,7 @@
                 </p>{/if}
               <div class="composer-bottom">
                 <div class="composer-tools">
-                  <PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning || !!run} change={changeSettings} />
+                  <PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning} change={changeSettings} />
                   <button
                     type="button"
                     class="attach-button"
@@ -3664,13 +3658,13 @@
                 {#if activeRunning}
                   {#if steeringSupported}<button type="button" class="steer-button" disabled={!canSteer} onclick={steer}
                     title={attachedImages.length || hasComposerMentions || prompt.trimStart().startsWith('/') ? 'Queue images, mentions, commands, and skills for the next reply' : 'Send text to the active reply'}
-                    >{steeringPending === observedReply?.runId ? 'Sending…' : 'Steer now'}</button>{/if}
+                    >{activeSteering ? 'Sending…' : 'Steer now'}</button>{/if}
                   <button
                     class="stop-button"
                     type="button"
                     onclick={stop}
-                    disabled={stopping}
-                    ><Square size={12} fill="currentColor" />{stopping
+                    disabled={activeStopping}
+                    ><Square size={12} fill="currentColor" />{activeStopping
                       ? 'Stopping…'
                       : 'Stop response'}</button
                   ><button
@@ -3691,7 +3685,7 @@
               {canCompact}
               compact={() => void send(false, undefined, '/compact')}
               changeAutoCompact={(autoCompactTokens) => changeSettings({ ...selectedSettings, autoCompactTokens })}
-              compactionSettingsDisabled={activeRunning || !!run}
+              compactionSettingsDisabled={activeRunning}
               bind:expanded={usageExpanded}
               conversation={active}
               settings={selectedSettings}
@@ -3742,7 +3736,7 @@
             newChat(provider, connectionId, undefined, computerId)}
           providerStatuses={statuses}
           {login}
-          running={!!run}
+          running={localRunning}
         />
       {/key}
     {:else if view === 'settings'}
@@ -3775,7 +3769,7 @@
   />
 {/if}
 {#if contextOpen}<ModelContext
-    running={!!run}
+    running={activeRunning}
     conversationId={active?.id}
     forked={active?.forked}
     settings={selectedSettings}

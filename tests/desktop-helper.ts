@@ -523,7 +523,9 @@ export async function mockDesktop(page: Page, mode = 'success') {
               throw new Error('The owning computer could not stop the response.');
             if (state.holdCancel)
               await new Promise<void>((resolve) => (state.releaseCancel = resolve));
-            pending?.();
+            const reply = state.capabilityRuns?.[args.runId];
+            if (reply) reply.finish('cancelled');
+            else pending?.();
             return;
           }
           if (command === 'answer_question' && mode === 'capabilities') {
@@ -567,6 +569,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
               return await new Promise((resolve) => {
                 (window as any).finishCapabilities = resolve;
                 pending = () => resolve('cancelled');
+                // Replies of different conversations run side by side, each held until finished.
+                ((window as any).capabilityRuns ??= {})[args.request.runId] = {
+                  conversationId: args.request.conversationId,
+                  emit,
+                  finish: resolve,
+                };
               });
             }
             if (mode === 'settings-deferred')

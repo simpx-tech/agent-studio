@@ -14,21 +14,34 @@ use tauri::{ipc::Channel, Manager};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+/// A reply or file Undo this app owns, with the conversation it belongs to.
+pub struct Run {
+    pub conversation: Option<String>,
+    pub cancel: CancellationToken,
+}
 #[derive(Default)]
-pub struct Runs(pub Mutex<HashMap<String, CancellationToken>>, AtomicU64);
+pub struct Runs(pub Mutex<HashMap<String, Run>>, AtomicU64);
 impl Runs {
     // A reloaded document cannot receive the old run's IPC or answer its questions.
     // Leave entries registered until the owned process tree has actually stopped.
     pub fn interrupt_for_reload(&self) {
         if let Ok(active) = self.0.lock() {
             self.1.fetch_add(1, Ordering::SeqCst);
-            for cancel in active.values() {
-                cancel.cancel();
+            for run in active.values() {
+                run.cancel.cancel();
             }
         }
     }
 
-    pub async fn begin(&self, id: &str, cancel: CancellationToken) -> Result<(), String> {
+    /// Admit work for a conversation. Different conversations run side by side; one
+    /// conversation admits a single reply or file Undo, and a stopped one keeps its place
+    /// until its process has exited and released the conversation's native session.
+    pub async fn begin(
+        &self,
+        id: &str,
+        conversation: Option<&str>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
         let generation = self.1.load(Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
@@ -37,15 +50,27 @@ impl Runs {
                 if generation != self.1.load(Ordering::SeqCst) {
                     return Err("This response was interrupted when the app reloaded. Retry from the current window.".into());
                 }
-                if active.is_empty() {
-                    active.insert(id.into(), cancel);
-                    return Ok(());
-                }
-                if active.values().any(|token| !token.is_cancelled()) {
+                let same = |run: &Run| {
+                    conversation.is_some() && run.conversation.as_deref() == conversation
+                };
+                if active
+                    .values()
+                    .any(|run| same(run) && !run.cancel.is_cancelled())
+                {
                     return Err(
-                        "Another response is still running. Stop it or wait for it to finish."
+                        "This conversation is already responding. Stop it or wait for it to finish."
                             .into(),
                     );
+                }
+                if !active.values().any(same) {
+                    active.insert(
+                        id.into(),
+                        Run {
+                            conversation: conversation.map(Into::into),
+                            cancel,
+                        },
+                    );
+                    return Ok(());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -962,37 +987,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_runs_are_never_replaced_and_reload_is_scoped_to_this_app() {
+    async fn conversations_run_side_by_side_but_each_admits_one_reply() {
         let runs = Runs::default();
         let other_app = Runs::default();
         let current = CancellationToken::new();
         let unrelated = CancellationToken::new();
-        runs.begin("current", current.clone()).await.unwrap();
-        other_app.begin("other", unrelated.clone()).await.unwrap();
+        runs.begin("current", Some("a"), current.clone())
+            .await
+            .unwrap();
+        other_app
+            .begin("other", Some("a"), unrelated.clone())
+            .await
+            .unwrap();
         assert!(runs
-            .begin("next", CancellationToken::new())
+            .begin("next", Some("a"), CancellationToken::new())
             .await
             .unwrap_err()
-            .contains("Another response"));
-        assert!(!current.is_cancelled());
+            .contains("already responding"));
+        let beside = CancellationToken::new();
+        runs.begin("beside", Some("b"), beside.clone())
+            .await
+            .unwrap();
+        runs.begin("unscoped", None, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!current.is_cancelled() && !beside.is_cancelled());
         runs.interrupt_for_reload();
-        assert!(current.is_cancelled());
-        assert!(!unrelated.is_cancelled());
+        assert!(current.is_cancelled() && beside.is_cancelled());
+        assert!(!unrelated.is_cancelled(), "reload is scoped to this app");
         assert!(runs.0.lock().unwrap().contains_key("current"));
     }
 
     #[tokio::test]
     async fn replacement_waits_for_owned_process_cleanup_after_reload() {
         let runs = Runs::default();
-        runs.begin("old", CancellationToken::new()).await.unwrap();
+        runs.begin("old", Some("a"), CancellationToken::new())
+            .await
+            .unwrap();
         runs.interrupt_for_reload();
         let replacement = CancellationToken::new();
-        let next = runs.begin("new", replacement.clone());
+        let next = runs.begin("new", Some("a"), replacement.clone());
         tokio::pin!(next);
         assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
             .await
             .is_err());
         assert!(!runs.0.lock().unwrap().contains_key("new"));
+        // Another conversation does not wait for this one's process to exit.
+        runs.begin("elsewhere", Some("b"), CancellationToken::new())
+            .await
+            .unwrap();
         runs.0.lock().unwrap().remove("old");
         next.await.unwrap();
         assert!(runs.0.lock().unwrap().contains_key("new"));
@@ -1002,9 +1045,11 @@ mod tests {
     #[tokio::test]
     async fn another_reload_invalidates_a_request_waiting_in_the_previous_document() {
         let runs = Runs::default();
-        runs.begin("old", CancellationToken::new()).await.unwrap();
+        runs.begin("old", Some("a"), CancellationToken::new())
+            .await
+            .unwrap();
         runs.interrupt_for_reload();
-        let next = runs.begin("stale", CancellationToken::new());
+        let next = runs.begin("stale", Some("a"), CancellationToken::new());
         tokio::pin!(next);
         assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
             .await
@@ -1013,7 +1058,7 @@ mod tests {
         runs.0.lock().unwrap().remove("old");
         assert!(next.await.unwrap_err().contains("app reloaded"));
         assert!(runs.0.lock().unwrap().is_empty());
-        runs.begin("current", CancellationToken::new())
+        runs.begin("current", Some("a"), CancellationToken::new())
             .await
             .unwrap();
     }
