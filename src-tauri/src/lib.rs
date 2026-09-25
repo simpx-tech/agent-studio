@@ -492,10 +492,20 @@ fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Res
             }
         }
     }
-    file.persist(path)
+    replace_workspace(file, &path)
         .map_err(|_| "Cannot finish workspace save. The previous file was preserved.")?;
     *current = true;
     Ok(())
+}
+/// Replaces the saved workspace with a written and flushed file from the same folder. Commands
+/// read the workspace without the storage lock, and a plain Windows replace fails while one has
+/// it open; `std::fs::rename` then renames with POSIX semantics, and that reader keeps the
+/// previous file.
+fn replace_workspace(file: tempfile::NamedTempFile, path: &std::path::Path) -> std::io::Result<()> {
+    let saved = file.into_temp_path().keep().map_err(|error| error.error)?;
+    std::fs::rename(&saved, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&saved);
+    })
 }
 #[tauri::command]
 async fn run_agent(
@@ -707,7 +717,7 @@ async fn undo_files(
             file.as_file()
                 .sync_all()
                 .map_err(|_| "Cannot flush Undo status")?;
-            file.persist(root.join("workspace.json"))
+            replace_workspace(file, &root.join("workspace.json"))
                 .map_err(|_| "Cannot save Undo status")?;
         }
         Ok(preview)
@@ -1011,4 +1021,24 @@ pub fn run() {
         ])
         .run(context)
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod workspace_file_tests {
+    use std::io::Write;
+
+    #[test]
+    fn replaces_the_workspace_while_a_command_reads_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("workspace.json");
+        std::fs::write(&path, b"previous").unwrap();
+        let reader = std::fs::File::open(&path).unwrap();
+        let mut file = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        file.write_all(b"saved").unwrap();
+        super::replace_workspace(file, &path).unwrap();
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"saved");
+        // The written file became the workspace; no temporary file is left behind.
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }
