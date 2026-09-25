@@ -764,6 +764,46 @@ pre {
   width: 6px;
   height: 6px;
 }
+/* An Active row's Move to history shows on hover or keyboard focus, and always on touch
+   screens. The title makes room for it while it shows. */
+.conversation-row {
+  position: relative;
+  display: flex;
+}
+.conversation-archive {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  width: 24px;
+  height: 24px;
+  margin-top: -12px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  opacity: 0;
+}
+.conversation-row:hover > .conversation-archive,
+.conversation-item:focus-visible + .conversation-archive,
+.conversation-archive:focus-visible {
+  opacity: 1;
+}
+.conversation-archive:hover {
+  color: var(--text);
+  background: var(--active);
+}
+.conversation-row:hover > .conversation-item:not(:last-child),
+.conversation-item:focus-visible:not(:last-child),
+.conversation-row:has(> .conversation-archive:focus-visible) > .conversation-item {
+  padding-right: 32px;
+}
+@media (hover: none) {
+  .conversation-archive {
+    opacity: 1;
+  }
+  .conversation-row > .conversation-item:not(:last-child) {
+    padding-right: 32px;
+  }
+}
 .sidebar-empty {
   font-size: var(--text-sm);
   padding: 18px 8px;
@@ -2284,6 +2324,16 @@ pre {
   .computer-new-chat,
   .folder-new-chat {
     opacity: 1;
+  }
+  .conversation-archive {
+    right: 0;
+    width: 44px;
+    height: 44px;
+    margin-top: -22px;
+    opacity: 1;
+  }
+  .sidebar .conversation-row > .conversation-item:not(:last-child) {
+    padding-right: 44px;
   }
   .browser-status {
     padding: 4px 14px;

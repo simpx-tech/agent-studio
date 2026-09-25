@@ -8,6 +8,7 @@ import {
   knownLocations,
   locationConnections,
   loginIdentity,
+  nextActiveConversation,
   rememberLocation,
   computerFolderEnvironments,
   scratchLocation,
@@ -343,6 +344,43 @@ describe('computer and folder chat scope', () => {
     });
     expect(scratchLocation(workspace.fleet, scratches[0])).toBe(location);
     expect(scratchLocation(workspace.fleet, scratches[2])).toBeUndefined();
+  });
+  it('moves on to the Active conversation listed below a chat leaving Active, else the one above', () => {
+    const { workspace, installation, location } = fixture();
+    ensureLocationConnections(workspace.fleet, location);
+    const chat = (title: string, place = location, archived = false): Conversation => ({
+      id: title,
+      settings: settingsFor(workspace.preferences),
+      location: place,
+      title,
+      createdAt: '',
+      updatedAt: '',
+      messages: [],
+      ...(archived ? { archived } : {}),
+    });
+    const standalone = {
+      computerId: installation.computerId,
+      environmentId: installation.id,
+      path: '',
+    };
+    const conversations = [
+      chat('first'),
+      chat('archived', location, true),
+      chat('second'),
+      chat('standalone', standalone),
+    ];
+    const groups = groupConversations(conversations, workspace.fleet, installation, [
+      { id: 'scratch', computerId: installation.computerId, location: standalone },
+    ]);
+    const next = (id: string) => nextActiveConversation(groups, id)?.id;
+    // The listed order crosses folders and computers; History and scratch chats are skipped.
+    expect(next('first')).toBe('second');
+    expect(next('second')).toBe('standalone');
+    expect(next('standalone')).toBe('second');
+    expect(next('archived')).toBeUndefined();
+    expect(next('unknown')).toBeUndefined();
+    const alone = groupConversations([chat('only')], workspace.fleet, installation);
+    expect(nextActiveConversation(alone, 'only')).toBeUndefined();
   });
 
   it('syncs archiving and never loses a concurrent location or history edit during run reconciliation', () => {

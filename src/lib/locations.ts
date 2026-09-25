@@ -275,3 +275,15 @@ export function groupConversations<S extends { computerId: string; location?: Ch
     };
   });
 }
+// The Active conversation listed below `id`, else the one above it, to open when `id` leaves
+// Active. Scratch chats are unsent drafts, not conversations, and are skipped.
+export function nextActiveConversation(
+  groups: ReturnType<typeof groupConversations>,
+  id: string,
+): Conversation | undefined {
+  const listed = groups
+    .filter((group) => group.id === 'active')
+    .flatMap((group) => group.computers.flatMap((c) => c.folders.flatMap((f) => f.conversations)));
+  const index = listed.findIndex((c) => c.id === id);
+  return index < 0 ? undefined : (listed[index + 1] ?? listed[index - 1]);
+}

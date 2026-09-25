@@ -141,6 +141,7 @@
     knownLocations,
     conversationLocation,
     groupConversations,
+    nextActiveConversation,
     scratchLocation,
   } from '$lib/locations';
   import {
@@ -2034,12 +2035,73 @@
       selectingLocation = false;
     }
   }
-  function archiveConversation() {
-    if (!active || activeRunning || active.archived) return;
-    active.archived = true;
-    active.updatedAt = new Date().toISOString();
-    revealConversation(active);
+  // Moves a conversation to History. The open chat gives way to the Active conversation listed
+  // below it, else above it (a search match first), or to a new chat when none is left. From the
+  // sidebar, the view and the phone drawer stay as they are.
+  function archiveConversation(c: Conversation, fromSidebar = false) {
+    if (!loaded || c.archived || conversationRunning(c)) return;
+    const open = c.id === activeId;
+    const unfiltered = () =>
+      groupConversations(
+        workspace.conversations
+          .filter((other) => !other.archived)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+        workspace.fleet,
+        installation,
+      );
+    const next = open
+      ? (nextActiveConversation(conversationGroups, c.id) ??
+        (query ? nextActiveConversation(unfiltered(), c.id) : undefined))
+      : undefined;
+    c.archived = true;
+    c.updatedAt = new Date().toISOString();
     saveSoon();
+    if (!open) return;
+    const shown = view,
+      drawer = sidebarOpen;
+    if (next) {
+      nearBottom = true;
+      openConversation(next);
+    } else newChat();
+    if (fromSidebar) {
+      view = shown;
+      sidebarOpen = drawer;
+    }
+  }
+  // The toolbar's Move to history. Its button leaves with the chat, so focus continues in the
+  // next chat's composer, or at its actions menu on phones.
+  function archiveOpenChat() {
+    if (!active) return;
+    archiveConversation(active);
+    void tick().then(() => {
+      if (document.activeElement && document.activeElement !== document.body) return;
+      if (mobile) document.querySelector<HTMLElement>('.mobile-actions-toggle')?.focus();
+      else composerInput?.focus({ preventScroll: true });
+    });
+  }
+  // A sidebar row's Move to history. Keyboard focus moves on to the row now in its place.
+  function archiveRow(event: MouseEvent, c: Conversation) {
+    const control = event.currentTarget as HTMLElement;
+    const rows = () => [
+      ...(sidebarElement?.querySelectorAll<HTMLElement>(
+        '#conversation-panel-active :is(.conversation-item, .scratch-item)',
+      ) ?? []),
+    ];
+    const index = rows().indexOf(control.previousElementSibling as HTMLElement);
+    const focused = document.activeElement === control,
+      open = c.id === activeId;
+    archiveConversation(c, true);
+    if (!focused || !c.archived) return;
+    void tick().then(() => {
+      const listed = rows();
+      const row =
+        (open && listed.find((r) => r.getAttribute('aria-current') === 'page')) ||
+        listed[index] ||
+        listed[index - 1];
+      (
+        row || sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      )?.focus();
+    });
   }
   function openConversation(c: Conversation) {
     templatesOpen = false;
@@ -3402,35 +3464,45 @@
                             title={`Unsent draft · ${s.title}`}
                             ><PenLine size={13} aria-hidden="true" /><span>{s.title}</span></button
                           >{/each}
-                        {#each folder.conversations as c}<button
-                            class="conversation-item"
-                            class:current={activeId === c.id && view === 'chat'}
-                            aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
-                            aria-haspopup="menu"
-                            oncontextmenu={(event) => openConversationMenu(event, c.id)}
-                            onkeydown={(event) => {
-                              if (
-                                event.key === 'ContextMenu' ||
-                                (event.shiftKey && event.key === 'F10')
-                              )
-                                openConversationMenu(event, c.id);
-                            }}
-                            onpointerdown={(event) => startTouchMenu(event, c.id)}
-                            onpointermove={moveTouchMenu}
-                            onpointerup={cancelTouchMenu}
-                            onpointercancel={cancelTouchMenu}
-                            onclick={(event) => {
-                              if (longPressedConversation === c.id) {
-                                event.preventDefault();
-                                longPressedConversation = undefined;
-                              } else openConversation(c);
-                            }}
-                            title={c.title}
-                            ><span>{c.title}</span
-                            >{#if c.messages.some((m) => m.status === 'running')}<i
-                                class="pulse-dot"
-                              ></i>{/if}</button
-                          >{/each}
+                        {#each folder.conversations as c}<div class="conversation-row">
+                            <button
+                              class="conversation-item"
+                              class:current={activeId === c.id && view === 'chat'}
+                              aria-current={activeId === c.id && view === 'chat'
+                                ? 'page'
+                                : undefined}
+                              aria-haspopup="menu"
+                              oncontextmenu={(event) => openConversationMenu(event, c.id)}
+                              onkeydown={(event) => {
+                                if (
+                                  event.key === 'ContextMenu' ||
+                                  (event.shiftKey && event.key === 'F10')
+                                )
+                                  openConversationMenu(event, c.id);
+                              }}
+                              onpointerdown={(event) => startTouchMenu(event, c.id)}
+                              onpointermove={moveTouchMenu}
+                              onpointerup={cancelTouchMenu}
+                              onpointercancel={cancelTouchMenu}
+                              onclick={(event) => {
+                                if (longPressedConversation === c.id) {
+                                  event.preventDefault();
+                                  longPressedConversation = undefined;
+                                } else openConversation(c);
+                              }}
+                              title={c.title}
+                              ><span>{c.title}</span
+                              >{#if c.messages.some((m) => m.status === 'running')}<i
+                                  class="pulse-dot"
+                                ></i>{/if}</button
+                            >{#if !c.archived && !conversationRunning(c)}<button
+                                class="conversation-archive"
+                                title="Move to history"
+                                aria-label={`Move ${c.title} to history`}
+                                onclick={(event) => archiveRow(event, c)}
+                                ><Archive size={14} aria-hidden="true" /></button
+                              >{/if}
+                          </div>{/each}
                       </div>{/if}
                   </div>
                 {/each}{/if}
@@ -3697,6 +3769,13 @@
               </div>
             </div>
             {#key activeId}<ToolbarActions>
+              {#if active && !active.archived}<button
+                  class="icon-button"
+                  disabled={activeRunning}
+                  onclick={archiveOpenChat}
+                  title="Move to history"
+                  aria-label="Move to history"><Archive size={16} /></button
+                >{/if}
               {#if active}<button
                   class="icon-button"
                   disabled={forking || imagesLoading || forkPoint(active) < 0}
@@ -3714,13 +3793,6 @@
                   contextOpen = true;
                 }}><BookOpen size={16} /></button
               >
-              {#if active && !active.archived}<button
-                  class="icon-button"
-                  disabled={activeRunning}
-                  onclick={archiveConversation}
-                  title="Move to history"
-                  aria-label="Move to history"><Archive size={16} /></button
-                >{/if}
               <button
                 class="icon-button"
                 onclick={() => (editorOpen = true)}

@@ -318,7 +318,7 @@ test('paired Viewer fetches private MCP input from its owning host without persi
   try {
     await call('POST', 'heartbeat', { environmentId: host, connections: [], running: [runId] });
     await seedAndPairPwa(page, url, token, workspace);
-    await page.getByRole('button', { name: /Remote elicitation/ }).click();
+    await page.getByRole('button', { name: /^Remote elicitation/ }).click();
     const form = page.getByRole('region', { name: 'MCP request' });
     await expect(form.getByText('Private remote request', { exact: true })).toBeVisible();
     await page.getByLabel('Message', { exact: true }).fill('Keep remote draft');
@@ -332,7 +332,7 @@ test('paired Viewer fetches private MCP input from its owning host without persi
       revision: checkpoint.revision,
       workspace: checkpoint.workspace,
     });
-    await expect(page.getByRole('button', { name: /Remote elicitation refreshed/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Remote elicitation refreshed/ })).toBeVisible();
     await expect(form.getByText('Private remote request', { exact: true })).toBeVisible();
     await form.getByRole('button', { name: 'Decline', exact: true }).click();
     await expect(page.getByText('MCP response reached the host.', { exact: true })).toBeVisible();
@@ -354,7 +354,7 @@ test('paired Viewer fetches private MCP input from its owning host without persi
       /transient-only|Private remote request/,
     );
     await page.reload();
-    await page.getByRole('button', { name: /Remote elicitation/ }).click();
+    await page.getByRole('button', { name: /^Remote elicitation/ }).click();
     await expect(form).toHaveCount(0);
     expect(workerError).toBeUndefined();
   } finally {

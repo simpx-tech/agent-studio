@@ -235,7 +235,7 @@ test('paired Viewer answers a desktop-started question through the owning host a
     await call('POST', 'heartbeat', { environmentId: host, connections: [], running: [runId] });
     await seedAndPairPwa(page, url, token, workspace);
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    await page.getByRole('button', { name: /Remote question/ }).click();
+    await page.getByRole('button', { name: /^Remote question/ }).click();
     await page.getByRole('radio', { name: 'Blue' }).check();
     await page.getByRole('button', { name: 'Send answers' }).click();
     await expect(page.getByText('Your answer reached the host.', { exact: true })).toBeVisible();
@@ -250,7 +250,7 @@ test('paired Viewer answers a desktop-started question through the owning host a
     expect(received.filter((job) => job.method === 'run')).toHaveLength(0);
     await page.reload();
     await page.getByRole('button', { name: 'Open conversations' }).click();
-    await page.getByRole('button', { name: /Remote question/ }).click();
+    await page.getByRole('button', { name: /^Remote question/ }).click();
     await expect(page.getByText('Your answer reached the host.', { exact: true })).toBeVisible();
     await expect(page.getByText('Your answers', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('region', { name: 'Agent questions' })).toHaveCount(0);

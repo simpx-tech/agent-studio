@@ -80,6 +80,7 @@ test('forks a History row with keyboard navigation without restoring or editing 
   await send(page, 'History source');
   await page.getByRole('button', { name: 'Move to history', exact: true }).click();
   await expect.poll(async () => (await saved(page)).conversations[0].archived).toBe(true);
+  await page.getByRole('tab', { name: /History/ }).click();
   const source = (await saved(page)).conversations[0];
   const sourceRow = page
     .locator('.conversation-item')

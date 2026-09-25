@@ -358,6 +358,9 @@ test('signed-out Gemini warns before submission and preserves the draft through 
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
   await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  // Archiving opens a new chat; reopen the archived one from History.
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.locator('#conversation-panel-history .conversation-item').click();
   await page.evaluate(() => {
     localStorage.removeItem('test-google-login');
     window.dispatchEvent(new Event('focus'));
@@ -1855,10 +1858,13 @@ test('computer then folder scopes CLI choices and groups active and history with
   await active.locator('.folder-group-toggle').click();
   await expect(active.locator('.conversation-item')).toHaveCount(0);
   await page.getByRole('button', { name: 'Move to history', exact: true }).click();
-  await expect(historyTab).toHaveAttribute('aria-selected', 'true');
+  // With no other Active chat left, a new chat opens and the sidebar stays on Active.
+  await expect(page.locator('.page-title')).toHaveText('New conversation');
+  await expect(activeTab).toHaveAttribute('aria-selected', 'true');
+  await expect(active.locator('.conversation-item')).toHaveCount(0);
+  await historyTab.click();
   await expect(history).toBeVisible();
   await expect(history.locator('.conversation-item')).toHaveCount(1);
-  await expect(active.locator('.conversation-item')).toHaveCount(0);
   await expect(page.getByLabel('Message', { exact: true })).toBeEnabled();
   await page.reload();
   await historyTab.click();
