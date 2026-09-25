@@ -4,6 +4,7 @@ import {
   questionRequestSchema,
   validAnswer,
   mergeQuestions,
+  awaitingAnswer,
   type QuestionRequest,
 } from './questions';
 import { applyRunEvent, retainRunEvent } from './activity';
@@ -43,6 +44,14 @@ const message = (): Message => ({
   blocks: [],
 });
 describe('question lifecycle', () => {
+  it('waits for the user only while a question or form is pending', () => {
+    const q = questionFixture();
+    expect(awaitingAnswer({ questions: [q] })).toBe(true);
+    expect(awaitingAnswer({ questions: [{ ...q, status: 'answered' }] })).toBe(false);
+    expect(awaitingAnswer({ elicitations: [{ status: 'pending' }] })).toBe(true);
+    expect(awaitingAnswer({ elicitations: [{ status: 'declined' }] })).toBe(false);
+    expect(awaitingAnswer({})).toBe(false);
+  });
   it('requires explicit complete answers, permits custom input and preserves skips', () => {
     const q = questionFixture();
     const a = {

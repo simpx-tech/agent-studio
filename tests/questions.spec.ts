@@ -89,8 +89,13 @@ test('desktop keeps an unanswered question and its draft across older relay sync
   await form.getByRole('button', { name: 'Next', exact: true }).click();
   expect(await page.evaluate(() => (window as any).answersSent ?? [])).toEqual([]);
   await expect(page.getByText('Waiting for you', { exact: true })).toBeVisible();
+  // The sidebar shows a question instead of the spinner until the answer is sent.
+  const sidebarRow = page.locator('.conversation-item[aria-current="page"]');
+  await expect(sidebarRow.locator('.conversation-waiting')).toHaveCount(1);
+  await expect(sidebarRow.locator('.conversation-running')).toHaveCount(0);
   await form.getByRole('button', { name: 'Send answers' }).click();
   await expect(form).toHaveCount(0);
+  await expect(sidebarRow.locator('.conversation-running')).toHaveCount(1);
   await page.evaluate(() => {
     const w = window as any;
     w.emitCapability({ kind: 'text', text: 'Blue was explicitly selected.' });

@@ -271,16 +271,6 @@ pre {
 .expanded-chevron {
   transform: rotate(90deg);
 }
-.pulse-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent-strong);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  display: inline-block;
-  flex-shrink: 0;
-  animation: pulse 1.6s ease-in-out infinite;
-}
 .provider-icon {
   width: 40px;
   height: 40px;
@@ -783,8 +773,10 @@ pre {
   border-radius: var(--radius-full);
   background: var(--accent-strong);
 }
-/* A running reply spins like running calls and plan steps. */
-.conversation-item .conversation-running {
+/* A running reply spins like running calls and plan steps, and shows a question instead while
+   it waits for your answer. */
+.conversation-item .conversation-running,
+.conversation-item .conversation-waiting {
   color: var(--accent-strong);
 }
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch

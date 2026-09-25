@@ -8,8 +8,11 @@
     GitFork,
     Rewind,
     Undo2,
+    LoaderCircle,
+    MessageCircleQuestionMark,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
+  import { awaitingAnswer } from '$lib/questions';
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
@@ -110,13 +113,16 @@
           minute: '2-digit',
         })}</span
       >{#if message.status === 'running'}<span class="live-label"
-          ><i class="pulse-dot"></i>
-          {message.questions?.some((q) => q.status === 'pending') ||
-          message.elicitations?.some((q) => q.status === 'pending')
-            ? 'Waiting for you'
-            : message.compact || message.compactions?.at(-1)?.status === 'running'
+          >{#if awaitingAnswer(message)}<MessageCircleQuestionMark
+              size={13}
+              aria-hidden="true"
+            />Waiting for you{:else}<LoaderCircle
+              size={13}
+              class="spinning"
+              aria-hidden="true"
+            />{message.compact || message.compactions?.at(-1)?.status === 'running'
               ? 'Compacting context'
-              : 'Responding'}</span
+              : 'Responding'}{/if}</span
         >{/if}
     </div>
     {#if message.role === 'user'}

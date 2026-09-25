@@ -32,6 +32,7 @@
     SlidersHorizontal,
     RefreshCw,
     LoaderCircle,
+    MessageCircleQuestionMark,
     CircleStop,
     X,
     Pencil,
@@ -118,6 +119,7 @@
   import { forkConversation, forkPoint, forkFitsWorkspace } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
+  import { awaitingAnswer } from '$lib/questions';
   import {
     messageBackgroundWork,
     type BackgroundWorkEvent,
@@ -3537,7 +3539,10 @@
                             title={`Unsent draft · ${s.title}`}
                             ><PenLine size={13} aria-hidden="true" /><span>{s.title}</span></button
                           >{/each}
-                        {#each folder.conversations as c}<div class="conversation-row">
+                        {#each folder.conversations as c}{@const runningReply = c.messages.find(
+                            (m) => m.status === 'running',
+                          )}
+                          <div class="conversation-row">
                             <button
                               class="conversation-item"
                               class:current={activeId === c.id && view === 'chat'}
@@ -3565,7 +3570,11 @@
                               }}
                               title={c.title}
                               ><span>{c.title}</span
-                              >{#if c.messages.some((m) => m.status === 'running')}<LoaderCircle
+                              >{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
+                                  size={14}
+                                  class="conversation-waiting"
+                                  aria-hidden="true"
+                                />{:else if runningReply}<LoaderCircle
                                   size={14}
                                   class="spinning conversation-running"
                                   aria-hidden="true"

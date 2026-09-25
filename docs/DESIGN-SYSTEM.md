@@ -72,8 +72,11 @@ mark in the script and `BrandMark.svelte` together.
   hover and focus treatment. Checkboxes use `.checkbox`.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
-  accent bar at its left edge. A chat whose reply runs shows an accent `LoaderCircle` spinner at
-  the end of its row, the same in-progress mark as running calls and plan steps.
+  accent bar at its left edge.
+- **Live state:** a running reply shows the accent `LoaderCircle` spinner, like running calls and
+  plan steps: at the end of its sidebar row and beside Responding or Compacting context in its
+  heading. While it waits for your answer to a question or form, both show
+  `MessageCircleQuestionMark` instead.
 - **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
   `--shadow-lg`/`--shadow-xl` for popovers and menus.
 - **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded
