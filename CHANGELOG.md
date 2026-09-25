@@ -5,6 +5,35 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.3.0 - 2026-09-25
+
+Tool calls now show what ran and what came back, and each reply keeps its plan and background work in its footer row.
+
+### Added
+
+- See the command each tool call ran and what it returned: output with its exit code, standard error, numbered file contents, search matches, web page text and connected tool results
+- See the images an agent viewed or a tool returned, and open them full size
+- Give tool calls and groups icons for what they do, such as the Git logo for git commands and a flask for test runs
+- Show an edit's own diff inside its tool call
+- Keep complete tool outputs on the computer that ran the reply until their chat is deleted, without adding them to synced history
+- Show a reply's plan, workflow runs and background work as toggles beside its elapsed time
+- Count every kind of action in Work history groups, such as Read 3 files and ran 2 commands
+- Show the app version and this changelog in Settings → About
+
+### Changed
+
+- Save and load large workspaces without blocking the window
+- Look up accounts and chats faster in large workspaces
+
+### Fixed
+
+- Name new conversations with generated titles again
+- Open Connections without freezing in large workspaces
+- Keep chats responsive while the relay has nothing new
+- Keep long chats responsive while selecting text
+- Keep following background work after its reply ends
+- Mark native workflow runs with a workflow icon in the reply row
+
 ## 0.2.1 - 2026-09-24
 
 ### Fixed
