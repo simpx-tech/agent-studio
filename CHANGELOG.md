@@ -5,6 +5,38 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.4.0 - 2026-09-25
+
+Chats no longer wait for each other, and notifications now say which chat finished and what it said.
+
+### Added
+
+- Run replies in several conversations at once, including chats with the same account, and stop each one on its own
+- Send a chat's queued messages as soon as its reply finishes, even while another chat is open
+- Title notifications with their chat and show the start of the reply, the text a stopped reply had reached, the error, or the question waiting for you
+- Group History by app session, titled with the day and time Agent Studio started
+- See what each running tool call is doing, such as Running `npm test`, before it folds into its group's count
+- Move a chat to History from its sidebar row; moving the open chat opens the next Active one
+- Keep every unsent new chat as its own draft in its folder, marked with a pen until you send or discard it
+
+### Changed
+
+- Remove the "An agent is responding in another conversation" notice; the sidebar shows which chats are replying
+- Make Move to history the first action in the chat toolbar
+- Mark chats with a running reply with a spinner and the open chat with a bar
+- Show a spinner beside Responding, and a question icon and orange highlight while a reply waits for your answer
+- Show sent images above the message bubble, with thumbnails that leave out file names
+- Draw the Stop response icon as an outline like the other icons
+
+### Fixed
+
+- Show desktop notifications for a later question in a reply and for MCP input requests
+- Start new chats with the agent and account you last chose, not the account of the reply that started last
+- Stop "Cannot finish workspace save" errors when Agent Studio starts
+- Give every chat started at the same time a generated title, not only the first two
+- Return a queued message to the composer when it no longer fits the workspace, instead of dropping it
+- Keep the open chat in place when a reply finishes in another chat
+
 ## 0.3.0 - 2026-09-25
 
 Tool calls now show what ran and what came back, and each reply keeps its plan and background work in its footer row.
