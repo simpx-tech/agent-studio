@@ -767,17 +767,20 @@ pre {
   color: var(--text-faint);
 }
 .scratch-item.current > svg {
-  color: var(--accent-strong);
+  color: var(--text-secondary);
 }
-.conversation-item.current::before {
+/* The open chat or draft has an accent bar at its left edge, never a dot: a dot marks a
+   running reply. */
+.conversation-list .conversation-item.current::before,
+.conversation-list .scratch-item.current::before {
   content: '';
   position: absolute;
-  left: 13px;
+  left: 0;
   top: 50%;
-  width: 5px;
-  height: 5px;
-  margin-top: -2.5px;
-  border-radius: 50%;
+  width: 3px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: var(--radius-full);
   background: var(--accent-strong);
 }
 .conversation-item .pulse-dot {

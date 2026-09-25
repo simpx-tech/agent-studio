@@ -60,6 +60,12 @@ test('replies in different conversations run side by side and stop independently
   await expect(stop).toBeVisible();
   await expect(chat(page, 'First task').locator('.pulse-dot')).toBeVisible();
   await expect(chat(page, 'Second task').locator('.pulse-dot')).toBeVisible();
+  // The open chat is marked by a bar, so its selection never reads as another running dot.
+  const mark = await chat(page, 'Second task').evaluate((row) => {
+    const style = getComputedStyle(row, '::before');
+    return { width: parseFloat(style.width), height: parseFloat(style.height) };
+  });
+  expect(mark.height).toBeGreaterThan(mark.width * 3);
   await page.screenshot({ path: 'artifacts/concurrent-chats-browser.png' });
 
   // Stopping the open conversation leaves the other reply running.

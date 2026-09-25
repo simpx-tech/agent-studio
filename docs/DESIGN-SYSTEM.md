@@ -71,6 +71,8 @@ mark in the script and `BrandMark.svelte` together.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,
   hover and focus treatment. Checkboxes use `.checkbox`.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
+- **Selected rows:** the open chat or draft in the sidebar has the selected background and an
+  accent bar at its left edge. Dots are reserved for live state, such as a running reply.
 - **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
   `--shadow-lg`/`--shadow-xl` for popovers and menus.
 - **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded
