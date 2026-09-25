@@ -154,7 +154,7 @@ test('a sidebar row of the open chat opens the next chat, and running chats keep
   }
   await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
   expect(await activeRows(page)).toEqual(['Open chat', 'Finished chat', 'Running chat']);
-  await expect(row(page, 'Running chat').locator('.pulse-dot')).toHaveCount(1);
+  await expect(row(page, 'Running chat').locator('.conversation-running')).toHaveCount(1);
   await expect(archive(page, 'Running chat')).toHaveCount(0);
   await row(page, 'Open chat').hover();
   await archive(page, 'Open chat').click();

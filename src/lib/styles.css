@@ -769,7 +769,7 @@ pre {
 .scratch-item.current > svg {
   color: var(--text-secondary);
 }
-/* The open chat or draft has an accent bar at its left edge, never a dot: a dot marks a
+/* The open chat or draft has an accent bar at its left edge, distinct from the spinner of a
    running reply. */
 .conversation-list .conversation-item.current::before,
 .conversation-list .scratch-item.current::before {
@@ -783,9 +783,9 @@ pre {
   border-radius: var(--radius-full);
   background: var(--accent-strong);
 }
-.conversation-item .pulse-dot {
-  width: 6px;
-  height: 6px;
+/* A running reply spins like running calls and plan steps. */
+.conversation-item .conversation-running {
+  color: var(--accent-strong);
 }
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch
    screens. The title makes room for it while it shows. */

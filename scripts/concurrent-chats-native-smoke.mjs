@@ -227,7 +227,7 @@ try {
       (titles) => {
         const rows = [...document.querySelectorAll('.conversation-item')];
         return titles.map(
-          (title) => !!rows.find((e) => e.title === title)?.querySelector('.pulse-dot'),
+          (title) => !!rows.find((e) => e.title === title)?.querySelector('.conversation-running'),
         );
       },
       chats.map((c) => c.title),

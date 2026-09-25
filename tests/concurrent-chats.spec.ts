@@ -58,9 +58,9 @@ test('replies in different conversations run side by side and stop independently
   const [first, second] = await heldRuns(page);
   expect(first.conversationId).not.toBe(second.conversationId);
   await expect(stop).toBeVisible();
-  await expect(chat(page, 'First task').locator('.pulse-dot')).toBeVisible();
-  await expect(chat(page, 'Second task').locator('.pulse-dot')).toBeVisible();
-  // The open chat is marked by a bar, so its selection never reads as another running dot.
+  await expect(chat(page, 'First task').locator('.conversation-running')).toBeVisible();
+  await expect(chat(page, 'Second task').locator('.conversation-running')).toBeVisible();
+  // The open chat is marked by a bar, never a dot, beside its running spinner.
   const mark = await chat(page, 'Second task').evaluate((row) => {
     const style = getComputedStyle(row, '::before');
     return { width: parseFloat(style.width), height: parseFloat(style.height) };
@@ -74,15 +74,15 @@ test('replies in different conversations run side by side and stop independently
   expect(
     await page.evaluate(() => (window as any).cancelCalls.map((call: any) => call.runId)),
   ).toEqual([second.runId]);
-  await expect(chat(page, 'Second task').locator('.pulse-dot')).toHaveCount(0);
-  await expect(chat(page, 'First task').locator('.pulse-dot')).toBeVisible();
+  await expect(chat(page, 'Second task').locator('.conversation-running')).toHaveCount(0);
+  await expect(chat(page, 'First task').locator('.conversation-running')).toBeVisible();
 
   await chat(page, 'First task').click();
   await expect(stop).toBeVisible();
   await finish(page, first.runId, 'complete', 'First answer');
   await expect(page.getByText('First answer')).toBeVisible();
   await expect(send).toBeVisible();
-  await expect(chat(page, 'First task').locator('.pulse-dot')).toHaveCount(0);
+  await expect(chat(page, 'First task').locator('.conversation-running')).toHaveCount(0);
 });
 
 test('a chat that is not open sends its queued message when its own reply completes', async ({
@@ -120,7 +120,7 @@ test('a chat that is not open sends its queued message when its own reply comple
   });
   await expect(composer).toHaveValue('Unsent draft');
   await expect(page.getByText('Quick answer')).toBeVisible();
-  await expect(chat(page, 'Long task').locator('.pulse-dot')).toBeVisible();
+  await expect(chat(page, 'Long task').locator('.conversation-running')).toBeVisible();
 
   await chat(page, 'Long task').click();
   await expect(page.getByRole('list', { name: 'Queued messages' })).toHaveCount(0);
@@ -140,7 +140,7 @@ test('a stopped reply in a chat that is not open keeps its queue until the chat 
 
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await finish(page, reply.runId, 'cancelled');
-  await expect(chat(page, 'Task to stop').locator('.pulse-dot')).toHaveCount(0);
+  await expect(chat(page, 'Task to stop').locator('.conversation-running')).toHaveCount(0);
   expect(await runCount(page)).toBe('1');
 
   await chat(page, 'Task to stop').click();

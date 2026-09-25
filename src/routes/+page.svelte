@@ -31,6 +31,7 @@
     ChevronRight,
     SlidersHorizontal,
     RefreshCw,
+    LoaderCircle,
     CircleStop,
     X,
     Pencil,
@@ -3564,9 +3565,11 @@
                               }}
                               title={c.title}
                               ><span>{c.title}</span
-                              >{#if c.messages.some((m) => m.status === 'running')}<i
-                                  class="pulse-dot"
-                                ></i>{/if}</button
+                              >{#if c.messages.some((m) => m.status === 'running')}<LoaderCircle
+                                  size={14}
+                                  class="spinning conversation-running"
+                                  aria-hidden="true"
+                                />{/if}</button
                             >{#if !c.archived && !conversationRunning(c)}<button
                                 class="conversation-archive"
                                 title="Move to history"
