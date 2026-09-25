@@ -18,7 +18,7 @@ const allowedWorkspaceCopies: [site: string, reason: string][] = [
   ['src/lib/transport.ts › resolveRelaySettings', 'adopting the relay’s computers'],
   ['src/lib/transport.ts › localCall', 'recording an explicit Undo edits'],
   ['src/routes/+page.svelte › forkChat', 'the 20 MB limit before an explicit fork'],
-  ['src/routes/+page.svelte › send', 'the 20 MB limit, only when sending images'],
+  ['src/routes/+page.svelte › fitsWorkspace', 'the 20 MB limit, only when sending images'],
   ['src/routes/+page.svelte › exportWorkspace', 'desktop export'],
   ['src/routes/+page.svelte › exportWorkspace', 'Viewer export'],
 ];

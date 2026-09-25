@@ -12,6 +12,25 @@ const heldRuns = (page: Page) =>
   );
 const chat = (page: Page, title: string) =>
   page.locator('.conversation-item').filter({ hasText: title });
+const finish = (page: Page, runId: string, status: string, text?: string) =>
+  page.evaluate(
+    ({ runId, status, text }) => {
+      const run = (window as any).capabilityRuns[runId];
+      if (text) run.emit({ kind: 'text', text });
+      run.finish(status);
+    },
+    { runId, status, text },
+  );
+const runCount = (page: Page) => page.evaluate(() => localStorage.getItem('test-run-count'));
+// Start a reply that stays open, then queue a follow-up for it.
+async function queueDuringReply(page: Page, first: string, follow: string) {
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true });
+  await composer.fill(first);
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await composer.fill(follow);
+  await page.getByRole('button', { name: 'Queue message' }).click();
+  await expect(page.getByRole('list', { name: 'Queued messages' })).toBeVisible();
+}
 
 test('replies in different conversations run side by side and stop independently', async ({
   page,
@@ -54,26 +73,20 @@ test('replies in different conversations run side by side and stop independently
 
   await chat(page, 'First task').click();
   await expect(stop).toBeVisible();
-  await page.evaluate((runId) => {
-    const run = (window as any).capabilityRuns[runId];
-    run.emit({ kind: 'text', text: 'First answer' });
-    run.finish('complete');
-  }, first.runId);
+  await finish(page, first.runId, 'complete', 'First answer');
   await expect(page.getByText('First answer')).toBeVisible();
   await expect(send).toBeVisible();
   await expect(chat(page, 'First task').locator('.pulse-dot')).toHaveCount(0);
 });
 
-test('a queued message waits only for its own conversation', async ({ page }) => {
+test('a chat that is not open sends its queued message when its own reply completes', async ({
+  page,
+}) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
   const composer = page.getByRole('textbox', { name: 'Message', exact: true });
-  await composer.fill('Long task');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await composer.fill('Follow-up for the long task');
-  await page.getByRole('button', { name: 'Queue message' }).click();
-  await expect(page.getByRole('list', { name: 'Queued messages' })).toBeVisible();
+  await queueDuringReply(page, 'Long task', 'Follow-up for the long task');
 
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await chooseTestFolder(page);
@@ -82,25 +95,15 @@ test('a queued message waits only for its own conversation', async ({ page }) =>
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => heldRuns(page).then((runs) => runs.length)).toBe(2);
   const [long, quick] = await heldRuns(page);
-  await page.evaluate((runId) => {
-    const run = (window as any).capabilityRuns[runId];
-    run.emit({ kind: 'text', text: 'Quick answer' });
-    run.finish('complete');
-  }, quick.runId);
+  await finish(page, quick.runId, 'complete', 'Quick answer');
   await expect(page.getByText('Quick answer')).toBeVisible();
-  // The other conversation's reply is still running, so its queued message stays queued.
-  expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+  // The other conversation's reply is still running, so its queued message keeps waiting.
+  expect(await runCount(page)).toBe('2');
 
-  await chat(page, 'Long task').click();
-  const queue = page.getByRole('list', { name: 'Queued messages' });
-  await expect(queue.getByText('Follow-up for the long task')).toBeVisible();
-  await page.evaluate((runId) => {
-    const run = (window as any).capabilityRuns[runId];
-    run.emit({ kind: 'text', text: 'Long answer' });
-    run.finish('complete');
-  }, long.runId);
-  await expect(page.getByText('Long answer')).toBeVisible();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('3');
+  // Its reply completes while this chat stays open with an unsent draft.
+  await composer.fill('Unsent draft');
+  await finish(page, long.runId, 'complete', 'Long answer');
+  await expect.poll(() => runCount(page)).toBe('3');
   expect(
     await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!)),
   ).toMatchObject({
@@ -109,5 +112,35 @@ test('a queued message waits only for its own conversation', async ({ page }) =>
       expect.objectContaining({ text: 'Follow-up for the long task' }),
     ]),
   });
-  await expect(queue).toHaveCount(0);
+  await expect(composer).toHaveValue('Unsent draft');
+  await expect(page.getByText('Quick answer')).toBeVisible();
+  await expect(chat(page, 'Long task').locator('.pulse-dot')).toBeVisible();
+
+  await chat(page, 'Long task').click();
+  await expect(page.getByRole('list', { name: 'Queued messages' })).toHaveCount(0);
+  await expect(page.getByText('Long answer')).toBeVisible();
+  await expect(page.getByText('Follow-up for the long task', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+});
+
+test('a stopped reply in a chat that is not open keeps its queue until the chat is opened', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await queueDuringReply(page, 'Task to stop', 'Queued after the stop');
+  const [reply] = await heldRuns(page);
+
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await finish(page, reply.runId, 'cancelled');
+  await expect(chat(page, 'Task to stop').locator('.pulse-dot')).toHaveCount(0);
+  expect(await runCount(page)).toBe('1');
+
+  await chat(page, 'Task to stop').click();
+  await expect(page.getByRole('list', { name: 'Queued messages' })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(
+    'Queued after the stop',
+  );
+  expect(await runCount(page)).toBe('1');
 });

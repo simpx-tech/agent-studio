@@ -37,6 +37,8 @@ const chats = [
     prompt: 'Do not use any tools. Reply exactly: QUICK DONE',
   },
 ];
+// Queued in the Codex chat while it replies, then sent while another chat is open.
+const codexFollowUp = 'Do not use any tools. Reply exactly: CODEX FOLLOW-UP DONE';
 
 function launch() {
   execFileSync(
@@ -190,19 +192,22 @@ try {
       chat.title,
     );
   };
-  const send = async (chat) => {
-    await openChat(chat);
-    await page.evaluate((text) => {
+  const type = (text) =>
+    page.evaluate((text) => {
       const input = document.querySelector('[aria-label="Message"]');
       input.value = text;
       input.dispatchEvent(new Event('input', { bubbles: true }));
-    }, chat.prompt);
+    }, text);
+  const send = async (chat) => {
+    await openChat(chat);
+    await type(chat.prompt);
     await page.waitFor(
       () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
     );
     await page.button('Send message');
     chat.sentAt = Date.now();
   };
+  const text = (message) => message.blocks.map((b) => b.text ?? '').join('\n');
   const hasButton = (name) =>
     page.evaluate(
       (name) => [...document.querySelectorAll('button')].some((b) => b.innerText.trim() === name),
@@ -247,6 +252,12 @@ try {
   await waitForStop();
   // The next chats send while the long reply is still running.
   await send(codex);
+  await type(codexFollowUp);
+  await page.waitFor(
+    () => document.querySelector('[aria-label="Queue message"]')?.disabled === false,
+  );
+  await page.button('Queue message');
+  await page.waitFor(() => !!document.querySelector('[aria-label="Queued messages"]'));
   await send(quick);
   const states = await running();
   report.runningAfterSends = Object.fromEntries(chats.map((c, i) => [c.key, states[i]]));
@@ -267,23 +278,46 @@ try {
   await page.button('Stop response');
   const longReply = await settled(long, 60_000);
   assert.equal(longReply.status, 'cancelled', longReply.error);
-  const codexReply = await settled(codex);
-  assert.equal(codexReply.status, 'complete', codexReply.error);
-  assert.match(codexReply.blocks.map((b) => b.text ?? '').join('\n'), /CODEX DONE/);
-  await openChat(codex);
-  await capture('codex-finished-after-stop');
 
-  const errors = [longReply, codexReply, quickReply]
+  // With the long chat still open, the Codex reply completes and sends its queued follow-up.
+  const deadline = Date.now() + 300_000;
+  let conversation, answers;
+  for (;;) {
+    conversation = (await page.invoke('load_workspace')).conversations.find(
+      (c) => c.id === codex.id,
+    );
+    answers = conversation.messages.filter((m) => m.role === 'assistant');
+    if (answers[0]?.status && !['running', 'complete'].includes(answers[0].status)) break;
+    if (answers.length === 2 && answers[1].status !== 'running') break;
+    assert(Date.now() < deadline, 'codex: the queued follow-up did not finish');
+    await sleep(500);
+  }
+  const [codexReply, followUpReply] = answers;
+  assert.equal(codexReply.status, 'complete', codexReply.error);
+  assert.match(text(codexReply), /CODEX DONE/);
+  assert(followUpReply, 'the queued follow-up was sent');
+  assert(conversation.messages.some((m) => m.role === 'user' && text(m) === codexFollowUp));
+  assert.equal(followUpReply.status, 'complete', followUpReply.error);
+  assert.match(text(followUpReply), /CODEX FOLLOW-UP DONE/);
+  report.openWhileFollowUpSent = await page.evaluate(
+    () => document.querySelector('.conversation-item[aria-current="page"]')?.title,
+  );
+  assert.equal(report.openWhileFollowUpSent, long.title, 'the long chat stayed open');
+  await openChat(codex);
+  await capture('codex-follow-up-sent');
+
+  const errors = [longReply, codexReply, followUpReply, quickReply]
     .map((m) => m.error ?? '')
     .filter((e) => /already responding|Another response/.test(e));
   assert.deepEqual(errors, []);
-  for (const [chat, message] of [
-    [long, longReply],
-    [codex, codexReply],
-    [quick, quickReply],
+  for (const [key, provider, message] of [
+    ['long', 'claude', longReply],
+    ['codex', 'codex', codexReply],
+    ['codexFollowUp', 'codex', followUpReply],
+    ['quick', 'claude', quickReply],
   ])
-    report.chats[chat.key] = {
-      provider: chat.provider,
+    report.chats[key] = {
+      provider,
       status: message.status,
       durationMs: message.durationMs,
       error: message.error,

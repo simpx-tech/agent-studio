@@ -342,6 +342,8 @@
   let runs = $state<Record<string, string>>({});
   // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
   let queued = $state<Record<string, QueuedMessage[]>>({});
+  // Conversations whose queue waits to be opened instead of sending in the background.
+  const heldQueues = new Set<string>();
   // Steering inputs still being delivered, by run.
   let steeringPending = $state<Record<string, boolean>>({});
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
@@ -557,27 +559,24 @@
         option.connectionId === selectedSettings.connectionId,
     )?.id ?? (active ? selectedSettings.provider : ''),
   );
-  const selectedConnection = $derived(
-    workspace.fleet.connections.find((c) => c.id === selectedSettings.connectionId),
-  );
-  const selectedRemote = $derived(
-    !!selectedConnection &&
-      executionHost(workspace.fleet, selectedConnection.environmentId) !== installation?.id,
-  );
-  const selectedStatus = $derived(
-    selectedSettings.connectionId
-      ? selectedRemote
+  // A chat's account connection, whether another computer runs it, and its reported status.
+  function replyConnection(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
+    const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
+    const host = connection && executionHost(workspace.fleet, connection.environmentId);
+    const remote = !!connection && host !== installation?.id;
+    const status = settings.connectionId
+      ? remote
         ? presence
-            .find(
-              (p) =>
-                p.environmentId ===
-                  executionHost(workspace.fleet, selectedConnection?.environmentId ?? '') &&
-                p.online,
-            )
-            ?.connections.find((c) => c.connectionId === selectedSettings.connectionId)
-        : connectionStatuses[selectedSettings.connectionId]
-      : statusFor(selectedSettings.provider),
-  );
+            .find((p) => p.environmentId === host && p.online)
+            ?.connections.find((c) => c.connectionId === settings.connectionId)
+        : connectionStatuses[settings.connectionId]
+      : statusFor(settings.provider);
+    return { connection, remote, status };
+  }
+  const selectedReplyConnection = $derived(replyConnection(selectedSettings));
+  const selectedConnection = $derived(selectedReplyConnection.connection);
+  const selectedRemote = $derived(selectedReplyConnection.remote);
+  const selectedStatus = $derived(selectedReplyConnection.status);
 
   const selectedUsageKey = $derived(usageKey(selectedSettings));
   const selectedUsage = $derived(snapshotFor(usageSnapshots, selectedSettings));
@@ -977,6 +976,7 @@
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
               queued = {};
+              heldQueues.clear();
               resetDrafts();
               forking = false;
               const previousView = view;
@@ -1980,6 +1980,7 @@
     revealConversation(c);
     locationPending = false;
     activeId = c.id;
+    heldQueues.delete(c.id);
     switchDraft(draftKey.chat(c.id));
     editorOpen = false;
     contextOpen = false;
@@ -2409,6 +2410,71 @@
       } else if (failed) returnQueuedToDraft(id);
     });
   });
+  // Conversations that are not open send their next queued message once their reply completes.
+  // Anything else keeps the queue until the conversation is opened: a stopped or failed reply
+  // returns it to the draft there, and the composer explains changed mentions or a full workspace.
+  $effect(() => {
+    const open = activeId;
+    const ready = Object.keys(queued).filter((id) => {
+      if (id === open || heldQueues.has(id)) return false;
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      const next = queued[id]?.[0];
+      const last = conversation?.messages.at(-1);
+      return (
+        !!conversation &&
+        !!next &&
+        last?.role === 'assistant' &&
+        last.status === 'complete' &&
+        (!next.mentions?.length ||
+          next.mentionConnectionId === conversation.settings.connectionId) &&
+        canSendQueued(conversation)
+      );
+    });
+    if (ready.length) untrack(() => ready.forEach(sendQueued));
+  });
+  // The composer's checks for a saved conversation, without the composer's own state.
+  function canSendQueued(conversation: Conversation) {
+    const { settings, location } = conversation;
+    const target = replyConnection(settings);
+    return (
+      loaded &&
+      !conversationRunning(conversation) &&
+      !stopping[conversation.id] &&
+      (!location ||
+        !!settings.connectionId ||
+        executionHost(workspace.fleet, location.environmentId) === installation?.id) &&
+      (!location?.path ||
+        locationConnections(workspace.fleet, location).some(
+          (c) => c.id === settings.connectionId,
+        )) &&
+      (desktop() || paired) &&
+      (desktop() || online) &&
+      (!target.remote || (paired && !syncError)) &&
+      !!target.status?.installed &&
+      target.status.auth === 'ready'
+    );
+  }
+  function sendQueued(id: string) {
+    const conversation = workspace.conversations.find((c) => c.id === id);
+    const [next, ...rest] = queued[id] ?? [];
+    if (!conversation || !next) return;
+    if (!fitsWorkspace(next.text, next.images)) {
+      heldQueues.add(id);
+      return;
+    }
+    if (rest.length) queued[id] = rest;
+    else delete queued[id];
+    const now = new Date().toISOString();
+    if (conversation.archived) conversation.archived = false;
+    delete conversation.rewind;
+    addUserMessage(conversation, next, now);
+    const { provider, model } = conversation.settings;
+    const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
+    void startReply(conversation, {
+      now,
+      modelName: selectedModelName(model, modelChoices(catalog, provider, model)),
+    });
+  }
   async function steer() {
     if (!canSteer || !observedReply?.runId) return;
     const reply = observedReply,
@@ -2489,15 +2555,16 @@
       return;
     }
     if (!canSend || (!retry && !text && !images.length)) return;
-    if (!retry && images.length) {
-      // Keep the draft intact when the portable workspace cannot fit the images.
-      const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
-      const addition = new TextEncoder().encode(JSON.stringify($state.snapshot(images))).length;
-      if (bytes + addition + text.length * 4 + 64000 > 20_000_000) {
-        attachmentError =
-          'The saved workspace is nearly full (20 MB). Export and delete older chats, or remove an attachment before sending.';
-        return;
+    // Keep the draft intact when the portable workspace cannot fit the images.
+    if (!retry && !fitsWorkspace(text, images)) {
+      // A queued message returns to the composer with the rest of its queue.
+      if (queuedMessage && activeId) {
+        queued[activeId] = [queuedMessage, ...(queued[activeId] ?? [])];
+        returnQueuedToDraft(activeId);
       }
+      attachmentError =
+        'The saved workspace is nearly full (20 MB). Export and delete older chats, or remove an attachment before sending.';
+      return;
     }
     nearBottom = true;
     const now = new Date().toISOString();
@@ -2542,21 +2609,7 @@
       } else conversation.messages.pop();
     }
     if (!retry) {
-      conversation.messages.push({
-        id: crypto.randomUUID(),
-        role: 'user',
-        ...(skills?.length ? { skills } : {}),
-        ...(mentions?.length ? { mentions } : {}),
-        blocks: [
-          {
-            type: 'markdown',
-            text,
-          },
-        ],
-        ...(images.length ? { images: structuredClone($state.snapshot(images)) } : {}),
-        status: 'complete',
-        createdAt: now,
-      });
+      addUserMessage(conversation, { text, images, skills, mentions }, now);
       if (!queuedMessage && !compactRequest) {
         prompt = '';
         clearImages();
@@ -2565,6 +2618,56 @@
     }
     // A new conversation's composer continues as that conversation's draft.
     if (isNewConversation) composerDraftKey = draftKey.chat(conversation.id);
+    await startReply(conversation, {
+      now,
+      modelName: selectedModelName(conversation.settings.model, availableModels),
+      compact,
+      created: isNewConversation,
+      remember: true,
+    });
+  }
+  // Whether the portable workspace can take a message with these images.
+  function fitsWorkspace(text: string, images: ChatImage[]) {
+    if (!images.length) return true;
+    const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
+    const addition = new TextEncoder().encode(JSON.stringify($state.snapshot(images))).length;
+    return bytes + addition + text.length * 4 + 64000 <= 20_000_000;
+  }
+  function addUserMessage(
+    conversation: Conversation,
+    input: Pick<QueuedMessage, 'text' | 'images' | 'skills' | 'mentions'>,
+    now: string,
+  ) {
+    conversation.messages.push({
+      id: crypto.randomUUID(),
+      role: 'user',
+      ...(input.skills?.length ? { skills: input.skills } : {}),
+      ...(input.mentions?.length ? { mentions: input.mentions } : {}),
+      blocks: [
+        {
+          type: 'markdown',
+          text: input.text,
+        },
+      ],
+      ...(input.images.length ? { images: structuredClone($state.snapshot(input.images)) } : {}),
+      status: 'complete',
+      createdAt: now,
+    });
+  }
+  // Answer the conversation's latest messages and follow the reply until it ends. A reply sent
+  // from the queue of a conversation that is not open leaves remembered choices unchanged.
+  async function startReply(
+    conversation: Conversation,
+    options: {
+      now: string;
+      modelName: string;
+      compact?: boolean;
+      created?: boolean;
+      remember?: boolean;
+    },
+  ) {
+    const { now, compact } = options;
+    const session = workspaceSession;
     const history = historyFor(conversation);
     const assistantId = crypto.randomUUID();
     const responseSettings = structuredClone($state.snapshot(conversation.settings));
@@ -2578,12 +2681,12 @@
           !!m.settings?.connectionId &&
           m.settings.connectionId !== responseSettings.connectionId,
       );
-    rememberSettings(workspace.preferences, responseSettings);
+    if (options.remember) rememberSettings(workspace.preferences, responseSettings);
     conversation.messages.push({
       id: assistantId,
       role: 'assistant',
       settings: responseSettings,
-      modelName: selectedModelName(responseSettings.model, availableModels),
+      modelName: options.modelName,
       executionLabel: responseSettings.connectionId
         ? connectionLabel(workspace.fleet, responseSettings.connectionId)
         : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
@@ -2602,7 +2705,7 @@
     try {
       await persist();
       if (session !== workspaceSession) return;
-      if (isNewConversation)
+      if (options.created)
         void nameConversation(
           conversation.id,
           responseSettings.provider,
@@ -2692,7 +2795,7 @@
           delete stopping[conversation.id];
         }
         saveSoon();
-        void scrollToEnd();
+        if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
       }
     }
