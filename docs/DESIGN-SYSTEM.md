@@ -65,6 +65,9 @@ mark in the script and `BrandMark.svelte` together.
 
 - **Buttons:** `.primary` (accent fill), `.secondary` (raised neutral), `.danger` (solid red for
   confirmed destruction), `.text-button` (inline action), `.icon-button` (32px ghost).
+- **Icons:** Lucide outlines at their default stroke; never fill a glyph for emphasis. Choose one
+  that stays clear as an outline: Stop response uses `CircleStop`, because an outlined square
+  reads as an unchecked checkbox.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,
   hover and focus treatment. Checkboxes use `.checkbox`.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.

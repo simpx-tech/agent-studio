@@ -31,7 +31,7 @@
     ChevronRight,
     SlidersHorizontal,
     RefreshCw,
-    Square,
+    CircleStop,
     X,
     Pencil,
     Check,
@@ -4148,7 +4148,7 @@
                     type="button"
                     onclick={stop}
                     disabled={activeStopping}
-                    ><Square size={12} fill="currentColor" />{activeStopping
+                    ><CircleStop size={16} />{activeStopping
                       ? 'Stopping…'
                       : 'Stop response'}</button
                   ><button
