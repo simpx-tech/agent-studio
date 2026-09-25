@@ -87,9 +87,10 @@ with the old key that contains the new public key, and switch the secret afterwa
    `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security` groups, and `- ` items, newest
    first. Unit tests reject any other format and require the newest section to match the app
    version.
-3. Run the local pipeline, commit, and merge to `main`.
-4. The [Desktop builds workflow](../.github/workflows/desktop-build.yml) verifies the app, builds
-   and signs every platform, then the **Publish release** job checks signatures and versions and
+3. Run the local pipeline, commit, and merge to `main`. The workflow runs no tests, so this is the
+   only verification before the release is published.
+4. The [Desktop builds workflow](../.github/workflows/desktop-build.yml) builds and signs every
+   platform, then the **Publish release** job checks signatures and versions and
    creates the release `v<version>` with the installers, their `.sig` files, and `latest.json`.
    The release notes, on GitHub and in the app's update details, are the version's
    `CHANGELOG.md` section as plain text (`node scripts/release.ts notes`). `gh` keeps the release

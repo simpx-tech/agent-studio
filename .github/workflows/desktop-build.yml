@@ -1,11 +1,9 @@
 name: Desktop builds
 
-# Hosted runs are reserved for the production branch; development relies on the local
-# pipeline documented in docs/DEVELOPMENT.md. Manual dispatch remains available for any branch.
+# Hosted runs only package and publish releases from the production branch and run no tests;
+# the local pipeline documented in docs/DEVELOPMENT.md verifies every push.
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -17,52 +15,11 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  verify:
-    name: Verify application
-    runs-on: windows-latest
-    timeout-minutes: 45
-    env:
-      STUDIO_TEST_PORT: '1447'
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-          cache: npm
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        with:
-          workspaces: src-tauri -> target
-          key: verify
-          cache-on-failure: true
-      - run: npm ci
-      - name: Install test browser
-        run: npx playwright install msedge
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
-      - name: Initialize native fixture shell
-        shell: powershell
-        run: Write-Output 'Native fixture shell ready'
-      # Native fixtures spawn PowerShell children with bounded startup waits.
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-      # Run browser checks after native compilation and the frontend build.
-      - run: npm run verify
-      - name: Retain failed browser traces
-        if: failure()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: browser-traces-${{ github.sha }}
-          path: test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
   build:
     name: Build ${{ matrix.name }}
-    # A merge updates main via a push, covering merge, squash, and rebase merges.
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # A merge updates main via a push, covering merge, squash, and rebase merges. Manual runs on
+    # other branches build nothing.
+    if: github.ref == 'refs/heads/main'
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -145,10 +102,10 @@ jobs:
 
   release:
     name: Publish release
-    # Publish only after verification and every platform build succeed. The production VPS
-    # installs each published release by itself; see docs/DEPLOYMENT.md.
-    needs: [verify, build]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Publish only after every platform build succeeds. The production VPS installs each
+    # published release by itself; see docs/DEPLOYMENT.md.
+    needs: [build]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
