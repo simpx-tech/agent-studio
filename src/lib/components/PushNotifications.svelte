@@ -228,8 +228,9 @@
   {#if error}<p role="alert">{error}</p>{/if}
   {#if feedback}<p role="status">{feedback}</p>{/if}
   <p class="notification-privacy">
-    Alerts do not include chat text or titles. Keep Agent Studio open on the computer running your
-    agents.
+    Alerts show the chat’s title and the start of its reply; your phone’s notification preview
+    settings decide whether that text shows on the lock screen. Keep Agent Studio open on the
+    computer running your agents.
   </p>
 </section>
 

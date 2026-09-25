@@ -1,7 +1,8 @@
 import type { Workspace } from './domain';
-import { attentionKeys, type PushNotice } from './notifications';
+import { attentionKeys, chatNotification, type PushNotice } from './notifications';
 
-// Snapshots contain only run identities and lifecycle flags, never message text.
+// Snapshots contain only run identities and lifecycle flags, never message text; each
+// notice carries its chat's title and a line about the reply.
 // The first snapshot is a baseline so opening saved history cannot ring the bell.
 export function createDesktopNotificationTracker(now = Date.now) {
   let ready = false;
@@ -18,18 +19,21 @@ export function createDesktopNotificationTracker(now = Date.now) {
       const created = Date.parse(message.createdAt);
       const fresh = created >= started && created <= now() && now() - created < 300_000;
       if (ready && (old || fresh)) {
-        if (terminal && !old?.terminal)
+        if (terminal && !old?.terminal) {
+          const kind = message.status as 'complete' | 'cancelled' | 'error';
           notices.push({
-            kind: message.status as 'complete' | 'cancelled' | 'error',
+            kind,
             conversationId: conversation.id,
             tag: `${message.runId}:terminal`,
+            ...chatNotification(kind, conversation, message),
           });
-        else if (!terminal && !old?.terminal)
+        } else if (!terminal && !old?.terminal)
           for (const key of attention.filter((key) => !old?.attention.has(key)))
             notices.push({
               kind: 'attention',
               conversationId: conversation.id,
               tag: `${message.runId}:${key}`,
+              ...chatNotification('attention', conversation, message, key),
             });
       }
       runs.set(message.runId, {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import webpush from 'web-push';
 import { pushService, validPushEndpoint } from '../../relay/push';
 import { createRelay } from '../../relay/server';
-import { emptyShared } from './sync';
+import { emptyShared, type RelayJob } from './sync';
 import type { Message } from './domain';
 import { notificationConversation, requestsAttention } from './notifications';
 
@@ -32,6 +32,7 @@ function fixture() {
   const send = vi.fn(async (_subscription: webpush.PushSubscription, _payload: string) => {});
   let pending = 0;
   const active = new Set(['session']);
+  const titles = new Map<string, string>();
   const args = {
     directory,
     token: 'synthetic-notification-pairing-key',
@@ -39,6 +40,7 @@ function fixture() {
     sessionActive: (id: string) => active.has(id),
     send,
     pendingCount: () => pending,
+    conversationTitle: (id: string) => titles.get(id),
   };
   let service = pushService(args);
   const device = subscription();
@@ -49,6 +51,7 @@ function fixture() {
     },
     send,
     active,
+    titles,
     device,
     directory,
     restart: (token = args.token) => (service = pushService({ ...args, token })),
@@ -153,7 +156,7 @@ function workspace(status: Message['status'] = 'running') {
   const value = emptyShared();
   value.conversations.push({
     id: crypto.randomUUID(),
-    title: 'Secret project name',
+    title: 'Release checklist',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
@@ -164,11 +167,30 @@ function workspace(status: Message['status'] = 'running') {
         role: 'assistant',
         status,
         createdAt: new Date().toISOString(),
-        blocks: [{ type: 'markdown', text: 'Private reply content?' }],
+        blocks: [{ type: 'markdown', text: 'Ready to ship **today**?' }],
       },
     ],
   });
   return value;
+}
+function runJob(
+  conversationId: string,
+  status: RelayJob['status'],
+  events: unknown[],
+  error?: string,
+): RelayJob {
+  const id = crypto.randomUUID();
+  return {
+    id,
+    source: crypto.randomUUID(),
+    target: crypto.randomUUID(),
+    method: 'run',
+    status,
+    cancel: false,
+    events,
+    ...(error ? { error } : {}),
+    args: { request: { runId: id, conversationId } },
+  };
 }
 it('notifies once for a finished local reply, never replays history, and persists identity/dedup across restart', async () => {
   const f = fixture();
@@ -179,9 +201,13 @@ it('notifies once for a finished local reply, never replays history, and persist
   expect(f.send).not.toHaveBeenCalled();
   f.service.changed(running, done);
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
-  const serialized = JSON.stringify(f.send.mock.calls);
-  expect(serialized).not.toContain('Private reply');
-  expect(serialized).not.toContain('Secret project');
+  // The alert names its chat and starts with the reply, as plain text.
+  expect(JSON.parse(f.send.mock.calls[0][1])).toMatchObject({
+    kind: 'complete',
+    conversationId: done.conversations[0].id,
+    title: 'Release checklist',
+    body: 'Ready to ship today?',
+  });
   const before = f.service.status('session').publicKey;
   f.restart();
   expect(f.service.status('session').publicKey).toBe(before);
@@ -192,9 +218,61 @@ it('notifies once for a finished local reply, never replays history, and persist
   f.service.changed(emptyShared(), history);
   await f.service.drain();
   expect(f.send).toHaveBeenCalledTimes(1);
+  // Only undelivered alerts keep their text, in the retry queue.
   const data = readFileSync(join(f.directory, 'web-push.json'), 'utf8');
-  expect(data).not.toContain('Private reply');
+  expect(data).not.toContain('Ready to ship');
   expect(data).not.toContain('synthetic-notification-pairing-key');
+});
+it('describes remote jobs from their events when they end before the final checkpoint', async () => {
+  const f = fixture();
+  const conversationId = crypto.randomUUID();
+  f.titles.set(conversationId, 'Phone chat');
+  const sent = () => JSON.parse(f.send.mock.calls.at(-1)![1]);
+  f.service.jobUpdated(
+    runJob(conversationId, 'complete', [
+      { kind: 'progress', id: 'p1', revision: 1, text: 'Looking at the relay.' },
+      { kind: 'text', text: '## Done\nThe **phone** alert names its chat.' },
+    ]),
+  );
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  expect(sent()).toMatchObject({
+    kind: 'complete',
+    conversationId,
+    title: 'Phone chat',
+    body: 'Done: The phone alert names its chat.',
+  });
+  f.service.jobUpdated(
+    runJob(conversationId, 'cancelled', [
+      { kind: 'progress', id: 'p1', revision: 2, text: 'Editing `push.ts`' },
+      { kind: 'text', text: 42 },
+    ]),
+  );
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  expect(sent()).toMatchObject({ kind: 'cancelled', body: 'Stopped: Editing push.ts' });
+  // Expired jobs fail with the relay's own error; a deleted chat keeps a generic title.
+  f.service.jobUpdated(
+    runJob(crypto.randomUUID(), 'error', [], 'Error: The execution environment disconnected.'),
+  );
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+  expect(sent()).toMatchObject({
+    title: 'Your agent needs attention',
+    body: 'Failed: The execution environment disconnected.',
+  });
+  const question = {
+    id: crypto.randomUUID(),
+    revision: 1,
+    status: 'pending',
+    questions: [
+      { id: 'q', header: 'Branch', question: 'Which branch?', options: [], multiSelect: false },
+    ],
+  };
+  f.service.jobUpdated(runJob(conversationId, 'running', [{ kind: 'question', question }]));
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(4));
+  expect(sent()).toMatchObject({
+    kind: 'attention',
+    title: 'Phone chat',
+    body: 'Question: Which branch?',
+  });
 });
 it('recognizes only explicit parent question tools and deduplicates job and workspace notifications', async () => {
   const f = fixture(),

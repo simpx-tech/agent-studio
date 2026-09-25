@@ -12,10 +12,17 @@ import { join } from 'node:path';
 import webpush from 'web-push';
 import { z } from 'zod';
 import type { SharedWorkspace, RelayJob } from '../src/lib/sync.ts';
+import type { Message } from '../src/lib/domain.ts';
 import { toolActivitySchema } from '../src/lib/activity.ts';
-import { attentionKeys, requestsAttention, type PushNotice } from '../src/lib/notifications.ts';
-import { questionRequestSchema } from '../src/lib/questions.ts';
-import { elicitationReceiptSchema } from '../src/lib/elicitations.ts';
+import {
+  attentionKeys,
+  chatNotification,
+  requestsAttention,
+  type PushNotice,
+} from '../src/lib/notifications.ts';
+import { questionRequestSchema, type QuestionRequest } from '../src/lib/questions.ts';
+import { elicitationReceiptSchema, type ElicitationReceipt } from '../src/lib/elicitations.ts';
+import { proposedPlanSchema, type ProposedPlan } from '../src/lib/proposed-plans.ts';
 
 const day = 24 * 60 * 60 * 1000;
 // Browser-supplied endpoints must never turn the relay into an HTTP proxy.
@@ -54,6 +61,9 @@ const noticeSchema = z.object({
   kind: z.enum(['complete', 'attention', 'error', 'cancelled', 'test']),
   conversationId: z.string().uuid().optional(),
   tag: z.string().max(100),
+  // Bounded by chatNotification in code points; these limits count UTF-16 units.
+  title: z.string().max(200).optional(),
+  body: z.string().max(400).optional(),
 });
 const subscriberSchema = z.object({
   id: z.string().uuid(),
@@ -85,6 +95,39 @@ const diskSchema = z.object({
     .max(4000),
 });
 type State = z.infer<typeof diskSchema>;
+type Reply = Parameters<typeof chatNotification>[2];
+
+// A job can end before the execution host's final checkpoint reaches the relay. Its retained
+// events hold the current answer (each text event repeats all of it), progress comments,
+// proposed plans and any error.
+function jobReply(
+  job: RelayJob,
+  questions: QuestionRequest[],
+  elicitations: ElicitationReceipt[],
+): Reply {
+  const blocks: Message['blocks'] = [];
+  const proposedPlans: ProposedPlan[] = [];
+  let answer = '';
+  let error = job.error;
+  for (const event of job.events) {
+    const value = event as { kind?: unknown; id?: unknown; text?: unknown; proposedPlan?: unknown };
+    if (value?.kind === 'proposedplan') {
+      const plan = proposedPlanSchema.safeParse(value.proposedPlan);
+      if (plan.success) proposedPlans.push(plan.data);
+    } else if (typeof value?.text === 'string') {
+      if (value.kind === 'text') answer = value.text;
+      else if (value.kind === 'progress' && typeof value.id === 'string')
+        blocks.push({
+          type: 'activity',
+          text: value.text,
+          progress: { id: value.id, revision: 0 },
+        });
+      else if (value.kind === 'error') error ??= value.text;
+    }
+  }
+  if (answer) blocks.push({ type: 'markdown', text: answer });
+  return { blocks, error, questions, elicitations, proposedPlans };
+}
 export type PushSender = (
   subscription: webpush.PushSubscription,
   payload: string,
@@ -98,6 +141,7 @@ export function pushService({
   sessionActive,
   send = webpush.sendNotification,
   pendingCount,
+  conversationTitle = () => undefined,
   active = () => true,
 }: {
   directory: string;
@@ -106,6 +150,8 @@ export function pushService({
   sessionActive: (session: string) => boolean;
   send?: PushSender;
   pendingCount?: () => number;
+  // A job reports its run's events but not the title of the chat it belongs to.
+  conversationTitle?: (conversationId: string) => string | undefined;
   active?: () => boolean;
 }) {
   const file = join(directory, 'web-push.json');
@@ -309,12 +355,28 @@ export function pushService({
           continue;
         const base = { conversationId: conversation.id, tag: `studio-${message.runId}` };
         if (message.status !== 'running' && (!old || old.status === 'running'))
-          enqueue(next, { ...base, kind: message.status }, `${message.runId}:terminal`);
+          enqueue(
+            next,
+            {
+              ...base,
+              kind: message.status,
+              ...chatNotification(message.status, conversation, message),
+            },
+            `${message.runId}:terminal`,
+          );
         else if (message.status === 'running')
           for (const key of attentionKeys(message).filter(
             (key) => !old || !attentionKeys(old).includes(key),
           ))
-            enqueue(next, { ...base, kind: 'attention' }, `${message.runId}:${key}`);
+            enqueue(
+              next,
+              {
+                ...base,
+                kind: 'attention',
+                ...chatNotification('attention', conversation, message, key),
+              },
+              `${message.runId}:${key}`,
+            );
       }
       save(next);
       void drain();
@@ -372,6 +434,8 @@ export function pushService({
       if (!kind) return;
       try {
         const next = pruned();
+        const conversation = { title: conversationTitle(request.data.conversationId) ?? '' };
+        const reply = jobReply(job, questions, elicitations);
         for (const key of kind === 'attention'
           ? questions.length || elicitations.length
             ? attentionKeys({ blocks: [], questions, elicitations })
@@ -379,7 +443,12 @@ export function pushService({
           : ['terminal'])
           enqueue(
             next,
-            { kind, conversationId: request.data.conversationId, tag: `studio-${job.id}` },
+            {
+              kind,
+              conversationId: request.data.conversationId,
+              tag: `studio-${job.id}`,
+              ...chatNotification(kind, conversation, reply, key),
+            },
             `${job.id}:${key}`,
           );
         save(next);

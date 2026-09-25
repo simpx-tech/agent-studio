@@ -119,7 +119,7 @@ test('desktop defaults on, retains mute and disable, notifies for questions and 
   await expect(page.getByLabel('Play the Agent Studio chime')).not.toBeChecked();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await chooseTestFolder(page);
-  await page.getByRole('textbox', { name: 'Message' }).fill('Private test question');
+  await page.getByRole('textbox', { name: 'Message' }).fill('Plan the release checklist');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect
     .poll(() => page.evaluate(() => typeof (window as any).emitCapability))
@@ -139,10 +139,25 @@ test('desktop defaults on, retains mute and disable, notifies for questions and 
     }),
   );
   await expect.poll(notices).toHaveLength(2);
-  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await page.evaluate(() => {
+    (window as any).emitCapability({ kind: 'text', text: 'The **checklist** is ready.' });
+    (window as any).finishCapabilities('complete');
+  });
   await expect.poll(notices).toHaveLength(3);
-  expect((await notices()).map((n: any) => n.kind)).toEqual(['test', 'attention', 'complete']);
-  expect(JSON.stringify(await notices())).not.toContain('Private');
+  // Each alert names its chat (the first message until a title is generated) and says
+  // what the reply did; a question tool without a recorded question keeps generic text.
+  const [test, attention, complete] = await notices();
+  expect(test).toEqual({ kind: 'test', tag: expect.stringMatching(/^test:/) });
+  expect(attention).toMatchObject({
+    kind: 'attention',
+    title: 'Plan the release checklist',
+    body: 'Your agent asked for your input.',
+  });
+  expect(complete).toMatchObject({
+    kind: 'complete',
+    title: 'Plan the release checklist',
+    body: 'The checklist is ready.',
+  });
   await page.reload();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Disable notifications', exact: true }).click();

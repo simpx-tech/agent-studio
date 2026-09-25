@@ -7,7 +7,8 @@ const name = `agent-studio-shell-${version}`;
 const assets = new Set([...build, ...files, '/']);
 worker.addEventListener('push', (event) => {
   // Every accepted push produces a visible notification, including in foreground
-  // (required by Safari's userVisibleOnly contract). Never include reply text.
+  // (required by Safari's userVisibleOnly contract). It shows the chat's title and a
+  // line about its reply as plain text, or generic text when the relay sent none.
   let notice: PushNotice = { kind: 'complete', tag: 'studio-reply' };
   try {
     const value = event.data?.json();
@@ -17,6 +18,8 @@ worker.addEventListener('push', (event) => {
         notice.conversationId = value.conversationId;
       if (Number.isSafeInteger(value.pendingCount) && value.pendingCount >= 0)
         notice.pendingCount = value.pendingCount;
+      if (typeof value.title === 'string') notice.title = value.title;
+      if (typeof value.body === 'string') notice.body = value.body;
     }
   } catch {
     /* A payload-less push still needs a visible notification. */

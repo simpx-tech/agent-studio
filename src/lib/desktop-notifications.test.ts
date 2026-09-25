@@ -69,6 +69,30 @@ it('notifies for explicit parent questions once, then completion, but never chil
   c.messages[0].status = 'complete';
   expect(observe({ conversations: [c] }).map((n) => n.kind)).toEqual(['complete']);
 });
+it('names the chat and starts with its reply in each notice', () => {
+  const observe = createDesktopNotificationTracker(() => time);
+  observe({ conversations: [] });
+  const c = chat();
+  c.title = 'Fix the login flow';
+  question(c);
+  const [attention] = observe({ conversations: [c] });
+  expect(attention).toMatchObject({
+    kind: 'attention',
+    title: 'Fix the login flow',
+    body: 'Your agent asked for your input.',
+  });
+  c.messages[0].blocks.push({ type: 'markdown', text: 'The **session** now survives reloads.' });
+  c.messages[0].status = 'complete';
+  expect(observe({ conversations: [c] })).toEqual([
+    {
+      kind: 'complete',
+      conversationId: c.id,
+      tag: `${c.messages[0].runId}:terminal`,
+      title: 'Fix the login flow',
+      body: 'The session now survives reloads.',
+    },
+  ]);
+});
 it('handles fast remote completion without a running checkpoint and excludes future timestamps', () => {
   const observe = createDesktopNotificationTracker(() => time);
   observe({ conversations: [] });

@@ -106,7 +106,12 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
       state.conversations[1].messages[0].status = 'complete';
     });
     await expect.poll(() => deliveries.length).toBe(1);
-    expect(deliveries[0]).toMatchObject({ kind: 'complete', conversationId: otherId });
+    expect(deliveries[0]).toMatchObject({
+      kind: 'complete',
+      conversationId: otherId,
+      title: 'Other chat',
+      body: 'Working',
+    });
     await expect(composer).toHaveValue('Preserve my draft');
 
     await page.screenshot({ path: testInfo.outputPath('foreground-chat.png') });
@@ -119,7 +124,12 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
       message.status = 'error';
     });
     await expect.poll(() => deliveries.length).toBe(2);
-    expect(deliveries[1]).toMatchObject({ kind: 'error', conversationId: id });
+    expect(deliveries[1]).toMatchObject({
+      kind: 'error',
+      conversationId: id,
+      title: 'Viewed chat',
+      body: 'The reply could not finish.',
+    });
     expect(deliveries).toHaveLength(2);
   } finally {
     server.closeAllConnections();
@@ -280,14 +290,15 @@ test('mobile opts in, receives a real worker push without an app page, opens its
       data: JSON.stringify({ kind: 'test', tag: 'qa-zero-badge', pendingCount: 0 }),
     });
     await expect.poll(() => worker.evaluate(() => (self as any).qaBadgeCount)).toBe(0);
+    // The worker shows the chat's title and the start of its reply.
     await expect
       .poll(async () =>
         worker.evaluate(async () => {
           const worker = self as unknown as ServiceWorkerGlobalScope;
-          return (await worker.registration.getNotifications()).map((n) => n.title);
+          return (await worker.registration.getNotifications()).map((n) => [n.title, n.body]);
         }),
       )
-      .toContain('Reply ready');
+      .toContainEqual(['Notification test chat', 'The requested work is complete.']);
     // Cold-start deep link waits for workspace restoration and opens the reply.
     await page.goto(`${url}/#conversation=${id}`);
     await expect(page.getByText('The requested work is complete.', { exact: true })).toBeVisible();

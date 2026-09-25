@@ -1,4 +1,5 @@
-//! Device-local notifications. No chat text, CLI data, or user-supplied sound paths.
+//! Device-local notifications: the chat's title and a plain line about its reply, prepared by
+//! the page. No CLI data or user-supplied sound paths.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -48,7 +49,14 @@ pub struct Notice {
     kind: Kind,
     conversation_id: Option<String>,
     tag: String,
+    // The chat's title and a line about its reply (`chatNotification` in the page). Without
+    // them the notice shows the generic text of its kind.
+    title: Option<String>,
+    body: Option<String>,
 }
+// In characters, as in the page, which already cut the text at a word.
+const TITLE_LIMIT: usize = 80;
+const BODY_LIMIT: usize = 180;
 #[derive(Clone, Copy, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
@@ -61,51 +69,90 @@ enum Kind {
 impl Notice {
     fn validate(&self) -> Result<(), String> {
         let (id, event) = self.tag.split_once(':').ok_or("Invalid notification")?;
-        let valid = if self.kind == Kind::Test {
-            id == "test" && uuid::Uuid::parse_str(event).is_ok() && self.conversation_id.is_none()
-        } else {
-            uuid::Uuid::parse_str(id).is_ok()
-                && event
-                    == if self.kind == Kind::Attention {
-                        "attention"
+        let bounded = self.title.as_ref().is_none_or(|t| t.len() <= 1_000)
+            && self.body.as_ref().is_none_or(|b| b.len() <= 2_000);
+        let valid = bounded
+            && if self.kind == Kind::Test {
+                id == "test"
+                    && uuid::Uuid::parse_str(event).is_ok()
+                    && self.conversation_id.is_none()
+                    && self.title.is_none()
+                    && self.body.is_none()
+            } else {
+                uuid::Uuid::parse_str(id).is_ok()
+                    && if self.kind == Kind::Attention {
+                        // `attentionKeys` in the page: the first question call, then later
+                        // calls and MCP input requests by their UUID.
+                        event == "attention"
+                            || event
+                                .strip_prefix("attention:")
+                                .or_else(|| event.strip_prefix("elicitation:"))
+                                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
                     } else {
-                        "terminal"
+                        event == "terminal"
                     }
-                && self
-                    .conversation_id
-                    .as_deref()
-                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-        };
+                    && self
+                        .conversation_id
+                        .as_deref()
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            };
         if valid {
             Ok(())
         } else {
             Err("Invalid notification".into())
         }
     }
-    fn content(&self) -> (&'static str, &'static str) {
-        match self.kind {
-            Kind::Complete => (
-                "Reply ready",
-                "Your agent finished its reply. Open Agent Studio to read it or answer a question.",
-            ),
+    fn content(&self) -> (String, String) {
+        let (title, body) = match self.kind {
+            Kind::Complete => ("Reply ready", "Your agent finished its reply."),
             Kind::Attention => (
                 "Your attention is needed",
-                "Your agent asked for your input. Open Agent Studio to continue.",
+                "Your agent asked for your input.",
             ),
-            Kind::Error => (
-                "Your agent needs attention",
-                "A reply could not finish. Open Agent Studio for details.",
-            ),
-            Kind::Cancelled => (
-                "Your agent stopped",
-                "The reply was stopped. Open Agent Studio to review its progress.",
-            ),
+            Kind::Error => ("Your agent needs attention", "The reply could not finish."),
+            Kind::Cancelled => ("Your agent stopped", "The reply was stopped."),
             Kind::Test => (
                 "Notifications are ready",
                 "Agent Studio can notify you when work finishes or needs your attention.",
             ),
-        }
+        };
+        let text = |value: &Option<String>, limit, fallback: &str| {
+            value
+                .as_deref()
+                .map(|value| line(value, limit))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| fallback.to_owned())
+        };
+        (
+            text(&self.title, TITLE_LIMIT, title),
+            text(&self.body, BODY_LIMIT, body),
+        )
     }
+}
+// One plain line within `limit` characters. Toast XML cannot hold control characters or
+// U+FFFE/U+FFFF, even escaped.
+fn line(text: &str, limit: usize) -> String {
+    let words = text
+        .split(|c: char| {
+            c.is_whitespace() || c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}')
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if words.chars().count() <= limit {
+        return words;
+    }
+    let mut cut: String = words.chars().take(limit - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+// Linux servers that render body markup would read <, > and & in chat text as markup.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn escape_markup(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 fn path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
@@ -243,18 +290,26 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
         let target = app.clone();
         let id = notice.conversation_id.clone();
         tauri_winrt_notification::Toast::new(&app.config().identifier)
-            .title(title).text1(body).sound(None)
+            .title(&title).text1(&body).sound(None)
             .on_activated(move |_| { open(&target, id.as_deref()); Ok(()) })
             .show().map_err(|_| "Could not send a desktop notification. Check your system notification settings and try the test again.".to_string())
     }
     #[cfg(not(target_os = "windows"))]
     {
         use std::sync::atomic::Ordering;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let body = if notify_rust::get_capabilities()
+            .is_ok_and(|capabilities| capabilities.iter().any(|c| c == "body-markup"))
+        {
+            escape_markup(&body)
+        } else {
+            body
+        };
         let mut notification = notify_rust::Notification::new();
         notification
             .appname("Agent Studio")
-            .summary(title)
-            .body(body)
+            .summary(&title)
+            .body(&body)
             .timeout(10_000);
         // No sound_name: macOS UNNotificationContent.sound is nil.
         // Linux needs an explicit hint.
@@ -353,18 +408,61 @@ mod tests {
             kind: Kind::Complete,
             conversation_id: Some(id.clone()),
             tag: format!("{id}:terminal"),
+            title: Some("Fix the login flow".into()),
+            body: Some("Done. The login flow now keeps the session.".into()),
         };
         assert!(n.validate().is_ok());
+        n.body = Some("x".repeat(2_001));
+        assert!(n.validate().is_err());
+        n.body = None;
         n.tag = format!("{id}:attention");
         assert!(n.validate().is_err());
         n.kind = Kind::Attention;
         assert!(n.validate().is_ok());
+        // Later question calls and MCP input requests are named by their UUID.
+        for key in ["attention", "elicitation"] {
+            n.tag = format!("{id}:{key}:{}", uuid::Uuid::new_v4());
+            assert!(n.validate().is_ok());
+        }
+        n.tag = format!("{id}:elicitation:file:///private");
+        assert!(n.validate().is_err());
+        n.tag = format!("{id}:attention");
         n.conversation_id = Some("file:///private".into());
         assert!(n.validate().is_err());
         n.kind = Kind::Test;
         n.tag = format!("test:{id}");
         n.conversation_id = None;
+        assert!(n.validate().is_err());
+        n.title = None;
         assert!(n.validate().is_ok());
+    }
+    #[test]
+    fn shows_the_chat_title_and_reply_line_as_plain_bounded_text() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut n = Notice {
+            kind: Kind::Cancelled,
+            conversation_id: Some(id.clone()),
+            tag: format!("{id}:terminal"),
+            title: Some("Fix\u{0}the <toast> & \u{ffff}titles\n".into()),
+            body: Some(format!("Stopped: {}", "word ".repeat(60))),
+        };
+        let (title, body) = n.content();
+        assert_eq!(title, "Fix the <toast> & titles");
+        assert!(body.chars().count() <= BODY_LIMIT);
+        assert!(body.starts_with("Stopped: word word") && body.ends_with("word…"));
+        n.title = Some(" \t".into());
+        n.body = None;
+        assert_eq!(
+            n.content(),
+            (
+                "Your agent stopped".to_owned(),
+                "The reply was stopped.".to_owned()
+            )
+        );
+        assert_eq!(
+            escape_markup("a < b && c > d"),
+            "a &lt; b &amp;&amp; c &gt; d"
+        );
     }
     #[test]
     fn bundled_chime_is_short_audible_pcm_without_clipping() {

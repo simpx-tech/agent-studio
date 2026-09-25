@@ -211,6 +211,7 @@ export function createRelay({
               .map((job) => [job.id, job.status]),
           ),
         ),
+      conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
     });
     const file = join(directory, 'workspace.json');
     let state: z.infer<typeof diskSchema> = {

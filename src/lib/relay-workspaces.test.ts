@@ -719,11 +719,18 @@ describe('private relay workspaces over real HTTP', () => {
     await vi.waitFor(() => expect(f.sent).toHaveLength(1));
     expect(f.sent[0].endpoint).toBe(subscriptions[0].endpoint);
     expect(f.sent[0].payload.pendingCount).toBe(1);
-    expect(JSON.stringify(f.sent)).not.toContain('Alice');
+    // Alice's device names her chat; nothing about it reaches Bob's.
+    expect(f.sent[0].payload).toMatchObject({
+      title: 'Alice confidential chat',
+      body: 'Alice private answer',
+    });
     expect((await f.request('POST', 'push/test', undefined, bob.headers)).status).toBe(202);
     await vi.waitFor(() => expect(f.sent).toHaveLength(2));
     expect(f.sent[1].endpoint).toBe(subscriptions[1].endpoint);
     expect(f.sent[1].payload.pendingCount).toBe(0);
+    expect(
+      JSON.stringify(f.sent.filter((push) => push.endpoint === subscriptions[1].endpoint)),
+    ).not.toContain('Alice');
     const rotated = rotateWorkspace({ directory: f.directory, id: f.alice.workspace.id });
     expect((await f.request('POST', 'push/test', undefined, alice.headers)).status).toBe(401);
     const reconnected = await f.pair(rotated.token);

@@ -96,8 +96,8 @@
   {#if error || settings?.lastError}<p role="alert">{error || settings?.lastError}</p>{/if}
   {#if feedback}<p role="status">{feedback}</p>{/if}
   <p class="privacy">
-    Alerts contain no chat text or titles. Keep Agent Studio open or minimized. Your computer’s
-    notification settings control banners; mute the chime here when you need quiet.
+    Alerts show the chat’s title and the start of its reply. Keep Agent Studio open or minimized.
+    Your computer’s notification settings control banners; mute the chime here when you need quiet.
   </p>
 </section>
 
