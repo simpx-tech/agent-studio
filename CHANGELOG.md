@@ -5,25 +5,6 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
-## 0.4.0 - 2026-09-25
-
-Chats no longer wait for each other: start or continue any conversation while others are still replying.
-
-### Added
-
-- Run replies in several conversations at once, including chats with the same account, and stop each one on its own
-- Send a chat's queued messages as soon as its reply finishes, even while another chat is open
-
-### Changed
-
-- Remove the "An agent is responding in another conversation" notice; the sidebar shows which chats are replying
-
-### Fixed
-
-- Give every chat started at the same time a generated title, not only the first two
-- Return a queued message to the composer when it no longer fits the workspace, instead of dropping it
-- Keep the open chat in place when a reply finishes in another chat
-
 ## 0.3.0 - 2026-09-25
 
 Tool calls now show what ran and what came back, and each reply keeps its plan and background work in its footer row.
