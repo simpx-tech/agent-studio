@@ -1231,7 +1231,8 @@ pre {
   font-weight: 500;
   color: var(--accent-text);
 }
-/* Your messages read as right-aligned bubbles; the heading stays for assistive technology. */
+/* Your messages read as right-aligned bubbles with their images above them; the heading stays
+   for assistive technology. */
 .message.user {
   grid-template-columns: minmax(0, 1fr);
   justify-items: end;
@@ -1242,11 +1243,11 @@ pre {
 }
 .message.user .message-content {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   max-width: min(86%, 680px);
-  padding: 10px 15px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 18px 18px 6px 18px;
 }
 .message.user .message-heading {
   position: absolute;
@@ -1260,12 +1261,14 @@ pre {
 }
 .message.user .image-attachments {
   justify-content: flex-end;
-  margin: 2px 0 8px;
-}
-.message.user .image-attachments:last-child {
-  margin-bottom: 2px;
+  margin: 0;
 }
 .user-text {
+  max-width: 100%;
+  padding: 10px 15px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 18px 18px 6px 18px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: var(--text-md);

@@ -120,6 +120,16 @@ test('pasting and dropping images preserves drafts and supports removal at compa
   await expect(page.getByRole('button', { name: 'Preview pasted.png' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('.message[data-status="complete"]')).toHaveCount(2);
+  // Sent images sit above the message bubble, which holds only the text.
+  const sent = page.locator('.message.user');
+  const bubble = sent.locator('.user-text');
+  const transparent = 'rgba(0, 0, 0, 0)';
+  await expect(bubble).toHaveText('Please explain this diagram.');
+  await expect(bubble).not.toHaveCSS('background-color', transparent);
+  await expect(sent.locator('.message-content')).toHaveCSS('background-color', transparent);
+  const sentImage = await sent.getByRole('img', { name: 'dropped.png' }).boundingBox();
+  const bubbleBox = await bubble.boundingBox();
+  expect(sentImage!.y + sentImage!.height).toBeLessThanOrEqual(bubbleBox!.y);
   await page.getByLabel('Message', { exact: true }).fill('And what shape is it?');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
