@@ -55,7 +55,23 @@ const calls: Tool[] = [
     commandRun: true,
     command: 'true',
   },
+  {
+    id: 'claude:build',
+    name: 'Run command',
+    operation: 'command',
+    commandRun: true,
+    command: 'npm run build',
+  },
+  {
+    id: 'claude:heredoc',
+    name: 'Run command',
+    operation: 'command',
+    commandRun: true,
+    command: "cat <<'EOF' > notes.md",
+    commandTruncated: true,
+  },
 ];
+const buildLog = Array.from({ length: 3000 }, (_, i) => `module ${i} built\n`).join('');
 const outputs = {
   'claude:git-status': { stdout: ' M src/app.ts\n?? notes.md\n', exitCode: 0 },
   'claude:git-diff': { stdout: ' src/app.ts | 2 +-\n', exitCode: 0 },
@@ -69,6 +85,14 @@ const outputs = {
     images: [{ mediaType: 'image/png', data: png, bytes: 72, width: 2, height: 1 }],
   },
   'claude:docs': { stdout: 'Layout guide\n' },
+  // The host previews long streams by their ends and returns them whole on request.
+  'claude:build': {
+    stdout: buildLog,
+    previewStdout: 'module 0 built\n[… 51 KB not shown …]\nmodule 2999 built\n',
+    exitCode: 0,
+  },
+  // A command the saved record shortened comes whole from the host.
+  'claude:heredoc': { command: "cat <<'EOF' > notes.md\nThe complete note body\nEOF" },
 };
 const summaries: Record<string, object> = {
   'claude:git-status': { lines: 2, bytes: 26, exitCode: 0 },
@@ -78,6 +102,8 @@ const summaries: Record<string, object> = {
   'claude:shot': { lines: 0, bytes: 0, images: 1 },
   'claude:docs': { lines: 1, bytes: 13 },
   'claude:quiet': { lines: 0, bytes: 0, exitCode: 0 },
+  'claude:build': { lines: 3000, bytes: buildLog.length, exitCode: 0 },
+  'claude:heredoc': { lines: 0, bytes: 0, exitCode: 0 },
 };
 
 async function startReply(page: Page) {
@@ -214,6 +240,31 @@ for (const mobile of [false, true]) {
     await expect(quiet.locator('.result-meta')).toHaveText('No output');
     expect(await outputCalls(page)).not.toContain('claude:quiet');
 
+    // A long result shows its ends until the whole of it is asked for.
+    const build = card(page, 'npm run build');
+    await build.locator('summary').click();
+    const log = build.getByRole('region', { name: 'Output text', exact: true });
+    await expect(log).toContainText('module 2999 built');
+    await expect(log).not.toContainText('module 1500 built');
+    await build.getByRole('button', { name: 'Show full output' }).click();
+    await expect(log).toContainText('module 1500 built');
+    await expect(build.getByRole('button', { name: 'Show full output' })).toHaveCount(0);
+    expect(
+      await page.evaluate(() =>
+        (window as any).toolOutputCalls
+          .filter((call: any) => call.toolId === 'claude:build')
+          .map((call: any) => !!call.full),
+      ),
+    ).toEqual([false, true]);
+
+    // A command the saved record shortened is shown whole.
+    const heredoc = card(page, "cat <<'EOF' > notes.md");
+    await heredoc.locator('summary').click();
+    await expect(heredoc.getByRole('region', { name: 'Command text', exact: true })).toContainText(
+      'The complete note body',
+    );
+    await expect(heredoc.locator('.result-meta', { hasText: 'Shortened' })).toHaveCount(0);
+
     expect(
       await page.locator('.tool-activity').evaluate((el) => el.scrollWidth <= el.clientWidth),
     ).toBe(true);
@@ -304,5 +355,5 @@ test('a result is loaded once, waits while the host reads it, and missing result
   });
   const pruned = card(page, 'git diff --stat');
   await pruned.locator('summary').click();
-  await expect(pruned.getByRole('alert')).toContainText('no longer kept');
+  await expect(pruned.getByRole('alert')).toContainText('was not kept on the computer that ran it');
 });

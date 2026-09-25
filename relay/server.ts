@@ -44,6 +44,7 @@ const jobInput = z
       'mentions',
       'nativeInstructions',
       'toolOutput',
+      'toolOutputImage',
       'mcp',
       'plugins',
       'undoFiles',
@@ -104,22 +105,32 @@ const jobInput = z
     ) {
       ctx.addIssue({ code: 'custom', message: 'Invalid native instruction request' });
     }
+    const toolId = z
+      .string()
+      .min(1)
+      .max(240)
+      .refine((id) => !/[\u0000-\u001f\u007f]/.test(id));
     if (
       job.method === 'toolOutput' &&
       !z
+        .object({ runId: uuid, toolId, connectionId: uuid, full: z.boolean().optional() })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output request' });
+    if (
+      job.method === 'toolOutputImage' &&
+      !z
         .object({
           runId: uuid,
-          toolId: z
-            .string()
-            .min(1)
-            .max(240)
-            .refine((id) => !/[\u0000-\u001f\u007f]/.test(id)),
+          toolId,
+          index: z.number().int().nonnegative().max(1_000_000),
           connectionId: uuid,
         })
         .strict()
         .safeParse(job.args).success
     )
-      ctx.addIssue({ code: 'custom', message: 'Invalid tool output request' });
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output image request' });
     if (
       job.method === 'answer' &&
       !z

@@ -89,16 +89,37 @@ async fn read_native_instructions(
     native_instructions::read(app, conversation_id, provider, connection_id).await
 }
 
-/// A finished tool call's result, kept on this computer by the run that made it.
+/// A finished tool call's result, kept on this computer by the run that made it: a preview
+/// of each stream, or all of it up to the full size when `full` is set.
 #[tauri::command]
 async fn read_tool_output(
     app: tauri::AppHandle,
     pending: State<'_, std::sync::Arc<tool_output::Pending>>,
     run_id: String,
     tool_id: String,
-) -> Result<tool_output::Stored, String> {
+    full: Option<bool>,
+) -> Result<tool_output::View, String> {
     let root = tool_output::root(&app)?;
-    tool_output::read(root, pending.inner().clone(), run_id, tool_id).await
+    tool_output::read(
+        root,
+        pending.inner().clone(),
+        run_id,
+        tool_id,
+        full.unwrap_or(false),
+    )
+    .await
+}
+/// One image of a finished tool call's result.
+#[tauri::command]
+async fn read_tool_output_image(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<tool_output::ImageData, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_image(root, pending.inner().clone(), run_id, tool_id, index).await
 }
 #[tauri::command]
 async fn search_mentions(
@@ -960,6 +981,7 @@ pub fn run() {
             manage_plugins,
             read_native_instructions,
             read_tool_output,
+            read_tool_output_image,
             load_workspace,
             save_workspace,
             drafts::load_drafts,

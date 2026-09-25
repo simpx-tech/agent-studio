@@ -1,8 +1,8 @@
 <script module lang="ts">
-  import { createToolOutputCache } from '$lib/tool-output';
+  import { createFetchCache, outputSize, type ToolOutput } from '$lib/tool-output';
   import { readToolOutput } from '$lib/transport';
   // Shared by every reply in this window, so reopening a call does not ask the host again.
-  const outputs = createToolOutputCache(readToolOutput);
+  const outputs = createFetchCache<ToolOutput>(outputSize);
 </script>
 
 <script lang="ts">
@@ -15,10 +15,10 @@
     formatBytes,
     outputLines,
     toolOutputImageUrl,
-    type ToolOutput,
     type ToolOutputImage,
   } from '$lib/tool-output';
   import { fileLanguage, primaryCommand } from '$lib/tool-presentation';
+  import ToolResultImage from './ToolResultImage.svelte';
 
   let {
     tool,
@@ -40,39 +40,8 @@
     cmd: 'Command Prompt',
   };
   const prompts = { bash: '$', sh: '$', zsh: '%', powershell: 'PS>', cmd: '>' };
-  // Lines a CLI hook put before the model's command are shown, but quietly.
-  const commandParts = $derived.by(() => {
-    if (!tool.command) return;
-    const lines = tool.command.split('\n');
-    const first = lines.findIndex((line) => line.trim() === primaryCommand(tool.command!).line);
-    const hooks = first > 0 ? lines.slice(0, first).join('\n').trim() : '';
-    const body = first > 0 ? lines.slice(first).join('\n') : tool.command;
-    const language =
-      tool.shell === 'powershell' ? 'powershell' : tool.shell === 'cmd' ? '' : 'bash';
-    return { hooks, body, highlighted: highlightCode(body, language) };
-  });
-  const input = $derived.by(() => {
-    if (!tool.input) return;
-    let json = false;
-    try {
-      JSON.parse(tool.input);
-      json = true;
-    } catch {
-      /* Plain text input stays unhighlighted. */
-    }
-    return { text: tool.input, highlighted: json ? highlightCode(tool.input, 'json') : null };
-  });
   const summary = $derived(tool.output);
   const empty = $derived(!!summary && !summary.bytes && !summary.images);
-  const meta = $derived.by(() => {
-    if (!summary) return '';
-    if (empty) return 'No output';
-    const lines = `${summary.lines.toLocaleString()} ${summary.lines === 1 ? 'line' : 'lines'}`;
-    const images = summary.images
-      ? `${summary.images} ${summary.images === 1 ? 'image' : 'images'}`
-      : '';
-    return [summary.lines || !images ? lines : '', images].filter(Boolean).join(' · ');
-  });
   const fileRead = $derived(tool.operation === 'read');
   const running = $derived(tool.status === 'running' && replyStatus === 'running');
   const failed = $derived(
@@ -83,8 +52,14 @@
   let error = $state('');
   let loading = $state(false);
   let attempt = $state(0);
+  let full = $state(false);
   // Only the call and its run select a result; revisions and relay updates do not reload it.
-  const key = $derived(runId && summary && !empty ? `${runId}\n${tool.id}` : '');
+  // A shortened command or input comes whole from the same result.
+  const key = $derived(
+    runId && summary && (!empty || tool.commandTruncated || tool.inputTruncated)
+      ? `${runId}\n${tool.id}\n${full}`
+      : '',
+  );
   $effect(() => {
     const current = key;
     void attempt;
@@ -92,7 +67,9 @@
     let live = true;
     loading = true;
     error = '';
-    untrack(() => outputs.get(runId!, tool.id, connectionId)).then(
+    untrack(() =>
+      outputs.get(current, () => readToolOutput(runId!, tool.id, connectionId, full)),
+    ).then(
       (value) => {
         if (!live) return;
         output = value;
@@ -109,21 +86,65 @@
     };
   });
 
-  const stdoutLines = $derived(outputLines(output?.stdout ?? ''));
-  const stderrLines = $derived(outputLines(output?.stderr ?? ''));
+  const command = $derived(output?.command ?? tool.command);
+  const commandShortened = $derived(!!tool.commandTruncated && !output?.command);
+  // Lines a CLI hook put before the model's command are shown, but quietly.
+  const commandParts = $derived.by(() => {
+    if (!command) return;
+    const lines = command.split('\n');
+    const first = lines.findIndex((line) => line.trim() === primaryCommand(command).line);
+    const hooks = first > 0 ? lines.slice(0, first).join('\n').trim() : '';
+    const body = first > 0 ? lines.slice(first).join('\n') : command;
+    const language =
+      tool.shell === 'powershell' ? 'powershell' : tool.shell === 'cmd' ? '' : 'bash';
+    return { hooks, body, highlighted: highlightCode(body, language) };
+  });
+  const input = $derived.by(() => {
+    const text = output?.input ?? tool.input;
+    if (!text) return;
+    let json = false;
+    try {
+      JSON.parse(text);
+      json = true;
+    } catch {
+      /* Plain text input stays unhighlighted. */
+    }
+    return {
+      text,
+      shortened: !!tool.inputTruncated && !output?.input,
+      highlighted: json ? highlightCode(text, 'json') : null,
+    };
+  });
+  const meta = $derived.by(() => {
+    if (!summary) return '';
+    if (empty) return 'No output';
+    const lines = `${summary.lines.toLocaleString()} ${summary.lines === 1 ? 'line' : 'lines'}`;
+    const images = summary.images
+      ? `${summary.images} ${summary.images === 1 ? 'image' : 'images'}`
+      : '';
+    return [summary.lines || !images ? lines : '', images].filter(Boolean).join(' · ');
+  });
+
+  const stdout = $derived(output?.stdout.text ?? '');
+  const stderr = $derived(output?.stderr.text ?? '');
+  const stdoutLines = $derived(outputLines(stdout));
   const language = $derived(fileRead ? fileLanguage(tool.path) : undefined);
   const highlighted = $derived(
-    output && language && stdoutLines.length <= 3000
-      ? highlightCode(output.stdout, language)
+    output && language && output.stdout.complete && stdoutLines.length <= 3000
+      ? highlightCode(stdout, language)
       : null,
   );
+  // Line numbers need the whole text; a preview's hidden middle would shift them.
   const gutter = $derived.by(() => {
-    if (!fileRead || output?.startLine == null || !stdoutLines.length) return '';
+    if (!fileRead || output?.startLine == null || !output.stdout.complete || !stdoutLines.length)
+      return '';
     const start = output.startLine;
     return stdoutLines.map((_, index) => start + index).join('\n');
   });
+  const partial = $derived(!!output && (!output.stdout.complete || !output.stderr.complete));
+  const kept = $derived((output?.stdout.bytes ?? 0) + (output?.stderr.bytes ?? 0));
   // A long result starts in a box of about 18 lines that scrolls.
-  const tall = $derived(stdoutLines.length + stderrLines.length > 18);
+  const tall = $derived(stdoutLines.length + outputLines(stderr).length > 18);
   let expanded = $state(false);
 
   let copied = $state('');
@@ -139,20 +160,13 @@
     copyTimer = setTimeout(() => (copied = ''), 1500);
   }
 
-  let preview = $state<ToolOutputImage>();
+  let preview = $state<{ image: ToolOutputImage; label: string }>();
   let dialog = $state<HTMLDialogElement>();
-  async function open(image: ToolOutputImage) {
-    preview = image;
+  async function open(image: ToolOutputImage, label: string) {
+    preview = { image, label };
     await tick();
     dialog?.showModal();
   }
-  const imageLabel = (image: ToolOutputImage) =>
-    [
-      image.width && image.height ? `${image.width} × ${image.height}` : '',
-      formatBytes(image.bytes),
-    ]
-      .filter(Boolean)
-      .join(' · ');
 </script>
 
 {#snippet copyButton(label: string, text: string)}
@@ -176,9 +190,9 @@
         <section class="result-section" aria-label="Command">
           <div class="result-bar">
             <span class="result-title">{tool.shell ? shells[tool.shell] : 'Command'}</span>
-            {#if tool.commandTruncated}<span class="result-meta">Shortened</span>{/if}
+            {#if commandShortened}<span class="result-meta">Shortened</span>{/if}
             <span class="bar-space"></span>
-            {@render copyButton('Command', tool.command!)}
+            {@render copyButton('Command', command!)}
           </div>
           <!-- Commands scroll inside their box; keyboard users can focus it. -->
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -204,7 +218,7 @@
         <section class="result-section" aria-label="Input">
           <div class="result-bar">
             <span class="result-title">Input</span>
-            {#if tool.inputTruncated}<span class="result-meta">Shortened</span>{/if}
+            {#if input.shortened}<span class="result-meta">Shortened</span>{/if}
             <span class="bar-space"></span>
             {@render copyButton('Input', input.text)}
           </div>
@@ -227,7 +241,7 @@
                 title="Exit code reported by the provider">Exit code {summary.exitCode}</span
               >{/if}
             <span class="bar-space"></span>
-            {#if output && (output.stdout || output.stderr)}
+            {#if output && (stdout || stderr)}
               {#if tall}<button
                   type="button"
                   class="result-action"
@@ -237,9 +251,7 @@
                 >{/if}
               {@render copyButton(
                 'Output',
-                [output.stdout, output.stderr]
-                  .filter(Boolean)
-                  .join(output.stdout.endsWith('\n') ? '' : '\n'),
+                [stdout, stderr].filter(Boolean).join(stdout.endsWith('\n') ? '' : '\n'),
               )}
             {/if}
           </div>
@@ -247,11 +259,11 @@
             <p class="result-note">
               This reply has no run identity, so its output cannot be found.
             </p>
-          {:else if loading}
+          {:else if loading && !output}
             <p class="result-note" role="status">
               <LoaderCircle size={13} class="spinning" aria-hidden="true" />Loading output…
             </p>
-          {:else if error}
+          {:else if error && !output}
             <p class="result-note failed" role="alert">
               {error}
               <button type="button" class="result-action" onclick={() => attempt++}
@@ -259,10 +271,7 @@
               >
             </p>
           {:else if output}
-            {#if output.omitted}<p class="result-note">
-                Not kept: this reply reached its 256 MB output limit on the computer that ran it.
-              </p>{/if}
-            {#if output.stdout}
+            {#if stdout}
               <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
               <div
                 class="result-scroll"
@@ -274,12 +283,12 @@
                 <div class="code-view">
                   {#if gutter}<pre class="gutter" aria-hidden="true">{gutter}</pre>{/if}
                   <pre class="result-text hljs"><code
-                      >{#if highlighted}{@html highlighted.html}{:else}{output.stdout}{/if}</code
+                      >{#if highlighted}{@html highlighted.html}{:else}{stdout}{/if}</code
                     ></pre>
                 </div>
               </div>
             {/if}
-            {#if output.stderr}
+            {#if stderr}
               <!-- Tools also write warnings and notes to standard error; only a failure is red. -->
               <div class="stream-label" class:failed>Standard error</div>
               <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -290,44 +299,55 @@
                 role="region"
                 aria-label="Error output text"
               >
-                <pre class="result-text stderr" class:failed>{output.stderr}</pre>
+                <pre class="result-text stderr" class:failed>{stderr}</pre>
               </div>
             {/if}
-            {#if output.images.length}
-              <div class="result-images">
-                {#each output.images as image, index (index)}
+            {#if partial}<p class="result-note">
+                {#if full}Showing the first and last 8 MB of each stream; the complete {formatBytes(
+                    kept,
+                  )} are kept on the computer that ran it.
+                {:else}Showing the first and last part of {formatBytes(kept)}.
                   <button
                     type="button"
-                    class="result-image"
-                    class:small={(image.width ?? 64) < 64 && (image.height ?? 64) < 64}
-                    title="Open image"
-                    aria-label={`Open image ${index + 1}${imageLabel(image) ? `, ${imageLabel(image)}` : ''}`}
-                    onclick={() => open(image)}
-                  >
-                    <img
-                      src={toolOutputImageUrl(image)}
-                      alt={`Image ${index + 1} returned by ${tool.name}`}
-                      width={image.width}
-                      height={image.height}
-                    />
-                    <span>{imageLabel(image)}</span>
-                  </button>
+                    class="result-action"
+                    disabled={loading}
+                    onclick={() => (full = true)}
+                    >{#if loading}<LoaderCircle
+                        size={12}
+                        class="spinning"
+                        aria-hidden="true"
+                      />{/if}Show full output</button
+                  >{/if}
+              </p>{/if}
+            {#if error}<p class="result-note failed" role="alert">
+                {error}
+                <button type="button" class="result-action" onclick={() => attempt++}
+                  ><RotateCcw size={12} aria-hidden="true" />Retry</button
+                >
+              </p>{/if}
+            {#if output.images.length}
+              <div class="result-images">
+                {#each output.images as info (info.index)}
+                  <ToolResultImage
+                    runId={runId!}
+                    toolId={tool.id}
+                    {connectionId}
+                    {info}
+                    name={tool.name}
+                    {open}
+                  />
                 {/each}
               </div>
             {/if}
             {#if output.imagesOmitted}<p class="result-note">
                 <ImageOff size={13} aria-hidden="true" />{output.imagesOmitted}
-                {output.imagesOmitted === 1 ? 'image was' : 'images were'} not kept: unreadable, unsupported,
-                or over the size limit.
+                {output.imagesOmitted === 1 ? 'image was' : 'images were'} not kept: unreadable or not
+                a supported image type.
               </p>{/if}
-            {#if output.truncated || summary.truncated}<p class="result-note">
-                Shortened: the beginning and end are kept, {formatBytes(
-                  new TextEncoder().encode(output.stdout + output.stderr).length,
-                )} of {formatBytes(summary.bytes)}.
+            {#if output.truncated}<p class="result-note">
+                The provider shortened this result before returning it.
               </p>{/if}
-            {#if !output.stdout && !output.stderr && !output.images.length && !output.omitted}<p
-                class="result-note"
-              >
+            {#if !stdout && !stderr && !output.images.length && !empty}<p class="result-note">
                 No output.
               </p>{/if}
           {/if}
@@ -348,15 +368,14 @@
 >
   {#if preview}
     <div class="image-preview-heading">
-      <span>{tool.path ?? tool.name}{imageLabel(preview) ? ` · ${imageLabel(preview)}` : ''}</span
-      ><button
+      <span>{tool.path ?? tool.name} · {preview.label}</span><button
         type="button"
         class="icon-button"
         aria-label="Close image preview"
         onclick={() => dialog?.close()}><X size={18} /></button
       >
     </div>
-    <img src={toolOutputImageUrl(preview)} alt={`Full size image returned by ${tool.name}`} />
+    <img src={toolOutputImageUrl(preview.image)} alt={`Full size image returned by ${tool.name}`} />
   {/if}
 </dialog>
 
@@ -536,36 +555,6 @@
     flex-wrap: wrap;
     gap: 8px;
     padding: 8px;
-  }
-  .result-image {
-    display: grid;
-    gap: 4px;
-    max-width: 100%;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface-1);
-    cursor: zoom-in;
-    color: var(--text-muted);
-    font-size: var(--text-2xs);
-    text-align: left;
-  }
-  .result-image:hover {
-    border-color: var(--border-hover);
-  }
-  .result-image img {
-    display: block;
-    max-width: 100%;
-    max-height: 320px;
-    width: auto;
-    height: auto;
-    border-radius: var(--radius-xs);
-    background: repeating-conic-gradient(var(--hover) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
-  }
-  /* Icons and other tiny images are enlarged with crisp pixels. */
-  .result-image.small img {
-    min-width: 64px;
-    image-rendering: pixelated;
   }
   .image-preview {
     max-width: min(96vw, 1600px);

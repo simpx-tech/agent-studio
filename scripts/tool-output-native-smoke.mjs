@@ -248,15 +248,30 @@ try {
     const result = (tool) =>
       page.invoke('read_tool_output', { runId: answer.runId, toolId: tool.id });
     const gitOutput = await result(git);
-    assert.match(gitOutput.stdout, /\?\? notes\.txt/);
+    assert.match(gitOutput.stdout.text, /\?\? notes\.txt/);
+    assert(gitOutput.stdout.complete);
     assert.equal(gitOutput.exitCode, 0);
     const readOutput = await result(read);
-    assert.match(readOutput.stdout, /alpha\s+beta\s+gamma/);
+    assert.match(readOutput.stdout.text, /alpha\s+beta\s+gamma/);
     const imageOutput = await result(image);
     assert.equal(imageOutput.images.length, 1, `${provider}: image not kept`);
+    const pixels = await page.invoke('read_tool_output_image', {
+      runId: answer.runId,
+      toolId: image.id,
+      index: 0,
+    });
+    assert.deepEqual([pixels.mediaType, pixels.width, pixels.height], ['image/png', 16, 8]);
     const stored = await readdir(join(data, 'tool-output', answer.runId));
     assert(stored.includes('run.json'));
     assert(stored.length >= 4, `${provider}: expected three results and a manifest`);
+    // Each call keeps its streams and images whole in its own folder.
+    const kept = await Promise.all(
+      stored
+        .filter((name) => name !== 'run.json')
+        .map((call) => readdir(join(data, 'tool-output', answer.runId, call))),
+    );
+    assert(kept.every((files) => files.includes('meta.json')));
+    assert(kept.some((files) => files.includes('image-0.png')));
     await page.click('[aria-label="Work history"]');
     await page.evaluate(() => {
       for (const summary of document.querySelectorAll('.activity-group > summary'))

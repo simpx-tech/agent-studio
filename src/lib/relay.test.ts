@@ -467,11 +467,32 @@ describe('real HTTP relay', () => {
       { ...args, toolId: '' },
       { ...args, toolId: 'a\nb' },
       { ...args, toolId: 'x'.repeat(241) },
+      { ...args, full: 'yes' },
     ])
       expect((await f.call('POST', 'jobs', { ...job, args: invalid })).status).toBe(400);
+    const image = { ...job, id: crypto.randomUUID(), method: 'toolOutputImage' };
+    for (const invalid of [
+      { ...args, index: -1 },
+      { ...args, index: 1.5 },
+      { ...args, index: 0, file: 'image-0.png' },
+      args,
+    ])
+      expect((await f.call('POST', 'jobs', { ...image, args: invalid })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', { ...image, args: { ...args, index: 0 } })).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await f.call('POST', 'jobs', {
+          ...job,
+          id: crypto.randomUUID(),
+          args: { ...args, full: true },
+        })
+      ).status,
+    ).toBe(200);
     expect((await f.call('POST', 'jobs', job)).status).toBe(200);
     await f.call('GET', 'jobs', undefined, f.target);
-    const result = { version: 1, toolId: args.toolId, stdout: 'Synthetic tool output\n' };
+    const result = { version: 2, toolId: args.toolId, stdout: 'Synthetic tool output\n' };
     expect(
       (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result }, f.target))
         .status,

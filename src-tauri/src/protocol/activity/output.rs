@@ -1,22 +1,14 @@
-//! Commands, inputs and results of tool calls. The command and a bounded input travel with
-//! the activity record; the result stays on the executing computer (`crate::tool_output`)
-//! and only its size and exit status reach the activity, since outputs and images are far
-//! too large for the synced workspace.
+//! Commands, inputs and results of tool calls. A command and input travel with the activity
+//! record, shortened there when long; the result, and the complete command or input, go to
+//! the executing computer's store (`crate::tool_output`) whole. Only the result's size and
+//! exit status reach the activity, since outputs and images are far too large for the
+//! synced workspace.
 use super::*;
 
-/// Characters of a command kept in the activity record.
+/// Characters of a command shown in the activity record; the store keeps all of it.
 pub(super) const COMMAND_LIMIT: usize = 8_000;
-/// Characters of a tool input kept in the activity record.
+/// Characters of a tool input shown in the activity record; the store keeps all of it.
 pub(super) const INPUT_LIMIT: usize = 4_000;
-/// Bytes of standard output kept on the executing computer.
-pub const STDOUT_LIMIT: usize = 256 * 1024;
-/// Bytes of standard error kept on the executing computer.
-pub const STDERR_LIMIT: usize = 64 * 1024;
-/// Images kept for one call, each at most `IMAGE_LIMIT` decoded bytes.
-pub const MAX_IMAGES: usize = 8;
-pub const IMAGE_LIMIT: usize = 5 * 1024 * 1024;
-/// Text read from a result before bounding; larger payloads are cut here first.
-const READ_LIMIT: usize = 4 * 1024 * 1024;
 pub const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// What the activity record says about a result kept on the executing computer.
@@ -25,7 +17,7 @@ pub const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "ima
 pub struct OutputSummary {
     /// Lines of text, counting standard output and error.
     pub lines: u64,
-    /// UTF-8 bytes of text before it was bounded.
+    /// UTF-8 bytes of text.
     pub bytes: u64,
     #[serde(skip_serializing_if = "is_zero")]
     pub images: u32,
@@ -33,7 +25,7 @@ pub struct OutputSummary {
     pub stderr: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
-    /// The kept text omits part of what the tool returned.
+    /// The provider shortened what it returned, such as a file search's match list.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
@@ -45,11 +37,11 @@ fn is_zero(value: &u32) -> bool {
 pub enum ImageSource {
     /// Base64 bytes the provider returned with the result.
     Base64 { media_type: String, data: String },
-    /// A file the provider reported viewing, read when the result is stored.
+    /// A file the provider reported viewing, copied when the result is stored.
     File { path: String },
 }
 
-/// A result waiting to be stored on the executing computer.
+/// A result waiting to be stored on the executing computer, exactly as the provider sent it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapturedOutput {
     pub tool_id: String,
@@ -60,9 +52,12 @@ pub struct CapturedOutput {
     /// The first line number of file content, when the text is a file read.
     pub start_line: Option<u64>,
     pub images: Vec<ImageSource>,
+    /// The complete command or input when the activity record shows a shortened one.
+    pub command: Option<String>,
+    pub input: Option<String>,
 }
 impl CapturedOutput {
-    pub(super) fn new(tool_id: &str) -> Self {
+    pub(crate) fn new(tool_id: &str) -> Self {
         Self {
             tool_id: tool_id.into(),
             stdout: String::new(),
@@ -71,12 +66,14 @@ impl CapturedOutput {
             exit_code: None,
             start_line: None,
             images: vec![],
+            command: None,
+            input: None,
         }
     }
-    pub(super) fn summary(&self, lines: u64, bytes: u64) -> OutputSummary {
+    fn summary(&self) -> OutputSummary {
         OutputSummary {
-            lines,
-            bytes,
+            lines: line_count(&self.stdout) + line_count(&self.stderr),
+            bytes: (self.stdout.len() + self.stderr.len()) as u64,
             images: self.images.len() as u32,
             stderr: !self.stderr.is_empty(),
             exit_code: self.exit_code,
@@ -84,11 +81,19 @@ impl CapturedOutput {
         }
     }
 }
+/// Lines of terminal text: each line ending, plus a final unterminated line.
+fn line_count(text: &str) -> u64 {
+    if text.is_empty() {
+        return 0;
+    }
+    let endings = text.bytes().filter(|b| *b == b'\n').count() as u64;
+    endings + u64::from(!text.ends_with('\n'))
+}
 
 /// Normalizes terminal text for display: CRLF endings, carriage-return progress redraws,
 /// ANSI escape sequences and other control characters. Tabs and newlines remain.
 pub(crate) fn terminal_text(value: &str) -> String {
-    let mut out = String::with_capacity(value.len().min(READ_LIMIT));
+    let mut out = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
     let mut line_start = 0;
     // A lone carriage return redraws its line, as progress output does: the next printed
@@ -143,46 +148,6 @@ pub(crate) fn terminal_text(value: &str) -> String {
         }
     }
     out
-}
-
-/// Keeps text within `limit` bytes: its beginning and end, with a marker for the rest.
-pub(crate) fn bounded(text: &str, limit: usize) -> (String, bool) {
-    if text.len() <= limit {
-        return (text.to_string(), false);
-    }
-    let head_end = floor_boundary(text, limit * 3 / 4);
-    let head_end = text[..head_end].rfind('\n').map_or(head_end, |i| i + 1);
-    let tail_start = ceil_boundary(text, text.len() - limit / 4);
-    let tail_start = text[tail_start..]
-        .find('\n')
-        .map_or(tail_start, |i| tail_start + i + 1);
-    let tail_start = tail_start.max(head_end);
-    let omitted = text[head_end..tail_start].lines().count();
-    (
-        format!(
-            "{}[… {} omitted …]\n{}",
-            &text[..head_end],
-            if omitted == 1 {
-                "1 line".to_string()
-            } else {
-                format!("{omitted} lines")
-            },
-            &text[tail_start..]
-        ),
-        true,
-    )
-}
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-fn ceil_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
 }
 
 /// Cuts a string to `limit` characters, reporting whether anything was removed.
@@ -296,8 +261,8 @@ pub(super) fn unwrap_shell(command: &str) -> (Option<&'static str>, String) {
     unchanged
 }
 
-/// Pretty JSON of a tool's arguments, bounded for the activity record.
-pub(super) fn input_text(value: &Value) -> Option<(String, bool)> {
+/// Pretty JSON of a tool's arguments.
+pub(super) fn input_text(value: &Value) -> Option<String> {
     if value.is_null() || value.as_object().is_some_and(|o| o.is_empty()) {
         return None;
     }
@@ -305,8 +270,7 @@ pub(super) fn input_text(value: &Value) -> Option<(String, bool)> {
         Some(text) => text.to_string(),
         None => serde_json::to_string_pretty(value).ok()?,
     };
-    let (text, truncated) = shortened(&text, INPUT_LIMIT);
-    (!text.trim().is_empty()).then_some((text, truncated))
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Text and images of a provider result: a string, or an array of content blocks in the
@@ -314,18 +278,18 @@ pub(super) fn input_text(value: &Value) -> Option<(String, bool)> {
 /// (`inputText`, `inputImage` data URL) shapes.
 pub(super) fn result_parts(value: &Value) -> (String, Vec<ImageSource>) {
     if let Some(text) = value.as_str() {
-        return (prefix(text, READ_LIMIT).into(), vec![]);
+        return (text.into(), vec![]);
     }
     let mut text = String::new();
     let mut images = vec![];
-    for block in value.as_array().into_iter().flatten().take(200) {
+    for block in value.as_array().into_iter().flatten() {
         match block["type"].as_str().unwrap_or_default() {
             "text" | "inputText" => {
                 if let Some(part) = block["text"].as_str() {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    text.push_str(prefix(part, READ_LIMIT.saturating_sub(text.len())));
+                    text.push_str(part);
                 }
             }
             "image" => {
@@ -345,29 +309,16 @@ pub(super) fn result_parts(value: &Value) -> (String, Vec<ImageSource>) {
             }
             _ => {}
         }
-        if images.len() > MAX_IMAGES {
-            images.truncate(MAX_IMAGES);
-        }
     }
     (text, images)
-}
-fn prefix(text: &str, limit: usize) -> &str {
-    &text[..floor_boundary(text, limit.min(text.len()))]
-}
-/// A result's text, cut at the reading limit before it is bounded for storage.
-pub(super) fn capped(text: &str) -> String {
-    prefix(text, READ_LIMIT).into()
 }
 fn base64_image(media_type: Option<&str>, data: Option<&str>) -> Option<ImageSource> {
     let media_type = media_type?.to_ascii_lowercase();
     let data = data?;
-    (IMAGE_TYPES.contains(&media_type.as_str())
-        && !data.is_empty()
-        && data.len() <= IMAGE_LIMIT.div_ceil(3) * 4)
-        .then(|| ImageSource::Base64 {
-            media_type,
-            data: data.into(),
-        })
+    (IMAGE_TYPES.contains(&media_type.as_str()) && !data.is_empty()).then(|| ImageSource::Base64 {
+        media_type,
+        data: data.into(),
+    })
 }
 fn data_url_image(url: &str) -> Option<ImageSource> {
     let (header, data) = url.strip_prefix("data:")?.split_once(',')?;
@@ -391,30 +342,64 @@ pub(super) fn claude_error_text(text: &str) -> &str {
 }
 
 impl ToolDecoder {
+    /// Records a shell call's command, shortened in the activity record when long; the
+    /// complete command then goes to the store with the call's result.
+    pub(super) fn set_command(
+        &mut self,
+        tool: &mut ToolActivity,
+        command: &str,
+        shell: Option<&'static str>,
+    ) {
+        let (short, truncated) = shortened(command, COMMAND_LIMIT);
+        if short.trim().is_empty() {
+            return;
+        }
+        tool.command = Some(short);
+        tool.command_truncated = truncated;
+        tool.shell = shell;
+        Self::remember(
+            &mut self.full_commands,
+            &tool.id,
+            truncated.then_some(command),
+        );
+    }
+    /// Records a tool's arguments, shortened in the activity record when long.
+    pub(super) fn set_input(&mut self, tool: &mut ToolActivity, value: &Value) {
+        let Some(text) = input_text(value) else {
+            return;
+        };
+        let (short, truncated) = shortened(&text, INPUT_LIMIT);
+        tool.input = Some(short);
+        tool.input_truncated = truncated;
+        Self::remember(&mut self.full_inputs, &tool.id, truncated.then_some(&text));
+    }
+    fn remember(map: &mut HashMap<String, String>, id: &str, full: Option<&str>) {
+        match full {
+            Some(full) if map.len() < 256 || map.contains_key(id) => {
+                map.insert(id.into(), clean(full, usize::MAX));
+            }
+            Some(_) => {}
+            None => {
+                map.remove(id);
+            }
+        }
+    }
+
     /// Queues a result for the executing computer's store and records its summary.
     pub(super) fn capture(&mut self, tool: &mut ToolActivity, mut output: CapturedOutput) {
-        let stdout = terminal_text(&output.stdout);
-        let stderr = terminal_text(&output.stderr);
-        let lines = [&stdout, &stderr]
-            .iter()
-            .filter(|t| !t.is_empty())
-            .map(|t| t.trim_end_matches('\n').split('\n').count() as u64)
-            .sum();
-        let bytes = (stdout.len() + stderr.len()) as u64;
-        let (stdout, cut_out) = bounded(&stdout, STDOUT_LIMIT);
-        let (stderr, cut_err) = bounded(&stderr, STDERR_LIMIT);
-        output.stdout = stdout;
-        output.stderr = stderr;
-        output.truncated |= cut_out || cut_err;
-        output.images.truncate(MAX_IMAGES);
-        tool.output = Some(output.summary(lines, bytes));
-        if output.stdout.is_empty() && output.stderr.is_empty() && output.images.is_empty() {
+        output.command = self.full_commands.remove(&tool.id);
+        output.input = self.full_inputs.remove(&tool.id);
+        tool.output = Some(output.summary());
+        if output.stdout.is_empty()
+            && output.stderr.is_empty()
+            && output.images.is_empty()
+            && output.command.is_none()
+            && output.input.is_none()
+        {
             return;
         }
         self.captured.retain(|o| o.tool_id != output.tool_id);
-        if self.captured.len() < 64 {
-            self.captured.push(output);
-        }
+        self.captured.push(output);
     }
 
     /// Results decoded since the last call, for the executing computer's store.
@@ -435,18 +420,15 @@ mod tests {
             terminal_text(raw),
             "ok line\nDownloading 100%\ndone\tend\nkept"
         );
-    }
-
-    #[test]
-    fn bounded_text_keeps_both_ends_on_line_and_char_boundaries() {
-        let text: String = (0..2000).map(|i| format!("line {i} é\n")).collect();
-        let (kept, cut) = bounded(&text, 4096);
-        assert!(cut);
-        assert!(kept.len() <= 4096 + 64);
-        assert!(kept.starts_with("line 0 é\n"));
-        assert!(kept.ends_with("line 1999 é\n"));
-        assert!(kept.contains(" lines omitted …]\n"));
-        assert_eq!(bounded("short", 10), ("short".into(), false));
+        assert_eq!(
+            [
+                line_count(""),
+                line_count("a"),
+                line_count("a\n"),
+                line_count("a\r\nb")
+            ],
+            [0, 1, 1, 2]
+        );
     }
 
     #[test]
@@ -686,7 +668,8 @@ mod tests {
                 "codex:root:dyn"
             ]
         );
-        assert_eq!(outputs[0].stdout, "git version 2.55\n");
+        // Results are kept exactly as the provider sent them and cleaned when shown.
+        assert_eq!(outputs[0].stdout, "\u{1b}[1mgit version 2.55\u{1b}[0m\r\n");
         assert_eq!(
             outputs[1].images,
             [ImageSource::File {
@@ -698,11 +681,16 @@ mod tests {
     }
 
     #[test]
-    fn large_results_are_bounded_but_summarized_at_full_size() {
+    fn large_results_and_long_commands_are_kept_whole() {
         let mut d = ToolDecoder::default();
-        claude_call(&mut d, "big", "Bash", json!({"command":"cat big.log"}));
-        let text = "x".repeat(99) + "\n";
-        let stdout = text.repeat(5000);
+        let heredoc = format!("cat > big.txt <<'EOF'\n{}EOF", "line\n".repeat(3000));
+        claude_call(&mut d, "big", "Bash", json!({ "command": heredoc }));
+        assert_eq!(
+            d.tools[0].command.as_ref().map(|c| c.chars().count()),
+            Some(COMMAND_LIMIT)
+        );
+        assert!(d.tools[0].command_truncated);
+        let stdout = ("x".repeat(99) + "\n").repeat(50_000);
         let big = claude_result(
             &mut d,
             "big",
@@ -713,10 +701,25 @@ mod tests {
         let summary = big.output.unwrap();
         assert_eq!(
             (summary.lines, summary.bytes, summary.truncated),
-            (5000, 500_000, true)
+            (50_000, 5_000_000, false)
         );
-        let kept = &d.take_outputs()[0].stdout;
-        assert!(kept.len() <= STDOUT_LIMIT + 64 && kept.contains("lines omitted"));
+        let output = d.take_outputs().remove(0);
+        assert_eq!(output.stdout.len(), 5_000_000);
+        assert_eq!(output.command.as_deref(), Some(heredoc.as_str()));
+        // A short command has nothing more to keep.
+        claude_call(&mut d, "small", "Bash", json!({"command":"ls"}));
+        claude_result(
+            &mut d,
+            "small",
+            false,
+            json!(""),
+            json!({"stdout":"a\n","stderr":""}),
+        );
+        assert_eq!(d.take_outputs()[0].command, None);
+        let images = json!((0..20).map(|_| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}})).collect::<Vec<_>>());
+        claude_call(&mut d, "shots", "mcp__browser__screenshots", json!({}));
+        let shots = claude_result(&mut d, "shots", false, images, Value::Null);
+        assert_eq!(shots.output.unwrap().images, 20);
     }
 
     #[test]

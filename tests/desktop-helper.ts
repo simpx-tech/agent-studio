@@ -310,16 +310,43 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   ],
             };
           }
-          if (command === 'read_tool_output') {
+          if (command === 'read_tool_output' || command === 'read_tool_output_image') {
             const state = window as any;
-            (state.toolOutputCalls ??= []).push(args);
+            (state.toolOutputCalls ??= []).push({ command, ...args });
             if (state.holdToolOutput)
               await new Promise<void>((resolve) => (state.releaseToolOutput = resolve));
             if (state.failToolOutput) throw state.failToolOutput;
+            // Fixtures: stdout/stderr text, a shorter previewStdout for long results, images.
             const output = state.toolOutputs?.[args.toolId];
-            if (!output)
-              throw 'This output is no longer kept on the computer that ran it. Outputs are kept for 30 days, up to 2 GB.';
-            return { version: 1, toolId: args.toolId, ...output };
+            if (!output) throw 'This output was not kept on the computer that ran it.';
+            if (command === 'read_tool_output_image') {
+              const image = output.images?.[args.index];
+              if (!image) throw 'This output was not kept on the computer that ran it.';
+              return image;
+            }
+            const text = (value = '', preview?: string) =>
+              preview && !args.full
+                ? { text: preview, bytes: value.length, complete: false }
+                : { text: value, bytes: value.length, complete: true };
+            return {
+              version: 2,
+              toolId: args.toolId,
+              exitCode: output.exitCode,
+              startLine: output.startLine,
+              truncated: false,
+              stdout: text(output.stdout, output.previewStdout),
+              stderr: text(output.stderr),
+              images: (output.images ?? []).map((image: any, index: number) => ({
+                index,
+                mediaType: image.mediaType,
+                bytes: image.bytes,
+                width: image.width,
+                height: image.height,
+              })),
+              imagesOmitted: 0,
+              command: output.command,
+              input: output.input,
+            };
           }
           if (command === 'search_mentions') {
             const state = window as any;

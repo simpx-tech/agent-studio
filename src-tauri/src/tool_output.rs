@@ -1,73 +1,72 @@
-//! Tool results kept on the computer that ran them. Commands and result sizes travel with
-//! the synced activity record; the text and images themselves stay here, bounded, and are
-//! read on demand through transport, so the workspace and relay sync never carry them.
+//! Tool results kept on the computer that ran them: complete, as the provider sent them, and
+//! for as long as their conversation exists. Commands and result sizes travel with the synced
+//! activity record; text, images and complete commands stay here and are read on demand
+//! through transport, so the workspace and relay sync never carry them.
 //!
-//! Layout: `tool-output/<run id>/<key>.json` per call, where the key is a name-based UUID of
-//! the call's activity ID, plus `run.json` with the run's conversation, start and size.
-use crate::protocol::activity::{CapturedOutput, ImageSource, IMAGE_LIMIT};
+//! Layout: `tool-output/<run id>/run.json` (conversation, start, bytes) and one folder per
+//! call, named by a name-based UUID of the call's activity ID, holding `stdout.txt` and
+//! `stderr.txt` as received, `image-<n>.<ext>` files, and `meta.json`, written last.
+use crate::protocol::activity::{terminal_text, CapturedOutput, ImageSource};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 
 const DIRECTORY: &str = "tool-output";
-/// Bytes one run may keep; later results record only that they were not kept.
-const RUN_LIMIT: u64 = 256 * 1024 * 1024;
-/// Decoded image bytes kept for one call.
-const CALL_IMAGE_LIMIT: usize = 8 * 1024 * 1024;
-/// Total bytes kept on this computer. Pruning removes the oldest runs beyond it.
-const TOTAL_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-const PRUNE_TARGET: u64 = TOTAL_LIMIT / 10 * 9;
-/// Results older than this are removed, like the CLIs' own transcripts.
-const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Text of each stream a window receives when it opens a call.
+pub const PREVIEW_BYTES: u64 = 512 * 1024;
+/// Text of each stream a full read returns, so both fit in one relay request of 20 MB.
+pub const FULL_BYTES: u64 = 8 * 1024 * 1024;
 /// Runs not yet saved in the workspace keep their results this long.
 const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
-/// A stored call file larger than this is not read.
-const FILE_LIMIT: u64 = 24 * 1024 * 1024;
+/// A call's `meta.json` larger than this is not read.
+const META_LIMIT: u64 = 64 * 1024 * 1024;
+/// Bytes read to recognize an image file and its dimensions.
+const SNIFF_BYTES: usize = 512 * 1024;
 const KEY_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6d1f_1c8e_52a4_4f0e_9a4b_7c1e_2d3f_4a5b);
-pub const NOT_KEPT: &str =
-    "This output is no longer kept on the computer that ran it. Outputs are kept for 30 days, up to 2 GB.";
+pub const NOT_KEPT: &str = "This output was not kept on the computer that ran it.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StoredImage {
-    pub media_type: String,
-    pub data: String,
-    pub bytes: u64,
+struct ImageMeta {
+    file: String,
+    media_type: String,
+    bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<u32>,
+    width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<u32>,
+    height: Option<u32>,
 }
-/// One call's result as stored and as returned to a window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Stored {
-    pub version: u32,
-    pub tool_id: String,
+struct Meta {
+    version: u32,
+    tool_id: String,
     #[serde(default)]
-    pub stdout: String,
+    exit_code: Option<i64>,
     #[serde(default)]
-    pub stderr: String,
+    start_line: Option<u64>,
     #[serde(default)]
-    pub truncated: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_line: Option<u64>,
+    truncated: bool,
     #[serde(default)]
-    pub images: Vec<StoredImage>,
-    /// Images reported but not kept: unreadable, unsupported or over the size limits.
+    images: Vec<ImageMeta>,
+    /// Images reported but not kept: unreadable or not a supported image type.
     #[serde(default)]
-    pub images_omitted: u32,
-    /// The run had reached its storage limit, so nothing was kept.
+    images_omitted: u32,
+    /// The complete command or input when the activity record shows a shortened one.
     #[serde(default)]
-    pub omitted: bool,
+    command: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,12 +77,65 @@ struct Manifest {
     bytes: u64,
 }
 
+/// One stream of a result as a window receives it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Text {
+    /// Cleaned for display; the beginning and end of a longer stream, with a marker between.
+    pub text: String,
+    /// The whole stream's size as kept.
+    pub bytes: u64,
+    pub complete: bool,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageView {
+    pub index: usize,
+    pub media_type: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+/// A call's result as a window receives it. Images are read one at a time.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub version: u32,
+    pub tool_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    pub truncated: bool,
+    pub stdout: Text,
+    pub stderr: Text,
+    pub images: Vec<ImageView>,
+    pub images_omitted: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageData {
+    pub media_type: String,
+    pub data: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
 #[derive(Default)]
 struct Slot {
-    value: Mutex<Option<Arc<Stored>>>,
+    done: AtomicBool,
     ready: tokio::sync::Notify,
 }
-/// Results still being written, so a window that asks right away still gets them, and the
+/// Results still being written, so a window that asks right away waits for them, and the
 /// runs that are recording, which pruning leaves alone.
 #[derive(Default)]
 pub struct Pending {
@@ -104,6 +156,12 @@ fn now_ms() -> u64 {
 }
 fn valid_tool_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control)
+}
+fn valid_request(run_id: &str, tool_id: &str) -> Result<(), String> {
+    if uuid::Uuid::parse_str(run_id).is_err() || !valid_tool_id(tool_id) {
+        return Err("Invalid tool output request".into());
+    }
+    Ok(())
 }
 pub fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app
@@ -189,89 +247,126 @@ fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
     }
     None
 }
-/// A checked image; `encoded` is the bytes' standard base64 when the provider sent it.
-fn stored_image(bytes: &[u8], encoded: Option<&str>) -> Option<StoredImage> {
-    if bytes.is_empty() || bytes.len() > IMAGE_LIMIT {
-        return None;
+fn extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
     }
-    let (media_type, size) = sniff(bytes)?;
-    Some(StoredImage {
-        media_type: media_type.into(),
-        data: encoded.map_or_else(
-            || base64::engine::general_purpose::STANDARD.encode(bytes),
-            str::to_owned,
-        ),
-        bytes: bytes.len() as u64,
-        width: size.map(|s| s.0),
-        height: size.map(|s| s.1),
-    })
 }
 
-/// A captured result with its base64 images decoded and checked by their own bytes, not the
-/// type the provider named. Reported image files are left for the worker to read.
-fn prepare(output: &CapturedOutput) -> (Stored, Vec<String>) {
-    let mut stored = Stored {
-        version: 1,
-        tool_id: output.tool_id.clone(),
-        stdout: output.stdout.clone(),
-        stderr: output.stderr.clone(),
-        truncated: output.truncated,
-        exit_code: output.exit_code,
-        start_line: output.start_line,
-        images: vec![],
-        images_omitted: 0,
-        omitted: false,
-    };
-    let mut files = vec![];
-    for image in &output.images {
-        match image {
-            ImageSource::Base64 { data, .. } => {
-                match base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .ok()
-                    .and_then(|bytes| stored_image(&bytes, Some(data)))
-                {
-                    Some(image) => add_image(&mut stored, image),
-                    None => stored.images_omitted += 1,
-                }
-            }
-            ImageSource::File { path } => files.push(path.clone()),
-        }
-    }
-    (stored, files)
-}
-fn add_image(stored: &mut Stored, image: StoredImage) {
-    let used: u64 = stored.images.iter().map(|i| i.bytes).sum();
-    if used + image.bytes <= CALL_IMAGE_LIMIT as u64 {
-        stored.images.push(image);
-    } else {
-        stored.images_omitted += 1;
-    }
-}
-/// Reads an image file a provider reported viewing: a regular file of a supported type.
-fn read_image_file(path: &Path) -> Option<StoredImage> {
-    let text = path.to_string_lossy();
-    if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
-        return None;
-    }
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > IMAGE_LIMIT as u64 {
-        return None;
-    }
-    stored_image(&std::fs::read(path).ok()?, None)
-}
-
-/// Writes `value` to `path` through a temporary file, so readers see all of it or nothing.
-fn write_atomic(path: &Path, value: &impl Serialize) -> Result<u64, String> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "Cannot serialize a tool output")?;
+/// Writes `bytes` to `path` through a temporary file, so readers see all of it or nothing.
+fn write_file(path: &Path, bytes: &[u8]) -> Result<u64, String> {
     let parent = path.parent().ok_or("Invalid tool output path")?;
     std::fs::create_dir_all(parent).map_err(|_| "Cannot create the tool output folder")?;
     let mut file =
         tempfile::NamedTempFile::new_in(parent).map_err(|_| "Cannot prepare a tool output")?;
-    std::io::Write::write_all(&mut file, &bytes).map_err(|_| "Cannot write a tool output")?;
+    file.write_all(bytes)
+        .map_err(|_| "Cannot write a tool output")?;
     file.persist(path)
         .map_err(|_| "Cannot finish writing a tool output")?;
     Ok(bytes.len() as u64)
+}
+fn write_json(path: &Path, value: &impl Serialize) -> Result<u64, String> {
+    write_file(
+        path,
+        &serde_json::to_vec(value).map_err(|_| "Cannot serialize a tool output")?,
+    )
+}
+/// Copies an image file a provider reported viewing: a regular file of a supported type.
+fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> {
+    let text = path.to_string_lossy();
+    if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
+        return None;
+    }
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut source = std::fs::File::open(path).ok()?;
+    let mut head = Vec::with_capacity(SNIFF_BYTES);
+    (&mut source)
+        .take(SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    let (media_type, size) = sniff(&head)?;
+    source.seek(SeekFrom::Start(0)).ok()?;
+    let file = format!("image-{index}.{}", extension(media_type));
+    let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
+    let bytes = std::io::copy(&mut source, &mut target).ok()?;
+    target.persist(directory.join(&file)).ok()?;
+    Some(ImageMeta {
+        file,
+        media_type: media_type.into(),
+        bytes,
+        width: size.map(|s| s.0),
+        height: size.map(|s| s.1),
+    })
+}
+/// Writes one call's result, replacing an earlier one, and returns the bytes written.
+fn write_call(
+    directory: &Path,
+    output: &CapturedOutput,
+    files: &[Option<PathBuf>],
+) -> Result<u64, String> {
+    let _ = std::fs::remove_dir_all(directory);
+    std::fs::create_dir_all(directory).map_err(|_| "Cannot create the tool output folder")?;
+    let mut written = 0;
+    for (name, text) in [
+        ("stdout.txt", &output.stdout),
+        ("stderr.txt", &output.stderr),
+    ] {
+        if !text.is_empty() {
+            written += write_file(&directory.join(name), text.as_bytes())?;
+        }
+    }
+    let mut images = vec![];
+    let mut omitted = 0;
+    for image in &output.images {
+        let ImageSource::Base64 { data, .. } = image else {
+            continue;
+        };
+        let decoded = base64::engine::general_purpose::STANDARD.decode(data).ok();
+        let Some((bytes, (media_type, size))) =
+            decoded.and_then(|bytes| sniff(&bytes).map(|kind| (bytes, kind)))
+        else {
+            omitted += 1;
+            continue;
+        };
+        let file = format!("image-{}.{}", images.len(), extension(media_type));
+        written += write_file(&directory.join(&file), &bytes)?;
+        images.push(ImageMeta {
+            file,
+            media_type: media_type.into(),
+            bytes: bytes.len() as u64,
+            width: size.map(|s| s.0),
+            height: size.map(|s| s.1),
+        });
+    }
+    for path in files {
+        match path
+            .as_deref()
+            .and_then(|path| copy_image(path, directory, images.len()))
+        {
+            Some(image) => {
+                written += image.bytes;
+                images.push(image);
+            }
+            None => omitted += 1,
+        }
+    }
+    let meta = Meta {
+        version: 2,
+        tool_id: output.tool_id.clone(),
+        exit_code: output.exit_code,
+        start_line: output.start_line,
+        truncated: output.truncated,
+        images,
+        images_omitted: omitted,
+        command: output.command.clone(),
+        input: output.input.clone(),
+    };
+    Ok(written + write_json(&directory.join("meta.json"), &meta)?)
 }
 
 enum Job {
@@ -353,19 +448,13 @@ impl Worker {
                     slot,
                     output,
                 } => {
-                    let Ok((mut stored, files)) =
-                        tauri::async_runtime::spawn_blocking(move || prepare(&output)).await
-                    else {
-                        self.release(&slot_key, &slot);
-                        continue;
-                    };
-                    for path in files {
-                        match self.image_file(&path).await {
-                            Some(image) => add_image(&mut stored, image),
-                            None => stored.images_omitted += 1,
+                    let mut files = vec![];
+                    for image in &output.images {
+                        if let ImageSource::File { path } = image {
+                            files.push(self.image_path(path).await);
                         }
                     }
-                    self.write(stored, &slot_key, &slot).await;
+                    self.write(output, files, &slot_key, &slot).await;
                 }
             }
         }
@@ -376,127 +465,225 @@ impl Worker {
         let pending = self.pending.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || prune(&root, &pending)).await;
     }
-    async fn image_file(&self, path: &str) -> Option<StoredImage> {
-        let path = match &self.distribution {
-            // Linux paths reach Windows through the distribution's own translation.
-            Some(distribution) => {
-                let (folder, name) = path.rsplit_once('/')?;
-                let folder = if folder.is_empty() { "/" } else { folder };
-                if name.is_empty() {
-                    return None;
-                }
-                crate::folders::windows_path(distribution, folder)
-                    .await
-                    .ok()?
-                    .join(name)
-            }
-            None => PathBuf::from(path),
+    /// A reported image path on this computer; Linux paths reach Windows through the
+    /// distribution's own translation.
+    async fn image_path(&self, path: &str) -> Option<PathBuf> {
+        let Some(distribution) = &self.distribution else {
+            return Some(PathBuf::from(path));
         };
-        tauri::async_runtime::spawn_blocking(move || read_image_file(&path))
-            .await
-            .ok()
-            .flatten()
-    }
-    async fn write(&mut self, stored: Stored, slot_key: &str, slot: &Arc<Slot>) {
-        let size = (stored.stdout.len()
-            + stored.stderr.len()
-            + stored.images.iter().map(|i| i.data.len()).sum::<usize>()) as u64;
-        let stored = if self.bytes + size > RUN_LIMIT {
-            Stored {
-                stdout: String::new(),
-                stderr: String::new(),
-                images: vec![],
-                omitted: true,
-                ..stored
-            }
-        } else {
-            stored
-        };
-        let stored = Arc::new(stored);
-        {
-            let mut value = slot.value.lock().unwrap_or_else(|e| e.into_inner());
-            *value = Some(stored.clone());
+        let (folder, name) = path.rsplit_once('/')?;
+        let folder = if folder.is_empty() { "/" } else { folder };
+        if name.is_empty() {
+            return None;
         }
-        slot.ready.notify_waiters();
-        let directory = self.root.join(&self.run_id);
-        let path = directory.join(format!("{}.json", key(&stored.tool_id)));
-        let manifest_path = directory.join("run.json");
-        let written = {
-            let stored = stored.clone();
-            let conversation_id = self.conversation_id.clone();
-            let created_at = self.created_at;
-            let previous = self.bytes;
-            tauri::async_runtime::spawn_blocking(move || {
-                let bytes = write_atomic(&path, &*stored)?;
-                write_atomic(
-                    &manifest_path,
-                    &Manifest {
-                        conversation_id,
-                        created_at,
-                        bytes: previous + bytes,
-                    },
-                )?;
-                Ok::<u64, String>(bytes)
-            })
-            .await
-        };
+        Some(
+            crate::folders::windows_path(distribution, folder)
+                .await
+                .ok()?
+                .join(name),
+        )
+    }
+    async fn write(
+        &mut self,
+        output: Box<CapturedOutput>,
+        files: Vec<Option<PathBuf>>,
+        slot_key: &str,
+        slot: &Arc<Slot>,
+    ) {
+        let run = self.root.join(&self.run_id);
+        let directory = run.join(key(&output.tool_id));
+        let conversation_id = self.conversation_id.clone();
+        let created_at = self.created_at;
+        let previous = self.bytes;
+        let written = tauri::async_runtime::spawn_blocking(move || {
+            let bytes = write_call(&directory, &output, &files)?;
+            write_json(
+                &run.join("run.json"),
+                &Manifest {
+                    conversation_id,
+                    created_at,
+                    bytes: previous + bytes,
+                },
+            )?;
+            Ok::<u64, String>(bytes)
+        })
+        .await;
         if let Ok(Ok(bytes)) = written {
             self.bytes += bytes;
         }
-        self.release(slot_key, slot);
-    }
-    /// Ends a slot's time in memory; readers then use the file, if one was written.
-    fn release(&self, slot_key: &str, slot: &Arc<Slot>) {
         // A later result for the same call may have replaced this slot.
         if let Ok(mut slots) = self.pending.slots.lock() {
             if slots.get(slot_key).is_some_and(|s| Arc::ptr_eq(s, slot)) {
                 slots.remove(slot_key);
             }
         }
+        slot.done.store(true, Ordering::SeqCst);
         slot.ready.notify_waiters();
     }
 }
 
-/// The result of one call of one run, from memory while it is being written, else from disk.
+/// Waits while a result of this call is still being written.
+async fn written(pending: &Pending, run_id: &str, tool_id: &str) {
+    let slot = pending
+        .slots
+        .lock()
+        .ok()
+        .and_then(|slots| slots.get(&slot_key(run_id, tool_id)).cloned());
+    if let Some(slot) = slot {
+        let ready = slot.ready.notified();
+        tokio::pin!(ready);
+        ready.as_mut().enable();
+        if !slot.done.load(Ordering::SeqCst) {
+            let _ = tokio::time::timeout(Duration::from_secs(20), ready).await;
+        }
+    }
+}
+fn read_meta(directory: &Path, tool_id: &str) -> Result<Meta, String> {
+    let path = directory.join("meta.json");
+    let metadata = std::fs::metadata(&path).map_err(|_| NOT_KEPT.to_string())?;
+    if metadata.len() > META_LIMIT {
+        return Err(NOT_KEPT.into());
+    }
+    let meta: Meta = serde_json::from_slice(&std::fs::read(&path).map_err(|_| NOT_KEPT)?)
+        .map_err(|_| NOT_KEPT.to_string())?;
+    if meta.tool_id != tool_id {
+        return Err(NOT_KEPT.into());
+    }
+    Ok(meta)
+}
+fn human(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1024.0 {
+        return format!("{kb:.0} KB");
+    }
+    format!("{:.1} MB", kb / 1024.0)
+}
+/// A stream as a window shows it: whole when it fits in `limit`, otherwise its beginning and
+/// end on line boundaries with a marker for what is not shown.
+fn read_text(path: &Path, limit: u64) -> Text {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Text {
+            complete: true,
+            ..Text::default()
+        };
+    };
+    let size = file.metadata().map_or(0, |m| m.len());
+    let mut read = |length: u64| {
+        let mut buffer = Vec::with_capacity(length as usize);
+        let _ = (&mut file).take(length).read_to_end(&mut buffer);
+        buffer
+    };
+    if size <= limit {
+        return Text {
+            text: terminal_text(&String::from_utf8_lossy(&read(size))),
+            bytes: size,
+            complete: true,
+        };
+    }
+    let head = read(limit / 4 * 3);
+    let mut tail = vec![];
+    if file.seek(SeekFrom::End(-((limit / 4) as i64))).is_ok() {
+        let _ = file.read_to_end(&mut tail);
+    }
+    // Whole characters and lines only at the cuts.
+    let head = match std::str::from_utf8(&head) {
+        Ok(text) => text,
+        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()]).unwrap_or_default(),
+    };
+    let head = head.rfind('\n').map_or(head, |i| &head[..=i]);
+    let start = tail
+        .iter()
+        .position(|b| (*b as i8) >= -0x40)
+        .unwrap_or(tail.len());
+    let tail = String::from_utf8_lossy(&tail[start..]);
+    let tail = tail.find('\n').map_or(&tail[..], |i| &tail[i + 1..]);
+    let hidden = size.saturating_sub((head.len() + tail.len()) as u64);
+    Text {
+        text: format!(
+            "{}[… {} not shown …]\n{}",
+            terminal_text(head),
+            human(hidden),
+            terminal_text(tail)
+        ),
+        bytes: size,
+        complete: false,
+    }
+}
+
+/// One call's result for a window: whole streams up to the preview size, or up to the full
+/// size when asked, and its images' descriptions.
 pub async fn read(
     root: PathBuf,
     pending: Arc<Pending>,
     run_id: String,
     tool_id: String,
-) -> Result<Stored, String> {
-    if uuid::Uuid::parse_str(&run_id).is_err() || !valid_tool_id(&tool_id) {
-        return Err("Invalid tool output request".into());
-    }
-    let slot = pending
-        .slots
-        .lock()
-        .ok()
-        .and_then(|slots| slots.get(&slot_key(&run_id, &tool_id)).cloned());
-    if let Some(slot) = slot {
-        let ready = slot.ready.notified();
-        tokio::pin!(ready);
-        ready.as_mut().enable();
-        let current = slot.value.lock().ok().and_then(|v| v.clone());
-        if let Some(stored) = current {
-            return Ok((*stored).clone());
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(20), ready).await;
-        if let Some(stored) = slot.value.lock().ok().and_then(|v| v.clone()) {
-            return Ok((*stored).clone());
-        }
-    }
-    let path = root.join(&run_id).join(format!("{}.json", key(&tool_id)));
+    full: bool,
+) -> Result<View, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        let metadata = std::fs::metadata(&path).map_err(|_| NOT_KEPT.to_string())?;
-        if metadata.len() > FILE_LIMIT {
+        let meta = read_meta(&directory, &tool_id)?;
+        let limit = if full { FULL_BYTES } else { PREVIEW_BYTES };
+        Ok(View {
+            version: meta.version,
+            tool_id,
+            exit_code: meta.exit_code,
+            start_line: meta.start_line,
+            truncated: meta.truncated,
+            stdout: read_text(&directory.join("stdout.txt"), limit),
+            stderr: read_text(&directory.join("stderr.txt"), limit),
+            images: meta
+                .images
+                .into_iter()
+                .enumerate()
+                .map(|(index, image)| ImageView {
+                    index,
+                    media_type: image.media_type,
+                    bytes: image.bytes,
+                    width: image.width,
+                    height: image.height,
+                })
+                .collect(),
+            images_omitted: meta.images_omitted,
+            command: meta.command,
+            input: meta.input,
+        })
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// One image of a call's result.
+pub async fn read_image(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<ImageData, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let meta = read_meta(&directory, &tool_id)?;
+        let image = meta.images.get(index).ok_or(NOT_KEPT)?;
+        // Stored names only; a name never reaches outside the call's folder.
+        if image.file.contains(['/', '\\']) || !image.file.starts_with("image-") {
             return Err(NOT_KEPT.to_string());
         }
-        let bytes = std::fs::read(&path).map_err(|_| NOT_KEPT.to_string())?;
-        let stored: Stored = serde_json::from_slice(&bytes).map_err(|_| NOT_KEPT.to_string())?;
-        if stored.tool_id != tool_id {
-            return Err(NOT_KEPT.to_string());
-        }
-        Ok(stored)
+        let bytes = std::fs::read(directory.join(&image.file)).map_err(|_| NOT_KEPT)?;
+        let (media_type, _) = sniff(&bytes).ok_or(NOT_KEPT)?;
+        Ok(ImageData {
+            media_type: media_type.into(),
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            bytes: bytes.len() as u64,
+            width: image.width,
+            height: image.height,
+        })
     })
     .await
     .map_err(|_| "Cannot read the tool output".to_string())?
@@ -540,21 +727,11 @@ fn referenced_runs(workspace: &Path) -> Option<HashSet<String>> {
             .collect(),
     )
 }
-fn directory_bytes(path: &Path) -> u64 {
-    std::fs::read_dir(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.metadata().ok())
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| metadata.len())
-        .sum()
-}
-static PRUNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Removes results of runs the workspace no longer has, results older than 30 days, and
-/// the oldest runs beyond the total limit. Runs still recording are kept.
+static PRUNING: AtomicBool = AtomicBool::new(false);
+/// Removes the results of runs the saved workspace no longer has, such as deleted chats.
+/// Results of saved chats are kept, whatever their age or size; runs still recording and
+/// runs saved within the last hour are left alone.
 pub fn prune(root: &Path, pending: &Pending) {
-    use std::sync::atomic::Ordering;
     if PRUNING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -563,47 +740,34 @@ pub fn prune(root: &Path, pending: &Pending) {
         .and_then(|data| referenced_runs(&data.join("workspace.json")));
     let active = pending.active.lock().map(|a| a.clone()).unwrap_or_default();
     let now = now_ms();
-    let mut runs = vec![];
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let Some(referenced) = &referenced else {
+            break;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if uuid::Uuid::parse_str(&name).is_err() || !path.is_dir() || active.contains(&name) {
+        if uuid::Uuid::parse_str(&name).is_err()
+            || !path.is_dir()
+            || active.contains(&name)
+            || referenced.contains(&name)
+        {
             continue;
         }
-        let manifest: Option<Manifest> = std::fs::read(path.join("run.json"))
+        let created_at = std::fs::read(path.join("run.json"))
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        let created_at = manifest.as_ref().map(|m| m.created_at).unwrap_or_else(|| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_millis() as u64)
-        });
-        let age = Duration::from_millis(now.saturating_sub(created_at));
-        let unsaved = referenced
-            .as_ref()
-            .is_some_and(|runs| !runs.contains(&name));
-        if age > MAX_AGE || (unsaved && age > UNSAVED_GRACE) {
+            .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+            .map(|m| m.created_at)
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+            })
+            .unwrap_or(0);
+        if Duration::from_millis(now.saturating_sub(created_at)) > UNSAVED_GRACE {
             let _ = std::fs::remove_dir_all(&path);
-            continue;
-        }
-        let bytes = manifest
-            .map(|m| m.bytes)
-            .unwrap_or_else(|| directory_bytes(&path));
-        runs.push((created_at, bytes, path));
-    }
-    let mut total: u64 = runs.iter().map(|r| r.1).sum();
-    if total > TOTAL_LIMIT {
-        runs.sort_by_key(|r| r.0);
-        for (_, bytes, path) in runs {
-            if total <= PRUNE_TARGET {
-                break;
-            }
-            if std::fs::remove_dir_all(&path).is_ok() {
-                total = total.saturating_sub(bytes);
-            }
         }
     }
     PRUNING.store(false, Ordering::SeqCst);
@@ -617,26 +781,28 @@ mod tests {
         0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0,
         0, 0, 4, 0, 0, 0, 3, 8, 2, 0, 0, 0,
     ];
+    const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
     fn output(tool_id: &str) -> CapturedOutput {
-        CapturedOutput {
+        let mut output = CapturedOutput {
             tool_id: tool_id.into(),
-            stdout: "hello\n".into(),
+            stdout: "\u{1b}[32mhello\u{1b}[0m\r\n".into(),
             stderr: "warning\n".into(),
             truncated: false,
             exit_code: Some(1),
             start_line: None,
-            images: vec![
-                ImageSource::Base64 {
-                    media_type: "image/png".into(),
-                    data: base64::engine::general_purpose::STANDARD.encode(PNG),
-                },
-                ImageSource::Base64 {
-                    media_type: "image/png".into(),
-                    data: base64::engine::general_purpose::STANDARD.encode(b"<svg/>"),
-                },
-            ],
-        }
+            images: vec![],
+            command: Some("npm test -- --long".into()),
+            input: None,
+        };
+        output.images = [PNG, b"<svg/>".as_slice()]
+            .iter()
+            .map(|bytes| ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+            .collect();
+        output
     }
 
     #[test]
@@ -656,111 +822,180 @@ mod tests {
         assert_eq!(sniff(b"<svg/>"), None);
     }
 
-    #[test]
-    fn prepared_results_keep_valid_images_and_count_the_rest() {
-        let (stored, files) = prepare(&output("claude:one"));
-        assert!(files.is_empty());
-        assert_eq!(stored.images.len(), 1);
-        assert_eq!(stored.images[0].width, Some(4));
-        assert_eq!(stored.images_omitted, 1);
-        assert_eq!(stored.exit_code, Some(1));
-        let mut large = output("claude:two");
-        large.images = (0..3)
-            .map(|_| ImageSource::Base64 {
-                media_type: "image/png".into(),
-                data: base64::engine::general_purpose::STANDARD
-                    .encode([PNG, &vec![0u8; 3 * 1024 * 1024]].concat()),
-            })
-            .collect();
-        let (stored, _) = prepare(&large);
-        assert_eq!((stored.images.len(), stored.images_omitted), (2, 1));
-    }
-
     #[tokio::test]
-    async fn results_are_read_from_pending_slots_then_disk_and_validated() {
+    async fn results_are_kept_whole_and_read_as_previews_full_views_and_images() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
         let pending = Arc::new(Pending::default());
-        let run = "11111111-1111-4111-8111-111111111111";
-        let (stored, _) = prepare(&output("claude:one"));
+        let mut captured = output("claude:one");
+        // A reported file image is copied; a missing one is counted as not kept.
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, PNG).unwrap();
+        captured.images.push(ImageSource::File {
+            path: file.to_string_lossy().into(),
+        });
+        let files = [Some(file), Some(dir.path().join("missing.png"))];
+        let directory = root.join(RUN).join(key("claude:one"));
+        write_call(&directory, &captured, &files).unwrap();
+        let view = read(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:one".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.stdout.text, "hello\n");
+        assert!(view.stdout.complete && view.stderr.complete);
+        assert_eq!(view.exit_code, Some(1));
+        assert_eq!(view.command.as_deref(), Some("npm test -- --long"));
+        assert_eq!((view.images.len(), view.images_omitted), (2, 2));
+        assert_eq!(view.images[1].width, Some(4));
+        // The raw stream is kept as the provider sent it.
+        assert_eq!(
+            std::fs::read_to_string(directory.join("stdout.txt")).unwrap(),
+            "\u{1b}[32mhello\u{1b}[0m\r\n"
+        );
+        let image = read_image(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:one".into(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(image.data)
+                .unwrap(),
+            PNG
+        );
+        assert!(read_image(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:one".into(),
+            2
+        )
+        .await
+        .is_err());
+        // A long stream is previewed by its ends and read whole on request.
+        let mut long = CapturedOutput::new("claude:long");
+        long.stdout = (0..40_000).map(|i| format!("line {i} é\n")).collect();
+        write_call(&root.join(RUN).join(key("claude:long")), &long, &[]).unwrap();
+        let preview = read(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:long".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!preview.stdout.complete);
+        assert_eq!(preview.stdout.bytes, long.stdout.len() as u64);
+        assert!(preview.stdout.text.starts_with("line 0 é\n"));
+        assert!(preview.stdout.text.ends_with("line 39999 é\n"));
+        assert!(preview.stdout.text.contains(" not shown …]\n"));
+        assert!(preview.stdout.text.len() <= PREVIEW_BYTES as usize + 64);
+        let whole = read(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:long".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(whole.stdout.complete);
+        assert_eq!(whole.stdout.text, long.stdout);
+        assert_eq!(
+            read(
+                root.clone(),
+                pending.clone(),
+                RUN.into(),
+                "claude:two".into(),
+                false
+            )
+            .await,
+            Err(NOT_KEPT.into())
+        );
+        for (run, tool) in [("../escape", "claude:one"), (RUN, ""), (RUN, "a\nb")] {
+            assert!(read(
+                root.clone(),
+                pending.clone(),
+                run.into(),
+                tool.into(),
+                false
+            )
+            .await
+            .unwrap_err()
+            .contains("Invalid"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_waits_for_a_result_being_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
         let slot = Arc::new(Slot::default());
         pending
             .slots
             .lock()
             .unwrap()
-            .insert(slot_key(run, "claude:one"), slot.clone());
+            .insert(slot_key(RUN, "claude:one"), slot.clone());
         let waiting = tokio::spawn(read(
             root.clone(),
             pending.clone(),
-            run.into(),
+            RUN.into(),
             "claude:one".into(),
+            false,
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
-        *slot.value.lock().unwrap() = Some(Arc::new(stored.clone()));
+        write_call(
+            &root.join(RUN).join(key("claude:one")),
+            &output("claude:one"),
+            &[],
+        )
+        .unwrap();
+        slot.done.store(true, Ordering::SeqCst);
         slot.ready.notify_waiters();
-        assert_eq!(waiting.await.unwrap().unwrap(), stored);
-        pending.slots.lock().unwrap().clear();
-        let path = root.join(run).join(format!("{}.json", key("claude:one")));
-        write_atomic(&path, &stored).unwrap();
-        assert_eq!(
-            read(
-                root.clone(),
-                pending.clone(),
-                run.into(),
-                "claude:one".into()
-            )
-            .await
-            .unwrap(),
-            stored
-        );
-        assert_eq!(
-            read(
-                root.clone(),
-                pending.clone(),
-                run.into(),
-                "claude:two".into()
-            )
-            .await,
-            Err(NOT_KEPT.into())
-        );
-        for (run, tool) in [("../escape", "claude:one"), (run, ""), (run, "a\nb")] {
-            assert!(read(root.clone(), pending.clone(), run.into(), tool.into())
-                .await
-                .unwrap_err()
-                .contains("Invalid"));
-        }
+        assert_eq!(waiting.await.unwrap().unwrap().stdout.text, "hello\n");
     }
 
     #[test]
-    fn pruning_removes_unsaved_old_and_excess_runs_but_keeps_active_ones() {
+    fn pruning_removes_only_runs_no_saved_chat_references() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
         let run = |n: u32| format!("{n:08}-1111-4111-8111-111111111111");
         let day = 24 * 60 * 60 * 1000;
         let now = now_ms();
-        for (n, age, bytes) in [
-            (1, 0, 10),
-            (2, 2 * day, 10),
-            (3, 31 * day, 10),
-            (4, 3 * day, TOTAL_LIMIT),
-            (5, 2 * day, 10),
-            (6, 2 * 60 * 60 * 1000, 10),
-            (7, 60 * 1000, 10),
+        for (n, age) in [
+            (1, 0),
+            (2, 2 * day),
+            (3, 400 * day),
+            (4, 3 * day),
+            (5, 2 * 60 * 60 * 1000),
+            (6, 60 * 1000),
         ] {
-            write_atomic(
+            write_json(
                 &root.join(run(n)).join("run.json"),
                 &Manifest {
                     conversation_id: "c".into(),
                     created_at: now - age,
-                    bytes,
+                    bytes: 3 * 1024 * 1024 * 1024,
                 },
             )
             .unwrap();
         }
-        let saved: Vec<_> = [1, 3, 4, 5].iter().map(|n| run(*n)).collect();
+        let saved: Vec<_> = [1, 3, 4].iter().map(|n| run(*n)).collect();
         std::fs::write(
             dir.path().join("workspace.json"),
-            serde_json::json!({"conversations":[{"messages":[{"runId":saved[0]},{"runId":saved[1]}],"rewind":{"removed":[{"runId":saved[2]}]}},{"messages":[{"runId":saved[3]}]}]}).to_string(),
+            serde_json::json!({"conversations":[{"messages":[{"runId":saved[0]},{"runId":saved[1]}],"rewind":{"removed":[{"runId":saved[2]}]}}]}).to_string(),
         )
         .unwrap();
         let pending = Pending::default();
@@ -770,8 +1005,15 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        // 2 is recording, 3 is too old, 4 is the oldest beyond the total limit, 6 was never
-        // saved, and 7 may not be saved yet.
-        assert_eq!(kept, HashSet::from([run(1), run(2), run(5), run(7)]));
+        // Saved runs stay whatever their age or size; 2 is recording, 5 was never saved, and
+        // 6 may not be saved yet.
+        assert_eq!(
+            kept,
+            HashSet::from([run(1), run(2), run(3), run(4), run(6)])
+        );
+        // Without a readable workspace nothing is removed.
+        std::fs::write(dir.path().join("workspace.json"), "not json").unwrap();
+        prune(&root, &Pending::default());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 5);
     }
 }

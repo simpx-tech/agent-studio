@@ -2,57 +2,66 @@ import { z } from 'zod';
 
 export const toolOutputImageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 const dimension = z.number().int().min(1).max(100_000).optional();
+const size = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /**
- * A tool call's result as the computer that ran it keeps it. Text is bounded there
- * (256 KB of output and 64 KB of errors, as UTF-8), images to eight of at most 5 MB.
+ * One stream of a result as the computer that ran it returns it: whole, or its beginning
+ * and end when the stream is larger than the requested view (512 KB, or 8 MB in full).
  */
+const textSchema = z.object({
+  text: z.string().max(9_000_000),
+  bytes: size,
+  complete: z.boolean(),
+});
+/** A tool call's result as its computer keeps it. Images are read one at a time. */
 export const toolOutputSchema = z.object({
   version: z.number().int().positive(),
   toolId: z.string().min(1).max(240),
-  stdout: z.string().max(300_000).default(''),
-  stderr: z.string().max(80_000).default(''),
-  truncated: z.boolean().default(false),
   exitCode: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
-  startLine: z.number().int().nonnegative().max(100_000_000).optional(),
+  startLine: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  truncated: z.boolean(),
+  stdout: textSchema,
+  stderr: textSchema,
   images: z
     .array(
       z.object({
+        index: z.number().int().nonnegative(),
         mediaType: z.enum(toolOutputImageTypes),
-        data: z
-          .string()
-          .min(4)
-          .max(7_000_000)
-          .regex(/^[A-Za-z0-9+/]+={0,2}$/),
-        bytes: z
-          .number()
-          .int()
-          .min(1)
-          .max(5 * 1024 * 1024),
+        bytes: size,
         width: dimension,
         height: dimension,
       }),
     )
-    .max(8)
-    .default([]),
-  imagesOmitted: z.number().int().nonnegative().max(1000).default(0),
-  omitted: z.boolean().default(false),
+    .max(100_000),
+  imagesOmitted: z.number().int().nonnegative(),
+  command: z.string().optional(),
+  input: z.string().optional(),
 });
 export type ToolOutput = z.infer<typeof toolOutputSchema>;
-export type ToolOutputImage = ToolOutput['images'][number];
+export type ToolOutputImageInfo = ToolOutput['images'][number];
+export const toolOutputImageSchema = z.object({
+  mediaType: z.enum(toolOutputImageTypes),
+  data: z
+    .string()
+    .min(4)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  bytes: size,
+  width: dimension,
+  height: dimension,
+});
+export type ToolOutputImage = z.infer<typeof toolOutputImageSchema>;
 
 export const toolOutputImageUrl = (image: ToolOutputImage) =>
   `data:${image.mediaType};base64,${image.data}`;
 
-type Load = (runId: string, toolId: string, connectionId?: string) => Promise<ToolOutput>;
 /**
- * Results a window already fetched, newest last. Bounded by count and by the size of their
- * text and images, so opening many screenshots cannot hold all of them in memory.
+ * Promises of what a window already fetched, newest last, bounded by count and by the size
+ * of their text or image data, so opening many long results cannot hold all of them.
  */
-export function createToolOutputCache(load: Load, limits = { entries: 48, bytes: 48_000_000 }) {
-  const entries = new Map<string, { promise: Promise<ToolOutput>; bytes: number }>();
-  const size = (output: ToolOutput) =>
-    (output.stdout.length + output.stderr.length) * 2 +
-    output.images.reduce((sum, image) => sum + image.data.length * 2, 0);
+export function createFetchCache<T>(
+  size: (value: T) => number,
+  limits = { entries: 48, bytes: 48_000_000 },
+) {
+  const entries = new Map<string, { promise: Promise<T>; bytes: number }>();
   function trim() {
     let total = [...entries.values()].reduce((sum, entry) => sum + entry.bytes, 0);
     for (const [key, entry] of entries) {
@@ -62,8 +71,7 @@ export function createToolOutputCache(load: Load, limits = { entries: 48, bytes:
     }
   }
   return {
-    get(runId: string, toolId: string, connectionId?: string): Promise<ToolOutput> {
-      const key = `${runId}\n${toolId}`;
+    get(key: string, load: () => Promise<T>): Promise<T> {
       const cached = entries.get(key);
       if (cached) {
         // Most recently used entries are evicted last.
@@ -71,11 +79,11 @@ export function createToolOutputCache(load: Load, limits = { entries: 48, bytes:
         entries.set(key, cached);
         return cached.promise;
       }
-      const entry = { promise: load(runId, toolId, connectionId), bytes: 0 };
+      const entry = { promise: load(), bytes: 0 };
       entries.set(key, entry);
       entry.promise.then(
-        (output) => {
-          entry.bytes = size(output);
+        (value) => {
+          entry.bytes = size(value);
           trim();
         },
         // A failure is never cached: Retry asks the computer again.
@@ -91,6 +99,9 @@ export function createToolOutputCache(load: Load, limits = { entries: 48, bytes:
     },
   };
 }
+export const outputSize = (output: ToolOutput) =>
+  (output.stdout.text.length + output.stderr.text.length) * 2;
+export const imageSize = (image: ToolOutputImage) => image.data.length * 2;
 
 /** Lines of text for display, without the final line ending. */
 export function outputLines(text: string): string[] {
@@ -104,5 +115,7 @@ export function formatBytes(bytes: number): string {
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
   const mb = kb / 1024;
-  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  const gb = mb / 1024;
+  return `${gb < 10 ? gb.toFixed(1) : Math.round(gb)} GB`;
 }

@@ -8,11 +8,9 @@ mod hooks;
 mod output;
 mod progress;
 mod subagents;
-use output::{
-    capped, claude_error_text, claude_exit_code, input_text, result_parts, shortened, unwrap_shell,
-    COMMAND_LIMIT,
-};
-pub use output::{CapturedOutput, ImageSource, OutputSummary, IMAGE_LIMIT};
+pub(crate) use output::terminal_text;
+use output::{claude_error_text, claude_exit_code, result_parts, unwrap_shell};
+pub use output::{CapturedOutput, ImageSource, OutputSummary};
 use progress::{ToolClock, ToolProgress};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -168,21 +166,6 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         agents: vec![],
     }
 }
-fn set_command(tool: &mut ToolActivity, command: &str, shell: Option<&'static str>) {
-    let (command, truncated) = shortened(command, COMMAND_LIMIT);
-    if command.trim().is_empty() {
-        return;
-    }
-    tool.command = Some(command);
-    tool.command_truncated = truncated;
-    tool.shell = shell;
-}
-fn set_input(tool: &mut ToolActivity, value: &Value) {
-    if let Some((input, truncated)) = input_text(value) {
-        tool.input = Some(input);
-        tool.input_truncated = truncated;
-    }
-}
 fn is_image_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [".png", ".jpg", ".jpeg", ".gif", ".webp"]
@@ -315,6 +298,9 @@ pub struct ToolDecoder {
     agent_lifecycle: std::collections::HashSet<String>,
     /// Results waiting for `take_outputs`.
     captured: Vec<CapturedOutput>,
+    /// Complete commands and inputs of calls whose records show shortened ones.
+    full_commands: HashMap<String, String>,
+    full_inputs: HashMap<String, String>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -366,7 +352,7 @@ impl ToolDecoder {
                 if studio_tool(&name) {
                     tool.detail = Some("Application tool call reported by Codex.".into());
                 } else {
-                    set_input(&mut tool, &item["arguments"]);
+                    self.set_input(&mut tool, &item["arguments"]);
                     if method == "item/completed" {
                         let (text, images) = result_parts(&item["contentItems"]);
                         let mut output = CapturedOutput::new(&tool.id);
@@ -620,7 +606,7 @@ impl ToolDecoder {
             tool.operation = Some("command".into());
             if let Some(command) = item["command"].as_str() {
                 let (shell, script) = unwrap_shell(command);
-                set_command(&mut tool, &script, shell);
+                self.set_command(&mut tool, &script, shell);
             }
             if let Some(path) = item["command"].as_str().and_then(direct_read_path) {
                 tool.name = "Read file".into();
@@ -639,7 +625,7 @@ impl ToolDecoder {
                     .or_else(|| item["aggregated_output"].as_str())
                     .unwrap_or_default();
                 let mut output = CapturedOutput::new(&tool.id);
-                output.stdout = capped(text);
+                output.stdout = text.into();
                 output.exit_code = exit_code;
                 self.capture(&mut tool, output);
             }
@@ -699,7 +685,7 @@ impl ToolDecoder {
             if let Some(server) = field(item, "server", 200) {
                 fact(&mut tool, "Connection", server);
             }
-            set_input(&mut tool, &item["arguments"]);
+            self.set_input(&mut tool, &item["arguments"]);
             if event == "item.completed" {
                 let result = &item["result"];
                 let (mut text, images) = result_parts(&result["content"]);
@@ -834,7 +820,7 @@ impl ToolDecoder {
                     tool.detail = Some(description);
                 }
                 if let Some(command) = input["command"].as_str() {
-                    set_command(&mut tool, command, None);
+                    self.set_command(&mut tool, command, None);
                 }
             }
             "ToolSearch" => {
@@ -853,7 +839,7 @@ impl ToolDecoder {
                 }
                 if let Some(command) = input["command"].as_str() {
                     let shell = if name == "Bash" { "bash" } else { "powershell" };
-                    set_command(&mut tool, command, Some(shell));
+                    self.set_command(&mut tool, command, Some(shell));
                 }
             }
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
@@ -879,7 +865,7 @@ impl ToolDecoder {
                 }
             }
             // Connected (MCP) and unrecognized tools show the arguments they were sent.
-            _ if !claude_builtin(name) && !studio_tool(name) => set_input(&mut tool, input),
+            _ if !claude_builtin(name) && !studio_tool(name) => self.set_input(&mut tool, input),
             _ => {}
         }
         self.publish(tool, out);
@@ -1445,7 +1431,8 @@ mod tests {
         assert!(codex[0].command_run);
         assert_eq!(codex[0].output.as_ref().unwrap().exit_code, Some(0));
         assert!(!serde_json::to_string(&codex).unwrap().contains("PRIVATE_"));
-        assert_eq!(d.take_outputs()[0].stdout, "PRIVATE_BODY\n");
+        // Kept exactly as sent; the store cleans line endings when showing it.
+        assert_eq!(d.take_outputs()[0].stdout, "PRIVATE_BODY\r\n");
     }
     #[test]
     fn claude_partial_inputs_require_real_results_and_keep_repeated_calls_separate() {

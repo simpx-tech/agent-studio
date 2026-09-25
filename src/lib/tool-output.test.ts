@@ -1,54 +1,82 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createToolOutputCache,
+  createFetchCache,
   formatBytes,
   outputLines,
+  outputSize,
+  toolOutputImageSchema,
   toolOutputSchema,
   type ToolOutput,
 } from './tool-output';
 
+const text = (value: string, complete = true) => ({
+  text: value,
+  bytes: value.length,
+  complete,
+});
 const output = (fields: Partial<ToolOutput> = {}): ToolOutput =>
-  toolOutputSchema.parse({ version: 1, toolId: 'claude:t', stdout: 'ok\n', ...fields });
+  toolOutputSchema.parse({
+    version: 2,
+    toolId: 'claude:t',
+    truncated: false,
+    stdout: text('ok\n'),
+    stderr: text(''),
+    images: [],
+    imagesOmitted: 0,
+    ...fields,
+  });
 
 describe('tool output', () => {
-  it('accepts bounded host results and rejects unsafe images', () => {
-    expect(output()).toMatchObject({ stderr: '', images: [], truncated: false, omitted: false });
-    const image = { mediaType: 'image/png', data: 'iVBORw0KGgo=', bytes: 8, width: 4, height: 3 };
-    expect(output({ images: [image as never] }).images).toHaveLength(1);
+  it('accepts complete and previewed results with image descriptions', () => {
+    expect(output({ stdout: text('head\n[… 1.2 MB not shown …]\ntail\n', false) }).stdout).toEqual(
+      expect.objectContaining({ complete: false }),
+    );
+    const image = { index: 0, mediaType: 'image/png', bytes: 8, width: 4, height: 3 };
+    expect(output({ images: [image as never], command: 'npm test' }).images).toHaveLength(1);
     for (const invalid of [
       { images: [{ ...image, mediaType: 'image/svg+xml' }] },
-      { images: [{ ...image, data: 'javascript:alert(1)' }] },
-      { images: Array(9).fill(image) },
-      { stdout: 'x'.repeat(300_001) },
+      { images: [{ ...image, index: -1 }] },
+      { stdout: { text: 'x', bytes: -1, complete: true } },
+      { stdout: 'plain text' },
       { toolId: '' },
     ])
       expect(
-        toolOutputSchema.safeParse({ version: 1, toolId: 'claude:t', ...invalid }).success,
+        toolOutputSchema.safeParse({ ...output(), ...invalid }).success,
+        JSON.stringify(invalid),
       ).toBe(false);
+    const data = { mediaType: 'image/webp', data: 'UklGRg==', bytes: 4 };
+    expect(toolOutputImageSchema.safeParse(data).success).toBe(true);
+    for (const invalid of [
+      { ...data, data: 'javascript:alert(1)' },
+      { ...data, mediaType: 'text/html' },
+    ])
+      expect(toolOutputImageSchema.safeParse(invalid).success).toBe(false);
   });
 
-  it('caches results per run and call, retries failures and stays bounded', async () => {
-    const load = vi.fn(async (runId: string, toolId: string) => {
-      if (toolId === 'fail') throw new Error('Host offline');
-      return output({ toolId, stdout: `${runId}:${toolId}` });
+  it('caches fetches, retries failures and stays within its bounds', async () => {
+    const load = vi.fn(async (key: string) => {
+      if (key === 'fail') throw new Error('Host offline');
+      return output({ stdout: text(key) });
     });
-    const cache = createToolOutputCache(load, { entries: 2, bytes: 1_000_000 });
-    expect((await cache.get('run', 'a')).stdout).toBe('run:a');
-    expect((await cache.get('run', 'a')).stdout).toBe('run:a');
+    const cache = createFetchCache(outputSize, { entries: 2, bytes: 1_000_000 });
+    const get = (key: string) => cache.get(key, () => load(key));
+    expect((await get('a')).stdout.text).toBe('a');
+    expect((await get('a')).stdout.text).toBe('a');
     expect(load).toHaveBeenCalledTimes(1);
-    await expect(cache.get('run', 'fail')).rejects.toThrow('Host offline');
-    await expect(cache.get('run', 'fail')).rejects.toThrow('Host offline');
+    await expect(get('fail')).rejects.toThrow('Host offline');
+    await expect(get('fail')).rejects.toThrow('Host offline');
     expect(load).toHaveBeenCalledTimes(3);
-    await cache.get('run', 'b');
-    await cache.get('run', 'c');
+    await get('b');
+    await get('c');
     // The least recently used entry left when a third arrived.
-    await cache.get('run', 'a');
+    await get('a');
     expect(load).toHaveBeenCalledTimes(6);
     // Two results of 10 bytes each do not fit in 15.
-    const small = createToolOutputCache(load, { entries: 10, bytes: 15 });
-    await small.get('run', 'x');
-    await small.get('run', 'y');
-    await small.get('run', 'x');
+    const small = createFetchCache(outputSize, { entries: 10, bytes: 15 });
+    const smallGet = (key: string) => small.get(key, () => load(key));
+    await smallGet('xxxxx');
+    await smallGet('yyyyy');
+    await smallGet('xxxxx');
     expect(load).toHaveBeenCalledTimes(9);
   });
 
@@ -60,5 +88,6 @@ describe('tool output', () => {
     expect(formatBytes(1536)).toBe('1.5 KB');
     expect(formatBytes(300 * 1024)).toBe('300 KB');
     expect(formatBytes(5.5 * 1024 * 1024)).toBe('5.5 MB');
+    expect(formatBytes(3 * 1024 ** 3)).toBe('3.0 GB');
   });
 });

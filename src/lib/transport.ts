@@ -20,7 +20,12 @@ import {
   type AccountAction,
 } from './live-usage';
 import { retainRunEvent } from './activity';
-import { toolOutputSchema, type ToolOutput } from './tool-output';
+import {
+  toolOutputImageSchema,
+  toolOutputSchema,
+  type ToolOutput,
+  type ToolOutputImage,
+} from './tool-output';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
@@ -346,6 +351,7 @@ const workerRuns = new Map<string, RelayJob>();
 function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, unknown>) {
   return (
     method === 'toolOutput' ||
+    method === 'toolOutputImage' ||
     (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
   );
 }
@@ -1135,6 +1141,7 @@ async function localCall(
     plugins: 'manage_plugins',
     nativeInstructions: 'read_native_instructions',
     toolOutput: 'read_tool_output',
+    toolOutputImage: 'read_tool_output_image',
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
     steer: 'steer_run',
@@ -1192,8 +1199,8 @@ async function routed<T>(
         ? 660_000
         : method === 'folders'
           ? 30_000
-          : method === 'toolOutput'
-            ? 45_000
+          : method === 'toolOutput' || method === 'toolOutputImage'
+            ? 60_000
             : runTimeoutMs(
                 method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
               ) + 10_000);
@@ -1421,14 +1428,31 @@ export async function readNativeInstructions(
 /**
  * A finished tool call's result, read from the computer that ran it: through native
  * commands here, or the owning host through the relay. It is never synced or exported.
+ * Each stream comes whole up to 512 KB, or up to 8 MB when `full` is set.
  */
 export async function readToolOutput(
   runId: string,
   toolId: string,
   connectionId?: string,
+  full = false,
 ): Promise<ToolOutput> {
   return toolOutputSchema.parse(
-    await routed('toolOutput', { runId, toolId, connectionId }, connectionId),
+    await routed(
+      'toolOutput',
+      { runId, toolId, connectionId, ...(full ? { full } : {}) },
+      connectionId,
+    ),
+  );
+}
+/** One image of a finished tool call's result, read like `readToolOutput`. */
+export async function readToolOutputImage(
+  runId: string,
+  toolId: string,
+  index: number,
+  connectionId?: string,
+): Promise<ToolOutputImage> {
+  return toolOutputImageSchema.parse(
+    await routed('toolOutputImage', { runId, toolId, index, connectionId }, connectionId),
   );
 }
 export type FolderListing = {
