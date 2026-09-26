@@ -1548,12 +1548,26 @@ export async function appSession(): Promise<{ id: string; startedAt: string } | 
   if (typeof value?.id !== 'string' || Number.isNaN(startedAt.getTime())) return undefined;
   return { id: value.id, startedAt: startedAt.toISOString() };
 }
+/** The desktop host asks for the whole workspace when it cannot complete a patch. */
+const needsWholeWorkspace = 'The whole workspace is needed to save this change.';
 export async function saveWorkspace(
   workspace: Workspace,
   scope = workspaceStorageScope(),
+  // The conversations that changed. Given them, the desktop host fills the rest in from its last
+  // write, so one streamed reply does not serialize every conversation. Omit them to send all.
+  changed?: Conversation[],
 ): Promise<void> {
   if (desktop()) {
-    await invoke('save_workspace', { workspace });
+    if (changed) {
+      const { conversations, ...index } = workspace;
+      const order = conversations.map((c) => c.id);
+      try {
+        await invoke('save_workspace_patch', { index, upsert: changed, order });
+      } catch (e) {
+        if (String(e).includes(needsWholeWorkspace)) await invoke('save_workspace', { workspace });
+        else throw e;
+      }
+    } else await invoke('save_workspace', { workspace });
     for (const notice of desktopNotices(workspace)) {
       // Consume all lifecycle events, including suppressed ones, so switching
       // chats later cannot replay an alert the reader already saw.

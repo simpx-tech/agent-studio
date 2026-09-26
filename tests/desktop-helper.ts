@@ -235,6 +235,31 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-workspace', JSON.stringify(args.workspace));
             return;
           }
+          // The host assembles a patch from the conversations it was sent and its last write,
+          // and asks for the whole workspace when it cannot. Mirror both so a partial save is
+          // as visible to these tests as a whole one.
+          if (command === 'save_workspace_patch') {
+            const saved = JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
+            const kept = new Map<string, unknown>(
+              (saved?.conversations ?? []).map((c: { id: string }) => [c.id, c]),
+            );
+            const sent = new Map<string, unknown>(
+              args.upsert.map((c: { id: string }) => [c.id, c]),
+            );
+            const conversations = (args.order as string[]).map((id) => {
+              const conversation = sent.get(id) ?? kept.get(id);
+              if (!conversation)
+                throw new Error('The whole workspace is needed to save this change.');
+              sent.delete(id);
+              return conversation;
+            });
+            if (sent.size) throw new Error('The whole workspace is needed to save this change.');
+            localStorage.setItem(
+              'test-workspace',
+              JSON.stringify({ ...args.index, conversations }),
+            );
+            return;
+          }
           if (command === 'load_drafts')
             return JSON.parse(localStorage.getItem('test-drafts') ?? 'null');
           if (command === 'save_drafts') {

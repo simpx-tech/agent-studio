@@ -758,7 +758,7 @@
       ?.messages.find((m) => m.role === 'assistant' && m.runId === event.runId);
     if (!reply) return;
     applyRunEvent(reply, { kind: 'tool', tool: event.tool });
-    saveSoon();
+    saveSoon(event.conversationId);
   }
   const switchNotices = $derived(
     replySwitches(active?.messages ?? [], (id) => accountName(workspace.fleet, id)),
@@ -1123,7 +1123,7 @@
                 message.error = error;
                 conversation.updatedAt = new Date().toISOString();
               }
-              await persist();
+              await persistChat(conversation.id);
             },
             apply: async (value) => {
               workspace.fleet = value.fleet;
@@ -1249,18 +1249,31 @@
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
   // changed. Streamed reply events count too, because they update messages before a save.
   let localChanges = 0;
-  async function persist(local = true) {
+  // Conversations changed since the last save, or `undefined` for all of them. A save without a
+  // named chat asks for everything, so a new call site is conservative by default.
+  let unsavedChats: Set<string> | undefined;
+  function markChats(chatId?: string) {
+    if (chatId === undefined) unsavedChats = undefined;
+    else if (unsavedChats) unsavedChats.add(chatId);
+  }
+  async function flushWorkspace() {
     if (!loaded) return;
-    if (local) localChanges++;
     const scope = workspaceStorageScope();
     // Saving serializes the workspace anyway, so copying it first only walked every
     // conversation twice. The queued save keeps this workspace and writes its newest state,
     // which is what the file should hold; a later reassignment cannot redirect it.
     const saved = workspace;
+    const pending = unsavedChats;
+    unsavedChats = new Set();
     const next = saveQueue.catch(() => {}).then(async () => {
       const started = performance.now();
       try {
-        await saveWorkspace(saved, scope);
+        // Resolve the named conversations when the save runs, so it sends their newest state.
+        await saveWorkspace(
+          saved,
+          scope,
+          pending && saved.conversations.filter((c) => pending.has(c.id)),
+        );
       } finally {
         lastSaveMs = performance.now() - started;
       }
@@ -1270,9 +1283,24 @@
       await next;
       storageError = '';
     } catch (e) {
+      // A failed save must never leave its conversations looking saved.
+      unsavedChats = undefined;
       storageError = `Changes could not be saved: ${String(e)}`;
       throw e;
     }
+  }
+  async function persist(local = true) {
+    if (!loaded) return;
+    if (local) localChanges++;
+    markChats();
+    await flushWorkspace();
+  }
+  /** Saves a change to one conversation, leaving the rest to the host's last write. */
+  async function persistChat(chatId: string) {
+    if (!loaded) return;
+    localChanges++;
+    markChats(chatId);
+    await flushWorkspace();
   }
   // How long the last save took, so a streamed reply can keep saving to a small share of the
   // time. A save writes the whole workspace, so it grows with the workspace and no frequency
@@ -1283,7 +1311,8 @@
   // writes the newest state, so requests made while one runs only need one more save after it.
   let savingSoon = false;
   let saveAgain = false;
-  function saveSoon() {
+  function saveSoon(chatId?: string) {
+    markChats(chatId);
     saveAgain = true;
     if (savingSoon) return;
     void (async () => {
@@ -1291,7 +1320,8 @@
       try {
         while (saveAgain) {
           saveAgain = false;
-          await persist().catch(() => {});
+          localChanges++;
+          await flushWorkspace().catch(() => {});
         }
       } finally {
         savingSoon = false;
@@ -3093,7 +3123,7 @@
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               ) {
                 if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
-                saveSoon();
+                saveSoon(conversation.id);
               }
               if (activeId === conversation.id) void scrollToEnd(true);
             },
@@ -3135,7 +3165,7 @@
           delete runs[conversation.id];
           delete stopping[conversation.id];
         }
-        saveSoon();
+        saveSoon(conversation.id);
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
       }
@@ -3179,14 +3209,14 @@
       conversation.title = result.title;
       conversation.titleStatus = 'generated';
       conversation.titleSource = { provider: result.provider, model: result.model };
-      saveSoon();
+      saveSoon(conversation.id);
       void refreshUsage(conversation.settings, true);
     } catch {
       if (session !== workspaceSession) return;
       const conversation = workspace.conversations.find((c) => c.id === id);
       if (conversation?.titleStatus === 'pending') {
         conversation.titleStatus = 'fallback';
-        saveSoon();
+        saveSoon(conversation.id);
       }
     }
   }

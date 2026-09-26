@@ -72,8 +72,29 @@ async function desktop(page: Page) {
             case 'save_workspace':
               // Native saves serialize the workspace through IPC.
               JSON.stringify(args.workspace);
+              w.saved = args.workspace;
               w.saves.workspace++;
               return;
+            case 'save_workspace_patch': {
+              // A patch serializes only the conversations it carries, as the host's does.
+              JSON.stringify(args.index);
+              JSON.stringify(args.upsert);
+              const kept = new Map((w.saved?.conversations ?? []).map((c: any) => [c.id, c]));
+              const sent = new Map(args.upsert.map((c: any) => [c.id, c]));
+              const conversations = args.order.map((id: string) => {
+                const conversation = sent.get(id) ?? kept.get(id);
+                if (!conversation)
+                  throw new Error('The whole workspace is needed to save this change.');
+                sent.delete(id);
+                return conversation;
+              });
+              if (sent.size) throw new Error('The whole workspace is needed to save this change.');
+              w.saved = { ...args.index, conversations };
+              w.saves.workspace++;
+              w.saves.patched = (w.saves.patched ?? 0) + 1;
+              w.saves.sentChats = (w.saves.sentChats ?? 0) + args.upsert.length;
+              return;
+            }
             case 'load_sync_state':
               return sync;
             case 'save_sync_state':
@@ -286,14 +307,18 @@ test('a streaming reply saves the whole workspace far less often than it reports
       await page.evaluate(() => (window as any).streamReply(120, 50));
       await page.waitForTimeout(500);
     });
-    const saves = (await page.evaluate(() => (window as any).saves.workspace)) - before;
+    const after = await page.evaluate(() => (window as any).saves);
+    const saves = after.workspace - before;
     test.info().annotations.push({
       type: 'streaming',
-      description: JSON.stringify({ saves, longTasks: tasks.slice(0, 5) }),
+      description: JSON.stringify({ saves, after, longTasks: tasks.slice(0, 5) }),
     });
-    // Each save writes the whole workspace, so reported progress must not drive one save each.
-    expect(saves, 'Whole-workspace saves while streaming 120 events').toBeLessThan(12);
+    // Reported progress must not drive one save each.
+    expect(saves, 'Saves while streaming 120 events').toBeLessThan(12);
     expect(saves, 'A streaming reply still saves its progress').toBeGreaterThan(0);
+    // Each of those saves carries the streaming conversation alone, not all 24 of them.
+    expect(after.patched, 'Saves sent as a patch').toBe(saves);
+    expect(after.sentChats, 'Conversations sent across those saves').toBe(saves);
     if (timed)
       expect(
         tasks[0] ?? 0,

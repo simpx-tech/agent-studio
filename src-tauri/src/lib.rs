@@ -35,10 +35,19 @@ use std::io::Write;
 use std::sync::Mutex;
 use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
-/// Serializes workspace and sync checkpoint writes. Holds whether `workspace.json` is known to
-/// be current, which spares later saves a check for a pre-migration file to back up.
+/// Serializes workspace and sync checkpoint writes, and holds what the last write left on disk.
 #[derive(Default)]
-struct Storage(Mutex<bool>);
+struct Storage(Mutex<StorageState>);
+#[derive(Default)]
+struct StorageState {
+    /// Whether `workspace.json` is known to be current, which spares later saves a check for a
+    /// pre-migration file to back up.
+    current: bool,
+    /// The workspace of the last write. A reply that changes one conversation sends that
+    /// conversation alone and this fills in the rest, so the page never serializes every
+    /// conversation to save one. Cleared whenever the file is written another way.
+    saved: Option<serde_json::Value>,
+}
 
 #[tauri::command]
 async fn manage_plugins(
@@ -469,20 +478,90 @@ fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, S
 }
 #[tauri::command]
 async fn save_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_workspace(&app, &workspace))
-        .await
-        .map_err(|_| "Cannot save the workspace")?
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = app.state::<Storage>();
+        let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+        write_workspace(&app, &mut state, workspace)
+    })
+    .await
+    .map_err(|_| "Cannot save the workspace")?
 }
-fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result<(), String> {
-    let storage = app.state::<Storage>();
-    let mut current = storage.0.lock().map_err(|_| "Storage lock failed")?;
+/// Told when a patch cannot be completed from the last write, so the page sends everything.
+pub const NEEDS_WHOLE_WORKSPACE: &str = "The whole workspace is needed to save this change.";
+/// Saves a workspace assembled from the conversations that changed and the last write. `order`
+/// names every conversation the workspace holds, so additions, removals and reordering all
+/// arrive; a conversation that is neither sent nor already saved fails instead of being dropped.
+#[tauri::command]
+async fn save_workspace_patch(
+    app: tauri::AppHandle,
+    index: serde_json::Value,
+    upsert: Vec<serde_json::Value>,
+    order: Vec<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = app.state::<Storage>();
+        let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+        let workspace = patched_workspace(&mut state, index, upsert, order)?;
+        write_workspace(&app, &mut state, workspace)
+    })
+    .await
+    .map_err(|_| "Cannot save the workspace")?
+}
+fn patched_workspace(
+    state: &mut StorageState,
+    mut index: serde_json::Value,
+    upsert: Vec<serde_json::Value>,
+    order: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if !index.is_object() {
+        return Err("Invalid workspace".into());
+    }
+    let mut sent = std::collections::HashMap::new();
+    for conversation in upsert {
+        let Some(id) = conversation["id"].as_str().map(str::to_owned) else {
+            return Err("Invalid workspace".into());
+        };
+        sent.insert(id, conversation);
+    }
+    let kept: std::collections::HashMap<&str, &serde_json::Value> = state
+        .saved
+        .as_ref()
+        .and_then(|saved| saved["conversations"].as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| c["id"].as_str().map(|id| (id, c)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut conversations = Vec::with_capacity(order.len());
+    for id in &order {
+        if let Some(conversation) = sent.remove(id) {
+            conversations.push(conversation);
+        } else if let Some(conversation) = kept.get(id.as_str()) {
+            conversations.push((*conversation).clone());
+        } else {
+            return Err(NEEDS_WHOLE_WORKSPACE.into());
+        }
+    }
+    // A conversation sent but left out of the order would be silently discarded.
+    if !sent.is_empty() {
+        return Err(NEEDS_WHOLE_WORKSPACE.into());
+    }
+    index["conversations"] = serde_json::Value::Array(conversations);
+    Ok(index)
+}
+fn write_workspace(
+    app: &tauri::AppHandle,
+    state: &mut StorageState,
+    workspace: serde_json::Value,
+) -> Result<(), String> {
     if workspace["version"] != 3
         || !workspace["preferences"].is_object()
         || !workspace["conversations"].is_array()
     {
         return Err("Invalid workspace".into());
     }
-    let bytes = serde_json::to_vec(workspace).map_err(|_| "Cannot serialize workspace")?;
+    let bytes = serde_json::to_vec(&workspace).map_err(|_| "Cannot serialize workspace")?;
     let root = app
         .path()
         .app_local_data_dir()
@@ -498,7 +577,7 @@ fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Res
     let path = root.join("workspace.json");
     // Keep the original pre-migration workspace once, without rewriting its data. Only the
     // file found at launch can be older, since this app writes the current version.
-    if !*current && path.is_file() {
+    if !state.current && path.is_file() {
         if let Ok(old) = std::fs::read(&path) {
             if let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&old) {
                 if let Some(version @ (1 | 2)) = previous["version"].as_u64() {
@@ -513,7 +592,8 @@ fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Res
     }
     replace_workspace(file, &path)
         .map_err(|_| "Cannot finish workspace save. The previous file was preserved.")?;
-    *current = true;
+    state.current = true;
+    state.saved = Some(workspace);
     Ok(())
 }
 /// Replaces the saved workspace with a written and flushed file from the same folder. Commands
@@ -707,7 +787,9 @@ async fn undo_files(
         if preview.undone {
             // Save the receipt on the executing host even if the requesting Viewer
             // disconnects before receiving its result. Retrying is idempotent.
-            let _storage = storage.0.lock().map_err(|_| "Storage lock failed")?;
+            let mut saved = storage.0.lock().map_err(|_| "Storage lock failed")?;
+            // This writes the file directly, so a later patch cannot build on the last write.
+            saved.saved = None;
             let mut workspace: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(root.join("workspace.json")).map_err(
                     |_| "Files were undone, but their status could not be saved. Retry Undo.",
@@ -1027,6 +1109,7 @@ pub fn run() {
             read_tool_output_image,
             load_workspace,
             save_workspace,
+            save_workspace_patch,
             drafts::load_drafts,
             drafts::save_drafts,
             run_agent,
@@ -1043,6 +1126,99 @@ pub fn run() {
         ])
         .run(context)
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod workspace_patch_tests {
+    use super::{patched_workspace, StorageState, NEEDS_WHOLE_WORKSPACE};
+    use serde_json::json;
+
+    fn chat(id: &str, title: &str) -> serde_json::Value {
+        json!({"id": id, "title": title, "messages": []})
+    }
+    fn state(chats: Vec<serde_json::Value>) -> StorageState {
+        StorageState {
+            current: true,
+            saved: Some(json!({"version": 3, "conversations": chats})),
+        }
+    }
+
+    #[test]
+    fn fills_unsent_conversations_from_the_last_write() {
+        let mut saved = state(vec![chat("a", "First"), chat("b", "Second")]);
+        let patched = patched_workspace(
+            &mut saved,
+            json!({"version": 3, "preferences": {}}),
+            vec![chat("b", "Renamed")],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap();
+        let chats = patched["conversations"].as_array().unwrap();
+        assert_eq!(chats.len(), 2);
+        assert_eq!(chats[0]["title"], "First");
+        assert_eq!(chats[1]["title"], "Renamed");
+        assert_eq!(patched["preferences"], json!({}));
+    }
+
+    #[test]
+    fn order_adds_removes_and_reorders_without_sending_every_conversation() {
+        let mut saved = state(vec![chat("a", "First"), chat("b", "Second")]);
+        let patched = patched_workspace(
+            &mut saved,
+            json!({"version": 3, "preferences": {}}),
+            vec![chat("c", "New")],
+            vec!["c".into(), "b".into()],
+        )
+        .unwrap();
+        let titles: Vec<&str> = patched["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, vec!["New", "Second"]);
+    }
+
+    #[test]
+    fn asks_for_the_whole_workspace_rather_than_dropping_a_conversation() {
+        // Nothing was written yet, so the conversations left out cannot be filled in.
+        let mut empty = StorageState::default();
+        assert_eq!(
+            patched_workspace(
+                &mut empty,
+                json!({"version": 3, "preferences": {}}),
+                vec![chat("a", "First")],
+                vec!["a".into(), "b".into()],
+            )
+            .unwrap_err(),
+            NEEDS_WHOLE_WORKSPACE
+        );
+        // A conversation sent but missing from the order would be discarded.
+        let mut saved = state(vec![chat("a", "First")]);
+        assert_eq!(
+            patched_workspace(
+                &mut saved,
+                json!({"version": 3, "preferences": {}}),
+                vec![chat("b", "Second")],
+                vec!["a".into()],
+            )
+            .unwrap_err(),
+            NEEDS_WHOLE_WORKSPACE
+        );
+    }
+
+    #[test]
+    fn rejects_an_index_that_is_not_a_workspace() {
+        let mut saved = state(vec![chat("a", "First")]);
+        assert!(patched_workspace(&mut saved, json!([]), vec![], vec![]).is_err());
+        assert!(patched_workspace(
+            &mut saved,
+            json!({"version": 3, "preferences": {}}),
+            vec![json!({"title": "No id"})],
+            vec![],
+        )
+        .is_err());
+    }
 }
 
 #[cfg(test)]
