@@ -5,6 +5,12 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.4.1 - 2026-09-25
+
+### Fixed
+
+- Stop a short window from scrolling the title bar and sidebar off screen
+
 ## 0.4.0 - 2026-09-25
 
 Chats no longer wait for each other, and notifications now say which chat finished and what it said.
