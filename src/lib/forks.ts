@@ -1,4 +1,4 @@
-import { type Conversation, type Workspace } from './domain';
+import { type Conversation } from './domain';
 
 // A fork ends at a finished reply. Never copy the user input or partial output
 // belonging to an in-flight turn, even when later malformed history exists.
@@ -51,14 +51,4 @@ export function forkConversation(source: Conversation, messageId?: string): Conv
     updatedAt: now,
     messages,
   };
-}
-
-export function forkFitsWorkspace(workspace: Workspace, fork: Conversation): boolean {
-  // Use the same byte limit as native storage and the relay. Check before
-  // inserting the copy, so a large image history cannot make saves fail.
-  return (
-    new TextEncoder().encode(
-      JSON.stringify({ ...workspace, conversations: [fork, ...workspace.conversations] }),
-    ).length <= 20_000_000
-  );
 }

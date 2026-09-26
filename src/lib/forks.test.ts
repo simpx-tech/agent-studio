@@ -7,7 +7,7 @@ import {
   type Conversation,
   type Message,
 } from './domain';
-import { forkConversation, forkFitsWorkspace, forkPoint } from './forks';
+import { forkConversation, forkPoint } from './forks';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
 
 const message = (
@@ -169,14 +169,5 @@ describe('conversation forks', () => {
     expect(fork.messages[3]).toMatchObject({ status: 'error', error: 'Recorded failure' });
     delete original.location;
     expect(forkConversation(original).location).toBeUndefined();
-  });
-  it('checks the UTF-8 workspace byte limit before adding a copy', () => {
-    const workspace = initialWorkspace();
-    workspace.conversations = [source()];
-    const fork = forkConversation(workspace.conversations[0]);
-    expect(forkFitsWorkspace(workspace, fork)).toBe(true);
-    fork.messages[0].blocks[0].text = 'é'.repeat(10_000_000);
-    expect(forkFitsWorkspace(workspace, fork)).toBe(false);
-    expect(workspace.conversations).toHaveLength(1);
   });
 });

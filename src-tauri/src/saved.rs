@@ -6,6 +6,12 @@ use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use std::path::Path;
 
+/// The whole saved workspace file. It has no size limit: a reader that stopped short would
+/// silently drop the conversations past its bound and report the file as unreadable.
+pub fn bytes(root: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(root.join("workspace.json"))
+}
+
 /// The computer and account registry (`fleet`) as saved in `root`'s workspace file.
 pub fn fleet(root: &Path, missing: &str, unreadable: &str) -> Result<Value, String> {
     #[derive(Deserialize)]
@@ -13,7 +19,7 @@ pub fn fleet(root: &Path, missing: &str, unreadable: &str) -> Result<Value, Stri
         #[serde(default)]
         fleet: Value,
     }
-    let bytes = std::fs::read(root.join("workspace.json")).map_err(|_| missing)?;
+    let bytes = bytes(root).map_err(|_| missing)?;
     parse::<Saved>(&bytes)
         .map(|saved| saved.fleet)
         .ok_or_else(|| unreadable.into())
@@ -169,5 +175,26 @@ mod tests {
         assert!(conversations(br#"{"conversations":null}"#)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn reads_a_workspace_past_the_former_twenty_megabyte_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let padding = "x".repeat(25_000_000);
+        let saved = format!(
+            r#"{{"fleet":{{"computers":[{{"id":"a"}}]}},"conversations":[{{"id":"c","messages":[{{"role":"user","text":"{padding}"}}]}}]}}"#
+        );
+        std::fs::write(root.path().join("workspace.json"), &saved).unwrap();
+        let read = bytes(root.path()).unwrap();
+        assert_eq!(read.len(), saved.len());
+        assert!(read.len() > 20_000_000);
+        // Both the registry and the conversations survive a file past the old limit.
+        assert_eq!(
+            fleet(root.path(), "missing", "unreadable").unwrap()["computers"][0]["id"],
+            "a"
+        );
+        let chats = conversations(&read).unwrap();
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].messages.as_ref().unwrap().len(), 1);
     }
 }

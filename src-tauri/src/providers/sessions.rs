@@ -364,16 +364,7 @@ impl Session {
             .path()
             .app_local_data_dir()
             .map_err(|_| "Cannot locate app data")?;
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        File::open(root.join("workspace.json"))
-            .map_err(|_| "Cannot read account registry")?
-            .take(20_000_001)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Cannot read account registry")?;
-        if bytes.len() > 20_000_000 {
-            return Err("Account registry exceeds its limit".into());
-        }
+        let bytes = crate::saved::bytes(&root).map_err(|_| "Cannot read account registry")?;
         let workspace: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| "Cannot read account registry")?;
         let provider = &request.agent.provider;

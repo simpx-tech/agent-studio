@@ -58,15 +58,8 @@ pub async fn read(
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    let mut bytes = Vec::new();
-    File::open(root.join("workspace.json"))
-        .map_err(|_| "Save this conversation before inspecting its native instructions")?
-        .take(20_000_001)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read the saved conversation")?;
-    if bytes.len() > 20_000_000 {
-        return Err("The saved workspace exceeds its size limit".into());
-    }
+    let bytes = crate::saved::bytes(&root)
+        .map_err(|_| "Save this conversation before inspecting its native instructions")?;
     let conversations =
         crate::saved::conversations(&bytes).ok_or("Cannot read the saved conversation")?;
     let location = conversation_location(

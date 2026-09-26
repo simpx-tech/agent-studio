@@ -243,8 +243,6 @@ export function createRelay({
     };
     const save = (next: typeof state) => {
       const bytes = JSON.stringify(next);
-      if (Buffer.byteLength(bytes) > 20_000_000)
-        throw new Error('Workspace exceeds the 20 MB relay limit.');
       const temporary = `${file}.tmp`;
       writeFileSync(temporary, bytes, { mode: 0o600 });
       const fd = openSync(temporary, 'r+');
@@ -468,9 +466,11 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/state' && req.method === 'PUT') {
+          // A workspace has no size limit, and this relay holds it in memory anyway, so its own
+          // upload is not bounded by the limit that protects every other route.
           const value = z
             .object({ revision: z.number().int().nonnegative(), workspace: sharedSchema })
-            .parse(await body(req, authorized));
+            .parse(await body(req, authorized, Number.POSITIVE_INFINITY));
           if (value.revision !== state.revision) {
             send(409, { ...state, workspaceId: workspace.id });
             return;

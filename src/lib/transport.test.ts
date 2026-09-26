@@ -840,6 +840,28 @@ it('publishes a running reply every poll without downloading the relay copy', as
   await transport.disconnectRelay();
 });
 
+it('syncs and saves a workspace past the former 20 MB limit', async () => {
+  const { transport, workspace, relay, local, polls } = await settledRelay();
+  // Comfortably past the limit this app and its relay used to reject.
+  workspace.conversations[0].messages.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    createdAt: '2026-09-26',
+    status: 'complete',
+    blocks: [{ type: 'markdown', text: 'x'.repeat(25_000_000) }],
+  });
+  local.changes++;
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
+  expect(relay.workspace.conversations[0].messages).toHaveLength(1);
+  expect(JSON.stringify(relay.workspace).length).toBeGreaterThan(20_000_000);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  await transport.disconnectRelay();
+});
+
 it('deletion waits for the remote response to stop and merges its final checkpoint', async () => {
   const connection = crypto.randomUUID(),
     runId = crypto.randomUUID();

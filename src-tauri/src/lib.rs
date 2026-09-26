@@ -483,9 +483,6 @@ fn write_workspace(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Res
         return Err("Invalid workspace".into());
     }
     let bytes = serde_json::to_vec(workspace).map_err(|_| "Cannot serialize workspace")?;
-    if bytes.len() > 20_000_000 {
-        return Err("Workspace exceeds 20 MB. Export and remove older conversations.".into());
-    }
     let root = app
         .path()
         .app_local_data_dir()

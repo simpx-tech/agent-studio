@@ -116,7 +116,7 @@
   } from '$lib/input-templates';
   import { claudeInstructions } from '$lib/claude-instructions';
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
-  import { forkConversation, forkPoint, forkFitsWorkspace } from '$lib/forks';
+  import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import { applyRunEvent } from '$lib/activity';
   import { awaitingAnswer } from '$lib/questions';
@@ -381,8 +381,6 @@
   let runs = $state<Record<string, string>>({});
   // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
   let queued = $state<Record<string, QueuedMessage[]>>({});
-  // Conversations whose queue waits to be opened instead of sending in the background.
-  const heldQueues = new Set<string>();
   // Steering inputs still being delivered, by run.
   let steeringPending = $state<Record<string, boolean>>({});
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
@@ -1067,7 +1065,6 @@
             replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
               workspaceSession++;
               queued = {};
-              heldQueues.clear();
               resetDrafts();
               forking = false;
               const previousView = view;
@@ -2151,7 +2148,6 @@
     revealConversation(c);
     locationPending = false;
     activeId = c.id;
-    heldQueues.delete(c.id);
     switchDraft(draftKey.chat(c.id));
     editorOpen = false;
     contextOpen = false;
@@ -2207,10 +2203,6 @@
     try {
       notice = '';
       fork = forkConversation($state.snapshot(source), messageId);
-      if (!forkFitsWorkspace($state.snapshot(workspace), fork))
-        throw new Error(
-          'This fork would exceed the 20 MB workspace limit. Export and remove older chats first.',
-        );
       workspace.conversations.unshift(fork);
       await persist();
       if (session !== workspaceSession) return;
@@ -2748,11 +2740,11 @@
   });
   // Conversations that are not open send their next queued message once their reply completes.
   // Anything else keeps the queue until the conversation is opened: a stopped or failed reply
-  // returns it to the draft there, and the composer explains changed mentions or a full workspace.
+  // returns it to the draft there, and the composer explains changed mentions.
   $effect(() => {
     const open = activeId;
     const ready = Object.keys(queued).filter((id) => {
-      if (id === open || heldQueues.has(id)) return false;
+      if (id === open) return false;
       const conversation = workspace.conversations.find((c) => c.id === id);
       const next = queued[id]?.[0];
       const last = conversation?.messages.at(-1);
@@ -2794,10 +2786,6 @@
     const conversation = workspace.conversations.find((c) => c.id === id);
     const [next, ...rest] = queued[id] ?? [];
     if (!conversation || !next) return;
-    if (!fitsWorkspace(next.text, next.images)) {
-      heldQueues.add(id);
-      return;
-    }
     if (rest.length) queued[id] = rest;
     else delete queued[id];
     const now = new Date().toISOString();
@@ -2891,17 +2879,6 @@
       return;
     }
     if (!canSend || (!retry && !text && !images.length)) return;
-    // Keep the draft intact when the portable workspace cannot fit the images.
-    if (!retry && !fitsWorkspace(text, images)) {
-      // A queued message returns to the composer with the rest of its queue.
-      if (queuedMessage && activeId) {
-        queued[activeId] = [queuedMessage, ...(queued[activeId] ?? [])];
-        returnQueuedToDraft(activeId);
-      }
-      attachmentError =
-        'The saved workspace is nearly full (20 MB). Export and delete older chats, or remove an attachment before sending.';
-      return;
-    }
     nearBottom = true;
     const now = new Date().toISOString();
     const isNewConversation = !active;
@@ -2964,13 +2941,6 @@
       created: isNewConversation,
       remember: true,
     });
-  }
-  // Whether the portable workspace can take a message with these images.
-  function fitsWorkspace(text: string, images: ChatImage[]) {
-    if (!images.length) return true;
-    const bytes = new TextEncoder().encode(JSON.stringify($state.snapshot(workspace))).length;
-    const addition = new TextEncoder().encode(JSON.stringify($state.snapshot(images))).length;
-    return bytes + addition + text.length * 4 + 64000 <= 20_000_000;
   }
   function addUserMessage(
     conversation: Conversation,
