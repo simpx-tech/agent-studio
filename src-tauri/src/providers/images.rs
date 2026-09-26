@@ -1,8 +1,11 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_CONVERSATION_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// One message becomes one provider request and one preview each. A conversation has no image
+/// budget: saving and syncing move one conversation at a time, so its images no longer set the
+/// cost of a reply. A provider that accepts less than this reports its own limit.
+pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_IMAGES_PER_MESSAGE: usize = 16;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,7 +23,7 @@ impl ChatImage {
             return Err("Invalid image name".into());
         }
         if self.data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-            return Err("Images must be 2 MB or smaller".into());
+            return Err("Images must be 16 MB or smaller".into());
         }
         let bytes = STANDARD
             .decode(&self.data)
@@ -32,7 +35,7 @@ impl ChatImage {
             _ => false,
         };
         if !valid || bytes.len() > MAX_IMAGE_BYTES {
-            return Err("Attach a valid PNG, JPEG, or WebP image up to 2 MB".into());
+            return Err("Attach a valid PNG, JPEG, or WebP image up to 16 MB".into());
         }
         Ok(bytes.len())
     }
@@ -124,16 +127,17 @@ mod tests {
         bad.messages[0].images[0].media_type = "image/svg+xml".into();
         assert!(bad.validate().is_err());
         bad = r.clone();
-        bad.messages[0].images = vec![r.messages[0].images[0].clone(); 5];
-        assert!(bad.validate().unwrap_err().contains("4 images"));
+        bad.messages[0].images = vec![r.messages[0].images[0].clone(); MAX_IMAGES_PER_MESSAGE + 1];
+        assert!(bad.validate().unwrap_err().contains("16 images"));
         bad = r.clone();
         bad.messages[0].images[0].data = STANDARD.encode(vec![0; MAX_IMAGE_BYTES + 1]);
         assert!(bad.validate().is_err());
+        // A conversation has no image budget of its own: every message may carry a full one.
         let mut bytes = vec![0; MAX_IMAGE_BYTES];
         bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-        bad = r.clone();
-        bad.messages[0].images[0].data = STANDARD.encode(bytes);
-        bad.messages = vec![bad.messages[0].clone(); 5];
-        assert!(bad.validate().unwrap_err().contains("8 MB"));
+        let mut full = r.clone();
+        full.messages[0].images[0].data = STANDARD.encode(bytes);
+        full.messages = vec![full.messages[0].clone(); 5];
+        assert!(full.validate().is_ok());
     }
 }

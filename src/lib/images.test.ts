@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { imageSchema, imageByteLength, maxImageBytes, checkImageBudget } from './images';
-import { historyFor, initialWorkspace, restoreWorkspace, settingsFor } from './domain';
+import { imageSchema, imageByteLength, maxImageBytes, maxImagesPerMessage } from './images';
+import {
+  historyFor,
+  initialWorkspace,
+  messageSchema,
+  restoreWorkspace,
+  settingsFor,
+} from './domain';
 import { sharedWorkspace, sharedSchema, mergeShared } from './sync';
 import { estimatePromptTokens } from './usage';
 
@@ -71,13 +77,25 @@ describe('portable image attachments', () => {
       expect(imageSchema.safeParse({ ...image, ...patch }).success).toBe(false);
     expect(imageByteLength(image)).toBe(Buffer.from(image.data, 'base64').length);
   });
-  it('bounds replayed image bytes across turns', () => {
-    const large = { ...image, data: Buffer.alloc(maxImageBytes).toString('base64') };
-    expect(() =>
-      checkImageBudget([{ images: [large, large] }, { images: [large, large] }]),
-    ).not.toThrow();
-    expect(() =>
-      checkImageBudget([{ images: [large, large] }, { images: [large, large, image] }]),
-    ).toThrow('8 MB');
+  it('bounds one image and one message, and no longer bounds a conversation', () => {
+    // A full-size image is valid, and every message may carry its own.
+    const bytes = Buffer.alloc(maxImageBytes);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
+    const large = { ...image, data: bytes.toString('base64') };
+    expect(imageSchema.safeParse(large).success).toBe(true);
+    const message = (images: unknown[]) => ({
+      id: crypto.randomUUID(),
+      role: 'user',
+      blocks: [],
+      images,
+      status: 'complete',
+      createdAt: new Date().toISOString(),
+    });
+    expect(messageSchema.safeParse(message(Array(maxImagesPerMessage).fill(large))).success).toBe(
+      true,
+    );
+    expect(
+      messageSchema.safeParse(message(Array(maxImagesPerMessage + 1).fill(image))).success,
+    ).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
 import { expectVisibleQuotaComparison } from './quota-helper';
-
+import { maxImageBytes, maxImagesPerMessage } from '../src/lib/images';
 import { mockDesktop } from './desktop-helper';
 
 async function imageFixture(page: Page, name = 'diagram.png') {
@@ -159,8 +159,12 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
       'not a valid image',
     ],
     [
-      { name: 'large.png', mimeType: 'image/png', buffer: Buffer.alloc(2 * 1024 * 1024 + 1) },
-      '2 MB',
+      {
+        name: 'large.png',
+        mimeType: 'image/png',
+        buffer: Buffer.alloc(maxImageBytes + 1),
+      },
+      '16 MB',
     ],
   ] as const) {
     await page.getByLabel('Image files').setInputFiles(file);
@@ -169,8 +173,12 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
   const file = await imageFixture(page);
   await page
     .getByLabel('Image files')
-    .setInputFiles(Array.from({ length: 5 }, (_, n) => ({ ...file, name: `${n}.png` })));
-  await expect(page.getByRole('alert').filter({ hasText: 'up to 4' })).toBeVisible();
+    .setInputFiles(
+      Array.from({ length: maxImagesPerMessage + 1 }, (_, n) => ({ ...file, name: `${n}.png` })),
+    );
+  await expect(
+    page.getByRole('alert').filter({ hasText: `up to ${maxImagesPerMessage}` }),
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: /^Remove .*\.png$/ })).toHaveCount(0);
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   await page

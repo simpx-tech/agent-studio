@@ -605,7 +605,6 @@ impl RunRequest {
         if self.messages.iter().map(|m| m.text.len()).sum::<usize>() > 400_000 {
             return Err("Conversation is too large. Start a new conversation.".into());
         }
-        let mut image_bytes = 0;
         if self
             .messages
             .iter()
@@ -664,14 +663,11 @@ impl RunRequest {
                     "Image attachments are available only in Codex and Claude user messages".into(),
                 );
             }
-            if message.images.len() > 4 {
-                return Err("Attach up to 4 images per message".into());
+            if message.images.len() > images::MAX_IMAGES_PER_MESSAGE {
+                return Err("Attach up to 16 images per message".into());
             }
             for image in &message.images {
-                image_bytes += image.validate()?;
-                if image_bytes > images::MAX_CONVERSATION_IMAGE_BYTES {
-                    return Err("This conversation has reached its 8 MB image limit. Start a new conversation to attach more images.".into());
-                }
+                image.validate()?;
             }
         }
         if self

@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Image attachments lost their conversation budget — 2026-09-26
+
+The user asked for the image limits to go now that saving and syncing move one conversation at a time. Three existed: sixteen — then four — per message, 2 MiB per image, and 8 MiB per conversation. Only the last was there for the workspace: it is gone from `images.ts`, from the page's attach handler, and from the native `RunRequest::validate`, and a conversation now holds as many images as it likes. `checkImageBudget` is deleted with it.
+
+The other two are not about storage, so they were raised rather than removed. One message becomes one provider request and one decoded preview each, and `imageSchema` guards data arriving from a synced workspace, so an unbounded field would let a damaged or hostile copy make a device allocate without limit. Sixteen images of up to 16 MB covers a batch of 4K screenshots — a 4K PNG of a UI runs 1–6 MB, where the old 2 MiB was the actual friction. Nothing encodes what a provider accepts: Agent Studio pipes images to the Claude and Codex CLIs rather than calling an API, the two do not share a limit, and a provider that accepts less now reports its own error instead of the app pre-empting it with a wrong number. The remaining texts read from the constants, so raising them again is one edit.
+
+Raising the per-image limit exposed a bug the old one had been hiding: `imageSchema` checked base64 with `(?:[A-Za-z0-9+/]{4})*`, a group repeated once per four characters, which recurses in V8's regex engine and threw `RangeError: Maximum call stack size exceeded` on a 16 MB image — about 22 MB of base64. The alphabet is now one character class and the groups of four are checked by length, which is linear and rejects the same strings: a stray `=`, three padding characters, and any length not a multiple of four.
+
+Validation: `npm run verify` (zero Svelte/TypeScript diagnostics, 417 unit/HTTP tests in 62 files, production build, 249 browser scenarios), Rust formatting, Clippy with warnings denied, and 304 Rust tests with eleven opt-in cases ignored. Log: `artifacts/image-limits-verify.log`. Coverage: `images.test.ts` replaces its replayed-bytes case with one that accepts a full-size image and a full message of them and rejects one image past the per-message count — the first of those is what caught the regex overflow; the Rust `rejects_unsupported_roles_providers_background_requests_and_malformed_images` now expects five messages each carrying a full-size image to validate. Not exercised: a real provider with a large attachment, so the CLIs' own limits are unmeasured; the app reports whatever they answer.
+
 ## The Viewer and the checkpoint stopped copying everything — 2026-09-26
 
 The two remaining per-reply whole-workspace paths, from the question the entries below left open.

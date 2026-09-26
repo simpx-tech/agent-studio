@@ -1,9 +1,16 @@
 import { z } from 'zod';
 
 export const imageTypes = ['image/png', 'image/jpeg', 'image/webp'] as const;
-export const maxImagesPerMessage = 4;
-export const maxImageBytes = 2 * 1024 * 1024;
-export const maxConversationImageBytes = 8 * 1024 * 1024;
+/**
+ * A conversation holds as many images as it likes: saving and syncing move one conversation at a
+ * time, so their bytes no longer set the cost of a reply. What remains bounds one message, which
+ * becomes one provider request and one preview each: enough for a batch of 4K screenshots, and
+ * small enough that a hostile or damaged synced workspace cannot make a device allocate without
+ * limit. A provider that accepts less than this reports its own limit.
+ */
+export const maxImagesPerMessage = 16;
+export const maxImageBytes = 16 * 1024 * 1024;
+export const maxImageLabel = `${maxImageBytes / 1024 / 1024} MB`;
 const maxBase64Length = 4 * Math.ceil(maxImageBytes / 3);
 export const imageSchema = z
   .object({
@@ -14,7 +21,11 @@ export const imageSchema = z
       .string()
       .min(4)
       .max(maxBase64Length)
-      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+      // A group repeated once per four characters recurses in the regex engine and overflows its
+      // stack on a large image, so the alphabet is one character class and the groups of four are
+      // checked by length instead.
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/)
+      .refine((data) => data.length % 4 === 0, 'Invalid image encoding'),
   })
   .refine(
     (image) => imageByteLength(image) <= maxImageBytes && hasImageHeader(image),
@@ -44,7 +55,7 @@ export async function readImage(file: File): Promise<ChatImage> {
   if (!(imageTypes as readonly string[]).includes(file.type))
     throw new Error('Choose a PNG, JPEG, or WebP image.');
   if (!file.size || file.size > maxImageBytes)
-    throw new Error(`${file.name}: images must be between 1 byte and 2 MB.`);
+    throw new Error(`${file.name}: images must be between 1 byte and ${maxImageLabel}.`);
   const url = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -66,12 +77,4 @@ export async function readImage(file: File): Promise<ChatImage> {
     throw new Error(`${file.name}: this image could not be opened.`);
   }
   return parsed.data;
-}
-
-export function checkImageBudget(messages: { images?: ChatImage[] }[]) {
-  const images = messages.flatMap((message) => message.images ?? []);
-  if (images.reduce((sum, image) => sum + imageByteLength(image), 0) > maxConversationImageBytes)
-    throw new Error(
-      'This conversation has reached its 8 MB image limit. Start a new conversation to attach more images.',
-    );
 }

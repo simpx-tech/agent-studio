@@ -194,7 +194,7 @@
     imageTypes,
     supportsImages,
     maxImagesPerMessage,
-    checkImageBudget,
+    maxImageLabel,
     type ChatImage,
   } from '$lib/images';
   import {
@@ -2768,7 +2768,7 @@
       return;
     }
     if (attachedImages.length + files.length > maxImagesPerMessage) {
-      attachmentError = 'Attach up to 4 images per message. Remove an image before adding more.';
+      attachmentError = `Attach up to ${maxImagesPerMessage} images per message. Remove an image before adding more.`;
       return;
     }
     const generation = attachmentGeneration;
@@ -2776,10 +2776,6 @@
     try {
       const images = await Promise.all(files.map(readImage));
       if (generation !== attachmentGeneration) return;
-      checkImageBudget([
-        ...(active ? historyFor(active) : []),
-        { images: [...attachedImages, ...images] },
-      ]);
       attachedImages = [...attachedImages, ...images];
     } catch (error) {
       if (generation === attachmentGeneration) attachmentError = (error as Error).message;
@@ -3787,7 +3783,7 @@
                         : 'Drop images to attach'}</strong
                 >
                 {#if imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage}<span
-                    >PNG, JPEG or WebP · Up to 4 images · 2 MB each</span
+                    >PNG, JPEG or WebP · Up to {maxImagesPerMessage} images · {maxImageLabel} each</span
                   >{/if}
               </div>
             </div>
@@ -4226,7 +4222,7 @@
                     class="attach-button"
                     aria-label="Attach images"
                     title={imagesSupported
-                      ? 'Attach images · PNG, JPEG, WebP · 2 MB each · up to 4'
+                      ? `Attach images · PNG, JPEG, WebP · ${maxImageLabel} each · up to ${maxImagesPerMessage}`
                       : 'Image attachments are available with Codex and Claude'}
                     disabled={!imagesSupported ||
                       imagesLoading ||
