@@ -5,6 +5,29 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.5.0 - 2026-09-26
+
+Replies can now show you what they made — a render, a screenshot, a chart, even a 3D model — and
+long conversations save and sync one chat at a time instead of the whole workspace.
+
+### Added
+
+- Let a reply show images from the computer it runs on, right where it explains them
+- Open a glTF, GLB, OBJ, STL or FBX model the reply sends in a viewer you can turn and zoom, with
+  its animations and a clip picker
+- Mark a chat whose reply finished while you were elsewhere with a green dot until you open it
+- Drag the conversation drawer open and closed from the left border of a phone screen
+- Show each linked site's own icon before its link, in the app and in the Viewer
+- Lead each edited file with the icon of its type
+- Keep as many images in a conversation as you like, with up to sixteen of 16 MB in one message
+
+### Changed
+
+- Save and sync one conversation at a time, so typing and selecting stay smooth in a long chat
+  while a reply streams
+- Drop the 20 MB limit on the saved workspace
+- Keep the Viewer's copy per conversation and resume its sync from the last checkpoint
+
 ## 0.4.1 - 2026-09-25
 
 ### Fixed
