@@ -4,9 +4,60 @@ import {
   interruptedReplyError,
   restoreWorkspace,
   settingsFor,
+  type Conversation,
   type Workspace,
 } from './domain';
-import { emptyShared, sharedWorkspace, type SharedWorkspace } from './sync';
+import {
+  emptyShared,
+  sharedChatSchema,
+  sharedMeta,
+  sharedWorkspace,
+  type SharedMeta,
+  type SharedWorkspace,
+} from './sync';
+
+// Conversations changed on this device since the last sync, as the page tracks them.
+function chatMarks() {
+  const marks = {
+    unsynced: new Set<string>() as Set<string> | undefined,
+    mark(chatId?: string) {
+      if (chatId === undefined) marks.unsynced = undefined;
+      else if (marks.unsynced) marks.unsynced.add(chatId);
+    },
+  };
+  return marks;
+}
+// The per-conversation runtime members, which every device provides the same way.
+function chatRuntime(get: () => Workspace, marks = chatMarks()) {
+  return {
+    chat: (id: string) => {
+      const conversation = get().conversations.find((c) => c.id === id);
+      return conversation && sharedChatSchema.parse(conversation);
+    },
+    chatIds: () => get().conversations.map((c) => c.id),
+    meta: () => sharedMeta(get()),
+    takeUnsynced: () => {
+      const pending = marks.unsynced;
+      marks.unsynced = new Set();
+      return pending;
+    },
+    restoreUnsynced: (ids: Set<string> | undefined) => {
+      if (ids === undefined || !marks.unsynced) marks.unsynced = undefined;
+      else for (const id of ids) marks.unsynced.add(id);
+    },
+    applyChats: async (upsert: Conversation[], remove: string[], meta?: SharedMeta) => {
+      const workspace = get();
+      if (meta) Object.assign(workspace, meta);
+      const gone = new Set(remove);
+      workspace.conversations = workspace.conversations.filter((c) => !gone.has(c.id));
+      for (const incoming of upsert) {
+        const at = workspace.conversations.findIndex((c) => c.id === incoming.id);
+        if (at >= 0) workspace.conversations[at] = incoming;
+        else workspace.conversations.push(incoming);
+      }
+    },
+  };
+}
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
@@ -46,6 +97,7 @@ it('invalidates host skill inventories after Viewer plugin mutations, including 
     installation: { id: host, computerId, name: 'QA', platform: 'windows' },
     workspace: () => workspace,
     shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -246,6 +298,7 @@ async function restartedDevice(ownsRun: boolean) {
     },
     workspace: () => restored,
     shared: () => sharedWorkspace(restored),
+    ...chatRuntime(() => restored),
     fleet: () => restored.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -331,6 +384,7 @@ it('saves a host Undo receipt into the live workspace once, including requests f
     },
     workspace: () => workspace,
     shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -388,6 +442,7 @@ async function fixture(remoteConnection?: string) {
     },
     workspace: () => workspace,
     shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -487,6 +542,7 @@ it('keeps a pending question when an older relay drops it from a successful save
     },
     workspace: () => current,
     shared: () => sharedWorkspace(current),
+    ...chatRuntime(() => current),
     fleet: () => current.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -572,6 +628,7 @@ async function settledRelay(revisionEndpoint = true) {
       local.reads++;
       return sharedWorkspace(workspace);
     },
+    ...chatRuntime(() => workspace),
     fleet: () => workspace.fleet,
     revision: () => local.changes,
     statuses: () => ({}),
@@ -588,6 +645,9 @@ async function settledRelay(revisionEndpoint = true) {
     if (command === 'save_sync_state') requests.push('save_sync_state');
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
+    // A relay without the incremental routes. Its whole-state path is what these cases cover.
+    if (args.path.startsWith('v1/state/manifest'))
+      return { status: 404, body: { error: 'Unknown relay operation.' } };
     if (args.path === 'v1/state/revision')
       return revisionEndpoint
         ? { status: 200, body: { instanceId: 'same-relay', revision: relay.revision } }
@@ -611,6 +671,9 @@ async function settledRelay(revisionEndpoint = true) {
     'GET v1/state',
     'save_sync_state',
   ]);
+  // One more poll asks this relay for a manifest once and learns it has none.
+  expect(await transport.pollRelay()).toEqual([]);
+  expect(requests.filter((r) => r === 'GET v1/state/manifest')).toHaveLength(1);
   requests.length = 0;
   const polls = async (count: number) => {
     const reads = local.reads;
@@ -803,11 +866,9 @@ it('routes requests and account updates with the fleet alone, never a workspace 
 });
 
 it('gets the state from relays without the revision endpoint without syncing it again', async () => {
+  // The manifest and revision probes were both answered 404 by the fixture's warm-up poll.
   const { transport, apply, polls } = await settledRelay(false);
-  expect(await polls(3)).toEqual({
-    state: ['GET v1/state/revision', ...Array(3).fill('GET v1/state')],
-    reads: 0,
-  });
+  expect(await polls(3)).toEqual({ state: Array(3).fill('GET v1/state'), reads: 0 });
   expect(apply).not.toHaveBeenCalled();
   await transport.disconnectRelay();
 });
@@ -859,6 +920,233 @@ it('syncs and saves a workspace past the former 20 MB limit', async () => {
   expect(relay.workspace.conversations[0].messages).toHaveLength(1);
   expect(JSON.stringify(relay.workspace).length).toBeGreaterThan(20_000_000);
   expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  await transport.disconnectRelay();
+});
+
+// A relay with per-conversation revisions, so a poll publishes and takes in only what moved.
+async function incrementalRelay() {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const chat = (title: string) => ({
+    id: crypto.randomUUID(),
+    title,
+    createdAt: '2026-09-26',
+    updatedAt: '2026-09-26',
+    settings: { provider: 'codex' as const, model: '', reasoning: '' as const, instructions: '' },
+    messages: [],
+  });
+  workspace.conversations.push(chat('First'), chat('Second'));
+  const installation = {
+    id: crypto.randomUUID(),
+    computerId: crypto.randomUUID(),
+    name: 'QA',
+    platform: 'windows' as const,
+  };
+  workspace.fleet.computers.push({ id: installation.computerId, name: 'QA' });
+  workspace.fleet.environments.push({
+    id: installation.id,
+    computerId: installation.computerId,
+    name: 'QA',
+    platform: 'windows',
+  });
+  const local = { changes: 0, reads: 0, runs: [] as string[] };
+  const marks = chatMarks();
+  transport.configureRuntime({
+    installation,
+    workspace: () => {
+      local.reads++;
+      return workspace;
+    },
+    shared: () => {
+      local.reads++;
+      return sharedWorkspace(workspace);
+    },
+    ...chatRuntime(() => workspace, marks),
+    fleet: () => workspace.fleet,
+    revision: () => local.changes,
+    statuses: () => ({}),
+    localRuns: () => local.runs,
+    apply: async (value) => {
+      local.reads++;
+      Object.assign(workspace, value);
+    },
+    checkpointRun: async () => {},
+  });
+  // The relay's own copy, with the revision that last changed each part of it.
+  const relay = {
+    revision: 5,
+    metaRevision: 5,
+    workspace: sharedWorkspace(workspace),
+    chats: Object.fromEntries(workspace.conversations.map((c) => [c.id, 5])),
+  };
+  const requests: string[] = [];
+  const manifest = () => ({
+    instanceId: 'same-relay',
+    revision: relay.revision,
+    metaRevision: relay.metaRevision,
+    chats: relay.chats,
+  });
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_resume') return 'https://relay.example.com/';
+    if (command === 'load_sync_state')
+      return { url: 'https://relay.example.com', instanceId: 'same-relay', base: relay.workspace };
+    if (command === 'save_sync_state') requests.push('save_sync_state');
+    if (command !== 'relay_request') return null;
+    requests.push(`${args.method} ${args.path}`);
+    if (args.path === 'v1/state/manifest') return { status: 200, body: manifest() };
+    if (args.path === 'v1/state/meta') {
+      const { conversations, ...meta } = relay.workspace;
+      return { status: 200, body: { ...manifest(), meta } };
+    }
+    if (args.path === 'v1/state/chats') {
+      const wanted = new Set(args.body.ids);
+      return {
+        status: 200,
+        body: {
+          ...manifest(),
+          chats: relay.workspace.conversations.filter((c) => wanted.has(c.id)),
+          chatRevisions: relay.chats,
+        },
+      };
+    }
+    if (args.path === 'v1/state/patch') {
+      if (args.body.revision !== relay.revision) return { status: 409, body: manifest() };
+      relay.revision++;
+      const conversations = relay.workspace.conversations.filter(
+        (c) => !(args.body.remove ?? []).includes(c.id),
+      );
+      for (const id of args.body.remove ?? []) delete relay.chats[id];
+      for (const incoming of args.body.upsert ?? []) {
+        const at = conversations.findIndex((c) => c.id === incoming.id);
+        if (at >= 0) conversations[at] = incoming;
+        else conversations.push(incoming);
+        relay.chats[incoming.id] = relay.revision;
+      }
+      if (args.body.meta) {
+        relay.workspace = { ...args.body.meta, conversations };
+        relay.metaRevision = relay.revision;
+      } else relay.workspace = { ...relay.workspace, conversations };
+      return { status: 200, body: manifest() };
+    }
+    if (args.path === 'v1/state/revision')
+      return { status: 200, body: { instanceId: 'same-relay', revision: relay.revision } };
+    if (args.path === 'v1/state')
+      return {
+        status: 200,
+        body: {
+          instanceId: 'same-relay',
+          revision: relay.revision,
+          workspace: relay.workspace,
+          chatRevisions: relay.chats,
+          metaRevision: relay.metaRevision,
+        },
+      };
+    return { status: 200, body: args.path === 'v1/heartbeat' ? [] : [] };
+  });
+  expect(await transport.resumeRelay()).toBe(true);
+  // The first poll takes the whole-state path and learns the relay's per-conversation revisions.
+  expect(await transport.pollRelay()).toEqual([]);
+  const polls = async (count: number) => {
+    const reads = local.reads;
+    requests.length = 0;
+    for (let i = 0; i < count; i++) expect(await transport.pollRelay()).not.toBeNull();
+    return { state: requests.filter((r) => r.includes('state')), reads: local.reads - reads };
+  };
+  return { transport, workspace, relay, local, requests, polls, marks };
+}
+
+it('publishes only the conversation that changed, and takes in only what moved', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  // Settled: the manifest alone answers, and nothing here is copied or validated whole.
+  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/manifest'), reads: 0 });
+
+  // One conversation changes here. Only it is sent, and the other is never downloaded.
+  const [first, second] = workspace.conversations;
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/manifest',
+    'POST v1/state/patch',
+    'save_sync_state',
+  ]);
+  const sent = relay.workspace.conversations.find((c) => c.id === first.id);
+  expect(sent?.title).toBe('Renamed here');
+  expect(relay.chats[first.id]).toBeGreaterThan(relay.chats[second.id]);
+  expect(await polls(1)).toEqual({ state: ['GET v1/state/manifest'], reads: 0 });
+
+  // Another device renames the other conversation. Only that one is fetched.
+  relay.revision++;
+  relay.workspace = {
+    ...relay.workspace,
+    conversations: relay.workspace.conversations.map((c) =>
+      c.id === second.id ? { ...c, title: 'Renamed elsewhere' } : c,
+    ),
+  };
+  relay.chats[second.id] = relay.revision;
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/manifest',
+    'POST v1/state/chats',
+    'save_sync_state',
+  ]);
+  expect(workspace.conversations.find((c) => c.id === second.id)?.title).toBe('Renamed elsewhere');
+  expect(workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
+  expect(await polls(1)).toEqual({ state: ['GET v1/state/manifest'], reads: 0 });
+  await transport.disconnectRelay();
+});
+
+it('sends replicated settings only when they move, and deletes on both sides', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  // A computer added here belongs to the settings the relay keeps beside its conversations.
+  workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Laptop' });
+  local.changes++;
+  marks.mark();
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/manifest',
+    'POST v1/state/patch',
+    'save_sync_state',
+  ]);
+  expect(relay.workspace.fleet.computers.map((c) => c.name)).toEqual(['QA', 'Laptop']);
+  expect(relay.metaRevision).toBe(relay.revision);
+
+  // A conversation deleted here is removed there, and one deleted there disappears here.
+  const [first, second] = workspace.conversations;
+  workspace.conversations = workspace.conversations.filter((c) => c.id !== first.id);
+  local.changes++;
+  marks.mark();
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(relay.workspace.conversations.map((c) => c.id)).toEqual([second.id]);
+  expect(relay.chats[first.id]).toBeUndefined();
+  relay.revision++;
+  relay.workspace = { ...relay.workspace, conversations: [] };
+  delete relay.chats[second.id];
+  expect((await polls(1)).state).toContain('GET v1/state/manifest');
+  expect(workspace.conversations).toEqual([]);
+  await transport.disconnectRelay();
+});
+
+it('keeps a conversation unpublished when another device wrote first', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first] = workspace.conversations;
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  // The relay moves between this poll's manifest and its patch, so the patch is refused.
+  const original = native.invoke.getMockImplementation()!;
+  let moved = false;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path === 'v1/state/patch' && !moved) {
+      moved = true;
+      relay.revision++;
+      return original(command, { ...args, body: { ...args.body, revision: -1 } });
+    }
+    return original(command, args);
+  });
+  expect((await polls(1)).state).toEqual(['GET v1/state/manifest', 'POST v1/state/patch']);
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('First');
+  // The next poll tries again with a fresh manifest and the change is still there.
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
   await transport.disconnectRelay();
 });
 

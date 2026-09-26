@@ -169,7 +169,7 @@
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
-  import { sharedWorkspace, type Presence } from '$lib/sync';
+  import { sharedChatSchema, sharedMeta, sharedWorkspace, type Presence } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
@@ -1147,14 +1147,52 @@
                   forgetDraft(key);
               // Received from the relay, so nothing new to send back.
               await persist(false);
-              if (
-                workspace.fleet.connections.some(
-                  (c) =>
-                    executionHost(workspace.fleet, c.environmentId) === installation?.id &&
-                    !connectionStatuses[c.id],
-                )
-              )
-                void refreshConnections();
+              refreshNewConnections();
+            },
+            chat: (id) => {
+              const conversation = workspace.conversations.find((c) => c.id === id);
+              return conversation && sharedChatSchema.parse(conversation);
+            },
+            chatIds: () => workspace.conversations.map((c) => c.id),
+            meta: () => sharedMeta(workspace),
+            takeUnsynced: () => {
+              const pending = unsyncedChats;
+              unsyncedChats = new Set();
+              return pending;
+            },
+            restoreUnsynced: (ids) => {
+              if (ids === undefined || !unsyncedChats) unsyncedChats = undefined;
+              else for (const id of ids) unsyncedChats.add(id);
+            },
+            // Only the conversations a sync merged, so an unrelated chat is never rewritten.
+            applyChats: async (upsert, remove, meta) => {
+              if (meta) {
+                workspace.fleet = meta.fleet;
+                workspace.workflows = meta.workflows;
+                workspace.inputTemplates = meta.inputTemplates;
+                workspace.claudeInstructions = meta.claudeInstructions;
+                workspace.appSessions = meta.appSessions;
+              }
+              const gone = new Set(remove);
+              if (gone.size)
+                workspace.conversations = workspace.conversations.filter((c) => !gone.has(c.id));
+              for (const incoming of upsert) {
+                const existing = workspace.conversations.find((c) => c.id === incoming.id);
+                // Preserve active object identities while network responses arrive.
+                if (existing) Object.assign(existing, incoming);
+                else workspace.conversations.push(incoming);
+              }
+              // A conversation deleted on another device takes its unsent draft along.
+              const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
+              for (const key of [...drafts.keys()])
+                if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
+                  forgetDraft(key);
+              // Received from the relay, so only these conversations need saving here.
+              if (!loaded) return;
+              for (const conversation of upsert) markChats(conversation.id);
+              if (gone.size || meta) markChats();
+              await flushWorkspace();
+              refreshNewConnections();
             },
           });
         await persist();
@@ -1249,12 +1287,29 @@
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
   // changed. Streamed reply events count too, because they update messages before a save.
   let localChanges = 0;
-  // Conversations changed since the last save, or `undefined` for all of them. A save without a
-  // named chat asks for everything, so a new call site is conservative by default.
+  // Conversations changed since the last save and since the last sync, or `undefined` for all of
+  // them. Naming no chat asks for everything, so a new call site is conservative by default.
   let unsavedChats: Set<string> | undefined;
+  let unsyncedChats: Set<string> | undefined;
   function markChats(chatId?: string) {
-    if (chatId === undefined) unsavedChats = undefined;
-    else if (unsavedChats) unsavedChats.add(chatId);
+    if (chatId === undefined) {
+      unsavedChats = undefined;
+      unsyncedChats = undefined;
+      return;
+    }
+    if (unsavedChats) unsavedChats.add(chatId);
+    if (unsyncedChats) unsyncedChats.add(chatId);
+  }
+  /** Checks any connection this device owns whose status is not known yet. */
+  function refreshNewConnections() {
+    if (
+      workspace.fleet.connections.some(
+        (c) =>
+          executionHost(workspace.fleet, c.environmentId) === installation?.id &&
+          !connectionStatuses[c.id],
+      )
+    )
+      void refreshConnections();
   }
   async function flushWorkspace() {
     if (!loaded) return;

@@ -6,6 +6,7 @@ import {
   type Message,
   type Workspace,
 } from './domain.ts';
+import { z } from 'zod';
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
@@ -31,6 +32,17 @@ export const sharedSchema = workspaceSchema.pick({
   claudeInstructions: true,
   appSessions: true,
 });
+/** One conversation as replicated, so a sync can validate and compare it by itself. */
+export const sharedChatSchema = sharedSchema.shape.conversations.element;
+/** The replicated fields other than the conversations, which move together. */
+export const sharedMetaSchema = sharedSchema.omit({ conversations: true });
+export type SharedMeta = z.infer<typeof sharedMetaSchema>;
+export const sharedMeta = (workspace: Workspace | SharedWorkspace): SharedMeta =>
+  sharedMetaSchema.parse(workspace);
+export const metaOf = (workspace: SharedWorkspace): SharedMeta => {
+  const { conversations, ...meta } = workspace;
+  return meta;
+};
 export type MergeOptions = {
   /**
    * Reports whether this device is the execution host of the run that produced `message`

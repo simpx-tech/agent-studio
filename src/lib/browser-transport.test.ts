@@ -1,7 +1,51 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { initialWorkspace, type Workspace } from './domain';
-import { sharedWorkspace } from './sync';
+import { initialWorkspace, type Conversation, type Workspace } from './domain';
+import { sharedChatSchema, sharedMeta, sharedWorkspace, type SharedMeta } from './sync';
 import { browserSessionSignal } from './browser-workspace';
+
+// Conversations changed on this device since the last sync, as the page tracks them.
+function chatMarks() {
+  const marks = {
+    unsynced: new Set<string>() as Set<string> | undefined,
+    mark(chatId?: string) {
+      if (chatId === undefined) marks.unsynced = undefined;
+      else if (marks.unsynced) marks.unsynced.add(chatId);
+    },
+  };
+  return marks;
+}
+// The per-conversation runtime members, which every device provides the same way.
+function chatRuntime(get: () => Workspace, marks = chatMarks()) {
+  return {
+    chat: (id: string) => {
+      const conversation = get().conversations.find((c) => c.id === id);
+      return conversation && sharedChatSchema.parse(conversation);
+    },
+    chatIds: () => get().conversations.map((c) => c.id),
+    meta: () => sharedMeta(get()),
+    takeUnsynced: () => {
+      const pending = marks.unsynced;
+      marks.unsynced = new Set();
+      return pending;
+    },
+    restoreUnsynced: (ids: Set<string> | undefined) => {
+      if (ids === undefined || !marks.unsynced) marks.unsynced = undefined;
+      else for (const id of ids) marks.unsynced.add(id);
+    },
+    applyChats: async (upsert: Conversation[], remove: string[], meta?: SharedMeta) => {
+      const workspace = get();
+      if (meta) Object.assign(workspace, meta);
+      const gone = new Set(remove);
+      workspace.conversations = workspace.conversations.filter((c) => !gone.has(c.id));
+      for (const incoming of upsert) {
+        const at = workspace.conversations.findIndex((c) => c.id === incoming.id);
+        if (at >= 0) workspace.conversations[at] = incoming;
+        else workspace.conversations.push(incoming);
+      }
+    },
+  };
+}
+
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -107,6 +151,7 @@ async function fixture() {
     installation,
     workspace: () => workspace,
     shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -120,6 +165,7 @@ async function fixture() {
     transport,
     workspace: () => workspace,
     shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
     data,
     fetcher,
     replace,

@@ -19,8 +19,14 @@ async function desktop(page: Page) {
   await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(relay.address() as { port: number }).port}`;
   const requests: string[] = [];
+  // How many conversations each upload carried, so a streamed reply cannot resend the rest.
+  const uploaded: number[] = [];
   await page.exposeFunction('relayBridge', async (method: string, path: string, body?: unknown) => {
     requests.push(`${method} ${path}`);
+    if (path === 'v1/state/patch')
+      uploaded.push((body as { upsert?: unknown[] })?.upsert?.length ?? 0);
+    if (path === 'v1/state' && method === 'PUT')
+      uploaded.push((body as { workspace: { conversations: unknown[] } }).workspace.conversations.length);
     const response = await fetch(`${origin}/${path}`, {
       method,
       headers: {
@@ -179,6 +185,7 @@ async function desktop(page: Page) {
   );
   return {
     requests,
+    uploaded,
     async close() {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
       rmSync(directory, { recursive: true, force: true });
@@ -233,7 +240,12 @@ test('an idle relay connection neither saves nor syncs the whole workspace', asy
       host.requests.filter((r) => r.endsWith(' v1/state')),
       'Idle polls fetched or sent the whole workspace. See docs/PERFORMANCE.md.',
     ).toEqual([]);
-    expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
+    // Each poll asks only which conversations moved.
+    expect(count('GET v1/state/manifest')).toBeGreaterThanOrEqual(2);
+    expect(
+      host.requests.filter((r) => r.startsWith('POST v1/state')),
+      'Idle polls sent conversations. See docs/PERFORMANCE.md.',
+    ).toEqual([]);
     expect(
       await page.evaluate(() => (window as any).saves),
       'Idle polls saved the workspace or its sync checkpoint. See docs/PERFORMANCE.md.',
@@ -269,10 +281,12 @@ test('a reply waiting on a tool call neither downloads nor rewrites the whole wo
     await page.waitForTimeout(8_000);
     const count = (request: string) => host.requests.filter((r) => r === request).length;
     expect(count('POST v1/heartbeat')).toBeGreaterThanOrEqual(2);
-    expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
+    expect(count('GET v1/state/manifest')).toBeGreaterThanOrEqual(2);
     expect(
-      host.requests.filter((r) => r.endsWith(' v1/state')),
-      'A waiting reply fetched or sent the whole workspace. See docs/PERFORMANCE.md.',
+      host.requests.filter(
+        (r) => r.endsWith(' v1/state') || r.startsWith('POST v1/state'),
+      ),
+      'A waiting reply fetched or sent conversations. See docs/PERFORMANCE.md.',
     ).toEqual([]);
     expect(
       await page.evaluate(() => (window as any).saves),
@@ -302,6 +316,7 @@ test('a streaming reply saves the whole workspace far less often than it reports
       .toBe(true);
     await page.waitForTimeout(2_000);
     const before = await page.evaluate(() => (window as any).saves.workspace);
+    host.uploaded.length = 0;
     // 120 reported events over about six seconds, 40 of them reasoning.
     const tasks = await longTasks(page, async () => {
       await page.evaluate(() => (window as any).streamReply(120, 50));
@@ -319,6 +334,11 @@ test('a streaming reply saves the whole workspace far less often than it reports
     // Each of those saves carries the streaming conversation alone, not all 24 of them.
     expect(after.patched, 'Saves sent as a patch').toBe(saves);
     expect(after.sentChats, 'Conversations sent across those saves').toBe(saves);
+    // Each poll publishes the streaming conversation alone, never the other 23.
+    expect(host.uploaded.length, 'Uploads while streaming').toBeGreaterThan(0);
+    expect(host.uploaded, 'Conversations per upload while streaming').toEqual(
+      host.uploaded.map(() => 1),
+    );
     if (timed)
       expect(
         tasks[0] ?? 0,

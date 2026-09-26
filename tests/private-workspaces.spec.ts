@@ -389,7 +389,9 @@ test('a changed HttpOnly cookie cannot expose a new workspace to a stale tab eve
     );
     const mismatch = page.waitForResponse(
       (response) =>
-        ['/v1/state', '/v1/state/revision'].includes(new URL(response.url()).pathname) &&
+        ['/v1/state', '/v1/state/revision', '/v1/state/manifest'].includes(
+          new URL(response.url()).pathname,
+        ) &&
         response.status() === 409,
     );
     // APIRequestContext shares this browser's actual HttpOnly cookie jar. No
@@ -480,7 +482,9 @@ test('a failed pending chat deletion cannot resurrect the old workspace after it
     );
     const mismatch = page.waitForResponse(
       (response) =>
-        ['/v1/state', '/v1/state/revision'].includes(new URL(response.url()).pathname) &&
+        ['/v1/state', '/v1/state/revision', '/v1/state/manifest'].includes(
+          new URL(response.url()).pathname,
+        ) &&
         response.status() === 409,
     );
     const switched = await context.request.post(`${f.url}/v1/browser-session`, {

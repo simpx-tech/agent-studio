@@ -296,7 +296,9 @@ test('a delayed administrator response cannot reveal its key after this browser 
     );
     const mismatch = page.waitForResponse(
       (response) =>
-        ['/v1/state', '/v1/state/revision'].includes(new URL(response.url()).pathname) &&
+        ['/v1/state', '/v1/state/revision', '/v1/state/manifest'].includes(
+          new URL(response.url()).pathname,
+        ) &&
         response.status() === 409,
     );
     const switched = await context.request.post(`${f.url}/v1/browser-session`, {

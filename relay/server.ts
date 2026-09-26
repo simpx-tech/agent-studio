@@ -157,12 +157,41 @@ const presenceInput = z.object({
     .max(100),
   running: z.array(uuid).max(100),
 });
-const diskSchema = z.object({
-  instanceId: uuid,
-  version: z.literal(1),
-  revision: z.number().int().nonnegative(),
-  workspace: sharedSchema,
+const count = z.number().int().nonnegative();
+// Version 2 records which revision last changed each conversation and the rest of the workspace,
+// so a device can ask what moved and send only its own changes. The whole workspace stays on
+// disk and in memory: push, pending counts, titles and the whole-state routes all read it.
+const diskSchema = z.union([
+  z.object({
+    instanceId: uuid,
+    version: z.literal(1),
+    revision: count,
+    workspace: sharedSchema,
+  }),
+  z.object({
+    instanceId: uuid,
+    version: z.literal(2),
+    revision: count,
+    workspace: sharedSchema,
+    chatRevisions: z.record(uuid, count),
+    metaRevision: count,
+  }),
+]);
+type RelayState = Extract<z.infer<typeof diskSchema>, { version: 2 }>;
+/** The replicated fields other than the conversations, which move together. */
+const metaSchema = sharedSchema.omit({ conversations: true });
+const chatSchema = sharedSchema.shape.conversations.element;
+const patchInput = z.object({
+  revision: count,
+  meta: metaSchema.optional(),
+  upsert: z.array(chatSchema).optional(),
+  remove: z.array(uuid).max(1000).optional(),
 });
+/** Everything but the conversations, as stored. */
+const metaOf = (workspace: z.infer<typeof sharedSchema>): z.infer<typeof metaSchema> => {
+  const { conversations, ...meta } = workspace;
+  return meta;
+};
 const terminal = (status: string) => ['complete', 'error', 'cancelled'].includes(status);
 export function createRelay({
   token,
@@ -217,15 +246,30 @@ export function createRelay({
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
     });
     const file = join(directory, 'workspace.json');
-    let state: z.infer<typeof diskSchema> = {
+    let state: RelayState = {
       instanceId: crypto.randomUUID(),
-      version: 1 as const,
+      version: 2 as const,
       revision: 0,
       workspace: emptyShared(),
+      chatRevisions: {},
+      metaRevision: 0,
     };
     let fresh = false;
     try {
-      state = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
+      const saved = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
+      state =
+        saved.version === 2
+          ? saved
+          : {
+              // A file written before per-conversation revisions: everything it holds is as old
+              // as its revision, so a device asking what moved downloads it once and settles.
+              ...saved,
+              version: 2 as const,
+              chatRevisions: Object.fromEntries(
+                saved.workspace.conversations.map((c) => [c.id, saved.revision]),
+              ),
+              metaRevision: saved.revision,
+            };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT')
         throw new Error('Relay data is unreadable; preserved without overwriting.');
@@ -241,7 +285,60 @@ export function createRelay({
       jobBytes.set(job.id, bytes);
       return true;
     };
-    const save = (next: typeof state) => {
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    /** A whole workspace from an app without the incremental routes, marking what moved. */
+    const replaced = (workspace: z.infer<typeof sharedSchema>): RelayState => {
+      const revision = state.revision + 1;
+      const before = new Map(state.workspace.conversations.map((c) => [c.id, c]));
+      const chatRevisions: Record<string, number> = {};
+      for (const conversation of workspace.conversations)
+        chatRevisions[conversation.id] = same(before.get(conversation.id), conversation)
+          ? (state.chatRevisions[conversation.id] ?? revision)
+          : revision;
+      return {
+        instanceId: state.instanceId,
+        version: 2,
+        revision,
+        workspace,
+        chatRevisions,
+        metaRevision: same(metaOf(state.workspace), metaOf(workspace))
+          ? state.metaRevision
+          : revision,
+      };
+    };
+    /** The conversations and meta a device sent, over what this relay already holds. */
+    const patched = (value: z.infer<typeof patchInput>): RelayState => {
+      const revision = state.revision + 1;
+      const chatRevisions = { ...state.chatRevisions };
+      const remove = new Set(value.remove ?? []);
+      for (const id of remove) delete chatRevisions[id];
+      const conversations = state.workspace.conversations.filter((c) => !remove.has(c.id));
+      for (const conversation of value.upsert ?? []) {
+        const at = conversations.findIndex((c) => c.id === conversation.id);
+        // Data a device already holds must not look new to the others.
+        if (at >= 0 && same(conversations[at], conversation)) continue;
+        if (at >= 0) conversations[at] = conversation;
+        else conversations.push(conversation);
+        chatRevisions[conversation.id] = revision;
+      }
+      const meta = metaOf(state.workspace);
+      const moved = !!value.meta && !same(meta, value.meta);
+      return {
+        instanceId: state.instanceId,
+        version: 2,
+        revision,
+        workspace: { ...(moved ? value.meta! : meta), conversations },
+        chatRevisions,
+        metaRevision: moved ? revision : state.metaRevision,
+      };
+    };
+    const manifest = () => ({
+      instanceId: state.instanceId,
+      revision: state.revision,
+      metaRevision: state.metaRevision,
+      chats: state.chatRevisions,
+    });
+    const save = (next: RelayState) => {
       const bytes = JSON.stringify(next);
       const temporary = `${file}.tmp`;
       writeFileSync(temporary, bytes, { mode: 0o600 });
@@ -465,6 +562,43 @@ export function createRelay({
           send(200, { instanceId: state.instanceId, revision: state.revision });
           return;
         }
+        // Which revision last changed each conversation, so a device downloads and uploads only
+        // what moved. Apps without these routes keep using the whole-state ones above.
+        if (url.pathname === '/v1/state/manifest' && req.method === 'GET') {
+          send(200, manifest());
+          return;
+        }
+        if (url.pathname === '/v1/state/meta' && req.method === 'GET') {
+          send(200, { ...manifest(), meta: metaOf(state.workspace) });
+          return;
+        }
+        if (url.pathname === '/v1/state/chats' && req.method === 'POST') {
+          const value = z
+            .object({ ids: z.array(uuid).max(1000) })
+            .strict()
+            .parse(await body(req, authorized, 64_000));
+          const wanted = new Set(value.ids);
+          send(200, {
+            ...manifest(),
+            chats: state.workspace.conversations.filter((c) => wanted.has(c.id)),
+            chatRevisions: state.chatRevisions,
+          });
+          return;
+        }
+        if (url.pathname === '/v1/state/patch' && req.method === 'POST') {
+          // A workspace has no size limit, and this relay holds it in memory anyway.
+          const value = patchInput.parse(await body(req, authorized, Number.POSITIVE_INFINITY));
+          if (value.revision !== state.revision) {
+            // The sender's manifest is stale; it can retry without downloading everything.
+            send(409, manifest());
+            return;
+          }
+          const previous = state.workspace;
+          save(patched(value));
+          push.changed(previous, state.workspace);
+          send(200, manifest());
+          return;
+        }
         if (url.pathname === '/v1/state' && req.method === 'PUT') {
           // A workspace has no size limit, and this relay holds it in memory anyway, so its own
           // upload is not bounded by the limit that protects every other route.
@@ -476,12 +610,9 @@ export function createRelay({
             return;
           }
           const previous = state.workspace;
-          save({
-            instanceId: state.instanceId,
-            version: 1,
-            revision: state.revision + 1,
-            workspace: value.workspace,
-          });
+          // Record what actually moved, so a device on the incremental routes still sees
+          // exactly the conversations this whole upload changed.
+          save(replaced(value.workspace));
           push.changed(previous, state.workspace);
           send(200, { ...state, workspaceId: workspace.id });
           return;
