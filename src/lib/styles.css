@@ -2315,6 +2315,36 @@ pre {
     border: 0;
     border-radius: 0;
     background: var(--backdrop);
+    visibility: hidden;
+    opacity: 0;
+  }
+  .sidebar-backdrop.mobile-open {
+    visibility: visible;
+    opacity: 1;
+  }
+  /* A released swipe carries the drawer the rest of the way. Visibility holds that
+     duration so a closing drawer stays painted as it leaves; the buttons and a
+     window narrowed to phone width keep moving it at once. */
+  .app-shell.drawer-settling .sidebar {
+    transition:
+      transform var(--duration) ease,
+      visibility var(--duration);
+  }
+  .app-shell.drawer-settling .sidebar-backdrop {
+    transition:
+      opacity var(--duration) ease,
+      visibility var(--duration);
+  }
+  /* A finger holds the drawer where it is, with no transition to catch up with. */
+  .app-shell.drawer-dragging .sidebar {
+    visibility: visible;
+    transform: translateX(calc((var(--drawer-progress, 0) - 1) * 100%));
+    transition: none;
+  }
+  .app-shell.drawer-dragging .sidebar-backdrop {
+    visibility: visible;
+    opacity: var(--drawer-progress, 0);
+    transition: none;
   }
   .mobile-menu,
   .mobile-close {

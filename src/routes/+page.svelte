@@ -4,6 +4,7 @@
   import UndoFilesDialog from '$lib/components/UndoFilesDialog.svelte';
   import { rewindConversation, undoRewind } from '$lib/rewind';
   import { trackMobileViewport } from '$lib/mobileViewport';
+  import { trackDrawerSwipe } from '$lib/drawerSwipe';
   import {
     notificationConversation,
     requestsAttention,
@@ -263,6 +264,11 @@
   let online = $state(true);
   const mobile = $derived(viewportWidth <= 650);
   let sidebarElement = $state<HTMLElement>();
+  // A finger dragging the drawer keeps it between closed and open until it lifts,
+  // and the drawer then carries itself the rest of the way.
+  let drawerDrag = $state<number>();
+  let drawerSettling = $state(false);
+  let drawerSettleTimer: ReturnType<typeof setTimeout>;
   async function toggleSidebar(open: boolean) {
     sidebarOpen = open;
     await tick();
@@ -969,6 +975,22 @@
     window.addEventListener('online', network);
     window.addEventListener('offline', network);
     const stopViewport = trackMobileViewport();
+    const stopDrawerSwipe = trackDrawerSwipe({
+      enabled: () => mobile && !deletion && !conversationMenu,
+      open: () => sidebarOpen,
+      drawer: () => sidebarElement,
+      move: (progress) => {
+        if (progress === undefined && drawerDrag !== undefined) {
+          drawerSettling = true;
+          clearTimeout(drawerSettleTimer);
+          drawerSettleTimer = setTimeout(() => (drawerSettling = false), 400);
+        }
+        drawerDrag = progress;
+      },
+      settle: (open) => {
+        if (open !== sidebarOpen) void toggleSidebar(open);
+      },
+    });
     let focusTimer: ReturnType<typeof setTimeout>;
     const onReturn = () => {
       if (!loaded || document.visibilityState === 'hidden') return;
@@ -1219,6 +1241,8 @@
       window.removeEventListener('online', network);
       window.removeEventListener('offline', network);
       stopViewport();
+      stopDrawerSwipe();
+      clearTimeout(drawerSettleTimer);
       clearTimeout(focusTimer);
       clearInterval(loginPoll);
       clearInterval(usagePoll);
@@ -3425,10 +3449,18 @@
     login={(key) => pair(window.location.origin, key)}
   />
 {:else}
-<div class="app-shell" style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}>
-  {#if mobile && sidebarOpen}<button
+<div
+  class="app-shell"
+  class:drawer-dragging={drawerDrag !== undefined}
+  class:drawer-settling={drawerSettling}
+  style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}
+  style:--drawer-progress={drawerDrag}
+>
+  {#if mobile}<button
       class="sidebar-backdrop"
+      class:mobile-open={sidebarOpen}
       aria-label="Close conversation menu"
+      inert={!sidebarOpen}
       onclick={() => toggleSidebar(false)}
     ></button>{/if}
   <aside

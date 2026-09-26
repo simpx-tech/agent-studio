@@ -14,6 +14,8 @@ The phone uses `viewport-fit=auto`: Safari provides the safe content rectangle a
 
 The phone shell follows both the height and vertical offset of the visible viewport while the keyboard is open. After dismissal it clears stale offsets. The document, body, main screen, sidebar, backdrop, and modal overlay use the dynamic viewport height at rest. Do not enlarge the app to the maximum of `vh`, `innerHeight`, and `clientHeight`: [iOS 26 reports include fullscreen metrics larger than the drawable page](https://bugs.webkit.org/show_bug.cgi?id=301994), which can clip the footer. The installed app uses an opaque black status bar, with web content below it. Focus transitions are checked through their animation, and pinch zoom stays under browser control. Message updates scroll only the conversation pane. These choices account for the distinction between the [layout and visual viewports](https://developer.mozilla.org/en-US/docs/Web/API/VisualViewport).
 
+The conversation drawer opens with a finger dragged in from the left border and closes with one dragged back across it, beside the menu and close buttons. It follows the finger and settles when it lifts, on the distance it covered or the speed it was released with, carrying itself the rest of the way; the buttons and a window narrowed to phone width still move it at once. Focus enters the drawer or returns to the menu as it does with the buttons. A mostly vertical drag, a swipe a horizontally scrolling row can still use, and touches over a dialog, confirmation or menu keep their own behavior, and the app watches those moves only while a swipe is under way, so ordinary scrolling keeps the browser's fast path. Reduced-motion settings drop the sliding animation.
+
 Shared dropdowns open next to their trigger, shift inside the visible screen, and open upward when there is more room above. The browser top layer keeps them outside the horizontally scrolling settings row and dialog clipping. Scrolling a dropdown does not scroll the surrounding page or toolbar.
 
 ## Hosting
@@ -33,7 +35,7 @@ For local development, use Node 24+, `npm ci`, `npm run build`, then `npm run re
 
 1. Pair each desktop host with the server in **Connections → Set up sync**. Sign in to its provider CLIs there.
 2. Open the server’s HTTPS address on the phone. Enter your workspace key and choose **Sign in**. The browser uses the current server address.
-3. Use the conversation menu to start a chat. Choose the execution computer, browse its folders, and select its agent account. Swipe the settings row to reach Model and Reasoning. The ellipsis opens additional conversation actions.
+3. Use the conversation menu, or swipe in from the left border, to start a chat. Choose the execution computer, browse its folders, and select its agent account. Swipe the settings row to reach Model and Reasoning. The ellipsis opens additional conversation actions.
 4. Choose **Install app → Install Viewer**. In Safari on iPhone, use **Share → Add to Home Screen**. Android browsers offer **Install app** or **Add to Home screen**. Enter inserts a newline on phone layouts; tap the send arrow to submit.
 
 After sign-in, the **Install app** download icon sits beside **Connections** and **Settings** in the sidebar footer. On phones, open the conversation drawer to reach it. It remains on the sign-in page before login. The chat status area only shows connection notices, with no empty installation row when connected.

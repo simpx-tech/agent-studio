@@ -304,3 +304,85 @@ test('the phone reserves its safe area once, without adding a second navigation 
   await page.setViewportSize({ width: 390, height: 751 });
   await expect.poll(bottomGap).toBe(10);
 });
+
+test('a finger drags the drawer in from the left border and swipes it away again', async ({
+  page,
+  openPwa,
+}, testInfo) => {
+  await openPwa();
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+  const cdp = await page.context().newCDPSession(page);
+  // Motion decides whether a released swipe settles or snaps, so ask for it here.
+  await cdp.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+  });
+  const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x = 0, y = 0) =>
+    cdp.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: type === 'touchEnd' ? [] : [{ x, y }],
+    });
+  const drag = async (from: [number, number], to: [number, number], steps = 6) => {
+    await touch('touchStart', ...from);
+    for (let step = 1; step <= steps; step++)
+      await touch(
+        'touchMove',
+        from[0] + ((to[0] - from[0]) * step) / steps,
+        from[1] + ((to[1] - from[1]) * step) / steps,
+      );
+  };
+  const sidebar = page.locator('.sidebar');
+  const backdrop = page.locator('.sidebar-backdrop');
+  const left = () => sidebar.evaluate((node) => Math.round(node.getBoundingClientRect().left));
+  await expect.poll(left).toBe(-320);
+  await expect(backdrop).toBeHidden();
+
+  // A mostly vertical drag belongs to the page it started on.
+  await drag([6, 520], [22, 300]);
+  await touch('touchEnd');
+  await expect.poll(left).toBe(-320);
+
+  // So does a swipe that starts away from the border.
+  await drag([200, 520], [340, 520]);
+  await touch('touchEnd');
+  await expect.poll(left).toBe(-320);
+
+  // Released short of the drawer's width, a slow drag hands it back.
+  await drag([6, 520], [60, 520]);
+  await page.waitForTimeout(250);
+  await touch('touchEnd');
+  await expect.poll(left).toBe(-320);
+  await expect(backdrop).toBeHidden();
+
+  // A longer drag holds the drawer under the finger until it lifts.
+  await drag([6, 520], [250, 520]);
+  // 244px of travel across a 320px drawer leaves 76px of it still off screen.
+  expect(Math.abs((await left()) + 76)).toBeLessThan(3);
+  await expect(backdrop).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('drawer-following-finger.png') });
+  await page.evaluate(() => {
+    const sidebar = document.querySelector('.sidebar')!;
+    (window as any).drawerSettled = new Promise((done) => {
+      sidebar.addEventListener('transitionend', (event) => {
+        if (event.target === sidebar && (event as TransitionEvent).propertyName === 'transform')
+          done('settled');
+      });
+      setTimeout(() => done('snapped'), 1000);
+    });
+  });
+  await touch('touchEnd');
+  // The drawer carries itself the rest of the way rather than jumping there.
+  expect(await page.evaluate(() => (window as any).drawerSettled)).toBe('settled');
+  await expect(sidebar).toHaveClass(/mobile-open/);
+  await expect.poll(left).toBe(0);
+  await expect(page.getByRole('button', { name: 'Close conversation menu' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Close conversations' })).toBeFocused();
+
+  // Dragging back across the open drawer takes it off screen again.
+  await drag([250, 520], [40, 520]);
+  expect(await left()).toBeLessThan(-120);
+  await touch('touchEnd');
+  await expect(sidebar).not.toHaveClass(/mobile-open/);
+  await expect.poll(left).toBe(-320);
+  await expect(backdrop).toBeHidden();
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+});
