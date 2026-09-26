@@ -35,6 +35,10 @@ test('desktop Settings shows the native app version and opens its changelog entr
   await expect(about.getByRole('heading', { name: 'Changelog', exact: true })).toBeVisible();
   await expect(about.locator('.releases > li')).toHaveCount(Math.min(5, releases.length));
 
+  // This mock runs a version older than the newest five, so its own entry waits behind the
+  // control that shows every release, and opens there.
+  await expect(release(about, nativeVersion)).toHaveCount(0);
+  await about.getByRole('button', { name: `Show all ${releases.length} releases` }).click();
   const current = release(about, nativeVersion);
   await expect(current).toHaveAttribute('open', '');
   await expect(current.locator('summary')).toContainText('Current');
