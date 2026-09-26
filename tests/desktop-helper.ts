@@ -61,6 +61,13 @@ export async function mockDesktop(page: Page, mode = 'success') {
             (window as any).savedArtifact = args;
             return 'C:/Downloads/' + args.filename;
           }
+          if (command === 'site_icon') {
+            ((window as any).siteIconReads ??= []).push(args.origin);
+            // Only one fixture site serves an icon; the others keep the generic mark.
+            return args.origin === 'https://en.wikipedia.org'
+              ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+              : null;
+          }
           if (command === 'relay_resume') return null;
           if (command === 'plugin:window|is_maximized') return false;
           if (command === 'plugin:event|listen') return 0;

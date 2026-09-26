@@ -1681,6 +1681,14 @@ export async function signIn(provider: string, connectionId?: string) {
     );
   await invoke('sign_in', { provider, connectionId });
 }
+/**
+ * The icon a linked site serves for itself, read on this computer for a reply's link marks.
+ * Only this computer can read one: a viewer keeps the generic mark.
+ */
+export async function siteIcon(origin: string): Promise<string | null> {
+  if (!desktop()) return null;
+  return (await invoke<string | null>('site_icon', { origin })) ?? null;
+}
 export async function openLink(url: string) {
   if (!/^https?:\/\//i.test(url)) return;
   if (desktop()) {

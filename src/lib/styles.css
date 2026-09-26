@@ -1498,11 +1498,29 @@ pre {
 }
 .prose a {
   color: var(--accent-text);
-  text-decoration-color: var(--accent-border);
+  font-weight: 500;
+  text-decoration-color: transparent;
   text-underline-offset: 3px;
+  transition: text-decoration-color var(--duration-fast) ease;
 }
 .prose a:hover {
   text-decoration-color: currentColor;
+}
+/* A linked site keeps its own icon before the link, read by the computer showing the reply
+   (see link-marks.ts). Sites whose icon is unknown or unreachable keep this generic mark,
+   so the space a mark takes never changes once the link is on screen. */
+.link-mark {
+  display: inline-block;
+  width: 1.02em;
+  height: 1.02em;
+  margin-right: 0.34em;
+  vertical-align: -0.16em;
+  border-radius: 3px;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'/%3E%3Cpath d='M2 12h20'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'/%3E%3Cpath d='M2 12h20'/%3E%3C/svg%3E")
+    center / contain no-repeat;
 }
 .prose input {
   width: auto;

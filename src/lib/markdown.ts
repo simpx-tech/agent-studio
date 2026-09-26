@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { Marked, type Token, type TokensList } from 'marked';
 import type { Visualization } from './visualizations';
+import { siteLink } from './link-marks';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
 
@@ -38,10 +39,26 @@ export function highlightCode(
   }
 }
 
+const attributeEntities: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+};
+const escapeAttribute = (value: string) =>
+  value.replace(/[&<>"]/g, (character) => attributeEntities[character]);
 const markdown = new Marked({
   gfm: true,
   breaks: true,
   renderer: {
+    // Links a browser would open as a page carry their site's mark; every other link,
+    // and every address Marked itself rejects, keeps its plain anchor.
+    link({ href, title, tokens }) {
+      const site = siteLink(href);
+      if (!site) return false;
+      const name = title ? ` title="${escapeAttribute(title)}"` : '';
+      return `<a href="${escapeAttribute(site.href)}"${name}><span class="link-mark ${site.mark}"></span>${this.parser.parseInline(tokens)}</a>`;
+    },
     code({ text, lang }) {
       const highlighted = highlightCode(text, lang);
       if (!highlighted) return false;

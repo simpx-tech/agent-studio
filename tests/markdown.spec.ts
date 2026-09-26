@@ -160,3 +160,83 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('links carry their site mark, keep it in saved history and open outside the app', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript(() => {
+    const w = window as any,
+      original = w.__TAURI_INTERNALS__.invoke;
+    w.openedPages = [];
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:opener|open_url') {
+        w.openedPages.push(args.url);
+        return;
+      }
+      return original(command, args);
+    };
+  });
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Show a random link');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await page.waitForFunction(() => !!(window as any).emitCapability);
+  await page.evaluate(() => {
+    (window as any).emitCapability({
+      kind: 'text',
+      text: [
+        "[Explore Wikipedia's random article](https://en.wikipedia.org/wiki/Special:Random)",
+        '',
+        'Also <https://github.com/tauri-apps/tauri>, [the notes](./notes.md) and',
+        '[mail](mailto:someone@example.com).',
+      ].join('\n'),
+    });
+    (window as any).finishCapabilities('complete');
+  });
+  const reply = page.locator('.message:not(.user) .prose').first();
+  const article = reply.getByRole('link', { name: "Explore Wikipedia's random article" });
+  await expect(article).toHaveAttribute('href', 'https://en.wikipedia.org/wiki/Special:Random');
+  // Only links a browser would open as a page are marked, and a mark is never an image.
+  await expect(reply.locator('a .link-mark')).toHaveCount(2);
+  await expect(reply.locator('a[href^="mailto:"], a[href$="notes.md"]')).toHaveCount(2);
+  await expect(
+    reply.locator('a[href^="mailto:"] .link-mark, a[href$="notes.md"] .link-mark'),
+  ).toHaveCount(0);
+  await expect(reply.locator('img')).toHaveCount(0);
+  // Each site is read once, by origin alone.
+  await expect
+    .poll(() => page.evaluate(() => (window as any).siteIconReads))
+    .toEqual(['https://en.wikipedia.org', 'https://github.com']);
+  const mark = article.locator('.link-mark');
+  await expect
+    .poll(() => mark.evaluate((element) => getComputedStyle(element).backgroundImage))
+    .toContain('data:image/png;base64');
+  expect(await mark.evaluate((element) => getComputedStyle(element).maskImage)).toBe('none');
+  // A site that serves no icon keeps the generic mark instead of an empty space.
+  const generic = reply.locator('a[href^="https://github.com"] .link-mark');
+  expect(await generic.evaluate((element) => getComputedStyle(element).backgroundImage)).toBe(
+    'none',
+  );
+  expect(await generic.evaluate((element) => getComputedStyle(element).maskImage)).toContain('svg');
+  expect(
+    await generic.evaluate((element) => element.getBoundingClientRect().width),
+  ).toBeGreaterThan(8);
+  await page.screenshot({ path: 'artifacts/link-marks.png' });
+  await article.click();
+  expect(await page.evaluate(() => (window as any).openedPages)).toEqual([
+    'https://en.wikipedia.org/wiki/Special:Random',
+  ]);
+  // A restored reply is marked again from its saved Markdown.
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: /Show a random link/ }).click();
+  const restored = page
+    .locator('.message:not(.user) .prose')
+    .first()
+    .getByRole('link', { name: "Explore Wikipedia's random article" })
+    .locator('.link-mark');
+  await expect
+    .poll(() => restored.evaluate((element) => getComputedStyle(element).backgroundImage))
+    .toContain('data:image/png;base64');
+});

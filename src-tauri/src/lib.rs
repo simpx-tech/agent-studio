@@ -20,6 +20,7 @@ mod relay;
 mod runner;
 mod saved;
 mod shared_context;
+mod site_icons;
 mod spend;
 mod standalone;
 mod startup;
@@ -1000,6 +1001,7 @@ pub fn run() {
             updates::check_app_update,
             updates::install_app_update,
             artifacts::save_artifact,
+            site_icons::site_icon,
             app_session,
             get_installation,
             discover_wsl,
