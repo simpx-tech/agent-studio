@@ -1252,9 +1252,19 @@
   async function persist(local = true) {
     if (!loaded) return;
     if (local) localChanges++;
-    const snapshot = $state.snapshot(workspace);
     const scope = workspaceStorageScope();
-    const next = saveQueue.catch(() => {}).then(() => saveWorkspace(snapshot, scope));
+    // Saving serializes the workspace anyway, so copying it first only walked every
+    // conversation twice. The queued save keeps this workspace and writes its newest state,
+    // which is what the file should hold; a later reassignment cannot redirect it.
+    const saved = workspace;
+    const next = saveQueue.catch(() => {}).then(async () => {
+      const started = performance.now();
+      try {
+        await saveWorkspace(saved, scope);
+      } finally {
+        lastSaveMs = performance.now() - started;
+      }
+    });
     saveQueue = next;
     try {
       await next;
@@ -1264,8 +1274,29 @@
       throw e;
     }
   }
+  // How long the last save took, so a streamed reply can keep saving to a small share of the
+  // time. A save writes the whole workspace, so it grows with the workspace and no frequency
+  // makes it free; the reply's own end, its plans, questions and file changes still save at once.
+  let lastSaveMs = 0;
+  const streamSaveInterval = () => Math.min(15_000, Math.max(1_000, lastSaveMs * 50));
+  // A streamed reply asks to save far faster than a large workspace can be written. Each save
+  // writes the newest state, so requests made while one runs only need one more save after it.
+  let savingSoon = false;
+  let saveAgain = false;
   function saveSoon() {
-    void persist().catch(() => {});
+    saveAgain = true;
+    if (savingSoon) return;
+    void (async () => {
+      savingSoon = true;
+      try {
+        while (saveAgain) {
+          saveAgain = false;
+          await persist().catch(() => {});
+        }
+      } finally {
+        savingSoon = false;
+      }
+    })();
   }
   async function restartToUpdate() {
     // Finish saving this workspace and its drafts before the installer closes the app.
@@ -3057,7 +3088,8 @@
                 event.kind === 'elicitation' ||
                 event.kind === 'steering' ||
                 event.kind === 'compaction' ||
-                (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= 1000) ||
+                (event.kind === 'reasoning' &&
+                  Date.now() - reasoningSavedAt >= streamSaveInterval()) ||
                 (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
               ) {
                 if (event.kind === 'reasoning') reasoningSavedAt = Date.now();

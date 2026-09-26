@@ -11,7 +11,7 @@ const token = 'synthetic-performance-relay-key-for-browser-checks';
 // workspace, relay polls that merged and saved everything took 370–440 ms each and fleet
 // lookups that copied the whole workspace held Connections for 1.9 s; the current code has no
 // task over 50 ms while idle or selecting and about 60 ms opening Connections.
-const budgets = { idle: 100, connections: 250, selection: 150 };
+const budgets = { idle: 100, connections: 250, selection: 150, streaming: 150 };
 
 async function desktop(page: Page) {
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-performance-'));
@@ -126,13 +126,26 @@ async function desktop(page: Page) {
                 context: null,
                 detail: 'Fixture',
               };
-            case 'run_agent':
-              // A reply that connects and then waits, as one running a long tool call does.
-              callbacks.get(args.onEvent.id)?.({
-                message: { kind: 'activity', text: 'Working' },
-                index: 0,
-              });
+            case 'run_agent': {
+              // A reply that connects and then waits, as one running a long tool call does,
+              // until a test streams answer text and reasoning through it.
+              const channel = args.onEvent.id;
+              let index = 0;
+              const emit = (message: unknown) =>
+                callbacks.get(channel)?.({ message, index: index++ });
+              emit({ kind: 'activity', text: 'Working' });
+              w.streamReply = async (events: number, everyMs: number) => {
+                for (let step = 0; step < events; step++) {
+                  emit(
+                    step % 3 === 0
+                      ? { kind: 'reasoning', text: `Considering step ${step}. ` }
+                      : { kind: 'text', text: `part ${step} ` },
+                  );
+                  await new Promise((resolve) => setTimeout(resolve, everyMs));
+                }
+              };
               return new Promise(() => {});
+            }
             case 'cancel_run':
               return;
             case 'generate_title':
@@ -249,6 +262,48 @@ test('a reply waiting on a tool call neither downloads nor rewrites the whole wo
   }
 });
 
+test('a streaming reply saves the whole workspace far less often than it reports', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const timed = !process.env.CI;
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    await page.getByLabel('Message', { exact: true }).fill('Explain it while you work');
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).streamReply === 'function'), {
+        timeout: 20_000,
+      })
+      .toBe(true);
+    await page.waitForTimeout(2_000);
+    const before = await page.evaluate(() => (window as any).saves.workspace);
+    // 120 reported events over about six seconds, 40 of them reasoning.
+    const tasks = await longTasks(page, async () => {
+      await page.evaluate(() => (window as any).streamReply(120, 50));
+      await page.waitForTimeout(500);
+    });
+    const saves = (await page.evaluate(() => (window as any).saves.workspace)) - before;
+    test.info().annotations.push({
+      type: 'streaming',
+      description: JSON.stringify({ saves, longTasks: tasks.slice(0, 5) }),
+    });
+    // Each save writes the whole workspace, so reported progress must not drive one save each.
+    expect(saves, 'Whole-workspace saves while streaming 120 events').toBeLessThan(12);
+    expect(saves, 'A streaming reply still saves its progress').toBeGreaterThan(0);
+    if (timed)
+      expect(
+        tasks[0] ?? 0,
+        'Longest task while a reply streams; see docs/PERFORMANCE.md to profile it',
+      ).toBeLessThan(budgets.streaming);
+  } finally {
+    await host.close();
+  }
+});
+
 test('a large workspace stays responsive while idle, in Connections and when selecting', async ({
   page,
 }) => {
@@ -258,7 +313,8 @@ test('a large workspace stays responsive while idle, in Connections and when sel
   const host = await desktop(page);
   try {
     await settle(page, host.requests);
-    const measured: Record<keyof typeof budgets, number[]> = {
+    // Streaming has its own scenario above; this one measures the three interactions.
+    const measured: Record<'idle' | 'connections' | 'selection', number[]> = {
       idle: await longTasks(page, () => page.waitForTimeout(8_000)),
       connections: await longTasks(page, async () => {
         await page.getByRole('button', { name: 'Connections', exact: true }).click();

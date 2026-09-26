@@ -9,7 +9,6 @@ import { describe, expect, it } from 'vitest';
 // Whole-workspace copies by file and enclosing function, and why each one is acceptable.
 const allowedWorkspaceCopies: [site: string, reason: string][] = [
   ['src/routes/+page.svelte › onMount callback › workspace', 'the runtime getter itself'],
-  ['src/routes/+page.svelte › persist', 'a save writes the whole workspace'],
   ['src/lib/transport.ts › saveWorkspace', 'the Viewer stores the whole workspace'],
   ['src/lib/transport.ts › resolveRelaySettings', 'desktop backup before adopting a relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'Viewer backup before adopting a relay'],
