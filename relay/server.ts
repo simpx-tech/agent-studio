@@ -46,6 +46,7 @@ const jobInput = z
       'nativeInstructions',
       'toolOutput',
       'toolOutputImage',
+      'toolOutputModel',
       'mcp',
       'plugins',
       'undoFiles',
@@ -132,6 +133,19 @@ const jobInput = z
         .safeParse(job.args).success
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid tool output image request' });
+    if (
+      job.method === 'toolOutputModel' &&
+      !z
+        .object({
+          runId: uuid,
+          toolId,
+          index: z.number().int().nonnegative().max(1_000_000),
+          connectionId: uuid,
+        })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output model request' });
     if (
       job.method === 'answer' &&
       !z

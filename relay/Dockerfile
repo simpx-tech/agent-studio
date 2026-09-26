@@ -25,6 +25,8 @@ COPY src/lib/structured-output.ts ./src/lib/
 COPY src/lib/claude-options.ts ./src/lib/
 COPY src/lib/claude-instructions.ts ./src/lib/
 COPY src/lib/app-sessions.ts ./src/lib/
+COPY src/lib/sent-files.ts ./src/lib/
+COPY src/lib/tool-output.ts ./src/lib/
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
 USER node
 EXPOSE 4317
