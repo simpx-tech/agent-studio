@@ -52,6 +52,8 @@ pub struct CapturedOutput {
     /// The first line number of file content, when the text is a file read.
     pub start_line: Option<u64>,
     pub images: Vec<ImageSource>,
+    /// Paths of 3D models a reply shows, reported by Agent Studio's own tool alone.
+    pub models: Vec<String>,
     /// The complete command or input when the activity record shows a shortened one.
     pub command: Option<String>,
     pub input: Option<String>,
@@ -66,6 +68,7 @@ impl CapturedOutput {
             exit_code: None,
             start_line: None,
             images: vec![],
+            models: vec![],
             command: None,
             input: None,
         }

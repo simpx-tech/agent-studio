@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { X } from '@lucide/svelte';
-  import type { SentFiles } from '$lib/sent-files';
+  import { imageInfo, isModel, type SentFiles } from '$lib/sent-files';
   import { toolOutputImageUrl, type ToolOutputImage } from '$lib/tool-output';
   import ToolResultImage from './ToolResultImage.svelte';
+  import ModelView from './ModelView.svelte';
 
   let {
     files,
@@ -27,15 +28,19 @@
 
 <figure class="sent-files">
   <div class="sent-images">
-    {#each files.files as file (file.index)}
-      <ToolResultImage
-        runId={files.runId}
-        toolId={files.toolId}
-        {connectionId}
-        info={file}
-        name={file.name}
-        open={(image, label) => open(image, label, file.name)}
-      />
+    {#each files.files as file (`${file.mediaType}:${file.index}`)}
+      {#if isModel(file)}
+        <ModelView runId={files.runId} toolId={files.toolId} {connectionId} {file} />
+      {:else}
+        <ToolResultImage
+          runId={files.runId}
+          toolId={files.toolId}
+          {connectionId}
+          info={imageInfo(file)}
+          name={file.name}
+          open={(image, label) => open(image, label, file.name)}
+        />
+      {/if}
     {/each}
   </div>
   {#if files.caption}<figcaption>{files.caption}</figcaption>{/if}

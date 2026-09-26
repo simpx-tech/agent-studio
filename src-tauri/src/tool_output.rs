@@ -30,6 +30,8 @@ pub const FULL_BYTES: u64 = 8 * 1024 * 1024;
 const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
 /// A call's `meta.json` larger than this is not read.
 const META_LIMIT: u64 = 64 * 1024 * 1024;
+/// The largest model file a reply shows, so one relay request carries it whole.
+pub const MODEL_BYTES: u64 = 12 * 1024 * 1024;
 /// Bytes read to recognize an image file and its dimensions.
 const SNIFF_BYTES: usize = 512 * 1024;
 const KEY_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6d1f_1c8e_52a4_4f0e_9a4b_7c1e_2d3f_4a5b);
@@ -45,6 +47,14 @@ struct ImageMeta {
     width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+}
+/// A 3D model a reply shows, kept whole beside the call's images.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelMeta {
+    file: String,
+    format: String,
+    bytes: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +72,8 @@ struct Meta {
     /// Images reported but not kept: unreadable or not a supported image type.
     #[serde(default)]
     images_omitted: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    models: Vec<ModelMeta>,
     /// The complete command or input when the activity record shows a shortened one.
     #[serde(default)]
     command: Option<String>,
@@ -117,6 +129,14 @@ pub struct View {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
+}
+/// One 3D model of a call's result as a window receives it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelData {
+    pub format: String,
+    pub data: String,
+    pub bytes: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,8 +304,8 @@ pub struct ImageFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
-/// Recognizes a file a conversation offers to show, with the reason when it cannot.
-pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
+/// A file the conversation offers to show, checked before its bytes are copied.
+fn offered_file(path: &Path, limit: u64) -> Result<std::fs::Metadata, String> {
     let text = path.to_string_lossy();
     if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
         return Err("needs an absolute path to a file".into());
@@ -295,8 +315,17 @@ pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
         return Err("is not a file".into());
     }
     if metadata.len() > limit {
-        return Err(format!("is larger than {}", human(limit)));
+        return Err(format!(
+            "is {}, larger than the {} a reply can show",
+            human(metadata.len()),
+            human(limit)
+        ));
     }
+    Ok(metadata)
+}
+/// Recognizes a file a conversation offers to show, with the reason when it cannot.
+pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
+    let metadata = offered_file(path, limit)?;
     let mut file = std::fs::File::open(path).map_err(|_| "cannot be opened".to_string())?;
     let mut head = Vec::with_capacity(SNIFF_BYTES.min(metadata.len() as usize + 1));
     (&mut file)
@@ -309,6 +338,102 @@ pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
         bytes: metadata.len(),
         width: size.map(|s| s.0),
         height: size.map(|s| s.1),
+    })
+}
+/// A 3D model a conversation offers to show: the format its own bytes report and its size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelFile {
+    pub format: String,
+    pub bytes: u64,
+}
+/// Recognizes glTF, GLB, OBJ, STL and FBX from a file's own content. A glTF document that
+/// names files beside it is refused, because only the file itself is sent.
+pub fn inspect_model(path: &Path, limit: u64) -> Result<ModelFile, String> {
+    let metadata = offered_file(path, limit)?;
+    let size = metadata.len();
+    let mut file = std::fs::File::open(path).map_err(|_| "cannot be opened".to_string())?;
+    let mut head = Vec::with_capacity(SNIFF_BYTES.min(size as usize + 1));
+    (&mut file)
+        .take(SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .map_err(|_| "cannot be read".to_string())?;
+    let format = model_format(&head, size).ok_or(
+        "is not a glTF, GLB, OBJ, STL or FBX model, or its content does not match its name",
+    )?;
+    if format == "gltf" {
+        // The whole document is text within the size limit already checked above.
+        let text =
+            std::fs::read_to_string(path).map_err(|_| "cannot be read as text".to_string())?;
+        gltf_is_self_contained(&text)?;
+    }
+    Ok(ModelFile {
+        format: format.into(),
+        bytes: size,
+    })
+}
+/// The model format a file's first bytes report, using its size for binary STL.
+fn model_format(head: &[u8], size: u64) -> Option<&'static str> {
+    if head.starts_with(b"glTF") {
+        return Some("glb");
+    }
+    if head.starts_with(b"Kaydara FBX Binary") {
+        return Some("fbx");
+    }
+    if size >= 84 && head.len() >= 84 {
+        let count = u32::from_le_bytes([head[80], head[81], head[82], head[83]]) as u64;
+        if size == 84 + count * 50 {
+            return Some("stl");
+        }
+    }
+    let text = String::from_utf8_lossy(head);
+    let trimmed = text.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);
+    if text.contains("FBXHeaderExtension") {
+        return Some("fbx");
+    }
+    if trimmed.starts_with('{') && text.contains("\"asset\"") {
+        return Some("gltf");
+    }
+    if trimmed.starts_with("solid") && text.contains("facet normal") {
+        return Some("stl");
+    }
+    let obj = trimmed.lines().filter(|line| {
+        let line = line.trim_start();
+        line.starts_with("v ") || line.starts_with("f ") || line.starts_with("vn ")
+    });
+    if obj.count() >= 3 {
+        return Some("obj");
+    }
+    None
+}
+/// A glTF document renders only when its buffers and images are inside it.
+fn gltf_is_self_contained(text: &str) -> Result<(), String> {
+    let document: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "is not a readable glTF document".to_string())?;
+    for kind in ["buffers", "images"] {
+        for entry in document[kind].as_array().into_iter().flatten() {
+            match entry["uri"].as_str() {
+                None => continue,
+                Some(uri) if uri.starts_with("data:") => continue,
+                Some(_) => return Err(format!(
+                    "is a glTF document that loads its {kind} from files beside it; send a .glb instead"
+                )),
+            }
+        }
+    }
+    Ok(())
+}
+/// Copies a model file the conversation offered, keeping its recognized format.
+fn copy_model(path: &Path, directory: &Path, index: usize, limit: u64) -> Option<ModelMeta> {
+    let model = inspect_model(path, limit).ok()?;
+    let file = format!("model-{index}.{}", model.format);
+    let mut source = std::fs::File::open(path).ok()?;
+    let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
+    let bytes = std::io::copy(&mut source, &mut target).ok()?;
+    target.persist(directory.join(&file)).ok()?;
+    Some(ModelMeta {
+        file,
+        format: model.format,
+        bytes,
     })
 }
 /// Copies an image file a provider reported viewing: a regular file of a supported type.
@@ -345,6 +470,7 @@ fn write_call(
     directory: &Path,
     output: &CapturedOutput,
     files: &[Option<PathBuf>],
+    models: &[Option<PathBuf>],
 ) -> Result<u64, String> {
     let _ = std::fs::remove_dir_all(directory);
     std::fs::create_dir_all(directory).map_err(|_| "Cannot create the tool output folder")?;
@@ -392,6 +518,16 @@ fn write_call(
             None => omitted += 1,
         }
     }
+    let mut kept = vec![];
+    for path in models {
+        if let Some(model) = path
+            .as_deref()
+            .and_then(|path| copy_model(path, directory, kept.len(), MODEL_BYTES))
+        {
+            written += model.bytes;
+            kept.push(model);
+        }
+    }
     let meta = Meta {
         version: 2,
         tool_id: output.tool_id.clone(),
@@ -400,6 +536,7 @@ fn write_call(
         truncated: output.truncated,
         images,
         images_omitted: omitted,
+        models: kept,
         command: output.command.clone(),
         input: output.input.clone(),
     };
@@ -491,7 +628,11 @@ impl Worker {
                             files.push(self.image_path(path).await);
                         }
                     }
-                    self.write(output, files, &slot_key, &slot).await;
+                    let mut models = vec![];
+                    for path in &output.models {
+                        models.push(self.image_path(path).await);
+                    }
+                    self.write(output, files, models, &slot_key, &slot).await;
                 }
             }
         }
@@ -524,6 +665,7 @@ impl Worker {
         &mut self,
         output: Box<CapturedOutput>,
         files: Vec<Option<PathBuf>>,
+        models: Vec<Option<PathBuf>>,
         slot_key: &str,
         slot: &Arc<Slot>,
     ) {
@@ -533,7 +675,7 @@ impl Worker {
         let created_at = self.created_at;
         let previous = self.bytes;
         let written = tauri::async_runtime::spawn_blocking(move || {
-            let bytes = write_call(&directory, &output, &files)?;
+            let bytes = write_call(&directory, &output, &files, &models)?;
             write_json(
                 &run.join("run.json"),
                 &Manifest {
@@ -726,6 +868,40 @@ pub async fn read_image(
     .map_err(|_| "Cannot read the tool output".to_string())?
 }
 
+/// One 3D model of a call's result, whole, for the window that shows the reply.
+pub async fn read_model(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<ModelData, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let meta = read_meta(&directory, &tool_id)?;
+        let model = meta.models.get(index).ok_or(NOT_KEPT)?;
+        // Stored names only; a name never reaches outside the call's folder.
+        if model.file.contains(['/', '\\']) || !model.file.starts_with("model-") {
+            return Err(NOT_KEPT.to_string());
+        }
+        let path = directory.join(&model.file);
+        let size = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
+        if size > MODEL_BYTES {
+            return Err(NOT_KEPT.to_string());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| NOT_KEPT)?;
+        Ok(ModelData {
+            format: model.format.clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            bytes: bytes.len() as u64,
+        })
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
 /// Runs the saved workspace still references, or `None` when it cannot be read.
 fn referenced_runs(workspace: &Path) -> Option<HashSet<String>> {
     #[derive(Deserialize)]
@@ -829,6 +1005,7 @@ mod tests {
             exit_code: Some(1),
             start_line: None,
             images: vec![],
+            models: vec![],
             command: Some("npm test -- --long".into()),
             input: None,
         };
@@ -859,6 +1036,125 @@ mod tests {
         assert_eq!(sniff(b"<svg/>"), None);
     }
 
+    /// The smallest valid GLB: a header, a JSON chunk and a binary chunk.
+    fn glb(json: &str) -> Vec<u8> {
+        let mut chunk = json.as_bytes().to_vec();
+        while !chunk.len().is_multiple_of(4) {
+            chunk.push(b' ');
+        }
+        let mut bytes = b"glTF".to_vec();
+        bytes.extend(2u32.to_le_bytes());
+        bytes.extend((12 + 8 + chunk.len() as u32).to_le_bytes());
+        bytes.extend((chunk.len() as u32).to_le_bytes());
+        bytes.extend(b"JSON");
+        bytes.extend(chunk);
+        bytes
+    }
+
+    #[test]
+    fn models_are_recognized_by_their_own_content() {
+        assert_eq!(model_format(&glb("{}"), 40), Some("glb"));
+        assert_eq!(model_format(b"Kaydara FBX Binary  \0", 200), Some("fbx"));
+        assert_eq!(
+            model_format(b"; FBX 7.4\nFBXHeaderExtension: {", 200),
+            Some("fbx")
+        );
+        assert_eq!(
+            model_format(b"{\n \"asset\": {\"version\": \"2.0\"}\n}", 30),
+            Some("gltf")
+        );
+        assert_eq!(
+            model_format(b"solid cube\n facet normal 0 0 1\n", 30),
+            Some("stl")
+        );
+        assert_eq!(
+            model_format(b"# cube\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 40),
+            Some("obj")
+        );
+        // Binary STL is recognized by the triangle count its header reports.
+        let mut stl = vec![0u8; 84];
+        stl[80] = 1;
+        stl.extend(vec![0u8; 50]);
+        assert_eq!(model_format(&stl, stl.len() as u64), Some("stl"));
+        assert_eq!(model_format(&stl[..84], 134), Some("stl"));
+        assert_eq!(model_format(PNG, PNG.len() as u64), None);
+        assert_eq!(model_format(b"just some notes\n", 16), None);
+    }
+
+    #[test]
+    fn a_gltf_document_that_needs_files_beside_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let self_contained = dir.path().join("scene.gltf");
+        std::fs::write(
+            &self_contained,
+            r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"data:application/octet-stream;base64,AA=="}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_model(&self_contained, MODEL_BYTES).map(|m| m.format),
+            Ok("gltf".into())
+        );
+        let external = dir.path().join("external.gltf");
+        std::fs::write(
+            &external,
+            r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"scene.bin"}]}"#,
+        )
+        .unwrap();
+        let error = inspect_model(&external, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("send a .glb instead"), "{error}");
+        // Size, kind and path are reported before anything is copied.
+        let big = dir.path().join("big.glb");
+        std::fs::write(&big, glb(&format!("{{\"x\":\"{}\"}}", "0".repeat(2048)))).unwrap();
+        let error = inspect_model(&big, 512).unwrap_err();
+        assert!(error.contains("larger than"), "{error}");
+        assert!(inspect_model(&dir.path().join("gone.glb"), MODEL_BYTES).is_err());
+        assert!(inspect_model(Path::new("relative.glb"), MODEL_BYTES).is_err());
+    }
+
+    #[tokio::test]
+    async fn models_are_kept_beside_images_and_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
+        let mut captured = output("claude:model");
+        captured.images.clear();
+        let model = dir.path().join("figure.glb");
+        let bytes = glb(r#"{"asset":{"version":"2.0"}}"#);
+        std::fs::write(&model, &bytes).unwrap();
+        captured.models = vec![model.to_string_lossy().into()];
+        let directory = root.join(RUN).join(key("claude:model"));
+        write_call(
+            &directory,
+            &captured,
+            &[],
+            &[Some(model), Some(dir.path().join("missing.glb"))],
+        )
+        .unwrap();
+        let data = read_model(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:model".into(),
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(data.format, "glb");
+        assert_eq!(data.bytes, bytes.len() as u64);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&data.data)
+                .unwrap(),
+            bytes
+        );
+        // An unreadable path is simply not kept, and no other index appears.
+        assert!(
+            read_model(root, pending, RUN.into(), "claude:model".into(), 1)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn results_are_kept_whole_and_read_as_previews_full_views_and_images() {
         let dir = tempfile::tempdir().unwrap();
@@ -873,7 +1169,7 @@ mod tests {
         });
         let files = [Some(file), Some(dir.path().join("missing.png"))];
         let directory = root.join(RUN).join(key("claude:one"));
-        write_call(&directory, &captured, &files).unwrap();
+        write_call(&directory, &captured, &files, &[]).unwrap();
         let view = read(
             root.clone(),
             pending.clone(),
@@ -922,7 +1218,7 @@ mod tests {
         // A long stream is previewed by its ends and read whole on request.
         let mut long = CapturedOutput::new("claude:long");
         long.stdout = (0..40_000).map(|i| format!("line {i} é\n")).collect();
-        write_call(&root.join(RUN).join(key("claude:long")), &long, &[]).unwrap();
+        write_call(&root.join(RUN).join(key("claude:long")), &long, &[], &[]).unwrap();
         let preview = read(
             root.clone(),
             pending.clone(),
@@ -996,6 +1292,7 @@ mod tests {
         write_call(
             &root.join(RUN).join(key("claude:one")),
             &output("claude:one"),
+            &[],
             &[],
         )
         .unwrap();

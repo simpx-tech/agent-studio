@@ -23,6 +23,8 @@ import {
 import { retainRunEvent } from './activity';
 import {
   toolOutputImageSchema,
+  toolOutputModelSchema,
+  type ToolOutputModel,
   toolOutputSchema,
   type ToolOutput,
   type ToolOutputImage,
@@ -406,6 +408,7 @@ function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, un
   return (
     method === 'toolOutput' ||
     method === 'toolOutputImage' ||
+    method === 'toolOutputModel' ||
     (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
   );
 }
@@ -1405,6 +1408,7 @@ async function localCall(
     nativeInstructions: 'read_native_instructions',
     toolOutput: 'read_tool_output',
     toolOutputImage: 'read_tool_output_image',
+    toolOutputModel: 'read_tool_output_model',
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
     steer: 'steer_run',
@@ -1705,6 +1709,17 @@ export async function readToolOutput(
       { runId, toolId, connectionId, ...(full ? { full } : {}) },
       connectionId,
     ),
+  );
+}
+/** One 3D model of a finished tool call's result, read like `readToolOutput`. */
+export async function readToolOutputModel(
+  runId: string,
+  toolId: string,
+  index: number,
+  connectionId?: string,
+): Promise<ToolOutputModel> {
+  return toolOutputModelSchema.parse(
+    await routed('toolOutputModel', { runId, toolId, index, connectionId }, connectionId),
   );
 }
 /** One image of a finished tool call's result, read like `readToolOutput`. */

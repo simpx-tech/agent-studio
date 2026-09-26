@@ -1,5 +1,13 @@
 import { expect, it } from 'vitest';
-import { mergeSentFiles, sentFileGroupsSchema, sentFilesSchema, type SentFiles } from './sent-files';
+import {
+  imageInfo,
+  isModel,
+  mergeSentFiles,
+  sentFileGroupsSchema,
+  sentFilesSchema,
+  type SentFiles,
+} from './sent-files';
+import { modelBytes, modelFormats } from './tool-output';
 import { applyRunEvent, retainRunEvent } from './activity';
 import { replyContent } from './markdown';
 import {
@@ -116,12 +124,37 @@ it('places a group at its own marker, once, and keeps an unmarked group in the r
   const parts = replyContent('<!-- files:renders -->', [], [group]);
   expect(parts.map((p) => p.type)).toEqual(['files']);
   expect(parts[0].type === 'files' && parts[0].files.id).toBe('renders');
-  expect(replyContent('<!-- files:renders -->\n\n<!-- files:renders -->', [], [group])).toHaveLength(
-    1,
-  );
+  expect(
+    replyContent('<!-- files:renders -->\n\n<!-- files:renders -->', [], [group]),
+  ).toHaveLength(1);
   expect(replyContent('', [], [group]).map((p) => p.type)).toEqual(['files']);
   expect(replyContent('<!-- files:missing -->', [], [])).toEqual([]);
   expect(replyContent('<!-- visualize:renders -->', [], [group]).map((p) => p.type)).toEqual([
     'files',
   ]);
+});
+
+it('records a 3D model beside images and reads its bytes back', () => {
+  const model = {
+    ...group,
+    id: 'figure',
+    files: [
+      { index: 0, name: 'figure.glb', mediaType: 'model/gltf-binary' as const, bytes: 2048 },
+      group.files[0],
+    ],
+  };
+  expect(sentFilesSchema.safeParse(model).success).toBe(true);
+  expect(model.files.map(isModel)).toEqual([true, false]);
+  expect(imageInfo(group.files[0])).toEqual({
+    index: 0,
+    mediaType: 'image/png',
+    bytes: 2048,
+    width: 512,
+    height: 512,
+  });
+  expect(modelFormats['model/gltf-binary']).toBe('glb');
+  // Images and models are numbered within their own kind, so both start at zero.
+  expect(mergeSentFiles([group], [model]).map((g) => g.id)).toEqual(['renders', 'figure']);
+  const bytes = new Uint8Array(modelBytes({ format: 'glb', data: 'Z2xURg==', bytes: 4 }));
+  expect([...bytes]).toEqual([...new TextEncoder().encode('glTF')]);
 });

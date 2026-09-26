@@ -346,7 +346,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   ],
             };
           }
-          if (command === 'read_tool_output' || command === 'read_tool_output_image') {
+          if (
+            command === 'read_tool_output' ||
+            command === 'read_tool_output_image' ||
+            command === 'read_tool_output_model'
+          ) {
             const state = window as any;
             (state.toolOutputCalls ??= []).push({ command, ...args });
             if (state.holdToolOutput)
@@ -359,6 +363,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
               const image = output.images?.[args.index];
               if (!image) throw 'This output was not kept on the computer that ran it.';
               return image;
+            }
+            if (command === 'read_tool_output_model') {
+              const model = output.models?.[args.index];
+              if (!model) throw 'This output was not kept on the computer that ran it.';
+              return model;
             }
             const text = (value = '', preview?: string) =>
               preview && !args.full

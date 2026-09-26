@@ -119,6 +119,18 @@ async fn read_tool_output(
     )
     .await
 }
+/// One 3D model a finished tool call kept, whole, for the viewer that shows it.
+#[tauri::command]
+async fn read_tool_output_model(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<tool_output::ModelData, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_model(root, pending.inner().clone(), run_id, tool_id, index).await
+}
 /// One image of a finished tool call's result.
 #[tauri::command]
 async fn read_tool_output_image(
@@ -1107,6 +1119,7 @@ pub fn run() {
             read_native_instructions,
             read_tool_output,
             read_tool_output_image,
+            read_tool_output_model,
             load_workspace,
             save_workspace,
             save_workspace_patch,

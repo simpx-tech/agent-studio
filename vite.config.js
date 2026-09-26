@@ -47,6 +47,19 @@ export default defineConfig(() => ({
     },
   ],
 
+  // The 3D viewer loads three.js only for a reply that shows a model. Pre-bundling it with
+  // the other dependencies keeps that first model from reloading the page mid-render.
+  optimizeDeps: {
+    include: [
+      'three',
+      'three/examples/jsm/controls/OrbitControls.js',
+      'three/examples/jsm/loaders/GLTFLoader.js',
+      'three/examples/jsm/loaders/FBXLoader.js',
+      'three/examples/jsm/loaders/OBJLoader.js',
+      'three/examples/jsm/loaders/STLLoader.js',
+    ],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

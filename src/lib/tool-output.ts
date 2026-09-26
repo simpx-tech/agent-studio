@@ -50,6 +50,41 @@ export const toolOutputImageSchema = z.object({
 });
 export type ToolOutputImage = z.infer<typeof toolOutputImageSchema>;
 
+/** The 3D formats a reply can show, named by the media type its record keeps. */
+export const toolOutputModelTypes = [
+  'model/gltf-binary',
+  'model/gltf+json',
+  'model/obj',
+  'model/stl',
+  'model/fbx',
+] as const;
+export type ToolOutputModelType = (typeof toolOutputModelTypes)[number];
+export const modelFormats = {
+  'model/gltf-binary': 'glb',
+  'model/gltf+json': 'gltf',
+  'model/obj': 'obj',
+  'model/stl': 'stl',
+  'model/fbx': 'fbx',
+} as const satisfies Record<ToolOutputModelType, string>;
+export const toolOutputModelSchema = z.object({
+  format: z.enum(['glb', 'gltf', 'obj', 'stl', 'fbx']),
+  // One base64 string, checked without a group repeated per four characters: on a file of
+  // several megabytes that overflows the regular expression engine.
+  data: z
+    .string()
+    .min(4)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  bytes: size,
+});
+export type ToolOutputModel = z.infer<typeof toolOutputModelSchema>;
+/** Model bytes for a loader, without a copy through a data URL. */
+export function modelBytes(model: ToolOutputModel): ArrayBuffer {
+  const binary = atob(model.data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 export const toolOutputImageUrl = (image: ToolOutputImage) =>
   `data:${image.mediaType};base64,${image.data}`;
 

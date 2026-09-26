@@ -21,7 +21,7 @@ const MAX_PATH: usize = 4096;
 const MAX_CAPTION: usize = 300;
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, its absolute paths, and an optional one-line caption. Use it for a rendered diagram, a screenshot, a chart or another picture the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP files of up to 16 MiB are shown, at most 8 per call and 12 groups per reply. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each image from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, its absolute paths, and an optional one-line caption. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 12 MiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,7 +56,7 @@ pub fn tool() -> Value {
     json!({"name":NAME,"description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{
             "id":{"type":"string","minLength":1,"maxLength":80,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
-            "files":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Absolute paths of PNG, JPEG, GIF or WebP files on the computer running this conversation."},
+            "files":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
             "caption":{"type":"string","minLength":1,"maxLength":300,"description":"Optional single line shown above the files."}
         },"required":["id","files"],"additionalProperties":false}})
 }
@@ -167,6 +167,52 @@ impl Staging {
     }
 }
 
+/// What a checked path turned out to be. A picture is shown as an image; a model opens in
+/// the reply's 3D viewer.
+enum Checked {
+    Image(crate::tool_output::ImageFile),
+    Model(crate::tool_output::ModelFile),
+}
+/// Recognizes one offered path on this computer, preferring the kind its name suggests for
+/// the explanation when neither matches.
+async fn inspect(host: PathBuf, reported: &str) -> Result<Checked, String> {
+    let named_model = matches!(
+        extension(reported).as_deref(),
+        Some("glb" | "gltf" | "obj" | "stl" | "fbx")
+    );
+    tokio::task::spawn_blocking(move || {
+        let image = crate::tool_output::inspect_image(&host, MAX_BYTES);
+        if let Ok(image) = image.as_ref() {
+            return Ok(Checked::Image(image.clone()));
+        }
+        match crate::tool_output::inspect_model(&host, crate::tool_output::MODEL_BYTES) {
+            Ok(model) => Ok(Checked::Model(model)),
+            Err(model) => Err(if named_model {
+                model
+            } else {
+                image.expect_err("image check failed")
+            }),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("could not be checked".into()))
+}
+fn extension(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    let (_, extension) = name.rsplit_once('.')?;
+    Some(extension.to_ascii_lowercase())
+}
+/// The media type a reply records for a model, so one field names every kind of file.
+fn model_media_type(format: &str) -> &'static str {
+    match format {
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
+        "stl" => "model/stl",
+        _ => "model/fbx",
+    }
+}
+
 fn file_name(path: &str) -> String {
     let name = path
         .rsplit(['/', '\\'])
@@ -207,31 +253,36 @@ impl FileSender {
             );
         };
         let mut files = vec![];
-        let mut paths = vec![];
+        let mut images = vec![];
+        let mut models = vec![];
         let mut rejected = vec![];
         for path in &submission.files {
             let checked = match staging.host_path(path).await {
-                Ok(host) => {
-                    let limit = MAX_BYTES;
-                    tokio::task::spawn_blocking(move || {
-                        crate::tool_output::inspect_image(&host, limit)
-                    })
-                    .await
-                    .unwrap_or_else(|_| Err("could not be checked".into()))
-                }
+                Ok(host) => inspect(host, path).await,
                 Err(reason) => Err(reason),
             };
             match checked {
-                Ok(image) => {
+                Ok(Checked::Image(image)) => {
                     files.push(SentFile {
-                        index: files.len(),
+                        index: images.len(),
                         name: file_name(path),
                         media_type: image.media_type,
                         bytes: image.bytes,
                         width: image.width,
                         height: image.height,
                     });
-                    paths.push(path.clone());
+                    images.push(path.clone());
+                }
+                Ok(Checked::Model(model)) => {
+                    files.push(SentFile {
+                        index: models.len(),
+                        name: file_name(path),
+                        media_type: model_media_type(&model.format).into(),
+                        bytes: model.bytes,
+                        width: None,
+                        height: None,
+                    });
+                    models.push(path.clone());
                 }
                 Err(reason) => rejected.push(format!("  {path}: {reason}")),
             }
@@ -243,10 +294,11 @@ impl FileSender {
             ));
         }
         let mut output = CapturedOutput::new(tool_id);
-        output.images = paths
+        output.images = images
             .into_iter()
             .map(|path| ImageSource::File { path })
             .collect();
+        output.models = models;
         recorder.record(output);
         let record = SentFiles {
             id: submission.id,
@@ -520,6 +572,48 @@ mod tests {
             .unwrap();
         assert_eq!(response["result"]["success"], false);
         assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn each_path_is_recognized_as_an_image_or_a_model_where_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(
+            &png,
+            [
+                0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13, b'I', b'H', b'D',
+                b'R', 0, 0, 0, 4, 0, 0, 0, 3, 8, 2, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+        let model = dir.path().join("figure.glb");
+        std::fs::write(&model, b"glTF\x02\x00\x00\x00\x14\x00\x00\x00").unwrap();
+        let broken = dir.path().join("broken.glb");
+        std::fs::write(&broken, b"not a model at all").unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, b"plain text").unwrap();
+        let checked = |path: &std::path::Path| {
+            let host = path.to_path_buf();
+            let reported = path.to_string_lossy().into_owned();
+            async move { inspect(host, &reported).await }
+        };
+        assert!(matches!(checked(&png).await, Ok(Checked::Image(_))));
+        let Ok(Checked::Model(model)) = checked(&model).await else {
+            panic!("a GLB is shown as a model");
+        };
+        assert_eq!(model.format, "glb");
+        assert_eq!(model_media_type(&model.format), "model/gltf-binary");
+        // The explanation follows what the file was meant to be.
+        assert!(checked(&broken)
+            .await
+            .err()
+            .unwrap()
+            .contains("is not a glTF, GLB, OBJ, STL or FBX model"));
+        assert!(checked(&notes)
+            .await
+            .err()
+            .unwrap()
+            .contains("is not a PNG, JPEG, GIF or WebP image"));
     }
 
     #[test]
