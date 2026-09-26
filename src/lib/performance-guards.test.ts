@@ -9,7 +9,6 @@ import { describe, expect, it } from 'vitest';
 // Whole-workspace copies by file and enclosing function, and why each one is acceptable.
 const allowedWorkspaceCopies: [site: string, reason: string][] = [
   ['src/routes/+page.svelte › onMount callback › workspace', 'the runtime getter itself'],
-  ['src/lib/transport.ts › saveWorkspace', 'the Viewer stores the whole workspace'],
   ['src/lib/transport.ts › resolveRelaySettings', 'desktop backup before adopting a relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'Viewer backup before adopting a relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'adopting the relay’s computers'],
@@ -72,7 +71,8 @@ function owner(node: ts.Node) {
 }
 
 // A zero-argument `.workspace()` call is the runtime's whole-workspace getter, a $state.snapshot
-// of everything. Snapshotting, cloning or serializing `workspace` itself copies all of it too.
+// of everything. Snapshotting, cloning or serializing `workspace` itself copies all of it too, and
+// so does the same on `baseline`, the sync module's copy of everything the relay holds.
 function copiesWorkspace(node: ts.Node) {
   if (!ts.isCallExpression(node)) return false;
   const callee = node.expression;
@@ -83,7 +83,7 @@ function copiesWorkspace(node: ts.Node) {
     ['$state.snapshot', 'JSON.stringify', 'structuredClone'].includes(callee.getText()) &&
     !!first &&
     ts.isIdentifier(first) &&
-    first.text === 'workspace'
+    (first.text === 'workspace' || first.text === 'baseline')
   );
 }
 
@@ -102,7 +102,7 @@ function copiesIn(file: string, text: string) {
 
 function workspaceCopies() {
   return sources('src', ['.ts', '.svelte'])
-    .filter(({ text }) => text.includes('workspace'))
+    .filter(({ text }) => text.includes('workspace') || text.includes('baseline'))
     .flatMap(({ file, text }) => copiesIn(file, text))
     .sort();
 }

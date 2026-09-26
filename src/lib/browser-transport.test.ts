@@ -192,7 +192,8 @@ it('pins browser requests to the authenticated workspace and switches without me
   await transport.pollRelay();
   await transport.saveWorkspace(workspace());
   const oldScope = transport.workspaceStorageScope()!;
-  expect([...cache.keys()]).toEqual([`${oldScope}:sync`, oldScope]);
+  // The Viewer keeps an index beside one entry per conversation; this workspace has none.
+  expect([...cache.keys()]).toEqual([`${oldScope}:sync`, `${oldScope}:index`]);
   const oldWorkspace = structuredClone(workspace());
   await transport.connectRelay(window.location.origin, 'bob');
   await transport.saveWorkspace(oldWorkspace, oldScope);

@@ -43,6 +43,7 @@ import {
   clearBrowserWorkspace,
   discardOtherBrowserWorkspaces,
   readBrowserWorkspace,
+  saveBrowserWorkspace,
   type BrowserWorkspaceScope,
 } from './browser-workspace';
 import { browserWorkspaceStore } from './browser-store';
@@ -371,9 +372,19 @@ let settledRevision: number | undefined;
 let baselineChats: Record<string, number> = {};
 let baselineMetaRevision = 0;
 let manifestEndpoint = true;
-// The checkpoint saved during this connection, so unchanged polls skip rewriting it, and when
-// it was written, so a streaming reply's polls do not rewrite a large one every time.
-let checkpointJson = '';
+const checkpointRevisionsSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  chats: z.record(z.string(), z.number().int().nonnegative()),
+  metaRevision: z.number().int().nonnegative(),
+});
+export type CheckpointRevisions = z.infer<typeof checkpointRevisionsSchema>;
+/** A checkpoint written before these revisions existed resumes with a whole sync instead. */
+const checkpointRevisions = (value: unknown): CheckpointRevisions | undefined =>
+  checkpointRevisionsSchema.safeParse(value).data;
+// The relay revision the saved checkpoint holds, so an unchanged poll skips rewriting it without
+// serializing it to compare, and when it was written, so a streaming reply's polls do not rewrite
+// a large one every time. The baseline is always the relay's own state at that revision.
+let checkpointRevision: number | undefined;
 let checkpointSavedAt = 0;
 const CHECKPOINT_INTERVAL = 15_000;
 // Relays before v1/state/revision answer it with 404; they get the full state each poll.
@@ -408,16 +419,20 @@ export function configureRuntime(context: RuntimeContext) {
   runtime = context;
   void startAccountUpdates();
 }
-// A new or restored relay connection starts with a full sync.
-function resetBaseline(next: SharedWorkspace) {
+/**
+ * A new or restored relay connection starts from its checkpoint. With the revisions that
+ * checkpoint was written at, the first poll is already incremental; without them it syncs the
+ * whole workspace once and learns them from the answer.
+ */
+function resetBaseline(next: SharedWorkspace, revisions?: CheckpointRevisions) {
   baseline = next;
-  baselineRevision = undefined;
+  baselineRevision = revisions?.revision;
   settledRevision = undefined;
-  checkpointJson = '';
+  checkpointRevision = revisions?.revision;
   checkpointSavedAt = 0;
   revisionEndpoint = true;
-  baselineChats = {};
-  baselineMetaRevision = 0;
+  baselineChats = revisions?.chats ?? {};
+  baselineMetaRevision = revisions?.metaRevision ?? 0;
   manifestEndpoint = true;
 }
 const accountUpdateGate = new AccountUpdateGate();
@@ -899,7 +914,7 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     }
     if (!current()) return false;
     browserScope = scope;
-    resetBaseline(saved?.base ?? remote);
+    resetBaseline(saved?.base ?? remote, saved && checkpointRevisions(saved.revisions));
     relayInstance = state.instanceId;
     relayUrl = url;
     relayConnected = true;
@@ -912,16 +927,15 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     url: string;
     instanceId: string;
     base: SharedWorkspace;
+    revisions?: unknown;
   } | null>('load_sync_state');
   if (generation !== relayGeneration) return false;
   if (restoring && checkpoint?.url === url && checkpoint.instanceId !== state.instanceId)
     throw new Error(relayReplaced);
-  const nextBaseline =
-    checkpoint?.url === url && checkpoint.instanceId === state.instanceId
-      ? sharedSchema.parse(checkpoint.base)
-      : emptyShared();
+  const resumed = checkpoint?.url === url && checkpoint.instanceId === state.instanceId;
+  const nextBaseline = resumed ? sharedSchema.parse(checkpoint.base) : emptyShared();
   if (generation !== relayGeneration) return false;
-  resetBaseline(nextBaseline);
+  resetBaseline(nextBaseline, resumed ? checkpointRevisions(checkpoint.revisions) : undefined);
   relayInstance = state.instanceId;
   relayUrl = url;
   relayConnected = true;
@@ -1085,15 +1099,21 @@ async function syncIncremental(
       await runtime.applyChats(plan.apply, plan.forget, plan.applyMeta);
       if (generation !== relayGeneration) return null;
     }
-    baseline = {
+    const next: SharedWorkspace = {
       ...plan.mergedMeta,
       conversations: nextBaselineChats(baseline.conversations, involved, plan.result),
     };
-    baselineRevision = current.revision;
-    baselineChats = current.chats;
-    baselineMetaRevision = current.metaRevision;
+    const revisions = {
+      revision: current.revision,
+      chats: current.chats,
+      metaRevision: current.metaRevision,
+    };
+    await saveCheckpoint(generation, next, revisions);
+    baseline = next;
+    baselineRevision = revisions.revision;
+    baselineChats = revisions.chats;
+    baselineMetaRevision = revisions.metaRevision;
     settledRevision = undefined;
-    await saveCheckpoint(generation);
     return true;
   } catch (e) {
     // Nothing was published, so these conversations must be tried again.
@@ -1101,14 +1121,20 @@ async function syncIncremental(
     throw e;
   }
 }
-/** Writes the merge baseline for the next start of the app, at intervals while a reply streams. */
-async function saveCheckpoint(generation: number): Promise<void> {
-  if (!runtime) return;
+/**
+ * Writes the merge baseline and the revisions it came from for the next start of the app, at
+ * intervals while a reply streams. Call before advancing the baseline in memory, so a failed
+ * write leaves the next poll to try again.
+ */
+async function saveCheckpoint(
+  generation: number,
+  base: SharedWorkspace,
+  revisions: CheckpointRevisions,
+): Promise<void> {
+  if (!runtime || revisions.revision === checkpointRevision) return;
   const streaming = !!runtime.localRuns().length || workerRuns.size > 0;
   if (streaming && Date.now() - checkpointSavedAt < CHECKPOINT_INTERVAL) return;
-  const json = JSON.stringify(baseline);
-  if (json === checkpointJson) return;
-  const checkpoint = { url: relayUrl, instanceId: relayInstance, base: baseline };
+  const checkpoint = { url: relayUrl, instanceId: relayInstance, base, revisions };
   if (desktop()) await invoke('save_sync_state', { value: checkpoint });
   else if (browserScope) {
     const key = `${browserScopeKey(browserScope)}:sync`;
@@ -1116,7 +1142,7 @@ async function saveCheckpoint(generation: number): Promise<void> {
     await store.put([[key, JSON.stringify(checkpoint)]], () => generation === relayGeneration);
     if (generation !== relayGeneration) return;
   }
-  checkpointJson = json;
+  checkpointRevision = revisions.revision;
   checkpointSavedAt = Date.now();
 }
 export async function pollRelay(): Promise<Presence[] | null> {
@@ -1234,46 +1260,32 @@ export async function pollRelay(): Promise<Presence[] | null> {
         await runtime.apply(mergeShared(start, current, accepted, options));
         if (generation !== relayGeneration) return null;
       }
+      // A relay with per-conversation revisions reports them here too, so the next poll can
+      // publish and take in only what moved. An older one reports none and keeps this path.
+      const reported = z
+        .object({
+          metaRevision: z.number().int().nonnegative(),
+          chatRevisions: z.record(z.string(), z.number().int().nonnegative()),
+        })
+        .safeParse(acceptedManifest ?? remote);
       // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
       // A reply changes this device every event, and rewriting the whole checkpoint each poll
       // stalls a large workspace. Only the next start of the app reads it, and an older
       // checkpoint merges conservatively, so a streaming reply writes it at intervals instead.
-      const streaming = !!runtime.localRuns().length || workerRuns.size > 0;
-      if (
-        acceptedJson !== checkpointJson &&
-        (!streaming || Date.now() - checkpointSavedAt >= CHECKPOINT_INTERVAL)
-      ) {
-        const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
-        if (desktop()) await invoke('save_sync_state', { value: checkpoint });
-        else if (browserScope) {
-          const key = `${browserScopeKey(browserScope)}:sync`;
-          const store = await workspaceStore();
-          await store.put(
-            [[key, JSON.stringify(checkpoint)]],
-            () => generation === relayGeneration,
-          );
-          if (generation !== relayGeneration) return null;
-        }
-        checkpointJson = acceptedJson;
-        checkpointSavedAt = Date.now();
-      }
+      await saveCheckpoint(generation, accepted, {
+        revision: acceptedRevision!,
+        chats: reported.success ? reported.data.chatRevisions : {},
+        metaRevision: reported.success ? reported.data.metaRevision : 0,
+      });
+      if (generation !== relayGeneration) return null;
       baseline = accepted;
       baselineRevision = acceptedRevision;
+      if (reported.success) {
+        baselineChats = reported.data.chatRevisions;
+        baselineMetaRevision = reported.data.metaRevision;
+      }
       // Both sides are equal when the relay holds what was sent and nothing changed since.
       settledRevision = sent && runtime.revision?.() === before ? before : undefined;
-      // A relay with per-conversation revisions reports them here too, so the next poll can
-      // publish and take in only what moved. An older one reports none and keeps this path.
-      const reported = (acceptedManifest ?? remote) as {
-        metaRevision?: unknown;
-        chatRevisions?: unknown;
-      };
-      const revisions = z
-        .object({ metaRevision: z.number().int().nonnegative(), chatRevisions: z.record(z.string(), z.number().int().nonnegative()) })
-        .safeParse(reported);
-      if (revisions.success) {
-        baselineChats = revisions.data.chatRevisions;
-        baselineMetaRevision = revisions.data.metaRevision;
-      }
       // Every conversation is published, so nothing is left waiting for the incremental path.
       runtime.takeUnsynced();
     }
@@ -1792,7 +1804,13 @@ export async function saveWorkspace(
     // A queued save from a former session must never be written to the new user's cache.
     if (!scope || scope !== workspaceStorageScope()) return;
     const store = await workspaceStore();
-    await store.put([[scope, JSON.stringify(workspace)]], () => scope === workspaceStorageScope());
+    await saveBrowserWorkspace(
+      store,
+      scope,
+      workspace,
+      changed,
+      () => scope === workspaceStorageScope(),
+    );
   }
   updatePendingBadge(pendingChatCount(workspace.conversations));
 }

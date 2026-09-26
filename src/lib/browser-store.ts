@@ -87,9 +87,10 @@ export const browserWorkspaceStore: BrowserWorkspaceStore = {
       });
       return true;
     }),
-  update: (change) =>
-    connected((database) =>
-      transaction(database, 'readwrite', (store, fail) => {
+  update: (change, current = () => true) =>
+    connected(async (database) => {
+      if (!current()) return;
+      await transaction(database, 'readwrite', (store, fail) => {
         const request = store.getAllKeys();
         request.onsuccess = () => {
           try {
@@ -102,6 +103,6 @@ export const browserWorkspaceStore: BrowserWorkspaceStore = {
             fail(error);
           }
         };
-      }),
-    ),
+      });
+    }),
 };

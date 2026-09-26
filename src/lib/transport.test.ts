@@ -980,6 +980,12 @@ async function incrementalRelay() {
     chats: Object.fromEntries(workspace.conversations.map((c) => [c.id, 5])),
   };
   const requests: string[] = [];
+  // What the host has on disk, which a restart reads back.
+  let saved: unknown = {
+    url: 'https://relay.example.com',
+    instanceId: 'same-relay',
+    base: relay.workspace,
+  };
   const manifest = () => ({
     instanceId: 'same-relay',
     revision: relay.revision,
@@ -988,9 +994,11 @@ async function incrementalRelay() {
   });
   native.invoke.mockImplementation(async (command, args) => {
     if (command === 'relay_resume') return 'https://relay.example.com/';
-    if (command === 'load_sync_state')
-      return { url: 'https://relay.example.com', instanceId: 'same-relay', base: relay.workspace };
-    if (command === 'save_sync_state') requests.push('save_sync_state');
+    if (command === 'load_sync_state') return saved;
+    if (command === 'save_sync_state') {
+      saved = args.value;
+      requests.push('save_sync_state');
+    }
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
     if (args.path === 'v1/state/manifest') return { status: 200, body: manifest() };
@@ -1052,7 +1060,7 @@ async function incrementalRelay() {
     for (let i = 0; i < count; i++) expect(await transport.pollRelay()).not.toBeNull();
     return { state: requests.filter((r) => r.includes('state')), reads: local.reads - reads };
   };
-  return { transport, workspace, relay, local, requests, polls, marks };
+  return { transport, workspace, relay, local, requests, polls, marks, checkpoint: () => saved };
 }
 
 it('publishes only the conversation that changed, and takes in only what moved', async () => {
@@ -1122,6 +1130,27 @@ it('sends replicated settings only when they move, and deletes on both sides', a
   delete relay.chats[second.id];
   expect((await polls(1)).state).toContain('GET v1/state/manifest');
   expect(workspace.conversations).toEqual([]);
+  await transport.disconnectRelay();
+});
+
+it('resumes from its checkpoint without syncing the whole workspace again', async () => {
+  const { transport, workspace, relay, local, polls, marks, checkpoint } =
+    await incrementalRelay();
+  const [first] = workspace.conversations;
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  expect((await polls(1)).state).toContain('save_sync_state');
+  // The checkpoint carries the revisions its baseline came from.
+  expect(checkpoint()).toMatchObject({
+    revisions: { revision: relay.revision, metaRevision: relay.metaRevision },
+  });
+  // Connecting again reads it back, as a restarted app does, so the first poll is already
+  // incremental instead of downloading and uploading the whole workspace once.
+  await transport.disconnectRelay();
+  expect(await transport.resumeRelay()).toBe(true);
+  expect((await polls(1)).state).toEqual(['GET v1/state/manifest']);
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
   await transport.disconnectRelay();
 });
 

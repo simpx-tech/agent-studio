@@ -8,6 +8,7 @@ import {
   clearBrowserWorkspace,
   discardOtherBrowserWorkspaces,
   readBrowserWorkspace,
+  saveBrowserWorkspace,
   type BrowserWorkspaceStore,
 } from './browser-workspace';
 
@@ -37,7 +38,8 @@ function memoryStore() {
       for (const [key, value] of entries) data.set(key, value);
       return true;
     },
-    update: async (change) => {
+    update: async (change, current = () => true) => {
+      if (!current()) return;
       const { put = [], remove = [] } = change([...data.keys()]);
       for (const key of remove) data.delete(key);
       for (const [key, value] of put) data.set(key, value);
@@ -152,4 +154,76 @@ it('preserves damaged authenticated snapshots and checkpoints instead of overwri
     await expect(readBrowserWorkspace(store, scope)).rejects.toThrow(BrowserWorkspaceStorageError);
     expect(data).toEqual(before);
   }
+});
+
+const chat = (title: string) => ({
+  id: crypto.randomUUID(),
+  title,
+  createdAt: '2026-09-26',
+  updatedAt: '2026-09-26',
+  settings: { provider: 'codex' as const, model: '', reasoning: '' as const, instructions: '' },
+  messages: [],
+});
+
+it('writes one conversation per save and reads the workspace back whole', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(chat('First'), chat('Second'));
+  const [first, second] = workspace.conversations;
+  data.set(`${key}:sync`, checkpoint());
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  expect([...data.keys()].sort()).toEqual(
+    [`${key}:index`, `${key}:chat:${first.id}`, `${key}:chat:${second.id}`, `${key}:sync`].sort(),
+  );
+  // A streamed reply's checkpoint rewrites its own conversation, and nothing else.
+  const untouched = data.get(`${key}:chat:${second.id}`);
+  first.title = 'Renamed';
+  await saveBrowserWorkspace(store, key, workspace, [first], () => true);
+  expect(JSON.parse(data.get(`${key}:chat:${first.id}`)!).title).toBe('Renamed');
+  expect(data.get(`${key}:chat:${second.id}`)).toBe(untouched);
+  // The index never carries the conversations themselves.
+  expect(data.get(`${key}:index`)).not.toContain('Renamed');
+  const read = await readBrowserWorkspace(store, scope);
+  expect(read?.workspace.conversations.map((c) => c.title)).toEqual(['Renamed', 'Second']);
+  expect(read?.workspace).not.toHaveProperty('chats');
+});
+
+it('removes a deleted conversation and never writes past a changed session', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(chat('First'), chat('Second'));
+  const [first, second] = workspace.conversations;
+  data.set(`${key}:sync`, checkpoint());
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  workspace.conversations = [first];
+  await saveBrowserWorkspace(store, key, workspace, [], () => true);
+  expect(data.has(`${key}:chat:${second.id}`)).toBe(false);
+  expect((await readBrowserWorkspace(store, scope))?.workspace.conversations).toHaveLength(1);
+  // A save queued by a session that has ended writes nothing.
+  workspace.conversations = [];
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => false);
+  expect(data.has(`${key}:chat:${first.id}`)).toBe(true);
+});
+
+it('reads a copy an earlier release wrote whole and replaces it on the next save', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(chat('From the old cache'));
+  data.set(key, JSON.stringify(workspace));
+  data.set(`${key}:sync`, checkpoint());
+  const read = await readBrowserWorkspace(store, scope);
+  expect(read?.workspace.conversations.map((c) => c.title)).toEqual(['From the old cache']);
+  await saveBrowserWorkspace(store, key, read!.workspace, undefined, () => true);
+  expect(data.has(key)).toBe(false);
+  expect((await readBrowserWorkspace(store, scope))?.workspace.conversations).toHaveLength(1);
+});
+
+it('refuses a workspace whose index lists a conversation the store no longer has', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(chat('Missing soon'));
+  data.set(`${key}:sync`, checkpoint());
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  data.delete(`${key}:chat:${workspace.conversations[0].id}`);
+  await expect(readBrowserWorkspace(store, scope)).rejects.toThrow(BrowserWorkspaceStorageError);
 });

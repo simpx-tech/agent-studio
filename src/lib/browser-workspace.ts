@@ -1,4 +1,9 @@
-import { initialWorkspace, restoreWorkspace, type Workspace } from './domain';
+import {
+  initialWorkspace,
+  restoreWorkspace,
+  type Conversation,
+  type Workspace,
+} from './domain';
 import { sharedSchema, type SharedWorkspace } from './sync';
 
 export type BrowserWorkspaceScope = {
@@ -13,9 +18,11 @@ export type BrowserWorkspaceStore = {
   // Writes only while `current` holds when the write starts, so a save from a former
   // session cannot land after that session's data was cleared.
   put(entries: [string, string][], current?: () => boolean): Promise<boolean>;
-  // Chooses what to write or remove from the stored keys, within one transaction.
+  // Chooses what to write or remove from the stored keys, within one transaction. Writes only
+  // while `current` holds, as `put` does.
   update(
     change: (keys: string[]) => { put?: [string, string][]; remove?: string[] },
+    current?: () => boolean,
   ): Promise<void>;
 };
 export class BrowserWorkspaceStorageError extends Error {
@@ -83,7 +90,9 @@ export async function adoptBrowserStorage(store: BrowserWorkspaceStore, storage:
           if (key.endsWith(':backup')) return !stored.has(key);
           // A saved workspace moves only together with its own checkpoint.
           const scope = key.replace(/:sync$/, '');
-          return !stored.has(scope) && !stored.has(`${scope}:sync`);
+          return (
+            !stored.has(scope) && !stored.has(`${scope}:index`) && !stored.has(`${scope}:sync`)
+          );
         }),
       };
     });
@@ -125,6 +134,49 @@ export async function discardOtherBrowserWorkspaces(
   await store.update((keys) => ({ remove: keys.filter(other) }));
 }
 
+/**
+ * The Viewer keeps one entry per conversation beside an index of everything else, so applying a
+ * streamed reply's checkpoint writes that conversation alone. Releases before this kept the whole
+ * workspace under the scope key itself; it is read once more and replaced on the next save.
+ */
+const indexKey = (key: string) => `${key}:index`;
+const chatKey = (key: string, id: string) => `${key}:chat:${id}`;
+export const browserChatOrder = (index: unknown): string[] => {
+  const chats = (index as { chats?: unknown })?.chats;
+  if (!Array.isArray(chats) || chats.some((id) => typeof id !== 'string'))
+    throw new BrowserWorkspaceStorageError();
+  return chats as string[];
+};
+
+/** Writes the index and the conversations given, or all of them when none are named. */
+export async function saveBrowserWorkspace(
+  store: BrowserWorkspaceStore,
+  key: string,
+  workspace: Workspace,
+  changed: Conversation[] | undefined,
+  current: () => boolean,
+) {
+  const { conversations, ...rest } = workspace;
+  const order = conversations.map((c) => c.id);
+  const entries: [string, string][] = [
+    [indexKey(key), JSON.stringify({ ...rest, chats: order })],
+  ];
+  for (const conversation of changed ?? conversations)
+    entries.push([chatKey(key, conversation.id), JSON.stringify(conversation)]);
+  const kept = new Set(order.map((id) => chatKey(key, id)));
+  await store.update(
+    (keys) => ({
+      put: entries,
+      // The copy an earlier release wrote whole, and any conversation that is gone.
+      remove: keys.filter(
+        (stored) =>
+          stored === key || (stored.startsWith(`${key}:chat:`) && !kept.has(stored)),
+      ),
+    }),
+    current,
+  );
+}
+
 // A saved browser snapshot is never an authentication source. Call only after the
 // server has confirmed both the session's workspace and that workspace's instance.
 export async function readBrowserWorkspace(
@@ -132,7 +184,8 @@ export async function readBrowserWorkspace(
   scope: BrowserWorkspaceScope,
 ) {
   const key = browserScopeKey(scope);
-  const [saved, checkpoint] = await store.get([key, `${key}:sync`]);
+  const [whole, index, checkpoint] = await store.get([key, indexKey(key), `${key}:sync`]);
+  const saved = index === undefined ? whole : index;
   if (saved === undefined && checkpoint === undefined) return undefined;
   try {
     if (typeof checkpoint !== 'string') throw new BrowserWorkspaceStorageError();
@@ -140,11 +193,22 @@ export async function readBrowserWorkspace(
     if (previous.url !== scope.url || previous.instanceId !== scope.instanceId)
       throw new BrowserWorkspaceStorageError();
     const base = sharedSchema.parse(previous.base);
+    // The revisions this baseline came from, when the checkpoint was written with them.
+    const revisions: unknown = previous.revisions;
     if (saved === undefined) return undefined;
     if (typeof saved !== 'string') throw new BrowserWorkspaceStorageError();
+    const parsed = JSON.parse(saved);
+    if (index === undefined) return { workspace: restoreWorkspace(parsed), base, revisions };
+    const order = browserChatOrder(parsed);
+    const stored = await store.get(order.map((id) => chatKey(key, id)));
+    // A conversation the index lists must be there; never open a workspace missing one.
+    if (stored.some((value) => typeof value !== 'string'))
+      throw new BrowserWorkspaceStorageError();
+    const conversations = (stored as string[]).map((value) => JSON.parse(value));
     return {
-      workspace: restoreWorkspace(JSON.parse(saved)),
+      workspace: restoreWorkspace({ ...parsed, chats: undefined, conversations }),
       base,
+      revisions,
     };
   } catch {
     throw new BrowserWorkspaceStorageError();

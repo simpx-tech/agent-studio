@@ -178,9 +178,14 @@ test('Viewer moves a cache saved in localStorage by an earlier release into Inde
         (await relay.state()).workspace.conversations.map((c: { title: string }) => c.title),
       )
       .toContain('Chat saved only in this browser');
-    expect(Object.keys(await viewerCache(page))).toEqual(
-      expect.arrayContaining([key, `${key}:sync`]),
+    // The moved copy was rewritten in the current layout: an index, its checkpoint, and one
+    // entry per conversation rather than the whole workspace under the scope key itself.
+    const cached = Object.keys(await viewerCache(page));
+    expect(cached).toEqual(expect.arrayContaining([`${key}:index`, `${key}:sync`]));
+    expect(cached.filter((stored) => stored.startsWith(`${key}:chat:`))).toHaveLength(
+      local.conversations.length,
     );
+    expect(cached).not.toContain(key);
     expect(await privateLocalStorage(page)).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
