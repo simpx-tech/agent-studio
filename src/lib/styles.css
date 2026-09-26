@@ -16,6 +16,14 @@
 * {
   box-sizing: border-box;
 }
+/* The window itself never scrolls: the shell fills the viewport and its regions
+   scroll on their own. Without this a child taller than the viewport scrolls the
+   whole app, carrying the title bar and sidebar off screen. */
+html,
+body {
+  height: 100dvh;
+  overflow: hidden;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -409,7 +417,7 @@ pre {
 
 .app-shell {
   height: 100dvh;
-  min-height: 600px;
+  min-height: 0;
   display: grid;
   grid-template-columns: var(--sidebar-width, 236px) minmax(0, 1fr);
   overflow: hidden;
@@ -2243,12 +2251,10 @@ pre {
   margin-left: auto;
 }
 @media (max-width: 650px) {
+  /* The root canvas is sized in the base rules: an oversized fixed child cannot
+     extend the web view's drawable area beyond a shorter percentage-height document. */
   html,
   body {
-    /* Size the root canvas too: an oversized fixed child cannot extend the
-       web view's drawable area beyond a shorter percentage-height document. */
-    height: 100dvh;
-    overflow: hidden;
     overscroll-behavior: none;
   }
   /* viewport-fit=auto lets the browser provide a safe content rectangle.
