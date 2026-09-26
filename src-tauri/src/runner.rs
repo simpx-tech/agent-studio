@@ -98,6 +98,10 @@ impl EventSink {
     pub fn send(&self, event: RunEvent) -> Result<(), String> {
         (self.send)(event)
     }
+    /// The store this run keeps its results in, for output it stages itself.
+    pub fn recorder(&self) -> Option<crate::tool_output::Recorder> {
+        self.outputs.clone()
+    }
     /// Stores tool results the decoder captured, when this run keeps them.
     pub fn outputs(&self, outputs: Vec<crate::protocol::activity::CapturedOutput>) {
         if let Some(recorder) = &self.outputs {
@@ -593,6 +597,13 @@ async fn stream_turn(
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     decoder.compactions.manual = request.compact;
     let mut visualizer = crate::providers::visualize::Visualizer::default();
+    let mut sender = crate::providers::sent_files::FileSender::default();
+    // Files this reply shows are checked and kept where the conversation runs.
+    let staging = crate::providers::sent_files::Staging::new(
+        &request.run_id,
+        process.exe.wsl.as_ref().map(|w| w.distribution.clone()),
+        channel,
+    );
     let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::with_context(
         request.native_session.is_none() || request.native_context().is_some(),
     );
@@ -773,6 +784,7 @@ async fn stream_turn(
                                 }
                             }
                             for event in visualizer.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                            for event in sender.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if value["type"] == "control_request" {
                                 let own_session = value["session_id"].is_null() || value["session_id"].as_str() == Some(process.session_id.as_str());
                                 if let Some(response) = questions.as_mut().and_then(|q| q.claude_plan(&value, initialized && prompt_sent && !interrupting && !request.compact && own_session)) {
@@ -793,6 +805,10 @@ async fn stream_turn(
                                     continue;
                                 }
                                 if let Some(response) = input_lifetime.awaited.claude_response(&value) {
+                                    process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                    continue;
+                                }
+                                if let Some(response) = sender.claude(&value, &staging).await {
                                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
                                     continue;
                                 }
@@ -842,7 +858,7 @@ async fn stream_turn(
                     }
                     if request.agent.provider == "gemini" && !decoder.completed { break Err("Antigravity ended before confirming the response. Try again.".into()); }
                     if claude_visualizer && stdin_open { break Err("Claude exited before confirming the final reply. Partial output has been kept.".into()); }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
                     break Ok(("complete".to_string(), decoder.text));
                 }
             }

@@ -92,6 +92,18 @@ Visuals use the artifact sandbox with inline CSS/JavaScript, SVG, and data image
 
 Integration references: [Codex dynamic tool calls](https://learn.chatgpt.com/docs/app-server), [Claude Code custom tools](https://code.claude.com/docs/en/agent-sdk/custom-tools). Claude Code's SDK requires bidirectional stdin for custom tools; Agent Studio retains it until a result arrives with no delegated agent/workflow tasks pending, then waits for the owned process to exit. Persistent background shell tasks do not hold that input open.
 
+## Files a reply shows
+
+Codex and Claude can show a picture that already exists on the computer running the conversation — a render, a screenshot, a plotted chart, a diagram they just produced — instead of only naming its path. Both call **send_files** with a stable `id`, the absolute `files` paths, and an optional one-line `caption`. Accepted files appear inline in the reply, as thumbnails up to 320 pixels wide with their dimensions and size; clicking one opens it full size, and Escape or Close returns to the chat. The caption sits below them.
+
+After accepting a call, the tool tells the agent to place `<!-- files:ID -->` on its own line between blank lines where the files belong in the explanation, exactly like a visualization marker: only a standalone top-level marker positions a group, a repeated marker does not duplicate it, and a group whose marker never arrives stays at the end of the reply.
+
+Paths are read only from the tool, never from prose, Markdown image links or another tool's output, and only for the conversation's own parent call: Claude submissions must match a registered parent `tool_use`, and Codex calls must come from the parent thread without a namespace. Each path is checked where the conversation runs — absolute, a regular file, at most 16 MiB, and recognized as PNG, JPEG, GIF or WebP by its own first bytes. A WSL conversation reports its Linux paths, which the owning Windows host translates through that distribution. Files that fail return their reason to the agent, which is asked to tell you; a call whose files all fail shows nothing. Limits are eight files per call and twelve groups per reply, and reusing an id replaces that group.
+
+The bytes stay on the executing computer with the run's other tool results, under `tool-output/<run id>/<call>/`, and are pruned with them (see [Tools and activity](#tools-and-activity)). The saved reply keeps only bounded metadata — the run and call that hold the images, each file's name, type, size and dimensions, and the caption — so the workspace, exports and relay sync never carry file contents, and the files are not replayed into later prompts. Each window loads an image on demand through the same transport as any other tool result, so a paired phone or browser reads it from the owning host when that computer is online, and an image that is no longer kept says so in place.
+
+The tool is offered only to Codex and Claude chats with tools enabled; Gemini, background titles and other restricted queries never receive it. Non-image files are not shown: mention their path in the reply instead.
+
 ## Slash commands and skills
 
 Start a message with `/` to search commands and skills for the selected agent. Use the arrow keys and Enter or Tab to complete a choice, or click/tap it. Escape closes suggestions. Completing a native command or skill inserts its name and a space without sending, so you can add arguments before submitting. You can also type the full `/name arguments` directly. Namespaced Claude commands, including plugin skills and saved native workflows, keep their CLI spelling.

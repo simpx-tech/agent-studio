@@ -6,6 +6,7 @@ import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
 import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
+import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
 import { steeringReceiptSchema, mergeSteering } from './steering.ts';
@@ -214,6 +215,11 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     const parsed = visualizationSchema.safeParse(event.visualization);
     if (message.role === 'assistant' && parsed.success)
       message.visualizations = mergeVisualizations(message.visualizations, [parsed.data]);
+  } else if (event.kind === 'sentfiles') {
+    const parsed = sentFilesSchema.safeParse(event.sentFiles);
+    // Files belong to the reply's own run on the computer that kept them.
+    if (message.role === 'assistant' && parsed.success && message.runId === parsed.data.runId)
+      message.sentFiles = mergeSentFiles(message.sentFiles, [parsed.data]);
   } else if (event.kind === 'nativeworkflow') {
     const parsed = nativeWorkflowsSchema.safeParse(event.nativeWorkflows);
     if (parsed.success && parsed.data.revision > (message.nativeWorkflows?.revision ?? -1))
@@ -450,6 +456,15 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
       if (parsed.data.revision > (events[index].visualization?.revision ?? -1))
         events[index] = event;
     } else if (events.filter((e) => e.kind === 'visualization').length < 12) events.push(event);
+    return;
+  }
+  if (event.kind === 'sentfiles') {
+    const parsed = sentFilesSchema.safeParse(event.sentFiles);
+    if (!parsed.success) return;
+    const index = events.findIndex((e) => e.kind === 'sentfiles' && e.sentFiles?.id === parsed.data.id);
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].sentFiles?.revision ?? -1)) events[index] = event;
+    } else if (events.filter((e) => e.kind === 'sentfiles').length < 12) events.push(event);
     return;
   }
   const index =

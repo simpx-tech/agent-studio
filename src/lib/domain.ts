@@ -10,6 +10,7 @@ import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
+import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
@@ -211,6 +212,7 @@ export const messageSchema = z
     plan: planSchema.optional(),
     proposedPlans: proposedPlansSchema.optional(),
     visualizations: visualizationsSchema.optional(),
+    sentFiles: sentFileGroupsSchema.optional(),
     questions: questionsSchema.optional(),
     elicitations: elicitationReceiptsSchema.optional(),
     steering: steeringSchema.optional(),
@@ -240,6 +242,13 @@ export const messageSchema = z
       (message.role === 'assistant' &&
         message.elicitations.every((e) => e.runId === message.runId)),
     { message: 'MCP input does not match its response run' },
+  )
+  .refine(
+    (message) =>
+      !message.sentFiles?.length ||
+      (message.role === 'assistant' &&
+        message.sentFiles.every((group) => group.runId === message.runId)),
+    { message: 'Shown files do not match their response run' },
   );
 export type Message = z.infer<typeof messageSchema>;
 export const conversationSchema = z.object({
@@ -302,6 +311,7 @@ export type RunEvent = TokenUsage & {
     | 'proposedplan'
     | 'filechanges'
     | 'visualization'
+    | 'sentfiles'
     | 'question'
     | 'elicitation'
     | 'steering'
@@ -317,6 +327,7 @@ export type RunEvent = TokenUsage & {
   plan?: Plan;
   proposedPlan?: ProposedPlan;
   visualization?: Visualization;
+  sentFiles?: SentFiles;
   question?: QuestionRequest;
   elicitation?: ElicitationReceipt;
   steering?: SteeringReceipt;

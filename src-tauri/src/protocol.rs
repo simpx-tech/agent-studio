@@ -65,6 +65,10 @@ pub enum RunEvent {
     Visualization {
         visualization: crate::providers::visualize::Visualization,
     },
+    SentFiles {
+        #[serde(rename = "sentFiles")]
+        sent_files: crate::providers::sent_files::SentFiles,
+    },
     Plan {
         plan: plan::Plan,
     },

@@ -67,7 +67,7 @@ fn plan_response(
 fn start_params(request: &RunRequest) -> Value {
     // `never` also silently declines MCP user input inside Codex. Allow only
     // that interaction category, keeping ordinary execution approvals disabled.
-    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool()]});
+    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool(), super::sent_files::codex_tool()]});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -260,6 +260,13 @@ pub async fn run(
         ..Default::default()
     };
     let mut visualizer = super::visualize::Visualizer::default();
+    let mut sender = super::sent_files::FileSender::default();
+    // Files this reply shows are checked and kept where the conversation runs.
+    let staging = super::sent_files::Staging::new(
+        &request.run_id,
+        process.exe.wsl.as_ref().map(|w| w.distribution.clone()),
+        channel,
+    );
     let output_limit = request.output_line_limit();
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -411,6 +418,11 @@ pub async fn run(
                         if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
                         continue;
                     }
+                    if let Some((response, event)) = sender.codex(&value, &thread, &staging).await {
+                        if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the files shown")?;
+                        continue;
+                    }
                     if let Some((response, event)) = visualizer.codex_response(&value, &thread) {
                         if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
                         process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
@@ -478,7 +490,7 @@ pub async fn run(
                         if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }
                         return Ok(("complete".into(), "Context compacted.".into()));
                     }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     if request.agent.output_schema.is_some() {
                         let value = serde_json::from_str(&decoder.text).unwrap_or(Value::Null);
                         decoder.text = crate::structured_output::result(&value)?;
@@ -674,7 +686,7 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool()]})
+            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool(), super::super::sent_files::codex_tool()]})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");

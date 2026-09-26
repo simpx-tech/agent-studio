@@ -16,6 +16,7 @@ mod elicitation_schema;
 #[cfg(windows)]
 mod login_console;
 pub mod questions;
+pub mod sent_files;
 pub mod sessions;
 pub mod steering;
 pub mod visualize;
@@ -745,7 +746,14 @@ impl RunRequest {
         } else {
             ""
         };
-        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:")
+        let files = if self.tools_enabled()
+            && (self.uses_codex_server() || self.uses_claude_visualizer())
+        {
+            sent_files::GUIDANCE
+        } else {
+            ""
+        };
+        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {files} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:")
     }
     pub fn native_context(&self) -> Option<String> {
         let native = self.base_native_context();

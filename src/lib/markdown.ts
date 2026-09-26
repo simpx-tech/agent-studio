@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { Marked, type Token, type TokensList } from 'marked';
 import type { Visualization } from './visualizations';
+import type { SentFiles } from './sent-files';
 import { siteLink } from './link-marks';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
@@ -72,12 +73,18 @@ export function renderMarkdown(text: string): string {
 }
 
 type ReplyPart = { key: string } & (
-  { type: 'text'; html: string } | { type: 'visual'; visual: Visualization }
+  | { type: 'text'; html: string }
+  | { type: 'visual'; visual: Visualization }
+  | { type: 'files'; files: SentFiles }
 );
 
-// Only standalone, top-level markers can position a visual already accepted by
-// the provider adapter. Code examples and quoted/nested markers remain inert.
-export function replyContent(text: string, visuals: Visualization[] = []): ReplyPart[] {
+// Only standalone, top-level markers can position a visual or a group of files already
+// accepted by the provider adapter. Code examples and quoted/nested markers remain inert.
+export function replyContent(
+  text: string,
+  visuals: Visualization[] = [],
+  files: SentFiles[] = [],
+): ReplyPart[] {
   const tokens = markdown.lexer(text);
   const result: ReplyPart[] = [];
   const placed = new Set<string>();
@@ -90,24 +97,39 @@ export function replyContent(text: string, visuals: Visualization[] = []): Reply
     if (html.trim()) result.push({ key, type: 'text', html });
     pending = [];
   }
+  function place(part: ReplyPart & { key: string }) {
+    if (placed.has(part.key)) return false;
+    flush();
+    result.push(part);
+    placed.add(part.key);
+    key = `text:${part.key}`;
+    return true;
+  }
   for (const token of tokens) {
     const marker =
-      token.type === 'html' && token.raw.trim().match(/^<!-- visualize:([a-zA-Z0-9_-]{1,80}) -->$/);
+      token.type === 'html' &&
+      token.raw.trim().match(/^<!-- (visualize|files):([a-zA-Z0-9_-]{1,80}) -->$/);
     if (!marker) {
       pending.push(token);
       continue;
     }
-    const visual = visuals.find((v) => v.id === marker[1]);
-    if (!visual || placed.has(visual.id)) continue;
-    flush();
-    result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
-    placed.add(visual.id);
-    key = `text:${visual.id}`;
+    if (marker[1] === 'visualize') {
+      const visual = visuals.find((v) => v.id === marker[2]);
+      if (visual) place({ key: `visual:${visual.id}`, type: 'visual', visual });
+      continue;
+    }
+    const group = files.find((f) => f.id === marker[2]);
+    if (group) place({ key: `files:${group.id}`, type: 'files', files: group });
   }
   flush();
-  // Older replies and visuals received before their prose keep an inline fallback.
+  // Older replies and content received before its prose keep an inline fallback.
   for (const visual of visuals) {
-    if (!placed.has(visual.id)) result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
+    if (!placed.has(`visual:${visual.id}`))
+      result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
+  }
+  for (const group of files) {
+    if (!placed.has(`files:${group.id}`))
+      result.push({ key: `files:${group.id}`, type: 'files', files: group });
   }
   return result;
 }

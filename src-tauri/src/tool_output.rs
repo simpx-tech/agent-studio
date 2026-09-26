@@ -274,6 +274,43 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<u64, String> {
         &serde_json::to_vec(value).map_err(|_| "Cannot serialize a tool output")?,
     )
 }
+/// What a reply shows about a file before its bytes are copied: the type its own first
+/// bytes report and its size. The path is checked here, on the computer that runs the
+/// conversation, and never opened for its content.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageFile {
+    pub media_type: String,
+    pub bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+/// Recognizes a file a conversation offers to show, with the reason when it cannot.
+pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
+    let text = path.to_string_lossy();
+    if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
+        return Err("needs an absolute path to a file".into());
+    }
+    let metadata = std::fs::metadata(path).map_err(|_| "cannot be read here".to_string())?;
+    if !metadata.is_file() {
+        return Err("is not a file".into());
+    }
+    if metadata.len() > limit {
+        return Err(format!("is larger than {}", human(limit)));
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| "cannot be opened".to_string())?;
+    let mut head = Vec::with_capacity(SNIFF_BYTES.min(metadata.len() as usize + 1));
+    (&mut file)
+        .take(SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .map_err(|_| "cannot be read".to_string())?;
+    let (media_type, size) = sniff(&head).ok_or("is not a PNG, JPEG, GIF or WebP image")?;
+    Ok(ImageFile {
+        media_type: media_type.into(),
+        bytes: metadata.len(),
+        width: size.map(|s| s.0),
+        height: size.map(|s| s.1),
+    })
+}
 /// Copies an image file a provider reported viewing: a regular file of a supported type.
 fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> {
     let text = path.to_string_lossy();

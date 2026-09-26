@@ -176,8 +176,7 @@ impl Visualizer {
             }
             "notifications/initialized" | "ping" => response["result"] = json!({}),
             "tools/list" => {
-                response["result"] =
-                    json!({"tools":[tool(), super::questions::tool(), super::background::tool()]})
+                response["result"] = json!({"tools":[tool(), super::questions::tool(), super::sent_files::tool(), super::background::tool()]})
             }
             "tools/call" if m["params"]["name"] == "visualize" => {
                 let args = &m["params"]["arguments"];

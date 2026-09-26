@@ -23,6 +23,7 @@
   import ImageAttachments from './ImageAttachments.svelte';
   import type { BackgroundRun } from '$lib/background-work';
   import VisualizationView from './VisualizationView.svelte';
+  import SentFilesView from './SentFilesView.svelte';
   import QuestionForm from './QuestionForm.svelte';
   import PlanApproval from './PlanApproval.svelte';
   import ProposedPlan from './ProposedPlan.svelte';
@@ -79,7 +80,7 @@
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
   const artifacts = $derived(messageArtifacts(message));
-  const content = $derived(replyContent(text, message.visualizations));
+  const content = $derived(replyContent(text, message.visualizations, message.sentFiles));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
   const waiting = $derived(awaitingAnswer(message));
@@ -168,6 +169,8 @@
       {#each structured ? [] : content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
+        {:else if part.type === 'files'}
+          <SentFilesView files={part.files} connectionId={author.connectionId} />
         {:else}
           <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
           <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->
