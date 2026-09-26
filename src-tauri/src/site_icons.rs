@@ -16,8 +16,9 @@ const MAX_PAGE: usize = 256 * 1024;
 /// Site icons rarely change; a site without one is asked again later in the session.
 const KEEP_FOUND: Duration = Duration::from_secs(12 * 60 * 60);
 const KEEP_MISSING: Duration = Duration::from_secs(30 * 60);
-/// Origins remembered at once; the oldest reading makes room for a new one.
+/// Readings remembered at once, by count and by size; the oldest make room for a new one.
 const KEEP_ORIGINS: usize = 500;
+const KEEP_BYTES: usize = 8 * 1024 * 1024;
 /// Declared icons tried when the usual address serves none.
 const MAX_DECLARED: usize = 3;
 
@@ -67,16 +68,23 @@ fn remembered(readings: &Readings, origin: &str, now: Instant) -> Option<Option<
 }
 
 fn remember(readings: &mut Readings, origin: &str, icon: Option<String>, now: Instant) {
-    if readings.len() >= KEEP_ORIGINS && !readings.contains_key(origin) {
+    readings.insert(origin.to_string(), (icon, now));
+    let mut bytes: usize = readings
+        .values()
+        .map(|(icon, _)| icon.as_ref().map_or(0, String::len))
+        .sum();
+    while readings.len() > KEEP_ORIGINS || bytes > KEEP_BYTES {
         let oldest = readings
             .iter()
+            .filter(|(kept, _)| kept.as_str() != origin)
             .min_by_key(|(_, (_, read))| *read)
-            .map(|(origin, _)| origin.clone());
-        if let Some(oldest) = oldest {
-            readings.remove(&oldest);
-        }
+            .map(|(kept, _)| kept.clone());
+        let Some(oldest) = oldest else { break };
+        bytes -= readings
+            .remove(&oldest)
+            .and_then(|(icon, _)| icon)
+            .map_or(0, |icon| icon.len());
     }
-    readings.insert(origin.to_string(), (icon, now));
 }
 
 async fn fetch(origin: &str) -> Option<String> {
@@ -371,5 +379,17 @@ mod tests {
         // The oldest readings went first; the newest origin is still there.
         assert_eq!(remembered(&readings, "https://a.example", later), None);
         assert!(readings.contains_key(&format!("https://{}.example", KEEP_ORIGINS - 1)));
+        // Large icons make room the same way, long before their count would.
+        let mut large = Readings::new();
+        for index in 0..12u64 {
+            remember(
+                &mut large,
+                &format!("https://large{index}.example"),
+                Some("x".repeat(KEEP_BYTES / 8)),
+                later + Duration::from_secs(index),
+            );
+        }
+        assert_eq!(large.len(), 8);
+        assert!(large.contains_key("https://large11.example"));
     }
 }

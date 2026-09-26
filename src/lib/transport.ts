@@ -1683,11 +1683,17 @@ export async function signIn(provider: string, connectionId?: string) {
 }
 /**
  * The icon a linked site serves for itself, read on this computer for a reply's link marks.
- * Only this computer can read one: a viewer keeps the generic mark.
+ * A paired browser asks its relay instead, since its window may not load one itself.
  */
 export async function siteIcon(origin: string): Promise<string | null> {
-  if (!desktop()) return null;
-  return (await invoke<string | null>('site_icon', { origin })) ?? null;
+  if (desktop()) return (await invoke<string | null>('site_icon', { origin })) ?? null;
+  // A paired browser has its relay read the icon: its own window may load images from that
+  // origin alone, and the relay keeps one reading for every device.
+  const read = await relayApi<{ icon?: string | null }>(
+    'GET',
+    `v1/icon/${encodeURIComponent(origin)}`,
+  );
+  return read?.icon ?? null;
 }
 export async function openLink(url: string) {
   if (!/^https?:\/\//i.test(url)) return;

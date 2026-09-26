@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { serveDownloads } from './downloads.ts';
+import { siteIcons, siteOrigin, type SiteIcons } from './icons.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { pushService, type PushSender } from './push.ts';
@@ -170,6 +171,7 @@ export function createRelay({
   downloadsDirectory,
   now = Date.now,
   pushSender,
+  icons = siteIcons({ now }),
 }: {
   token: string;
   directory: string;
@@ -177,6 +179,7 @@ export function createRelay({
   downloadsDirectory?: string;
   now?: () => number;
   pushSender?: PushSender;
+  icons?: SiteIcons;
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
@@ -733,6 +736,27 @@ export function createRelay({
       }
       if (!uuid.safeParse(actor).success) {
         send(400, { error: 'A valid environment identity is required.' });
+        return;
+      }
+      // A link mark for a paired browser, whose window may load images from this origin
+      // alone. It carries no workspace data: an origin goes out and its icon comes back.
+      const mark = req.method === 'GET' && req.url?.split('?')[0].match(/^\/v1\/icon\/(.+)$/);
+      if (mark) {
+        let origin = null;
+        try {
+          origin = siteOrigin(decodeURIComponent(mark[1]));
+        } catch {
+          /* A malformed address is not a site. */
+        }
+        if (!origin) {
+          send(400, { error: 'A site icon needs an http or https address.' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'private, max-age=3600',
+        });
+        res.end(JSON.stringify({ icon: await icons.icon(origin) }));
         return;
       }
       await context(workspace).handle(

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRelay } from '../relay/server';
+import { siteIcons } from '../relay/icons';
 import { initialWorkspace } from '../src/lib/domain';
 import { seedAndPairPwa } from './pwa-helper';
 import { mockDesktop } from './desktop-helper';
@@ -239,4 +240,75 @@ test('links carry their site mark, keep it in saved history and open outside the
   await expect
     .poll(() => restored.evaluate((element) => getComputedStyle(element).backgroundImage))
     .toContain('data:image/png;base64');
+});
+
+test('the Viewer marks links with the icons its relay read', async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), 'studio-link-marks-web-'));
+  const token = 'synthetic-link-marks-fixture-pairing-key';
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const asked: string[] = [];
+  const server = createRelay({
+    token,
+    directory,
+    webDirectory: resolve('build'),
+    icons: siteIcons({
+      fetcher: (async (url: URL | string) => {
+        asked.push(String(url));
+        return String(url) === 'https://en.wikipedia.org/favicon.ico'
+          ? new Response(png)
+          : new Response(null, { status: 404 });
+      }) as typeof fetch,
+      resolve: (async () => [{ address: '93.184.216.34', family: 4 }]) as never,
+    }),
+  });
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const workspace = initialWorkspace(),
+    now = new Date().toISOString();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Link marks fixture',
+    createdAt: now,
+    updatedAt: now,
+    archived: true,
+    settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        status: 'complete',
+        createdAt: now,
+        blocks: [
+          {
+            type: 'markdown',
+            text: "[Explore Wikipedia's random article](https://en.wikipedia.org/wiki/Special:Random) and [the notes](./notes.md).",
+          },
+        ],
+      },
+    ],
+  });
+  try {
+    await seedAndPairPwa(page, url, token, workspace);
+    await page.getByRole('tab', { name: /History/ }).click();
+    await page.getByRole('button', { name: /Link marks fixture/ }).click();
+    const article = page.getByRole('link', { name: "Explore Wikipedia's random article" });
+    const mark = article.locator('.link-mark');
+    await expect
+      .poll(() => mark.evaluate((element) => getComputedStyle(element).backgroundImage))
+      .toContain('data:image/png;base64');
+    // The browser itself loads nothing from the site: only its relay asked, and only the origin.
+    expect(asked).toEqual(['https://en.wikipedia.org/favicon.ico']);
+    await expect(page.locator('.prose a[href$="notes.md"] .link-mark')).toHaveCount(0);
+    await expect(page.locator('.prose img')).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(article).toBeVisible();
+    await page.screenshot({ path: 'artifacts/link-marks-viewer.png' });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((closed) => server.close(() => closed()));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
