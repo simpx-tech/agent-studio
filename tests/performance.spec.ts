@@ -55,9 +55,13 @@ async function desktop(page: Page) {
       });
       let sync: unknown = null;
       let next = 0;
+      const callbacks = new Map<number, (value: unknown) => void>();
       w.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label: 'main' } },
-        transformCallback: () => ++next,
+        transformCallback(callback: (value: unknown) => void) {
+          callbacks.set(++next, callback);
+          return next;
+        },
         unregisterCallback() {},
         async invoke(command: string, args: any) {
           switch (command) {
@@ -122,6 +126,15 @@ async function desktop(page: Page) {
                 context: null,
                 detail: 'Fixture',
               };
+            case 'run_agent':
+              // A reply that connects and then waits, as one running a long tool call does.
+              callbacks.get(args.onEvent.id)?.({
+                message: { kind: 'activity', text: 'Working' },
+                index: 0,
+              });
+              return new Promise(() => {});
+            case 'cancel_run':
+              return;
             case 'generate_title':
               throw new Error('Synthetic title unavailable');
           }
@@ -190,6 +203,46 @@ test('an idle relay connection neither saves nor syncs the whole workspace', asy
     expect(
       await page.evaluate(() => (window as any).saves),
       'Idle polls saved the workspace or its sync checkpoint. See docs/PERFORMANCE.md.',
+    ).toEqual(saves);
+  } finally {
+    await host.close();
+  }
+});
+
+test('a reply waiting on a tool call neither downloads nor rewrites the whole workspace', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    await page.getByLabel('Message', { exact: true }).fill('Run the slow suite');
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    // The reply's first progress goes out, then it waits without changing anything here.
+    await expect
+      .poll(() => host.requests.filter((r) => r === 'PUT v1/state').length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    // Let the send's own changes, including its failed title, finish going out.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      host.requests.length = 0;
+      await page.waitForTimeout(3_000);
+      if (!host.requests.some((r) => r.endsWith(' v1/state'))) break;
+    }
+    const saves = await page.evaluate(() => (window as any).saves);
+    host.requests.length = 0;
+    await page.waitForTimeout(8_000);
+    const count = (request: string) => host.requests.filter((r) => r === request).length;
+    expect(count('POST v1/heartbeat')).toBeGreaterThanOrEqual(2);
+    expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
+    expect(
+      host.requests.filter((r) => r.endsWith(' v1/state')),
+      'A waiting reply fetched or sent the whole workspace. See docs/PERFORMANCE.md.',
+    ).toEqual([]);
+    expect(
+      await page.evaluate(() => (window as any).saves),
+      'A waiting reply saved the workspace or its sync checkpoint. See docs/PERFORMANCE.md.',
     ).toEqual(saves);
   } finally {
     await host.close();

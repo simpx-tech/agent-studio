@@ -45,6 +45,7 @@ it('invalidates host skill inventories after Viewer plugin mutations, including 
   transport.configureRuntime({
     installation: { id: host, computerId, name: 'QA', platform: 'windows' },
     workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -244,6 +245,7 @@ async function restartedDevice(ownsRun: boolean) {
       platform: 'windows',
     },
     workspace: () => restored,
+    shared: () => sharedWorkspace(restored),
     fleet: () => restored.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -328,6 +330,7 @@ it('saves a host Undo receipt into the live workspace once, including requests f
       platform: 'windows',
     },
     workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -384,6 +387,7 @@ async function fixture(remoteConnection?: string) {
       platform: 'windows',
     },
     workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -482,6 +486,7 @@ it('keeps a pending question when an older relay drops it from a successful save
       platform: 'windows',
     },
     workspace: () => current,
+    shared: () => sharedWorkspace(current),
     fleet: () => current.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -563,6 +568,10 @@ async function settledRelay(revisionEndpoint = true) {
       local.reads++;
       return workspace;
     },
+    shared: () => {
+      local.reads++;
+      return sharedWorkspace(workspace);
+    },
     fleet: () => workspace.fleet,
     revision: () => local.changes,
     statuses: () => ({}),
@@ -626,7 +635,11 @@ it('syncs a change from either side, then returns to revision checks', async () 
   const { transport, workspace, relay, local, apply, polls } = await settledRelay();
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
-  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
   expect(relay.workspace.conversations[0].title).toBe('Renamed here');
   expect(apply).not.toHaveBeenCalled();
   expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
@@ -642,7 +655,7 @@ it('syncs a change from either side, then returns to revision checks', async () 
   expect(apply).toHaveBeenCalledOnce();
   expect(workspace.conversations[0].title).toBe('Renamed elsewhere');
   // One more sync confirms both sides are equal; the checkpoint is already saved.
-  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
   expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
   expect(apply).toHaveBeenCalledOnce();
   await transport.disconnectRelay();
@@ -657,7 +670,11 @@ it('settles after sending a new chat that the relay lists in another order', asy
     title: 'New chat',
   });
   local.changes++;
-  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
   expect(relay.workspace.conversations.map((c) => c.title)).toEqual(['Settled chat', 'New chat']);
   expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
   expect(apply).not.toHaveBeenCalled();
@@ -690,12 +707,16 @@ it('keeps app sessions that an older relay drops without sending them after ever
   workspace.appSessions = [session];
   local.changes++;
   // With only the list changed, there is nothing to send to a relay without one.
-  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
   expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
   // The next change carries it, and the relay drops it again.
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
-  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
   expect(relay.workspace.conversations[0].title).toBe('Renamed here');
   expect(relay.workspace.appSessions).toBeUndefined();
   expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
@@ -711,7 +732,7 @@ it('keeps app sessions that an older relay drops without sending them after ever
   expect(workspace.conversations[0].title).toBe('Renamed elsewhere');
   expect(workspace.appSessions).toEqual([session]);
   expect(apply).toHaveBeenCalledOnce();
-  expect((await polls(1)).state).toEqual(['GET v1/state']);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
   expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
   await transport.disconnectRelay();
 });
@@ -722,13 +743,21 @@ it('sends app sessions to a relay that keeps them', async () => {
   workspace.appSessions = [first];
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
-  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
   expect(relay.workspace.appSessions).toEqual([first]);
   expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
   // Once the relay holds the list, another start of the app is sent by itself.
   workspace.appSessions = [first, second];
   local.changes++;
-  expect((await polls(1)).state).toEqual(['GET v1/state', 'PUT v1/state', 'save_sync_state']);
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
   expect(relay.workspace.appSessions).toEqual([first, second]);
   expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
   expect(apply).not.toHaveBeenCalled();
@@ -783,12 +812,30 @@ it('gets the state from relays without the revision endpoint without syncing it 
   await transport.disconnectRelay();
 });
 
-it('syncs every poll while this computer runs a reply', async () => {
-  const { transport, local, polls } = await settledRelay();
+it('publishes a running reply every poll without downloading the relay copy', async () => {
+  const { transport, workspace, relay, local, polls } = await settledRelay();
   local.runs.push(crypto.randomUUID());
-  const { state, reads } = await polls(2);
-  expect(state).toEqual(Array(2).fill('GET v1/state'));
-  expect(reads).toBe(2);
+  // A reply changes this device between polls, and every poll sends its progress on.
+  for (const title of ['Progress 1', 'Progress 2']) {
+    workspace.conversations[0].title = title;
+    local.changes++;
+    // The relay still holds the baseline, so its revision answers instead of the whole state,
+    // and rewriting the whole checkpoint waits until the reply has run for a while.
+    expect((await polls(1)).state).toEqual(['GET v1/state/revision', 'PUT v1/state']);
+    expect(relay.workspace.conversations[0].title).toBe(title);
+  }
+  // A reply waiting on a long tool call changes nothing, so its polls read nothing either.
+  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
+  // Once the interval passes, the next poll of the reply saves the checkpoint again.
+  vi.setSystemTime(Date.now() + 20_000);
+  workspace.conversations[0].title = 'Progress 3';
+  local.changes++;
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
+  vi.useRealTimers();
   local.runs.length = 0;
   await transport.disconnectRelay();
 });

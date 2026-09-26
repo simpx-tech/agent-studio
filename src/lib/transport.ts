@@ -300,6 +300,11 @@ type RuntimeContext = {
   installation: Installation;
   /** A copy of the whole workspace, which is slow for a large one. */
   workspace: () => Workspace;
+  /**
+   * The replicated part of the workspace alone. Validating the live data already detaches it,
+   * so this costs about half of a whole-workspace copy followed by the same validation.
+   */
+  shared: () => SharedWorkspace;
   /** A copy of the computer and account registry alone, for routing and ownership checks. */
   fleet: () => Fleet;
   /**
@@ -331,8 +336,11 @@ let baseline = emptyShared();
 // a poll left both sides equal. Later polls then only ask whether the relay moved.
 let baselineRevision: number | undefined;
 let settledRevision: number | undefined;
-// The checkpoint saved during this connection, so unchanged polls skip rewriting it.
+// The checkpoint saved during this connection, so unchanged polls skip rewriting it, and when
+// it was written, so a streaming reply's polls do not rewrite a large one every time.
 let checkpointJson = '';
+let checkpointSavedAt = 0;
+const CHECKPOINT_INTERVAL = 15_000;
 // Relays before v1/state/revision answer it with 404; they get the full state each poll.
 let revisionEndpoint = true;
 const relayReplaced =
@@ -371,6 +379,7 @@ function resetBaseline(next: SharedWorkspace) {
   baselineRevision = undefined;
   settledRevision = undefined;
   checkpointJson = '';
+  checkpointSavedAt = 0;
   revisionEndpoint = true;
 }
 const accountUpdateGate = new AccountUpdateGate();
@@ -935,17 +944,17 @@ export async function pollRelay(): Promise<Presence[] | null> {
         throw new Error('Pair this device again to restore its server connection.');
     }
     // Syncing copies, compares and saves the whole workspace, which stalls the page, so once a
-    // poll leaves both sides equal, later ones only ask whether the relay moved. Replies
-    // running here still sync every poll, since other devices follow their progress.
+    // poll leaves both sides equal, later ones only ask whether the relay moved. A reply running
+    // here counts each of its events as a change, so its progress still goes out every poll,
+    // while a reply waiting on a long tool call stops costing anything. Asking for the revision
+    // first also keeps a publishing poll from downloading the baseline it already holds.
     const revision = runtime.revision?.();
     const settled =
-      revision !== undefined &&
-      revision === settledRevision &&
-      baselineRevision !== undefined &&
-      !runtime.localRuns().length &&
-      !workerRuns.size;
+      revision !== undefined && revision === settledRevision && baselineRevision !== undefined;
     let unchanged = false;
-    if (settled && revisionEndpoint) {
+    // Whether the relay still holds exactly `baseline`, so no download is needed to merge.
+    let held = false;
+    if (baselineRevision !== undefined && revisionEndpoint) {
       const probe = await relayRaw('GET', 'v1/state/revision');
       if (probe.status !== 200 && probe.status !== 404)
         throw new Error(probe.body?.error ?? `Relay request failed (${probe.status}).`);
@@ -955,25 +964,35 @@ export async function pollRelay(): Promise<Presence[] | null> {
         typeof probe.body.revision === 'number'
       ) {
         if (probe.body.instanceId !== relayInstance) throw new Error(relayReplaced);
-        unchanged = probe.body.revision === baselineRevision && runtime.revision?.() === revision;
+        held = probe.body.revision === baselineRevision;
+        unchanged = settled && held && runtime.revision?.() === revision;
       } else revisionEndpoint = false;
     }
     let fetched: RelayState | undefined;
-    if (!unchanged) {
+    if (!unchanged && !held) {
       fetched = await relayApi<RelayState>('GET', 'v1/state');
       if (fetched.instanceId !== relayInstance) throw new Error(relayReplaced);
       // Relays without v1/state/revision send the revision with the whole state.
       unchanged =
         settled && fetched.revision === baselineRevision && runtime.revision?.() === revision;
     }
+    // The revision probe proved the relay holds the baseline, so this poll merges against the
+    // copy already in memory rather than downloading and validating the same data again.
+    if (held && !unchanged && baselineRevision !== undefined)
+      fetched = { instanceId: relayInstance, revision: baselineRevision, workspace: baseline };
     // Verify the workspace first, then publish the viewed chat before a
     // completion checkpoint can enqueue push.
     await publishNotificationView();
     if (generation !== relayGeneration) return null;
     if (fetched && !unchanged) {
       let remote = fetched;
+      // The relay's own copy of the baseline was validated when this device accepted it.
+      let remoteShared: SharedWorkspace | undefined =
+        remote.workspace === baseline ? baseline : undefined;
+      // Read the revision and this device's data together, so a change that lands between them
+      // cannot leave the poll reporting that both sides are equal without having sent it.
       const before = runtime.revision?.();
-      const start = sharedWorkspace(runtime.workspace());
+      const start = runtime.shared();
       const options = desktop()
         ? { deadRun: (c: Conversation, m: Message) => deadRunHere(start.fleet, c, m) }
         : undefined;
@@ -981,7 +1000,8 @@ export async function pollRelay(): Promise<Presence[] | null> {
       let acceptedJson = '';
       let acceptedRevision: number | undefined;
       for (let attempt = 0; attempt < 4; attempt++) {
-        const merged = mergeShared(baseline, start, sharedSchema.parse(remote.workspace), options);
+        remoteShared ??= sharedSchema.parse(remote.workspace);
+        const merged = mergeShared(baseline, start, remoteShared, options);
         // An older relay or app drops app sessions. This device keeps its own and sends them
         // with its next other change, instead of writing them back after every write there.
         const unsent =
@@ -1001,12 +1021,17 @@ export async function pollRelay(): Promise<Presence[] | null> {
         });
         if (response.status === 409 && response.body?.code !== 'workspace_changed') {
           remote = response.body;
+          remoteShared = undefined;
           continue;
         }
         if (response.status !== 200)
           throw new Error(response.body?.error ?? 'Workspace sync failed.');
-        accepted = sharedSchema.parse(response.body.workspace);
-        acceptedJson = JSON.stringify(accepted);
+        // The relay stores what it accepted, so its answer is usually this poll's own data,
+        // already validated. Validate it again only when an older relay left something out.
+        const storedJson = JSON.stringify(response.body.workspace);
+        const echoed = storedJson === mergedJson;
+        accepted = echoed ? unsent : sharedSchema.parse(response.body.workspace);
+        acceptedJson = echoed ? mergedJson : JSON.stringify(accepted);
         acceptedRevision = response.body.revision;
         break;
       }
@@ -1015,12 +1040,19 @@ export async function pollRelay(): Promise<Presence[] | null> {
       // Nothing arrives when the relay holds exactly what this poll sent.
       const sent = sameShared(accepted, start);
       if (!sent) {
-        const current = sharedWorkspace(runtime.workspace());
+        const current = runtime.shared();
         await runtime.apply(mergeShared(start, current, accepted, options));
         if (generation !== relayGeneration) return null;
       }
       // Save local data before advancing the merge checkpoint. Failed writes remain recoverable.
-      if (acceptedJson !== checkpointJson) {
+      // A reply changes this device every event, and rewriting the whole checkpoint each poll
+      // stalls a large workspace. Only the next start of the app reads it, and an older
+      // checkpoint merges conservatively, so a streaming reply writes it at intervals instead.
+      const streaming = !!runtime.localRuns().length || workerRuns.size > 0;
+      if (
+        acceptedJson !== checkpointJson &&
+        (!streaming || Date.now() - checkpointSavedAt >= CHECKPOINT_INTERVAL)
+      ) {
         const checkpoint = { url: relayUrl, instanceId: relayInstance, base: accepted };
         if (desktop()) await invoke('save_sync_state', { value: checkpoint });
         else if (browserScope) {
@@ -1033,6 +1065,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
           if (generation !== relayGeneration) return null;
         }
         checkpointJson = acceptedJson;
+        checkpointSavedAt = Date.now();
       }
       baseline = accepted;
       baselineRevision = acceptedRevision;

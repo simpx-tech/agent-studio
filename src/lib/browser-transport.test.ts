@@ -106,6 +106,7 @@ async function fixture() {
   transport.configureRuntime({
     installation,
     workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
     fleet: () => workspace.fleet,
     statuses: () => ({}),
     localRuns: () => [],
@@ -118,6 +119,7 @@ async function fixture() {
   return {
     transport,
     workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
     data,
     fetcher,
     replace,

@@ -169,7 +169,7 @@
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
-  import type { Presence } from '$lib/sync';
+  import { sharedWorkspace, type Presence } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
@@ -1057,6 +1057,9 @@
           configureRuntime({
             installation,
             workspace: () => $state.snapshot(workspace),
+            // Validating the live workspace already detaches the replicated part of it, so this
+            // costs about half of a snapshot of everything followed by the same validation.
+            shared: () => sharedWorkspace(workspace),
             fleet: () => $state.snapshot(workspace.fleet),
             revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),

@@ -11,8 +11,6 @@ const allowedWorkspaceCopies: [site: string, reason: string][] = [
   ['src/routes/+page.svelte › onMount callback › workspace', 'the runtime getter itself'],
   ['src/routes/+page.svelte › persist', 'a save writes the whole workspace'],
   ['src/lib/transport.ts › saveWorkspace', 'the Viewer stores the whole workspace'],
-  ['src/lib/transport.ts › pollRelay', 'merging, only after either side changed'],
-  ['src/lib/transport.ts › pollRelay', 'applying changes that arrived from the relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'desktop backup before adopting a relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'Viewer backup before adopting a relay'],
   ['src/lib/transport.ts › resolveRelaySettings', 'adopting the relay’s computers'],
