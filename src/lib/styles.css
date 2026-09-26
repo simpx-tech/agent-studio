@@ -781,6 +781,19 @@ pre {
   border-radius: var(--radius-full);
   background: var(--accent-strong);
 }
+/* A chat whose reply finished while you were reading elsewhere keeps a green dot in the
+   gutter of its row, in the pen mark's place, until you open it. */
+.conversation-item .conversation-finished {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
 /* A running reply spins like running calls and plan steps, and shows an orange question
    instead while it waits for your answer. */
 .conversation-item .conversation-running {

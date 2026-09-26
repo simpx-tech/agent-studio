@@ -10,6 +10,7 @@
     requestsAttention,
     pendingChatCount,
   } from '$lib/notifications';
+  import { createFinishedChatTracker, type FinishedChats } from '$lib/finished-chats';
   import {
     watchDesktopNotifications,
     watchNotificationView,
@@ -739,6 +740,23 @@
     ),
   );
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
+  // Chats whose reply finished while the reader was elsewhere keep a dot in the sidebar until
+  // they are opened. Reading state belongs to this window: never saved, exported or synced.
+  let finishedChats = $state<FinishedChats>({});
+  let observeFinishedChats = createFinishedChatTracker();
+  function noteFinishedChats() {
+    finishedChats = observeFinishedChats(
+      workspace.conversations,
+      finishedChats,
+      view === 'chat' ? (activeId ?? undefined) : undefined,
+    );
+  }
+  // The conversation on screen is read, including one whose reply ended while Connections,
+  // Settings or a scratch chat was open.
+  $effect(() => {
+    const id = view === 'chat' ? activeId : null;
+    if (id && untrack(() => finishedChats[id])) delete finishedChats[id];
+  });
   const observedReply = $derived(
     active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
   );
@@ -1072,6 +1090,8 @@
         draftSettings = settingsFor(workspace.preferences);
         await loadSavedDrafts();
         loaded = true;
+        // The baseline of this session: saved chats are read history, however they ended.
+        noteFinishedChats();
         if (!continueScratch()) newChat();
         if (installation)
           configureRuntime({
@@ -1091,6 +1111,10 @@
               forking = false;
               const previousView = view;
               workspace = value;
+              // Another workspace's replies are history here, not news.
+              finishedChats = {};
+              observeFinishedChats = createFinishedChatTracker();
+              noteFinishedChats();
               connectionStatuses = {};
               cliInventories = {};
               presence = [];
@@ -1144,6 +1168,7 @@
                 message.status = status;
                 message.error = error;
                 conversation.updatedAt = new Date().toISOString();
+                noteFinishedChats();
               }
               await persistChat(conversation.id);
             },
@@ -1168,6 +1193,7 @@
                 if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
                   forgetDraft(key);
               // Received from the relay, so nothing new to send back.
+              noteFinishedChats();
               await persist(false);
               refreshNewConnections();
             },
@@ -1210,6 +1236,7 @@
                 if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
                   forgetDraft(key);
               // Received from the relay, so only these conversations need saving here.
+              noteFinishedChats();
               if (!loaded) return;
               for (const conversation of upsert) markChats(conversation.id);
               if (gone.size || meta) markChats();
@@ -2281,6 +2308,7 @@
     });
   }
   function openConversation(c: Conversation) {
+    delete finishedChats[c.id];
     templatesOpen = false;
     sidebarOpen = false;
     locationGeneration++;
@@ -3241,6 +3269,7 @@
           delete stopping[conversation.id];
         }
         saveSoon(conversation.id);
+        noteFinishedChats();
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
       }
@@ -3659,7 +3688,7 @@
                           >{/each}
                         {#each folder.conversations as c}{@const runningReply = c.messages.find(
                             (m) => m.status === 'running',
-                          )}
+                          )}{@const finished = !runningReply && !!finishedChats[c.id]}
                           <div class="conversation-row">
                             <button
                               class="conversation-item"
@@ -3686,8 +3715,10 @@
                                   longPressedConversation = undefined;
                                 } else openConversation(c);
                               }}
-                              title={c.title}
-                              ><span>{c.title}</span
+                              title={finished ? `${c.title} · New reply` : c.title}
+                              aria-label={finished ? `${c.title}, new reply` : undefined}
+                              >{#if finished}<i class="conversation-finished" aria-hidden="true"
+                                ></i>{/if}<span>{c.title}</span
                               >{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
                                   size={14}
                                   class="conversation-waiting"
