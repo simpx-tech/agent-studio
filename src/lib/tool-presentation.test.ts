@@ -4,8 +4,10 @@ import {
   commandKind,
   connectedTool,
   fileLanguage,
+  fileTypeIcon,
   primaryCommand,
   toolVisual,
+  type ToolIconKey,
 } from './tool-presentation';
 
 const tool = (fields: Partial<ToolActivity>): ToolActivity => ({
@@ -166,6 +168,52 @@ describe('tool presentation', () => {
     expect(toolVisual(tool({ name: 'Wait for background tasks' })).icon).toBe('waitTasks');
     expect(toolVisual(tool({ name: 'Legacy tool' })).icon).toBe('tool');
     expect(connectedTool(tool({ name: 'Bash' }))).toBeUndefined();
+  });
+
+  it('gives each edited file the icon of its type', () => {
+    const cases: [string, ToolIconKey][] = [
+      ['src/lib/theme.css', 'style'],
+      ['src/lib/styles.scss', 'style'],
+      ['src/app.html', 'markup'],
+      ['static/page.xml', 'markup'],
+      ['src/lib/components/FileChanges.svelte', 'component'],
+      ['web/App.tsx', 'component'],
+      ['src/lib/tool-presentation.ts', 'code'],
+      ['src-tauri/src/lib.rs', 'code'],
+      ['scripts/brand-icons.mjs', 'code'],
+      ['src/lib/file-changes.test.ts', 'test'],
+      ['tests/file-changes.spec.ts', 'test'],
+      ['runner_test.go', 'test'],
+      ['package.json', 'data'],
+      ['package-lock.json', 'lock'],
+      ['pnpm-lock.yaml', 'lock'],
+      ['src-tauri/Cargo.lock', 'lock'],
+      ['src-tauri/Cargo.toml', 'config'],
+      ['.github/workflows/release.yml', 'config'],
+      ['.env.production', 'config'],
+      ['.prettierrc', 'config'],
+      ['scripts/vps/install.sh', 'shell'],
+      ['scripts/start-windows.ps1', 'shell'],
+      ['relay/Dockerfile', 'container'],
+      ['compose.yaml', 'container'],
+      ['.gitattributes', 'git'],
+      ['Makefile', 'build'],
+      ['docs/CAPABILITIES.md', 'file'],
+      ['LICENSE', 'file'],
+      ['notes.unknown', 'file'],
+      ['static/favicon.svg', 'image'],
+      ['artifacts/file-changes.png', 'image'],
+      ['analysis.ipynb', 'notebook'],
+      ['db/schema.sql', 'database'],
+      ['data/report.csv', 'spreadsheet'],
+      ['static/fonts/Geist.woff2', 'font'],
+      ['release/installer.zip', 'archive'],
+      ['docs/demo.mp4', 'media'],
+      ['target/debug/studio.exe', 'binary'],
+    ];
+    for (const [path, icon] of cases) expect([path, fileTypeIcon(path)]).toEqual([path, icon]);
+    expect(fileTypeIcon('C:\\Projects\\studio\\src\\lib\\Theme.CSS')).toBe('style');
+    expect(fileTypeIcon('unlock.ts')).toBe('code');
   });
 
   it('highlights file content by its extension', () => {

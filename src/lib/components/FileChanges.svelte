@@ -1,8 +1,10 @@
 <script lang="ts">
   import { ChevronRight } from '@lucide/svelte';
   import { fileChangeBase, relativeFilePath, type ChangeSummary } from '$lib/file-changes';
+  import { fileTypeIcon } from '$lib/tool-presentation';
   import { revealedDisclosures } from '$lib/disclosures';
   import DiffTable from './DiffTable.svelte';
+  import ToolIcon from './ToolIcon.svelte';
   let {
     response,
     chat,
@@ -106,6 +108,7 @@
           <details class="changed-file" ontoggle={diffs.opened(key)}>
             <summary title={file.path} onclick={diffs.reveal(key)}>
               <ChevronRight size={13} class="disclosure" />
+              <ToolIcon icon={fileTypeIcon(file.path)} size={14} />
               <span class="file-path"
                 >{#if file.previousPath}<span class="previous-path"
                     >{displayPath(file.previousPath)} →

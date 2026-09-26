@@ -31,6 +31,19 @@ export type ToolIconKey =
   | 'edit'
   | 'newFile'
   | 'notebook'
+  | 'component'
+  | 'markup'
+  | 'style'
+  | 'data'
+  | 'config'
+  | 'shell'
+  | 'database'
+  | 'spreadsheet'
+  | 'font'
+  | 'archive'
+  | 'lock'
+  | 'media'
+  | 'binary'
   | 'findFiles'
   | 'grep'
   | 'web'
@@ -565,6 +578,175 @@ export function fileLanguage(path?: string): string | undefined {
     : /(^|[\\/])makefile$/i.test(path ?? '')
       ? 'makefile'
       : undefined;
+}
+
+// The icon of each kind of file, by extension: a stylesheet, markup and a component
+// are told apart at a glance, and languages without an icon of their own share `code`.
+const extensionIcons: Record<string, ToolIconKey> = {
+  svelte: 'component',
+  vue: 'component',
+  astro: 'component',
+  tsx: 'component',
+  jsx: 'component',
+  html: 'markup',
+  htm: 'markup',
+  xhtml: 'markup',
+  xml: 'markup',
+  xsl: 'markup',
+  hbs: 'markup',
+  handlebars: 'markup',
+  ejs: 'markup',
+  pug: 'markup',
+  njk: 'markup',
+  liquid: 'markup',
+  css: 'style',
+  scss: 'style',
+  sass: 'style',
+  less: 'style',
+  styl: 'style',
+  pcss: 'style',
+  postcss: 'style',
+  json: 'data',
+  jsonc: 'data',
+  json5: 'data',
+  ndjson: 'data',
+  geojson: 'data',
+  graphql: 'data',
+  gql: 'data',
+  proto: 'data',
+  toml: 'config',
+  ini: 'config',
+  cfg: 'config',
+  conf: 'config',
+  env: 'config',
+  properties: 'config',
+  plist: 'config',
+  yml: 'config',
+  yaml: 'config',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  fish: 'shell',
+  ps1: 'shell',
+  psm1: 'shell',
+  psd1: 'shell',
+  bat: 'shell',
+  cmd: 'shell',
+  sql: 'database',
+  sqlite: 'database',
+  db: 'database',
+  csv: 'spreadsheet',
+  tsv: 'spreadsheet',
+  xlsx: 'spreadsheet',
+  xls: 'spreadsheet',
+  ods: 'spreadsheet',
+  woff: 'font',
+  woff2: 'font',
+  ttf: 'font',
+  otf: 'font',
+  eot: 'font',
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  bmp: 'image',
+  svg: 'image',
+  ico: 'image',
+  avif: 'image',
+  tif: 'image',
+  tiff: 'image',
+  heic: 'image',
+  mp4: 'media',
+  webm: 'media',
+  mov: 'media',
+  mkv: 'media',
+  avi: 'media',
+  mp3: 'media',
+  wav: 'media',
+  ogg: 'media',
+  flac: 'media',
+  m4a: 'media',
+  zip: 'archive',
+  tar: 'archive',
+  gz: 'archive',
+  tgz: 'archive',
+  bz2: 'archive',
+  xz: 'archive',
+  '7z': 'archive',
+  rar: 'archive',
+  zst: 'archive',
+  exe: 'binary',
+  dll: 'binary',
+  so: 'binary',
+  dylib: 'binary',
+  wasm: 'binary',
+  bin: 'binary',
+  ipynb: 'notebook',
+  ts: 'code',
+  mts: 'code',
+  cts: 'code',
+  js: 'code',
+  mjs: 'code',
+  cjs: 'code',
+  rs: 'code',
+  py: 'code',
+  go: 'code',
+  java: 'code',
+  kt: 'code',
+  kts: 'code',
+  swift: 'code',
+  c: 'code',
+  h: 'code',
+  cc: 'code',
+  cpp: 'code',
+  hpp: 'code',
+  cs: 'code',
+  rb: 'code',
+  php: 'code',
+  lua: 'code',
+  dart: 'code',
+  ex: 'code',
+  exs: 'code',
+  erl: 'code',
+  hs: 'code',
+  scala: 'code',
+  groovy: 'code',
+  zig: 'code',
+  nim: 'code',
+  clj: 'code',
+  jl: 'code',
+  sol: 'code',
+  r: 'code',
+  pl: 'code',
+  pm: 'code',
+  vb: 'code',
+  prisma: 'code',
+};
+
+/**
+ * The icon of a file's type, for the rows of Files edited: its name decides first, so a
+ * lock file, a Dockerfile, a Git file, a build file and a test keep their own icon.
+ */
+export function fileTypeIcon(path: string): ToolIconKey {
+  const name = (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+  if (/[-.]lock(?:b|\.json|\.ya?ml|\.toml)?$/.test(name)) return 'lock';
+  if (
+    /^(?:docker|container)file/.test(name) ||
+    /\.(?:docker|container)file$/.test(name) ||
+    /^(?:docker-)?compose\.ya?ml$/.test(name) ||
+    name === '.dockerignore'
+  )
+    return 'container';
+  if (/^\.git[a-z]*$/.test(name)) return 'git';
+  if (
+    /^(?:makefile|gnumakefile|cmakelists\.txt)$/.test(name) ||
+    /\.(?:mk|make|gradle|bazel|bzl)$/.test(name)
+  )
+    return 'build';
+  if (/[.\-_](?:test|spec)\.[a-z0-9]+$/.test(name) || /^test_.+\.py$/.test(name)) return 'test';
+  if (/^\.(?:env|editorconfig|[a-z]+rc)(?:\.|$)/.test(name)) return 'config';
+  return extensionIcons[name.match(/\.([a-z0-9]+)$/)?.[1] ?? ''] ?? 'file';
 }
 
 export type ToolVisual = {

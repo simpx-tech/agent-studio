@@ -157,7 +157,8 @@ for (const mobile of [false, true])
                     },
                     ...(before === 'original'
                       ? Array.from({ length: 6 }, (_, i) => ({
-                          path: `C:/Projects/studio/zz-extra-${i + 1}.txt`,
+                          // The last two carry their own file type, for the type icons.
+                          path: `C:/Projects/studio/zz-extra-${i + 1}.${['txt', 'txt', 'txt', 'txt', 'css', 'html'][i]}`,
                           kind: 'added',
                           hunks: [
                             {
@@ -184,6 +185,9 @@ for (const mobile of [false, true])
     }
     await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
     const summary = page.locator('.file-changes').last();
+    // Each row's leading icon names the kind of file it changed.
+    const typeIcon = (name: string) =>
+      summary.locator('.changed-file').filter({ hasText: name }).locator('summary [data-icon]');
     const footer = page.locator('.reply-footer').last();
     const filesToggle = footer.getByRole('button', { name: /Files edited/ });
     const usageToggle = footer.getByRole('button', { name: 'Reply usage and cost', exact: true });
@@ -216,6 +220,11 @@ for (const mobile of [false, true])
       'C:\\Projects\\studio\\src\\components\\Example.svelte',
     );
     await expect(file.locator('.file-kind')).toHaveText('Edited');
+    await expect(typeIcon('src/components/Example.svelte')).toHaveAttribute(
+      'data-icon',
+      'component',
+    );
+    await expect(typeIcon('docs/new.txt')).toHaveAttribute('data-icon', 'file');
     expect(
       await file.evaluate((el) => parseFloat(getComputedStyle(el).borderLeftWidth)),
     ).toBeGreaterThan(0);
@@ -235,6 +244,9 @@ for (const mobile of [false, true])
     await showAll.focus();
     await page.keyboard.press('Enter');
     await expect(summary.locator('.changed-file')).toHaveCount(8);
+    await expect(typeIcon('zz-extra-5.css')).toHaveAttribute('data-icon', 'style');
+    await expect(typeIcon('zz-extra-6.html')).toHaveAttribute('data-icon', 'markup');
+    await expect(typeIcon('zz-extra-1.txt')).toHaveAttribute('data-icon', 'file');
     await summary.getByRole('tab', { name: 'This response', exact: true }).click();
     await expect(summary.locator('.changed-file')).toHaveCount(2);
     await expect(summary.getByRole('button', { name: /Show fewer/ })).toHaveCount(0);
