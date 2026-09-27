@@ -21,7 +21,7 @@ const MAX_PATH: usize = 4096;
 const MAX_CAPTION: usize = 300;
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, its absolute paths, and an optional one-line caption. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 12 MiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, its absolute paths in files, and an optional one-line caption. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 12 MiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -391,6 +391,21 @@ impl FileSender {
         }
         events
     }
+    /// Why a call that matches no registered parent cannot show files. A call is registered
+    /// only when its arguments parse and the reply still has room, so name the fault the
+    /// caller can act on: reporting malformed arguments as an unregistered caller reads as a
+    /// capability this conversation lacks, and a model that believes that stops retrying.
+    fn unmatched(&self, args: &Value) -> String {
+        if let Err(invalid) = parse(args) {
+            return invalid;
+        }
+        if self.pending.len() >= MAX_GROUPS {
+            return format!(
+                "This reply already shows {MAX_GROUPS} groups of files. Reuse an existing id."
+            );
+        }
+        "Only a registered parent-conversation send_files call can show files.".into()
+    }
     /// A Claude SDK tool call for this conversation's files. Other requests of the
     /// agent_studio server are left to their own handlers.
     pub async fn claude(&mut self, value: &Value, staging: &Staging) -> Option<Value> {
@@ -419,9 +434,7 @@ impl FileSender {
                 }
                 result
             }
-            None => {
-                Err("Only a registered parent-conversation send_files call can show files.".into())
-            }
+            None => Err(self.unmatched(args)),
         };
         let text = match &result {
             Ok(text) => text.clone(),
@@ -544,6 +557,44 @@ mod tests {
         assert!(text.contains("does not keep files"));
     }
 
+    #[tokio::test]
+    async fn a_parent_call_hears_the_fault_it_can_act_on() {
+        let staging = Staging::new("run", None, None);
+        let control = |arguments: Value| json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":NAME,"arguments":arguments}}}});
+        let observed = |tool: &str, input: Value| json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":tool,"name":format!("mcp__agent_studio__{NAME}"),"input":input}]}});
+        let refusal = |answer: &Value| {
+            answer["response"]["response"]["mcp_response"]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // The schema names the paths `files`. A call that misnames them cannot register, and
+        // hearing about registration instead reads as a capability this conversation lacks.
+        let mut sender = FileSender::default();
+        let misnamed = json!({"id":"shots","paths":["/tmp/a.png"]});
+        sender.observe_claude(&observed("t1", misnamed.clone()));
+        let answer = sender.claude(&control(misnamed), &staging).await.unwrap();
+        let text = refusal(&answer);
+        assert!(text.contains("files (1 to 8 absolute paths"), "{text}");
+        assert!(!text.contains("registered parent-conversation"), "{text}");
+        // Past the ceiling the refusal names the way out rather than the registration.
+        let mut sender = FileSender::default();
+        for index in 0..=MAX_GROUPS {
+            let input = json!({"id":format!("g{index}"),"files":["/tmp/a.png"]});
+            sender.observe_claude(&observed(&format!("t{index}"), input));
+        }
+        let last = json!({"id":format!("g{MAX_GROUPS}"),"files":["/tmp/a.png"]});
+        let answer = sender.claude(&control(last), &staging).await.unwrap();
+        let text = refusal(&answer);
+        assert!(text.contains("already shows"), "{text}");
+        // A well-formed call of a reply with room still needs its registered parent.
+        let mut sender = FileSender::default();
+        let answer = sender
+            .claude(&control(args(json!(["/tmp/a.png"]))), &staging)
+            .await
+            .unwrap();
+        assert!(refusal(&answer).contains("registered parent-conversation"));
+    }
     #[tokio::test]
     async fn codex_files_come_from_the_parent_thread_alone() {
         let staging = Staging::new("run", None, None);

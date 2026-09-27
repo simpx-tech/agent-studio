@@ -42,6 +42,9 @@ pub fn codex_tool() -> Value {
     tool["deferLoading"] = json!(false);
     tool
 }
+const INVALID: &str = "Provide id (letters, digits, _ or -, at most 80), title (at most 100), and html (at most 512000 UTF-8 bytes). No other fields or file paths are accepted.";
+const TOO_MANY: &str = "This reply already contains 12 visuals. Update an existing id.";
+
 fn valid(args: &Value) -> bool {
     args.as_object().is_some_and(|o| o.len() == 3)
         && args["id"].as_str().is_some_and(|s| {
@@ -72,11 +75,11 @@ impl Visualizer {
     }
     fn submit(&mut self, args: &Value) -> Result<Visualization, &'static str> {
         if !valid(args) {
-            return Err("Provide id (letters, digits, _ or -, at most 80), title (at most 100), and html (at most 512000 UTF-8 bytes). No other fields or file paths are accepted.");
+            return Err(INVALID);
         }
         let index = self.visuals.iter().position(|v| v.id == args["id"]);
         if index.is_none() && self.visuals.len() >= 12 {
-            return Err("This reply already contains 12 visuals. Update an existing id.");
+            return Err(TOO_MANY);
         }
         let source = args["html"].as_str().unwrap();
         if self
@@ -189,6 +192,12 @@ impl Visualizer {
                     self.submit(args).map(|v| {
                         self.accepted.insert(id, v);
                     })
+                } else if !valid(args) {
+                    // Registration needs valid arguments, so a malformed call reaches here.
+                    // Say so: an unregistered-caller refusal reads as a missing capability.
+                    Err(INVALID)
+                } else if self.pending.len() >= 12 {
+                    Err(TOO_MANY)
                 } else {
                     Err("Only a registered parent-conversation visualize call can display a visual.")
                 };
@@ -344,6 +353,38 @@ mod tests {
         input["id"] = json!("thirteenth");
         assert!(state.submit(&input).is_err());
         assert!(state.submit(&args()).is_ok());
+    }
+    #[test]
+    fn claude_reports_the_fault_a_caller_can_act_on() {
+        let mut state = Visualizer::default();
+        // Registration needs valid arguments, so a malformed parent call never matches one.
+        // It must hear about its arguments, not about a parent conversation it already is.
+        let malformed = json!({"id":"counter","title":"Counter","markup":"<p>x</p>"});
+        state.observe_claude(&assistant(malformed.clone()));
+        let refused = state.claude_response(&control(malformed));
+        let result = &refused["response"]["response"]["mcp_response"]["result"];
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Provide id"), "{text}");
+        assert!(!text.contains("registered parent-conversation"), "{text}");
+        // A thirteenth visual is refused for the ceiling, which names the way out.
+        let mut state = Visualizer::default();
+        for index in 0..=12 {
+            let mut input = args();
+            input["id"] = json!(format!("v{index}"));
+            let mut call = assistant(input);
+            call["message"]["content"][0]["id"] = json!(format!("tool-{index}"));
+            state.observe_claude(&call);
+        }
+        let mut last = args();
+        last["id"] = json!("v12");
+        let refused = state.claude_response(&control(last));
+        let result = &refused["response"]["response"]["mcp_response"]["result"];
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("already contains 12 visuals"));
     }
     #[test]
     fn claude_requires_parent_call_accepted_by_our_server_and_successful_result() {
