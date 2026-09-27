@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { createFinishedChatTracker, type FinishedChats } from './finished-chats';
-import type { Conversation, Message } from './domain';
+import { interruptedReplyError, type Conversation, type Message } from './domain';
 
 const time = Date.now();
 function chat(status: Message['status'] = 'running', createdAt = time): Conversation {
@@ -82,6 +82,32 @@ it('marks a reply that started and finished between two updates, but not an old 
   const quick = chat('complete', time + 500);
   const stale = chat('complete', time - 600_000);
   expect(observe([quick, stale], {})).toEqual({ [quick.id]: reply(quick).runId });
+});
+
+it('marks a reply restored as interrupted once another computer finishes it', () => {
+  const conversation = chat('cancelled', time - 30_000);
+  reply(conversation).error = interruptedReplyError;
+  const observe = createFinishedChatTracker(() => time);
+  expect(observe([conversation], {})).toEqual({});
+  reply(conversation).status = 'running';
+  reply(conversation).error = undefined;
+  expect(observe([conversation], {})).toEqual({});
+  reply(conversation).status = 'complete';
+  expect(observe([conversation], {})).toEqual({ [conversation.id]: reply(conversation).runId });
+});
+
+it('marks a long reply first seen finished, and never again across thousands of chats', () => {
+  let clock = time;
+  const observe = createFinishedChatTracker(() => clock);
+  expect(observe([], {})).toEqual({});
+  clock += 30 * 60_000;
+  const long = chat('complete', time + 60_000);
+  expect(observe([long], {})).toEqual({ [long.id]: reply(long).runId });
+  const many = Array.from({ length: 3000 }, () => chat('complete', clock - 1000));
+  const marks = observe(many, {});
+  expect(Object.keys(marks)).toHaveLength(3000);
+  // The reader opens them all; later updates bring none of the marks back.
+  for (let pass = 0; pass < 3; pass++) expect(observe(many, {})).toEqual({});
 });
 
 it('keeps marks bounded to the chats it is given', () => {

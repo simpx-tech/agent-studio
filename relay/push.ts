@@ -17,6 +17,8 @@ import { toolActivitySchema } from '../src/lib/activity.ts';
 import {
   attentionKeys,
   chatNotification,
+  noticeBodyLimit,
+  noticeTitleLimit,
   requestsAttention,
   type PushNotice,
 } from '../src/lib/notifications.ts';
@@ -65,9 +67,27 @@ const noticeSchema = z.object({
   kind: z.enum(['complete', 'attention', 'error', 'cancelled', 'test']),
   conversationId: z.string().uuid().optional(),
   tag: z.string().max(100),
-  // Bounded by chatNotification in code points; these limits count UTF-16 units.
-  title: z.string().max(200).optional(),
-  body: z.string().max(400).optional(),
+  // Bounded by chatNotification in code points, at most two UTF-16 units each; these count
+  // units, with room to spare so a longer limit never makes saved alerts unreadable.
+  title: z
+    .string()
+    .max(noticeTitleLimit * 2 + 40)
+    .optional(),
+  body: z
+    .string()
+    .max(noticeBodyLimit * 2 + 40)
+    .optional(),
+});
+const pendingSchema = z.object({
+  id: z.string().uuid(),
+  subscriber: z.string().uuid(),
+  notice: noticeSchema,
+  // What the alert announces, so a newer line for it can replace the one still held.
+  receipt: z.string().max(120).optional(),
+  created: z.number().optional(),
+  expires: z.number(),
+  next: z.number(),
+  attempts: z.number(),
 });
 const subscriberSchema = z.object({
   id: z.string().uuid(),
@@ -85,19 +105,17 @@ const diskSchema = z.object({
   keys: z.object({ publicKey: base64(65), privateKey: base64(32) }),
   subscribers: z.array(subscriberSchema).max(1000),
   seen: z.array(z.tuple([z.string().max(120), z.number()])).max(4000),
+  // An alert this version cannot read is dropped rather than making the whole file, and
+  // with it the workspace's notifications, unreadable.
   pending: z
-    .array(
-      z.object({
-        id: z.string().uuid(),
-        subscriber: z.string().uuid(),
-        notice: noticeSchema,
-        created: z.number().optional(),
-        expires: z.number(),
-        next: z.number(),
-        attempts: z.number(),
+    .array(z.unknown())
+    .max(4000)
+    .transform((items) =>
+      items.flatMap((item) => {
+        const parsed = pendingSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
       }),
-    )
-    .max(4000),
+    ),
 });
 type State = z.infer<typeof diskSchema>;
 type Reply = Parameters<typeof chatNotification>[2];
@@ -147,6 +165,7 @@ export function pushService({
   send = webpush.sendNotification,
   pendingCount,
   conversationTitle = () => undefined,
+  conversationExists = () => true,
   active = () => true,
 }: {
   directory: string;
@@ -157,6 +176,8 @@ export function pushService({
   pendingCount?: () => number;
   // A job reports its run's events but not the title of the chat it belongs to.
   conversationTitle?: (conversationId: string) => string | undefined;
+  // An alert held for a chat deleted meanwhile is dropped.
+  conversationExists?: (conversationId: string) => boolean;
   active?: () => boolean;
 }) {
   const file = join(directory, 'web-push.json');
@@ -174,8 +195,9 @@ export function pushService({
     }
   >();
   // When each chat was last open in a visible, focused window, so an alert held for a
-  // computer is dropped even when its reader has since moved on to another chat.
-  const read = new Map<string, { at: number; session?: string }>();
+  // computer is dropped even when its reader has since moved on to another chat. A few
+  // readings per chat, newest last: a session revoked later must not hide an earlier one.
+  const read = new Map<string, { at: number; session?: string }[]>();
   function viewing(notice: PushNotice): boolean {
     return (
       notice.kind !== 'test' &&
@@ -191,12 +213,10 @@ export function pushService({
   function covered(item: State['pending'][number]): boolean {
     const id = item.notice.conversationId;
     if (!id) return false;
-    if (viewing(item.notice)) return true;
-    const last = read.get(id);
-    return (
-      !!last &&
-      last.at >= (item.created ?? item.expires - day) &&
-      (!last.session || sessionActive(last.session))
+    if (!conversationExists(id) || viewing(item.notice)) return true;
+    const since = item.created ?? item.expires - day;
+    return (read.get(id) ?? []).some(
+      (last) => last.at >= since && (!last.session || sessionActive(last.session)),
     );
   }
   function save(next: State) {
@@ -251,8 +271,21 @@ export function pushService({
       ),
     };
   }
-  function enqueue(next: State, notice: PushNotice, receipt: string, only?: string) {
-    if (next.seen.some(([key]) => key === receipt)) return;
+  /**
+   * Queues the alert `receipt` names once, building its text only when it goes out. An alert
+   * still waiting takes the newest line for what it announces: a question tool alerts as it
+   * begins, and its question is recorded seconds later, within the hold.
+   */
+  function enqueue(next: State, receipt: string, build: () => PushNotice, only?: string) {
+    if (next.seen.some(([key]) => key === receipt)) {
+      if (!next.pending.some((p) => p.receipt === receipt)) return;
+      const { title, body } = build();
+      next.pending = next.pending.map((p) =>
+        p.receipt === receipt ? { ...p, notice: { ...p.notice, title, body } } : p,
+      );
+      return;
+    }
+    const notice = build();
     next.seen = [...next.seen.slice(-3999), [receipt, now() + day]];
     // Record the receipt even when read in foreground; never replay it on blur.
     if (viewing(notice)) return;
@@ -262,6 +295,7 @@ export function pushService({
         id: randomUUID(),
         subscriber: subscriber.id,
         notice,
+        receipt,
         created: now(),
         expires: now() + day,
         // A test is a button the reader is waiting on; chat alerts wait for the computer.
@@ -387,8 +421,9 @@ export function pushService({
   function changed(before: SharedWorkspace, after: SharedWorkspace) {
     try {
       const next = pruned();
+      const earlier = new Map(before.conversations.map((c) => [c.id, c]));
       for (const conversation of after.conversations) {
-        const previous = before.conversations.find((c) => c.id === conversation.id);
+        const previous = earlier.get(conversation.id);
         const message = conversation.messages.at(-1);
         if (!message || message.role !== 'assistant' || !message.runId) continue;
         const old = previous?.messages.find((m) => m.id === message.id);
@@ -401,29 +436,21 @@ export function pushService({
         )
           continue;
         const base = { conversationId: conversation.id, tag: `studio-${message.runId}` };
-        if (message.status !== 'running' && (!old || old.status === 'running'))
-          enqueue(
-            next,
-            {
+        const status = message.status;
+        if (status !== 'running' && (!old || old.status === 'running'))
+          enqueue(next, `${message.runId}:terminal`, () => ({
+            ...base,
+            kind: status,
+            ...chatNotification(status, conversation, message),
+          }));
+        else if (status === 'running')
+          // Keys already announced still refresh an alert that is being held.
+          for (const key of attentionKeys(message))
+            enqueue(next, `${message.runId}:${key}`, () => ({
               ...base,
-              kind: message.status,
-              ...chatNotification(message.status, conversation, message),
-            },
-            `${message.runId}:terminal`,
-          );
-        else if (message.status === 'running')
-          for (const key of attentionKeys(message).filter(
-            (key) => !old || !attentionKeys(old).includes(key),
-          ))
-            enqueue(
-              next,
-              {
-                ...base,
-                kind: 'attention',
-                ...chatNotification('attention', conversation, message, key),
-              },
-              `${message.runId}:${key}`,
-            );
+              kind: 'attention',
+              ...chatNotification('attention', conversation, message, key),
+            }));
       }
       save(next);
       void drain();
@@ -444,10 +471,11 @@ export function pushService({
       views.set(source, { revision, conversationId, seenAt: now(), session });
       if (!conversationId || (session && !sessionActive(session))) return;
       // Newest last, so the oldest records are the ones this bounded map drops.
+      const readings = [...(read.get(conversationId) ?? []), { at: now(), session }].slice(-8);
       read.delete(conversationId);
-      read.set(conversationId, { at: now(), session });
+      read.set(conversationId, readings);
       for (const [id, last] of read) {
-        if (read.size <= 1000 && now() - last.at < day) break;
+        if (read.size <= 1000 && now() - (last.at(-1)?.at ?? 0) < day) break;
         read.delete(id);
       }
     },
@@ -489,23 +517,24 @@ export function pushService({
       if (!kind) return;
       try {
         const next = pruned();
-        const conversation = { title: conversationTitle(request.data.conversationId) ?? '' };
-        const reply = jobReply(job, questions, elicitations);
+        // Built at most once per update, and only for an alert that goes out or is refreshed.
+        let reply: Reply | undefined;
         for (const key of kind === 'attention'
           ? questions.length || elicitations.length
             ? attentionKeys({ blocks: [], questions, elicitations })
             : ['attention']
           : ['terminal'])
-          enqueue(
-            next,
-            {
+          enqueue(next, `${job.id}:${key}`, () => ({
+            kind,
+            conversationId: request.data.conversationId,
+            tag: `studio-${job.id}`,
+            ...chatNotification(
               kind,
-              conversationId: request.data.conversationId,
-              tag: `studio-${job.id}`,
-              ...chatNotification(kind, conversation, reply, key),
-            },
-            `${job.id}:${key}`,
-          );
+              { title: conversationTitle(request.data.conversationId) ?? '' },
+              (reply ??= jobReply(job, questions, elicitations)),
+              key,
+            ),
+          }));
         save(next);
         void drain();
       } catch {
@@ -559,7 +588,7 @@ export function pushService({
       next.subscribers = next.subscribers.map((s) =>
         s.id === subscriber.id ? { ...s, testAt: now() } : s,
       );
-      enqueue(next, { kind: 'test', tag: 'studio-test' }, randomUUID(), subscriber.id);
+      enqueue(next, randomUUID(), () => ({ kind: 'test', tag: 'studio-test' }), subscriber.id);
       save(next);
       void drain();
     },

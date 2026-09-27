@@ -295,6 +295,7 @@ export function createRelay({
           ),
         ),
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
+      conversationExists: (id) => state.workspace.conversations.some((c) => c.id === id),
     });
     const file = join(directory, 'workspace.json');
     let state: RelayState = {

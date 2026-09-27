@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
-import { createDesktopNotificationTracker } from './desktop-notifications';
+import { createDesktopNotificationTracker, questionGrace } from './desktop-notifications';
+import { interruptedReplyError } from './domain';
 import type { Conversation, Message } from './domain';
 
 const time = Date.now();
@@ -57,24 +58,31 @@ it('delivers every terminal kind once across repeated checkpoints and stale runn
   expect(observe({ conversations })).toEqual([]);
 });
 it('notifies for explicit parent questions once, then completion, but never child activity or prose', () => {
-  const observe = createDesktopNotificationTracker(() => time);
+  let clock = time;
+  const observe = createDesktopNotificationTracker(() => clock);
   observe({ conversations: [] });
   const c = chat();
   c.messages[0].blocks.push({ type: 'markdown', text: 'A question?' });
   question(c, 'child');
   expect(observe({ conversations: [c] })).toEqual([]);
   question(c);
+  // A question tool alone waits a moment for its question, then alerts on its own.
+  expect(observe({ conversations: [c] })).toEqual([]);
+  clock += questionGrace;
   expect(observe({ conversations: [c] }).map((n) => n.kind)).toEqual(['attention']);
   expect(observe({ conversations: [c] })).toEqual([]);
   c.messages[0].status = 'complete';
   expect(observe({ conversations: [c] }).map((n) => n.kind)).toEqual(['complete']);
 });
 it('names the chat and starts with its reply in each notice', () => {
-  const observe = createDesktopNotificationTracker(() => time);
+  let clock = time;
+  const observe = createDesktopNotificationTracker(() => clock);
   observe({ conversations: [] });
   const c = chat();
   c.title = 'Fix the login flow';
   question(c);
+  observe({ conversations: [c] });
+  clock += questionGrace;
   const [attention] = observe({ conversations: [c] });
   expect(attention).toMatchObject({
     kind: 'attention',
@@ -93,6 +101,68 @@ it('names the chat and starts with its reply in each notice', () => {
     },
   ]);
 });
+it('alerts with the question a question tool records a moment after it starts', () => {
+  let clock = time;
+  const wakes: number[] = [];
+  const observe = createDesktopNotificationTracker(
+    () => clock,
+    (delay) => wakes.push(delay),
+  );
+  observe({ conversations: [] });
+  const c = chat();
+  question(c);
+  expect(observe({ conversations: [c] })).toEqual([]);
+  // The window is asked to look again once the wait is over.
+  expect(wakes).toEqual([questionGrace]);
+  clock += 2_000;
+  c.messages[0].questions = [
+    {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'q',
+          header: 'Branch',
+          question: 'Merge into main?',
+          options: [],
+          multiSelect: false,
+        },
+      ],
+    },
+  ];
+  const notices = observe({ conversations: [c] });
+  expect(notices.map((n) => n.body)).toEqual(['Question: Merge into main?']);
+  clock += questionGrace;
+  expect(observe({ conversations: [c] })).toEqual([]);
+});
+
+it('alerts for a reply restored as interrupted once another computer finishes it', () => {
+  // The window starts while the reply runs elsewhere: its saved copy reads interrupted.
+  const c = chat('cancelled', time - 30_000);
+  c.messages[0].error = interruptedReplyError;
+  const observe = createDesktopNotificationTracker(() => time);
+  expect(observe({ conversations: [c] })).toEqual([]);
+  // Sync brings the running copy back, and later its end.
+  c.messages[0].status = 'running';
+  c.messages[0].error = undefined;
+  expect(observe({ conversations: [c] })).toEqual([]);
+  c.messages[0].status = 'complete';
+  expect(observe({ conversations: [c] }).map((n) => n.kind)).toEqual(['complete']);
+});
+
+it('alerts for a long reply first seen finished, and never twice across thousands of chats', () => {
+  let clock = time;
+  const observe = createDesktopNotificationTracker(() => clock);
+  observe({ conversations: [] });
+  // A reply that ran twenty minutes while this computer slept is still news.
+  clock += 30 * 60_000;
+  expect(observe({ conversations: [chat('complete', time + 60_000)] })).toHaveLength(1);
+  const many = Array.from({ length: 3000 }, () => chat('complete', clock - 1000));
+  expect(observe({ conversations: many })).toHaveLength(3000);
+  for (let pass = 0; pass < 3; pass++) expect(observe({ conversations: many })).toEqual([]);
+});
+
 it('handles fast remote completion without a running checkpoint and excludes future timestamps', () => {
   const observe = createDesktopNotificationTracker(() => time);
   observe({ conversations: [] });

@@ -59,6 +59,16 @@ export function requestsAttention(
       asksTheUser(block.tool.name),
   );
 }
+/**
+ * A question tool the model has started before its question is recorded. Claude reports
+ * AskUserQuestion as it begins, seconds before the question, so an alert raised on the tool
+ * alone waits for it: briefly on the desktop, and within its hold on the relay.
+ */
+export function provisionalAttention(
+  message: Pick<Message, 'blocks' | 'questions' | 'elicitations'>,
+): boolean {
+  return !message.questions?.length && !message.elicitations?.length && requestsAttention(message);
+}
 /** Whether a tool of this name asks the user something, under any provider prefix. */
 export function asksTheUser(tool: string): boolean {
   const name = tool.split(/[.:/]/).at(-1)?.toLowerCase();
@@ -121,8 +131,11 @@ export function chatNotification(
       : kind === 'error'
         ? labelled(
             'Failed',
-            // Thrown errors are recorded as String(error).
-            notificationLine(message.error, Infinity).replace(/^(?:Error:\s*)+/, ''),
+            // Thrown errors are recorded as String(error), and may be long.
+            notificationLine(
+              typeof message.error === 'string' ? message.error.slice(0, noticeBodyLimit * 4) : '',
+              Infinity,
+            ).replace(/^(?:Error:\s*)+/, ''),
           )
         : kind === 'cancelled'
           ? labelled('Stopped', markdownText(answer(message) || progress(message)))
@@ -153,7 +166,9 @@ function waitingFor(
 ): string | undefined {
   if (key.startsWith('elicitation:')) {
     const receipt = message.elicitations?.find((e) => `elicitation:${e.id}` === key);
-    return receipt && `${receipt.serverName} requests your input.`;
+    // The server is named in the chat; its name comes from the CLI configuration, which
+    // stays off lock screens.
+    return receipt && 'An MCP server requests your input.';
   }
   // attentionKeys names the first question call `attention` and later ones by id.
   const request =
@@ -170,41 +185,94 @@ const entities: Record<string, string> = {
   lt: '<',
   gt: '>',
   quot: '"',
-  '#39': "'",
   apos: "'",
+  mdash: '—',
+  ndash: '–',
+  hellip: '…',
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+  laquo: '«',
+  raquo: '»',
+  middot: '·',
+  bull: '•',
+  copy: '©',
+  reg: '®',
+  trade: '™',
+  deg: '°',
+  times: '×',
+  euro: '€',
+  pound: '£',
 };
+/** A character reference as the reader sees it; one it does not know stays as written. */
+function entity(match: string, name: string): string {
+  if (name[0] !== '#') return entities[name] ?? match;
+  const code = /^#x/i.test(name) ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+  return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+    ? String.fromCodePoint(code)
+    : '';
+}
 // Inline Markdown as a reader sees it: code spans and escaped characters stay literal, while
 // link targets, images' addresses, HTML tags and emphasis markers are dropped.
 function inline(text: string): string {
   const kept: string[] = [];
   const keep = (value: string) => `\uE000${kept.push(value) - 1}\uE001`;
-  return text
-    .replace(/[\uE000\uE001]/g, '')
-    .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _ticks, code: string) => keep(code.trim()))
-    .replace(/\\([!-\/:-@[-`{-~])/g, (_, char: string) => keep(char))
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[\^[^\]]*\]/g, '')
-    .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
-    .replace(/<((?:https?|mailto):[^\s<>]+)>/gi, '$1')
-    .replace(
-      /<\/?(?:a|abbr|b|code|del|em|i|ins|kbd|mark|s|small|span|strong|sub|sup|u)\b[^<>]*>/gi,
-      '',
-    )
-    .replace(
-      /<\/?(?:br|details|div|hr|img|li|ol|p|pre|summary|table|tbody|td|th|thead|tr|ul)\b[^<>]*>/gi,
-      ' ',
-    )
-    .replace(/(\*\*|__)(\S(?:.*?\S)?)\1/g, '$2')
-    .replace(/~~(\S(?:.*?\S)?)~~/g, '$1')
-    .replace(/(^|[^\w*])\*(\S(?:[^*]*?\S)?)\*(?![\w*])/g, '$1$2')
-    .replace(/(^|[^\w_])_(\S(?:[^_]*?\S)?)_(?![\w_])/g, '$1$2')
-    .replace(/&(nbsp|amp|lt|gt|quot|#39|apos);/g, (_, name: string) => entities[name])
-    .replace(/\uE000(\d+)\uE001/g, (_, index: string) => kept[Number(index)] ?? '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return (
+    text
+      .replace(/[\uE000\uE001]/g, '')
+      .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _ticks, code: string) =>
+        keep(code.trim()),
+      )
+      .replace(/\\([!-\/:-@[-`{-~])/g, (_, char: string) => keep(char))
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[\^[^\]]*\]/g, '')
+      .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
+      .replace(/<((?:https?|mailto):[^\s<>]+)>/gi, '$1')
+      .replace(
+        /<\/?(?:a|abbr|b|code|del|em|i|ins|kbd|mark|s|small|span|strong|sub|sup|u)\b[^<>]*>/gi,
+        '',
+      )
+      // Any other tag, as the chat renders none of them as text.
+      .replace(/<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?\/?>/g, ' ')
+      .replace(/(\*\*|__)(\S(?:.*?\S)?)\1/g, '$2')
+      .replace(/~~(\S(?:.*?\S)?)~~/g, '$1')
+      .replace(/(^|[^\w*])\*(\S(?:[^*]*?\S)?)\*(?![\w*])/g, '$1$2')
+      .replace(/(^|[^\w_])_(\S(?:[^_]*?\S)?)_(?![\w_])/g, '$1$2')
+      .replace(/&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});/g, entity)
+      .replace(/\uE000(\d+)\uE001/g, (_, index: string) => kept[Number(index)] ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
 }
 
+/** Lines of `text` one at a time, so reading a long answer stops once it has enough. */
+function* lines(text: string): Generator<string> {
+  for (let start = 0; start <= text.length;) {
+    const end = text.indexOf('\n', start);
+    const stop = end < 0 ? text.length : end;
+    yield text.slice(start, stop).replace(/\r$/, '');
+    if (end < 0) return;
+    start = end + 1;
+  }
+}
+/**
+ * A line without its HTML comments, and whether one stays open past it. A comment written
+ * inside a code span is text the reader sees, so code spans are kept whole.
+ */
+function withoutComments(line: string): [string, boolean] {
+  let open = false;
+  const text = line.replace(
+    /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|<!--[\s\S]*?(?:-->|$)/g,
+    (match) => {
+      if (match[0] === '`') return match;
+      if (!match.endsWith('-->')) open = true;
+      return ' ';
+    },
+  );
+  return [text, open];
+}
 /**
  * Markdown as one line of what a reader sees. Code blocks, rules and comments (including
  * visualization markers) are dropped, and blocks are joined with a separator unless they end a
@@ -216,8 +284,18 @@ export function markdownText(markdown: unknown, enough = noticeBodyLimit * 2): s
   let fence = '';
   // The last line was paragraph or list text that a following line continues.
   let open = false;
+  // The last block was a list item, whose indented lines continue it rather than start code.
+  let listed = false;
+  // An HTML comment, such as a visualization marker, hides the lines until it closes.
+  let comment = false;
   let length = 0;
-  for (const raw of markdown.replace(/<!--[\s\S]*?(?:-->|$)/g, ' ').split(/\r\n?|\n/)) {
+  for (let raw of lines(markdown)) {
+    if (comment) {
+      const end = raw.indexOf('-->');
+      if (end < 0) continue;
+      raw = raw.slice(end + 3);
+      comment = false;
+    }
     // Fences inside list items are indented further than CommonMark's three spaces.
     const marker = /^\s*(`{3,}|~{3,})/.exec(raw)?.[1];
     if (fence) {
@@ -233,10 +311,13 @@ export function markdownText(markdown: unknown, enough = noticeBodyLimit * 2): s
       open = false;
       continue;
     }
-    let line = raw
-      .slice(0, 2000)
-      .replace(/^\s*(?:>\s*)*/, '')
-      .trim();
+    const [visible, unclosed] = withoutComments(raw.slice(0, 2000));
+    comment = unclosed;
+    // An indented code block, which cannot interrupt a paragraph or a list.
+    if (!open && !listed && /^(?: {4}|\t)/.test(visible)) continue;
+    let line = visible.replace(/^\s*(?:>\s*)*/, '').trim();
+    // Link and footnote definitions show nothing where they stand.
+    if (/^\[\^?[^\]]+\]:\s*\S/.test(line)) continue;
     if (
       !line ||
       /^([-*_=])(?:\s*\1){2,}$/.test(line) ||
@@ -260,7 +341,10 @@ export function markdownText(markdown: unknown, enough = noticeBodyLimit * 2): s
     line = inline(line);
     if (!line) continue;
     if (open && !heading && !item && !row) blocks[blocks.length - 1].text += ` ${line}`;
-    else blocks.push({ text: line, heading });
+    else {
+      blocks.push({ text: line, heading });
+      listed = item;
+    }
     open = !heading && !row;
     length += line.length + 1;
     if (length >= enough) break;
@@ -277,22 +361,42 @@ export function markdownText(markdown: unknown, enough = noticeBodyLimit * 2): s
 }
 
 /**
- * Plain single-line text within `limit` code points, cut at a word where one is near. Lone
- * surrogates cannot cross native IPC, and control characters break toast XML.
+ * Plain single-line text within `limit` code points, cut at a word where one is near and
+ * never inside a character a reader sees as one, such as a flag or a family emoji. Lone
+ * surrogates cannot cross native IPC, control characters break toast XML, and direction
+ * controls and invisible marks could reorder or hide what a model wrote.
  */
 export function notificationLine(value: unknown, limit: number): string {
   if (typeof value !== 'string') return '';
   const text = value
     .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (c) => (c.length === 2 ? c : ''))
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\uE000\uE001\uFFFE\uFFFF]/g, ' ')
+    .replace(/[\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   const chars = Array.from(text);
   if (chars.length <= limit) return text;
-  let cut = chars.slice(0, limit - 1).join('');
+  let cut = graphemes(text, limit - 1);
   const space = cut.lastIndexOf(' ');
   if (space > 0 && space >= cut.length - 20) cut = cut.slice(0, space);
   return `${cut.replace(/[\s,;:.·–—-]+$/, '')}…`;
+}
+
+/** At most `count` code points of `text`, ending between the characters a reader sees. */
+function graphemes(text: string, count: number): string {
+  if (typeof Intl === 'undefined' || !('Segmenter' in Intl))
+    return Array.from(text).slice(0, count).join('');
+  let cut = '';
+  let used = 0;
+  for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+    text,
+  )) {
+    const size = Array.from(segment).length;
+    if (used + size > count) break;
+    cut += segment;
+    used += size;
+  }
+  return cut;
 }
 
 export function notificationConversation(hash: string): string | undefined {

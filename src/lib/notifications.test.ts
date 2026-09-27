@@ -64,6 +64,32 @@ describe('markdownText', () => {
     );
   });
 
+  it('shows no tag, reference, definition or indented code, and keeps comments in code', () => {
+    expect(markdownText('<h2>Title</h2> text <svg><path d="M0"/></svg> <script>x</script>')).toBe(
+      'Title text x',
+    );
+    expect(
+      markdownText('It' + '&#8217;' + 's done &mdash; really &#x1F600; &bogus; &#xD800;'),
+    ).toBe('It’s done — really 😀 &bogus;');
+    // A comment written in code is text; one outside code hides what it covers, across lines.
+    expect(markdownText('Use `<!--` to open a comment.')).toBe('Use <!-- to open a comment.');
+    expect(markdownText('Before <!-- hidden' + '\n' + 'still hidden --> after')).toBe(
+      'Before after',
+    );
+    expect(markdownText(['Intro:', '', '    const code = 1;', '', 'Outro.'].join('\n'))).toBe(
+      'Intro: Outro.',
+    );
+    // A list item keeps its indented continuation.
+    expect(markdownText(['- First', '', '    more about it'].join('\n'))).toBe(
+      'First · more about it',
+    );
+    expect(
+      markdownText(
+        ['See [the docs][1].', '', '[1]: https://example.com', '[^n]: A note'].join('\n'),
+      ),
+    ).toBe('See the docs.');
+  });
+
   it('drops code blocks, including unclosed ones, and stops once it has enough text', () => {
     expect(markdownText('```ts\nconst hidden = 1;\n```')).toBe('');
     expect(markdownText('Before\n~~~\nstreaming code')).toBe('Before');
@@ -80,6 +106,17 @@ describe('notificationLine', () => {
     expect(text).toMatch(/ word…$/);
     const emoji = notificationLine('🙂'.repeat(100), 10);
     expect(emoji).toBe(`${'🙂'.repeat(9)}…`);
+  });
+
+  it('never cuts inside a character a reader sees as one', () => {
+    const family = '👨' + '\u200D' + '👩' + '\u200D' + '👧';
+    // Five code points each: the cut at nine keeps one whole family.
+    expect(notificationLine(family.repeat(30), 10)).toBe(`${family}…`);
+    expect(notificationLine('🇧🇷'.repeat(10), 5)).toBe('🇧🇷🇧🇷…');
+  });
+
+  it('removes direction controls and invisible marks a model could reorder text with', () => {
+    expect(notificationLine('a\u202Eb\u2066c\u2069d\u200Be\u200Ff\uFEFFg', 80)).toBe('abcdefg');
   });
 
   it('removes control characters and lone surrogates that native IPC or toast XML reject', () => {
@@ -137,6 +174,9 @@ describe('chatNotification', () => {
         .body,
     ).toBe('Failed: Claude exited: rate limit');
     expect(chatNotification('error', chat, reply([])).body).toBe('The reply could not finish.');
+    // A very long error is read only as far as the line needs.
+    const long = chatNotification('error', chat, reply([], { error: 'x '.repeat(3_000_000) }));
+    expect(Array.from(long.body).length).toBeLessThanOrEqual(noticeBodyLimit);
   });
 
   it('shows the question each attention key names', () => {
@@ -162,8 +202,9 @@ describe('chatNotification', () => {
     expect(chatNotification('attention', chat, waiting, `attention:${second}`).body).toBe(
       'Question: Ship it?',
     );
+    // The server is named in the chat; its configured name stays off lock screens.
     expect(chatNotification('attention', chat, waiting, `elicitation:${elicitation}`).body).toBe(
-      'github requests your input.',
+      'An MCP server requests your input.',
     );
     // A question tool without a recorded question keeps the generic line.
     expect(chatNotification('attention', chat, reply([]), 'attention').body).toBe(

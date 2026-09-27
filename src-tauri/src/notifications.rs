@@ -130,8 +130,18 @@ impl Notice {
     }
 }
 // One plain line within `limit` characters. Toast XML cannot hold control characters or
-// U+FFFE/U+FFFF, even escaped.
+// U+FFFE/U+FFFF, even escaped, and direction controls and invisible marks could reorder or
+// hide what a model wrote, so they are removed.
 fn line(text: &str, limit: usize) -> String {
+    let text: String = text
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200b}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+            )
+        })
+        .collect();
     let words = text
         .split(|c: char| {
             c.is_whitespace() || c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}')
@@ -463,6 +473,9 @@ mod tests {
             escape_markup("a < b && c > d"),
             "a &lt; b &amp;&amp; c &gt; d"
         );
+        // A model cannot reorder the line with direction controls or hide text in marks.
+        n.title = Some("a\u{202e}b\u{2066}c\u{2069}d\u{200b}e\u{feff}f".into());
+        assert_eq!(n.content().0, "abcdef");
     }
     #[test]
     fn bundled_chime_is_short_audible_pcm_without_clipping() {

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createECDH, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import webpush from 'web-push';
@@ -39,6 +39,7 @@ function fixture() {
   let pending = 0;
   const active = new Set(['session']);
   const titles = new Map<string, string>();
+  const gone = new Set<string>();
   const args = {
     directory,
     token: 'synthetic-notification-pairing-key',
@@ -47,6 +48,7 @@ function fixture() {
     send,
     pendingCount: () => pending,
     conversationTitle: (id: string) => titles.get(id),
+    conversationExists: (id: string) => !gone.has(id),
   };
   let service = pushService(args);
   const device = subscription();
@@ -58,6 +60,7 @@ function fixture() {
     send,
     active,
     titles,
+    gone,
     device,
     directory,
     restart: (token = args.token) => (service = pushService({ ...args, token })),
@@ -296,7 +299,7 @@ it('describes remote jobs from their events when they end before the final check
   await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
   expect(sent()).toMatchObject({ kind: 'cancelled', body: 'Stopped: Editing push.ts' });
-  // Expired jobs fail with the relay's own error; a deleted chat keeps a generic title.
+  // Expired jobs fail with the relay's own error; a chat without a known title keeps a generic one.
   f.service.jobUpdated(
     runJob(crypto.randomUUID(), 'error', [], 'Error: The execution environment disconnected.'),
   );
@@ -368,6 +371,101 @@ it('recognizes only explicit parent question tools and deduplicates job and work
   f.service.changed(question, done);
   await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+});
+/** A reply waiting on the AskUserQuestion tool, whose question is not recorded yet. */
+function asking(value = workspace()) {
+  const asked = structuredClone(value);
+  asked.conversations[0].messages[0].blocks.push({
+    type: 'activity',
+    text: 'AskUserQuestion',
+    tool: {
+      id: 'question-1',
+      revision: 1,
+      category: 'tool',
+      name: 'AskUserQuestion',
+      status: 'running',
+      facts: [],
+      sources: [],
+      agents: [],
+    },
+  });
+  return asked;
+}
+const branchQuestion = () => ({
+  id: crypto.randomUUID(),
+  revision: 1,
+  status: 'pending' as const,
+  questions: [
+    { id: 'q', header: 'Branch', question: 'Which branch?', options: [], multiSelect: false },
+  ],
+});
+it('gives a held question alert the question recorded after its tool, on either path', async () => {
+  const f = fixture();
+  const running = workspace();
+  const tool = asking(running);
+  f.service.changed(running, tool);
+  f.advance(3_000);
+  const asked = structuredClone(tool);
+  asked.conversations[0].messages[0].questions = [branchQuestion()];
+  f.service.changed(tool, asked);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(f.send.mock.calls[0][1])).toMatchObject({
+    kind: 'attention',
+    body: 'Question: Which branch?',
+  });
+  // A job reports the tool, then the question, in later updates of the same run.
+  const conversationId = crypto.randomUUID();
+  const job = runJob(conversationId, 'running', [
+    { kind: 'tool', tool: (tool.conversations[0].messages[0].blocks[1] as { tool: unknown }).tool },
+  ]);
+  f.service.jobUpdated(job);
+  f.advance(2_000);
+  f.service.jobUpdated({
+    ...job,
+    events: [...job.events, { kind: 'question', question: branchQuestion() }],
+  });
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(f.send.mock.calls[1][1]).body).toBe('Question: Which branch?');
+});
+it('drops an alert held for a chat deleted meanwhile', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  f.service.changed(emptyShared(), done);
+  f.gone.add(done.conversations[0].id);
+  await f.settle();
+  expect(f.send).not.toHaveBeenCalled();
+});
+it('keeps a reading by an active session when a later reader of the chat is revoked', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  const id = done.conversations[0].id;
+  f.active.add('other');
+  f.service.changed(emptyShared(), done);
+  f.service.view('desktop', 1, id, 'session');
+  f.service.view('desktop', 2, null, 'session');
+  f.service.view('laptop', 1, id, 'other');
+  f.service.view('laptop', 2, null, 'other');
+  f.active.delete('other');
+  await f.settle();
+  expect(f.send).not.toHaveBeenCalled();
+});
+it('drops a saved alert it cannot read instead of refusing the whole file', async () => {
+  const f = fixture();
+  f.service.changed(emptyShared(), workspace('complete'));
+  const file = join(f.directory, 'web-push.json');
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  saved.pending.push({
+    ...saved.pending[0],
+    id: crypto.randomUUID(),
+    notice: { ...saved.pending[0].notice, body: 'x'.repeat(5_000) },
+  });
+  writeFileSync(file, JSON.stringify(saved));
+  f.restart();
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(f.send.mock.calls[0][1]).body).toBe('Ready to ship today?');
 });
 it('retries transient delivery after restart, removes expired endpoints, and revokes on session expiry or key rotation', async () => {
   const f = fixture();

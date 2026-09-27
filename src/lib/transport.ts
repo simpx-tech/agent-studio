@@ -226,7 +226,27 @@ export async function watchCliUpdates(onChange: (updates: CliUpdates) => void): 
   }
   return unlisten;
 }
-const desktopNotices = createDesktopNotificationTracker();
+// An alert waiting for its question asks for another look once the wait is over, taken at
+// the workspace this window last saved.
+let noticeWorkspace: Pick<Workspace, 'conversations'> | undefined;
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+const desktopNotices = createDesktopNotificationTracker(Date.now, (delay) => {
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    if (noticeWorkspace) notifyDesktop(noticeWorkspace);
+  }, delay);
+});
+function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
+  noticeWorkspace = workspace;
+  for (const notice of desktopNotices(workspace)) {
+    // Consume all lifecycle events, including suppressed ones, so switching
+    // chats later cannot replay an alert the reader already saw.
+    if (notice.conversationId === foregroundConversation()) continue;
+    // Notification/audio failure must never fail saving or interrupt a CLI run.
+    // Native delivery retains an actionable error in Connections.
+    void invoke('desktop_notification', { notice }).catch(() => {});
+  }
+}
 let notificationConversationId: () => string | undefined = () => undefined;
 let notificationViewId = '';
 let notificationViewRevision = 0;
@@ -2168,14 +2188,7 @@ export async function saveWorkspace(
         else throw e;
       }
     } else await invoke('save_workspace', { workspace });
-    for (const notice of desktopNotices(workspace)) {
-      // Consume all lifecycle events, including suppressed ones, so switching
-      // chats later cannot replay an alert the reader already saw.
-      if (notice.conversationId === foregroundConversation()) continue;
-      // Notification/audio failure must never fail saving or interrupt a CLI run.
-      // Native delivery retains an actionable error in Connections.
-      void invoke('desktop_notification', { notice }).catch(() => {});
-    }
+    notifyDesktop(workspace);
   } else {
     // A queued save from a former session must never be written to the new user's cache.
     if (!scope || scope !== workspaceStorageScope()) return;

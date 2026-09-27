@@ -138,6 +138,28 @@ test('desktop defaults on, retains mute and disable, notifies for questions and 
       },
     }),
   );
+  // The tool starts before its question is recorded, and its alert waits for the question.
+  await page.waitForTimeout(1000);
+  expect(await notices()).toHaveLength(1);
+  await page.evaluate(() =>
+    (window as any).emitCapability({
+      kind: 'question',
+      question: {
+        id: crypto.randomUUID(),
+        revision: 1,
+        status: 'pending',
+        questions: [
+          {
+            id: 'scope',
+            header: 'Scope',
+            question: 'Include the **mobile** checklist?',
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      },
+    }),
+  );
   await expect.poll(notices).toHaveLength(2);
   await page.evaluate(() => {
     (window as any).emitCapability({ kind: 'text', text: 'The **checklist** is ready.' });
@@ -145,13 +167,13 @@ test('desktop defaults on, retains mute and disable, notifies for questions and 
   });
   await expect.poll(notices).toHaveLength(3);
   // Each alert names its chat (the first message until a title is generated) and says
-  // what the reply did; a question tool without a recorded question keeps generic text.
+  // what the reply did, here the question its tool recorded.
   const [test, attention, complete] = await notices();
   expect(test).toEqual({ kind: 'test', tag: expect.stringMatching(/^test:/) });
   expect(attention).toMatchObject({
     kind: 'attention',
     title: 'Plan the release checklist',
-    body: 'Your agent asked for your input.',
+    body: 'Question: Include the mobile checklist?',
   });
   expect(complete).toMatchObject({
     kind: 'complete',

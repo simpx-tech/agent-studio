@@ -30,9 +30,12 @@ worker.addEventListener('push', (event) => {
       worker.registration.showNotification(title, {
         body,
         tag: notice.tag,
+        // Alerts of one reply share its tag, so the end replaces an unread question; it
+        // still rings rather than changing the old alert silently.
+        renotify: true,
         icon: '/icons/icon-192.png',
         data: { conversationId: notice.conversationId },
-      }),
+      } as NotificationOptions),
       notice.pendingCount === undefined
         ? Promise.resolve()
         : applyAppBadge(worker.navigator, notice.pendingCount).catch(() => {}),
