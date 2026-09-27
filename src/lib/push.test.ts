@@ -29,7 +29,13 @@ function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'studio-push-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   let time = Date.now();
-  const send = vi.fn(async (_subscription: webpush.PushSubscription, _payload: string) => {});
+  const send = vi.fn(
+    async (
+      _subscription: webpush.PushSubscription,
+      _payload: string,
+      _options: webpush.RequestOptions,
+    ) => {},
+  );
   let pending = 0;
   const active = new Set(['session']);
   const titles = new Map<string, string>();
@@ -56,6 +62,11 @@ function fixture() {
     directory,
     restart: (token = args.token) => (service = pushService({ ...args, token })),
     advance: (ms: number) => (time += ms),
+    // The relay coming back for an alert once its hold for a computer has passed.
+    settle: async () => {
+      time += 20_001;
+      await service.drain();
+    },
     pending: (count: number) => (pending = count),
   };
 }
@@ -64,6 +75,7 @@ it('sends the exact current pending count and refreshes it on retries instead of
   f.pending(7);
   f.send.mockRejectedValueOnce({ statusCode: 503 });
   f.service.changed(emptyShared(), workspace('complete'));
+  await f.settle();
   await vi.waitFor(() => expect(f.service.status('session').deliveryFailed).toBe(true));
   expect(JSON.parse(f.send.mock.calls[0][1]).pendingCount).toBe(7);
   f.pending(0);
@@ -86,11 +98,39 @@ it('suppresses viewed chat events across devices without replay, while other cha
   expect(f.send).not.toHaveBeenCalled();
   f.service.view('desktop:tab', 3, id);
   f.service.changed(emptyShared(), workspace('error'));
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   f.service.test('session');
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
   expect(JSON.parse(f.send.mock.calls[1][1]).kind).toBe('test');
   expect(readFileSync(join(f.directory, 'web-push.json'), 'utf8')).not.toContain('desktop:tab');
+});
+it('holds a chat alert for a computer to open it, while tests and prompt delivery are immediate', async () => {
+  const f = fixture();
+  const done = workspace('complete');
+  const id = done.conversations[0].id;
+  f.service.changed(emptyShared(), done);
+  f.advance(19_000);
+  await f.service.drain();
+  // The phone stays quiet while the reply can still be read where it was started.
+  expect(f.send).not.toHaveBeenCalled();
+  f.service.test('session');
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(f.send.mock.calls[0][1]).kind).toBe('test');
+  // Push services hold a normal alert back for a dozing phone; a reply must not wait.
+  expect(f.send.mock.calls[0][2]).toMatchObject({ urgency: 'high' });
+  // Opening the chat on a computer during the hold drops it, even after moving on.
+  f.service.view('desktop', 1, id, 'session');
+  f.advance(500);
+  f.service.view('desktop', 2, null, 'session');
+  f.advance(20_000);
+  await f.service.drain();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  // A chat nobody opened still reaches the phone once its hold has passed.
+  f.service.changed(emptyShared(), workspace('error'));
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(f.send.mock.calls[1][1])).toMatchObject({ kind: 'error' });
 });
 it('uses ordered per-tab leases, expires crashed clients, and ignores signed-out viewers', async () => {
   const f = fixture();
@@ -99,6 +139,7 @@ it('uses ordered per-tab leases, expires crashed clients, and ignores signed-out
   f.service.view('tab-a', 2, null, 'session');
   f.service.view('tab-a', 1, id, 'session'); // An older focus request arrives after blur.
   f.service.changed(emptyShared(), done);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   const next = workspace('cancelled');
   f.service.view('tab-a', 3, next.conversations[0].id, 'session');
@@ -110,12 +151,14 @@ it('uses ordered per-tab leases, expires crashed clients, and ignores signed-out
   f.service.view('tab-a', 4, expired.conversations[0].id, 'session');
   f.advance(15_000);
   f.service.changed(emptyShared(), expired);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
   const signedOut = workspace('complete');
   f.active.add('viewer');
   f.service.view('signed-out', 1, signedOut.conversations[0].id, 'viewer');
   f.active.delete('viewer');
   f.service.changed(emptyShared(), signedOut);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
 });
 it('drops queued retries when their chat is viewed and deduplicates job/checkpoint paths', async () => {
@@ -125,6 +168,7 @@ it('drops queued retries when their chat is viewed and deduplicates job/checkpoi
   const runId = done.conversations[0].messages[0].runId!;
   f.send.mockRejectedValueOnce({ statusCode: 503 });
   f.service.changed(emptyShared(), done);
+  await f.settle();
   await vi.waitFor(() => expect(f.service.status('session').deliveryFailed).toBe(true));
   f.service.view('desktop', 1, conversationId);
   f.advance(10_001);
@@ -200,6 +244,7 @@ it('notifies once for a finished local reply, never replays history, and persist
   f.service.changed(emptyShared(), running);
   expect(f.send).not.toHaveBeenCalled();
   f.service.changed(running, done);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   // The alert names its chat and starts with the reply, as plain text.
   expect(JSON.parse(f.send.mock.calls[0][1])).toMatchObject({
@@ -234,6 +279,7 @@ it('describes remote jobs from their events when they end before the final check
       { kind: 'text', text: '## Done\nThe **phone** alert names its chat.' },
     ]),
   );
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   expect(sent()).toMatchObject({
     kind: 'complete',
@@ -247,12 +293,14 @@ it('describes remote jobs from their events when they end before the final check
       { kind: 'text', text: 42 },
     ]),
   );
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
   expect(sent()).toMatchObject({ kind: 'cancelled', body: 'Stopped: Editing push.ts' });
   // Expired jobs fail with the relay's own error; a deleted chat keeps a generic title.
   f.service.jobUpdated(
     runJob(crypto.randomUUID(), 'error', [], 'Error: The execution environment disconnected.'),
   );
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
   expect(sent()).toMatchObject({
     title: 'Your agent needs attention',
@@ -267,6 +315,7 @@ it('describes remote jobs from their events when they end before the final check
     ],
   };
   f.service.jobUpdated(runJob(conversationId, 'running', [{ kind: 'question', question }]));
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(4));
   expect(sent()).toMatchObject({
     kind: 'attention',
@@ -295,6 +344,7 @@ it('recognizes only explicit parent question tools and deduplicates job and work
   });
   expect(requestsAttention(running.conversations[0].messages[0])).toBe(false);
   f.service.changed(running, question);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   f.service.jobUpdated({
     id: message.runId!,
@@ -316,12 +366,14 @@ it('recognizes only explicit parent question tools and deduplicates job and work
   const done = structuredClone(question);
   done.conversations[0].messages[0].status = 'complete';
   f.service.changed(question, done);
+  await f.settle();
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
 });
 it('retries transient delivery after restart, removes expired endpoints, and revokes on session expiry or key rotation', async () => {
   const f = fixture();
   f.send.mockRejectedValueOnce({ statusCode: 503 });
   f.service.changed(emptyShared(), workspace('error'));
+  await f.settle();
   await vi.waitFor(() => expect(f.service.status('session').deliveryFailed).toBe(true));
   f.restart();
   f.advance(10_001);
@@ -359,7 +411,9 @@ it('an in-flight expired endpoint cannot revoke a browser subscription renewed d
     () => new Promise<void>((_resolve, reject) => (rejectOld = reject)),
   );
   f.service.changed(emptyShared(), workspace('complete'));
-  expect(f.send).toHaveBeenCalledTimes(1);
+  f.advance(20_001);
+  void f.service.drain();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
   f.service.subscribe('session', crypto.randomUUID(), subscription(), 'https://studio.example.com');
   rejectOld({ statusCode: 410 });
   await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));

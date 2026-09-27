@@ -25,6 +25,10 @@ import { elicitationReceiptSchema, type ElicitationReceipt } from '../src/lib/el
 import { proposedPlanSchema, type ProposedPlan } from '../src/lib/proposed-plans.ts';
 
 const day = 24 * 60 * 60 * 1000;
+// A phone alert waits this long for the chat to be opened on a computer instead. A reply
+// often ends while its reader is at their desk with the app behind another window, where
+// only its own notification shows it; the phone should ring for what they leave unread.
+const hold = 20_000;
 // Browser-supplied endpoints must never turn the relay into an HTTP proxy.
 export function validPushEndpoint(value: string): boolean {
   try {
@@ -87,6 +91,7 @@ const diskSchema = z.object({
         id: z.string().uuid(),
         subscriber: z.string().uuid(),
         notice: noticeSchema,
+        created: z.number().optional(),
         expires: z.number(),
         next: z.number(),
         attempts: z.number(),
@@ -168,6 +173,9 @@ export function pushService({
       session?: string;
     }
   >();
+  // When each chat was last open in a visible, focused window, so an alert held for a
+  // computer is dropped even when its reader has since moved on to another chat.
+  const read = new Map<string, { at: number; session?: string }>();
   function viewing(notice: PushNotice): boolean {
     return (
       notice.kind !== 'test' &&
@@ -178,6 +186,17 @@ export function pushService({
           now() - view.seenAt < 15_000 &&
           (!view.session || sessionActive(view.session)),
       )
+    );
+  }
+  function covered(item: State['pending'][number]): boolean {
+    const id = item.notice.conversationId;
+    if (!id) return false;
+    if (viewing(item.notice)) return true;
+    const last = read.get(id);
+    return (
+      !!last &&
+      last.at >= (item.created ?? item.expires - day) &&
+      (!last.session || sessionActive(last.session))
     );
   }
   function save(next: State) {
@@ -243,8 +262,10 @@ export function pushService({
         id: randomUUID(),
         subscriber: subscriber.id,
         notice,
+        created: now(),
         expires: now() + day,
-        next: now(),
+        // A test is a button the reader is waiting on; chat alerts wait for the computer.
+        next: notice.kind === 'test' ? now() : now() + hold,
         attempts: 0,
       });
     }
@@ -252,6 +273,28 @@ export function pushService({
     next.pending = next.pending.slice(-4000);
   }
   let draining = false;
+  let waking: ReturnType<typeof setTimeout> | undefined;
+  // The server sweeps every ten seconds, which is coarse for a held alert. Wake at the
+  // moment the next one is due so its delay stays the one this service decided on.
+  function wake() {
+    if (waking) clearTimeout(waking);
+    waking = undefined;
+    // Unwritable storage is the server's ten-second sweep to keep retrying, not this.
+    if (unavailable) return;
+    const due = state.pending.reduce(
+      (soonest, p) => Math.min(soonest, p.next),
+      Number.POSITIVE_INFINITY,
+    );
+    if (!Number.isFinite(due)) return;
+    waking = setTimeout(
+      () => {
+        waking = undefined;
+        void drain();
+      },
+      Math.min(60_000, Math.max(250, due - now())),
+    );
+    waking.unref();
+  }
   async function drain() {
     if (draining || !active()) return;
     draining = true;
@@ -266,8 +309,8 @@ export function pushService({
           save(pruned());
           continue;
         }
-        // A reader may open the chat while a failed delivery waits to retry.
-        if (viewing(item.notice)) {
+        // A reader may open the chat while the hold or a failed delivery waits.
+        if (covered(item)) {
           save({ ...state, pending: state.pending.filter((p) => p.id !== item.id) });
           continue;
         }
@@ -282,7 +325,10 @@ export function pushService({
           };
           await send(subscriber.subscription, JSON.stringify(notice), {
             TTL: Math.max(0, Math.floor((item.expires - now()) / 1000)),
-            urgency: 'normal',
+            // A reply the reader is waiting for is time-sensitive: normal urgency lets a
+            // push service hold it for a dozing phone until its next maintenance window,
+            // which delivered alerts minutes after the answer they announce.
+            urgency: 'high',
             timeout: 10_000,
             topic: createHmac('sha256', token)
               .update(item.notice.tag)
@@ -335,6 +381,7 @@ export function pushService({
       unavailable = true;
     } finally {
       draining = false;
+      if (active()) wake();
     }
   }
   function changed(before: SharedWorkspace, after: SharedWorkspace) {
@@ -395,6 +442,14 @@ export function pushService({
       if (old && revision <= old.revision) return;
       if (!old && views.size >= 1000) throw new Error('Notification view limit reached.');
       views.set(source, { revision, conversationId, seenAt: now(), session });
+      if (!conversationId || (session && !sessionActive(session))) return;
+      // Newest last, so the oldest records are the ones this bounded map drops.
+      read.delete(conversationId);
+      read.set(conversationId, { at: now(), session });
+      for (const [id, last] of read) {
+        if (read.size <= 1000 && now() - last.at < day) break;
+        read.delete(id);
+      }
     },
     jobUpdated(job: RelayJob) {
       if (job.method !== 'run') return;

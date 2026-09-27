@@ -3270,6 +3270,10 @@
         }
         saveSoon(conversation.id);
         noteFinishedChats();
+        // Publish the end of the reply at once rather than on the next poll: a window
+        // behind others or minimized has its timers throttled to about once a minute,
+        // which held back the phone alert for the chat by that long.
+        if (paired) void syncNow();
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
       }

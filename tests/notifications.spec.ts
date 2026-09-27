@@ -17,10 +17,12 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
   const directory = mkdtempSync(join(tmpdir(), 'studio-foreground-push-'));
   const token = 'synthetic-foreground-notification-key';
   const deliveries: { kind: string; conversationId?: string }[] = [];
+  let time = Date.now();
   const server = createRelay({
     directory,
     token,
     webDirectory: resolve('build'),
+    now: () => time,
     pushSender: async (_subscription, payload) => {
       deliveries.push(JSON.parse(payload));
     },
@@ -57,6 +59,12 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
       body: JSON.stringify({ revision: state.revision, workspace: state.workspace }),
     });
     expect(result.status).toBe(200);
+  };
+  // A chat alert waits for one of this workspace's own windows to open that chat
+  // instead. This is the relay coming back for it once that hold has passed.
+  const held = async () => {
+    time += 20_001;
+    await update(() => {});
   };
   let viewed: string | null | undefined;
   let browserHeaders: Record<string, string> = {};
@@ -105,6 +113,8 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
     await update((state) => {
       state.conversations[1].messages[0].status = 'complete';
     });
+    expect(deliveries).toEqual([]);
+    await held();
     await expect.poll(() => deliveries.length).toBe(1);
     expect(deliveries[0]).toMatchObject({
       kind: 'complete',
@@ -123,6 +133,7 @@ test('the foreground PWA chat stays quiet, other chats notify, and leaving the a
       message.runId = crypto.randomUUID();
       message.status = 'error';
     });
+    await held();
     await expect.poll(() => deliveries.length).toBe(2);
     expect(deliveries[1]).toMatchObject({
       kind: 'error',
@@ -146,10 +157,12 @@ test('mobile opts in, receives a real worker push without an app page, opens its
   const directory = mkdtempSync(join(tmpdir(), 'studio-notifications-browser-'));
   const token = 'synthetic-push-browser-test-pairing-key';
   const deliveries: { kind: string; conversationId?: string; pendingCount?: number }[] = [];
+  let time = Date.now();
   const server = createRelay({
     directory,
     token,
     webDirectory: resolve('build'),
+    now: () => time,
     pushSender: async (_subscription, payload) => {
       deliveries.push(JSON.parse(payload));
     },
@@ -260,6 +273,16 @@ test('mobile opts in, receives a real worker push without an app page, opens its
       method: 'PUT',
       headers,
       body: JSON.stringify({ revision: current.revision, workspace: current.workspace }),
+    });
+    // Its alert waits for a window of this workspace to open that chat; no computer
+    // does, so the relay comes back for it once that hold has passed.
+    expect(deliveries).toHaveLength(1);
+    time += 20_001;
+    const settled = await (await fetch(url + '/v1/state', { headers })).json();
+    await fetch(url + '/v1/state', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ revision: settled.revision, workspace: settled.workspace }),
     });
     await expect.poll(() => deliveries.length).toBe(2);
     expect(deliveries[1].pendingCount).toBe(2);

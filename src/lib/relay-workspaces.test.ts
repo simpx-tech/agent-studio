@@ -716,6 +716,12 @@ describe('private relay workspaces over real HTTP', () => {
     expect(
       (await f.call(f.alice.token, 'PUT', 'state', { revision: 1, workspace: done })).status,
     ).toBe(200);
+    // Her alert waits for one of her own windows to open that chat instead; the relay
+    // comes back for it once the hold has passed, and repeats no alert already sent.
+    f.advance(20_001);
+    expect(
+      (await f.call(f.alice.token, 'PUT', 'state', { revision: 2, workspace: done })).status,
+    ).toBe(200);
     await vi.waitFor(() => expect(f.sent).toHaveLength(1));
     expect(f.sent[0].endpoint).toBe(subscriptions[0].endpoint);
     expect(f.sent[0].payload.pendingCount).toBe(1);
