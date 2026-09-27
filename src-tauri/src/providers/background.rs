@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 pub const TOOL: &str = "await_background_tasks";
 const CLAUDE_NAME: &str = "mcp__agent_studio__await_background_tasks";
-pub const DESCRIPTION: &str = "Keep your reply open while you wait for background tasks you started. Agent Studio tells the user that a reply is finished when your turn ends, so call this right before ending a turn in which you wait for finite background work whose results you still need: tests, builds, type checks, installs, migrations or CI polling started with run_in_background or Monitor. Pass their task IDs, then end your turn: you are re-invoked when each task finishes, and the reply completes after your final turn. Never pass servers, watchers or an app you launched for the user to try; they keep running after the reply ends. Background agents and workflows are awaited automatically.";
+pub const DESCRIPTION: &str = "Keep your reply open while you wait for background tasks you started. Agent Studio tells the user that a reply is finished when your turn ends, so call this right before ending a turn in which you wait for finite background work whose results you still need: tests, builds, type checks, installs, migrations or CI polling started with run_in_background or Monitor. Pass their IDs in task_ids, then end your turn: you are re-invoked when each task finishes, and the reply completes after your final turn. Never pass servers, watchers or an app you launched for the user to try; they keep running after the reply ends. Background agents and workflows are awaited automatically.";
 const MAX_IDS: usize = 8;
 const MAX_TASKS: usize = 256;
 const MAX_AWAITED: usize = 32;

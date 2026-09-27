@@ -45,6 +45,16 @@ pub fn codex_tool() -> Value {
 const INVALID: &str = "Provide id (letters, digits, _ or -, at most 80), title (at most 100), and html (at most 512000 UTF-8 bytes). No other fields or file paths are accepted.";
 const TOO_MANY: &str = "This reply already contains 12 visuals. Update an existing id.";
 
+/// The fault in an invalid call, naming any field this tool does not accept before its own
+/// field list, so a caller that guessed a name is corrected by the refusal itself.
+fn invalid_message(args: &Value) -> String {
+    let unexpected = super::unexpected_fields(args, &["id", "title", "html"]);
+    if unexpected.is_empty() {
+        return INVALID.into();
+    }
+    super::unexpected_message(&unexpected, INVALID)
+}
+
 fn valid(args: &Value) -> bool {
     args.as_object().is_some_and(|o| o.len() == 3)
         && args["id"].as_str().is_some_and(|s| {
@@ -73,13 +83,13 @@ impl Visualizer {
     pub fn has_visuals(&self) -> bool {
         self.published
     }
-    fn submit(&mut self, args: &Value) -> Result<Visualization, &'static str> {
+    fn submit(&mut self, args: &Value) -> Result<Visualization, String> {
         if !valid(args) {
-            return Err(INVALID);
+            return Err(invalid_message(args));
         }
         let index = self.visuals.iter().position(|v| v.id == args["id"]);
         if index.is_none() && self.visuals.len() >= 12 {
-            return Err(TOO_MANY);
+            return Err(TOO_MANY.into());
         }
         let source = args["html"].as_str().unwrap();
         if self
@@ -92,7 +102,7 @@ impl Visualizer {
             + source.len()
             > MAX_TOTAL
         {
-            return Err("Visuals in one reply must total at most 2000000 UTF-8 bytes.");
+            return Err("Visuals in one reply must total at most 2000000 UTF-8 bytes.".into());
         }
         let visual = Visualization {
             id: args["id"].as_str().unwrap().into(),
@@ -119,13 +129,13 @@ impl Visualizer {
         let result = if !root.is_empty() && p["threadId"] == root && p["namespace"].is_null() {
             self.submit(&p["arguments"])
         } else {
-            Err("Visualizations must be submitted by the parent conversation.")
+            Err("Visualizations must be submitted by the parent conversation.".into())
         };
         self.published |= result.is_ok();
         let text = result
             .as_ref()
             .map(|v| placement(&v.id))
-            .unwrap_or_else(|e| (*e).into());
+            .unwrap_or_else(Clone::clone);
         let response = json!({"id":value["id"],"result":{"success":result.is_ok(),"contentItems":[{"type":"inputText","text":text}]}});
         Some((
             response,
@@ -195,16 +205,19 @@ impl Visualizer {
                 } else if !valid(args) {
                     // Registration needs valid arguments, so a malformed call reaches here.
                     // Say so: an unregistered-caller refusal reads as a missing capability.
-                    Err(INVALID)
+                    Err(invalid_message(args))
                 } else if self.pending.len() >= 12 {
-                    Err(TOO_MANY)
+                    Err(TOO_MANY.into())
                 } else {
-                    Err("Only a registered parent-conversation visualize call can display a visual.")
+                    Err(
+                        "Only a registered parent-conversation visualize call can display a visual."
+                            .into(),
+                    )
                 };
                 let text = result
                     .as_ref()
                     .map(|_| placement(args["id"].as_str().unwrap()))
-                    .unwrap_or_else(|e| (*e).into());
+                    .unwrap_or_else(Clone::clone);
                 response["result"] =
                     json!({"isError":result.is_err(),"content":[{"type":"text","text":text}]});
             }
@@ -365,6 +378,10 @@ mod tests {
         let result = &refused["response"]["response"]["mcp_response"]["result"];
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("sent markup, which this tool does not accept"),
+            "{text}"
+        );
         assert!(text.contains("Provide id"), "{text}");
         assert!(!text.contains("registered parent-conversation"), "{text}");
         // A thirteenth visual is refused for the ceiling, which names the way out.

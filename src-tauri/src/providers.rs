@@ -65,6 +65,31 @@ impl Executable {
 pub fn valid_provider(provider: &str) -> bool {
     ["codex", "claude", "gemini"].contains(&provider)
 }
+
+/// Names the fields a tool call sent that its schema does not accept, so a refusal can
+/// correct the caller's guess. A model that reaches one of our tools through a deferred
+/// schema has only the tool's prose to name its arguments, and this ships to computers
+/// whose models we never see: the refusal has to teach the call shape by itself.
+pub(crate) fn unexpected_fields(args: &serde_json::Value, accepted: &[&str]) -> Vec<String> {
+    args.as_object()
+        .map(|object| {
+            object
+                .keys()
+                .filter(|key| !accepted.contains(&key.as_str()))
+                .take(5)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A refusal that names the rejected fields before the tool's own field list.
+pub(crate) fn unexpected_message(unexpected: &[String], accepted: &str) -> String {
+    format!(
+        "This call sent {}, which this tool does not accept. {accepted}",
+        unexpected.join(", ")
+    )
+}
 fn search_dirs() -> Vec<PathBuf> {
     let mut paths: Vec<_> = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect();
     if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {

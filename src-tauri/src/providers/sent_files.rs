@@ -21,7 +21,7 @@ const MAX_PATH: usize = 4096;
 const MAX_CAPTION: usize = 300;
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, its absolute paths in files, and an optional one-line caption. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 12 MiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 12 MiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,13 +75,13 @@ struct Submission {
     caption: Option<String>,
 }
 fn parse(args: &Value) -> Result<Submission, String> {
-    let object = args.as_object().ok_or(INVALID)?;
-    if object.len() > 3
-        || object
-            .keys()
-            .any(|k| !["id", "files", "caption"].contains(&k.as_str()))
-    {
+    if !args.is_object() {
         return Err(INVALID.into());
+    }
+    // Keys are unique, so rejecting every unaccepted name also bounds the object's size.
+    let unexpected = super::unexpected_fields(args, &["id", "files", "caption"]);
+    if !unexpected.is_empty() {
+        return Err(super::unexpected_message(&unexpected, INVALID));
     }
     let id = args["id"]
         .as_str()
@@ -575,6 +575,10 @@ mod tests {
         sender.observe_claude(&observed("t1", misnamed.clone()));
         let answer = sender.claude(&control(misnamed), &staging).await.unwrap();
         let text = refusal(&answer);
+        assert!(
+            text.contains("sent paths, which this tool does not accept"),
+            "{text}"
+        );
         assert!(text.contains("files (1 to 8 absolute paths"), "{text}");
         assert!(!text.contains("registered parent-conversation"), "{text}");
         // Past the ceiling the refusal names the way out rather than the registration.
