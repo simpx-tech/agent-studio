@@ -38,12 +38,19 @@ export const toolOutputSchema = z.object({
 });
 export type ToolOutput = z.infer<typeof toolOutputSchema>;
 export type ToolOutputImageInfo = ToolOutput['images'][number];
+/**
+ * One base64 string, checked without a group repeated per four characters: on a file of
+ * several megabytes that overflows the regular expression engine. A length one past a
+ * multiple of four cannot be decoded.
+ */
+const base64 = z
+  .string()
+  .min(4)
+  .regex(/^[A-Za-z0-9+/]+={0,2}$/)
+  .refine((data) => data.length % 4 !== 1);
 export const toolOutputImageSchema = z.object({
   mediaType: z.enum(toolOutputImageTypes),
-  data: z
-    .string()
-    .min(4)
-    .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  data: base64,
   bytes: size,
   width: dimension,
   height: dimension,
@@ -68,21 +75,21 @@ export const modelFormats = {
 } as const satisfies Record<ToolOutputModelType, string>;
 export const toolOutputModelSchema = z.object({
   format: z.enum(['glb', 'gltf', 'obj', 'stl', 'fbx']),
-  // One base64 string, checked without a group repeated per four characters: on a file of
-  // several megabytes that overflows the regular expression engine.
-  data: z
-    .string()
-    .min(4)
-    .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  data: base64,
   bytes: size,
 });
 export type ToolOutputModel = z.infer<typeof toolOutputModelSchema>;
-/** Model bytes for a loader, without a copy through a data URL. */
-export function modelBytes(model: ToolOutputModel): ArrayBuffer {
-  const binary = atob(model.data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
+/**
+ * Model bytes for a loader. A model runs to 12 MiB, and decoding it a character at a time
+ * held the page for a long frame, so the engine decodes it: natively where it can, otherwise
+ * through a data: URL fetched away from the page.
+ */
+export async function modelBytes(model: ToolOutputModel): Promise<ArrayBuffer> {
+  const native = Uint8Array as unknown as { fromBase64?(data: string): Uint8Array };
+  if (typeof native.fromBase64 === 'function')
+    return native.fromBase64(model.data).buffer as ArrayBuffer;
+  const response = await fetch(`data:application/octet-stream;base64,${model.data}`);
+  return response.arrayBuffer();
 }
 
 export const toolOutputImageUrl = (image: ToolOutputImage) =>

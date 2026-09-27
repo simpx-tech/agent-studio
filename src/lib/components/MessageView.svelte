@@ -85,8 +85,11 @@
     message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
   );
   const artifacts = $derived(messageArtifacts(message));
-  const content = $derived(replyContent(text, message.visualizations, message.sentFiles));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
+  // A structured reply's text is its JSON, shown whole above; its visuals and files follow it.
+  const content = $derived(
+    replyContent(structured ? '' : text, message.visualizations, message.sentFiles),
+  );
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
   const waiting = $derived(awaitingAnswer(message));
   function linkClick(event: MouseEvent) {
@@ -179,7 +182,7 @@
           <pre><code class="hljs language-json">{#if jsonHighlight}{@html jsonHighlight.html}{:else}{text}{/if}</code></pre>
         </div>
       {/if}
-      {#each structured ? [] : content as part (part.key)}
+      {#each content as part (part.key)}
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
         {:else if part.type === 'files'}
@@ -224,7 +227,7 @@
           running={message.status === 'running'}
         />
       {/each}
-      {#if !content.length && message.status === 'running' && !message.blocks.length}<div
+      {#if !content.length && !(structured && text) && message.status === 'running' && !message.blocks.length}<div
           class="reply-waiting"
         >
           <span></span><span></span><span></span><small>Making room for a good answer…</small>

@@ -134,7 +134,7 @@ it('places a group at its own marker, once, and keeps an unmarked group in the r
   ]);
 });
 
-it('records a 3D model beside images and reads its bytes back', () => {
+it('records a 3D model beside images and reads its bytes back', async () => {
   const model = {
     ...group,
     id: 'figure',
@@ -155,6 +155,6 @@ it('records a 3D model beside images and reads its bytes back', () => {
   expect(modelFormats['model/gltf-binary']).toBe('glb');
   // Images and models are numbered within their own kind, so both start at zero.
   expect(mergeSentFiles([group], [model]).map((g) => g.id)).toEqual(['renders', 'figure']);
-  const bytes = new Uint8Array(modelBytes({ format: 'glb', data: 'Z2xURg==', bytes: 4 }));
+  const bytes = new Uint8Array(await modelBytes({ format: 'glb', data: 'Z2xURg==', bytes: 4 }));
   expect([...bytes]).toEqual([...new TextEncoder().encode('glTF')]);
 });

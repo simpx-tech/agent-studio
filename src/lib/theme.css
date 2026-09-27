@@ -124,6 +124,8 @@
   --code-bg: #0c0c0e;
   --code-inline-bg: rgb(255 255 255 / 0.07);
   --code-text: #dcdce0;
+  /* A shown 3D model that carries no colour of its own */
+  --model-surface: #b9bcc4;
   --syntax-comment: #7d7d88;
   --syntax-keyword: #d0a8f0;
   --syntax-string: #b9df86;
@@ -310,6 +312,7 @@
   --code-bg: #f6f6f8;
   --code-inline-bg: rgb(0 0 0 / 0.05);
   --code-text: #27272a;
+  --model-surface: #7c808b;
   --syntax-comment: #8a8a95;
   --syntax-keyword: #8a3fd1;
   --syntax-string: #3d7d19;

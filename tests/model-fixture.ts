@@ -30,7 +30,8 @@ function glbContainer(json: string, binary: Uint8Array): Uint8Array {
   return glb;
 }
 
-export function triangleGlb(): Uint8Array {
+/** One triangle, turning through its 'Spin' clip unless `animated` is off. */
+export function triangleGlb({ animated = true } = {}): Uint8Array {
   const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
   const times = new Float32Array([0, 1]);
   const rotations = new Float32Array([0, 0, 0, 1, 0, 1, 0, 0]);
@@ -64,13 +65,15 @@ export function triangleGlb(): Uint8Array {
       { bufferView: 1, componentType: 5126, count: 2, type: 'SCALAR', min: [0], max: [1] },
       { bufferView: 2, componentType: 5126, count: 2, type: 'VEC4' },
     ],
-    animations: [
-      {
-        name: 'Spin',
-        samplers: [{ input: 1, output: 2, interpolation: 'LINEAR' }],
-        channels: [{ sampler: 0, target: { node: 0, path: 'rotation' } }],
-      },
-    ],
+    animations: animated
+      ? [
+          {
+            name: 'Spin',
+            samplers: [{ input: 1, output: 2, interpolation: 'LINEAR' }],
+            channels: [{ sampler: 0, target: { node: 0, path: 'rotation' } }],
+          },
+        ]
+      : undefined,
   });
   return glbContainer(json, binary);
 }
@@ -242,5 +245,6 @@ export function texturedGlb(): Uint8Array {
   return glbContainer(json, binary);
 }
 
-export const triangleGlbBase64 = () => Buffer.from(triangleGlb()).toString('base64');
+export const triangleGlbBase64 = (options?: { animated?: boolean }) =>
+  Buffer.from(triangleGlb(options)).toString('base64');
 export const texturedGlbBase64 = () => Buffer.from(texturedGlb()).toString('base64');
