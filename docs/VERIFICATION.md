@@ -1,5 +1,31 @@
 # Verification — 2026-09-08
 
+## Model lines become abstract prints — 2026-09-27
+
+The user found the line icons too literal and asked for something more artistic and abstract, "like an art image". Three directions were rendered in the picker, the toolbar and reply avatars: soft glowing fields of color, flat modernist compositions, and marbled paint. The user chose the modernist prints. They are also the only direction whose lines differ by shape as well as color at 20 to 28px.
+
+`ModelIcon.svelte` now draws a flat composition for each line on a 64-unit canvas:
+
+- Opus: arches under a pale sun;
+- Sonnet: three flowing ribbons;
+- Fable: two overlapping circles;
+- Haiku: a sun over a quiet horizon;
+- Mythos: a radiant sun disc;
+- Astra: a star cut by four quarter circles;
+- Sol: a striped setting sun;
+- Luna: a crescent in its halo;
+- Terra: layered hills;
+- other GPT models: quarter-circle tiles;
+- Flash: a zigzag split;
+- Pro: a faceted prism;
+- other Gemini models: twin circles.
+
+Their palettes are 55 `--art-<line>-<n>` tokens in theme.css, the same in every theme. The preview's film grain was dropped, since it vanishes below 64px. Its clip paths and gradient were replaced so the prints need no ids, and a page can hold any number of copies, including ones inside closed disclosures. Fable's and Gemini's overlaps are lens paths computed from the circles' intersections, GPT's quarter discs are arcs, and Sol's sun is two half discs.
+
+`ModelMark.svelte` puts the print at the start of every mark, ahead of the version: a 26px square in picker pills and a 20px one in the toolbar chip. On the reply avatar the print sits at the top, with the version beneath it. A pill without a version keeps its width, so names still line up, and draws only its print. The mark's edge moved onto an overlay above the print, because the pale Haiku, Sol and Terra prints otherwise dissolved into the light theme's white.
+
+Validation: `npm run verify` found zero Svelte/TypeScript diagnostics, passed 464 unit/HTTP tests in 69 files, built for production and passed all 258 browser scenarios on the first run. Rust formatting, Clippy with warnings denied, and 330 Rust tests passed, with twelve opt-in cases ignored; this change touches no Rust. `tests/model-marks.spec.ts` still checks each picker choice's line, CLI default's glyph, the versions, four different prints and tints, the Opus avatars reading 5 and 5.5, and the trigger before and after choosing Haiku 4.5. Screenshots were reviewed at 2x in dark and light, covering the Claude, Codex and Gemini pickers with all thirteen prints and reply avatars at desktop and phone widths: `artifacts/model-icons/showcase-dark.png`, `showcase-light.png`, `showcase-phone.png`, and the three directions in `art-directions.png`.
+
 ## Every model line has its own icon — 2026-09-27
 
 The user asked for each line of models to get its own artistic icon, with the version still visible. `modelMark` now names a model's line as well as its version: the five Claude families, GPT's Astra, Sol, Luna and Terra, Gemini's Flash and Pro, and GPT or Gemini models of no named line. `ModelIcon.svelte` draws one illustration per line on a 24-unit grid: line art at a 1.6 stroke with a 20% wash of the line's color and small solid accents, so the lines stay distinct at 14px:

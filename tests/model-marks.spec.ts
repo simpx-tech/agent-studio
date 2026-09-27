@@ -7,7 +7,7 @@ const output = 'artifacts/model-marks';
 const tint = (locator: Locator) =>
   locator.evaluate((element) => getComputedStyle(element).getPropertyValue('--provider-color'));
 
-test('each Claude line has its own icon and tint beside its version, and a reply says when another model ran', async ({
+test('each Claude line has its own print and tint beside its version, and a reply says when another model ran', async ({
   page,
 }) => {
   await mkdir(output, { recursive: true });
@@ -85,7 +85,7 @@ test('each Claude line has its own icon and tint beside its version, and a reply
   const replies = page.getByTestId('message').filter({ has: page.locator('.message-avatar') });
   const older = replies.filter({ hasText: 'An answer from the older CLI.' });
   const newer = replies.filter({ hasText: 'An answer after the update.' });
-  // Both replies draw Opus's icon; only the version tells them apart.
+  // Both replies draw Opus's print; only the version tells them apart.
   const avatar = (reply: Locator) => reply.locator('.message-avatar .model-mark');
   await expect(older.locator('.message-heading strong')).toHaveText('Opus 5');
   await expect(avatar(older)).toHaveAttribute('data-line', 'opus');
@@ -115,7 +115,7 @@ test('each Claude line has its own icon and tint beside its version, and a reply
   await expect(marks.first()).toHaveText('✳');
   await expect(marks.first().locator('svg')).toHaveCount(0);
   await expect(marks.locator('.version')).toHaveText(['5.5', '5', '5.1', '4.5']);
-  // Every line draws a different icon.
+  // Every line draws a different print.
   const icons = await marks.locator('svg').evaluateAll((all) => all.map((icon) => icon.innerHTML));
   expect(icons).toHaveLength(4);
   expect(new Set(icons).size).toBe(4);

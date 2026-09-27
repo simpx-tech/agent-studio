@@ -1,99 +1,105 @@
 <script lang="ts">
   import type { ModelLine } from '$lib/model-marks';
-  // One illustration per model line, drawn on a 24-unit grid as line art with a soft wash of
-  // its own color, so lines stay distinct at 14px beside their version number.
+  // Each model line's small abstract print, composed of flat shapes on a 64-unit canvas in the
+  // line's palette (--art-<line>-0 is the ground). Shapes use no ids, so a page can hold any
+  // number of copies.
   let { line }: { line: ModelLine } = $props();
-  const petals = [0, 72, 144, 216, 288];
+  const palette = $derived(
+    [0, 1, 2, 3, 4].map((shade) => `--k${shade}: var(--art-${line}-${shade})`).join('; '),
+  );
+  // Mythos's sun: twelve short rays around its disc.
+  const rays = Array.from({ length: 12 }, (_, index) => {
+    const angle = (index * Math.PI) / 6;
+    const at = (radius: number) => [32 + Math.sin(angle) * radius, 32 - Math.cos(angle) * radius];
+    return [...at(21), ...at(28)].map((value) => Number(value.toFixed(2)));
+  });
 </script>
 
-<svg viewBox="0 0 24 24" aria-hidden="true" data-line={line}>
-  {#if line === 'haiku'}
-    <!-- A cherry blossom: a haiku's season in five petals. -->
-    {#each petals as angle (angle)}
-      <path
-        class="wash"
-        transform="rotate({angle} 12 12)"
-        d="M12 12C9.9 10.4 9.2 7 10.6 4.1L12 5.4l1.4-1.3c1.4 2.9.7 6.3-1.4 7.9z"
-      />
-    {/each}
-    <circle class="solid" cx="12" cy="12" r="1.3" />
+<svg viewBox="0 0 64 64" aria-hidden="true" data-line={line} style={palette}>
+  <rect class="k0" width="64" height="64" />
+  {#if line === 'opus'}
+    <!-- Arches rising under a pale sun. -->
+    <circle class="k4" cx="47" cy="17" r="7" />
+    <circle class="k1" cx="29" cy="66" r="31" />
+    <circle class="k2" cx="29" cy="66" r="22" />
+    <circle class="k3" cx="29" cy="66" r="13" />
   {:else if line === 'sonnet'}
-    <!-- A quill, for verse written by hand. -->
-    <path
-      class="wash"
-      d="M19.8 3.2c-5.8.6-10.6 4.8-12.2 11.4-.2.8-.2 1.6 0 2 .4.2 1.2.1 2-.2 6.4-1.8 10.3-7 10.2-13.2z"
-    />
-    <path d="M19.8 3.2C15.5 7.8 11.4 12.1 7.4 16.8L4.2 20.2" />
-    <path d="M15.4 8.9l2.3.6M12.6 12l2.4.4" />
-  {:else if line === 'opus'}
-    <!-- Beamed notes: an opus is a composition. -->
-    <path
-      class="wash"
-      d="M9 18.2a2.6 2 0 1 1-5.2 0 2.6 2 0 0 1 5.2 0zM20.2 16.2a2.6 2 0 1 1-5.2 0 2.6 2 0 0 1 5.2 0z"
-    />
-    <path d="M9 18.2V6.4l11.2-2.6v12.4M9 9.8l11.2-2.6" />
+    <!-- Three lines of verse, flowing. -->
+    <path class="l1" stroke-width="8.5" d="M-6 22C10 8 24 34 40 20S62 6 72 14" />
+    <path class="l2" stroke-width="8.5" d="M-6 38C10 24 24 50 40 36S62 22 72 30" />
+    <path class="l3" stroke-width="8.5" d="M-6 54C10 40 24 66 40 52S62 38 72 46" />
   {:else if line === 'fable'}
-    <!-- The fox of Aesop's fables. -->
-    <path
-      class="wash"
-      d="M4.2 4.6l5 4.2c1.8-.4 3.8-.4 5.6 0l5-4.2c.6 3.8.2 7-1.2 9.6-1.6 2.8-4 5-6.6 6.4-2.6-1.4-5-3.6-6.6-6.4-1.4-2.6-1.8-5.8-1.2-9.6z"
-    />
-    <path d="M5.6 13.1c2.4-.3 4.4.7 6.4 3.1 2-2.4 4-3.4 6.4-3.1" />
-    <circle class="solid" cx="9.2" cy="11.3" r=".95" />
-    <circle class="solid" cx="14.8" cy="11.3" r=".95" />
-    <circle class="solid" cx="12" cy="18.7" r=".95" />
+    <!-- Two characters meeting, and where they overlap. -->
+    <circle class="k1" cx="24" cy="38" r="18" />
+    <circle class="k2" cx="42" cy="25" r="15" />
+    <path class="k3" d="M27.73 20.39A18 18 0 0 1 41.89 40A15 15 0 0 1 27.73 20.39z" />
+    <circle class="k4" cx="50" cy="51" r="4" />
+  {:else if line === 'haiku'}
+    <!-- A sun setting over a quiet horizon, and one brushstroke. -->
+    <circle class="k1" cx="39" cy="35" r="12" />
+    <rect class="k2" y="38" width="64" height="4" />
+    <rect class="k3" y="44" width="64" height="20" />
+    <rect class="k3" x="8" y="16" width="12" height="2" rx="1" opacity="0.55" />
   {:else if line === 'mythos'}
-    <!-- The all-seeing eye of myth. -->
-    <path
-      class="wash"
-      d="M2.6 12c2.4-4.2 5.6-6.4 9.4-6.4s7 2.2 9.4 6.4c-2.4 4.2-5.6 6.4-9.4 6.4S5 16.2 2.6 12z"
-    />
-    <circle cx="12" cy="12" r="3" />
-    <circle class="solid" cx="12" cy="12" r="1.2" />
-    <path d="M12 2.4V4M5.4 4.6l.9 1.3M18.6 4.6l-.9 1.3" />
+    <!-- A radiant sun disc with an eye at its heart. -->
+    {#each rays as [x1, y1, x2, y2] (`${x1},${y1}`)}
+      <line class="l1" stroke-width="2.4" {x1} {y1} {x2} {y2} />
+    {/each}
+    <circle class="k1" cx="32" cy="32" r="17" />
+    <circle class="k2" cx="32" cy="32" r="11" />
+    <circle class="k3" cx="32" cy="32" r="5" />
   {:else if line === 'astra'}
-    <!-- A star and its sparks. -->
-    <path
-      class="wash"
-      d="M12 3.2c.6 5.2 3.6 8.2 8.8 8.8-5.2.6-8.2 3.6-8.8 8.8-.6-5.2-3.6-8.2-8.8-8.8 5.2-.6 8.2-3.6 8.8-8.8z"
-    />
-    <path d="M18.8 3v3.4M17.1 4.7h3.4" />
-    <circle class="solid" cx="5.2" cy="18.8" r=".9" />
+    <!-- A star cut from the night by four quarter circles. -->
+    <circle class="k1" r="29" />
+    <circle class="k1" cx="64" r="29" />
+    <circle class="k1" cy="64" r="29" />
+    <circle class="k1" cx="64" cy="64" r="29" />
+    <circle class="k2" cx="32" cy="32" r="3.5" />
+    <circle class="k3" cx="53" cy="11" r="2.6" />
+    <circle class="k2" cx="10" cy="54" r="1.8" />
   {:else if line === 'sol'}
-    <!-- The sun. -->
-    <circle class="wash" cx="12" cy="12" r="4.2" />
-    <path
-      d="M12 2.4v3.2M21.6 12h-3.2M12 21.6v-3.2M2.4 12h3.2M16.7 7.3l1.3-1.3M16.7 16.7l1.3 1.3M7.3 16.7L6 18M7.3 7.3L6 6"
-    />
+    <!-- A striped sun going down. -->
+    <path class="k1" d="M12 36a20 20 0 0 1 40 0z" />
+    <path class="k2" d="M12 36a20 20 0 0 0 40 0z" />
+    <rect class="k0" y="39" width="64" height="2.2" />
+    <rect class="k0" y="44" width="64" height="2.8" />
+    <rect class="k0" y="49.5" width="64" height="3.4" />
+    <rect class="k3" y="55" width="64" height="9" />
   {:else if line === 'luna'}
-    <!-- The crescent moon and a star. -->
-    <path class="wash" d="M20.2 14.6A8.6 8.6 0 1 1 9.4 3.8a6.8 6.8 0 0 0 10.8 10.8z" />
-    <path class="solid" d="M17.4 4.4l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" />
+    <!-- A crescent in its halo. -->
+    <circle class="l1" stroke-width="1.5" cx="32" cy="32" r="25" />
+    <circle class="k2" cx="30" cy="34" r="17" />
+    <circle class="k0" cx="39" cy="27" r="15" />
+    <circle class="k3" cx="50" cy="13" r="1.8" />
+    <circle class="k2" cx="13" cy="17" r="1.2" />
   {:else if line === 'terra'}
-    <!-- Mountains of the earth. -->
-    <path class="wash" d="M2.6 19.4l6-10 3.8 5.8 3-4.2 6 8.4z" />
-    <path d="M6.9 12.3l1.2-.8.8.9 1.3-.4" />
+    <!-- Layered hills under a clay sun. -->
+    <circle class="k1" cx="46" cy="19" r="8" />
+    <circle class="k2" cx="14" cy="70" r="32" />
+    <circle class="k3" cx="54" cy="76" r="31" />
+    <circle class="k4" cx="26" cy="88" r="28" />
   {:else if line === 'gpt'}
-    <!-- A crystal lattice for GPT models of no named line. -->
-    <path class="wash" d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" />
-    <path d="M12 7.4l4 2.3v4.6l-4 2.3-4-2.3V9.7z" />
+    <!-- Four tiles, each turning a quarter circle its own way. -->
+    <path class="k1" d="M32 32H0A32 32 0 0 1 32 0z" />
+    <path class="k2" d="M32 0H64A32 32 0 0 1 32 32z" />
+    <path class="k3" d="M0 64V32A32 32 0 0 1 32 64z" />
+    <path class="k1" d="M64 64H32A32 32 0 0 1 64 32z" />
+    <circle class="k2" cx="48" cy="48" r="6" />
   {:else if line === 'flash'}
-    <!-- A lightning bolt. -->
-    <path class="wash" d="M13.2 2.6L5.6 13.2h5.8l-.8 8.2 7.8-10.8h-5.8z" />
+    <!-- The canvas split by a zigzag. -->
+    <polygon class="k1" points="64,0 44,0 30,28 42,28 20,64 64,64" />
+    <polygon class="k2" points="44,0 38,0 24,28 36,28 14,64 20,64 42,28 30,28" />
   {:else if line === 'pro'}
-    <!-- A cut gem. -->
-    <path class="wash" d="M7 4.2h10l4 5-9 11.4L3 9.2z" />
-    <path d="M3 9.2h18M9.6 4.2L8.2 9.2 12 20.6l3.8-11.4-1.4-5" />
+    <!-- A faceted prism seen from above. -->
+    <polygon class="k1" points="32,32 32,6 58,32" />
+    <polygon class="k2" points="32,32 32,6 6,32" />
+    <polygon class="k3" points="32,32 6,32 32,58" />
+    <polygon class="k4" points="32,32 58,32 32,58" />
   {:else}
-    <!-- Gemini's twin stars. -->
-    <path
-      class="wash"
-      d="M9 7c.5 3.6 2.4 5.5 6 6-3.6.5-5.5 2.4-6 6-.5-3.6-2.4-5.5-6-6 3.6-.5 5.5-2.4 6-6z"
-    />
-    <path
-      class="wash"
-      d="M17 3.4c.3 2 1.2 2.9 3.2 3.2-2 .3-2.9 1.2-3.2 3.2-.3-2-1.2-2.9-3.2-3.2 2-.3 2.9-1.2 3.2-3.2z"
-    />
+    <!-- Gemini's twins, bright where they overlap. -->
+    <circle class="k1" cx="24" cy="32" r="15" />
+    <circle class="k2" cx="40" cy="32" r="15" />
+    <path class="k3" d="M32 19.31A15 15 0 0 1 32 44.69A15 15 0 0 1 32 19.31z" />
   {/if}
 </svg>
 
@@ -102,19 +108,36 @@
     display: block;
     width: 100%;
     height: 100%;
-    overflow: visible;
+    overflow: hidden;
+  }
+  .k0 {
+    fill: var(--k0);
+  }
+  .k1 {
+    fill: var(--k1);
+  }
+  .k2 {
+    fill: var(--k2);
+  }
+  .k3 {
+    fill: var(--k3);
+  }
+  .k4 {
+    fill: var(--k4);
+  }
+  .l1,
+  .l2,
+  .l3 {
     fill: none;
-    stroke: currentColor;
-    stroke-width: 1.6;
     stroke-linecap: round;
-    stroke-linejoin: round;
   }
-  .wash {
-    fill: currentColor;
-    fill-opacity: 0.2;
+  .l1 {
+    stroke: var(--k1);
   }
-  .solid {
-    fill: currentColor;
-    stroke: none;
+  .l2 {
+    stroke: var(--k2);
+  }
+  .l3 {
+    stroke: var(--k3);
   }
 </style>

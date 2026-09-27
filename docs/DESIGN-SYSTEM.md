@@ -49,18 +49,19 @@ Model marks are tinted the same way. `modelMark` in `src/lib/model-marks.ts` nam
 line and version and sets `--provider-color` to the line's token, which is the same in both themes:
 `--model-opus`, `--model-sonnet`, `--model-fable`, `--model-haiku`, `--model-mythos`,
 `--model-astra`, `--model-sol`, `--model-luna`, `--model-terra`, `--model-flash` and `--model-pro`.
-GPT and Gemini models of no named line keep the provider color. `ModelMark.svelte` draws the line's
-illustration beside its version in semibold tabular numerals, in three shapes: a pill in each
-Model picker choice (one width for the usual versions, so the names line up), a chip on the Model
-trigger, and a tile on reply avatars with the version beneath the icon. Without a version the mark
-shows the line's icon alone; without a known line it shows the provider glyph.
+GPT and Gemini models of no named line keep the provider color. `ModelMark.svelte` sets the line's
+print beside its version in semibold tabular numerals, in three shapes: a pill in each Model picker
+choice (one width for the usual versions, so the names line up), a chip on the Model trigger, and a
+tile on reply avatars with the version beneath the print. The mark's edge is drawn over the print,
+so pale prints keep their shape on light surfaces. Without a version the mark shows the print
+alone; without a known line it shows the provider glyph.
 
-Line illustrations (`ModelIcon.svelte`) are the one exception to the Lucide outline rule. Each is
-line art on a 24-unit grid at a 1.6 stroke with a 20% wash of its own color (`.wash`) and small
-solid accents (`.solid`), so lines stay distinct at 14px: Opus beamed notes, Sonnet a quill, Fable
-a fox, Haiku a cherry blossom, Mythos an eye, Astra a star, Sol the sun, Luna a crescent, Terra
-mountains, other GPT models a crystal lattice, Flash a bolt, Pro a cut gem, and other Gemini
-models twin stars.
+Model line prints (`ModelIcon.svelte`) are the one exception to the Lucide outline rule: small
+abstract compositions of flat shapes on a 64-unit canvas, like mid-century art prints, filling the
+square they are given. Each line has its own palette in `theme.css`, `--art-<line>-0` for the
+ground and `-1` to `-4` for its shapes, identical in every theme like the prints themselves.
+Overlaps are drawn as paths of their own rather than clipped, so the prints use no ids and a page
+can hold any number of copies: Opus arches under a pale sun, Sonnet three flowing ribbons, Fable two overlapping circles, Haiku a sun over a quiet horizon, Mythos a radiant sun disc, Astra a star cut by four quarter circles, Sol a striped setting sun, Luna a crescent in its halo, Terra layered hills, other GPT models quarter-circle tiles, Flash a zigzag split, Pro a faceted prism, and other Gemini models twin circles.
 
 ## Themes
 
@@ -83,7 +84,7 @@ mark in the script and `BrandMark.svelte` together.
 - **Buttons:** `.primary` (accent fill), `.secondary` (raised neutral), `.danger` (solid red for
   confirmed destruction), `.text-button` (inline action), `.icon-button` (32px ghost).
 - **Icons:** Lucide outlines at their default stroke; never fill a glyph for emphasis (model line
-  illustrations are the one exception, see above). Choose one
+  prints are the one exception, see above). Choose one
   that stays clear as an outline: Stop response uses `CircleStop`, because an outlined square
   reads as an unchecked checkbox.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,

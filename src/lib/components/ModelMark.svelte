@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { ModelMark } from '$lib/model-marks';
   import ModelIcon from './ModelIcon.svelte';
-  // A chip in the toolbar, a pill in the Model picker, and a tile for a reply's avatar, where
-  // the version sits beneath the icon. The version always stays readable.
+  // A model's print beside its version: a chip in the toolbar, a pill in the Model picker, and
+  // a tile on a reply's avatar with the version beneath the print. The version always stays
+  // readable, and a model of no known line shows its provider's glyph in place of a print.
   let { mark, variant }: { mark: ModelMark; variant: 'chip' | 'pill' | 'tile' } = $props();
 </script>
 
@@ -13,7 +14,7 @@
   style:--provider-color={mark.color}
   aria-hidden="true"
 >
-  <span class="icon"
+  <span class="art"
     >{#if mark.line}<ModelIcon line={mark.line} />{:else}<span class="glyph">{mark.glyph}</span
       >{/if}</span
   >{#if mark.version}<span class="version">{mark.version}</span>{/if}
@@ -21,83 +22,94 @@
 
 <style>
   .model-mark {
-    --ink: color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text));
+    --tint: color-mix(in srgb, var(--provider-color) 12%, transparent);
+    position: relative;
+    display: inline-flex;
     flex-shrink: 0;
     align-items: center;
-    border: 1px solid color-mix(in srgb, var(--provider-color) 22%, transparent);
-    background: color-mix(in srgb, var(--provider-color) 11%, transparent);
-    color: var(--ink);
+    box-sizing: border-box;
+    overflow: hidden;
+    background: var(--tint);
+    color: color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text));
     line-height: 1;
   }
-  .icon {
+  /* The edge lies over the print, so a pale print keeps its shape on a light surface. */
+  .model-mark::after {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--provider-color) 24%, transparent);
+    content: '';
+    pointer-events: none;
+  }
+  /* The print fills a square at the start of the mark; its corners follow the mark's. */
+  .art {
     display: grid;
     place-items: center;
-  }
-  .glyph {
-    font-size: 1em;
+    flex-shrink: 0;
+    height: 100%;
+    aspect-ratio: 1;
   }
   .version {
     font-family: var(--font-sans);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.01em;
-  }
-  .chip,
-  .pill {
-    display: inline-flex;
-    box-sizing: border-box;
+    white-space: nowrap;
   }
   .chip {
     height: 20px;
-    padding: 0 6px 0 4px;
-    gap: 4px;
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
   }
-  .chip .icon {
-    width: 14px;
-    height: 14px;
+  .chip .version {
+    padding: 0 6px 0 5px;
+  }
+  .chip .glyph {
+    font-size: 13px;
   }
   /* Pills share one width for the usual versions, so the names beside them line up. */
   .pill {
     height: 26px;
-    min-width: 54px;
-    padding: 0 7px 0 5px;
-    gap: 5px;
+    min-width: 58px;
     border-radius: var(--radius-md);
     font-size: var(--text-sm);
   }
   .pill .version {
     flex: 1;
+    padding: 0 6px;
     text-align: center;
   }
+  .pill .glyph {
+    font-size: 15px;
+  }
+  /* Without a version a pill keeps its width but draws only its print. */
   .pill:not(.versioned) {
-    justify-content: center;
-    padding: 0;
+    background: none;
   }
-  .pill .icon {
-    width: 17px;
-    height: 17px;
+  .pill:not(.versioned) .art {
+    overflow: hidden;
+    border-radius: inherit;
+    background: var(--tint);
   }
-  /* A tile as wide as a reply's avatar: the icon, with the version beneath it when known. */
+  .pill:not(.versioned)::after {
+    inset: 0 auto 0 0;
+    aspect-ratio: 1;
+  }
   .tile {
-    display: flex;
     flex: 1;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
-    box-sizing: border-box;
-    padding: 5px 0;
     border-radius: var(--radius-md);
-    font-size: 16px;
+    font-size: var(--text-xs);
   }
-  .tile .icon {
-    width: 17px;
-    height: 17px;
+  .tile .art {
+    width: 100%;
+    height: auto;
   }
   .tile .version {
-    font-size: var(--text-xs);
-    white-space: nowrap;
+    padding: 3px 0 4px;
+  }
+  .tile .glyph {
+    font-size: 16px;
   }
 </style>
