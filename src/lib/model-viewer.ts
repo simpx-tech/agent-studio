@@ -164,6 +164,9 @@ export function createModelViewer(
     element.setAttribute('role', 'img');
     element.setAttribute('aria-label', options.label);
     element.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight ArrowUp ArrowDown + - Home');
+    // Laid out so the scene can size itself, but shown only once it draws, with its controls'
+    // touch and wheel rules in place.
+    element.style.visibility = 'hidden';
     stage.append(element);
     let created: ModelScene;
     try {
@@ -189,6 +192,7 @@ export function createModelViewer(
     }
     scene = created;
     canvas = element;
+    element.style.visibility = '';
     clips = created.clips;
     element.addEventListener('webglcontextlost', lost);
     element.addEventListener('keydown', keys);
