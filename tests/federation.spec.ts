@@ -192,11 +192,35 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           }
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('fixture-workspace') ?? 'null');
-          if (command === 'save_workspace') {
+          if (command === 'save_workspace' || command === 'save_workspace_patch') {
             if (w.holdAccountSave)
               await new Promise<void>((resolve) => (w.releaseAccountSave = resolve));
             if (w.failAccountSave) throw new Error('Synthetic account save failure');
-            localStorage.setItem('fixture-workspace', JSON.stringify(args.workspace));
+            if (command === 'save_workspace') {
+              localStorage.setItem('fixture-workspace', JSON.stringify(args.workspace));
+              return;
+            }
+            // The host completes a patch from its last write and asks for the whole workspace
+            // when it cannot, as src-tauri's save_workspace_patch does.
+            const saved = JSON.parse(localStorage.getItem('fixture-workspace') ?? 'null');
+            const kept = new Map<string, unknown>(
+              (saved?.conversations ?? []).map((c: { id: string }) => [c.id, c]),
+            );
+            const sent = new Map<string, unknown>(
+              args.upsert.map((c: { id: string }) => [c.id, c]),
+            );
+            const conversations = (args.order as string[]).map((id) => {
+              const conversation = sent.get(id) ?? kept.get(id);
+              if (!conversation)
+                throw new Error('The whole workspace is needed to save this change.');
+              sent.delete(id);
+              return conversation;
+            });
+            if (sent.size) throw new Error('The whole workspace is needed to save this change.');
+            localStorage.setItem(
+              'fixture-workspace',
+              JSON.stringify({ ...args.index, conversations }),
+            );
             return;
           }
           if (command === 'load_sync_state')

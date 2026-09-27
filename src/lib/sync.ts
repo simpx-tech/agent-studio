@@ -53,6 +53,16 @@ export type MergeOptions = {
   deadRun?: (conversation: Conversation, message: Message) => boolean;
 };
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
+/**
+ * Gives an object another copy's fields while keeping the object itself, since views and running
+ * replies hold on to live conversations. A field the copy no longer has is removed: `Object.assign`
+ * alone kept a removed Undo rewind, which the device then published back to every other one.
+ */
+export function replaceFields<T extends object>(target: T, source: T): T {
+  for (const key of Object.keys(target))
+    if (!(key in source)) delete (target as Record<string, unknown>)[key];
+  return Object.assign(target, source);
+}
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 /**
  * Whether two shared workspaces hold the same data. Lists compare by item id: this device

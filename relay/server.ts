@@ -207,6 +207,19 @@ const metaOf = (workspace: z.infer<typeof sharedSchema>): z.infer<typeof metaSch
   return meta;
 };
 const terminal = (status: string) => ['complete', 'error', 'cancelled'].includes(status);
+/**
+ * The largest workspace upload, whole or patched. A body is held about four times over while it
+ * is read and parsed, beside every workspace this relay keeps in memory, and the service runs
+ * within 512 MiB (docs/DEPLOYMENT.md), so an upload past this is refused before it is read.
+ */
+export const stateUploadLimit = 64_000_000;
+/** How much conversation data one answer to `v1/state/chats` carries; the rest is named. */
+const chatsAnswerBudget = 32_000_000;
+class TooLargeError extends Error {
+  constructor() {
+    super('Request exceeds its size limit.');
+  }
+}
 export function createRelay({
   token,
   directory,
@@ -215,6 +228,7 @@ export function createRelay({
   now = Date.now,
   pushSender,
   icons = siteIcons({ now }),
+  limits: { upload = stateUploadLimit, answer = chatsAnswerBudget } = {},
 }: {
   token: string;
   directory: string;
@@ -223,6 +237,8 @@ export function createRelay({
   now?: () => number;
   pushSender?: PushSender;
   icons?: SiteIcons;
+  /** The workspace upload limit and the conversation answer budget, in bytes. */
+  limits?: { upload?: number; answer?: number };
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
@@ -401,11 +417,13 @@ export function createRelay({
       limit = 20_000_000,
       allowEmpty = false,
     ) {
+      // A declared size past the limit is refused before any of it is read into memory.
+      if (Number(req.headers['content-length']) > limit) throw new TooLargeError();
       let length = 0;
       const chunks: Buffer[] = [];
       for await (const chunk of req) {
         length += chunk.length;
-        if (length > limit) throw new Error('Request exceeds its size limit.');
+        if (length > limit) throw new TooLargeError();
         chunks.push(chunk);
       }
       if (!authorized()) throw new Error('Workspace access was revoked. Pair this device again.');
@@ -573,7 +591,11 @@ export function createRelay({
         }
         // Pollers holding the current revision skip downloading the whole workspace.
         if (url.pathname === '/v1/state/revision' && req.method === 'GET') {
-          send(200, { instanceId: state.instanceId, revision: state.revision });
+          send(200, {
+            instanceId: state.instanceId,
+            workspaceId: workspace.id,
+            revision: state.revision,
+          });
           return;
         }
         // Which revision last changed each conversation, so a device downloads and uploads only
@@ -592,16 +614,25 @@ export function createRelay({
             .strict()
             .parse(await body(req, authorized, 64_000));
           const wanted = new Set(value.ids);
-          send(200, {
-            ...manifest(),
-            chats: state.workspace.conversations.filter((c) => wanted.has(c.id)),
-            chatRevisions: state.chatRevisions,
-          });
+          // One answer carries conversations up to a budget, always at least one, and names
+          // the rest, so a device asking for many large ones reads them in turns.
+          const chats: typeof state.workspace.conversations = [];
+          const rest: string[] = [];
+          let size = 0;
+          for (const conversation of state.workspace.conversations) {
+            if (!wanted.has(conversation.id)) continue;
+            const bytes = JSON.stringify(conversation).length;
+            if (chats.length && size + bytes > answer) rest.push(conversation.id);
+            else {
+              chats.push(conversation);
+              size += bytes;
+            }
+          }
+          send(200, { ...manifest(), chats, rest, chatRevisions: state.chatRevisions });
           return;
         }
         if (url.pathname === '/v1/state/patch' && req.method === 'POST') {
-          // A workspace has no size limit, and this relay holds it in memory anyway.
-          const value = patchInput.parse(await body(req, authorized, Number.POSITIVE_INFINITY));
+          const value = patchInput.parse(await body(req, authorized, upload));
           if (value.revision !== state.revision) {
             // The sender's manifest is stale; it can retry without downloading everything.
             send(409, manifest());
@@ -614,11 +645,9 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/state' && req.method === 'PUT') {
-          // A workspace has no size limit, and this relay holds it in memory anyway, so its own
-          // upload is not bounded by the limit that protects every other route.
           const value = z
             .object({ revision: z.number().int().nonnegative(), workspace: sharedSchema })
-            .parse(await body(req, authorized, Number.POSITIVE_INFINITY));
+            .parse(await body(req, authorized, upload));
           if (value.revision !== state.revision) {
             send(409, { ...state, workspaceId: workspace.id });
             return;
@@ -789,6 +818,12 @@ export function createRelay({
       } catch (e) {
         if (!authorized()) {
           send(401, { error: 'Workspace access was revoked. Pair this device again.' });
+          return;
+        }
+        if (e instanceof TooLargeError) {
+          // The rest of the body is never read, so the connection cannot be reused.
+          res.setHeader('Connection', 'close');
+          send(413, { code: 'too_large', error: e.message });
           return;
         }
         send(400, {

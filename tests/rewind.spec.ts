@@ -15,7 +15,11 @@ async function conversation(page: Page) {
           throw new Error('example.txt has changed since this response. Undo was not applied.');
         return { files: ['example.txt'], undone: args.commit };
       }
-      if (command === 'save_workspace' && (window as any).saveFailure) throw new Error('Disk full');
+      if (
+        (command === 'save_workspace' || command === 'save_workspace_patch') &&
+        (window as any).saveFailure
+      )
+        throw new Error('Disk full');
       return original(command, args);
     };
   });

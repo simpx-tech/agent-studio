@@ -86,7 +86,8 @@ test('pairing survives a relay restart and worker update, and startup retries an
     ).toBe(cookie!.value);
 
     // No focus/reload action after recovery: the existing page must retry by itself.
-    for (const path of ['browser-session', 'state']) {
+    // A browser that holds the workspace connects with the relay's small revision answer.
+    for (const path of ['browser-session', 'state/revision']) {
       unavailablePath = path;
       await page.reload();
       await expect(

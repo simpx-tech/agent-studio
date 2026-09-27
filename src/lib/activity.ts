@@ -161,6 +161,26 @@ export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[])
   return result;
 }
 
+/**
+ * Events a reply saves as soon as they arrive: plans, questions, file changes and the like, which
+ * a reader must not lose or must see without waiting. Streamed text and tool progress go out with
+ * the next sync and reach the disk with the next save.
+ */
+export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
+  return [
+    'nativeworkflow',
+    'plan',
+    'proposedplan',
+    'visualization',
+    'sentfiles',
+    'filechanges',
+    'question',
+    'elicitation',
+    'steering',
+    'compaction',
+  ].includes(event.kind);
+}
+
 export function applyRunEvent(message: Message, event: RunEvent) {
   if (event.kind === 'proposedplan') {
     const parsed = proposedPlanSchema.safeParse(event.proposedPlan);

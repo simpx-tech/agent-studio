@@ -7,6 +7,7 @@ import {
   mergeInvolved,
   nextBaselineChats,
   syncPlan,
+  uploadBatches,
 } from './incremental-sync';
 
 const chat = (id: string, title: string): Conversation => ({
@@ -160,4 +161,19 @@ it('keeps the baseline order, drops what went and appends what arrived', () => {
     'Renamed',
     'Added',
   ]);
+});
+
+it('splits uploads by size and leaves out a conversation too large to send alone', () => {
+  const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => chat(id, id));
+  const sizes = new Map([
+    ['a', 60],
+    ['b', 60],
+    ['c', 150],
+    ['d', 30],
+  ]);
+  expect(uploadBatches([a, b, c, d], sizes, 100)).toEqual({
+    batches: [[a], [b, d]],
+    oversized: [c],
+  });
+  expect(uploadBatches([], sizes, 100)).toEqual({ batches: [], oversized: [] });
 });

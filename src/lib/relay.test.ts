@@ -9,11 +9,11 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
-async function fixture() {
+async function fixture(limits?: { upload?: number; answer?: number }) {
   let time = Date.now();
   const token = 'synthetic-test-pairing-key-'.repeat(2);
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-relay-'));
-  const server = createRelay({ token, directory, now: () => time });
+  const server = createRelay({ token, directory, now: () => time, limits });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as { port: number };
   const source = crypto.randomUUID(),
@@ -52,7 +52,67 @@ async function fixture() {
     },
   };
 }
+// A conversation holding one message of `text`, as a device would sync it.
+const conversation = (text: string) => ({
+  id: crypto.randomUUID(),
+  title: text.slice(0, 20),
+  createdAt: '2026-09-27',
+  updatedAt: '2026-09-27',
+  settings: { provider: 'codex' as const, model: '', reasoning: '' as const, instructions: '' },
+  messages: [
+    {
+      id: crypto.randomUUID(),
+      role: 'user' as const,
+      blocks: [{ type: 'markdown' as const, text }],
+      status: 'complete' as const,
+      createdAt: '2026-09-27',
+    },
+  ],
+});
 describe('real HTTP relay', () => {
+  it('names its workspace in the revision answer, so a computer pairs without the whole state', async () => {
+    const f = await fixture();
+    expect(await f.call('GET', 'state/revision')).toEqual({
+      status: 200,
+      body: { instanceId: expect.any(String), workspaceId: 'owner', revision: 0 },
+    });
+  });
+
+  it('refuses a workspace upload past its limit, whole or patched', async () => {
+    const f = await fixture({ upload: 4_000 });
+    const large = conversation('x'.repeat(8_000));
+    expect(
+      await f.call('PUT', 'state', {
+        revision: 0,
+        workspace: { ...emptyShared(), conversations: [large] },
+      }),
+    ).toMatchObject({ status: 413, body: { code: 'too_large' } });
+    expect(await f.call('POST', 'state/patch', { revision: 0, upsert: [large] })).toMatchObject({
+      status: 413,
+      body: { code: 'too_large' },
+    });
+    // Nothing was stored, and an upload within the limit still goes through.
+    const small = conversation('Small');
+    const accepted = await f.call('POST', 'state/patch', { revision: 0, upsert: [small] });
+    expect(accepted).toMatchObject({
+      status: 200,
+      body: { revision: 1, chats: { [small.id]: 1 } },
+    });
+  });
+
+  it('answers conversations within a budget and names the rest for another request', async () => {
+    const f = await fixture({ answer: 3_000 });
+    const chats = ['a', 'b', 'c'].map((letter) => conversation(letter.repeat(2_000)));
+    expect((await f.call('POST', 'state/patch', { revision: 0, upsert: chats })).status).toBe(200);
+    const ids = chats.map((c) => c.id);
+    const first = await f.call('POST', 'state/chats', { ids });
+    expect(first.body.chats.map((c: { id: string }) => c.id)).toEqual([ids[0]]);
+    expect(first.body.rest).toEqual([ids[1], ids[2]]);
+    const second = await f.call('POST', 'state/chats', { ids: first.body.rest });
+    expect(second.body.chats.map((c: { id: string }) => c.id)).toEqual([ids[1]]);
+    expect(second.body.rest).toEqual([ids[2]]);
+  });
+
   it('routes Undo identities without accepting caller-supplied file content or paths', async () => {
     const f = await fixture();
     await f.call(
@@ -583,11 +643,20 @@ describe('real HTTP relay', () => {
     const f = await fixture();
     expect((await f.call('GET', 'state/revision', undefined, f.source, 'wrong')).status).toBe(401);
     const { instanceId } = (await f.call('GET', 'state')).body;
-    expect((await f.call('GET', 'state/revision')).body).toEqual({ instanceId, revision: 0 });
+    // It names the workspace, which pairing needs, and carries none of its data.
+    expect((await f.call('GET', 'state/revision')).body).toEqual({
+      instanceId,
+      workspaceId: 'owner',
+      revision: 0,
+    });
     const workspace = emptyShared();
     workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Desktop' });
     expect((await f.call('PUT', 'state', { revision: 0, workspace })).status).toBe(200);
-    expect((await f.call('GET', 'state/revision')).body).toEqual({ instanceId, revision: 1 });
+    expect((await f.call('GET', 'state/revision')).body).toEqual({
+      instanceId,
+      workspaceId: 'owner',
+      revision: 1,
+    });
   });
   it('routes work to the exact environment, claims once, streams progress, cancels and deduplicates submissions', async () => {
     const f = await fixture();

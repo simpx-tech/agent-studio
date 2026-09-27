@@ -166,7 +166,10 @@ test('validation, save failure recovery and combined length limits keep user inp
     const bridge = (window as any).__TAURI_INTERNALS__;
     const invoke = bridge.invoke;
     bridge.invoke = (command: string, args: unknown) => {
-      if (command === 'save_workspace' && (window as any).failTemplateSave)
+      if (
+        (command === 'save_workspace' || command === 'save_workspace_patch') &&
+        (window as any).failTemplateSave
+      )
         return Promise.reject('Synthetic disk failure');
       return invoke(command, args);
     };

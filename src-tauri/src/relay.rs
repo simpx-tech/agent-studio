@@ -150,6 +150,70 @@ pub async fn disconnect(state: &Relay, identifier: &str, environment: &str) -> R
     Ok(())
 }
 
+/// The largest relay answer read into memory: past it a request fails instead of exhausting
+/// memory. Sync asks for conversations in batches well below it.
+const RESPONSE_LIMIT: usize = 256_000_000;
+/// A relay that sends nothing for this long, or has not begun to answer a small request, has
+/// stalled.
+const IDLE_LIMIT: Duration = Duration::from_secs(30);
+
+fn relay_client() -> Result<reqwest::Client, String> {
+    // No total timeout: a large conversation takes as long as the link needs, and a stalled
+    // relay is caught by the send and idle limits below instead.
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Cannot initialize relay client".into())
+}
+
+/// How long sending a request and waiting for the start of its answer may take: longer for a
+/// larger body, such as a patch carrying a conversation with images, at about a megabit per
+/// second.
+fn send_limit(body_bytes: usize) -> Duration {
+    IDLE_LIMIT + Duration::from_secs((body_bytes / 125_000) as u64)
+}
+
+/// Reads an answer whole, failing when the relay stalls or sends more than the limit.
+async fn read_body(response: &mut reqwest::Response) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![];
+    loop {
+        let chunk = tokio::time::timeout(IDLE_LIMIT, response.chunk())
+            .await
+            .map_err(|_| "Relay response stalled")?
+            .map_err(|_| "Relay response interrupted")?;
+        let Some(chunk) = chunk else {
+            return Ok(bytes);
+        };
+        if bytes.len() + chunk.len() > RESPONSE_LIMIT {
+            return Err("Relay response exceeds the size limit".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+}
+
+/// A GET for pairing, with the answer's status and its JSON body when it has one.
+async fn identify(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    path: &str,
+    token: &str,
+    environment: &str,
+) -> Result<(reqwest::StatusCode, Option<Value>), String> {
+    let request = client
+        .get(url.join(path).map_err(|_| "Invalid relay URL")?)
+        .bearer_auth(token)
+        .header("x-environment-id", environment)
+        .send();
+    let mut response = tokio::time::timeout(send_limit(0), request)
+        .await
+        .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?
+        .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?;
+    let status = response.status();
+    let bytes = read_body(&mut response).await?;
+    Ok((status, serde_json::from_slice(&bytes).ok()))
+}
+
 async fn validate(
     url: &str,
     token: &str,
@@ -159,36 +223,26 @@ async fn validate(
     if token.len() < 32 || token.chars().any(char::is_control) {
         return Err("Enter the relay pairing key (at least 32 characters)".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Cannot initialize relay client")?;
-    let mut response = client
-        .get(url.join("v1/state").map_err(|_| "Invalid relay URL")?)
-        .bearer_auth(token)
-        .header("x-environment-id", environment)
-        .send()
-        .await
-        .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?;
-    if !response.status().is_success() {
-        return Err(
-            "Relay rejected the connection. Check the pairing key and server version.".into(),
-        );
+    let client = relay_client()?;
+    let rejected = || "Relay rejected the connection. Check the pairing key and server version.";
+    // A relay that names its workspace in the small revision answer is identified without
+    // sending its whole state. An older one sends the state, which names it instead; a missing
+    // workspace there means the owner's, so the smaller answer is used only when it has one.
+    let (status, identity) =
+        identify(&client, &url, "v1/state/revision", token, environment).await?;
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(rejected().into());
     }
-    let mut bytes = vec![];
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "Relay response interrupted")?
-    {
-        if bytes.len() + chunk.len() > 21_000_000 {
-            return Err("Relay response exceeds the size limit".into());
-        }
-        bytes.extend_from_slice(&chunk);
+    if let Some(identity) = identity.filter(|value| {
+        status.is_success() && value["instanceId"].is_string() && value["workspaceId"].is_string()
+    }) {
+        return Ok((client, url, identity));
     }
-    let remote =
-        serde_json::from_slice(&bytes).map_err(|_| "Relay returned an invalid response")?;
+    let (status, remote) = identify(&client, &url, "v1/state", token, environment).await?;
+    if !status.is_success() {
+        return Err(rejected().into());
+    }
+    let remote = remote.ok_or("Relay returned an invalid response")?;
     Ok((client, url, remote))
 }
 pub async fn request(
@@ -217,25 +271,20 @@ pub async fn request(
         )
         .bearer_auth(token)
         .header("x-environment-id", environment);
+    let mut size = 0;
     if let Some(body) = body {
-        request = request.json(&body);
+        let bytes = serde_json::to_vec(&body).map_err(|_| "Cannot encode the relay request")?;
+        size = bytes.len();
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes);
     }
-    let mut response = request
-        .send()
+    let mut response = tokio::time::timeout(send_limit(size), request.send())
         .await
+        .map_err(|_| "Relay connection timed out. Local changes remain on this device.")?
         .map_err(|_| "Relay connection lost. Local changes remain on this device.")?;
     let status = response.status().as_u16();
-    let mut bytes = vec![];
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "Relay response interrupted")?
-    {
-        if bytes.len() + chunk.len() > 21_000_000 {
-            return Err("Relay response exceeds the size limit".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = read_body(&mut response).await?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Relay returned an invalid response")?;
     Ok(json!({"status": status, "body": value}))
@@ -323,5 +372,13 @@ mod tests {
         ] {
             assert!(endpoint(url).is_err());
         }
+    }
+
+    #[test]
+    fn a_larger_upload_gets_longer_before_the_relay_must_answer() {
+        assert_eq!(send_limit(0), IDLE_LIMIT);
+        assert_eq!(send_limit(1_000_000), IDLE_LIMIT + Duration::from_secs(8));
+        // A 64 MB patch on a one-megabit uplink still has time to arrive.
+        assert!(send_limit(64_000_000) >= Duration::from_secs(64 * 8));
     }
 }

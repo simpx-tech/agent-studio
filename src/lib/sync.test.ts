@@ -6,7 +6,14 @@ import {
   settingsFor,
   type Conversation,
 } from './domain';
-import { emptyShared, mergeShared, sameShared, sharedSchema, sharedWorkspace } from './sync';
+import {
+  emptyShared,
+  mergeShared,
+  replaceFields,
+  sameShared,
+  sharedSchema,
+  sharedWorkspace,
+} from './sync';
 import { registerInstallation } from './fleet';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
@@ -338,4 +345,19 @@ describe('workspace replication', () => {
     };
     expect(snapshotFor({ other: reading }, settings)).toBeUndefined();
   });
+});
+
+it('replaces fields in place and drops the ones the copy no longer has', () => {
+  // A device kept a removed Undo rewind this way, then published it back to every other one.
+  const live: Record<string, unknown> = {
+    id: 'a',
+    title: 'Old',
+    rewind: { removed: [] },
+    archived: true,
+  };
+  const held = live;
+  replaceFields(live, { id: 'a', title: 'New', archived: false });
+  expect(live).toBe(held);
+  expect(live).toEqual({ id: 'a', title: 'New', archived: false });
+  expect('rewind' in live).toBe(false);
 });

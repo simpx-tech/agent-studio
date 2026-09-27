@@ -161,10 +161,11 @@ async function desktop(page: Page) {
               const emit = (message: unknown) =>
                 callbacks.get(channel)?.({ message, index: index++ });
               emit({ kind: 'activity', text: 'Working' });
-              w.streamReply = async (events: number, everyMs: number) => {
+              // `textOnly` streams answer text alone, as a reply's final answer does.
+              w.streamReply = async (events: number, everyMs: number, textOnly = false) => {
                 for (let step = 0; step < events; step++) {
                   emit(
-                    step % 3 === 0
+                    !textOnly && step % 3 === 0
                       ? { kind: 'reasoning', text: `Considering step ${step}. ` }
                       : { kind: 'text', text: `part ${step} ` },
                   );
@@ -183,9 +184,43 @@ async function desktop(page: Page) {
     },
     { installation, origin },
   );
+  const read = async (environment = installation.id) => {
+    const response = await fetch(`${origin}/v1/state`, {
+      headers: { authorization: `Bearer ${token}`, 'x-environment-id': environment },
+    });
+    return (await response.json()) as {
+      revision: number;
+      workspace: { conversations: { title: string; messages: any[] }[] };
+    };
+  };
   return {
     requests,
     uploaded,
+    /** Whether the relay's copy of the workspace contains `text`. */
+    async relayHas(text: string) {
+      return JSON.stringify((await read()).workspace).includes(text);
+    },
+    /** Another computer publishes more of the reply in the named chat, as while streaming. */
+    async streamElsewhere(title: string, text: string) {
+      const other = '00000000-0000-4000-8000-00000000abcd';
+      const state = await read(other);
+      const chat = state.workspace.conversations.find((c) => c.title === title)!;
+      const reply = chat.messages.at(-1)!;
+      const block = reply.blocks.find((b: { type: string }) => b.type === 'markdown');
+      if (block) block.text += ` ${text}`;
+      else reply.blocks.push({ type: 'markdown', text });
+      const response = await fetch(`${origin}/v1/state/patch`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-environment-id': other,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ revision: state.revision, upsert: [chat] }),
+      });
+      if (response.status !== 200)
+        throw new Error(`The other computer's patch got ${response.status}`);
+    },
     async close() {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
       rmSync(directory, { recursive: true, force: true });
@@ -240,8 +275,9 @@ test('an idle relay connection neither saves nor syncs the whole workspace', asy
       host.requests.filter((r) => r.endsWith(' v1/state')),
       'Idle polls fetched or sent the whole workspace. See docs/PERFORMANCE.md.',
     ).toEqual([]);
-    // Each poll asks only which conversations moved.
-    expect(count('GET v1/state/manifest')).toBeGreaterThanOrEqual(2);
+    // Each poll asks only for the relay's revision; nothing moved, so it needs no manifest.
+    expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
+    expect(count('GET v1/state/manifest')).toBe(0);
     expect(
       host.requests.filter((r) => r.startsWith('POST v1/state')),
       'Idle polls sent conversations. See docs/PERFORMANCE.md.',
@@ -281,7 +317,7 @@ test('a reply waiting on a tool call neither downloads nor rewrites the whole wo
     await page.waitForTimeout(8_000);
     const count = (request: string) => host.requests.filter((r) => r === request).length;
     expect(count('POST v1/heartbeat')).toBeGreaterThanOrEqual(2);
-    expect(count('GET v1/state/manifest')).toBeGreaterThanOrEqual(2);
+    expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
     expect(
       host.requests.filter(
         (r) => r.endsWith(' v1/state') || r.startsWith('POST v1/state'),
@@ -315,7 +351,7 @@ test('a streaming reply saves the whole workspace far less often than it reports
       })
       .toBe(true);
     await page.waitForTimeout(2_000);
-    const before = await page.evaluate(() => (window as any).saves.workspace);
+    const before = await page.evaluate(() => ({ ...(window as any).saves }));
     host.uploaded.length = 0;
     // 120 reported events over about six seconds, 40 of them reasoning.
     const tasks = await longTasks(page, async () => {
@@ -323,7 +359,7 @@ test('a streaming reply saves the whole workspace far less often than it reports
       await page.waitForTimeout(500);
     });
     const after = await page.evaluate(() => (window as any).saves);
-    const saves = after.workspace - before;
+    const saves = after.workspace - before.workspace;
     test.info().annotations.push({
       type: 'streaming',
       description: JSON.stringify({ saves, after, longTasks: tasks.slice(0, 5) }),
@@ -332,8 +368,10 @@ test('a streaming reply saves the whole workspace far less often than it reports
     expect(saves, 'Saves while streaming 120 events').toBeLessThan(12);
     expect(saves, 'A streaming reply still saves its progress').toBeGreaterThan(0);
     // Each of those saves carries the streaming conversation alone, not all 24 of them.
-    expect(after.patched, 'Saves sent as a patch').toBe(saves);
-    expect(after.sentChats, 'Conversations sent across those saves').toBe(saves);
+    expect(after.patched - (before.patched ?? 0), 'Saves sent as a patch').toBe(saves);
+    expect(after.sentChats - (before.sentChats ?? 0), 'Conversations sent across those saves').toBe(
+      saves,
+    );
     // Each poll publishes the streaming conversation alone, never the other 23.
     expect(host.uploaded.length, 'Uploads while streaming').toBeGreaterThan(0);
     expect(host.uploaded, 'Conversations per upload while streaming').toEqual(
@@ -344,6 +382,111 @@ test('a streaming reply saves the whole workspace far less often than it reports
         tasks[0] ?? 0,
         'Longest task while a reply streams; see docs/PERFORMANCE.md to profile it',
       ).toBeLessThan(budgets.streaming);
+  } finally {
+    await host.close();
+  }
+});
+
+test('a reply streaming only its answer reaches other devices before it ends', async ({ page }) => {
+  test.setTimeout(90_000);
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    await page.getByLabel('Message', { exact: true }).fill('Write the answer');
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).streamReply === 'function'), {
+        timeout: 20_000,
+      })
+      .toBe(true);
+    // About four seconds of answer text without reasoning, plans or questions, which used to
+    // reach the relay only when the reply ended.
+    await page.evaluate(() => (window as any).streamReply(40, 100, true));
+    await expect
+      .poll(() => host.relayHas('part 39'), {
+        timeout: 10_000,
+        message: 'The relay never received the streamed answer. See docs/PERFORMANCE.md.',
+      })
+      .toBe(true);
+  } finally {
+    await host.close();
+  }
+});
+
+test('sending a message saves and syncs only its conversation', async ({ page }) => {
+  test.setTimeout(90_000);
+  const timed = !process.env.CI;
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    const before = await page.evaluate(() => ({ ...(window as any).saves }));
+    host.uploaded.length = 0;
+    const tasks = await longTasks(page, async () => {
+      await page.getByLabel('Message', { exact: true }).fill('Run the slow suite');
+      await page.getByLabel('Message', { exact: true }).press('Enter');
+      await expect.poll(() => host.uploaded.length, { timeout: 20_000 }).toBeGreaterThan(0);
+      // Two more polls, so a sync that compared every conversation would have run by now.
+      await page.waitForTimeout(5_000);
+    });
+    const after = await page.evaluate(() => (window as any).saves);
+    // Every save since the send carried the changed conversation alone.
+    expect(after.workspace - before.workspace, 'Saves after sending').toBeGreaterThan(0);
+    expect(after.patched - (before.patched ?? 0), 'Saves sent as a patch').toBe(
+      after.workspace - before.workspace,
+    );
+    expect(host.uploaded, 'Conversations per upload after sending').toEqual(
+      host.uploaded.map(() => 1),
+    );
+    if (timed)
+      expect(
+        tasks[0] ?? 0,
+        'Longest task after sending; see docs/PERFORMANCE.md to profile it',
+      ).toBeLessThan(budgets.streaming);
+  } finally {
+    await host.close();
+  }
+});
+
+test('following another computer’s reply rewrites the sync checkpoint at most once a minute', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.waitForTimeout(3_000);
+    const before = await page.evaluate(() => ({ ...(window as any).saves }));
+    // Another computer streams a reply into a chat here: a published change every two seconds.
+    for (let step = 0; step < 6; step++) {
+      await host.streamElsewhere('Saved chat 5', `remote part ${step}`);
+      await page.waitForTimeout(2_000);
+    }
+    // This computer took in every update and saved it.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            JSON.stringify(
+              (window as any).saved?.conversations?.find(
+                (c: { title: string }) => c.title === 'Saved chat 5',
+              ) ?? '',
+            ).includes('remote part 5'),
+          ),
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+    const after = await page.evaluate(() => (window as any).saves);
+    // Each received update saves that chat alone, and the whole checkpoint is not rewritten
+    // for every one of them; the connection's first sync wrote it moments ago.
+    expect(after.workspace - before.workspace, 'Saves of the received chat').toBeGreaterThan(0);
+    expect(after.patched - (before.patched ?? 0), 'Saves sent as a patch').toBe(
+      after.workspace - before.workspace,
+    );
+    expect(after.sync - before.sync, 'Checkpoint rewrites while following').toBe(0);
   } finally {
     await host.close();
   }

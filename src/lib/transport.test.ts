@@ -1,4 +1,5 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createChangeMarks, type ChangeSet } from './change-marks';
 import {
   initialWorkspace,
   interruptedReplyError,
@@ -16,16 +17,14 @@ import {
   type SharedWorkspace,
 } from './sync';
 
-// Conversations changed on this device since the last sync, as the page tracks them.
-function chatMarks() {
-  const marks = {
-    unsynced: new Set<string>() as Set<string> | undefined,
-    mark(chatId?: string) {
-      if (chatId === undefined) marks.unsynced = undefined;
-      else if (marks.unsynced) marks.unsynced.add(chatId);
-    },
-  };
-  return marks;
+// What changed on this device since the last sync, tracked as the page tracks it. Like a
+// window that has just synced, it starts with nothing waiting.
+function chatMarks(started = false) {
+  const changes = createChangeMarks();
+  changes.takeUnsaved();
+  // A window that has just started counts everything as changed until its first sync.
+  if (!started) changes.takeUnsynced();
+  return { changes, mark: (chatId?: string) => changes.chat(chatId) };
 }
 // The per-conversation runtime members, which every device provides the same way.
 function chatRuntime(get: () => Workspace, marks = chatMarks()) {
@@ -36,15 +35,8 @@ function chatRuntime(get: () => Workspace, marks = chatMarks()) {
     },
     chatIds: () => get().conversations.map((c) => c.id),
     meta: () => sharedMeta(get()),
-    takeUnsynced: () => {
-      const pending = marks.unsynced;
-      marks.unsynced = new Set();
-      return pending;
-    },
-    restoreUnsynced: (ids: Set<string> | undefined) => {
-      if (ids === undefined || !marks.unsynced) marks.unsynced = undefined;
-      else for (const id of ids) marks.unsynced.add(id);
-    },
+    takeUnsynced: () => marks.changes.takeUnsynced(),
+    restoreUnsynced: (changes: ChangeSet) => marks.changes.restoreUnsynced(changes),
     applyChats: async (upsert: Conversation[], remove: string[], meta?: SharedMeta) => {
       const workspace = get();
       if (meta) Object.assign(workspace, meta);
@@ -71,6 +63,11 @@ beforeEach(() => {
   native.invoke.mockReset();
   vi.unstubAllGlobals();
 });
+afterEach(() => {
+  vi.useRealTimers();
+});
+// Moves the clock past the interval between checkpoint writes, so the next sync writes one.
+const later = () => vi.setSystemTime(Date.now() + 61_000);
 
 it('invalidates host skill inventories after Viewer plugin mutations, including uncertain failures', async () => {
   const transport = await fixture();
@@ -664,10 +661,12 @@ async function settledRelay(revisionEndpoint = true) {
     return { status: 200, body: args.path === 'v1/heartbeat' ? relay.presence : [] };
   });
   expect(await transport.resumeRelay()).toBe(true);
-  // The first poll syncs the whole workspace and finds both sides equal.
+  // Connecting asks only for the relay's identity; a relay without that small answer sends
+  // its whole state. The first poll syncs the whole workspace and finds both sides equal.
   expect(await transport.pollRelay()).toEqual([]);
   expect(requests.filter((r) => r.includes('state'))).toEqual([
-    'GET v1/state',
+    'GET v1/state/revision',
+    ...(revisionEndpoint ? [] : ['GET v1/state']),
     'GET v1/state',
     'save_sync_state',
   ]);
@@ -698,6 +697,7 @@ it('syncs a change from either side, then returns to revision checks', async () 
   const { transport, workspace, relay, local, apply, polls } = await settledRelay();
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -710,6 +710,7 @@ it('syncs a change from either side, then returns to revision checks', async () 
   relay.workspace = structuredClone(relay.workspace);
   relay.workspace.conversations[0].title = 'Renamed elsewhere';
   relay.revision++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'GET v1/state',
@@ -733,6 +734,7 @@ it('settles after sending a new chat that the relay lists in another order', asy
     title: 'New chat',
   });
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -775,6 +777,7 @@ it('keeps app sessions that an older relay drops without sending them after ever
   // The next change carries it, and the relay drops it again.
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -787,6 +790,7 @@ it('keeps app sessions that an older relay drops without sending them after ever
   relay.workspace = structuredClone(relay.workspace);
   relay.workspace.conversations[0].title = 'Renamed elsewhere';
   relay.revision++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'GET v1/state',
@@ -806,6 +810,7 @@ it('sends app sessions to a relay that keeps them', async () => {
   workspace.appSessions = [first];
   workspace.conversations[0].title = 'Renamed here';
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -816,6 +821,7 @@ it('sends app sessions to a relay that keeps them', async () => {
   // Once the relay holds the list, another start of the app is sent by itself.
   workspace.appSessions = [first, second];
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -888,7 +894,7 @@ it('publishes a running reply every poll without downloading the relay copy', as
   // A reply waiting on a long tool call changes nothing, so its polls read nothing either.
   expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
   // Once the interval passes, the next poll of the reply saves the checkpoint again.
-  vi.setSystemTime(Date.now() + 20_000);
+  later();
   workspace.conversations[0].title = 'Progress 3';
   local.changes++;
   expect((await polls(1)).state).toEqual([
@@ -912,6 +918,7 @@ it('syncs and saves a workspace past the former 20 MB limit', async () => {
     blocks: [{ type: 'markdown', text: 'x'.repeat(25_000_000) }],
   });
   local.changes++;
+  later();
   expect((await polls(1)).state).toEqual([
     'GET v1/state/revision',
     'PUT v1/state',
@@ -924,7 +931,16 @@ it('syncs and saves a workspace past the former 20 MB limit', async () => {
 });
 
 // A relay with per-conversation revisions, so a poll publishes and takes in only what moved.
-async function incrementalRelay() {
+// `saved` replaces the checkpoint a restart reads, `onCheckpoint` runs as one is written, and
+// `flush` stands in for the page writing its unsaved changes.
+async function incrementalRelay(
+  options: {
+    saved?: (base: SharedWorkspace) => unknown;
+    onCheckpoint?: (live: { workspace: Workspace; mark: (chatId?: string) => void }) => void;
+    flush?: () => Promise<void>;
+    started?: boolean;
+  } = {},
+) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();
   const chat = (title: string) => ({
@@ -950,7 +966,7 @@ async function incrementalRelay() {
     platform: 'windows',
   });
   const local = { changes: 0, reads: 0, runs: [] as string[] };
-  const marks = chatMarks();
+  const marks = chatMarks(options.started);
   transport.configureRuntime({
     installation,
     workspace: () => {
@@ -971,6 +987,7 @@ async function incrementalRelay() {
       Object.assign(workspace, value);
     },
     checkpointRun: async () => {},
+    ...(options.flush ? { flush: options.flush } : {}),
   });
   // The relay's own copy, with the revision that last changed each part of it.
   const relay = {
@@ -981,7 +998,7 @@ async function incrementalRelay() {
   };
   const requests: string[] = [];
   // What the host has on disk, which a restart reads back.
-  let saved: unknown = {
+  let saved: unknown = options.saved?.(relay.workspace) ?? {
     url: 'https://relay.example.com',
     instanceId: 'same-relay',
     base: relay.workspace,
@@ -998,6 +1015,13 @@ async function incrementalRelay() {
     if (command === 'save_sync_state') {
       saved = args.value;
       requests.push('save_sync_state');
+      options.onCheckpoint?.({
+        workspace,
+        mark: (chatId) => {
+          local.changes++;
+          marks.mark(chatId);
+        },
+      });
     }
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
@@ -1065,23 +1089,25 @@ async function incrementalRelay() {
 
 it('publishes only the conversation that changed, and takes in only what moved', async () => {
   const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
-  // Settled: the manifest alone answers, and nothing here is copied or validated whole.
-  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/manifest'), reads: 0 });
+  // Settled: the relay's small revision answers, as nothing moved there, and nothing here is
+  // copied or validated whole.
+  expect(await polls(2)).toEqual({ state: Array(2).fill('GET v1/state/revision'), reads: 0 });
 
   // One conversation changes here. Only it is sent, and the other is never downloaded.
   const [first, second] = workspace.conversations;
   first.title = 'Renamed here';
   local.changes++;
   marks.mark(first.id);
+  later();
   expect((await polls(1)).state).toEqual([
-    'GET v1/state/manifest',
+    'GET v1/state/revision',
     'POST v1/state/patch',
     'save_sync_state',
   ]);
   const sent = relay.workspace.conversations.find((c) => c.id === first.id);
   expect(sent?.title).toBe('Renamed here');
   expect(relay.chats[first.id]).toBeGreaterThan(relay.chats[second.id]);
-  expect(await polls(1)).toEqual({ state: ['GET v1/state/manifest'], reads: 0 });
+  expect(await polls(1)).toEqual({ state: ['GET v1/state/revision'], reads: 0 });
 
   // Another device renames the other conversation. Only that one is fetched.
   relay.revision++;
@@ -1092,14 +1118,16 @@ it('publishes only the conversation that changed, and takes in only what moved',
     ),
   };
   relay.chats[second.id] = relay.revision;
+  later();
   expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
     'GET v1/state/manifest',
     'POST v1/state/chats',
     'save_sync_state',
   ]);
   expect(workspace.conversations.find((c) => c.id === second.id)?.title).toBe('Renamed elsewhere');
   expect(workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
-  expect(await polls(1)).toEqual({ state: ['GET v1/state/manifest'], reads: 0 });
+  expect(await polls(1)).toEqual({ state: ['GET v1/state/revision'], reads: 0 });
   await transport.disconnectRelay();
 });
 
@@ -1109,8 +1137,9 @@ it('sends replicated settings only when they move, and deletes on both sides', a
   workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Laptop' });
   local.changes++;
   marks.mark();
+  later();
   expect((await polls(1)).state).toEqual([
-    'GET v1/state/manifest',
+    'GET v1/state/revision',
     'POST v1/state/patch',
     'save_sync_state',
   ]);
@@ -1140,6 +1169,7 @@ it('resumes from its checkpoint without syncing the whole workspace again', asyn
   first.title = 'Renamed here';
   local.changes++;
   marks.mark(first.id);
+  later();
   expect((await polls(1)).state).toContain('save_sync_state');
   // The checkpoint carries the revisions its baseline came from.
   expect(checkpoint()).toMatchObject({
@@ -1149,7 +1179,7 @@ it('resumes from its checkpoint without syncing the whole workspace again', asyn
   // incremental instead of downloading and uploading the whole workspace once.
   await transport.disconnectRelay();
   expect(await transport.resumeRelay()).toBe(true);
-  expect((await polls(1)).state).toEqual(['GET v1/state/manifest']);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
   expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
   await transport.disconnectRelay();
 });
@@ -1171,11 +1201,233 @@ it('keeps a conversation unpublished when another device wrote first', async () 
     }
     return original(command, args);
   });
-  expect((await polls(1)).state).toEqual(['GET v1/state/manifest', 'POST v1/state/patch']);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision', 'POST v1/state/patch']);
   expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('First');
   // The next poll tries again with a fresh manifest and the change is still there.
   expect((await polls(1)).state).toContain('POST v1/state/patch');
   expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Renamed here');
+  await transport.disconnectRelay();
+});
+it('publishes a change made here while a whole-state sync ran', async () => {
+  let ended = false;
+  // A reply ends here while the connection's first, whole-state sync writes its checkpoint.
+  const { transport, workspace, relay, polls } = await incrementalRelay({
+    onCheckpoint: ({ workspace, mark }) => {
+      if (ended) return;
+      ended = true;
+      workspace.conversations[0].title = 'Changed during the whole sync';
+      mark(workspace.conversations[0].id);
+    },
+  });
+  expect(ended).toBe(true);
+  // That sync read this device before the change, so the next poll publishes it.
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  const [first] = workspace.conversations;
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe(
+    'Changed during the whole sync',
+  );
+  await transport.disconnectRelay();
+});
+
+it('keeps an edit made here while the patch was on its way', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  // A reply runs here in Second, and its start is already published.
+  second.messages.push(
+    {
+      id: crypto.randomUUID(),
+      role: 'user',
+      status: 'complete',
+      createdAt: '2026-09-27',
+      blocks: [{ type: 'markdown', text: 'Go' }],
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      runId: crypto.randomUUID(),
+      status: 'running',
+      createdAt: '2026-09-27',
+      blocks: [{ type: 'markdown', text: 'Working' }],
+    },
+  );
+  local.changes++;
+  marks.mark(second.id);
+  await polls(1);
+  // The phone picks another model for Second's next reply while this device edits First, so
+  // the next poll both sends a conversation and takes one in.
+  relay.revision++;
+  relay.workspace = {
+    ...relay.workspace,
+    conversations: relay.workspace.conversations.map((c) =>
+      c.id === second.id ? { ...c, settings: { ...c.settings, model: 'gpt-5.5' } } : c,
+    ),
+  };
+  relay.chats[second.id] = relay.revision;
+  first.title = 'Edited here';
+  local.changes++;
+  marks.mark(first.id);
+  // The reply in Second ends while that poll's patch is on its way.
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path === 'v1/state/patch') {
+      native.invoke.mockImplementation(original);
+      const reply = workspace.conversations.find((c) => c.id === second.id)!.messages.at(-1)!;
+      reply.status = 'complete';
+      reply.blocks = [{ type: 'markdown', text: 'Working, done' }];
+      local.changes++;
+      marks.mark(second.id);
+    }
+    return original(command, args);
+  });
+  await polls(1);
+  const here = workspace.conversations.find((c) => c.id === second.id)!;
+  expect(here.settings.model).toBe('gpt-5.5');
+  expect(here.messages.at(-1)).toMatchObject({ status: 'complete' });
+  // The next poll publishes both changes together.
+  await polls(1);
+  const there = relay.workspace.conversations.find((c) => c.id === second.id)!;
+  expect(there.settings.model).toBe('gpt-5.5');
+  expect(there.messages.at(-1)).toMatchObject({ status: 'complete' });
+  await transport.disconnectRelay();
+});
+
+it('saves unsaved changes before writing a checkpoint', async () => {
+  const order: string[] = [];
+  const { transport, workspace, local, marks, polls } = await incrementalRelay({
+    flush: async () => {
+      order.push('flush');
+    },
+    onCheckpoint: () => order.push('checkpoint'),
+  });
+  // The connection's first sync wrote one, after saving.
+  expect(order).toEqual(['flush', 'checkpoint']);
+  workspace.conversations[0].title = 'Renamed here';
+  local.changes++;
+  marks.mark(workspace.conversations[0].id);
+  // Within the interval, a sync publishes without rewriting the whole checkpoint.
+  await polls(1);
+  expect(order).toEqual(['flush', 'checkpoint']);
+  // After it, the next sync catches the checkpoint up, again after saving.
+  later();
+  await polls(1);
+  expect(order).toEqual(['flush', 'checkpoint', 'flush', 'checkpoint']);
+  await transport.disconnectRelay();
+});
+
+it('publishes a change at once after the poll under way', async () => {
+  const { transport, workspace, relay, local, marks } = await incrementalRelay();
+  // A poll is under way, past reading this device, when a reply ends here.
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const original = native.invoke.getMockImplementation()!;
+  let holding = true;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (holding && command === 'relay_request' && args.path === 'v1/notification-view') {
+      holding = false;
+      await held;
+    }
+    return original(command, args);
+  });
+  const underWay = transport.pollRelay();
+  await vi.waitFor(() => expect(holding).toBe(false));
+  const [first] = workspace.conversations;
+  first.title = 'Reply ended';
+  local.changes++;
+  marks.mark(first.id);
+  // An ordinary poll is skipped while one runs; publishing at once waits for it instead.
+  expect(await transport.pollRelay()).toBeNull();
+  const now = transport.pollRelayNow();
+  release();
+  expect(await underWay).not.toBeNull();
+  expect(await now).not.toBeNull();
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Reply ended');
+  await transport.disconnectRelay();
+});
+
+it('reads conversations the relay leaves for another request', async () => {
+  const { transport, workspace, relay, polls } = await incrementalRelay();
+  // Another device renames both conversations, and the relay answers one per request.
+  relay.revision++;
+  relay.workspace = {
+    ...relay.workspace,
+    conversations: relay.workspace.conversations.map((c) => ({
+      ...c,
+      title: `${c.title} elsewhere`,
+    })),
+  };
+  for (const c of relay.workspace.conversations) relay.chats[c.id] = relay.revision;
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    const answer = await original(command, args);
+    if (command !== 'relay_request' || args.path !== 'v1/state/chats') return answer;
+    const [head, ...rest] = answer.body.chats;
+    return { ...answer, body: { ...answer.body, chats: [head], rest: rest.map((c: Conversation) => c.id) } };
+  });
+  const { state } = await polls(1);
+  expect(state.filter((r) => r === 'POST v1/state/chats')).toHaveLength(2);
+  expect(workspace.conversations.map((c) => c.title)).toEqual(['First elsewhere', 'Second elsewhere']);
+  await transport.disconnectRelay();
+});
+
+it('leaves a conversation too large to send unpublished, and still sends the others', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  // Past what one upload may carry, as a conversation holding many images can be.
+  first.messages.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    createdAt: '2026-09-27',
+    status: 'complete',
+    blocks: [{ type: 'markdown', text: 'x'.repeat(49_000_000) }],
+  });
+  second.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  marks.mark(second.id);
+  const { state } = await polls(1);
+  expect(state).toContain('POST v1/state/patch');
+  expect(relay.workspace.conversations.find((c) => c.id === second.id)?.title).toBe(
+    'Renamed here',
+  );
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.messages).toEqual([]);
+  expect(transport.relaySyncNotice()).toMatch(/^“First” is too large to sync\./);
+  // The relay keeps its own copy, so an edit there still merges with the one here.
+  relay.revision++;
+  relay.workspace = {
+    ...relay.workspace,
+    conversations: relay.workspace.conversations.map((c) =>
+      c.id === first.id ? { ...c, title: 'Renamed elsewhere' } : c,
+    ),
+  };
+  relay.chats[first.id] = relay.revision;
+  await polls(1);
+  const here = workspace.conversations.find((c) => c.id === first.id)!;
+  expect(here.title).toBe('Renamed elsewhere');
+  // Nothing written here is lost: as for any conversation edited on both sides, the version
+  // the relay never received stays beside it as a copy.
+  const copy = workspace.conversations.find((c) => c.title === 'First (conflict copy)');
+  expect(copy?.messages).toHaveLength(1);
+  await transport.disconnectRelay();
+});
+
+it('asks for the manifest when a checkpoint names none of its conversations', async () => {
+  // A checkpoint an earlier release wrote after a whole sync that reported no revisions. The
+  // relay is still at its revision, but trusting its empty list would take every conversation
+  // for one the relay no longer has.
+  const { transport, workspace, relay, requests, polls } = await incrementalRelay({
+    started: true,
+    saved: (base) => ({
+      url: 'https://relay.example.com',
+      instanceId: 'same-relay',
+      base,
+      revisions: { revision: 5, chats: {}, metaRevision: 0 },
+    }),
+  });
+  expect(workspace.conversations.map((c) => c.title)).toEqual(['First', 'Second']);
+  expect(relay.workspace.conversations).toHaveLength(2);
+  // The first poll asked for the manifest and learned the relay's own revisions.
+  expect(requests).toContain('GET v1/state/manifest');
+  expect(await polls(1)).toEqual({ state: ['GET v1/state/revision'], reads: 0 });
   await transport.disconnectRelay();
 });
 

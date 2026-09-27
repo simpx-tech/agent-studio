@@ -142,9 +142,14 @@ test('save failure keeps the original and draft and allows retry without a dupli
     const bridge = (window as any).__TAURI_INTERNALS__;
     const original = bridge.invoke.bind(bridge);
     bridge.invoke = (command: string, args: any) => {
+      const conversations =
+        command === 'save_workspace'
+          ? args.workspace.conversations
+          : command === 'save_workspace_patch'
+            ? args.upsert
+            : [];
       if (
-        command === 'save_workspace' &&
-        args.workspace.conversations.some((c: any) => c.title.endsWith('(fork)')) &&
+        conversations.some((c: any) => c.title.endsWith('(fork)')) &&
         !(window as any).allowForkSave
       )
         throw new Error('Synthetic disk full');

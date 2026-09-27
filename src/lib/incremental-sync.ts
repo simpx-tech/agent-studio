@@ -22,6 +22,8 @@ export type Manifest = z.infer<typeof manifestSchema>;
 export const chatsAnswerSchema = manifestSchema.extend({
   chats: z.array(sharedChatSchema),
   chatRevisions: z.record(z.string(), count),
+  /** Conversations asked for that did not fit this answer, for another request. */
+  rest: z.array(z.string()).optional(),
 });
 export const metaAnswerSchema = manifestSchema.extend({ meta: sharedMetaSchema });
 
@@ -127,14 +129,21 @@ export function syncPlan({
   const result = new Map(merged.conversations.map((c) => [c.id, c]));
   const send: Conversation[] = [];
   const apply: Conversation[] = [];
+  // The size of each conversation to send, as serialized, so uploads can be kept in bounds.
+  const sizes = new Map<string, number>();
   for (const [id, conversation] of result) {
-    if (!same(remoteChat(id), conversation)) send.push(conversation);
-    if (!same(localChat(id), conversation)) apply.push(conversation);
+    const json = JSON.stringify(conversation);
+    if (JSON.stringify(remoteChat(id)) !== json) {
+      send.push(conversation);
+      sizes.set(id, json.length);
+    }
+    if (JSON.stringify(localChat(id)) !== json) apply.push(conversation);
   }
   return {
     mergedMeta,
     result,
     send,
+    sizes,
     apply,
     // Only the relay's own conversations can be removed there, and only this device's here.
     remove: involved.filter((id) => id in manifest.chats && !result.has(id)),
@@ -164,4 +173,35 @@ export function nextBaselineChats(
   }
   for (const conversation of pending.values()) next.push(conversation);
   return next;
+}
+
+/**
+ * Splits conversations to send into uploads of at most `budget` serialized characters, in their
+ * order. One larger than the budget by itself is left out, for the caller to report.
+ */
+export function uploadBatches(
+  send: Conversation[],
+  sizes: Map<string, number>,
+  budget: number,
+): { batches: Conversation[][]; oversized: Conversation[] } {
+  const batches: Conversation[][] = [];
+  const oversized: Conversation[] = [];
+  let batch: Conversation[] = [];
+  let size = 0;
+  for (const conversation of send) {
+    const bytes = sizes.get(conversation.id) ?? JSON.stringify(conversation).length;
+    if (bytes > budget) {
+      oversized.push(conversation);
+      continue;
+    }
+    if (batch.length && size + bytes > budget) {
+      batches.push(batch);
+      batch = [];
+      size = 0;
+    }
+    batch.push(conversation);
+    size += bytes;
+  }
+  if (batch.length) batches.push(batch);
+  return { batches, oversized };
 }

@@ -11,6 +11,7 @@
     pendingChatCount,
   } from '$lib/notifications';
   import { createFinishedChatTracker, type FinishedChats } from '$lib/finished-chats';
+  import { createChangeMarks } from '$lib/change-marks';
   import {
     watchDesktopNotifications,
     watchNotificationView,
@@ -105,6 +106,8 @@
     connectRelay,
     disconnectRelay,
     pollRelay,
+    pollRelayNow,
+    relaySyncNotice,
     resolveRelaySettings,
     listFolders,
     resumeRelay,
@@ -125,7 +128,7 @@
   import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
-  import { applyRunEvent } from '$lib/activity';
+  import { applyRunEvent, savesAtOnce } from '$lib/activity';
   import { awaitingAnswer } from '$lib/questions';
   import {
     messageBackgroundWork,
@@ -176,7 +179,13 @@
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
-  import { sharedChatSchema, sharedMeta, sharedWorkspace, type Presence } from '$lib/sync';
+  import {
+    replaceFields,
+    sharedChatSchema,
+    sharedMeta,
+    sharedWorkspace,
+    type Presence,
+  } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
@@ -1193,8 +1202,15 @@
                 message.error = error;
                 conversation.updatedAt = new Date().toISOString();
                 noteFinishedChats();
+                await persistChat(conversation.id);
+                return;
               }
-              await persistChat(conversation.id);
+              // This computer runs the reply for another device, so its progress goes out with
+              // every poll. Like a reply started here, it saves at once only what a reader must
+              // not lose, and the rest with the next save instead of once per event.
+              localChanges++;
+              marks.chat(conversation.id);
+              if (event && savesAtOnce(event)) saveSoon(conversation.id);
             },
             apply: async (value) => {
               workspace.fleet = value.fleet;
@@ -1205,11 +1221,7 @@
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
-                if (existing) {
-                  Object.assign(existing, incoming);
-                  return existing;
-                }
-                return incoming;
+                return existing ? replaceFields(existing, incoming) : incoming;
               });
               // A conversation deleted on another device takes its unsent draft along.
               const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
@@ -1227,15 +1239,9 @@
             },
             chatIds: () => workspace.conversations.map((c) => c.id),
             meta: () => sharedMeta(workspace),
-            takeUnsynced: () => {
-              const pending = unsyncedChats;
-              unsyncedChats = new Set();
-              return pending;
-            },
-            restoreUnsynced: (ids) => {
-              if (ids === undefined || !unsyncedChats) unsyncedChats = undefined;
-              else for (const id of ids) unsyncedChats.add(id);
-            },
+            takeUnsynced: () => marks.takeUnsynced(),
+            restoreUnsynced: (changes) => marks.restoreUnsynced(changes),
+            flush: flushPending,
             // Only the conversations a sync merged, so an unrelated chat is never rewritten.
             applyChats: async (upsert, remove, meta) => {
               if (meta) {
@@ -1251,7 +1257,7 @@
               for (const incoming of upsert) {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
                 // Preserve active object identities while network responses arrive.
-                if (existing) Object.assign(existing, incoming);
+                if (existing) replaceFields(existing, incoming);
                 else workspace.conversations.push(incoming);
               }
               // A conversation deleted on another device takes its unsent draft along.
@@ -1259,11 +1265,12 @@
               for (const key of [...drafts.keys()])
                 if (key.startsWith('chat:') && key !== composerDraftKey && !chats.has(key))
                   forgetDraft(key);
-              // Received from the relay, so only these conversations need saving here.
+              // Received from the relay: only these conversations need saving here, and nothing
+              // needs publishing back. Settings and the order travel with the index.
               noteFinishedChats();
               if (!loaded) return;
-              for (const conversation of upsert) markChats(conversation.id);
-              if (gone.size || meta) markChats();
+              for (const conversation of upsert) marks.received(conversation.id);
+              if (gone.size || meta) marks.local();
               await flushWorkspace();
               refreshNewConnections();
             },
@@ -1308,14 +1315,16 @@
       document.removeEventListener('visibilitychange', saveDraftsWhenHidden);
     };
   });
-  async function syncNow() {
+  /** Polls the relay. `now` publishes a change at once, after any poll already under way. */
+  async function syncNow(now = false) {
     const version = relaySelectionVersion;
     try {
-      const peers = await pollRelay();
+      const peers = await (now ? pollRelayNow() : pollRelay());
       if (peers) {
         followNotification();
         presence = peers;
-        syncError = '';
+        // A conversation too large to send is named here while every other one syncs.
+        syncError = relaySyncNotice();
         syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · Environments report every few seconds`;
       }
     } catch (e) {
@@ -1363,18 +1372,17 @@
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
   // changed. Streamed reply events count too, because they update messages before a save.
   let localChanges = 0;
-  // Conversations changed since the last save and since the last sync, or `undefined` for all of
-  // them. Naming no chat asks for everything, so a new call site is conservative by default.
-  let unsavedChats: Set<string> | undefined;
-  let unsyncedChats: Set<string> | undefined;
-  function markChats(chatId?: string) {
-    if (chatId === undefined) {
-      unsavedChats = undefined;
-      unsyncedChats = undefined;
-      return;
-    }
-    if (unsavedChats) unsavedChats.add(chatId);
-    if (unsyncedChats) unsyncedChats.add(chatId);
+  // What changed here since the last save and the last sync: named conversations, the replicated
+  // settings, or everything when a change names nothing (src/lib/change-marks.ts).
+  const marks = createChangeMarks();
+  /** Whether this window runs a reply on the given connection itself, rather than a relay job. */
+  function runsHere(connectionId?: string) {
+    if (!desktop()) return false;
+    if (!connectionId) return true;
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    return (
+      !!connection && executionHost(workspace.fleet, connection.environmentId) === installation?.id
+    );
   }
   /** Checks any connection this device owns whose status is not known yet. */
   function refreshNewConnections() {
@@ -1394,8 +1402,7 @@
     // conversation twice. The queued save keeps this workspace and writes its newest state,
     // which is what the file should hold; a later reassignment cannot redirect it.
     const saved = workspace;
-    const pending = unsavedChats;
-    unsavedChats = new Set();
+    const pending = marks.takeUnsaved();
     const next = saveQueue.catch(() => {}).then(async () => {
       const started = performance.now();
       try {
@@ -1415,23 +1422,47 @@
       storageError = '';
     } catch (e) {
       // A failed save must never leave its conversations looking saved.
-      unsavedChats = undefined;
+      marks.failedSave();
       storageError = `Changes could not be saved: ${String(e)}`;
       throw e;
     }
   }
+  /**
+   * Saves and publishes every conversation and setting: for changes nobody named. `local = false`
+   * stores what arrived from the relay without publishing it back.
+   */
   async function persist(local = true) {
     if (!loaded) return;
-    if (local) localChanges++;
-    markChats();
+    if (local) {
+      localChanges++;
+      marks.chat();
+    } else marks.received();
     await flushWorkspace();
   }
-  /** Saves a change to one conversation, leaving the rest to the host's last write. */
+  /** Saves and publishes a change to one conversation, leaving the rest to the host's last write. */
   async function persistChat(chatId: string) {
     if (!loaded) return;
     localChanges++;
-    markChats(chatId);
+    marks.chat(chatId);
     await flushWorkspace();
+  }
+  /** Saves and publishes the replicated settings: computers, accounts, templates, instructions. */
+  async function persistSettings() {
+    if (!loaded) return;
+    localChanges++;
+    marks.meta();
+    await flushWorkspace();
+  }
+  /** Saves what this device keeps to itself, such as remembered choices, publishing nothing. */
+  async function persistLocal() {
+    if (!loaded) return;
+    marks.local();
+    await flushWorkspace();
+  }
+  /** Writes whatever is still unsaved, and waits for saves already queued. */
+  async function flushPending() {
+    if (marks.unsaved()) await flushWorkspace();
+    else await saveQueue.catch(() => {});
   }
   // How long the last save took, so a streamed reply can keep saving to a small share of the
   // time. A save writes the whole workspace, so it grows with the workspace and no frequency
@@ -1442,8 +1473,22 @@
   // writes the newest state, so requests made while one runs only need one more save after it.
   let savingSoon = false;
   let saveAgain = false;
+  /** Saves and publishes a change to one conversation soon, or every one when none is named. */
   function saveSoon(chatId?: string) {
-    markChats(chatId);
+    marks.chat(chatId);
+    scheduleSave();
+  }
+  /** Saves and publishes a change to the replicated settings soon. */
+  function saveSettingsSoon() {
+    marks.meta();
+    scheduleSave();
+  }
+  /** Saves remembered choices and other state this device keeps to itself soon. */
+  function saveLocalSoon() {
+    marks.local();
+    scheduleSave();
+  }
+  function scheduleSave() {
     saveAgain = true;
     if (savingSoon) return;
     void (async () => {
@@ -1524,7 +1569,7 @@
     historyBusy = true;
     try {
       workspace.conversations = workspace.conversations.map((c) => (c.id === next.id ? next : c));
-      await persist();
+      await persistChat(next.id);
       if (session !== workspaceSession) return;
       await releaseConversation(next.id, next.settings.connectionId).catch(() => {});
       selectedArtifact = null;
@@ -1558,7 +1603,8 @@
       activeRunning
     )
       throw new Error('The conversation changed. Reopen Undo.');
-    await persist();
+    // Undo reads this conversation from the saved file, so it must be there as shown.
+    await persistChat(conversationId);
   }
   async function markFilesUndone(conversationId: string, runId: string, session: number) {
     if (session !== workspaceSession) return;
@@ -1570,7 +1616,7 @@
       conversation.historyRevision = (conversation.historyRevision ?? 0) + 1;
     }
     conversation.updatedAt = new Date().toISOString();
-    await persist();
+    await persistChat(conversation.id);
   }
   async function updateInputTemplate(
     template: InputTemplate | undefined,
@@ -1592,7 +1638,7 @@
     );
     workspace.inputTemplates = next;
     try {
-      await persist();
+      await persistSettings();
     } catch {
       if (
         session === workspaceSession &&
@@ -1611,7 +1657,7 @@
       );
     workspace.claudeInstructions = value;
     try {
-      await persist();
+      await persistSettings();
     } catch {
       if (session === workspaceSession && workspace.claudeInstructions === value)
         workspace.claudeInstructions = before;
@@ -1645,7 +1691,7 @@
         ensureEnvironmentConnections(workspace.fleet, environment.id, detected, loginIdentities());
       }
       if (workspace.fleet.connections.length !== before) {
-        await persist();
+        await persistSettings();
         await refreshConnections(undefined, true);
       }
       if (view === 'connections') void refreshAccountUsage(forceUsage);
@@ -1671,7 +1717,7 @@
       wslError = discovery.warning ?? '';
       const before = JSON.stringify(workspace.fleet);
       registerWslEnvironments(workspace.fleet, installation, discovery);
-      if (JSON.stringify(workspace.fleet) !== before) await persist();
+      if (JSON.stringify(workspace.fleet) !== before) await persistSettings();
     } catch (e) {
       wslError = String(e);
     } finally {
@@ -2031,13 +2077,17 @@
     )
       return;
     settingsRevision++;
+    if (remember) rememberSettings(workspace.preferences, settings);
+    if (chosen) rememberAgent(workspace.preferences, settings);
     if (active) {
       active.settings = settings;
       active.updatedAt = new Date().toISOString();
-    } else draftSettings = settings;
-    if (remember) rememberSettings(workspace.preferences, settings);
-    if (chosen) rememberAgent(workspace.preferences, settings);
-    saveSoon();
+      saveSoon(active.id);
+    } else {
+      // A new chat's settings live in its draft; only the remembered choices are saved.
+      draftSettings = settings;
+      saveLocalSoon();
+    }
   }
   function chooseProvider(value: string) {
     if (active) return;
@@ -2110,6 +2160,8 @@
     computerId?: string,
   ) {
     if (!loaded || selectingLocation) return;
+    // Opening a chat on a computer can register its CLI logins as connections.
+    const connections = workspace.fleet.connections.length;
     templatesOpen = false;
     sidebarOpen = false;
     folderBrowserOpen = false;
@@ -2150,13 +2202,13 @@
     if (draftLocation && !draftLocation.path) {
       const scope = { ...draftLocation };
       ensureLocationConnections(workspace.fleet, scope, loginIdentities());
-      saveSoon();
+      if (workspace.fleet.connections.length !== connections) saveSettingsSoon();
       void saveQueue
         .then(() => refreshConnections(scope, true))
         .catch((e) => {
           notice = String(e);
         });
-    }
+    } else if (workspace.fleet.connections.length !== connections) saveSettingsSoon();
     activeId = null;
     // Each new chat is a scratch chat of its own; the one left behind stays if it has content.
     scratchId = crypto.randomUUID();
@@ -2184,7 +2236,7 @@
     if (provider) {
       rememberSettings(workspace.preferences, draftSettings);
       rememberAgent(workspace.preferences, draftSettings);
-      saveSoon();
+      saveLocalSoon();
     }
   }
   function preferredConnection(provider: ProviderId, location: ChatLocation) {
@@ -2249,6 +2301,7 @@
         location = { ...location, path: listing.path };
       }
       if (generation !== locationGeneration || conversationId !== activeId) return;
+      const connections = workspace.fleet.connections.length;
       ensureLocationConnections(workspace.fleet, location, loginIdentities());
       const sameComputer = selectedComputerId === locationComputerId(location);
       const settings = sameComputer
@@ -2261,7 +2314,9 @@
       // Automatic computer defaults must not replace the user's remembered account elsewhere.
       changeSettings(settings, sameComputer);
       const revision = settingsRevision;
-      await persist();
+      // The folder joins this device's recent ones; new connections belong to every device.
+      if (workspace.fleet.connections.length !== connections) await persistSettings();
+      else await persistLocal();
       // CLI availability belongs to the environment, not each folder. Reuse known results.
       void (async () => {
         await refreshConnections(location, true);
@@ -2307,7 +2362,7 @@
       : undefined;
     c.archived = true;
     c.updatedAt = new Date().toISOString();
-    saveSoon();
+    saveSoon(c.id);
     if (!open) return;
     const shown = view,
       drawer = sidebarOpen;
@@ -2401,7 +2456,7 @@
     if (!available) return;
     const connections = workspace.fleet.connections.length;
     ensureLocationConnections(workspace.fleet, location, loginIdentities());
-    if (workspace.fleet.connections.length !== connections) saveSoon();
+    if (workspace.fleet.connections.length !== connections) saveSettingsSoon();
     void refreshConnections(location, true).catch((e) => {
       notice = String(e);
     });
@@ -2420,7 +2475,7 @@
       notice = '';
       fork = forkConversation($state.snapshot(source), messageId);
       workspace.conversations.unshift(fork);
-      await persist();
+      await persistChat(fork.id);
       if (session !== workspaceSession) return;
       query = '';
       revealConversation(fork);
@@ -2618,7 +2673,8 @@
       await cancelTitle(target.id).catch(() => {});
       if (session !== workspaceSession) return;
       workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
-      await persist();
+      // The saved order leaves it out, and a sync sees it gone from the baseline.
+      await persistChat(target.id);
       if (session !== workspaceSession) return;
       // Its unsent draft is deleted with the conversation.
       forgetDraft(draftKey.chat(target.id));
@@ -3029,7 +3085,7 @@
       if (session !== workspaceSession) return;
       if (activeId === selected && prompt === draft) prompt = '';
       steeringAttempt = undefined;
-      saveSoon();
+      if (selected) saveSoon(selected);
     } catch (error) {
       if (session === workspaceSession && activeId === selected) attachmentError = String(error);
     } finally {
@@ -3223,8 +3279,11 @@
     runs[conversation.id] = runId;
     const started = performance.now();
     let reasoningSavedAt = 0;
+    // The computer that runs a reply publishes its progress; a reply routed to another computer
+    // is published by that computer, so this copy of it is only saved here.
+    const publishes = runsHere(responseSettings.connectionId);
     try {
-      await persist();
+      await persistChat(conversation.id);
       if (session !== workspaceSession) return;
       if (options.created)
         void nameConversation(
@@ -3259,23 +3318,27 @@
               const hadQuestion = requestsAttention(m);
               applyRunEvent(m, event);
               localChanges++;
-              if (
-                event.kind === 'nativeworkflow' ||
-                event.kind === 'plan' ||
-                event.kind === 'proposedplan' ||
-                event.kind === 'visualization' ||
-                event.kind === 'filechanges' ||
+              // Every event goes out with the next sync, so other devices follow the text and
+              // tool calls as they stream; saving to disk keeps its own, slower rate.
+              if (publishes) marks.chat(conversation.id);
+              else marks.received(conversation.id);
+              const asks =
                 event.kind === 'question' ||
                 event.kind === 'elicitation' ||
-                event.kind === 'steering' ||
-                event.kind === 'compaction' ||
+                (event.kind === 'tool' && !hadQuestion && requestsAttention(m));
+              if (
+                savesAtOnce(event) ||
+                asks ||
                 (event.kind === 'reasoning' &&
-                  Date.now() - reasoningSavedAt >= streamSaveInterval()) ||
-                (event.kind === 'tool' && !hadQuestion && requestsAttention(m))
+                  Date.now() - reasoningSavedAt >= streamSaveInterval())
               ) {
                 if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
-                saveSoon(conversation.id);
+                if (publishes) saveSoon(conversation.id);
+                else saveLocalSoon();
               }
+              // A question waits for the reader, so it reaches the relay, and the phone alert,
+              // at once rather than on a poll that a hidden window runs about once a minute.
+              if (asks && publishes && paired) void syncNow(true);
               if (activeId === conversation.id) void scrollToEnd(true);
             },
           );
@@ -3320,8 +3383,9 @@
         noteFinishedChats();
         // Publish the end of the reply at once rather than on the next poll: a window
         // behind others or minimized has its timers throttled to about once a minute,
-        // which held back the phone alert for the chat by that long.
-        if (paired) void syncNow();
+        // which held back the phone alert for the chat by that long. A poll already under
+        // way read the reply before it ended, so this one runs after it.
+        if (paired) void syncNow(true);
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
       }

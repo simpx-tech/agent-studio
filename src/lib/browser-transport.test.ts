@@ -1,18 +1,16 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createChangeMarks, type ChangeSet } from './change-marks';
 import { initialWorkspace, type Conversation, type Workspace } from './domain';
 import { sharedChatSchema, sharedMeta, sharedWorkspace, type SharedMeta } from './sync';
 import { browserSessionSignal } from './browser-workspace';
 
-// Conversations changed on this device since the last sync, as the page tracks them.
+// What changed on this device since the last sync, tracked as the page tracks it. Like a
+// window that has just synced, it starts with nothing waiting.
 function chatMarks() {
-  const marks = {
-    unsynced: new Set<string>() as Set<string> | undefined,
-    mark(chatId?: string) {
-      if (chatId === undefined) marks.unsynced = undefined;
-      else if (marks.unsynced) marks.unsynced.add(chatId);
-    },
-  };
-  return marks;
+  const changes = createChangeMarks();
+  changes.takeUnsaved();
+  changes.takeUnsynced();
+  return { changes, mark: (chatId?: string) => changes.chat(chatId) };
 }
 // The per-conversation runtime members, which every device provides the same way.
 function chatRuntime(get: () => Workspace, marks = chatMarks()) {
@@ -23,15 +21,8 @@ function chatRuntime(get: () => Workspace, marks = chatMarks()) {
     },
     chatIds: () => get().conversations.map((c) => c.id),
     meta: () => sharedMeta(get()),
-    takeUnsynced: () => {
-      const pending = marks.unsynced;
-      marks.unsynced = new Set();
-      return pending;
-    },
-    restoreUnsynced: (ids: Set<string> | undefined) => {
-      if (ids === undefined || !marks.unsynced) marks.unsynced = undefined;
-      else for (const id of ids) marks.unsynced.add(id);
-    },
+    takeUnsynced: () => marks.changes.takeUnsynced(),
+    restoreUnsynced: (changes: ChangeSet) => marks.changes.restoreUnsynced(changes),
     applyChats: async (upsert: Conversation[], remove: string[], meta?: SharedMeta) => {
       const workspace = get();
       if (meta) Object.assign(workspace, meta);
