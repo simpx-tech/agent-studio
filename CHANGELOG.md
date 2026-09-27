@@ -5,6 +5,15 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.5.1 - 2026-09-27
+
+### Fixed
+
+- Show a sent 3D model with the textures inside it, instead of flat grey
+- Deliver a reply's phone notification as soon as the reply ends, rather than one to three minutes
+  later
+- Stop a phone from ringing for a chat already opened on the computer that ran it
+
 ## 0.5.0 - 2026-09-26
 
 Replies can now show you what they made — a render, a screenshot, a chart, even a 3D model — and
