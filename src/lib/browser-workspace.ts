@@ -15,6 +15,12 @@ export type BrowserWorkspaceScope = {
 // localStorage holds only about 5 MB per origin, less than two copies of a large workspace.
 export type BrowserWorkspaceStore = {
   get(keys: string[]): Promise<unknown[]>;
+  // Reads the given keys and every entry whose key starts with `prefix` in one transaction, so
+  // no other tab's write lands between them.
+  snapshot(
+    keys: string[],
+    prefix: string,
+  ): Promise<{ values: unknown[]; entries: [string, unknown][] }>;
   // Writes only while `current` holds when the write starts, so a save from a former
   // session cannot land after that session's data was cleared.
   put(entries: [string, string][], current?: () => boolean): Promise<boolean>;
@@ -184,7 +190,12 @@ export async function readBrowserWorkspace(
   scope: BrowserWorkspaceScope,
 ) {
   const key = browserScopeKey(scope);
-  const [whole, index, checkpoint] = await store.get([key, indexKey(key), `${key}:sync`]);
+  // The index and its conversations are read together: another tab writing between two reads
+  // could remove an entry the first read listed.
+  const {
+    values: [whole, index, checkpoint],
+    entries,
+  } = await store.snapshot([key, indexKey(key), `${key}:sync`], chatKey(key, ''));
   const saved = index === undefined ? whole : index;
   if (saved === undefined && checkpoint === undefined) return undefined;
   try {
@@ -200,11 +211,18 @@ export async function readBrowserWorkspace(
     const parsed = JSON.parse(saved);
     if (index === undefined) return { workspace: restoreWorkspace(parsed), base, revisions };
     const order = browserChatOrder(parsed);
-    const stored = await store.get(order.map((id) => chatKey(key, id)));
-    // A conversation the index lists must be there; never open a workspace missing one.
-    if (stored.some((value) => typeof value !== 'string'))
-      throw new BrowserWorkspaceStorageError();
-    const conversations = (stored as string[]).map((value) => JSON.parse(value));
+    const stored = new Map(entries.map(([entry, value]) => [entry, value]));
+    const checkpointed = new Map(base.conversations.map((c) => [c.id, c]));
+    const conversations = order.flatMap((id) => {
+      const value = stored.get(chatKey(key, id));
+      if (typeof value === 'string') return [JSON.parse(value)];
+      // Another tab of this workspace removes the entry of a conversation it never received,
+      // after this index listed it. The conversation opens as the checkpoint holds it, and the
+      // relay's copy merges over it, rather than locking this browser out of its workspace. One
+      // the checkpoint lacks returns from the relay on the next sync if it ever reached it.
+      const synced = checkpointed.get(id);
+      return synced ? [synced] : [];
+    });
     return {
       workspace: restoreWorkspace({ ...parsed, chats: undefined, conversations }),
       base,

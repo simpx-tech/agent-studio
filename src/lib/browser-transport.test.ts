@@ -48,6 +48,10 @@ const cache = vi.hoisted(() => new Map<string, string>());
 vi.mock('./browser-store', () => ({
   browserWorkspaceStore: {
     get: async (keys: string[]) => keys.map((key) => cache.get(key)),
+    snapshot: async (keys: string[], prefix: string) => ({
+      values: keys.map((key) => cache.get(key)),
+      entries: [...cache].filter(([key]) => key.startsWith(prefix)),
+    }),
     put: async (entries: [string, string][], current = () => true) => {
       await Promise.resolve();
       if (!current()) return false;

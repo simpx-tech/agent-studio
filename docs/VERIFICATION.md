@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## A Viewer tab can no longer lock the Viewer out of its saved copy — 2026-09-27
+
+From the same review. Each Viewer save writes its index and the conversations it names, and removes the entry of any conversation missing from its own index. A second tab that had not received a conversation yet therefore removed that conversation's entry while the first tab's index still listed it. Reading refused an index with a missing entry, which left the browser on the storage error until its site data was cleared. Reading also took the index and the entries in two transactions, so a write between them could produce the same refusal.
+
+`readBrowserWorkspace` now reads the index, the checkpoint and every conversation entry in one transaction through the store's new `snapshot`. A listed conversation whose entry is gone opens as the sync checkpoint holds it, so the relay's copy merges over it on the next sync. One the checkpoint lacks is left out, and returns from the relay if it ever reached it. Keeping two tabs fully consistent would need one writer at a time, which remains a separate change.
+
+Validation: `browser-workspace.test.ts` replaces the refusal case with one where a stale tab removed two entries: the synced conversation opens as the checkpoint held it, and the unsynced one is left out.
+
 ## Sync publishes streamed replies, stops whole passes and bounds its transfers — 2026-09-27
 
 The user asked for a review of the send-files, notification and sync work of 2026-09-25 to 09-27, then for the findings to be fixed. This entry covers the sync and saving ones. Each was reproduced first: in a scratch copy of HEAD with the performance harness, and with vitest cases that mirror the page's own apply.

@@ -33,6 +33,10 @@ function memoryStore() {
   const data = new Map<string, string>();
   const store: BrowserWorkspaceStore = {
     get: async (keys) => keys.map((key) => data.get(key)),
+    snapshot: async (keys, prefix) => ({
+      values: keys.map((key) => data.get(key)),
+      entries: [...data].filter(([key]) => key.startsWith(prefix)),
+    }),
     put: async (entries, current = () => true) => {
       if (!current()) return false;
       for (const [key, value] of entries) data.set(key, value);
@@ -218,12 +222,20 @@ it('reads a copy an earlier release wrote whole and replaces it on the next save
   expect((await readBrowserWorkspace(store, scope))?.workspace.conversations).toHaveLength(1);
 });
 
-it('refuses a workspace whose index lists a conversation the store no longer has', async () => {
+it('opens a conversation whose entry another tab removed as the checkpoint holds it', async () => {
   const { store, data } = memoryStore();
   const workspace = initialWorkspace();
-  workspace.conversations.push(chat('Missing soon'));
-  data.set(`${key}:sync`, checkpoint());
+  const synced = chat('Synced before');
+  workspace.conversations.push(synced, chat('Never synced'));
+  // The checkpoint holds the first conversation as the relay last had it.
+  const base = initialWorkspace();
+  base.conversations.push({ ...synced, title: 'Synced before, as the relay had it' });
+  data.set(`${key}:sync`, checkpoint(base));
   await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
-  data.delete(`${key}:chat:${workspace.conversations[0].id}`);
-  await expect(readBrowserWorkspace(store, scope)).rejects.toThrow(BrowserWorkspaceStorageError);
+  // A stale tab of this workspace saved without them, removing both entries.
+  for (const conversation of workspace.conversations) data.delete(`${key}:chat:${conversation.id}`);
+  const read = await readBrowserWorkspace(store, scope);
+  expect(read?.workspace.conversations.map((c) => c.title)).toEqual([
+    'Synced before, as the relay had it',
+  ]);
 });

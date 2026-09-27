@@ -79,6 +79,25 @@ export const browserWorkspaceStore: BrowserWorkspaceStore = {
       });
       return requests.map((request) => request.result);
     }),
+  snapshot: (keys, prefix) =>
+    connected(async (database) => {
+      let requests: IDBRequest[] = [];
+      let found: IDBRequest<IDBValidKey[]> | undefined;
+      let values: IDBRequest<unknown[]> | undefined;
+      await transaction(database, 'readonly', (store) => {
+        requests = keys.map((key) => store.get(key));
+        // Every key that starts with the prefix, and no other.
+        const range = IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff));
+        found = store.getAllKeys(range);
+        values = store.getAll(range);
+      });
+      return {
+        values: requests.map((request) => request.result),
+        entries: (found?.result ?? []).map(
+          (key, index) => [String(key), values?.result[index]] as [string, unknown],
+        ),
+      };
+    }),
   put: (entries, current = () => true) =>
     connected(async (database) => {
       if (!current()) return false;
