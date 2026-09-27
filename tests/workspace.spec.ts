@@ -2058,7 +2058,7 @@ test('reselecting the computer preserves the draft and folders reuse ready CLI a
   await picker('Computer').click();
   await page.getByRole('option', { name: 'Desktop', exact: true }).click();
   await expect(picker('Folder')).toHaveAttribute('title', 'C:\\Projects\\studio');
-  await expect(picker('Model')).toHaveText('GPT-6 Astra');
+  await expect(picker('Model').locator('.selected-name')).toHaveText('GPT-6 Astra');
   await expect(picker('Reasoning')).toHaveText('High');
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
     'Keep this draft and its settings',
@@ -2224,14 +2224,14 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await expect(picker('Folder')).toHaveAttribute('title', 'C:\\Projects\\studio');
   await picker('Agent').click();
   await page.getByRole('option', { name: 'Codex', exact: true }).click();
-  await expect(picker('Model')).toHaveText('GPT-6 Astra');
+  await expect(picker('Model').locator('.selected-name')).toHaveText('GPT-6 Astra');
   await page.evaluate(() => {
     for (const request of (window as any).pendingCli) request.resolve();
   });
   await expect(picker('Model')).toBeEnabled();
   await expect(picker('Folder')).toHaveAttribute('title', 'C:\\Projects\\studio');
   await expect(picker('Agent')).toHaveText('Codex');
-  await expect(picker('Model')).toHaveText('GPT-6 Astra');
+  await expect(picker('Model').locator('.selected-name')).toHaveText('GPT-6 Astra');
 });
 
 test('Desktop uses its own Claude in a WSL folder and preserves that execution choice in history', async ({

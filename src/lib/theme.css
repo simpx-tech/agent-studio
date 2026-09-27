@@ -150,6 +150,12 @@
 
   /* Provider marks: share of the provider color in glyphs (the rest is --text) */
   --provider-ink-mix: 100%;
+  /* Model marks: one tint per Claude family, drawn like provider marks in every theme */
+  --model-opus: #dda987;
+  --model-sonnet: #b3a6f2;
+  --model-fable: #eba2bd;
+  --model-haiku: #9fd5a9;
+  --model-mythos: #e3cb7b;
 
   /* Fixed palette swatches for theme previews; identical in every theme */
   --palette-dark-canvas: #111113;

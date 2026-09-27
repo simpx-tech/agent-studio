@@ -45,6 +45,12 @@ named colors, so every surface follows the selected theme.
 `color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text))`, which keeps the
 mark legible in the light theme.
 
+Model marks are drawn the same way: `modelMark` in `src/lib/model-marks.ts` sets
+`--provider-color` to one Claude family token (`--model-opus`, `--model-sonnet`, `--model-fable`,
+`--model-haiku`, `--model-mythos`, the same in both themes) or to the provider color, and the tile
+shows the model's version in semibold tabular numerals (`.model-version`, `.option-mark.version`).
+A tile without a version keeps the provider glyph.
+
 ## Themes
 
 Dark is the default. Settings → Appearance offers Dark, Light and System per device; the choice

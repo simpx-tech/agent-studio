@@ -4,16 +4,20 @@
   import AppUpdates from './AppUpdates.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import ClaudeInstructions from './ClaudeInstructions.svelte';
+  import CliUpdates from './CliUpdates.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
   import PushNotifications from './PushNotifications.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
-  import { desktop, type AppUpdateStatus } from '$lib/transport';
+  import { desktop, type AppUpdateStatus, type CliUpdates as CliUpdateState } from '$lib/transport';
   let {
     paired,
     workspaceSession = 0,
     exportWorkspace,
     appUpdate,
     restartToUpdate,
+    cliUpdates,
+    applyCliUpdates,
+    environmentName,
     claudeInstructions,
     saveClaudeInstructions,
   }: {
@@ -22,6 +26,9 @@
     exportWorkspace: () => Promise<void>;
     appUpdate?: AppUpdateStatus;
     restartToUpdate: () => Promise<void>;
+    cliUpdates?: CliUpdateState;
+    applyCliUpdates: (updates: CliUpdateState) => void;
+    environmentName: (environmentId: string) => string;
     claudeInstructions?: string;
     saveClaudeInstructions: (
       value: string | undefined,
@@ -51,7 +58,7 @@
         <h1>Settings</h1>
         <p>
           {desktop()
-            ? 'Appearance, notifications, app updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
+            ? 'Appearance, notifications, app and Claude Code updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
             : 'Appearance, notifications, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'}
         </p>
       </div>
@@ -63,7 +70,8 @@
           {paired}
           {workspaceSession}
         />{/if}
-      {#if desktop()}<AppUpdates status={appUpdate} restart={restartToUpdate} />{/if}
+      {#if desktop()}<AppUpdates status={appUpdate} restart={restartToUpdate} />
+        <CliUpdates updates={cliUpdates} apply={applyCliUpdates} {environmentName} />{/if}
       {#key workspaceSession}<ClaudeInstructions
           value={claudeInstructions}
           save={saveClaudeInstructions}

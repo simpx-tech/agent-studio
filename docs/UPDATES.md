@@ -37,6 +37,38 @@ public, so no GitHub token is involved.
   **Current**. The desktop app reports its native version; the Viewer reports the version it
   was built from, so a stale cached Viewer shows its own version.
 
+## Claude Code updates
+
+Claude Code updates itself only from its interactive terminal. Agent Studio always runs it
+headless, so a CLI used only through Agent Studio kept the version it was installed with, and the
+Model picker's aliases mean what that version says: Claude Code 2.1.278 runs Opus 5 for `opus`,
+2.1.281 runs Opus 5.5. The desktop app therefore keeps Claude Code current itself
+(`src-tauri/src/cli_updates.rs`).
+
+- **What runs.** The CLI's own `claude update`, which follows its release channel
+  (`autoUpdatesChannel`) and any administrator version policy and verifies the signed build before
+  swapping it in. Agent Studio never downloads Claude Code itself. It reads `claude --version`
+  before and after, so an update is recognized by the version change rather than by wording.
+- **When and where.** A minute after startup, then every six hours; a failure, or another Claude
+  Code update holding the install lock, retries after an hour. Checks cover this computer's CLI on
+  PATH, which every account profile shares, and on Windows each WSL distribution's Linux CLI only
+  while that distribution already runs, so an automatic check never starts one.
+- **Settings.** **Settings → Claude Code updates** has **Update Claude Code automatically** (on by
+  default, stored per device in `cli-updates.json` in app data), each installation's last result,
+  and **Check for updates**, which checks every installation at once. `DISABLE_AUTOUPDATER` in the
+  app's environment, Claude Code's own switch, also stops the automatic checks. **Connections**
+  shows the version on this computer's Claude card.
+- **Results.** Up to date, or held by a channel or version policy with the CLI's reason; updated
+  from one version to another; another update running; managed by a package manager (Homebrew,
+  winget and apk print their own upgrade command, which Agent Studio shows but does not run);
+  turned off by an administrator; or failed, with the CLI's bounded reason. Status is transient,
+  desktop-only and never synced; the Viewer shows none.
+- **After an update.** Claude model catalogs for that computer are fetched again, so the picker
+  names the models the new version resolves. Running replies keep their process. A chat's parked
+  process is replaced on its next reply because its launch identity includes the CLI file's size
+  and modification time (see [native sessions](NATIVE-SESSIONS.md)); the new process resumes the
+  native session. Parked WSL processes keep their version until they are released.
+
 ## Security
 
 - Every package is signed with the project's updater key (minisign/Ed25519). The app embeds only

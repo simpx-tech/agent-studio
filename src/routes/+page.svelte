@@ -17,9 +17,13 @@
     publishNotificationView,
     watchAppUpdates,
     installAppUpdate,
+    watchCliUpdates,
     type AppUpdateStatus,
+    type CliUpdates,
   } from '$lib/transport';
   import { restartBlocked } from '$lib/app-updates';
+  import { newlyUpdated } from '$lib/cli-updates';
+  import { modelMark } from '$lib/model-marks';
   import {
     ArrowUp,
     ArrowRight,
@@ -281,6 +285,7 @@
   let storageError = $state('');
   let notice = $state('');
   let appUpdate = $state<AppUpdateStatus>();
+  let cliUpdates = $state<CliUpdates>();
   let restartingForUpdate = $state(false);
   let statuses = $state<ProviderStatus[]>([]);
   let refreshing = $state(false);
@@ -692,6 +697,17 @@
   const availableModels = $derived(
     modelChoices(models, selectedSettings.provider, selectedSettings.model),
   );
+  // Each choice carries its model mark, so versions and families differ at a glance.
+  const modelOptions = $derived(
+    availableModels.map((model) => {
+      const name = model.name.replace(/^CLI default\s*·\s*/, '');
+      const mark = modelMark(selectedSettings.provider, name);
+      return { ...model, mark: mark.text, color: mark.color };
+    }),
+  );
+  const selectedModelMark = $derived(
+    modelMark(selectedSettings.provider, selectedModelName(selectedSettings.model, availableModels)),
+  );
   const currentModel = $derived(
     availableModels.find((model) => model.id === selectedSettings.model)!,
   );
@@ -967,6 +983,11 @@
     void watchAppUpdates((status) => (appUpdate = status)).then((stop) => {
       if (disposed) stop();
       else stopAppUpdates = stop;
+    });
+    let stopCliUpdates = () => {};
+    void watchCliUpdates(applyCliUpdates).then((stop) => {
+      if (disposed) stop();
+      else stopCliUpdates = stop;
     });
     const notificationHash = () => {
       notificationTarget = notificationConversation(window.location.hash);
@@ -1261,6 +1282,7 @@
       stopNotificationView();
       stopNotifications();
       stopAppUpdates();
+      stopCliUpdates();
       stopBrowserSession();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
@@ -1801,6 +1823,24 @@
     return JSON.stringify([settings.provider, connection ?? settings.connectionId ?? null]);
   }
   const modelRefreshWarning = 'Could not refresh models. Your saved choices are still available.';
+  function applyCliUpdates(next: CliUpdates) {
+    const updated = newlyUpdated(cliUpdates, next);
+    cliUpdates = next;
+    if (updated.length) forgetClaudeCatalogs(updated);
+  }
+  // An updated Claude Code can resolve its aliases to newer models, so its catalogs are stale.
+  function forgetClaudeCatalogs(environmentIds: string[]) {
+    for (const key of [...modelCache.keys()]) {
+      const [provider, connection] = JSON.parse(key) as [string, unknown];
+      const environmentId = (connection as { environmentId?: unknown } | null)?.environmentId;
+      if (
+        provider === 'claude' &&
+        (typeof environmentId !== 'string' || environmentIds.includes(environmentId))
+      )
+        modelCache.delete(key);
+    }
+    if (selectedSettings.provider === 'claude') void refreshModels(true);
+  }
   async function refreshModels(force = true) {
     const generation = ++modelGeneration;
     if ((!active && !selectedLocation) || !canQueryConnection(selectedSettings.connectionId)) {
@@ -3981,12 +4021,16 @@
                   bind:this={modelPicker}
                   label="Model"
                   value={selectedSettings.model}
-                  options={availableModels}
+                  options={modelOptions}
                   disabled={!loaded ||
                     (desktop() && (locationPending || (!selectedLocation && !active)))}
                   onchange={chooseModel}
                 >
-                  {#snippet icon()}<Cpu size={16} />{/snippet}
+                  {#snippet icon()}{#if selectedModelMark.version}<span
+                        class="model-mark model-version"
+                        style:--provider-color={selectedModelMark.color}
+                        >{selectedModelMark.text}</span
+                      >{:else}<Cpu size={16} />{/if}{/snippet}
                 </ChoicePicker>
               </div>
               <div class="chat-setting reasoning-setting">
@@ -4363,6 +4407,7 @@
           {wslDiscovery}
           {wslError}
           {cliInventories}
+          {cliUpdates}
           {usageSnapshots}
           {usageLoading}
           {usageErrors}
@@ -4396,6 +4441,11 @@
           {exportWorkspace}
           {appUpdate}
           {restartToUpdate}
+          {cliUpdates}
+          {applyCliUpdates}
+          environmentName={(id) =>
+            workspace.fleet.environments.find((environment) => environment.id === id)?.name ??
+            'This computer'}
           claudeInstructions={workspace.claudeInstructions}
           {saveClaudeInstructions}
         />

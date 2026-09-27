@@ -2,6 +2,7 @@ mod artifacts;
 mod background_work;
 mod badges;
 mod cli_queries;
+mod cli_updates;
 mod context;
 mod drafts;
 mod folders;
@@ -1000,6 +1001,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::Updates::new(version))
+        .manage(cli_updates::CliUpdates::default())
         .manage(runner::Runs::default())
         .manage(pool::Pool::default())
         .manage(mcp::Management::default())
@@ -1042,6 +1044,7 @@ pub fn run() {
                 }
             });
             updates::start(app.handle());
+            cli_updates::start(app.handle());
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -1097,6 +1100,9 @@ pub fn run() {
             updates::app_update_status,
             updates::check_app_update,
             updates::install_app_update,
+            cli_updates::cli_update_status,
+            cli_updates::set_cli_auto_update,
+            cli_updates::check_cli_updates,
             artifacts::save_artifact,
             site_icons::site_icon,
             app_session,

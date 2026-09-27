@@ -1,0 +1,119 @@
+<script lang="ts">
+  import { SquareTerminal } from '@lucide/svelte';
+  import { cliUpdateSummary } from '$lib/cli-updates';
+  import { checkCliUpdates, setCliAutoUpdate, type CliUpdates } from '$lib/transport';
+  let {
+    updates,
+    apply,
+    environmentName,
+  }: {
+    updates: CliUpdates | undefined;
+    apply: (updates: CliUpdates) => void;
+    environmentName: (environmentId: string) => string;
+  } = $props();
+  let busy = $state(false);
+  let error = $state('');
+  const checking = $derived(!!updates?.statuses.some((status) => status.phase === 'checking'));
+  async function act(action: () => Promise<CliUpdates>) {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      apply(await action());
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+</script>
+
+<section aria-labelledby="cli-updates-heading">
+  <h2 id="cli-updates-heading"><SquareTerminal size={18} />Claude Code updates</h2>
+  <p>
+    Claude Code updates itself only in its terminal, and Agent Studio runs it without one. So Agent
+    Studio runs <code>claude update</code> a minute after it starts and every six hours, on this computer
+    and in WSL distributions that are running. A newer Claude Code can mean newer models for Opus, Sonnet,
+    Fable and Haiku.
+  </p>
+  {#if updates}
+    <label class="checkbox"
+      ><input
+        type="checkbox"
+        checked={updates.automatic}
+        disabled={busy}
+        onchange={(event) => act(() => setCliAutoUpdate(event.currentTarget.checked))}
+      /><span>Update Claude Code automatically</span></label
+    >
+    {#if updates.notice}<p>{updates.notice}</p>{/if}
+    {#if updates.statuses.length}
+      <ul class="installations" aria-label="Claude Code installations">
+        {#each updates.statuses as status (status.environmentId)}
+          <li>
+            <strong>{environmentName(status.environmentId)}</strong>
+            <span class="version">{status.version ?? 'Version unknown'}</span>
+            <span class="summary" role="status">{cliUpdateSummary(status)}</span>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="summary">Not checked since Agent Studio started.</p>
+    {/if}
+    <div class="actions">
+      <button class="secondary" disabled={busy || checking} onclick={() => act(checkCliUpdates)}
+        >{busy || checking ? 'Checking…' : 'Check for updates'}</button
+      >
+    </div>
+  {/if}
+  {#if error}<p role="alert">{error}</p>{/if}
+</section>
+
+<style>
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+  .installations {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .installations li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+  }
+  .installations strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .version {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+  .summary {
+    flex-basis: 100%;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin: 14px 0 0;
+  }
+</style>

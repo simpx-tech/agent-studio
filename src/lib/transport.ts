@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { version as packageVersion } from '../../package.json';
 
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
+import { cliUpdatesSchema, type CliUpdates } from './cli-updates';
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
@@ -190,6 +191,34 @@ export async function watchAppUpdates(
     clearInterval(timer);
     unlisten();
   };
+}
+export type { CliUpdates, CliUpdateStatus } from './cli-updates';
+/** Turns this computer's automatic Claude Code updates on or off. */
+export const setCliAutoUpdate = async (automatic: boolean): Promise<CliUpdates> =>
+  cliUpdatesSchema.parse(await invoke('set_cli_auto_update', { automatic }));
+/** Runs `claude update` for every installation on this computer now. */
+export const checkCliUpdates = async (): Promise<CliUpdates> =>
+  cliUpdatesSchema.parse(await invoke('check_cli_updates'));
+export async function watchCliUpdates(onChange: (updates: CliUpdates) => void): Promise<() => void> {
+  if (!desktop()) return () => {};
+  let revision = 0;
+  const apply = (value: unknown) => {
+    const updates = cliUpdatesSchema.safeParse(value);
+    if (updates.success) onChange(updates.data);
+  };
+  const unlisten = await listen<unknown>('studio-cli-update', ({ payload }) => {
+    ++revision;
+    apply(payload);
+  });
+  const current = ++revision;
+  try {
+    const value = await invoke<unknown>('cli_update_status');
+    // A native event that arrived meanwhile is newer than this reading.
+    if (current === revision) apply(value);
+  } catch {
+    // Update status is informational; chats keep using the installed CLI without it.
+  }
+  return unlisten;
 }
 const desktopNotices = createDesktopNotificationTracker();
 let notificationConversationId: () => string | undefined = () => undefined;

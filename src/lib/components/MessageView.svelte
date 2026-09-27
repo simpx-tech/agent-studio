@@ -15,7 +15,8 @@
   import { awaitingAnswer } from '$lib/questions';
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
-  import { replyModelName, type ReplyTimeTotal } from '$lib/replies';
+  import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
+  import { modelMark } from '$lib/model-marks';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import { compactionLabel } from '$lib/compaction';
@@ -68,6 +69,9 @@
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
   const author = $derived(message.settings ?? agent);
+  // The model that ran, as the picker shows it: its version on its family's tint.
+  const mark = $derived(modelMark(author.provider, replyModelName(message)));
+  const mismatch = $derived(message.role === 'assistant' ? replyModelMismatch(message) : undefined);
   const text = $derived(
     messageText(message) ||
       (message.status !== 'running' &&
@@ -104,8 +108,12 @@
       <ArrowRightLeft size={13} aria-hidden="true" />{switchNotice}
     </p>
   {/if}
-  <div class="message-avatar" style:--provider-color={providers[author.provider].color}>
-    {message.role === 'user' ? 'Y' : providers[author.provider].mark}
+  <div
+    class="message-avatar"
+    class:model-version={message.role !== 'user' && mark.version}
+    style:--provider-color={message.role === 'user' ? providers[author.provider].color : mark.color}
+  >
+    {message.role === 'user' ? 'Y' : mark.text}
   </div>
   <div class="message-content">
     <div class="message-heading">
@@ -124,6 +132,12 @@
               : 'Responding'}{/if}</span
         >{/if}
     </div>
+    {#if mismatch}<p
+        class="model-mismatch"
+        title={`The Model picker showed ${mismatch.picked} when this reply was sent, but Claude Code reported ${mismatch.ran}. An older Claude Code maps Opus, Sonnet, Fable and Haiku to older models, and a fallback model answers when the chosen one is unavailable.`}
+      >
+        <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
+      </p>{/if}
     {#if message.role === 'user'}
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}

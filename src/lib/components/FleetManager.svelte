@@ -36,13 +36,15 @@
   import AccountUsage from './AccountUsage.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop, contextCache } from '$lib/transport';
+  import { desktop, contextCache, type CliUpdates } from '$lib/transport';
+  import { cliUpdateSummary } from '$lib/cli-updates';
   let {
     workspace = $bindable(),
     installation,
     wslDiscovery,
     wslError,
     cliInventories,
+    cliUpdates,
     statuses = $bindable(),
     usageSnapshots,
     usageLoading,
@@ -67,6 +69,7 @@
     wslDiscovery: WslDiscovery | undefined;
     wslError: string;
     cliInventories: Record<string, CliInventory>;
+    cliUpdates?: CliUpdates;
     statuses: Record<string, ProviderStatus>;
     usageSnapshots: Record<string, UsageSnapshot>;
     usageLoading: Record<string, boolean>;
@@ -570,6 +573,10 @@
                   {@const cliEntry =
                     cliEnvironment &&
                     cliInventories[cliEnvironment.id]?.entries?.find((entry) => entry.id === id)}
+                  {@const cliUpdate =
+                    id === 'claude' && cliEnvironment
+                      ? cliUpdates?.statuses.find((s) => s.environmentId === cliEnvironment.id)
+                      : undefined}
                   <article
                     class="connection-card provider-group"
                     aria-label={providers[id].name + ' connections'}
@@ -603,6 +610,23 @@
                       </header>
                       {#if cliEntry?.path}<div class="cli-location">
                           <span>CLI path</span><code title={cliEntry.path}>{cliEntry.path}</code>
+                        </div>{/if}
+                      {#if cliUpdate}<div class="cli-location" title={cliUpdateSummary(cliUpdate)}>
+                          <span>Version</span><code>{cliUpdate.version ?? 'unknown'}</code><span
+                            class="cli-update"
+                            class:failed={cliUpdate.phase === 'failed'}
+                            >{cliUpdate.phase === 'updated'
+                              ? cliUpdate.previous
+                                ? 'Updated from ' + cliUpdate.previous
+                                : 'Updated'
+                              : cliUpdate.phase === 'checking'
+                                ? 'Checking for updates…'
+                                : cliUpdate.phase === 'current'
+                                  ? 'Up to date'
+                                  : cliUpdate.phase === 'failed'
+                                    ? 'Update failed'
+                                    : 'Not updated automatically'}</span
+                          >
                         </div>{/if}
                     </div>
                     {#each accounts as account (account.id)}
@@ -1137,6 +1161,16 @@
   }
   .cli-location span {
     flex-shrink: 0;
+  }
+  .cli-location .cli-update {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .cli-location .cli-update.failed {
+    color: var(--warning);
   }
   .cli-location code {
     min-width: 0;

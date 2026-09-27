@@ -55,6 +55,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-app-update-installed', 'true');
             return;
           }
+          if (['cli_update_status', 'check_cli_updates', 'set_cli_auto_update'].includes(command)) {
+            const updates = JSON.parse(
+              localStorage.getItem('test-cli-updates') ?? '{"automatic":true,"statuses":[]}',
+            );
+            if (command === 'set_cli_auto_update') updates.automatic = args.automatic;
+            if (command === 'check_cli_updates')
+              (window as any).cliUpdateChecks = ((window as any).cliUpdateChecks ?? 0) + 1;
+            localStorage.setItem('test-cli-updates', JSON.stringify(updates));
+            return updates;
+          }
           // The native version deliberately differs from package.json's.
           if (command === 'plugin:app|version') return '0.2.0';
           if (command === 'save_artifact') {
@@ -286,7 +296,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
                 model('gpt-6-astra', 'GPT-6 Astra'),
                 model('gpt-5.6-sol', 'GPT-5.6 Sol', ['low', 'high'], 'low'),
               ],
-              claude: [
+              // A spec can name the aliases the way a CLI resolved them.
+              claude: JSON.parse(localStorage.getItem('test-claude-models') ?? 'null') ?? [
                 model('', 'CLI default'),
                 model('sonnet', 'Sonnet'),
                 model('fable', 'Fable'),

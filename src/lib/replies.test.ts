@@ -3,6 +3,7 @@ import { initialWorkspace, restoreWorkspace, settingsFor, type Message } from '.
 import {
   formatModelName,
   replyAccountChanged,
+  replyModelMismatch,
   replyModelName,
   replySettingsChanged,
   replySwitches,
@@ -104,6 +105,38 @@ describe('reply identities and model switches', () => {
       ['gpt-6-astra', 'GPT-6-Astra'],
     ])
       expect(formatModelName(id)).toBe(name);
+  });
+  it('notices a Claude reply that ran another model than the one picked', () => {
+    const claude = (
+      modelName: string | undefined,
+      reported: string | undefined,
+      model = 'opus',
+    ) => {
+      const message = reply(model);
+      message.settings = { ...message.settings!, provider: 'claude' };
+      message.modelName = modelName;
+      if (reported) message.usage = { model: reported };
+      return message;
+    };
+    // The picker named Opus 5.5, but an older CLI ran Opus 5.
+    expect(replyModelMismatch(claude('Opus 5.5', 'claude-opus-5'))).toEqual({
+      picked: 'Opus 5.5',
+      ran: 'Opus 5',
+    });
+    expect(replyModelMismatch(claude('Opus 5.5', 'claude-sonnet-5'))?.ran).toBe('Sonnet 5');
+    for (const message of [
+      claude('Opus 5.5', 'claude-opus-5-5'),
+      // Replies sent before the picker named versions, or without a report, stay quiet.
+      claude('Opus (latest)', 'claude-opus-5'),
+      claude('Opus', 'claude-opus-5'),
+      claude('Opus 5.5', undefined),
+      claude(undefined, 'claude-opus-5'),
+      claude('CLI default', 'claude-fable-5-1', ''),
+      // An explicit model that ran as named.
+      claude('claude-opus-4-8', 'claude-opus-4-8', 'claude-opus-4-8'),
+      { ...claude('GPT-6 Astra', 'gpt-5.6-sol'), settings: reply('gpt-6-astra').settings },
+    ])
+      expect(replyModelMismatch(message)).toBeUndefined();
   });
   it('announces model and reasoning changes only on the affected assistant reply', () => {
     const first = reply('gpt-6-astra');

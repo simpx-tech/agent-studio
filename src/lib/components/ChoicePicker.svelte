@@ -231,6 +231,7 @@
           >
             {#if option.mark}<span
                 class="option-mark"
+                class:version={/\d/.test(option.mark)}
                 style:--provider-color={option.color}
                 aria-hidden="true">{option.mark}</span
               >{/if}
@@ -390,6 +391,13 @@
     border: 1px solid color-mix(in srgb, var(--provider-color) 20%, transparent);
     font-size: 16px;
     line-height: 1;
+  }
+  /* A model version (5.5) rather than a provider glyph. */
+  .option-mark.version {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
   }
   .option-copy {
     display: grid;

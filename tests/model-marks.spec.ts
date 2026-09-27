@@ -1,0 +1,182 @@
+import { test, expect, type Locator } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+import { mockDesktop } from './desktop-helper';
+import { initialWorkspace, settingsFor } from '../src/lib/domain';
+
+const output = 'artifacts/model-marks';
+const tint = (locator: Locator) =>
+  locator.evaluate((element) => getComputedStyle(element).getPropertyValue('--provider-color'));
+
+test('each Claude model shows its version on its family tint, and a reply says when another model ran', async ({
+  page,
+}) => {
+  await mkdir(output, { recursive: true });
+  await mockDesktop(page);
+  const model = (id: string, name: string) => ({
+    id,
+    name,
+    reasoningLevels: id === 'haiku' || !id ? [] : ['low', 'medium', 'high'],
+    defaultReasoning: '',
+  });
+  const workspace = initialWorkspace();
+  const now = new Date().toISOString();
+  const settings = {
+    ...settingsFor(workspace.preferences),
+    provider: 'claude' as const,
+    model: 'opus',
+  };
+  const reply = (text: string, reported: string) => ({
+    id: crypto.randomUUID(),
+    runId: crypto.randomUUID(),
+    role: 'assistant' as const,
+    status: 'complete' as const,
+    createdAt: now,
+    settings,
+    // The picker named Opus 5.5 for both replies; the first came from an older CLI.
+    modelName: 'Opus 5.5',
+    blocks: [{ type: 'markdown' as const, text }],
+    usage: { model: reported },
+  });
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Model marks fixture',
+    settings,
+    createdAt: now,
+    updatedAt: now,
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        status: 'complete',
+        createdAt: now,
+        blocks: [{ type: 'markdown', text: 'Which model answers?' }],
+      },
+      reply('An answer from the older CLI.', 'claude-opus-5'),
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        status: 'complete',
+        createdAt: now,
+        blocks: [{ type: 'markdown', text: 'And now?' }],
+      },
+      reply('An answer after the update.', 'claude-opus-5-5'),
+    ],
+  });
+  await page.addInitScript(
+    ({ workspace, models }) => {
+      localStorage.setItem('test-workspace', JSON.stringify(workspace));
+      localStorage.setItem('test-claude-models', JSON.stringify(models));
+    },
+    {
+      workspace,
+      models: [
+        model('', 'CLI default'),
+        model('opus', 'Opus 5.5'),
+        model('sonnet', 'Sonnet 5'),
+        model('fable', 'Fable 5.1'),
+        model('haiku', 'Haiku 4.5'),
+      ],
+    },
+  );
+  await page.goto('/');
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: 'Model marks fixture', exact: true }).click();
+
+  const replies = page.getByTestId('message').filter({ has: page.locator('.message-avatar') });
+  const older = replies.filter({ hasText: 'An answer from the older CLI.' });
+  const newer = replies.filter({ hasText: 'An answer after the update.' });
+  await expect(older.locator('.message-heading strong')).toHaveText('Opus 5');
+  await expect(older.locator('.message-avatar')).toHaveText('5');
+  await expect(older.locator('.model-mismatch')).toHaveText('Ran Opus 5 instead of Opus 5.5');
+  await expect(newer.locator('.message-heading strong')).toHaveText('Opus 5.5');
+  await expect(newer.locator('.message-avatar')).toHaveText('5.5');
+  await expect(newer.locator('.model-mismatch')).toHaveCount(0);
+  expect(await tint(older.locator('.message-avatar'))).toBe(
+    await tint(newer.locator('.message-avatar')),
+  );
+  await page.screenshot({ path: `${output}/replies.png` });
+
+  // The toolbar shows the selected model's version, and every choice carries its own mark.
+  const picker = page.getByRole('combobox', { name: 'Model', exact: true });
+  await expect(picker.locator('.model-mark')).toHaveText('5.5');
+  await expect(picker.locator('.selected-name')).toHaveText('Opus 5.5');
+  await picker.click();
+  const options = page.getByRole('option');
+  await expect(options.locator('.option-mark')).toHaveText(['✳', '5.5', '5', '5.1', '4.5']);
+  await expect(options.locator('.option-name')).toHaveText([
+    'CLI default',
+    'Opus 5.5',
+    'Sonnet 5',
+    'Fable 5.1',
+    'Haiku 4.5',
+  ]);
+  const tints = await Promise.all(
+    ['Opus 5.5', 'Sonnet 5', 'Fable 5.1', 'Haiku 4.5'].map((name) =>
+      tint(page.getByRole('option', { name, exact: true }).locator('.option-mark')),
+    ),
+  );
+  expect(new Set(tints).size).toBe(4);
+  expect(tints[0]).toBe(await tint(newer.locator('.message-avatar')));
+  await page.screenshot({ path: `${output}/picker.png` });
+  await page.getByRole('option', { name: 'Haiku 4.5', exact: true }).click();
+  await expect(picker.locator('.model-mark')).toHaveText('4.5');
+  await expect(picker.locator('.selected-name')).toHaveText('Haiku 4.5');
+  expect(await tint(picker.locator('.model-mark'))).toBe(tints[3]);
+});
+
+test('Settings keeps Claude Code updated automatically and Connections shows its version', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  const checkedAt = new Date(2026, 8, 27, 12, 40).getTime();
+  await page.addInitScript((checkedAt) => {
+    localStorage.setItem(
+      'test-cli-updates',
+      JSON.stringify({
+        automatic: true,
+        statuses: [
+          {
+            environmentId: '11111111-1111-4111-8111-111111111111',
+            phase: 'updated',
+            version: '2.1.283',
+            previous: '2.1.278',
+            checkedAt,
+          },
+        ],
+      }),
+    );
+  }, checkedAt);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const section = page.getByRole('region', { name: 'Claude Code updates' });
+  const automatic = section.getByRole('checkbox', { name: 'Update Claude Code automatically' });
+  await expect(automatic).toBeChecked();
+  // The page formats times in the browser's locale.
+  const clock = await page.evaluate(
+    (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    checkedAt,
+  );
+  await expect(section.getByRole('status')).toHaveText(
+    `Updated from 2.1.278 to 2.1.283 at ${clock}.`,
+  );
+  await expect(section).toContainText('2.1.283');
+  await section.screenshot({ path: `${output}/settings.png` });
+  await automatic.uncheck();
+  await expect(automatic).not.toBeChecked();
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('test-cli-updates')!).automatic),
+  ).toBe(false);
+  await section.getByRole('button', { name: 'Check for updates', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).cliUpdateChecks)).toBe(1);
+
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  // Only this computer's Claude card has an update reading.
+  const claude = page
+    .getByRole('article', { name: 'Claude connections' })
+    .filter({ hasText: 'Version' });
+  await expect(claude).toHaveCount(1);
+  await claude.screenshot({ path: `${output}/connections.png` });
+  await expect(claude.locator('.cli-location').filter({ hasText: 'Version' })).toHaveText(
+    /Version\s*2\.1\.283\s*Updated from 2\.1\.278/,
+  );
+});

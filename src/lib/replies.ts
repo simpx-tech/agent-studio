@@ -65,6 +65,23 @@ export function replyModelName(message: Message): string {
   return message.modelName || formatModelName(reported || message.settings?.model || '');
 }
 
+// A resolved Claude name: Opus 5.5, never CLI default or an unresolved Opus.
+const versionedClaudeName = /^[A-Z][a-z]+ \d+(?:\.\d+)*$/;
+
+/** A Claude reply that ran another model than the one the picker named when it was sent, such
+ * as an older CLI resolving an alias to an older model or a fallback model answering. Replies
+ * sent before the picker named versions have nothing to compare and stay quiet. */
+export function replyModelMismatch(message: Message): { picked: string; ran: string } | undefined {
+  const reported = message.usage?.model;
+  const picked = message.modelName;
+  if (message.settings?.provider !== 'claude' || !reported || !picked) return undefined;
+  if (reported === message.settings.model) return undefined;
+  const ran = formatModelName(reported);
+  return versionedClaudeName.test(picked) && versionedClaudeName.test(ran) && picked !== ran
+    ? { picked, ran }
+    : undefined;
+}
+
 // Older snapshots may lack a connection; only two recorded connections can differ.
 export function replyAccountChanged(previous: ChatSettings, next: ChatSettings): boolean {
   return (
