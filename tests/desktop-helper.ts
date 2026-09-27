@@ -57,9 +57,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (['cli_update_status', 'check_cli_updates', 'set_cli_auto_update'].includes(command)) {
             const updates = JSON.parse(
-              localStorage.getItem('test-cli-updates') ?? '{"automatic":true,"statuses":[]}',
+              localStorage.getItem('test-cli-updates') ??
+                '{"automatic":{"claude":true,"codex":true},"statuses":[]}',
             );
-            if (command === 'set_cli_auto_update') updates.automatic = args.automatic;
+            if (command === 'set_cli_auto_update') updates.automatic[args.provider] = args.automatic;
             if (command === 'check_cli_updates')
               (window as any).cliUpdateChecks = ((window as any).cliUpdateChecks ?? 0) + 1;
             localStorage.setItem('test-cli-updates', JSON.stringify(updates));

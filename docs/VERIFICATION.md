@@ -1,5 +1,38 @@
 # Verification — 2026-09-08
 
+## Codex stays current too — 2026-09-27
+
+The user asked for Codex to update the way Claude Code now does. Codex has the same gap. Its own update check lives in the interactive terminal (`~/.codex/version.json` was last checked on 5 September), Agent Studio runs `codex app-server`, and this computer kept 0.153.4 while 0.157.1 was out.
+
+`codex update` exists, but unlike `claude update` it reruns whatever installed Codex every time it runs (`codex-rs/tui/src/update_action.rs`). That is the standalone installer (`powershell -ExecutionPolicy Bypass -c "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"`, or `curl … install.sh` on Unix), a global `npm`/`bun`/`vp`/`pnpm` install, or `brew upgrade --cask codex`. The standalone installer:
+
+- verifies SHA-256 digests;
+- installs each release into `~/.codex/packages/standalone/releases/<version>-<target>` and switches `current`;
+- deletes only `.staging.*` folders;
+- answers its own prompts "no" when non-interactive;
+- skips the download when the latest release is already complete.
+
+So `cli_updates.rs` compares `codex --version` (now parsed from `codex-cli 0.153.4`) with the latest `@openai/codex` on the npm registry, and runs `codex update` only for a newer release or when the registry cannot be read.
+
+A package manager replaces a Windows installation's files in place, which fails while a process runs them. Such an installation therefore waits, in a new Waiting state looked at every half hour, until no reply runs here and the pool (`holds_native`) keeps no Codex process. A standalone installation, recognized by its canonical path under `packages/standalone/releases/`, never waits, and neither does Linux. Codex's own messages add a Managed outcome ("Could not detect the Codex installation method…"), and a failure reason replaces Codex's echo of the whole installer command with "The installer failed with status …".
+
+Settings becomes **CLI updates** with a switch per CLI. `cli-updates.json` now holds `{claude, codex}`, and the development-only `{automatic}` reads as both on. Statuses carry their provider, Connections shows the Codex version, and an update refetches that CLI's model catalogs.
+
+Validation: `npm run verify` found zero Svelte/TypeScript diagnostics, passed 464 unit/HTTP tests in 69 files, built for production and passed all 258 browser scenarios on the first run. Rust formatting, Clippy with warnings denied, and 330 Rust tests passed, with twelve opt-in cases ignored. Logs: `artifacts/cli-updates/codex-*`. New coverage:
+
+- version parsing for both CLIs;
+- `newer`, including a pre-release installed ahead of the latest;
+- `codex_plan`: current, update, update without a readable latest, and waiting with and without a known version;
+- standalone detection from a real `packages/standalone/releases` tree versus an npm script;
+- Codex's outcomes: updated with its success line, unknown install method, installer failure;
+- the Waiting schedule, the per-CLI switches and the pool's `holds_native`;
+- stand-in Claude and Codex CLIs updating through the real process path;
+- `tests/model-marks.spec.ts` now renders both switches, a Codex installation waiting with its message, and both Connections version rows.
+
+Native, with the user's approval: an isolated `com.vinicius.agentstudio.codex-updates-qa` build (CDP 19781) listed six Codex models with Codex 0.153.4. Its automatic check reported Claude Code 2.1.283 up to date and updated Codex from 0.153.4 to 0.157.1, 72 seconds after launch. `current` now points at `releases/0.157.1-x86_64-pc-windows-msvc`, with 0.153.4 kept beside it. Three seconds later the Model list included GPT-6-Sol and GPT-6-Luna, which 0.157.1 adds. Settings read "Updated from 0.153.4 to 0.157.1 at 15:37." and Connections "Version 0.157.1 Updated from 0.153.4". A console-window watcher saw only the QA launcher's own terminal at launch, and none during the update.
+
+Not exercised: an npm, bun, pnpm or Homebrew Codex (including the waiting path on a real installation), and a WSL distribution's Codex.
+
 ## Claude Code stays current, and models show their version — 2026-09-27
 
 Once the picker named each alias for what the installed CLI runs, the user asked for the CLI to keep itself current and for models to look different enough that a stale one gets noticed. Claude Code's auto-updater is part of its interactive terminal UI (`AutoUpdaterWrapper`, beside the REPL code in 2.1.278). `--print`, which is all Agent Studio runs, never reaches it, so the CLI kept the version installed on 21 September through 93 Opus replies. `src-tauri/src/cli_updates.rs` runs the CLI's own `claude update` instead: a minute after startup and every six hours, retrying a failure or lock contention after an hour. It covers the CLI on PATH, one binary for every account profile, and on Windows each WSL distribution's Linux CLI only while `wsl --list --running` lists it. The update itself stays the CLI's: it follows `autoUpdatesChannel` and administrator version policies, verifies the signed manifest, stages the build under `~/.local/share/claude/versions/` and swaps the launcher by renaming it. Running Claude processes hold only a per-version lock that keeps their version's files. `--version` before and after decides whether an update happened. The CLI's messages classify the rest: up to date or held by a policy (with its reason), another update holding the install lock, a package manager's install (its upgrade command is shown, never run), an administrator block, or a failure with its error line. **Settings → Claude Code updates** has the switch (device-local `cli-updates.json`, on by default; `DISABLE_AUTOUPDATER` in the app's environment also stops automatic checks), each installation's result and **Check for updates**. Connections shows the version on this computer's Claude card. An update refetches that environment's Claude catalogs, and the CLI-file fingerprint from the previous change starts the new binary on a chat's next reply.

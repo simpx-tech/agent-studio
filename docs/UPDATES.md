@@ -37,34 +37,47 @@ public, so no GitHub token is involved.
   **Current**. The desktop app reports its native version; the Viewer reports the version it
   was built from, so a stale cached Viewer shows its own version.
 
-## Claude Code updates
+## CLI updates
 
-Claude Code updates itself only from its interactive terminal. Agent Studio always runs it
-headless, so a CLI used only through Agent Studio kept the version it was installed with, and the
-Model picker's aliases mean what that version says: Claude Code 2.1.278 runs Opus 5 for `opus`,
-2.1.281 runs Opus 5.5. The desktop app therefore keeps Claude Code current itself
-(`src-tauri/src/cli_updates.rs`).
+Claude Code and Codex update themselves only from their interactive terminals. Agent Studio always
+runs them headless, so a CLI used only through Agent Studio kept the version it was installed
+with, and with it the models it offers: Claude Code 2.1.278 runs Opus 5 for `opus`, 2.1.281 runs
+Opus 5.5, and Codex 0.153.4 stayed installed while 0.157.1 was out. The desktop app therefore
+keeps both current itself (`src-tauri/src/cli_updates.rs`).
 
-- **What runs.** The CLI's own `claude update`, which follows its release channel
-  (`autoUpdatesChannel`) and any administrator version policy and verifies the signed build before
-  swapping it in. Agent Studio never downloads Claude Code itself. It reads `claude --version`
-  before and after, so an update is recognized by the version change rather than by wording.
+- **What runs.** Each CLI's own updater; Agent Studio never downloads a CLI itself. `claude update`
+  follows its release channel (`autoUpdatesChannel`) and any administrator version policy and
+  verifies the signed build before swapping it in. `codex update` reruns whatever installed Codex:
+  on Windows and Unix its standalone installer, which verifies each download's SHA-256 digest,
+  keeps every release in its own folder under `~/.codex/packages/standalone/releases/` and
+  switches a `current` link, or npm, bun, pnpm or Homebrew. It runs even when nothing changed, so
+  Agent Studio first compares `codex --version` with the latest `@openai/codex` on the npm
+  registry and runs it only for a newer release, or when the registry cannot be read. Both CLIs'
+  `--version` is read before and after, so an update is recognized by the version change rather
+  than by wording.
 - **When and where.** A minute after startup, then every six hours; a failure, or another Claude
-  Code update holding the install lock, retries after an hour. Checks cover this computer's CLI on
-  PATH, which every account profile shares, and on Windows each WSL distribution's Linux CLI only
+  Code update holding the install lock, retries after an hour. Checks cover this computer's CLIs on
+  PATH, which every account profile shares, and on Windows each WSL distribution's Linux CLIs only
   while that distribution already runs, so an automatic check never starts one.
-- **Settings.** **Settings → Claude Code updates** has **Update Claude Code automatically** (on by
-  default, stored per device in `cli-updates.json` in app data), each installation's last result,
-  and **Check for updates**, which checks every installation at once. `DISABLE_AUTOUPDATER` in the
-  app's environment, Claude Code's own switch, also stops the automatic checks. **Connections**
-  shows the version on this computer's Claude card.
+- **Codex in use.** A package manager replaces a Windows installation's files in place, which fails
+  while a process runs them. So a newer Codex installed that way waits, shown as waiting and looked
+  at again every half hour, until no reply runs on this computer and no Codex process is parked
+  for a chat's next message; parked processes are released after fifteen idle minutes. The
+  standalone installer adds each release beside the running one and never waits, and Linux keeps
+  running files open while they are replaced.
+- **Settings.** **Settings → CLI updates** has **Update Claude Code automatically** and **Update
+  Codex automatically** (both on by default, stored per device in `cli-updates.json` in app data),
+  each installation's last result, and **Check for updates**, which checks every installation at
+  once. `DISABLE_AUTOUPDATER` in the app's environment, Claude Code's own switch, also stops its
+  automatic checks. **Connections** shows the version on this computer's Claude and Codex cards.
 - **Results.** Up to date, or held by a channel or version policy with the CLI's reason; updated
-  from one version to another; another update running; managed by a package manager (Homebrew,
-  winget and apk print their own upgrade command, which Agent Studio shows but does not run);
+  from one version to another; waiting for Codex to be free; another update running; managed (a
+  Claude Code installed with Homebrew, winget or apk prints its own upgrade command, which Agent
+  Studio shows but does not run, and a Codex that cannot tell how it was installed says so);
   turned off by an administrator; or failed, with the CLI's bounded reason. Status is transient,
   desktop-only and never synced; the Viewer shows none.
-- **After an update.** Claude model catalogs for that computer are fetched again, so the picker
-  names the models the new version resolves. Running replies keep their process. A chat's parked
+- **After an update.** That CLI's model catalogs for that computer are fetched again, so the picker
+  names the models the new version offers. Running replies keep their process. A chat's parked
   process is replaced on its next reply because its launch identity includes the CLI file's size
   and modification time (see [native sessions](NATIVE-SESSIONS.md)); the new process resumes the
   native session. Parked WSL processes keep their version until they are released.

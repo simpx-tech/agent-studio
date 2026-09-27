@@ -1,13 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { cliUpdateSummary, cliUpdatesSchema, newlyUpdated, type CliUpdates } from './cli-updates';
+import {
+  cliName,
+  cliUpdateSummary,
+  cliUpdatesSchema,
+  newlyUpdated,
+  type CliUpdates,
+} from './cli-updates';
 
 const at = new Date(2026, 8, 27, 12, 40).getTime();
 const clock = new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const automatic = { claude: true, codex: true };
 
-describe('Claude Code updates', () => {
+describe('CLI updates', () => {
   it('describes each installation’s last check', () => {
     expect(
       cliUpdateSummary({
+        provider: 'claude',
         environmentId: 'windows',
         phase: 'updated',
         version: '2.1.283',
@@ -15,51 +23,72 @@ describe('Claude Code updates', () => {
         checkedAt: at,
       }),
     ).toBe(`Updated from 2.1.278 to 2.1.283 at ${clock}.`);
-    expect(cliUpdateSummary({ environmentId: 'windows', phase: 'current', checkedAt: at })).toBe(
-      `Up to date. Checked ${clock}.`,
-    );
     expect(
       cliUpdateSummary({
+        provider: 'codex',
+        environmentId: 'windows',
+        phase: 'current',
+        checkedAt: at,
+      }),
+    ).toBe(`Up to date. Checked ${clock}.`);
+    expect(
+      cliUpdateSummary({
+        provider: 'claude',
         environmentId: 'windows',
         phase: 'current',
         message: 'The stable channel is at 2.1.270. Staying on 2.1.278.',
       }),
     ).toBe('The stable channel is at 2.1.270. Staying on 2.1.278.');
-    expect(cliUpdateSummary({ environmentId: 'windows', phase: 'checking' })).toContain('Checking');
-    expect(cliUpdateSummary({ environmentId: 'windows', phase: 'failed', message: 'EPERM' })).toBe(
-      'The last update did not finish: EPERM',
-    );
+    expect(
+      cliUpdateSummary({ provider: 'codex', environmentId: 'windows', phase: 'checking' }),
+    ).toBe('Checking for a newer Codex…');
     expect(
       cliUpdateSummary({
+        provider: 'claude',
         environmentId: 'windows',
-        phase: 'managed',
-        message: 'Claude is managed by winget.',
+        phase: 'failed',
+        message: 'EPERM',
       }),
-    ).toBe('Claude is managed by winget.');
+    ).toBe('The last update did not finish: EPERM');
+    expect(cliUpdateSummary({ provider: 'codex', environmentId: 'windows', phase: 'failed' })).toBe(
+      'The last update did not finish: Codex could not update.',
+    );
+    for (const phase of ['waiting', 'managed'] as const)
+      expect(
+        cliUpdateSummary({
+          provider: 'codex',
+          environmentId: 'windows',
+          phase,
+          message: 'Codex 0.157.1 is available.',
+        }),
+      ).toBe('Codex 0.157.1 is available.');
+    expect(cliName('claude')).toBe('Claude Code');
   });
-  it('reports each finished update once', () => {
-    const reading = (checkedAt: number, phase: 'updated' | 'current' = 'updated'): CliUpdates => ({
-      automatic: true,
-      statuses: [{ environmentId: 'windows', phase, version: '2.1.283', checkedAt }],
+  it('reports each finished update once, by CLI', () => {
+    const reading = (
+      checkedAt: number,
+      phase: 'updated' | 'current' = 'updated',
+      provider: 'claude' | 'codex' = 'claude',
+    ): CliUpdates => ({
+      automatic,
+      statuses: [{ provider, environmentId: 'windows', phase, version: '2.1.283', checkedAt }],
     });
-    expect(newlyUpdated(undefined, reading(1))).toEqual(['windows']);
+    const windows = (provider: 'claude' | 'codex') => [{ provider, environmentId: 'windows' }];
+    expect(newlyUpdated(undefined, reading(1))).toEqual(windows('claude'));
     expect(newlyUpdated(reading(1), reading(1))).toEqual([]);
-    expect(newlyUpdated(reading(1), reading(2))).toEqual(['windows']);
+    expect(newlyUpdated(reading(1), reading(2))).toEqual(windows('claude'));
     expect(newlyUpdated(undefined, reading(1, 'current'))).toEqual([]);
+    // Claude Code's earlier update does not hide Codex's in the same environment.
+    expect(newlyUpdated(reading(1), reading(1, 'updated', 'codex'))).toEqual(windows('codex'));
   });
   it('accepts only bounded native readings', () => {
-    expect(cliUpdatesSchema.safeParse({ automatic: true, statuses: [] }).success).toBe(true);
-    expect(
-      cliUpdatesSchema.safeParse({
-        automatic: true,
-        statuses: [{ environmentId: 'windows', phase: 'unknown' }],
-      }).success,
-    ).toBe(false);
-    expect(
-      cliUpdatesSchema.safeParse({
-        automatic: true,
-        statuses: [{ environmentId: 'windows', phase: 'failed', message: 'x'.repeat(301) }],
-      }).success,
-    ).toBe(false);
+    expect(cliUpdatesSchema.safeParse({ automatic, statuses: [] }).success).toBe(true);
+    for (const statuses of [
+      [{ provider: 'claude', environmentId: 'windows', phase: 'unknown' }],
+      [{ provider: 'gemini', environmentId: 'windows', phase: 'current' }],
+      [{ provider: 'codex', environmentId: 'windows', phase: 'failed', message: 'x'.repeat(301) }],
+    ])
+      expect(cliUpdatesSchema.safeParse({ automatic, statuses }).success).toBe(false);
+    expect(cliUpdatesSchema.safeParse({ automatic: true, statuses: [] }).success).toBe(false);
   });
 });

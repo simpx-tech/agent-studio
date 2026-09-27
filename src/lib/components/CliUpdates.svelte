@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SquareTerminal } from '@lucide/svelte';
-  import { cliUpdateSummary } from '$lib/cli-updates';
+  import { cliName, cliUpdateSummary, updatedClis } from '$lib/cli-updates';
   import { checkCliUpdates, setCliAutoUpdate, type CliUpdates } from '$lib/transport';
   let {
     updates,
@@ -29,28 +29,35 @@
 </script>
 
 <section aria-labelledby="cli-updates-heading">
-  <h2 id="cli-updates-heading"><SquareTerminal size={18} />Claude Code updates</h2>
+  <h2 id="cli-updates-heading"><SquareTerminal size={18} />CLI updates</h2>
   <p>
-    Claude Code updates itself only in its terminal, and Agent Studio runs it without one. So Agent
-    Studio runs <code>claude update</code> a minute after it starts and every six hours, on this computer
-    and in WSL distributions that are running. A newer Claude Code can mean newer models for Opus, Sonnet,
-    Fable and Haiku.
+    Claude Code and Codex update themselves only in their terminals, and Agent Studio runs them
+    without one. So Agent Studio runs <code>claude update</code> and <code>codex update</code> a minute
+    after it starts and every six hours, on this computer and in WSL distributions that are running. Codex
+    updates only when a newer version is out, and a Codex installed with npm or another package manager
+    on Windows waits until no Codex chat here is using it. Newer CLIs can bring newer models.
   </p>
   {#if updates}
-    <label class="checkbox"
-      ><input
-        type="checkbox"
-        checked={updates.automatic}
-        disabled={busy}
-        onchange={(event) => act(() => setCliAutoUpdate(event.currentTarget.checked))}
-      /><span>Update Claude Code automatically</span></label
-    >
+    <div class="switches">
+      {#each updatedClis as cli (cli.provider)}
+        <label class="checkbox"
+          ><input
+            type="checkbox"
+            checked={updates.automatic[cli.provider]}
+            disabled={busy}
+            onchange={(event) =>
+              act(() => setCliAutoUpdate(cli.provider, event.currentTarget.checked))}
+          /><span>Update {cli.name} automatically</span></label
+        >
+      {/each}
+    </div>
     {#if updates.notice}<p>{updates.notice}</p>{/if}
     {#if updates.statuses.length}
-      <ul class="installations" aria-label="Claude Code installations">
-        {#each updates.statuses as status (status.environmentId)}
+      <ul class="installations" aria-label="CLI installations">
+        {#each updates.statuses as status (status.provider + ':' + status.environmentId)}
           <li>
-            <strong>{environmentName(status.environmentId)}</strong>
+            <strong>{cliName(status.provider)}</strong>
+            <span class="where">{environmentName(status.environmentId)}</span>
             <span class="version">{status.version ?? 'Version unknown'}</span>
             <span class="summary" role="status">{cliUpdateSummary(status)}</span>
           </li>
@@ -78,6 +85,11 @@
     font-family: var(--font-mono);
     font-size: 0.92em;
   }
+  .switches {
+    display: grid;
+    justify-items: start;
+    gap: 8px;
+  }
   .installations {
     display: grid;
     gap: 8px;
@@ -98,6 +110,10 @@
   .installations strong {
     color: var(--text);
     font-weight: 500;
+  }
+  .where {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
   }
   .version {
     color: var(--text-secondary);

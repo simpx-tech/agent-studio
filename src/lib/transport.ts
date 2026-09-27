@@ -7,7 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { version as packageVersion } from '../../package.json';
 
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
-import { cliUpdatesSchema, type CliUpdates } from './cli-updates';
+import { cliUpdatesSchema, type CliUpdates, type UpdatedCli } from './cli-updates';
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
@@ -193,10 +193,13 @@ export async function watchAppUpdates(
   };
 }
 export type { CliUpdates, CliUpdateStatus } from './cli-updates';
-/** Turns this computer's automatic Claude Code updates on or off. */
-export const setCliAutoUpdate = async (automatic: boolean): Promise<CliUpdates> =>
-  cliUpdatesSchema.parse(await invoke('set_cli_auto_update', { automatic }));
-/** Runs `claude update` for every installation on this computer now. */
+/** Turns this computer's automatic updates of one CLI on or off. */
+export const setCliAutoUpdate = async (
+  provider: UpdatedCli,
+  automatic: boolean,
+): Promise<CliUpdates> =>
+  cliUpdatesSchema.parse(await invoke('set_cli_auto_update', { provider, automatic }));
+/** Checks every Claude Code and Codex installation on this computer for an update now. */
 export const checkCliUpdates = async (): Promise<CliUpdates> =>
   cliUpdatesSchema.parse(await invoke('check_cli_updates'));
 export async function watchCliUpdates(onChange: (updates: CliUpdates) => void): Promise<() => void> {

@@ -573,10 +573,11 @@
                   {@const cliEntry =
                     cliEnvironment &&
                     cliInventories[cliEnvironment.id]?.entries?.find((entry) => entry.id === id)}
-                  {@const cliUpdate =
-                    id === 'claude' && cliEnvironment
-                      ? cliUpdates?.statuses.find((s) => s.environmentId === cliEnvironment.id)
-                      : undefined}
+                  {@const cliUpdate = cliEnvironment
+                    ? cliUpdates?.statuses.find(
+                        (s) => s.provider === id && s.environmentId === cliEnvironment.id,
+                      )
+                    : undefined}
                   <article
                     class="connection-card provider-group"
                     aria-label={providers[id].name + ' connections'}
@@ -623,9 +624,11 @@
                                 ? 'Checking for updates…'
                                 : cliUpdate.phase === 'current'
                                   ? 'Up to date'
-                                  : cliUpdate.phase === 'failed'
-                                    ? 'Update failed'
-                                    : 'Not updated automatically'}</span
+                                  : cliUpdate.phase === 'waiting'
+                                    ? 'Update waiting'
+                                    : cliUpdate.phase === 'failed'
+                                      ? 'Update failed'
+                                      : 'Not updated automatically'}</span
                           >
                         </div>{/if}
                     </div>

@@ -124,23 +124,34 @@ test('each Claude model shows its version on its family tint, and a reply says w
   expect(await tint(picker.locator('.model-mark'))).toBe(tints[3]);
 });
 
-test('Settings keeps Claude Code updated automatically and Connections shows its version', async ({
+test('Settings keeps Claude Code and Codex updated automatically and Connections shows their versions', async ({
   page,
 }) => {
   await mockDesktop(page);
   const checkedAt = new Date(2026, 8, 27, 12, 40).getTime();
   await page.addInitScript((checkedAt) => {
+    const environmentId = '11111111-1111-4111-8111-111111111111';
     localStorage.setItem(
       'test-cli-updates',
       JSON.stringify({
-        automatic: true,
+        automatic: { claude: true, codex: true },
         statuses: [
           {
-            environmentId: '11111111-1111-4111-8111-111111111111',
+            provider: 'claude',
+            environmentId,
             phase: 'updated',
             version: '2.1.283',
             previous: '2.1.278',
             checkedAt,
+          },
+          {
+            provider: 'codex',
+            environmentId,
+            phase: 'waiting',
+            version: '0.153.4',
+            checkedAt,
+            message:
+              'Codex 0.157.1 is available. Agent Studio installs it once no Codex chat on this computer is replying or waiting for its next message.',
           },
         ],
       }),
@@ -148,35 +159,45 @@ test('Settings keeps Claude Code updated automatically and Connections shows its
   }, checkedAt);
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const section = page.getByRole('region', { name: 'Claude Code updates' });
-  const automatic = section.getByRole('checkbox', { name: 'Update Claude Code automatically' });
-  await expect(automatic).toBeChecked();
+  const section = page.getByRole('region', { name: 'CLI updates' });
+  const claudeSwitch = section.getByRole('checkbox', { name: 'Update Claude Code automatically' });
+  const codexSwitch = section.getByRole('checkbox', { name: 'Update Codex automatically' });
+  await expect(claudeSwitch).toBeChecked();
+  await expect(codexSwitch).toBeChecked();
   // The page formats times in the browser's locale.
   const clock = await page.evaluate(
     (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     checkedAt,
   );
-  await expect(section.getByRole('status')).toHaveText(
+  const rows = section.getByRole('listitem');
+  await expect(rows.filter({ hasText: 'Claude Code' }).getByRole('status')).toHaveText(
     `Updated from 2.1.278 to 2.1.283 at ${clock}.`,
   );
-  await expect(section).toContainText('2.1.283');
+  await expect(rows.filter({ hasText: 'Codex' }).getByRole('status')).toContainText(
+    'Codex 0.157.1 is available.',
+  );
+  await expect(rows.filter({ hasText: 'Codex' })).toContainText('0.153.4');
   await section.screenshot({ path: `${output}/settings.png` });
-  await automatic.uncheck();
-  await expect(automatic).not.toBeChecked();
+  // Each CLI has its own switch.
+  await codexSwitch.uncheck();
+  await expect(codexSwitch).not.toBeChecked();
+  await expect(claudeSwitch).toBeChecked();
   expect(
     await page.evaluate(() => JSON.parse(localStorage.getItem('test-cli-updates')!).automatic),
-  ).toBe(false);
+  ).toEqual({ claude: true, codex: false });
   await section.getByRole('button', { name: 'Check for updates', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).cliUpdateChecks)).toBe(1);
 
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  // Only this computer's Claude card has an update reading.
-  const claude = page
-    .getByRole('article', { name: 'Claude connections' })
-    .filter({ hasText: 'Version' });
-  await expect(claude).toHaveCount(1);
-  await claude.screenshot({ path: `${output}/connections.png` });
-  await expect(claude.locator('.cli-location').filter({ hasText: 'Version' })).toHaveText(
+  // Only this computer's cards have update readings.
+  const card = (provider: string) =>
+    page.getByRole('article', { name: `${provider} connections` }).filter({ hasText: 'Version' });
+  await expect(card('Claude')).toHaveCount(1);
+  await expect(card('Claude').locator('.cli-location').filter({ hasText: 'Version' })).toHaveText(
     /Version\s*2\.1\.283\s*Updated from 2\.1\.278/,
   );
+  await expect(card('Codex').locator('.cli-location').filter({ hasText: 'Version' })).toHaveText(
+    /Version\s*0\.153\.4\s*Update waiting/,
+  );
+  await card('Codex').screenshot({ path: `${output}/connections-codex.png` });
 });

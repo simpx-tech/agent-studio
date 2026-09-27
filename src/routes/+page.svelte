@@ -1826,20 +1826,25 @@
   function applyCliUpdates(next: CliUpdates) {
     const updated = newlyUpdated(cliUpdates, next);
     cliUpdates = next;
-    if (updated.length) forgetClaudeCatalogs(updated);
+    if (updated.length) forgetCatalogs(updated);
   }
-  // An updated Claude Code can resolve its aliases to newer models, so its catalogs are stale.
-  function forgetClaudeCatalogs(environmentIds: string[]) {
+  // An updated CLI can offer newer models (Claude Code also resolves its aliases anew), so the
+  // catalogs of that CLI in that environment are stale.
+  function forgetCatalogs(updated: { provider: string; environmentId: string }[]) {
     for (const key of [...modelCache.keys()]) {
       const [provider, connection] = JSON.parse(key) as [string, unknown];
       const environmentId = (connection as { environmentId?: unknown } | null)?.environmentId;
       if (
-        provider === 'claude' &&
-        (typeof environmentId !== 'string' || environmentIds.includes(environmentId))
+        updated.some(
+          (update) =>
+            update.provider === provider &&
+            (typeof environmentId !== 'string' || update.environmentId === environmentId),
+        )
       )
         modelCache.delete(key);
     }
-    if (selectedSettings.provider === 'claude') void refreshModels(true);
+    if (updated.some((update) => update.provider === selectedSettings.provider))
+      void refreshModels(true);
   }
   async function refreshModels(force = true) {
     const generation = ++modelGeneration;

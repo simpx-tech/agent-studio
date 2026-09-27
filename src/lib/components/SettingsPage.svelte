@@ -58,7 +58,7 @@
         <h1>Settings</h1>
         <p>
           {desktop()
-            ? 'Appearance, notifications, app and Claude Code updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
+            ? 'Appearance, notifications, app and CLI updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
             : 'Appearance, notifications, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'}
         </p>
       </div>

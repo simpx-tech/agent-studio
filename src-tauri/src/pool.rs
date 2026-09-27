@@ -255,6 +255,14 @@ impl Pool {
     pub fn len(&self) -> usize {
         self.0.lock().map(|parked| parked.len()).unwrap_or(0)
     }
+    /// Whether a parked process runs this provider's CLI on this host rather than in WSL.
+    pub fn holds_native(&self, provider: &str) -> bool {
+        self.0.lock().map_or(true, |parked| {
+            parked
+                .values()
+                .any(|(process, _)| process.exe.provider == provider && process.exe.wsl.is_none())
+        })
+    }
     /// Keep the process for the conversation's next reply, evicting the oldest idle
     /// process beyond the bound and any previous process of the same conversation.
     pub async fn park(&self, conversation: &str, mut process: Process) {
@@ -467,9 +475,12 @@ mod tests {
     #[tokio::test]
     async fn pool_reuses_by_conversation_bounds_idle_processes_and_expires_them() {
         let pool = Pool::default();
+        assert!(!pool.holds_native("codex"));
         let first = process("a");
         let first_pid = first.child.id().unwrap();
         pool.park("a", first).await;
+        // A Codex update waits while a parked process runs this host's CLI.
+        assert!(pool.holds_native("codex") && !pool.holds_native("claude"));
         pool.park("a", process("a2")).await;
         assert!(
             !running(first_pid),
@@ -499,6 +510,7 @@ mod tests {
         assert!(pool.take("b").is_none());
         pool.shutdown().await;
         assert_eq!(pool.len(), 0);
+        assert!(!pool.holds_native("codex"));
     }
 
     #[tokio::test(start_paused = true)]
