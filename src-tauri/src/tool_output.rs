@@ -364,7 +364,16 @@ pub fn inspect_model(path: &Path, limit: u64) -> Result<ModelFile, String> {
         // The whole document is text within the size limit already checked above.
         let text =
             std::fs::read_to_string(path).map_err(|_| "cannot be read as text".to_string())?;
-        gltf_is_self_contained(&text)?;
+        let document: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| "is not a readable glTF document".to_string())?;
+        gltf_is_viewable(&document, "glTF document")?;
+    } else if format == "glb" {
+        // A GLB carries the same document in its first chunk. It is at the head of the file,
+        // so the sniffed window holds it for any model this tool accepts; a chunk larger than
+        // that window is left alone rather than guessed at.
+        if let Some(document) = glb_document(&head) {
+            gltf_is_viewable(&document, "GLB")?;
+        }
     }
     Ok(ModelFile {
         format: format.into(),
@@ -405,19 +414,55 @@ fn model_format(head: &[u8], size: u64) -> Option<&'static str> {
     }
     None
 }
-/// A glTF document renders only when its buffers and images are inside it.
-fn gltf_is_self_contained(text: &str) -> Result<(), String> {
-    let document: serde_json::Value =
-        serde_json::from_str(text).map_err(|_| "is not a readable glTF document".to_string())?;
+/// The JSON chunk of a GLB, when the sniffed head holds all of it. The container is a
+/// 12-byte header then length-prefixed chunks, the first of which is the document.
+fn glb_document(head: &[u8]) -> Option<serde_json::Value> {
+    let length = u32::from_le_bytes(head.get(12..16)?.try_into().ok()?) as usize;
+    if head.get(16..20)? != b"JSON" {
+        return None;
+    }
+    serde_json::from_slice(head.get(20..20usize.checked_add(length)?)?).ok()
+}
+
+/// An extension the document cannot be read without, and the viewer cannot read. The viewer
+/// parses the bytes it was given and fetches nothing (src/lib/model-scene.ts), so it carries
+/// no Draco, meshopt or Basis decoder: those load their own decoder over the network, which
+/// is exactly what that viewer refuses to do. Naming them here turns a model that would open
+/// as an empty box into a refusal the sender can act on.
+fn undecodable_extension(name: &str) -> Option<&'static str> {
+    match name {
+        "KHR_draco_mesh_compression" => Some("Draco mesh compression"),
+        "EXT_meshopt_compression" => Some("meshopt compression"),
+        "KHR_texture_basisu" => Some("Basis Universal textures"),
+        _ => None,
+    }
+}
+
+/// A glTF document renders only when its buffers and images are inside it and nothing it
+/// requires needs a decoder the viewer does not carry.
+fn gltf_is_viewable(document: &serde_json::Value, kind_name: &str) -> Result<(), String> {
     for kind in ["buffers", "images"] {
         for entry in document[kind].as_array().into_iter().flatten() {
             match entry["uri"].as_str() {
                 None => continue,
                 Some(uri) if uri.starts_with("data:") => continue,
                 Some(_) => return Err(format!(
-                    "is a glTF document that loads its {kind} from files beside it; send a .glb instead"
+                    "is a {kind_name} that loads its {kind} from files beside it; send a self-contained .glb instead"
                 )),
             }
+        }
+    }
+    for entry in document["extensionsRequired"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = entry.as_str() else { continue };
+        if let Some(human) = undecodable_extension(name) {
+            return Err(format!(
+                "needs {human} ({name}), which the 3D viewer cannot decode; \
+                 export it uncompressed, reducing the mesh if that goes over the size limit"
+            ));
         }
     }
     Ok(())
@@ -1101,7 +1146,46 @@ mod tests {
         )
         .unwrap();
         let error = inspect_model(&external, MODEL_BYTES).unwrap_err();
-        assert!(error.contains("send a .glb instead"), "{error}");
+        assert!(
+            error.contains("send a self-contained .glb instead"),
+            "{error}"
+        );
+        // A GLB carries the same document, so the same two faults are caught there: the
+        // viewer decodes nothing it would have to fetch a decoder for, and a Draco GLB used
+        // to reach the reader as a box that could not be opened.
+        let compressed = dir.path().join("compressed.glb");
+        std::fs::write(
+            &compressed,
+            glb(
+                r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_draco_mesh_compression"],"extensionsRequired":["KHR_draco_mesh_compression"]}"#,
+            ),
+        )
+        .unwrap();
+        let error = inspect_model(&compressed, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("Draco mesh compression"), "{error}");
+        assert!(error.contains("export it uncompressed"), "{error}");
+        let binary_external = dir.path().join("external.glb");
+        std::fs::write(
+            &binary_external,
+            glb(r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"scene.bin"}]}"#),
+        )
+        .unwrap();
+        let error = inspect_model(&binary_external, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("loads its buffers"), "{error}");
+        // An extension the document merely uses has fallback data beside it and still opens,
+        // and one the viewer implements itself is never refused.
+        let optional = dir.path().join("optional.glb");
+        std::fs::write(
+            &optional,
+            glb(
+                r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_draco_mesh_compression"],"extensionsRequired":["KHR_materials_specular"]}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_model(&optional, MODEL_BYTES).map(|m| m.format),
+            Ok("glb".into())
+        );
         // Size, kind and path are reported before anything is copied.
         let big = dir.path().join("big.glb");
         std::fs::write(&big, glb(&format!("{{\"x\":\"{}\"}}", "0".repeat(2048)))).unwrap();

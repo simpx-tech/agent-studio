@@ -15,6 +15,26 @@ import type {
 } from 'three';
 
 export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'stl' | 'fbx';
+
+/**
+ * Why a model would not open, as a sentence the reader can act on. The loaders that decode
+ * a compressed glTF fetch their own decoder, which this viewer refuses, so three.js reports
+ * the missing one by name; a sender is told the same thing when the file is offered
+ * (`undecodable_extension` in src-tauri/src/tool_output.rs), and this covers a file that
+ * arrived before that check or names a compression it does not list.
+ */
+export function describeModelFault(cause: unknown): string {
+  const text = String((cause as Error)?.message ?? cause ?? '');
+  const compression = /DRACOLoader/i.test(text)
+    ? 'Draco compression'
+    : /meshopt/i.test(text)
+      ? 'meshopt compression'
+      : /KTX2|basisu/i.test(text)
+        ? 'Basis Universal textures'
+        : '';
+  if (compression) return `This model uses ${compression}, which the viewer cannot decode.`;
+  return 'This model could not be opened.';
+}
 export type ModelScene = {
   /** Named animations inside the file, in their own order. */
   clips: string[];

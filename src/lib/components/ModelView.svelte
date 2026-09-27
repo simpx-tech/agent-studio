@@ -18,7 +18,7 @@
     type ToolOutputModelType,
   } from '$lib/tool-output';
   import type { SentFile } from '$lib/sent-files';
-  import { createModelScene, type ModelScene } from '$lib/model-scene';
+  import { createModelScene, describeModelFault, type ModelScene } from '$lib/model-scene';
   import ChoicePicker from './ChoicePicker.svelte';
 
   let {
@@ -89,8 +89,8 @@
           sizes.observe(canvas);
           follow(created);
         },
-        () => {
-          if (!cancelled) error = 'This model could not be opened.';
+        (cause) => {
+          if (!cancelled) error = describeModelFault(cause);
         },
       );
     });
