@@ -7,7 +7,7 @@ const output = 'artifacts/model-marks';
 const tint = (locator: Locator) =>
   locator.evaluate((element) => getComputedStyle(element).getPropertyValue('--provider-color'));
 
-test('each Claude model shows its version on its family tint, and a reply says when another model ran', async ({
+test('each Claude line has its own icon and tint beside its version, and a reply says when another model ran', async ({
   page,
 }) => {
   await mkdir(output, { recursive: true });
@@ -85,24 +85,40 @@ test('each Claude model shows its version on its family tint, and a reply says w
   const replies = page.getByTestId('message').filter({ has: page.locator('.message-avatar') });
   const older = replies.filter({ hasText: 'An answer from the older CLI.' });
   const newer = replies.filter({ hasText: 'An answer after the update.' });
+  // Both replies draw Opus's icon; only the version tells them apart.
+  const avatar = (reply: Locator) => reply.locator('.message-avatar .model-mark');
   await expect(older.locator('.message-heading strong')).toHaveText('Opus 5');
-  await expect(older.locator('.message-avatar')).toHaveText('5');
+  await expect(avatar(older)).toHaveAttribute('data-line', 'opus');
+  await expect(avatar(older).locator('.version')).toHaveText('5');
   await expect(older.locator('.model-mismatch')).toHaveText('Ran Opus 5 instead of Opus 5.5');
   await expect(newer.locator('.message-heading strong')).toHaveText('Opus 5.5');
-  await expect(newer.locator('.message-avatar')).toHaveText('5.5');
+  await expect(avatar(newer)).toHaveAttribute('data-line', 'opus');
+  await expect(avatar(newer).locator('.version')).toHaveText('5.5');
+  await expect(avatar(newer).locator('svg')).toBeVisible();
   await expect(newer.locator('.model-mismatch')).toHaveCount(0);
-  expect(await tint(older.locator('.message-avatar'))).toBe(
-    await tint(newer.locator('.message-avatar')),
-  );
+  expect(await tint(avatar(older))).toBe(await tint(avatar(newer)));
   await page.screenshot({ path: `${output}/replies.png` });
 
-  // The toolbar shows the selected model's version, and every choice carries its own mark.
+  // The toolbar shows the selected model's mark, and every choice carries its own.
   const picker = page.getByRole('combobox', { name: 'Model', exact: true });
-  await expect(picker.locator('.model-mark')).toHaveText('5.5');
+  await expect(picker.locator('.model-mark')).toHaveAttribute('data-line', 'opus');
+  await expect(picker.locator('.model-mark .version')).toHaveText('5.5');
   await expect(picker.locator('.selected-name')).toHaveText('Opus 5.5');
   await picker.click();
   const options = page.getByRole('option');
-  await expect(options.locator('.option-mark')).toHaveText(['✳', '5.5', '5', '5.1', '4.5']);
+  const marks = options.locator('.model-mark');
+  await expect(marks).toHaveCount(5);
+  expect(
+    await marks.evaluateAll((all) => all.map((mark) => mark.getAttribute('data-line'))),
+  ).toEqual(['none', 'opus', 'sonnet', 'fable', 'haiku']);
+  // CLI default keeps the provider glyph, since which model it runs is unknown.
+  await expect(marks.first()).toHaveText('✳');
+  await expect(marks.first().locator('svg')).toHaveCount(0);
+  await expect(marks.locator('.version')).toHaveText(['5.5', '5', '5.1', '4.5']);
+  // Every line draws a different icon.
+  const icons = await marks.locator('svg').evaluateAll((all) => all.map((icon) => icon.innerHTML));
+  expect(icons).toHaveLength(4);
+  expect(new Set(icons).size).toBe(4);
   await expect(options.locator('.option-name')).toHaveText([
     'CLI default',
     'Opus 5.5',
@@ -112,14 +128,15 @@ test('each Claude model shows its version on its family tint, and a reply says w
   ]);
   const tints = await Promise.all(
     ['Opus 5.5', 'Sonnet 5', 'Fable 5.1', 'Haiku 4.5'].map((name) =>
-      tint(page.getByRole('option', { name, exact: true }).locator('.option-mark')),
+      tint(page.getByRole('option', { name, exact: true }).locator('.model-mark')),
     ),
   );
   expect(new Set(tints).size).toBe(4);
-  expect(tints[0]).toBe(await tint(newer.locator('.message-avatar')));
+  expect(tints[0]).toBe(await tint(avatar(newer)));
   await page.screenshot({ path: `${output}/picker.png` });
   await page.getByRole('option', { name: 'Haiku 4.5', exact: true }).click();
-  await expect(picker.locator('.model-mark')).toHaveText('4.5');
+  await expect(picker.locator('.model-mark')).toHaveAttribute('data-line', 'haiku');
+  await expect(picker.locator('.model-mark .version')).toHaveText('4.5');
   await expect(picker.locator('.selected-name')).toHaveText('Haiku 4.5');
   expect(await tint(picker.locator('.model-mark'))).toBe(tints[3]);
 });

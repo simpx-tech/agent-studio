@@ -17,6 +17,7 @@
   import { openLink } from '$lib/transport';
   import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
   import { modelMark } from '$lib/model-marks';
+  import ModelMark from './ModelMark.svelte';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import { compactionLabel } from '$lib/compaction';
@@ -108,13 +109,11 @@
       <ArrowRightLeft size={13} aria-hidden="true" />{switchNotice}
     </p>
   {/if}
-  <div
-    class="message-avatar"
-    class:model-version={message.role !== 'user' && mark.version}
-    style:--provider-color={message.role === 'user' ? providers[author.provider].color : mark.color}
-  >
-    {message.role === 'user' ? 'Y' : mark.text}
-  </div>
+  {#if message.role === 'user'}
+    <div class="message-avatar" style:--provider-color={providers[author.provider].color}>Y</div>
+  {:else}
+    <div class="message-avatar model"><ModelMark {mark} variant="tile" /></div>
+  {/if}
   <div class="message-content">
     <div class="message-heading">
       <strong>{message.role === 'user' ? 'You' : replyModelName(message)}</strong><span

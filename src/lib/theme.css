@@ -156,6 +156,13 @@
   --model-fable: #eba2bd;
   --model-haiku: #9fd5a9;
   --model-mythos: #e3cb7b;
+  /* ...and one per named GPT and Gemini line */
+  --model-astra: #8fd3e8;
+  --model-sol: #f0c46b;
+  --model-luna: #c3cde0;
+  --model-terra: #b6c98a;
+  --model-flash: #f2d56b;
+  --model-pro: #8fb6f2;
 
   /* Fixed palette swatches for theme previews; identical in every theme */
   --palette-dark-canvas: #111113;

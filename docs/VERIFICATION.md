@@ -1,5 +1,34 @@
 # Verification — 2026-09-08
 
+## Every model line has its own icon — 2026-09-27
+
+The user asked for each line of models to get its own artistic icon, with the version still visible. `modelMark` now names a model's line as well as its version: the five Claude families, GPT's Astra, Sol, Luna and Terra, Gemini's Flash and Pro, and GPT or Gemini models of no named line. `ModelIcon.svelte` draws one illustration per line on a 24-unit grid: line art at a 1.6 stroke with a 20% wash of the line's color and small solid accents, so the lines stay distinct at 14px:
+
+- Opus: beamed notes;
+- Sonnet: a quill;
+- Fable: a fox;
+- Haiku: a cherry blossom;
+- Mythos: an eye;
+- Astra: a star with sparks;
+- Sol: the sun;
+- Luna: a crescent and a star;
+- Terra: mountains;
+- other GPT models: a crystal lattice;
+- Flash: a bolt;
+- Pro: a cut gem;
+- other Gemini models: twin stars.
+
+Six tokens join the Claude family tints: `--model-astra`, `--model-sol`, `--model-luna`, `--model-terra`, `--model-flash` and `--model-pro`.
+
+`ModelMark.svelte` sets the icon beside the version in three shapes. Each Model picker choice gets a pill, drawn through a new `optionMark` snippet in `ChoicePicker`; pills share one width for the usual versions, so the names line up. The Model trigger gets a chip, and reply avatars a tile with the version beneath the icon. The first tile put the version in a badge on its corner, which covered half of Haiku's blossom at 4.5. The version moved below the icon, and the avatar grows to fit it. An unresolved alias shows its line's icon alone, and CLI default keeps the provider glyph. At 2x, Luna's first star measured under two pixels and read as a speck, so it grew to 4.4 units.
+
+Validation: `npm run verify` found zero Svelte/TypeScript diagnostics, passed 464 unit/HTTP tests in 69 files, built for production and passed all 258 browser scenarios. After Luna's star grew, a second run on the final candidate passed the same checks but only 256 browser scenarios. The two failures, in `desktop-notifications.spec.ts` (pending badges) and `workspace.spec.ts` (missing quota readings), timed out waiting for the page's first render. Both passed alone, and a full rerun passed all 258. Rust formatting, Clippy with warnings denied, and 330 Rust tests passed, with twelve opt-in cases ignored; this change touches no Rust. Coverage:
+
+- `model-marks.test.ts` covers each Claude family's line, version and tint, an unresolved alias, unknown names, the GPT and Gemini lines, and a name that merely contains "sol".
+- `tests/model-marks.spec.ts` checks every picker choice's line in order, CLI default's glyph, the versions, four different icons and tints, the Opus avatars reading 5 and 5.5, and the trigger's mark before and after choosing Haiku 4.5.
+
+Screenshots were reviewed at 2x in dark and light: the Claude, Codex and Gemini pickers with all thirteen icons, and reply avatars at desktop and phone widths. The showcase is `artifacts/model-icons/showcase.png`.
+
 ## Codex stays current too — 2026-09-27
 
 The user asked for Codex to update the way Claude Code now does. Codex has the same gap. Its own update check lives in the interactive terminal (`~/.codex/version.json` was last checked on 5 September), Agent Studio runs `codex app-server`, and this computer kept 0.153.4 while 0.157.1 was out.

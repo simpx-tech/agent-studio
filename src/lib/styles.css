@@ -1219,28 +1219,13 @@ pre {
   display: grid;
   place-items: center;
 }
-/* A reply's model version (5.5) instead of the provider glyph. */
-.message-avatar.model-version,
-.model-mark.model-version {
-  font-family: var(--font-sans);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-}
-/* The selected model in the toolbar's Model picker, drawn like the reply avatars. */
-.model-mark {
-  display: grid;
-  place-items: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--provider-color) 11%, transparent);
-  border: 1px solid color-mix(in srgb, var(--provider-color) 22%, transparent);
-  color: color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text));
-  font-size: 13px;
-  line-height: 1;
+/* A reply's avatar is its model's mark, which draws its own tile and grows to fit a version. */
+.message-avatar.model {
+  display: flex;
+  height: auto;
+  min-height: var(--message-avatar-size);
+  background: none;
+  border: 0;
 }
 .model-mismatch {
   display: flex;

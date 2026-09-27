@@ -45,11 +45,22 @@ named colors, so every surface follows the selected theme.
 `color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text))`, which keeps the
 mark legible in the light theme.
 
-Model marks are drawn the same way: `modelMark` in `src/lib/model-marks.ts` sets
-`--provider-color` to one Claude family token (`--model-opus`, `--model-sonnet`, `--model-fable`,
-`--model-haiku`, `--model-mythos`, the same in both themes) or to the provider color, and the tile
-shows the model's version in semibold tabular numerals (`.model-version`, `.option-mark.version`).
-A tile without a version keeps the provider glyph.
+Model marks are tinted the same way. `modelMark` in `src/lib/model-marks.ts` names a model's
+line and version and sets `--provider-color` to the line's token, which is the same in both themes:
+`--model-opus`, `--model-sonnet`, `--model-fable`, `--model-haiku`, `--model-mythos`,
+`--model-astra`, `--model-sol`, `--model-luna`, `--model-terra`, `--model-flash` and `--model-pro`.
+GPT and Gemini models of no named line keep the provider color. `ModelMark.svelte` draws the line's
+illustration beside its version in semibold tabular numerals, in three shapes: a pill in each
+Model picker choice (one width for the usual versions, so the names line up), a chip on the Model
+trigger, and a tile on reply avatars with the version beneath the icon. Without a version the mark
+shows the line's icon alone; without a known line it shows the provider glyph.
+
+Line illustrations (`ModelIcon.svelte`) are the one exception to the Lucide outline rule. Each is
+line art on a 24-unit grid at a 1.6 stroke with a 20% wash of its own color (`.wash`) and small
+solid accents (`.solid`), so lines stay distinct at 14px: Opus beamed notes, Sonnet a quill, Fable
+a fox, Haiku a cherry blossom, Mythos an eye, Astra a star, Sol the sun, Luna a crescent, Terra
+mountains, other GPT models a crystal lattice, Flash a bolt, Pro a cut gem, and other Gemini
+models twin stars.
 
 ## Themes
 
@@ -71,7 +82,8 @@ mark in the script and `BrandMark.svelte` together.
 
 - **Buttons:** `.primary` (accent fill), `.secondary` (raised neutral), `.danger` (solid red for
   confirmed destruction), `.text-button` (inline action), `.icon-button` (32px ghost).
-- **Icons:** Lucide outlines at their default stroke; never fill a glyph for emphasis. Choose one
+- **Icons:** Lucide outlines at their default stroke; never fill a glyph for emphasis (model line
+  illustrations are the one exception, see above). Choose one
   that stays clear as an outline: Stop response uses `CircleStop`, because an outlined square
   reads as an unchecked checkbox.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,

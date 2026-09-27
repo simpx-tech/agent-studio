@@ -124,6 +124,7 @@
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
   import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
+  import ModelMark from '$lib/components/ModelMark.svelte';
   import { applyRunEvent } from '$lib/activity';
   import { awaitingAnswer } from '$lib/questions';
   import {
@@ -697,13 +698,15 @@
   const availableModels = $derived(
     modelChoices(models, selectedSettings.provider, selectedSettings.model),
   );
-  // Each choice carries its model mark, so versions and families differ at a glance.
-  const modelOptions = $derived(
-    availableModels.map((model) => {
-      const name = model.name.replace(/^CLI default\s*·\s*/, '');
-      const mark = modelMark(selectedSettings.provider, name);
-      return { ...model, mark: mark.text, color: mark.color };
-    }),
+  // Each choice's mark: its line's illustration and its version, so lines and versions differ
+  // at a glance.
+  const modelMarks = $derived(
+    new Map(
+      availableModels.map((model) => [
+        model.id,
+        modelMark(selectedSettings.provider, model.name.replace(/^CLI default\s*·\s*/, '')),
+      ]),
+    ),
   );
   const selectedModelMark = $derived(
     modelMark(selectedSettings.provider, selectedModelName(selectedSettings.model, availableModels)),
@@ -4026,16 +4029,19 @@
                   bind:this={modelPicker}
                   label="Model"
                   value={selectedSettings.model}
-                  options={modelOptions}
+                  options={availableModels}
                   disabled={!loaded ||
                     (desktop() && (locationPending || (!selectedLocation && !active)))}
                   onchange={chooseModel}
                 >
-                  {#snippet icon()}{#if selectedModelMark.version}<span
-                        class="model-mark model-version"
-                        style:--provider-color={selectedModelMark.color}
-                        >{selectedModelMark.text}</span
-                      >{:else}<Cpu size={16} />{/if}{/snippet}
+                  {#snippet icon()}{#if selectedModelMark.line || selectedModelMark.version}<ModelMark
+                        mark={selectedModelMark}
+                        variant="chip"
+                      />{:else}<Cpu size={16} />{/if}{/snippet}
+                  {#snippet optionMark(option)}{@const mark = modelMarks.get(option.id)}{#if mark}<ModelMark
+                        {mark}
+                        variant="pill"
+                      />{/if}{/snippet}
                 </ChoicePicker>
               </div>
               <div class="chat-setting reasoning-setting">
