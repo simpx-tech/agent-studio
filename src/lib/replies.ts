@@ -28,8 +28,25 @@ export function formatReplyTime(durationMs: number): string {
   return `${hours ? `${hours}h ` : ''}${minutes}m ${seconds % 60}s`;
 }
 
+// claude-opus-5-5 reads as Opus 5.5 and claude-haiku-4-5-20251001 as Haiku 4.5, without a
+// provider prefix (us.anthropic.), snapshot date or context suffix ([1m]), as the Claude
+// catalog names them in src-tauri/src/models.rs.
+function claudeModelName(id: string): string | undefined {
+  const base = id.split(/[[@:]/)[0];
+  const start = base.indexOf('claude-');
+  if (start < 0) return undefined;
+  const parts = base.slice(start + 'claude-'.length).split('-');
+  if (/^\d{8}$/.test(parts.at(-1) ?? '')) parts.pop();
+  const [family, ...version] = parts;
+  if (!/^[a-z]+$/.test(family) || !version.length || !version.every((p) => /^\d{1,2}$/.test(p)))
+    return undefined;
+  return `${family[0].toUpperCase()}${family.slice(1)} ${version.join('.')}`;
+}
+
 export function formatModelName(id: string): string {
   if (!id) return 'CLI default';
+  const claude = claudeModelName(id);
+  if (claude) return claude;
   return id.replace(
     /(^|[- ])([a-z]+)/g,
     (_, separator: string, word: string) =>

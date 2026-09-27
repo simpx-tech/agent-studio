@@ -19,9 +19,10 @@ export const fallbackModels: ModelCatalog = {
   codex: [automaticModel],
   claude: [
     automaticModel,
+    // The selected CLI decides which model an alias means; its catalog names that model.
     ...['opus', 'sonnet', 'fable', 'haiku'].map((id): ModelInfo => ({
       id,
-      name: `${id[0].toUpperCase()}${id.slice(1)} (latest)`,
+      name: `${id[0].toUpperCase()}${id.slice(1)}`,
       reasoningLevels: id === 'haiku' ? [] : ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultReasoning: '',
     })),

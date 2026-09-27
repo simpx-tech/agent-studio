@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { initialWorkspace, restoreWorkspace, settingsFor, type Message } from './domain';
 import {
+  formatModelName,
   replyAccountChanged,
   replyModelName,
   replySettingsChanged,
@@ -85,11 +86,24 @@ describe('reply identities and model switches', () => {
     );
   });
   it('prefers a reported model over an alias and keeps unknown defaults explicit', () => {
-    const message = reply('sonnet');
-    message.modelName = 'Sonnet (latest)';
-    message.usage = { model: 'claude-sonnet-4-5' };
-    expect(replyModelName(message)).toBe('Claude-Sonnet-4-5');
+    // The catalog named `opus` for a newer CLI than the parked process that answered.
+    const message = reply('opus');
+    message.modelName = 'Opus 5.5';
+    message.usage = { model: 'claude-opus-5' };
+    expect(replyModelName(message)).toBe('Opus 5');
     expect(replyModelName(reply(''))).toBe('CLI default');
+  });
+  it('names Claude model IDs as the catalog does and other IDs as before', () => {
+    for (const [id, name] of [
+      ['claude-opus-5-5', 'Opus 5.5'],
+      ['claude-haiku-4-5-20251001', 'Haiku 4.5'],
+      ['claude-fable-5-1[1m]', 'Fable 5.1'],
+      ['us.anthropic.claude-opus-5-5', 'Opus 5.5'],
+      ['claude-sonnet-4-5@20250929', 'Sonnet 4.5'],
+      ['claude-3-5-sonnet-20241022', 'Claude-3-5-Sonnet-20241022'],
+      ['gpt-6-astra', 'GPT-6-Astra'],
+    ])
+      expect(formatModelName(id)).toBe(name);
   });
   it('announces model and reasoning changes only on the affected assistant reply', () => {
     const first = reply('gpt-6-astra');

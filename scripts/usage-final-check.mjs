@@ -32,7 +32,7 @@ const pick = async (label, name) => {
 try {
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await pick('Agent', 'Claude');
-  await pick('Model', 'Fable (latest)');
+  await pick('Model', /^Fable\b/);
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-fable-weekly').getByRole('meter')).toBeVisible({
     timeout: 30000,
@@ -62,7 +62,7 @@ try {
     await expect(arrow.locator('svg')).toBeVisible();
   }
   await page.screenshot({ path: 'artifacts/usage-final-native.png' });
-  await pick('Model', 'Sonnet (latest)');
+  await pick('Model', /^Sonnet\b/);
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
   await expect
     .poll(async () => (await invoke('load_workspace')).preferences.modelByProvider.claude)

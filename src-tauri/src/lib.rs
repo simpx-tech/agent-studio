@@ -280,9 +280,15 @@ async fn list_models(
         provider.as_deref().unwrap_or("codex"),
         connection_id.as_deref(),
     )?;
+    // Claude names its aliases from a query in the same neutral folder as usage readings.
+    let runtime = app
+        .path()
+        .app_local_data_dir()
+        .ok()
+        .map(|root| root.join("usage-runtime"));
     Ok(profiles::scope(
         profile,
-        models::catalog(provider.as_deref().unwrap_or("codex")),
+        models::catalog(provider.as_deref().unwrap_or("codex"), runtime.as_deref()),
     )
     .await)
 }

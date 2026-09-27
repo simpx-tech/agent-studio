@@ -2112,7 +2112,7 @@ test('cold CLI checks and model requests do not block folder selection or overwr
   await picker('Agent').click();
   await page.getByRole('option', { name: 'Claude', exact: true }).click();
   await picker('Model').click();
-  await page.getByRole('option', { name: 'Sonnet (latest)', exact: true }).click();
+  await page.getByRole('option', { name: 'Sonnet', exact: true }).click();
   await picker('Reasoning').click();
   await page.getByRole('option', { name: 'High', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('Wait for availability before sending');
@@ -2178,7 +2178,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await picker('Agent').click();
   await page.getByRole('option', { name: 'Claude', exact: true }).click();
   await picker('Model').click();
-  await page.getByRole('option', { name: 'Sonnet (latest)', exact: true }).click();
+  await page.getByRole('option', { name: 'Sonnet', exact: true }).click();
   // Ubuntu's installed Codex was already detected at startup; Claude is still unchecked.
   await expect
     .poll(() =>

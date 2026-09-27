@@ -218,8 +218,26 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "sharedContext": request.shared_context,
         "program": exe.program,
         "prefix": exe.prefix,
+        "installed": installed(exe),
     })
     .to_string())
+}
+
+/// The size and modification time of the CLI file a native launch runs (npm's script, or
+/// the executable itself). Updating the CLI in place changes them, so the next reply starts
+/// the new version instead of reusing a process that still runs the old one, which can mean
+/// a different model for the same alias. WSL's Linux file is not visible from here.
+fn installed(exe: &Executable) -> Option<String> {
+    if exe.wsl.is_some() {
+        return None;
+    }
+    let file = exe.prefix.first().map_or(exe.program.clone(), Into::into);
+    let metadata = std::fs::metadata(file).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH);
+    Some(format!("{}:{}", metadata.len(), modified.ok()?.as_nanos()))
 }
 
 #[derive(Default)]
@@ -562,6 +580,34 @@ mod tests {
             fingerprint(&changed, &exe()).unwrap(),
             "instructions travel in-band and do not restart the process"
         );
+    }
+
+    #[test]
+    fn an_updated_cli_file_is_a_new_launch_identity() {
+        let request: RunRequest = serde_json::from_value(serde_json::json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"opus","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("claude.exe");
+        std::fs::write(&program, "2.1.278").unwrap();
+        let native = Executable {
+            provider: "claude".into(),
+            program: program.clone(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let base = fingerprint(&request, &native).unwrap();
+        assert_eq!(base, fingerprint(&request, &native).unwrap());
+        std::fs::write(&program, "2.1.281 ").unwrap();
+        assert_ne!(base, fingerprint(&request, &native).unwrap());
+        // npm installs run their script through Node, so the script is what an update changes.
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "2.1.278").unwrap();
+        let npm = Executable {
+            prefix: vec![script.to_string_lossy().into_owned()],
+            ..native
+        };
+        let base = fingerprint(&request, &npm).unwrap();
+        std::fs::write(&script, "2.1.281 ").unwrap();
+        assert_ne!(base, fingerprint(&request, &npm).unwrap());
     }
 
     #[test]

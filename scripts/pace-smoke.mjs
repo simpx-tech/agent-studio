@@ -35,7 +35,7 @@ page.on('pageerror', (error) => errors.push(error.message));
 try {
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await pick('Agent', 'Claude');
-  await pick('Model', 'Fable (latest)');
+  await pick('Model', /^Fable\b/);
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-fable-weekly').getByRole('meter')).toBeVisible({
     timeout: 30000,
@@ -65,7 +65,7 @@ try {
   }
   await page.screenshot({ path: 'artifacts/pace-quotas-native.png' });
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-  await pick('Model', 'Haiku (latest)');
+  await pick('Model', /^Haiku\b/);
   const readings = [];
   for (let turn = 0; turn < 3; turn++) {
     await page

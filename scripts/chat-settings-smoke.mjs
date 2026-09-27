@@ -40,7 +40,7 @@ try {
     {
       provider: 'Claude',
       id: 'claude',
-      model: 'Sonnet (latest)',
+      model: /^Sonnet\b/,
       modelId: 'sonnet',
       reasoning: 'Low',
       effort: 'low',

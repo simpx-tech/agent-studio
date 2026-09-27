@@ -17,7 +17,7 @@ const before = await invoke('load_workspace');
 const marker = `Usage QA ${crypto.randomUUID()}`;
 const cases = [
   { provider: 'codex', name: 'Codex', model: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
-  { provider: 'claude', name: 'Claude', model: 'haiku', label: 'Haiku (latest)' },
+  { provider: 'claude', name: 'Claude', model: 'haiku', label: /^Haiku\b/ },
   { provider: 'gemini', name: 'Gemini', model: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
 ];
 const results = [];
@@ -59,13 +59,13 @@ try {
   }
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await pick('Agent', 'Claude');
-  await pick('Model', 'Fable (latest)');
+  await pick('Model', /^Fable\b/);
   await page.locator('.context-chip').click();
   await expect(page.getByTestId('limit-fable-weekly').getByRole('meter')).toBeVisible({
     timeout: 30000,
   });
   await page.screenshot({ path: 'artifacts/usage-fable-native.png' });
-  await pick('Model', 'Sonnet (latest)');
+  await pick('Model', /^Sonnet\b/);
   await expect(page.getByTestId('limit-fable-weekly')).toHaveCount(0);
   for (const item of cases) {
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
