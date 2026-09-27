@@ -183,6 +183,11 @@ async function parse(
   const manager = new THREE.LoadingManager();
   // A model may name textures or buffers beside it; none of them are sent, and the viewer
   // must not reach for them. An unresolvable URL keeps the geometry and drops the texture.
+  // The two schemes that survive carry the file's own bytes: three.js hands a glTF's
+  // embedded images to the image loader as blob: object URLs, and a .gltf's inline ones as
+  // data:. Both are fetched, so connect-src and img-src must allow them in every policy
+  // this viewer runs under, or three drops the texture and a model is silently grey
+  // (src-tauri/tauri.conf.json, relay/web.ts; covered by src/lib/csp.test.ts).
   manager.setURLModifier((url) => (url.startsWith('data:') || url.startsWith('blob:') ? url : ''));
   const text = () => new TextDecoder().decode(bytes);
   if (format === 'glb' || format === 'gltf') {

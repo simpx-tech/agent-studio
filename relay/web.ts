@@ -6,6 +6,15 @@ import type { sessionStore } from './sessions.ts';
 import type { RelayWorkspace, workspaceRegistry } from './workspaces.ts';
 import { artifactPreviewHtml, artifactPreviewHeaders } from './artifact-preview.ts';
 
+/**
+ * The viewer's own policy. `blob:` and `data:` are load-bearing rather than decorative:
+ * three.js reads a glTF's embedded images out of the file, wraps each in a Blob and fetches
+ * that object URL, so a policy without them leaves every sent model untextured. See
+ * src/lib/model-scene.ts, which refuses every other URL a model file names.
+ */
+export const webViewerCsp =
+  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'";
+
 const cookieName = 'agent_studio_session';
 const lifetime = 7 * 24 * 60 * 60 * 1000;
 const mime: Record<string, string> = {
@@ -63,8 +72,7 @@ export function servePublic(req: IncomingMessage, res: ServerResponse, files: Ma
       : 'no-cache',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy':
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'",
+    'Content-Security-Policy': webViewerCsp,
   });
   res.end(req.method === 'HEAD' ? undefined : readFileSync(file));
   return true;
