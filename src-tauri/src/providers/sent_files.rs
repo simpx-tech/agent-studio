@@ -15,9 +15,12 @@ pub const NAME: &str = "send_files";
 const MAX_FILES: usize = 8;
 /// Groups one reply shows.
 pub const MAX_GROUPS: usize = 12;
-/// The largest file a reply shows, matching one chat attachment.
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// The largest image a reply shows, matching one chat attachment.
+const MAX_BYTES: u64 = crate::tool_output::IMAGE_BYTES;
 const MAX_PATH: usize = 4096;
+/// How long one call's paths may take to check. The reply waits for the call, and so does
+/// its Stop, so a hung share or mount must not hold either for long.
+const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_CAPTION: usize = 300;
 const MAX_NAME: usize = 120;
 
@@ -57,7 +60,7 @@ pub fn tool() -> Value {
         "type":"object","properties":{
             "id":{"type":"string","minLength":1,"maxLength":80,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
             "files":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
-            "caption":{"type":"string","minLength":1,"maxLength":300,"description":"Optional single line shown above the files."}
+            "caption":{"type":"string","minLength":1,"maxLength":300,"description":"Optional single line shown below the files."}
         },"required":["id","files"],"additionalProperties":false}})
 }
 pub fn codex_tool() -> Value {
@@ -112,11 +115,17 @@ fn parse(args: &Value) -> Result<Submission, String> {
     let caption = match &args["caption"] {
         Value::Null => None,
         Value::String(text) => {
+            // One line, as the reply shows it: tabs, line breaks and every other control
+            // character become spaces.
+            let text: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
             let text = text.trim();
             if text.is_empty() || text.chars().count() > MAX_CAPTION {
                 return Err(INVALID.into());
             }
-            Some(text.replace(['\r', '\n'], " "))
+            Some(text.into())
         }
         _ => return Err(INVALID.into()),
     };
@@ -156,8 +165,13 @@ impl Staging {
             return Err("needs an absolute path in this Linux distribution".into());
         }
         let (folder, name) = path.rsplit_once('/').ok_or("needs an absolute path")?;
-        if name.is_empty() {
+        if name.is_empty() || name == "." || name == ".." {
             return Err("names a folder, not a file".into());
+        }
+        // Windows reads a backslash or a colon in the name as a path of its own, and drops
+        // trailing dots and spaces, which would name another file.
+        if name.contains(['\\', ':']) || name.ends_with(['.', ' ']) {
+            return Err("has a name this computer cannot reach from Windows".into());
         }
         let folder = if folder.is_empty() { "/" } else { folder };
         Ok(crate::folders::windows_path(distribution, folder)
@@ -256,11 +270,17 @@ impl FileSender {
         let mut images = vec![];
         let mut models = vec![];
         let mut rejected = vec![];
+        let deadline = tokio::time::Instant::now() + CHECK_LIMIT;
         for path in &submission.files {
-            let checked = match staging.host_path(path).await {
-                Ok(host) => inspect(host, path).await,
-                Err(reason) => Err(reason),
+            let check = async {
+                match staging.host_path(path).await {
+                    Ok(host) => inspect(host, path).await,
+                    Err(reason) => Err(reason),
+                }
             };
+            let checked = tokio::time::timeout_at(deadline, check)
+                .await
+                .unwrap_or_else(|_| Err("could not be read in time".into()));
             match checked {
                 Ok(Checked::Image(image)) => {
                     files.push(SentFile {
@@ -299,6 +319,7 @@ impl FileSender {
             .map(|path| ImageSource::File { path })
             .collect();
         output.models = models;
+        output.sent = true;
         recorder.record(output);
         let record = SentFiles {
             id: submission.id,
@@ -491,6 +512,9 @@ mod tests {
     fn keeps_captions_on_one_line_and_names_from_paths() {
         let parsed = parse(&json!({"id":"a","files":["/tmp/a.png"],"caption":"one\ntwo"})).unwrap();
         assert_eq!(parsed.caption.as_deref(), Some("one two"));
+        let parsed =
+            parse(&json!({"id":"a","files":["/tmp/a.png"],"caption":"Front\tBack\u{7}"})).unwrap();
+        assert_eq!(parsed.caption.as_deref(), Some("Front Back"));
         assert_eq!(file_name("/home/me/shot.png"), "shot.png");
         assert_eq!(file_name(r"C:\renders\front.png"), "front.png");
         assert_eq!(file_name("/home/me/"), "me");
@@ -512,6 +536,14 @@ mod tests {
         let staging = Staging::new("run", Some("Ubuntu".into()), None);
         assert!(staging.host_path("relative.png").await.is_err());
         assert!(staging.host_path("/home/me/").await.is_err());
+        assert!(staging.host_path("/home/me/..").await.is_err());
+        // A Linux name Windows would read as a path of its own is refused before translation.
+        let error = staging
+            .host_path("/tmp/C:\\Users\\me\\x.png")
+            .await
+            .unwrap_err();
+        assert!(error.contains("cannot reach from Windows"), "{error}");
+        assert!(staging.host_path("/tmp/shot.png.").await.is_err());
         let local = Staging::new("run", None, None);
         assert!(local.host_path("relative.png").await.is_err());
     }
@@ -642,7 +674,15 @@ mod tests {
         )
         .unwrap();
         let model = dir.path().join("figure.glb");
-        std::fs::write(&model, b"glTF\x02\x00\x00\x00\x14\x00\x00\x00").unwrap();
+        // A GLB header and the document chunk it carries.
+        let document = br#"{"asset":{"version":"2.0"}} "#;
+        let mut glb = b"glTF".to_vec();
+        glb.extend(2u32.to_le_bytes());
+        glb.extend((20 + document.len() as u32).to_le_bytes());
+        glb.extend((document.len() as u32).to_le_bytes());
+        glb.extend(b"JSON");
+        glb.extend(document);
+        std::fs::write(&model, glb).unwrap();
         let broken = dir.path().join("broken.glb");
         std::fs::write(&broken, b"not a model at all").unwrap();
         let notes = dir.path().join("notes.txt");

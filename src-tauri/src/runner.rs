@@ -904,7 +904,10 @@ async fn stream_turn(
                     }
                     break Ok(("complete".into(), "Context compacted.".into()));
                 }
-                if decoder.text.trim().is_empty() && !visualizer.has_visuals() {
+                if decoder.text.trim().is_empty()
+                    && !visualizer.has_visuals()
+                    && !sender.has_files()
+                {
                     process.healthy = false;
                     break Err("The CLI finished without a text response. Check Connections or try another model.".into());
                 }

@@ -9,7 +9,7 @@ import { version as packageVersion } from '../../package.json';
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
 import { cliUpdatesSchema, type CliUpdates, type UpdatedCli } from './cli-updates';
 import { createDesktopNotificationTracker } from './desktop-notifications';
-import { applyAppBadge, pendingChatCount } from './notifications';
+import { applyAppBadge, asksTheUser, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { FolderEntry, FolderPlace } from './folders';
 import type { SavedDrafts } from './drafts';
@@ -780,28 +780,48 @@ async function relayRaw(
   const sessionRequest = path === 'v1/browser-session';
   if (!sessionRequest && !browserWorkspaceId)
     throw new Error('Pair this device with your private workspace first.');
-  const response = await fetch(`/${path}`, {
-    method,
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Environment-Id': runtime.installation.id,
-      ...(browserWorkspaceId && !(sessionRequest && method === 'POST')
-        ? { 'X-Workspace-Id': browserWorkspaceId }
-        : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: 'no-store',
-    keepalive: path === 'v1/notification-view',
-    redirect: 'error',
-    signal: AbortSignal.timeout(30_000),
-  });
-  const result = {
-    status: response.status,
-    body: response.headers.get('content-type')?.includes('application/json')
-      ? await response.json()
-      : { error: 'Open the PWA on your Agent Studio server.' },
+  const text = body === undefined ? undefined : JSON.stringify(body);
+  // No request may stall for 30 seconds, while a large one takes as long as it keeps moving:
+  // an upload gets time for its size at 1 Mbit/s, and the clock restarts with each part of
+  // the answer that arrives.
+  const controller = new AbortController();
+  let stalled: ReturnType<typeof setTimeout> | undefined;
+  const allow = (ms: number) => {
+    clearTimeout(stalled);
+    stalled = setTimeout(
+      () => controller.abort(new DOMException('The relay stopped answering.', 'TimeoutError')),
+      ms,
+    );
   };
+  allow(30_000 + (text?.length ?? 0) / 125);
+  let result: { status: number; body: any };
+  try {
+    const response = await fetch(`/${path}`, {
+      method,
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Environment-Id': runtime.installation.id,
+        ...(browserWorkspaceId && !(sessionRequest && method === 'POST')
+          ? { 'X-Workspace-Id': browserWorkspaceId }
+          : {}),
+      },
+      body: text,
+      cache: 'no-store',
+      keepalive: path === 'v1/notification-view',
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    allow(30_000);
+    result = {
+      status: response.status,
+      body: response.headers.get('content-type')?.includes('application/json')
+        ? await answer(response, () => allow(30_000))
+        : { error: 'Open the PWA on your Agent Studio server.' },
+    };
+  } finally {
+    clearTimeout(stalled);
+  }
   if (generation !== relayGeneration)
     throw new Error('The private workspace connection changed. Try again after pairing.');
   if (
@@ -818,7 +838,29 @@ async function relayRaw(
   }
   return result;
 }
+/** A JSON answer read part by part, telling `moving` of each part that arrives. */
+async function answer(response: Response, moving: () => void): Promise<unknown> {
+  if (!response.body) return response.json();
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    moving();
+  }
+  return JSON.parse(await new Blob(parts as BlobPart[]).text());
+}
 export class OfflineHostError extends Error {}
+/** A relay answer other than success, with its status. */
+class RelayResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 export type PushStatus = {
   publicKey: string;
   enabled: boolean;
@@ -913,7 +955,10 @@ async function relayApi<T = any>(method: string, path: string, body?: unknown): 
   const response = await relayRaw(method, path, body);
   if (response.body?.code === 'host_offline') throw new OfflineHostError(response.body.error);
   if (response.status >= 300)
-    throw new Error(response.body?.error ?? `Relay request failed (${response.status}).`);
+    throw new RelayResponseError(
+      response.body?.error ?? `Relay request failed (${response.status}).`,
+      response.status,
+    );
   return response.body;
 }
 export async function connectRelay(url: string, token: string) {
@@ -1712,8 +1757,8 @@ async function routed<T>(
         ? 660_000
         : method === 'folders'
           ? 30_000
-          : method === 'toolOutput' || method === 'toolOutputImage'
-            ? 60_000
+          : method === 'toolOutput' || method === 'toolOutputImage' || method === 'toolOutputModel'
+            ? 120_000
             : runTimeoutMs(
                 method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
               ) + 10_000);
@@ -1738,10 +1783,20 @@ async function routed<T>(
     remoteRuns.delete(id);
   }
 }
+/** Events someone waits on, which a job sends at once rather than with the next batch. */
+function awaitsAnswer(event: RunEvent) {
+  return (
+    event.kind === 'question' ||
+    event.kind === 'elicitation' ||
+    (event.kind === 'tool' && !!event.tool && !event.tool.parentId && asksTheUser(event.tool.name))
+  );
+}
 async function executeJob(job: RelayJob) {
   const generation = relayGeneration;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let soon: ReturnType<typeof setTimeout> | undefined;
   let publishing = Promise.resolve();
+  let waiting: Promise<void> | undefined;
   let status: RelayJob['status'] = 'running';
   let result: unknown, error: string | undefined;
   const events: RunEvent[] = [];
@@ -1757,10 +1812,14 @@ async function executeJob(job: RelayJob) {
       .catch(() => {})
       .then(() => runtime!.checkpointRun(request, event, finalStatus, error));
   };
+  // Sends the newest state after the update in flight. Calls made while one waits share it,
+  // so a burst of events costs one request.
   const publish = () => {
-    publishing = publishing
+    if (waiting) return waiting;
+    waiting = publishing = publishing
       .catch(() => {})
       .then(async () => {
+        waiting = undefined;
         if (generation !== relayGeneration || !relayConnected) return;
         const response = await relayApi<RelayJob>('PUT', `v1/jobs/${job.id}`, {
           status,
@@ -1776,6 +1835,20 @@ async function executeJob(job: RelayJob) {
         }
       });
     return publishing;
+  };
+  // Events go out shortly after they arrive, and those someone waits on at once. A hidden
+  // window runs the repeating timer below about once a minute, which then only notices a
+  // cancellation, while a timer an event starts keeps its time.
+  const publishSoon = (now: boolean) => {
+    if (now) {
+      clearTimeout(soon);
+      soon = undefined;
+      void publish().catch(() => {});
+    } else
+      soon ??= setTimeout(() => {
+        soon = undefined;
+        void publish().catch(() => {});
+      }, 700);
   };
   try {
     const connectionId = job.args.connectionId;
@@ -1803,6 +1876,7 @@ async function executeJob(job: RelayJob) {
       retainRunEvent(events, event);
       // The execution host retains results even if the initiating computer disconnects.
       persistEvent(event);
+      publishSoon(awaitsAnswer(event));
     });
     status = result === 'cancelled' ? 'cancelled' : 'complete';
   } catch (e) {
@@ -1810,13 +1884,26 @@ async function executeJob(job: RelayJob) {
     error = String(e).slice(0, 4000);
   } finally {
     clearInterval(timer);
+    clearTimeout(soon);
     if (job.method === 'plugins') invalidatePluginMutation(job.args.action as PluginAction);
     persistEvent(
       undefined,
       status === 'cancelled' ? 'cancelled' : status === 'error' ? 'error' : 'complete',
     );
     await checkpoint.catch(() => {});
-    await publish().catch(() => {});
+    await publish().catch(async (e) => {
+      // The relay may refuse a finished request's result: larger than it accepts, or without
+      // room beside the results it holds. Say so, rather than leave the request to expire as
+      // though this computer had gone. A reply ends with its saved conversation instead.
+      if (job.method === 'run' || status === 'error') return;
+      status = 'error';
+      result = undefined;
+      error =
+        e instanceof RelayResponseError && e.status === 413
+          ? 'The result is larger than the relay accepts.'
+          : `The result could not be sent through the relay: ${String(e instanceof Error ? e.message : e).slice(0, 500)}`;
+      await publish().catch(() => {});
+    });
     workerRuns.delete(job.id);
   }
 }
@@ -1939,6 +2026,34 @@ export async function readNativeInstructions(
   );
 }
 /**
+ * Runs `task` when fewer than `size` others started here are still running, handing each
+ * finished slot straight to the task that waited longest.
+ */
+function createLimiter(size: number) {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (running < size) running++;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else running--;
+    }
+  };
+}
+/**
+ * Reads of a kept image, model or full output from another computer, which carry up to tens
+ * of megabytes each through the relay's bounded request storage: a window asks for two at
+ * a time.
+ */
+const largeReads = createLimiter(2);
+function largeRead<T>(connectionId: string | undefined, read: () => Promise<T>): Promise<T> {
+  return remoteTarget(connectionId) ? largeReads(read) : read();
+}
+/**
  * A finished tool call's result, read from the computer that ran it: through native
  * commands here, or the owning host through the relay. It is never synced or exported.
  * Each stream comes whole up to 512 KB, or up to 8 MB when `full` is set.
@@ -1949,13 +2064,9 @@ export async function readToolOutput(
   connectionId?: string,
   full = false,
 ): Promise<ToolOutput> {
-  return toolOutputSchema.parse(
-    await routed(
-      'toolOutput',
-      { runId, toolId, connectionId, ...(full ? { full } : {}) },
-      connectionId,
-    ),
-  );
+  const read = () =>
+    routed('toolOutput', { runId, toolId, connectionId, ...(full ? { full } : {}) }, connectionId);
+  return toolOutputSchema.parse(await (full ? largeRead(connectionId, read) : read()));
 }
 /** One 3D model of a finished tool call's result, read like `readToolOutput`. */
 export async function readToolOutputModel(
@@ -1965,7 +2076,9 @@ export async function readToolOutputModel(
   connectionId?: string,
 ): Promise<ToolOutputModel> {
   return toolOutputModelSchema.parse(
-    await routed('toolOutputModel', { runId, toolId, index, connectionId }, connectionId),
+    await largeRead(connectionId, () =>
+      routed('toolOutputModel', { runId, toolId, index, connectionId }, connectionId),
+    ),
   );
 }
 /** One image of a finished tool call's result, read like `readToolOutput`. */
@@ -1976,7 +2089,9 @@ export async function readToolOutputImage(
   connectionId?: string,
 ): Promise<ToolOutputImage> {
   return toolOutputImageSchema.parse(
-    await routed('toolOutputImage', { runId, toolId, index, connectionId }, connectionId),
+    await largeRead(connectionId, () =>
+      routed('toolOutputImage', { runId, toolId, index, connectionId }, connectionId),
+    ),
   );
 }
 export type FolderListing = {

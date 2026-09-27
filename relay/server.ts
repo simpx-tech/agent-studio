@@ -215,6 +215,19 @@ const terminal = (status: string) => ['complete', 'error', 'cancelled'].includes
 export const stateUploadLimit = 64_000_000;
 /** How much conversation data one answer to `v1/state/chats` carries; the rest is named. */
 const chatsAnswerBudget = 32_000_000;
+/**
+ * The largest update of one request. A finished read of a kept tool result carries a whole
+ * image (16 MiB, a third larger as base64) or model, or both streams of its full output.
+ */
+export const jobUpdateLimit = 24_000_000;
+/** What one workspace's requests may hold at once, their results included. */
+const jobStorageBudget = 64_000_000;
+/**
+ * Optional reads of a kept tool result, whose large results leave as soon as the requester has
+ * them, or a minute after they finish when it never asks.
+ */
+const resultRead = (method: string) =>
+  method === 'toolOutput' || method === 'toolOutputImage' || method === 'toolOutputModel';
 class TooLargeError extends Error {
   constructor() {
     super('Request exceeds its size limit.');
@@ -228,7 +241,12 @@ export function createRelay({
   now = Date.now,
   pushSender,
   icons = siteIcons({ now }),
-  limits: { upload = stateUploadLimit, answer = chatsAnswerBudget } = {},
+  limits: {
+    upload = stateUploadLimit,
+    answer = chatsAnswerBudget,
+    jobUpdate = jobUpdateLimit,
+    jobStorage = jobStorageBudget,
+  } = {},
 }: {
   token: string;
   directory: string;
@@ -237,8 +255,11 @@ export function createRelay({
   now?: () => number;
   pushSender?: PushSender;
   icons?: SiteIcons;
-  /** The workspace upload limit and the conversation answer budget, in bytes. */
-  limits?: { upload?: number; answer?: number };
+  /**
+   * The workspace upload limit, the conversation answer budget, the largest request update
+   * and what a workspace's requests may hold, in bytes.
+   */
+  limits?: { upload?: number; answer?: number; jobUpdate?: number; jobStorage?: number };
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
@@ -311,7 +332,7 @@ export function createRelay({
     const reserveJob = (job: RelayJob) => {
       const bytes = Buffer.byteLength(JSON.stringify(job));
       const total = [...jobBytes.values()].reduce((sum, size) => sum + size, 0);
-      if (total - (jobBytes.get(job.id) ?? 0) + bytes > 40_000_000) return false;
+      if (total - (jobBytes.get(job.id) ?? 0) + bytes > jobStorage) return false;
       jobBytes.set(job.id, bytes);
       return true;
     };
@@ -403,7 +424,10 @@ export function createRelay({
           job.updated = now();
           push.jobUpdated(job);
         }
-        if (terminal(job.status) && now() - job.updated > 600_000) {
+        if (
+          terminal(job.status) &&
+          now() - job.updated > (resultRead(job.method) ? 60_000 : 600_000)
+        ) {
           jobs.delete(id);
           jobBytes.delete(id);
         }
@@ -792,6 +816,11 @@ export function createRelay({
           }
           if (req.method === 'GET') {
             send(200, job);
+            // Only the requester reads a finished read, so its result leaves once sent.
+            if (resultRead(job.method) && terminal(job.status) && actor === job.source) {
+              jobs.delete(job.id);
+              jobBytes.delete(job.id);
+            }
             return;
           }
           if (req.method === 'PUT' && actor === job.target && !terminal(job.status)) {
@@ -802,7 +831,7 @@ export function createRelay({
                 result: z.unknown().optional(),
                 error: z.string().max(4000).optional(),
               })
-              .parse(await body(req, authorized));
+              .parse(await body(req, authorized, jobUpdate));
             const next = { ...job, ...update, updated: now() };
             if (!reserveJob(next)) {
               send(429, { error: 'Workspace request storage is busy. Try again later.' });

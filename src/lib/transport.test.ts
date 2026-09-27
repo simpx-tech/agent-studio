@@ -152,6 +152,153 @@ it('invalidates host skill inventories after Viewer plugin mutations, including 
   await transport.disconnectRelay();
 });
 
+// This computer, paired with a relay that hands it `job` once and answers its updates with
+// `update`, which records each one.
+async function hostOf(
+  job: { id: string; method: string; args: Record<string, unknown> },
+  update: (body: any) => { status: number; body: unknown } = () => ({ status: 200, body: {} }),
+) {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const host = crypto.randomUUID(),
+    computerId = crypto.randomUUID(),
+    accountId = crypto.randomUUID();
+  workspace.fleet.computers.push({ id: computerId, name: 'QA' });
+  workspace.fleet.environments.push({ id: host, computerId, name: 'QA', platform: 'windows' });
+  workspace.fleet.accounts.push({
+    id: accountId,
+    provider: 'claude',
+    name: 'QA',
+    purpose: 'personal',
+  });
+  workspace.fleet.connections.push({
+    id: job.args.connectionId as string,
+    accountId,
+    environmentId: host,
+    profile: 'existing',
+  });
+  transport.configureRuntime({
+    installation: { id: host, computerId, name: 'QA', platform: 'windows' },
+    workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
+    fleet: () => workspace.fleet,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply: async () => {},
+    checkpointRun: async () => {},
+  });
+  const updates: any[] = [];
+  let claimed = false;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_resume') return 'https://relay.example.com/';
+    if (command === 'load_sync_state')
+      return {
+        url: 'https://relay.example.com',
+        instanceId: 'same-relay',
+        base: sharedWorkspace(workspace),
+      };
+    if (command !== 'relay_request') return null;
+    if (args.path === 'v1/state')
+      return {
+        status: 200,
+        body: { instanceId: 'same-relay', workspace: sharedWorkspace(workspace), revision: 0 },
+      };
+    if (args.path === 'v1/jobs') {
+      const jobs = claimed ? [] : [job];
+      claimed = true;
+      return { status: 200, body: jobs };
+    }
+    if (args.path === `v1/jobs/${job.id}` && args.method === 'PUT') {
+      updates.push(structuredClone(args.body));
+      return update(args.body);
+    }
+    return { status: 200, body: [] };
+  });
+  await transport.resumeRelay();
+  return { transport, updates };
+}
+
+it('ends a read whose result the relay refuses with the reason, not an expiry', async () => {
+  const connectionId = crypto.randomUUID();
+  const job = {
+    id: crypto.randomUUID(),
+    method: 'toolOutputImage',
+    args: { runId: crypto.randomUUID(), toolId: 'claude:shot', index: 0, connectionId },
+  };
+  const { transport, updates } = await hostOf(job, (body) =>
+    body.status === 'complete'
+      ? { status: 413, body: { code: 'too_large', error: 'Request exceeds its size limit.' } }
+      : { status: 200, body: {} },
+  );
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) =>
+    command === 'read_tool_output_image'
+      ? { mediaType: 'image/png', data: 'AAAA', bytes: 3 }
+      : original(command, args),
+  );
+  await transport.pollRelay();
+  await vi.waitFor(() => expect(updates.at(-1)?.status).toBe('error'));
+  expect(updates.at(-2)).toMatchObject({ status: 'complete', result: { bytes: 3 } });
+  expect(updates.at(-1)).toMatchObject({
+    error: 'The result is larger than the relay accepts.',
+  });
+  expect(updates.at(-1).result).toBeUndefined();
+  await transport.disconnectRelay();
+});
+
+it("sends a job's question at once and its other events shortly after they arrive", async () => {
+  const connectionId = crypto.randomUUID();
+  const id = crypto.randomUUID();
+  const job = {
+    id,
+    method: 'run',
+    args: { connectionId, request: { runId: id, agent: { provider: 'claude' } } },
+  };
+  const { transport, updates } = await hostOf(job);
+  let channel: { onmessage: (event: unknown) => void } | undefined;
+  let finish = (_: unknown) => {};
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command !== 'run_agent') return original(command, args);
+    channel = args.onEvent;
+    return new Promise((resolve) => (finish = resolve));
+  });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  await transport.pollRelay();
+  for (let i = 0; i < 20 && !channel; i++) await vi.advanceTimersByTimeAsync(0);
+  const sent = (kind: string) => updates.some((u) => u.events.some((e: any) => e.kind === kind));
+  channel!.onmessage({ kind: 'text', text: 'Checking the files' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sent('text')).toBe(false);
+  await vi.advanceTimersByTimeAsync(700);
+  expect(sent('text')).toBe(true);
+  channel!.onmessage({
+    kind: 'question',
+    question: {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'scope',
+          header: 'Scope',
+          question: 'Which folder?',
+          options: [{ label: 'src', description: '' }],
+          multiSelect: false,
+        },
+      ],
+    },
+  });
+  // Sent without waiting for any timer, which a hidden window runs about once a minute.
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sent('question')).toBe(true);
+  finish('complete');
+  vi.useRealTimers();
+  await vi.waitFor(() => expect(updates.at(-1)?.status).toBe('complete'));
+  await vi.waitFor(() => transport.disconnectRelay());
+});
+
 it('routes MCP management and OAuth polling to the exact selected host', async () => {
   const connectionId = crypto.randomUUID();
   const transport = await fixture(connectionId);
@@ -1361,11 +1508,17 @@ it('reads conversations the relay leaves for another request', async () => {
     const answer = await original(command, args);
     if (command !== 'relay_request' || args.path !== 'v1/state/chats') return answer;
     const [head, ...rest] = answer.body.chats;
-    return { ...answer, body: { ...answer.body, chats: [head], rest: rest.map((c: Conversation) => c.id) } };
+    return {
+      ...answer,
+      body: { ...answer.body, chats: [head], rest: rest.map((c: Conversation) => c.id) },
+    };
   });
   const { state } = await polls(1);
   expect(state.filter((r) => r === 'POST v1/state/chats')).toHaveLength(2);
-  expect(workspace.conversations.map((c) => c.title)).toEqual(['First elsewhere', 'Second elsewhere']);
+  expect(workspace.conversations.map((c) => c.title)).toEqual([
+    'First elsewhere',
+    'Second elsewhere',
+  ]);
   await transport.disconnectRelay();
 });
 
@@ -1386,9 +1539,7 @@ it('leaves a conversation too large to send unpublished, and still sends the oth
   marks.mark(second.id);
   const { state } = await polls(1);
   expect(state).toContain('POST v1/state/patch');
-  expect(relay.workspace.conversations.find((c) => c.id === second.id)?.title).toBe(
-    'Renamed here',
-  );
+  expect(relay.workspace.conversations.find((c) => c.id === second.id)?.title).toBe('Renamed here');
   expect(relay.workspace.conversations.find((c) => c.id === first.id)?.messages).toEqual([]);
   expect(transport.relaySyncNotice()).toMatch(/^“First” is too large to sync\./);
   // The relay keeps its own copy, so an edit there still merges with the one here.

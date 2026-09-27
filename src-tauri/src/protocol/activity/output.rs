@@ -54,6 +54,9 @@ pub struct CapturedOutput {
     pub images: Vec<ImageSource>,
     /// Paths of 3D models a reply shows, reported by Agent Studio's own tool alone.
     pub models: Vec<String>,
+    /// Files a reply shows: kept in the places the reply numbered them, within the sizes
+    /// they were checked against.
+    pub sent: bool,
     /// The complete command or input when the activity record shows a shortened one.
     pub command: Option<String>,
     pub input: Option<String>,
@@ -69,6 +72,7 @@ impl CapturedOutput {
             start_line: None,
             images: vec![],
             models: vec![],
+            sent: false,
             command: None,
             input: None,
         }
@@ -658,6 +662,9 @@ mod tests {
         assert_eq!(mcp[0].input.as_deref(), Some("{\n  \"q\": \"layout\"\n}"));
         assert!(mcp[0].output.as_ref().unwrap().stderr);
         d.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","turnId":"t","item":{"type":"dynamicToolCall","id":"plan","tool":"studio_update_plan","arguments":{"steps":[]},"status":"completed","success":true,"contentItems":[{"type":"inputText","text":"ok"}]}}}), "root");
+        let sent = d.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","turnId":"t","item":{"type":"dynamicToolCall","id":"files","tool":"send_files","arguments":{"id":"shots","files":["C:\\renders\\front.png"]},"status":"completed","success":true,"contentItems":[{"type":"inputText","text":"1 file is shown"}]}}}), "root");
+        // Its paths belong to the reply's file view: never synced activity or a kept result.
+        assert!(sent[0].input.is_none());
         let custom = d.codex_server(&json!({"method":"item/completed","params":{"threadId":"root","turnId":"t","item":{"type":"dynamicToolCall","id":"dyn","tool":"lookup","arguments":{"id":7},"status":"completed","success":true,"contentItems":[{"type":"inputText","text":"Found 7"}]}}}), "root");
         assert!(custom[0].input.is_some());
         let outputs = d.take_outputs();

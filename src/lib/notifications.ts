@@ -51,13 +51,18 @@ export function requestsAttention(
 ): boolean {
   if (message.elicitations?.some((e) => e.status === 'pending')) return true;
   if (message.questions?.length) return message.questions.some((q) => q.status === 'pending');
-  return message.blocks.some((block) => {
-    if (block.type !== 'activity' || !block.tool || block.tool.parentId) return false;
-    const name = block.tool.name.split(/[.:/]/).at(-1)?.toLowerCase();
-    return ['askuserquestion', 'request_user_input', 'request_user_input_async'].includes(
-      name ?? '',
-    );
-  });
+  return message.blocks.some(
+    (block) =>
+      block.type === 'activity' &&
+      !!block.tool &&
+      !block.tool.parentId &&
+      asksTheUser(block.tool.name),
+  );
+}
+/** Whether a tool of this name asks the user something, under any provider prefix. */
+export function asksTheUser(tool: string): boolean {
+  const name = tool.split(/[.:/]/).at(-1)?.toLowerCase();
+  return ['askuserquestion', 'request_user_input', 'request_user_input_async'].includes(name ?? '');
 }
 
 export function attentionKeys(

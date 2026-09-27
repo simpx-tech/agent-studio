@@ -32,6 +32,8 @@ const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
 const META_LIMIT: u64 = 64 * 1024 * 1024;
 /// The largest model file a reply shows, so one relay request carries it whole.
 pub const MODEL_BYTES: u64 = 12 * 1024 * 1024;
+/// The largest image a reply shows, matching one chat attachment.
+pub const IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes read to recognize an image file and its dimensions.
 const SNIFF_BYTES: usize = 512 * 1024;
 const KEY_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6d1f_1c8e_52a4_4f0e_9a4b_7c1e_2d3f_4a5b);
@@ -47,6 +49,19 @@ struct ImageMeta {
     width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+}
+impl ImageMeta {
+    /// The place of a file a reply shows that could not be kept. Its empty name reads as
+    /// not kept, so the files after it keep the numbers the reply gave them.
+    fn missing() -> Self {
+        Self {
+            file: String::new(),
+            media_type: String::new(),
+            bytes: 0,
+            width: None,
+            height: None,
+        }
+    }
 }
 /// A 3D model a reply shows, kept whole beside the call's images.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -304,10 +319,24 @@ pub struct ImageFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
+/// Whether a path names a place for ordinary files: an absolute path on a drive or a share,
+/// never a device such as a named pipe, which reading could hang on.
+fn plain_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    if !path.is_absolute() {
+        return false;
+    }
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => matches!(
+            prefix.kind(),
+            Prefix::Disk(_) | Prefix::UNC(..) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..)
+        ),
+        _ => true,
+    }
+}
 /// A file the conversation offers to show, checked before its bytes are copied.
 fn offered_file(path: &Path, limit: u64) -> Result<std::fs::Metadata, String> {
-    let text = path.to_string_lossy();
-    if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
+    if !plain_path(path) {
         return Err("needs an absolute path to a file".into());
     }
     let metadata = std::fs::metadata(path).map_err(|_| "cannot be read here".to_string())?;
@@ -364,16 +393,15 @@ pub fn inspect_model(path: &Path, limit: u64) -> Result<ModelFile, String> {
         // The whole document is text within the size limit already checked above.
         let text =
             std::fs::read_to_string(path).map_err(|_| "cannot be read as text".to_string())?;
-        let document: serde_json::Value = serde_json::from_str(&text)
+        // A byte-order mark may come before the document, as the viewer reads past it.
+        let document: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
             .map_err(|_| "is not a readable glTF document".to_string())?;
         gltf_is_viewable(&document, "glTF document")?;
     } else if format == "glb" {
-        // A GLB carries the same document in its first chunk. It is at the head of the file,
-        // so the sniffed window holds it for any model this tool accepts; a chunk larger than
-        // that window is left alone rather than guessed at.
-        if let Some(document) = glb_document(&head) {
-            gltf_is_viewable(&document, "GLB")?;
-        }
+        // A GLB carries the same document in its first chunk, which may be larger than the
+        // sniffed head, so it is read whole from the file.
+        let document = glb_document(&mut file, &head, size)?;
+        gltf_is_viewable(&document, "GLB")?;
     }
     Ok(ModelFile {
         format: format.into(),
@@ -414,14 +442,35 @@ fn model_format(head: &[u8], size: u64) -> Option<&'static str> {
     }
     None
 }
-/// The JSON chunk of a GLB, when the sniffed head holds all of it. The container is a
-/// 12-byte header then length-prefixed chunks, the first of which is the document.
-fn glb_document(head: &[u8]) -> Option<serde_json::Value> {
-    let length = u32::from_le_bytes(head.get(12..16)?.try_into().ok()?) as usize;
-    if head.get(16..20)? != b"JSON" {
-        return None;
+/// The document of a GLB. The container is a 12-byte header (magic, version, total length)
+/// and then length-prefixed chunks, the first of which is the document.
+fn glb_document(
+    file: &mut std::fs::File,
+    head: &[u8],
+    size: u64,
+) -> Result<serde_json::Value, String> {
+    let invalid = || "is not a readable GLB file".to_string();
+    let word = |at: usize| {
+        head.get(at..at + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(invalid)
+    };
+    let version = word(4)?;
+    if version != 2 {
+        return Err(format!(
+            "is a version {version} GLB, which the 3D viewer cannot read; export glTF 2.0"
+        ));
     }
-    serde_json::from_slice(head.get(20..20usize.checked_add(length)?)?).ok()
+    let total = u64::from(word(8)?);
+    let length = u64::from(word(12)?);
+    if total > size || total < 20 + length || head.get(16..20) != Some(b"JSON".as_slice()) {
+        return Err(invalid());
+    }
+    let mut document = vec![0; length as usize];
+    file.seek(SeekFrom::Start(20)).map_err(|_| invalid())?;
+    file.read_exact(&mut document).map_err(|_| invalid())?;
+    serde_json::from_slice(&document).map_err(|_| invalid())
 }
 
 /// An extension the document cannot be read without, and the viewer cannot read. The viewer
@@ -432,7 +481,7 @@ fn glb_document(head: &[u8]) -> Option<serde_json::Value> {
 fn undecodable_extension(name: &str) -> Option<&'static str> {
     match name {
         "KHR_draco_mesh_compression" => Some("Draco mesh compression"),
-        "EXT_meshopt_compression" => Some("meshopt compression"),
+        "EXT_meshopt_compression" | "KHR_meshopt_compression" => Some("meshopt compression"),
         "KHR_texture_basisu" => Some("Basis Universal textures"),
         _ => None,
     }
@@ -452,12 +501,21 @@ fn gltf_is_viewable(document: &serde_json::Value, kind_name: &str) -> Result<(),
             }
         }
     }
-    for entry in document["extensionsRequired"]
-        .as_array()
+    let names = |key: &str| {
+        document[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    };
+    // meshopt and Basis fall back to data the document carries unless it requires them, but
+    // three.js sets up Draco for any document that lists it as used and fails without a
+    // decoder, so Draco is refused whenever it is listed.
+    let draco = names("extensionsUsed")
         .into_iter()
-        .flatten()
-    {
-        let Some(name) = entry.as_str() else { continue };
+        .filter(|name| *name == "KHR_draco_mesh_compression");
+    for name in names("extensionsRequired").into_iter().chain(draco) {
         if let Some(human) = undecodable_extension(name) {
             return Err(format!(
                 "needs {human} ({name}), which the 3D viewer cannot decode; \
@@ -467,13 +525,26 @@ fn gltf_is_viewable(document: &serde_json::Value, kind_name: &str) -> Result<(),
     }
     Ok(())
 }
+/// Copies `source`, at most `limit` bytes of it when one applies, and fails when there are
+/// more: the file may have grown since it was checked.
+fn copy_within(
+    source: &mut std::fs::File,
+    target: &mut impl Write,
+    limit: Option<u64>,
+) -> Option<u64> {
+    let Some(limit) = limit else {
+        return std::io::copy(source, target).ok();
+    };
+    let bytes = std::io::copy(&mut source.take(limit + 1), target).ok()?;
+    (bytes <= limit).then_some(bytes)
+}
 /// Copies a model file the conversation offered, keeping its recognized format.
 fn copy_model(path: &Path, directory: &Path, index: usize, limit: u64) -> Option<ModelMeta> {
     let model = inspect_model(path, limit).ok()?;
     let file = format!("model-{index}.{}", model.format);
     let mut source = std::fs::File::open(path).ok()?;
     let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
-    let bytes = std::io::copy(&mut source, &mut target).ok()?;
+    let bytes = copy_within(&mut source, &mut target, Some(limit))?;
     target.persist(directory.join(&file)).ok()?;
     Some(ModelMeta {
         file,
@@ -481,10 +552,15 @@ fn copy_model(path: &Path, directory: &Path, index: usize, limit: u64) -> Option
         bytes,
     })
 }
-/// Copies an image file a provider reported viewing: a regular file of a supported type.
-fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> {
-    let text = path.to_string_lossy();
-    if !path.is_absolute() || text.starts_with(r"\\.\") || text.starts_with(r"\\?\") {
+/// Copies an image file a provider reported viewing or a reply shows: a regular file of a
+/// supported type, within `limit` when one applies.
+fn copy_image(
+    path: &Path,
+    directory: &Path,
+    index: usize,
+    limit: Option<u64>,
+) -> Option<ImageMeta> {
+    if !plain_path(path) {
         return None;
     }
     if !std::fs::metadata(path).ok()?.is_file() {
@@ -500,7 +576,7 @@ fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> 
     source.seek(SeekFrom::Start(0)).ok()?;
     let file = format!("image-{index}.{}", extension(media_type));
     let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
-    let bytes = std::io::copy(&mut source, &mut target).ok()?;
+    let bytes = copy_within(&mut source, &mut target, limit)?;
     target.persist(directory.join(&file)).ok()?;
     Some(ImageMeta {
         file,
@@ -551,26 +627,37 @@ fn write_call(
             height: size.map(|s| s.1),
         });
     }
+    // Files a reply shows keep their place when one cannot be kept, since the reply names each
+    // by its position, and stay within the sizes they were checked against.
+    let limit = output.sent.then_some(IMAGE_BYTES);
     for path in files {
         match path
             .as_deref()
-            .and_then(|path| copy_image(path, directory, images.len()))
+            .and_then(|path| copy_image(path, directory, images.len(), limit))
         {
             Some(image) => {
                 written += image.bytes;
                 images.push(image);
             }
+            None if output.sent => images.push(ImageMeta::missing()),
             None => omitted += 1,
         }
     }
     let mut kept = vec![];
     for path in models {
-        if let Some(model) = path
+        match path
             .as_deref()
             .and_then(|path| copy_model(path, directory, kept.len(), MODEL_BYTES))
         {
-            written += model.bytes;
-            kept.push(model);
+            Some(model) => {
+                written += model.bytes;
+                kept.push(model);
+            }
+            None => kept.push(ModelMeta {
+                file: String::new(),
+                format: String::new(),
+                bytes: 0,
+            }),
         }
     }
     let meta = Meta {
@@ -864,6 +951,7 @@ pub async fn read(
                 .images
                 .into_iter()
                 .enumerate()
+                .filter(|(_, image)| !image.file.is_empty())
                 .map(|(index, image)| ImageView {
                     index,
                     media_type: image.media_type,
@@ -1051,6 +1139,7 @@ mod tests {
             start_line: None,
             images: vec![],
             models: vec![],
+            sent: false,
             command: Some("npm test -- --long".into()),
             input: None,
         };
@@ -1172,13 +1261,14 @@ mod tests {
         .unwrap();
         let error = inspect_model(&binary_external, MODEL_BYTES).unwrap_err();
         assert!(error.contains("loads its buffers"), "{error}");
-        // An extension the document merely uses has fallback data beside it and still opens,
-        // and one the viewer implements itself is never refused.
+        // meshopt the document merely uses has fallback data beside it and still opens, and
+        // an extension the viewer implements itself is never refused. three.js sets up Draco
+        // for any document that lists it, so a listed Draco is refused even when optional.
         let optional = dir.path().join("optional.glb");
         std::fs::write(
             &optional,
             glb(
-                r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_draco_mesh_compression"],"extensionsRequired":["KHR_materials_specular"]}"#,
+                r#"{"asset":{"version":"2.0"},"extensionsUsed":["EXT_meshopt_compression"],"extensionsRequired":["KHR_materials_specular"]}"#,
             ),
         )
         .unwrap();
@@ -1186,6 +1276,24 @@ mod tests {
             inspect_model(&optional, MODEL_BYTES).map(|m| m.format),
             Ok("glb".into())
         );
+        for (name, document) in [
+            (
+                "draco.glb",
+                r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_draco_mesh_compression"]}"#,
+            ),
+            (
+                "meshopt.glb",
+                r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_meshopt_compression"],"extensionsRequired":["KHR_meshopt_compression"]}"#,
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, glb(document)).unwrap();
+            let error = inspect_model(&path, MODEL_BYTES).unwrap_err();
+            assert!(
+                error.contains("the 3D viewer cannot decode"),
+                "{name}: {error}"
+            );
+        }
         // Size, kind and path are reported before anything is copied.
         let big = dir.path().join("big.glb");
         std::fs::write(&big, glb(&format!("{{\"x\":\"{}\"}}", "0".repeat(2048)))).unwrap();
@@ -1193,6 +1301,73 @@ mod tests {
         assert!(error.contains("larger than"), "{error}");
         assert!(inspect_model(&dir.path().join("gone.glb"), MODEL_BYTES).is_err());
         assert!(inspect_model(Path::new("relative.glb"), MODEL_BYTES).is_err());
+        // A GLB is read by its own header: a glTF 1.0 container and a cut file are named.
+        let mut version_one = glb(r#"{"asset":{"version":"1.0"}}"#);
+        version_one[4] = 1;
+        let old = dir.path().join("old.glb");
+        std::fs::write(&old, version_one).unwrap();
+        let error = inspect_model(&old, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("version 1 GLB"), "{error}");
+        let mut cut = glb(r#"{"asset":{"version":"2.0"}}"#);
+        cut.truncate(cut.len() - 4);
+        let truncated = dir.path().join("truncated.glb");
+        std::fs::write(&truncated, cut).unwrap();
+        let error = inspect_model(&truncated, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("not a readable GLB file"), "{error}");
+        // The document is read whole past the sniffed head, where a buffer beside the file
+        // listed after a long node list used to go unnoticed.
+        let nodes = vec![r#"{"name":"part"}"#; SNIFF_BYTES / 10].join(",");
+        let large = dir.path().join("large.glb");
+        std::fs::write(
+            &large,
+            glb(&format!(
+                r#"{{"asset":{{"version":"2.0"}},"nodes":[{nodes}],"buffers":[{{"uri":"scene.bin"}}]}}"#
+            )),
+        )
+        .unwrap();
+        let error = inspect_model(&large, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("loads its buffers"), "{error}");
+        // A byte-order mark before a glTF document is read past, as the viewer does.
+        let marked = dir.path().join("marked.gltf");
+        std::fs::write(&marked, "\u{feff}{\"asset\":{\"version\":\"2.0\"}}").unwrap();
+        assert_eq!(
+            inspect_model(&marked, MODEL_BYTES).map(|m| m.format),
+            Ok("gltf".into())
+        );
+    }
+
+    #[test]
+    fn only_places_for_ordinary_files_are_offered() {
+        assert!(!plain_path(Path::new("relative.png")));
+        #[cfg(windows)]
+        {
+            assert!(plain_path(Path::new(r"C:\renders\front.png")));
+            assert!(plain_path(Path::new(r"\\server\share\front.png")));
+            assert!(plain_path(Path::new(
+                r"\\wsl.localhost\Ubuntu\home\front.png"
+            )));
+            assert!(plain_path(Path::new(r"\\?\C:\renders\front.png")));
+            // Devices, which a read could hang on, are never files a reply shows.
+            assert!(!plain_path(Path::new(r"\\.\pipe\agent")));
+            assert!(!plain_path(Path::new(r"\\?\GLOBALROOT\Device\Null")));
+        }
+        #[cfg(not(windows))]
+        assert!(plain_path(Path::new("/home/me/front.png")));
+    }
+
+    #[test]
+    fn a_copy_stops_at_the_size_its_file_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grown.png");
+        std::fs::write(&path, [7u8; 10]).unwrap();
+        let copy = |limit| {
+            let mut source = std::fs::File::open(&path).unwrap();
+            let mut target = vec![];
+            copy_within(&mut source, &mut target, limit).map(|bytes| (bytes, target.len()))
+        };
+        assert_eq!(copy(None), Some((10, 10)));
+        assert_eq!(copy(Some(10)), Some((10, 10)));
+        assert_eq!(copy(Some(9)), None);
     }
 
     #[tokio::test]
@@ -1211,7 +1386,7 @@ mod tests {
             &directory,
             &captured,
             &[],
-            &[Some(model), Some(dir.path().join("missing.glb"))],
+            &[Some(dir.path().join("missing.glb")), Some(model)],
         )
         .unwrap();
         let data = read_model(
@@ -1219,7 +1394,7 @@ mod tests {
             pending.clone(),
             RUN.into(),
             "claude:model".into(),
-            0,
+            1,
         )
         .await
         .unwrap();
@@ -1231,11 +1406,58 @@ mod tests {
                 .unwrap(),
             bytes
         );
-        // An unreadable path is simply not kept, and no other index appears.
-        assert!(
-            read_model(root, pending, RUN.into(), "claude:model".into(), 1)
-                .await
-                .is_err()
+        // An unreadable path is not kept, and the model after it keeps the number the reply
+        // gave it; no other index appears.
+        for index in [0, 2] {
+            assert!(read_model(
+                root.clone(),
+                pending.clone(),
+                RUN.into(),
+                "claude:model".into(),
+                index
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn images_a_reply_shows_keep_their_numbers_when_one_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
+        let mut captured = CapturedOutput::new("claude:sent");
+        captured.sent = true;
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, PNG).unwrap();
+        let files = [Some(dir.path().join("gone.png")), Some(file)];
+        let directory = root.join(RUN).join(key("claude:sent"));
+        write_call(&directory, &captured, &files, &[]).unwrap();
+        let view = read(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:sent".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        // The reply numbers the second file 1, so it is read as 1.
+        let indexes: Vec<_> = view.images.iter().map(|image| image.index).collect();
+        assert_eq!((indexes, view.images_omitted), (vec![1], 0));
+        let image = read_image(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:sent".into(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(
+            read_image(root, pending, RUN.into(), "claude:sent".into(), 0).await,
+            Err(NOT_KEPT.into())
         );
     }
 

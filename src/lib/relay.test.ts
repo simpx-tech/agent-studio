@@ -9,7 +9,12 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
-async function fixture(limits?: { upload?: number; answer?: number }) {
+async function fixture(limits?: {
+  upload?: number;
+  answer?: number;
+  jobUpdate?: number;
+  jobStorage?: number;
+}) {
   let time = Date.now();
   const token = 'synthetic-test-pairing-key-'.repeat(2);
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-relay-'));
@@ -561,6 +566,51 @@ describe('real HTTP relay', () => {
     expect(JSON.stringify((await f.call('GET', 'workspace')).body)).not.toContain(
       'Synthetic tool output',
     );
+    // The requester has its result, and nothing else reads it, so it leaves at once.
+    expect((await f.call('GET', `jobs/${job.id}`)).status).toBe(404);
+  });
+  it('keeps large read results only until they are read, within the storage budget', async () => {
+    const f = await fixture({ jobUpdate: 3_000, jobStorage: 6_000 });
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const read = () => ({
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'toolOutputImage',
+      args: {
+        runId: crypto.randomUUID(),
+        toolId: 'claude:toolu_01',
+        connectionId: crypto.randomUUID(),
+        index: 0,
+      },
+    });
+    const image = (size: number) => ({ mediaType: 'image/png', data: 'A'.repeat(size), bytes: 1 });
+    const [first, second, third] = [read(), read(), read()];
+    for (const job of [first, second, third]) await f.call('POST', 'jobs', job);
+    await f.call('GET', 'jobs', undefined, f.target);
+    const finish = (id: string, size: number) =>
+      f.call(
+        'PUT',
+        `jobs/${id}`,
+        { status: 'complete', events: [], result: image(size) },
+        f.target,
+      );
+    // An update past its limit is refused before it is read.
+    expect((await finish(first.id, 4_000)).body.code).toBe('too_large');
+    expect((await finish(first.id, 2_000)).status).toBe(200);
+    expect((await finish(second.id, 2_000)).status).toBe(200);
+    // Two held results leave no room for a third until one is read.
+    expect((await finish(third.id, 2_000)).status).toBe(429);
+    expect((await f.call('GET', `jobs/${first.id}`)).body.result).toEqual(image(2_000));
+    expect((await finish(third.id, 2_000)).status).toBe(200);
+    // A result its requester never reads leaves a minute after it finished.
+    f.advance(60_001);
+    expect((await f.call('GET', `jobs/${second.id}`)).status).toBe(404);
   });
   it('keeps healthy native workflows past one reply deadline while expiring abandoned work', async () => {
     const f = await fixture(),

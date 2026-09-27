@@ -175,7 +175,10 @@ fn is_image_path(path: &str) -> bool {
 /// Agent Studio's own tools, whose arguments and results other panels already show.
 fn studio_tool(name: &str) -> bool {
     name.starts_with("mcp__agent_studio__")
-        || matches!(name, "studio_ask_user" | "studio_update_plan" | "visualize")
+        || matches!(
+            name,
+            "studio_ask_user" | "studio_update_plan" | "visualize" | "send_files"
+        )
 }
 /// Claude tools whose inputs other panels show or that carry file bodies.
 fn claude_builtin(name: &str) -> bool {
