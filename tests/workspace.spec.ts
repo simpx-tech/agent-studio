@@ -3,6 +3,7 @@ import { chooseTestFolder } from './folder-helper';
 import { expectVisibleQuotaComparison } from './quota-helper';
 import { maxImageBytes, maxImagesPerMessage } from '../src/lib/images';
 import { mockDesktop } from './desktop-helper';
+import { createHash } from 'node:crypto';
 
 async function imageFixture(page: Page, name = 'diagram.png') {
   const data = await page.evaluate(() => {
@@ -24,6 +25,46 @@ async function imageFixture(page: Page, name = 'diagram.png') {
   return { name, mimeType: 'image/png', buffer: Buffer.from(data, 'base64') };
 }
 
+test('a draft edited while its images are kept waits for the next send', async ({ page }) => {
+  await mockDesktop(page, 'error');
+  // The image store answers only once the test lets it.
+  await page.addInitScript(() => {
+    const w = window as any,
+      original = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'store_chat_image' && !w.imagesReleased)
+        await new Promise<void>((resolve) => {
+          w.releaseImages = () => {
+            w.imagesReleased = true;
+            resolve();
+          };
+        });
+      return original(command, args);
+    };
+  });
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Image files').setInputFiles(await imageFixture(page));
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Describe this');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByText('Saving images…')).toBeVisible();
+  await input.fill('Describe this diagram');
+  await page.evaluate(() => (window as any).releaseImages());
+  await expect(page.getByText('Saving images…')).toHaveCount(0);
+  // Nothing went out, and the edited draft keeps its image.
+  await expect(page.locator('.message')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBeNull();
+  await expect(input).toHaveValue('Describe this diagram');
+  await expect(page.getByRole('button', { name: 'Remove diagram.png' })).toBeVisible();
+  // Sent again, it goes out as edited.
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('1');
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(request.messages[0].text).toBe('Describe this diagram');
+  expect(request.messages[0].images).toHaveLength(1);
+});
+
 test('images can be previewed, sent without text, reopened and retried with the original bytes', async ({
   page,
 }) => {
@@ -40,7 +81,20 @@ test('images can be previewed, sent without text, reopened and retried with the 
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.messages[0].text).toBe('');
-  expect(request.messages[0].images[0].data).toBe(file.buffer.toString('base64'));
+  // The message names its image by hash; the bytes stay once in this computer's image store.
+  const hash = createHash('sha256').update(file.buffer).digest('hex');
+  expect(request.messages[0].images[0]).toEqual({
+    id: expect.any(String),
+    name: 'diagram.png',
+    mediaType: 'image/png',
+    hash,
+    bytes: file.buffer.length,
+  });
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('test-images')!));
+  expect(kept[hash].data).toBe(file.buffer.toString('base64'));
+  const saved = await page.evaluate(() => localStorage.getItem('test-workspace')!);
+  expect(saved).toContain(hash);
+  expect(saved).not.toContain(file.buffer.toString('base64').slice(0, 40));
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled();
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();

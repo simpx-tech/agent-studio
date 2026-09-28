@@ -156,6 +156,11 @@ const RESPONSE_LIMIT: usize = 256_000_000;
 /// A relay that sends nothing for this long, or has not begun to answer a small request, has
 /// stalled.
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
+/// Sent with every request: this app keeps chat images as references to the relay's image
+/// store (src-tauri/src/chat_images.rs), so the relay answers with references, not bytes.
+const IMAGES: (&str, &str) = ("x-studio-images", "1");
+/// Told when the relay predates the image store.
+pub const OLD_RELAY: &str = "Update the relay to sync conversations with images.";
 
 fn relay_client() -> Result<reqwest::Client, String> {
     // No total timeout: a large conversation takes as long as the link needs, and a stalled
@@ -204,6 +209,7 @@ async fn identify(
         .get(url.join(path).map_err(|_| "Invalid relay URL")?)
         .bearer_auth(token)
         .header("x-environment-id", environment)
+        .header(IMAGES.0, IMAGES.1)
         .send();
     let mut response = tokio::time::timeout(send_limit(0), request)
         .await
@@ -258,19 +264,15 @@ pub async fn request(
     {
         return Err("Invalid relay operation".into());
     }
-    let (client, url, token, environment) = state
-        .connection
-        .lock()
-        .map_err(|_| "Relay state failed")?
-        .clone()
-        .ok_or("Connect to the relay first")?;
+    let (client, url, token, environment) = connection(state)?;
     let mut request = client
         .request(
             method.parse().map_err(|_| "Invalid method")?,
             url.join(path).map_err(|_| "Invalid relay path")?,
         )
         .bearer_auth(token)
-        .header("x-environment-id", environment);
+        .header("x-environment-id", environment)
+        .header(IMAGES.0, IMAGES.1);
     let mut size = 0;
     if let Some(body) = body {
         let bytes = serde_json::to_vec(&body).map_err(|_| "Cannot encode the relay request")?;
@@ -288,6 +290,112 @@ pub async fn request(
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Relay returned an invalid response")?;
     Ok(json!({"status": status, "body": value}))
+}
+type Connection = (reqwest::Client, reqwest::Url, String, String);
+fn connection(state: &Relay) -> Result<Connection, String> {
+    state
+        .connection
+        .lock()
+        .map_err(|_| "Relay state failed")?
+        .clone()
+        .ok_or_else(|| "Connect to the relay first".into())
+}
+/// A request for the image store, authenticated as every relay request is.
+fn image_request(
+    (client, url, token, environment): &Connection,
+    method: reqwest::Method,
+    path: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    Ok(client
+        .request(method, url.join(path).map_err(|_| "Invalid relay path")?)
+        .bearer_auth(token)
+        .header("x-environment-id", environment)
+        .header(IMAGES.0, IMAGES.1))
+}
+/// The relay's own reason for refusing an image request, or a plain one.
+fn refusal(status: reqwest::StatusCode, bytes: &[u8]) -> String {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return OLD_RELAY.into();
+    }
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("Relay image request failed ({status})."))
+}
+/// Which of these images the relay lacks.
+pub async fn missing_images(state: &Relay, hashes: &[String]) -> Result<Vec<String>, String> {
+    let connection = connection(state)?;
+    let body = serde_json::to_vec(&json!({ "hashes": hashes }))
+        .map_err(|_| "Cannot encode the relay request")?;
+    let size = body.len();
+    let request = image_request(&connection, reqwest::Method::POST, "v1/images/missing")?
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .send();
+    let mut response = tokio::time::timeout(send_limit(size), request)
+        .await
+        .map_err(|_| "Relay connection timed out.")?
+        .map_err(|_| "Relay connection lost.")?;
+    let status = response.status();
+    let bytes = read_body(&mut response).await?;
+    if !status.is_success() {
+        return Err(refusal(status, &bytes));
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Relay returned an invalid response")?;
+    Ok(value["missing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|hash| hash.as_str())
+        .filter(|hash| hashes.iter().any(|sent| sent == hash))
+        .map(str::to_owned)
+        .collect())
+}
+/// Uploads one image's bytes, which the relay checks against their hash.
+pub async fn upload_image(state: &Relay, hash: &str, bytes: Vec<u8>) -> Result<(), String> {
+    let connection = connection(state)?;
+    let size = bytes.len();
+    let request = image_request(
+        &connection,
+        reqwest::Method::PUT,
+        &format!("v1/images/{hash}"),
+    )?
+    .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+    .body(bytes)
+    .send();
+    let mut response = tokio::time::timeout(send_limit(size), request)
+        .await
+        .map_err(|_| "Relay connection timed out while uploading an image.")?
+        .map_err(|_| "Relay connection lost while uploading an image.")?;
+    let status = response.status();
+    let answer = read_body(&mut response).await?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(refusal(status, &answer))
+    }
+}
+/// One image's bytes from the relay's image store.
+pub async fn download_image(state: &Relay, hash: &str) -> Result<Vec<u8>, String> {
+    let connection = connection(state)?;
+    let request = image_request(
+        &connection,
+        reqwest::Method::GET,
+        &format!("v1/images/{hash}"),
+    )?
+    .send();
+    let mut response = tokio::time::timeout(send_limit(0), request)
+        .await
+        .map_err(|_| "Relay connection timed out.")?
+        .map_err(|_| "Relay connection lost.")?;
+    let status = response.status();
+    let bytes = read_body(&mut response).await?;
+    if status.is_success() {
+        Ok(bytes)
+    } else {
+        Err(refusal(status, &bytes))
+    }
 }
 #[cfg(test)]
 mod tests {

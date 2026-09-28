@@ -2,18 +2,30 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
 /// One message becomes one provider request and one preview each. A conversation has no image
-/// budget: saving and syncing move one conversation at a time, so its images no longer set the
-/// cost of a reply. A provider that accepts less than this reports its own limit.
-pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// budget: messages keep references to the image store (src-tauri/src/chat_images.rs), so its
+/// images no longer set the cost of a reply. A provider that accepts less than this reports its
+/// own limit.
+pub const MAX_IMAGE_BYTES: usize = crate::chat_images::MAX_IMAGE_BYTES;
 pub const MAX_IMAGES_PER_MESSAGE: usize = 16;
 
+/// An image of a message: a reference to the image store, or, from an app older than the store,
+/// its bytes inline. The fields serialize in this order, so an inline image fingerprints exactly
+/// as native sessions recorded it before the store (see `sessions::Session::prepare`).
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatImage {
     pub id: String,
     pub name: String,
     pub media_type: String,
-    pub data: String,
+    /// The bytes as base64: inline in a request from an older app, and put in memory for the
+    /// images a reply sends to its provider (`chat_images::materialize`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// The SHA-256 of the bytes, which names them in the image store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 impl ChatImage {
@@ -22,11 +34,31 @@ impl ChatImage {
         if self.name.is_empty() || self.name.chars().count() > 200 {
             return Err("Invalid image name".into());
         }
-        if self.data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+        let (data, hash) = (self.data.as_deref(), self.hash.as_deref());
+        if let (None, Some(hash)) = (data, hash) {
+            let bytes = self.bytes.unwrap_or(0) as usize;
+            if !crate::chat_images::valid_hash(hash)
+                || !matches!(
+                    self.media_type.as_str(),
+                    "image/png" | "image/jpeg" | "image/webp"
+                )
+                || bytes == 0
+            {
+                return Err("Invalid image reference".into());
+            }
+            if bytes > MAX_IMAGE_BYTES {
+                return Err("Images must be 16 MB or smaller".into());
+            }
+            return Ok(bytes);
+        }
+        let Some(data) = data.filter(|_| hash.is_none()) else {
+            return Err("Invalid image reference".into());
+        };
+        if data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
             return Err("Images must be 16 MB or smaller".into());
         }
         let bytes = STANDARD
-            .decode(&self.data)
+            .decode(data)
             .map_err(|_| "Invalid image encoding")?;
         let valid = match self.media_type.as_str() {
             "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -40,7 +72,17 @@ impl ChatImage {
         Ok(bytes.len())
     }
     pub fn data_url(&self) -> String {
-        format!("data:{};base64,{}", self.media_type, self.data)
+        format!("data:{};base64,{}", self.media_type, self.base64())
+    }
+    /// The bytes as base64, which a reply's request holds for the images it sends.
+    pub fn base64(&self) -> &str {
+        self.data.as_deref().unwrap_or_default()
+    }
+    /// The length of the bytes as base64, for the output a provider may echo.
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.map_or(self.base64().len(), |bytes| {
+            (bytes as usize).div_ceil(3) * 4
+        })
     }
     pub fn label(&self, message: usize, image: usize) -> String {
         format!(
@@ -77,7 +119,7 @@ mod tests {
         assert!(payload["origin"].is_null());
         assert_eq!(
             payload["message"]["content"][2]["source"]["data"],
-            image.data
+            image.base64()
         );
         assert_eq!(
             payload["message"]["content"][2]["source"]["media_type"],
@@ -87,7 +129,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("message 1"));
-        assert!(!r.prompt().contains(&image.data));
+        assert!(!r.prompt().contains(image.base64()));
         let dir = tempfile::tempdir().unwrap();
         let exe = Executable {
             provider: "claude".into(),
@@ -104,7 +146,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|a| a[0] == "--input-format" && a[1] == "stream-json"));
-        assert!(!args.iter().any(|a| a.contains(&image.data)));
+        assert!(!args.iter().any(|a| a.contains(image.base64())));
     }
     #[test]
     fn rejects_unsupported_roles_providers_background_requests_and_malformed_images() {
@@ -120,7 +162,7 @@ mod tests {
         assert!(bad.validate().is_err());
         for data in ["https://example.com/img.png", "!!!!", ""] {
             bad = r.clone();
-            bad.messages[0].images[0].data = data.into();
+            bad.messages[0].images[0].data = Some(data.into());
             assert!(bad.validate().is_err());
         }
         bad = r.clone();
@@ -130,14 +172,40 @@ mod tests {
         bad.messages[0].images = vec![r.messages[0].images[0].clone(); MAX_IMAGES_PER_MESSAGE + 1];
         assert!(bad.validate().unwrap_err().contains("16 images"));
         bad = r.clone();
-        bad.messages[0].images[0].data = STANDARD.encode(vec![0; MAX_IMAGE_BYTES + 1]);
+        bad.messages[0].images[0].data = Some(STANDARD.encode(vec![0; MAX_IMAGE_BYTES + 1]));
         assert!(bad.validate().is_err());
         // A conversation has no image budget of its own: every message may carry a full one.
         let mut bytes = vec![0; MAX_IMAGE_BYTES];
         bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         let mut full = r.clone();
-        full.messages[0].images[0].data = STANDARD.encode(bytes);
+        full.messages[0].images[0].data = Some(STANDARD.encode(bytes));
         full.messages = vec![full.messages[0].clone(); 5];
         assert!(full.validate().is_ok());
+        // A reference to the image store names its bytes by hash, within the same bound.
+        let mut stored = r.clone();
+        let image = &mut stored.messages[0].images[0];
+        (image.data, image.hash, image.bytes) = (None, Some("a".repeat(64)), Some(68));
+        assert!(stored.validate().is_ok());
+        for (hash, bytes) in [
+            ("A".repeat(64), 68),
+            ("a".repeat(63), 68),
+            ("a".repeat(64), 0),
+            ("a".repeat(64), MAX_IMAGE_BYTES as u64 + 1),
+        ] {
+            let mut bad = stored.clone();
+            let image = &mut bad.messages[0].images[0];
+            (image.hash, image.bytes) = (Some(hash), Some(bytes));
+            assert!(bad.validate().is_err());
+        }
+        // An image is either a reference or inline, never both.
+        let mut both = stored.clone();
+        both.messages[0].images[0].data = r.messages[0].images[0].data.clone();
+        assert!(both.validate().is_err());
+        // Its request still fingerprints without bytes, as the store names them.
+        let saved = serde_json::to_value(&stored.messages[0].images[0]).unwrap();
+        assert_eq!(
+            saved.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["bytes", "hash", "id", "mediaType", "name"]
+        );
     }
 }

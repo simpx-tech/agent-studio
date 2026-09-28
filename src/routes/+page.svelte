@@ -115,6 +115,8 @@
     workspaceStorageScope,
     BrowserWorkspaceStorageError,
     OfflineHostError,
+    portableWorkspace,
+    storeChatImages,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import InputTemplates from '$lib/components/InputTemplates.svelte';
@@ -211,7 +213,9 @@
     supportsImages,
     maxImagesPerMessage,
     maxImageLabel,
-    type ChatImage,
+    storedImage,
+    type DraftImage,
+    type StoredImage,
   } from '$lib/images';
   import {
     enqueueMessage,
@@ -349,7 +353,7 @@
   $effect(() => {
     if (view !== 'chat') templatesOpen = false;
   });
-  let attachedImages = $state<ChatImage[]>([]);
+  let attachedImages = $state<DraftImage[]>([]);
   // Unsent composer content per chat and per scratch chat. Text is saved on this device only;
   // attached images stay until the app closes.
   const drafts = new Map<string, Draft>();
@@ -394,6 +398,8 @@
   let forking = $state(false);
   let attachmentError = $state('');
   let imagesLoading = $state(false);
+  // A message's images are being kept in the image store before it is sent.
+  let imagesSending = $state(false);
   let imageDragDepth = $state(0);
   let attachmentGeneration = 0;
   let imageInput = $state<HTMLInputElement>();
@@ -851,6 +857,7 @@
       !historyBusy &&
       !historyAction &&
       !imagesLoading &&
+      !imagesSending &&
       (!attachedImages.length || imagesSupported) &&
       !selectingLocation &&
       !locationPending &&
@@ -884,6 +891,7 @@
       !activeStopping &&
       !activeSteering &&
       !imagesLoading &&
+      !imagesSending &&
       !attachedImages.length &&
       !hasComposerMentions &&
       !!prompt.trim() &&
@@ -899,6 +907,7 @@
       !activeSteering &&
       !activeStopping &&
       !imagesLoading &&
+      !imagesSending &&
       (!attachedImages.length || imagesSupported) &&
       !selectingLocation &&
       !locationPending &&
@@ -3050,16 +3059,26 @@
       target.status.auth === 'ready'
     );
   }
-  function sendQueued(id: string) {
+  async function sendQueued(id: string) {
     const conversation = workspace.conversations.find((c) => c.id === id);
     const [next, ...rest] = queued[id] ?? [];
     if (!conversation || !next) return;
     if (rest.length) queued[id] = rest;
     else delete queued[id];
+    const session = workspaceSession;
+    let images: StoredImage[] = [];
+    try {
+      images = await storeChatImages(next.images);
+    } catch {
+      // The queue waits for the chat to be opened, as after a stopped reply.
+      if (session === workspaceSession) queued[id] = [next, ...(queued[id] ?? [])];
+      return;
+    }
+    if (session !== workspaceSession) return;
     const now = new Date().toISOString();
     if (conversation.archived) conversation.archived = false;
     delete conversation.rewind;
-    addUserMessage(conversation, next, now);
+    addUserMessage(conversation, { ...next, images }, now);
     const { provider, model } = conversation.settings;
     const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
     void startReply(conversation, {
@@ -3147,6 +3166,26 @@
       return;
     }
     if (!canSend || (!retry && !text && !images.length)) return;
+    // The images go to the image store before the message names them: this computer's on the
+    // desktop, the relay's in a browser. A failure keeps them where they were.
+    let stored: StoredImage[] = [];
+    if (!retry && images.length) {
+      const selected = activeId;
+      imagesSending = true;
+      try {
+        stored = await storeChatImages(images);
+      } catch (error) {
+        if (session === workspaceSession)
+          attachmentError = `The images could not be kept: ${(error as Error)?.message ?? error}`;
+        return;
+      } finally {
+        if (session === workspaceSession) imagesSending = false;
+      }
+      if (session !== workspaceSession || activeId !== selected) return;
+      // A draft edited while its images were kept goes out when it is sent again, which is
+      // quick now that they are.
+      if (!queuedMessage && (prompt.trim() !== text || attachedImages !== images)) return;
+    }
     nearBottom = true;
     const now = new Date().toISOString();
     const isNewConversation = !active;
@@ -3190,7 +3229,7 @@
       } else conversation.messages.pop();
     }
     if (!retry) {
-      addUserMessage(conversation, { text, images, skills, mentions }, now);
+      addUserMessage(conversation, { text, images: stored, skills, mentions }, now);
       if (!queuedMessage && !compactRequest) {
         prompt = '';
         clearImages();
@@ -3212,7 +3251,7 @@
   }
   function addUserMessage(
     conversation: Conversation,
-    input: Pick<QueuedMessage, 'text' | 'images' | 'skills' | 'mentions'>,
+    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & { images: StoredImage[] },
     now: string,
   ) {
     conversation.messages.push({
@@ -3226,7 +3265,7 @@
           text: input.text,
         },
       ],
-      ...(input.images.length ? { images: structuredClone($state.snapshot(input.images)) } : {}),
+      ...(input.images.length ? { images: input.images.map(storedImage) } : {}),
       status: 'complete',
       createdAt: now,
     });
@@ -3473,17 +3512,25 @@
       throw e;
     }
   }
+  // An export stands on its own: its images carry their bytes, which the desktop reads from its
+  // image store and a browser from the relay's. Images neither holds keep their references.
+  const unexported = (missing: number) =>
+    missing
+      ? ` ${missing} ${missing === 1 ? 'image was' : 'images were'} not available and ${missing === 1 ? 'keeps its reference' : 'keep their references'}.`
+      : '';
   async function exportWorkspace() {
     try {
       if (desktop()) {
         const { invoke } = await import('@tauri-apps/api/core');
-        const path = await invoke<string>('export_workspace', {
+        const exported = await invoke<{ path: string; missingImages: number }>('export_workspace', {
           workspace: $state.snapshot(workspace),
         });
-        notice = `Workspace exported to ${path}`;
+        notice = `Workspace exported to ${exported.path}.${unexported(exported.missingImages)}`;
       } else {
+        const copy = $state.snapshot(workspace);
+        const missing = await portableWorkspace(copy);
         const url = URL.createObjectURL(
-          new Blob([JSON.stringify($state.snapshot(workspace), null, 2)], {
+          new Blob([JSON.stringify(copy, null, 2)], {
             type: 'application/json',
           }),
         );
@@ -3492,6 +3539,7 @@
         a.download = 'agent-studio-workspace.json';
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        if (missing) notice = `Workspace exported.${unexported(missing)}`;
       }
     } catch (e) {
       notice = String(e);
@@ -4393,6 +4441,7 @@
                 }}
               />
               {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
+              {#if imagesSending}<p class="attachment-notice" role="status">{desktop() ? 'Saving images…' : 'Uploading images…'}</p>{/if}
               {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
               {:else if attachedImages.length && !imagesSupported}<p
                   class="attachment-notice"

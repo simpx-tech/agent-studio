@@ -1,6 +1,7 @@
 // Opt-in: real image understanding via the native composer and existing CLI logins.
 // Use native-images.tauri.json, separate target/WebView directories, and CDP 9461.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -191,8 +192,18 @@ try {
       id,
     );
     const saved = (await page.invoke('load_workspace')).conversations.find((c) => c.id === id);
-    assert.equal(saved.messages[0].images[0].data, base64);
-    assert.equal(saved.messages[0].images[0].mediaType, 'image/png');
+    // The saved message names its image by hash; the bytes stay once in the image store.
+    const bytes = Buffer.from(base64, 'base64');
+    assert.deepEqual(
+      { ...saved.messages[0].images[0], id: undefined },
+      {
+        id: undefined,
+        name: `${provider}-fixture.png`,
+        mediaType: 'image/png',
+        hash: createHash('sha256').update(bytes).digest('hex'),
+        bytes: bytes.length,
+      },
+    );
     assert(
       !saved.messages[1].blocks.some((block) => block.tool),
       'Visual understanding must not rely on reading a local file.',
@@ -211,14 +222,19 @@ try {
       title,
     );
     await page.waitFor(() => !!document.querySelector('.message.user img')?.naturalWidth);
+    // The reopened preview reads the image store through its protocol, not the chat data.
+    assert.match(
+      await page.evaluate(() => document.querySelector('.message.user img').src),
+      /^(http:\/\/studio-image\.localhost\/|studio-image:\/\/localhost\/)[0-9a-f]{64}$/,
+    );
     const after = await page.cdp('Page.captureScreenshot', { format: 'png' });
     await writeFile(
       `artifacts/images-native/${provider}-reply.png`,
       Buffer.from(after.data, 'base64'),
     );
-    report.providers[provider] = { ...reply, preservedBytes: true, reopened: true, noTools: true };
+    report.providers[provider] = { ...reply, storedImage: true, reopened: true, noTools: true };
     console.log(
-      `${provider}: image code, shape, color, saved bytes, and reopened preview verified.`,
+      `${provider}: image code, shape, color, stored image, and reopened preview verified.`,
     );
   }
   assert.deepEqual(page.errors, []);

@@ -722,7 +722,7 @@ impl RunRequest {
                 .messages
                 .iter()
                 .flat_map(|m| &m.images)
-                .map(|image| image.data.len())
+                .map(images::ChatImage::encoded_len)
                 .sum::<usize>()
             + self
                 .messages
@@ -864,7 +864,7 @@ impl RunRequest {
                         {
                             for (image_index, image) in message.images.iter().enumerate() {
                                 content.push(serde_json::json!({"type":"text","text":image.label(index, image_index)}));
-                                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64()}}));
                             }
                         }
                     }
@@ -874,7 +874,7 @@ impl RunRequest {
                     vec![serde_json::json!({"type":"text","text":self.native_user_text()})];
                 if self.native_image_message(self.messages.len() - 1) {
                     for image in &self.messages.last().expect("validated conversation").images {
-                        content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                        content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64()}}));
                     }
                 }
                 payload.push_str(&format!("{}\n", serde_json::json!({"type":"user","uuid":self.run_id,"origin":{"kind":"human"},"message":{"role":"user","content":content}})));
@@ -890,13 +890,13 @@ impl RunRequest {
             for (message_index, message) in history.messages.iter().enumerate() {
                 for (image_index, image) in message.images.iter().enumerate() {
                     content.push(serde_json::json!({"type":"text","text":image.label(message_index, image_index)}));
-                    content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                    content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64()}}));
                 }
             }
             let context = serde_json::json!({"type":"user","shouldQuery":false,"message":{"role":"user","content":content}});
             let mut content = vec![serde_json::json!({"type":"text","text":current.text})];
             for image in current.images {
-                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data}}));
+                content.push(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64()}}));
             }
             let input = serde_json::json!({"type":"user","uuid":self.run_id,"origin":{"kind":"human"},"message":{"role":"user","content":content}});
             format!("{context}\n{input}\n")

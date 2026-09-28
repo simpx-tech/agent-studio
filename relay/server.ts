@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { sessionStore } from './sessions.ts';
 import { workspaceRegistry, WorkspaceAdminError, type RelayWorkspace } from './workspaces.ts';
 import {
+  copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -27,6 +29,17 @@ import { pluginRequestSchema } from '../src/lib/plugins.ts';
 import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
+import {
+  ImageUploadError,
+  imageStore,
+  imageType,
+  inlineImages,
+  inlineMessages,
+  referencedImages,
+  storeInlineImages,
+  storeInlineMessages,
+  validImageHash,
+} from './images.ts';
 
 const uuid = z.string().uuid();
 const jobInput = z
@@ -207,6 +220,12 @@ const metaOf = (workspace: z.infer<typeof sharedSchema>): z.infer<typeof metaSch
   return meta;
 };
 const terminal = (status: string) => ['complete', 'error', 'cancelled'].includes(status);
+/** The messages a run request carries, whose images the image store keeps. */
+const runMessages = (job: { method: string; args: Record<string, unknown> }) => {
+  if (job.method !== 'run') return undefined;
+  const messages = (job.args.request as { messages?: unknown } | undefined)?.messages;
+  return Array.isArray(messages) ? (messages as { images?: unknown[] }[]) : undefined;
+};
 /**
  * The largest workspace upload, whole or patched. A body is held about four times over while it
  * is read and parsed, beside every workspace this relay keeps in memory, and the service runs
@@ -297,6 +316,7 @@ export function createRelay({
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
       conversationExists: (id) => state.workspace.conversations.some((c) => c.id === id),
     });
+    const images = imageStore(directory, now);
     const file = join(directory, 'workspace.json');
     let state: RelayState = {
       instanceId: crypto.randomUUID(),
@@ -405,6 +425,14 @@ export function createRelay({
     };
     // A paired but empty relay must retain its identity before the first workspace edit.
     if (fresh) save(state);
+    // Images saved inline before the image store move into it once, with the file they came
+    // from kept beside it.
+    if (storeInlineImages(state.workspace.conversations, images)) {
+      const backup = join(directory, 'workspace-before-images.json');
+      if (!existsSync(backup)) copyFileSync(file, backup);
+      save(state);
+    }
+    let imagesPrunedAt = 0;
     const expire = () => {
       for (const [id, job] of jobs) {
         if (
@@ -435,6 +463,12 @@ export function createRelay({
       }
       for (const [id, peer] of peers)
         if (now() - peer.seenAt > 24 * 60 * 60 * 1000) peers.delete(id);
+      // Images nothing refers to any more leave the store, an hour apart at most.
+      if (now() - imagesPrunedAt >= 60 * 60 * 1000) {
+        imagesPrunedAt = now();
+        const runs = [...jobs.values()].flatMap((job) => runMessages(job) ?? []);
+        images.prune(referencedImages(state.workspace.conversations, [runs]));
+      }
     };
     async function body(
       req: IncomingMessage,
@@ -467,6 +501,18 @@ export function createRelay({
         res.end(JSON.stringify(data));
       };
       const actor = req.headers['x-environment-id'];
+      // Apps that know the image store say so; the others read images inline.
+      const references = req.headers['x-studio-images'] === '1';
+      const forApp = (value: RelayState) =>
+        references
+          ? value
+          : {
+              ...value,
+              workspace: {
+                ...value.workspace,
+                conversations: inlineImages(value.workspace.conversations, images),
+              },
+            };
       const authorized = () =>
         active() && (bearer || (!!sessionIdentity && sessions.active(sessionIdentity)));
       if (!authorized()) {
@@ -611,7 +657,7 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/state' && req.method === 'GET') {
-          send(200, { ...state, workspaceId: workspace.id });
+          send(200, { ...forApp(state), workspaceId: workspace.id });
           return;
         }
         // Pollers holding the current revision skip downloading the whole workspace.
@@ -620,6 +666,8 @@ export function createRelay({
             instanceId: state.instanceId,
             workspaceId: workspace.id,
             revision: state.revision,
+            // Messages here keep references to images this relay stores.
+            images: 1,
           });
           return;
         }
@@ -653,11 +701,17 @@ export function createRelay({
               size += bytes;
             }
           }
-          send(200, { ...manifest(), chats, rest, chatRevisions: state.chatRevisions });
+          send(200, {
+            ...manifest(),
+            chats: references ? chats : inlineImages(chats, images),
+            rest,
+            chatRevisions: state.chatRevisions,
+          });
           return;
         }
         if (url.pathname === '/v1/state/patch' && req.method === 'POST') {
           const value = patchInput.parse(await body(req, authorized, upload));
+          storeInlineImages(value.upsert ?? [], images);
           if (value.revision !== state.revision) {
             // The sender's manifest is stale; it can retry without downloading everything.
             send(409, manifest());
@@ -673,8 +727,9 @@ export function createRelay({
           const value = z
             .object({ revision: z.number().int().nonnegative(), workspace: sharedSchema })
             .parse(await body(req, authorized, upload));
+          storeInlineImages(value.workspace.conversations, images);
           if (value.revision !== state.revision) {
-            send(409, { ...state, workspaceId: workspace.id });
+            send(409, { ...forApp(state), workspaceId: workspace.id });
             return;
           }
           const previous = state.workspace;
@@ -682,7 +737,37 @@ export function createRelay({
           // exactly the conversations this whole upload changed.
           save(replaced(value.workspace));
           push.changed(previous, state.workspace);
-          send(200, { ...state, workspaceId: workspace.id });
+          send(200, { ...forApp(state), workspaceId: workspace.id });
+          return;
+        }
+        // Which of these images this relay lacks, so a device uploads each one once.
+        if (url.pathname === '/v1/images/missing' && req.method === 'POST') {
+          const value = z
+            .object({ hashes: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(1000) })
+            .strict()
+            .parse(await body(req, authorized, 128_000));
+          send(200, { missing: value.hashes.filter((hash) => !images.has(hash)) });
+          return;
+        }
+        const image = url.pathname.match(/^\/v1\/images\/([^/]+)$/)?.[1];
+        if (image && req.method === 'PUT') {
+          await images.receive(req, image, authorized);
+          send(200, { hash: image });
+          return;
+        }
+        if (image && req.method === 'GET') {
+          const bytes = validImageHash(image) ? images.read(image) : undefined;
+          if (!bytes) {
+            send(404, { error: 'This image is not on the relay.' });
+            return;
+          }
+          res.writeHead(200, {
+            'Content-Type': imageType(bytes) ?? 'application/octet-stream',
+            'Content-Length': bytes.length,
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff',
+          });
+          res.end(bytes);
           return;
         }
         if (url.pathname === '/v1/heartbeat' && req.method === 'POST') {
@@ -732,6 +817,8 @@ export function createRelay({
         }
         if (url.pathname === '/v1/jobs' && req.method === 'POST') {
           const value = jobInput.parse(await body(req, authorized));
+          const messages = runMessages(value);
+          if (messages) storeInlineMessages(messages, images);
           if (value.source !== actor) {
             send(403, { error: 'Source identity mismatch.' });
             return;
@@ -791,7 +878,23 @@ export function createRelay({
             job.status = 'running';
             job.updated = now();
           }
-          send(200, work);
+          send(
+            200,
+            references
+              ? work
+              : work.map((job) => {
+                  const messages = runMessages(job);
+                  if (!messages) return job;
+                  const request = job.args.request as Record<string, unknown>;
+                  return {
+                    ...job,
+                    args: {
+                      ...job.args,
+                      request: { ...request, messages: inlineMessages(messages, images) },
+                    },
+                  };
+                }),
+          );
           return;
         }
         const match = url.pathname.match(/^\/v1\/jobs\/([a-f0-9-]+)(\/cancel)?$/);
@@ -848,6 +951,11 @@ export function createRelay({
       } catch (e) {
         if (!authorized()) {
           send(401, { error: 'Workspace access was revoked. Pair this device again.' });
+          return;
+        }
+        if (e instanceof ImageUploadError) {
+          if (e.status === 413) res.setHeader('Connection', 'close');
+          send(e.status, { error: e.message });
           return;
         }
         if (e instanceof TooLargeError) {

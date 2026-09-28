@@ -225,9 +225,10 @@ test('links carry their site mark, keep it in saved history and open outside the
   ).toBeGreaterThan(8);
   await page.screenshot({ path: 'artifacts/link-marks.png' });
   await article.click();
-  expect(await page.evaluate(() => (window as any).openedPages)).toEqual([
-    'https://en.wikipedia.org/wiki/Special:Random',
-  ]);
+  // Opening waits for the opener plugin's first import, which a busy machine can delay.
+  await expect
+    .poll(() => page.evaluate(() => (window as any).openedPages))
+    .toEqual(['https://en.wikipedia.org/wiki/Special:Random']);
   // A restored reply is marked again from its saved Markdown.
   await page.reload();
   await page.getByRole('tab', { name: /History/ }).click();

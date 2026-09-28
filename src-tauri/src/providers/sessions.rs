@@ -1,6 +1,7 @@
 //! Host-local bindings to CLI-owned transcripts. Never accept a transcript ID or
 //! path from a renderer/relay, and never put native transcripts in workspace sync.
 use super::RunRequest;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -64,6 +65,35 @@ struct Identity {
 fn fingerprint(value: &impl Serialize) -> Result<String, String> {
     let bytes = serde_json::to_vec(value).map_err(|_| "Cannot encode session identity")?;
     Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).to_string())
+}
+/// The fingerprints a binding written before the image store recorded for this history: each
+/// image with its bytes inline as base64, read from the image store. `None` when the history has
+/// no images or this computer does not hold one of them.
+fn inline_history(root: &Path, request: &RunRequest) -> Option<Vec<String>> {
+    if request
+        .messages
+        .iter()
+        .all(|message| message.images.is_empty())
+    {
+        return None;
+    }
+    let images = root.join("images");
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let mut inline = message.clone();
+            for image in &mut inline.images {
+                if image.data.is_none() {
+                    let bytes = crate::chat_images::read(&images, image.hash.as_deref()?).ok()?;
+                    image.data = Some(STANDARD.encode(bytes));
+                }
+                image.hash = None;
+                image.bytes = None;
+            }
+            fingerprint(&inline).ok()
+        })
+        .collect()
 }
 
 fn inherited_profile(provider: &str) -> Option<String> {
@@ -231,12 +261,24 @@ impl Session {
         lock.try_lock().map_err(|_| {
             "This conversation is already running in another app window. Wait for it to finish."
         })?;
-        let previous: Option<Record> = match std::fs::read(&path) {
+        let mut previous: Option<Record> = match std::fs::read(&path) {
             Ok(bytes) if bytes.len() <= 32_000 => Some(serde_json::from_slice(&bytes).map_err(|_| "Native session binding is unreadable. It was preserved; start a new conversation.")?),
             Ok(_) => return Err("Native session binding exceeds its limit. Start a new conversation.".into()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("Cannot read native session binding".into()),
         };
+        // A binding written before the image store fingerprinted each image with its bytes
+        // inline. A history that continues it once its images read as they were then is the same
+        // history, and the binding records references from this reply on.
+        if let Some(previous) = previous.as_mut() {
+            if !history.starts_with(&previous.history) {
+                if let Some(inline) = inline_history(root, request) {
+                    if inline.starts_with(&previous.history) {
+                        previous.history = history[..previous.history.len()].to_vec();
+                    }
+                }
+            }
+        }
         let mut switched_account = false;
         let mut history_rewritten = false;
         if let Some(previous) = &previous {
@@ -840,6 +882,39 @@ mod tests {
         .await;
         assert_eq!(reproduced, previous);
         assert_eq!(source_variants(terminal).len(), 1);
+    }
+    #[test]
+    fn a_binding_from_before_the_image_store_continues_once_its_images_are_references() {
+        let root = tempfile::tempdir().unwrap();
+        let png = STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=")
+            .unwrap();
+        let mut r = request();
+        r.messages[0] = serde_json::from_value(json!({"role":"user","text":"Look","images":[{"id":uuid::Uuid::new_v4(),"name":"shot.png","mediaType":"image/png","data":STANDARD.encode(&png)}]})).unwrap();
+        // A reply sent while images traveled inline records the binding.
+        let session = Session::prepare(root.path(), &r).unwrap().unwrap();
+        session.bind(session.id(), true).unwrap();
+        let bound = session.id().to_string();
+        drop(session);
+        // The image then moves into the store, and the next reply names it by hash.
+        let stored = crate::chat_images::store(&root.path().join("images"), &png).unwrap();
+        let image = &mut r.messages[0].images[0];
+        (image.data, image.hash, image.bytes) =
+            (None, Some(stored.hash.clone()), Some(stored.bytes));
+        r.messages.push(message("assistant", "A small square"));
+        r.messages.push(message("user", "And now?"));
+        let resumed = Session::prepare(root.path(), &r).unwrap().unwrap();
+        assert!(resumed.resumed);
+        assert_eq!(resumed.id(), bound);
+        resumed.bind(resumed.id(), true).unwrap();
+        drop(resumed);
+        // The binding now records references, so it continues without the bytes.
+        std::fs::remove_file(root.path().join("images").join(&stored.hash)).unwrap();
+        r.messages.push(message("assistant", "Still a square"));
+        r.messages.push(message("user", "Once more"));
+        let again = Session::prepare(root.path(), &r).unwrap().unwrap();
+        assert!(again.resumed);
+        assert_eq!(again.id(), bound);
     }
     fn request() -> RunRequest {
         serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"","instructions":"Private guidance"},"messages":[{"role":"user","text":"Private request"}]})).unwrap()

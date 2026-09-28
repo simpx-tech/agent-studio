@@ -350,6 +350,9 @@ pub(crate) async fn execute(
     } else {
         String::new()
     };
+    // The images this reply sends its provider, read here or from the relay. The request keeps
+    // them in memory only, after its session was fingerprinted on references.
+    crate::chat_images::materialize(&app, &mut request).await?;
     let mut reused = None;
     if let Some(conversation) = request.conversation_id.as_deref().filter(|_| parkable) {
         if let Some(mut parked) = pool.take(conversation) {

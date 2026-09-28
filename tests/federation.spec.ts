@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
+import { createHash } from 'node:crypto';
 
 test('shared account context is explicit, scoped, cancellable and saved across reloads', async ({
   page,
@@ -98,10 +99,34 @@ async function host(page: Page, relay: string, token: string, name: string, plat
         authorization: `Bearer ${token}`,
         'x-environment-id': identity.id,
         'content-type': 'application/json',
+        // The native relay client says it keeps images as references to the image store.
+        'x-studio-images': '1',
       },
       body: body == null ? undefined : JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() };
+  });
+  // The native client uploads what the relay lacks from this computer's image store.
+  await page.exposeFunction('uploadImages', async (images: [string, string][]) => {
+    const headers = {
+      authorization: `Bearer ${token}`,
+      'x-environment-id': identity.id,
+      'x-studio-images': '1',
+    };
+    const answer = await fetch(`${relay}/v1/images/missing`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ hashes: images.map(([hash]) => hash) }),
+    });
+    const { missing } = (await answer.json()) as { missing: string[] };
+    for (const [hash, data] of images)
+      if (missing.includes(hash))
+        await fetch(`${relay}/v1/images/${hash}`, {
+          method: 'PUT',
+          headers,
+          body: new Uint8Array(Buffer.from(data, 'base64')),
+        });
+    return [];
   });
   await page.addInitScript(
     ({ identity }) => {
@@ -110,7 +135,14 @@ async function host(page: Page, relay: string, token: string, name: string, plat
       let next = 0;
       const callbacks = new Map<number, (value: unknown) => void>();
       let finish: (() => void) | undefined;
+      // This computer's image store, by hash.
+      const storedImages = (): Record<string, { mediaType: string; data: string }> =>
+        JSON.parse(localStorage.getItem('fixture-images') ?? '{}');
       w.__TAURI_INTERNALS__ = {
+        convertFileSrc: (path: string) => {
+          const image = storedImages()[path];
+          return image ? `data:${image.mediaType};base64,${image.data}` : 'data:,';
+        },
         metadata: { currentWindow: { label: 'main' } },
         transformCallback(fn: (value: unknown) => void) {
           const id = ++next;
@@ -293,6 +325,25 @@ async function host(page: Page, relay: string, token: string, name: string, plat
               context: null,
               detail: 'Fixture',
             };
+          }
+          if (command === 'store_chat_image') {
+            const bytes = new Uint8Array(args as ArrayBuffer);
+            const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+            const hash = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+            let binary = '';
+            for (const byte of bytes) binary += String.fromCharCode(byte);
+            const images = storedImages();
+            images[hash] = { mediaType: 'image/png', data: btoa(binary) };
+            localStorage.setItem('fixture-images', JSON.stringify(images));
+            return { hash, bytes: bytes.length, mediaType: 'image/png' };
+          }
+          if (command === 'upload_chat_images') {
+            const images = storedImages();
+            return w.uploadImages(
+              (args.hashes as string[]).flatMap((hash) =>
+                images[hash] ? [[hash, images[hash].data]] : [],
+              ),
+            );
           }
           if (command === 'generate_title') throw new Error('Synthetic title unavailable');
           if (command === 'cancel_title') return;
@@ -1333,11 +1384,18 @@ test('two app environments pair, share accounts, route chats, retain progress an
       desktop.getByTestId('message').filter({ hasText: 'Response from MacBook, completed.' }),
     ).toHaveAttribute('data-status', 'complete', { timeout: 20_000 });
     expect(await desktop.evaluate(() => localStorage.getItem('fixture-run'))).toBeNull();
+    // The reply names the image by hash, and the relay holds its bytes once for the computer
+    // that runs it to read.
+    const imageHash = createHash('sha256').update(Buffer.from(imageData, 'base64')).digest('hex');
     expect(
       await mac.evaluate(
-        () => JSON.parse(localStorage.getItem('fixture-run')!).messages[0].images[0].data,
+        () => JSON.parse(localStorage.getItem('fixture-run')!).messages[0].images[0],
       ),
-    ).toBe(imageData);
+    ).toMatchObject({ name: 'remote-image.png', hash: imageHash });
+    const held = await fetch(`${url}/v1/images/${imageHash}`, {
+      headers: { authorization: `Bearer ${token}`, 'x-environment-id': crypto.randomUUID() },
+    });
+    expect(Buffer.from(await held.arrayBuffer()).toString('base64')).toBe(imageData);
     await expect(desktop.locator('.activity-summary')).not.toHaveAttribute('open', '');
     await expect(desktop.getByLabel('Reply usage and cost')).not.toContainText(
       /input|output|tokens|cost|\$/i,
@@ -1386,9 +1444,9 @@ test('two app environments pair, share accounts, route chats, retain progress an
       await mac.evaluate(
         () =>
           JSON.parse(localStorage.getItem('fixture-workspace')!).conversations[0].messages[0]
-            .images[0].data,
+            .images[0].hash,
       ),
-    ).toBe(imageData);
+    ).toBe(imageHash);
     expect(
       await mac.evaluate(
         () =>

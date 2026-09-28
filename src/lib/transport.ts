@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
+import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -23,6 +23,17 @@ import {
 } from './live-usage';
 import { retainRunEvent } from './activity';
 import {
+  blobBase64,
+  imageHashes,
+  imageLists,
+  isInline,
+  storedImage,
+  type ChatImage,
+  type DraftImage,
+  type StoredImage,
+} from './images';
+import {
+  createFetchCache,
   toolOutputImageSchema,
   toolOutputModelSchema,
   type ToolOutputModel,
@@ -205,7 +216,9 @@ export const setCliAutoUpdate = async (
 /** Checks every Claude Code and Codex installation on this computer for an update now. */
 export const checkCliUpdates = async (): Promise<CliUpdates> =>
   cliUpdatesSchema.parse(await invoke('check_cli_updates'));
-export async function watchCliUpdates(onChange: (updates: CliUpdates) => void): Promise<() => void> {
+export async function watchCliUpdates(
+  onChange: (updates: CliUpdates) => void,
+): Promise<() => void> {
   if (!desktop()) return () => {};
   let revision = 0;
   const apply = (value: unknown) => {
@@ -822,6 +835,8 @@ async function relayRaw(
       headers: {
         'Content-Type': 'application/json',
         'X-Environment-Id': runtime.installation.id,
+        // This app keeps chat images as references to the relay's image store.
+        'X-Studio-Images': '1',
         ...(browserWorkspaceId && !(sessionRequest && method === 'POST')
           ? { 'X-Workspace-Id': browserWorkspaceId }
           : {}),
@@ -1019,8 +1034,19 @@ type WholeState = {
  * route sends its whole state instead, which the caller may reuse; a device that already holds
  * the workspace never needs it to connect.
  */
+/**
+ * Whether the relay keeps images in its image store, as its revision answer says. One that
+ * predates the store cannot take conversations that name images by reference: they stay on
+ * this device until the relay is updated.
+ */
+let relayStoresImages = false;
+const oldRelayImages = 'Update the relay to sync conversations with images.';
+function noteImageStore(probe: { status: number; body: any }) {
+  if (probe.status === 200) relayStoresImages = probe.body?.images === 1;
+}
 async function relayIdentity(): Promise<{ instanceId: string; state?: WholeState }> {
   const probe = await relayRaw('GET', 'v1/state/revision');
+  noteImageStore(probe);
   if (probe.status === 200 && typeof probe.body?.instanceId === 'string') {
     if (
       !desktop() &&
@@ -1170,6 +1196,7 @@ async function syncIncremental(
   let manifest: Manifest | undefined;
   if (baselineManifest && revisionEndpoint) {
     const probe = await relayRaw('GET', 'v1/state/revision');
+    noteImageStore(probe);
     if (probe.status !== 200 && probe.status !== 404)
       throw new Error(probe.body?.error ?? `Relay request failed (${probe.status}).`);
     if (
@@ -1296,7 +1323,8 @@ async function syncIncremental(
     // Uploads stay within what a relay accepts at once, and within its thousand removals. A
     // conversation too large for that by itself stays unpublished, and the relay keeps its last
     // copy, while every other one still goes out.
-    const { batches, oversized } = uploadBatches(plan.send, plan.sizes, uploadBudget);
+    const { send, held } = await publishable(plan.send);
+    const { batches, oversized } = uploadBatches(send, plan.sizes, uploadBudget);
     const removals: string[][] = [];
     for (let at = 0; at < plan.remove.length; at += 1000)
       removals.push(plan.remove.slice(at, at + 1000));
@@ -1325,10 +1353,17 @@ async function syncIncremental(
       if (current.instanceId !== relayInstance) throw new Error(relayReplaced);
     }
     published = true;
-    const names = oversized.map((c) => `“${c.title}”`).join(', ');
-    syncNotice = oversized.length
-      ? `${names} ${oversized.length === 1 ? 'is' : 'are'} too large to sync. ${tooLargeHint}`
-      : '';
+    syncNotice = [
+      oversized.length
+        ? `${chatNames(oversized)} ${oversized.length === 1 ? 'is' : 'are'} too large to sync. ${tooLargeHint}`
+        : '',
+      heldNotice(held),
+    ]
+      .filter(Boolean)
+      .join(' ');
+    // Their images may reach the relay later, so they are tried again on the next poll.
+    if (held.length)
+      runtime.restoreUnsynced({ chats: new Set(held.map((c) => c.id)), meta: false });
     if (generation !== relayGeneration) return null;
     // The merge read this device before the patch went out. A conversation edited here since,
     // such as a reply that finished meanwhile, merges again over that edit, with the copy the
@@ -1381,7 +1416,7 @@ async function syncIncremental(
     if (since.size) runtime.restoreUnsynced({ chats: since, meta: false });
     // The relay still holds its own copy of a conversation this poll could not send.
     const result = new Map(plan.result);
-    for (const { id } of oversized) {
+    for (const { id } of [...oversized, ...held]) {
       const remote = remoteChat(id);
       if (remote) result.set(id, remote);
       else result.delete(id);
@@ -1480,6 +1515,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
     let held = false;
     if (baselineRevision !== undefined && revisionEndpoint) {
       const probe = await relayRaw('GET', 'v1/state/revision');
+      noteImageStore(probe);
       if (probe.status !== 200 && probe.status !== 404)
         throw new Error(probe.body?.error ?? `Relay request failed (${probe.status}).`);
       if (
@@ -1521,7 +1557,9 @@ export async function pollRelay(): Promise<Presence[] | null> {
       const covered = runtime.takeUnsynced();
       let coveredPublished = false;
       try {
-        const start = runtime.shared();
+        // A conversation naming images the relay cannot take yet goes out as the relay last had
+        // it and waits here, as on the incremental path, while everything else syncs.
+        const { outgoing: start, held: waiting } = await holdImageChats(runtime.shared());
         let accepted: SharedWorkspace | undefined;
         let acceptedRevision: number | undefined;
         let acceptedManifest: Record<string, unknown> | undefined;
@@ -1562,6 +1600,10 @@ export async function pollRelay(): Promise<Presence[] | null> {
         }
         if (!accepted) throw new Error('Workspace is changing quickly. Sync will retry shortly.');
         coveredPublished = true;
+        // Their images may reach the relay later, so they are tried again on the next poll.
+        syncNotice = heldNotice(waiting);
+        if (waiting.length)
+          runtime.restoreUnsynced({ chats: new Set(waiting.map((c) => c.id)), meta: false });
         if (generation !== relayGeneration) return null;
         // Nothing arrives when the relay holds exactly what this poll sent.
         const sent = sameShared(accepted, start);
@@ -1596,8 +1638,10 @@ export async function pollRelay(): Promise<Presence[] | null> {
           baselineMetaRevision = reported.data.metaRevision;
         }
         baselineManifest = reported.success;
-        // Both sides are equal when the relay holds what was sent and nothing changed since.
-        settledRevision = sent && runtime.revision?.() === before ? before : undefined;
+        // Both sides are equal when the relay holds what was sent and nothing changed since, and
+        // nothing waits here for its images.
+        settledRevision =
+          sent && !waiting.length && runtime.revision?.() === before ? before : undefined;
       } finally {
         if (!coveredPublished) runtime.restoreUnsynced(covered);
       }
@@ -2114,6 +2158,183 @@ export async function readToolOutputImage(
     ),
   );
 }
+/** Hashes the relay is known to hold, so each image is checked and uploaded once a session. */
+let relayImages = { generation: -1, known: new Set<string>() };
+function knownOnRelay() {
+  if (relayImages.generation !== relayGeneration)
+    relayImages = { generation: relayGeneration, known: new Set() };
+  return relayImages.known;
+}
+/**
+ * Makes sure the relay holds these images before a conversation or a reply names them: the
+ * desktop uploads those it holds, and a browser uploads its own when it sends them. Returns
+ * the hashes the relay still lacks.
+ */
+async function publishImages(hashes: string[]): Promise<Set<string>> {
+  const known = knownOnRelay();
+  const wanted = [...new Set(hashes)].filter((hash) => !known.has(hash));
+  if (!wanted.length) return new Set();
+  let lacking: string[] = [];
+  if (desktop()) lacking = await invoke<string[]>('upload_chat_images', { hashes: wanted });
+  else
+    for (let at = 0; at < wanted.length; at += 1000)
+      lacking.push(
+        ...(
+          await relayApi<{ missing: string[] }>('POST', 'v1/images/missing', {
+            hashes: wanted.slice(at, at + 1000),
+          })
+        ).missing,
+      );
+  for (const hash of wanted) if (!lacking.includes(hash)) known.add(hash);
+  return new Set(lacking);
+}
+/**
+ * The conversations of `send` the relay can take now. One naming an image the relay lacks
+ * and nobody here holds, or any image while the relay predates the image store, stays
+ * unpublished, and the relay keeps its last copy.
+ */
+async function publishable(send: Conversation[]) {
+  const named = send.map((conversation) => ({ conversation, hashes: imageHashes(conversation) }));
+  if (!named.some(({ hashes }) => hashes.length)) return { send, held: [] as Conversation[] };
+  const lacking = relayStoresImages
+    ? await publishImages(named.flatMap(({ hashes }) => hashes))
+    : undefined;
+  const held = named.filter(
+    ({ hashes }) => hashes.length && (!lacking || hashes.some((hash) => lacking.has(hash))),
+  );
+  return {
+    send: named.filter((entry) => !held.includes(entry)).map(({ conversation }) => conversation),
+    held: held.map(({ conversation }) => conversation),
+  };
+}
+/**
+ * For a whole-state sync: this device's workspace with each conversation the relay cannot take
+ * yet as the baseline has it, or left out when the baseline lacks it. The sync then neither
+ * sends the conversation nor reads the relay's older copy, or its absence, as a change to it.
+ */
+async function holdImageChats(start: SharedWorkspace) {
+  const { held } = await publishable(start.conversations);
+  if (!held.length) return { outgoing: start, held };
+  const ids = new Set(held.map((c) => c.id));
+  const synced = new Map(baseline.conversations.map((c) => [c.id, c]));
+  const conversations = start.conversations.flatMap((c) => {
+    if (!ids.has(c.id)) return [c];
+    const before = synced.get(c.id);
+    return before ? [before] : [];
+  });
+  return { outgoing: { ...start, conversations }, held };
+}
+const chatNames = (list: Conversation[]) => list.map((c) => `“${c.title}”`).join(', ');
+/** What the sync status says about conversations that wait for their images. */
+function heldNotice(held: Conversation[]) {
+  if (!held.length) return '';
+  return relayStoresImages
+    ? `${chatNames(held)} ${held.length === 1 ? 'names images' : 'name images'} the relay does not have yet. ${held.length === 1 ? 'It syncs' : 'They sync'} once the computer that attached them is connected.`
+    : `${chatNames(held)} ${held.length === 1 ? 'stays' : 'stay'} on this device. ${oldRelayImages}`;
+}
+/**
+ * Keeps the images of a message in the image store before it names them: this computer's store
+ * on the desktop, the relay's in a browser, which keeps none of its own. The message keeps
+ * only the references returned.
+ */
+export async function storeChatImages(images: DraftImage[]): Promise<StoredImage[]> {
+  if (desktop()) {
+    for (const image of images) {
+      const kept = await invoke<{ hash: string }>(
+        'store_chat_image',
+        new Uint8Array(await image.blob.arrayBuffer()),
+      );
+      if (kept.hash !== image.hash) throw new Error(`${image.name} changed while it was kept.`);
+    }
+    return images.map(storedImage);
+  }
+  if (!relayConnected) throw new Error('Connect to your workspace to send images.');
+  const known = knownOnRelay();
+  const lacking = await publishImages(images.map((image) => image.hash));
+  for (const image of images) {
+    if (lacking.has(image.hash)) {
+      const answer = await relayImage('PUT', image.hash, image.blob);
+      if (answer.status >= 300)
+        throw new Error(answer.error ?? `The relay did not keep ${image.name} (${answer.status}).`);
+      lacking.delete(image.hash);
+      known.add(image.hash);
+    }
+    // This window shows the image it just sent without reading it back.
+    void chatImages.get(image.hash, async () => image.blob);
+  }
+  return images.map(storedImage);
+}
+/** Where a window reads a stored image directly: the desktop's image protocol. */
+export function chatImageUrl(hash: string): string | undefined {
+  return desktop() ? convertFileSrc(hash, 'studio-image') : undefined;
+}
+// Images a browser read, newest last, bounded by count and bytes.
+const chatImages = createFetchCache<Blob>((blob) => blob.size, {
+  entries: 64,
+  bytes: 160_000_000,
+});
+/** A stored image's bytes for a browser, from the relay's image store. */
+export function readChatImage(hash: string): Promise<Blob> {
+  return chatImages.get(hash, async () => {
+    const answer = await relayImage('GET', hash);
+    if (answer.status !== 200 || !answer.blob)
+      throw new Error(answer.error ?? 'This image is not on the relay.');
+    return answer.blob;
+  });
+}
+/** One image through the relay's image store, as raw bytes rather than JSON. */
+async function relayImage(
+  method: 'GET' | 'PUT',
+  hash: string,
+  body?: Blob,
+): Promise<{ status: number; blob?: Blob; error?: string }> {
+  if (!runtime || !browserWorkspaceId)
+    throw new Error('Pair this device with your private workspace first.');
+  const generation = relayGeneration;
+  const response = await fetch(`/v1/images/${hash}`, {
+    method,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    redirect: 'error',
+    headers: {
+      'X-Environment-Id': runtime.installation.id,
+      'X-Workspace-Id': browserWorkspaceId,
+      'X-Studio-Images': '1',
+      ...(body ? { 'Content-Type': 'application/octet-stream' } : {}),
+    },
+    body,
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (generation !== relayGeneration)
+    throw new Error('The private workspace connection changed. Try again after pairing.');
+  if (response.ok && method === 'GET')
+    return { status: response.status, blob: await response.blob() };
+  const answer = response.headers.get('content-type')?.includes('application/json')
+    ? await response.json().catch(() => ({}))
+    : {};
+  return { status: response.status, error: answer.error };
+}
+/**
+ * A workspace copy for an export from a browser, with its images' bytes inline so it stands
+ * on its own. It changes the copy it is given; images the relay cannot provide keep their
+ * references, and are counted.
+ */
+export async function portableWorkspace(workspace: { conversations: Conversation[] }) {
+  let missing = 0;
+  for (const conversation of workspace.conversations)
+    for (const images of imageLists(conversation) as ChatImage[][])
+      for (const [index, image] of images.entries()) {
+        if (isInline(image)) continue;
+        try {
+          const data = await blobBase64(await readChatImage(image.hash));
+          const { id, name, mediaType } = image;
+          images[index] = { id, name, mediaType, data };
+        } catch {
+          missing++;
+        }
+      }
+  return missing;
+}
 export type FolderListing = {
   path: string;
   parent: string | null;
@@ -2237,6 +2458,17 @@ export async function runAgent(
   request: RunRequest,
   onEvent: (event: RunEvent) => void,
 ): Promise<'complete' | 'cancelled'> {
+  // Another computer reads the reply's images from the relay, which must hold them first.
+  if (remoteTarget(request.agent.connectionId)) {
+    const hashes = request.messages.flatMap((message) => imageHashes({ messages: [message] }));
+    if (hashes.length) {
+      if (!relayStoresImages) throw new Error(oldRelayImages);
+      if ((await publishImages(hashes)).size)
+        throw new Error(
+          'An image in this chat is not on the relay yet. Open the chat on the computer that attached it while it is connected, then send again.',
+        );
+    }
+  }
   return routed(
     'run',
     { request, connectionId: request.agent.connectionId },

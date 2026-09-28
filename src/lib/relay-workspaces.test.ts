@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createECDH, randomBytes } from 'node:crypto';
+import { createECDH, createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { execFileSync } from 'node:child_process';
@@ -159,6 +159,35 @@ async function fixture() {
       await received;
       return { release, completed };
     },
+    /** An image upload whose first bytes arrive, and the rest once `release` is called. */
+    async stalledImage(headers: Record<string, string>, bytes: Buffer) {
+      const hash = createHash('sha256').update(bytes).digest('hex');
+      let release!: () => void;
+      const received = new Promise<void>((resolve) => server.once('request', () => resolve()));
+      const completed = new Promise<number>((resolve, reject) => {
+        const request = httpRequest(
+          `${url}/v1/images/${hash}`,
+          {
+            method: 'PUT',
+            headers: {
+              'content-type': 'application/octet-stream',
+              'x-studio-images': '1',
+              ...headers,
+            },
+          },
+          (response) => {
+            response.resume();
+            response.on('end', () => resolve(response.statusCode!));
+            response.on('error', reject);
+          },
+        );
+        request.on('error', reject);
+        request.write(bytes.subarray(0, 8));
+        release = () => request.end(bytes.subarray(8));
+      });
+      await received;
+      return { hash, release, completed };
+    },
     advance: (ms: number) => (time += ms),
   };
 }
@@ -254,7 +283,9 @@ describe('private relay workspaces over real HTTP', () => {
       running: [],
       accountUpdates: [update],
     };
-    expect((await f.call(f.alice.token, 'POST', 'heartbeat', heartbeat, f.target)).status).toBe(200);
+    expect((await f.call(f.alice.token, 'POST', 'heartbeat', heartbeat, f.target)).status).toBe(
+      200,
+    );
     const viewer = await f.pair(f.alice.token);
     const viewed = await f.request(
       'POST',
@@ -637,6 +668,26 @@ describe('private relay workspaces over real HTTP', () => {
       expect((await f.call(rotated.token, 'GET', 'state')).body.workspace).toEqual(emptyShared());
     },
   );
+
+  it('does not keep an image whose access is revoked while its bytes arrive', async () => {
+    const f = await fixture();
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const pending = await f.stalledImage(
+      { authorization: `Bearer ${f.alice.token}`, 'x-environment-id': f.source },
+      png,
+    );
+    const rotated = rotateWorkspace({ directory: f.directory, id: f.alice.workspace.id });
+    pending.release();
+    expect(await pending.completed).toBe(401);
+    const images = join(f.directory, 'workspaces', f.alice.workspace.id, 'images');
+    expect(readdirSync(images)).toEqual([]);
+    expect(
+      (await f.call(rotated.token, 'POST', 'images/missing', { hashes: [pending.hash] })).body,
+    ).toEqual({ missing: [pending.hash] });
+  });
 
   it('fails closed for a corrupt registry without overwriting its contents or falling back to the owner', async () => {
     const f = await fixture();

@@ -58,3 +58,14 @@ describe.each(policies)('%s', (_label, policy) => {
     for (const scheme of schemes) expect(allowed).toContain(scheme);
   });
 });
+
+// A chat image is shown from the desktop's image store through the studio-image protocol
+// (src-tauri/src/chat_images.rs), which Windows serves as an http://studio-image.localhost
+// address and other systems under the scheme itself.
+describe.each(policies.filter(([label]) => !label.startsWith('relay/')))('%s', (_label, policy) => {
+  it('lets a chat image load from the image store', () => {
+    const allowed = sources(policy, 'img-src');
+    expect(allowed).toContain('studio-image:');
+    expect(allowed).toContain('http://studio-image.localhost');
+  });
+});

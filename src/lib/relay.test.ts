@@ -1,6 +1,16 @@
 import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../../relay/server.ts';
@@ -74,12 +84,344 @@ const conversation = (text: string) => ({
     },
   ],
 });
+/** A 1×1 PNG, and the same with one more byte, so two images differ. */
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+  'base64',
+);
+const otherPng = Buffer.concat([png, Buffer.from([0])]);
+const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+/** A conversation whose first message carries `images`, as a device syncs it. */
+const withImages = (images: unknown[]) => {
+  const chat = conversation('An image');
+  (chat.messages[0] as { images?: unknown[] }).images = images;
+  return chat;
+};
+const inline = (bytes: Buffer, id = crypto.randomUUID()) => ({
+  id,
+  name: 'shot.png',
+  mediaType: 'image/png',
+  data: bytes.toString('base64'),
+});
+const stored = (bytes: Buffer, id: string) => ({
+  id,
+  name: 'shot.png',
+  mediaType: 'image/png',
+  hash: sha256(bytes),
+  bytes: bytes.length,
+});
+
+describe('image store', () => {
+  // A request as a device that knows the image store sends it, or as an older one when
+  // `references` is off; `raw` sends bytes rather than JSON.
+  async function request(
+    f: Awaited<ReturnType<typeof fixture>>,
+    method: string,
+    path: string,
+    options: { body?: unknown; raw?: Buffer; references?: boolean; actor?: string } = {},
+  ) {
+    const response = await fetch(
+      `http://127.0.0.1:${(f.server.address() as { port: number }).port}/v1/${path}`,
+      {
+        method,
+        headers: {
+          authorization: `Bearer ${f.token}`,
+          'x-environment-id': options.actor ?? f.source,
+          ...(options.references === false ? {} : { 'x-studio-images': '1' }),
+          'content-type': options.raw ? 'application/octet-stream' : 'application/json',
+        },
+        body: options.raw
+          ? new Uint8Array(options.raw)
+          : options.body === undefined
+            ? undefined
+            : JSON.stringify(options.body),
+      },
+    );
+    const type = response.headers.get('content-type') ?? '';
+    return {
+      status: response.status,
+      type,
+      body: type.includes('json')
+        ? ((await response.json()) as any)
+        : Buffer.from(await response.arrayBuffer()),
+    };
+  }
+
+  it('keeps each image once, refusing bytes that are not an image or not its hash', async () => {
+    const f = await fixture();
+    const hash = sha256(png);
+    expect((await request(f, 'POST', 'images/missing', { body: { hashes: [hash] } })).body).toEqual(
+      {
+        missing: [hash],
+      },
+    );
+    expect((await request(f, 'PUT', `images/${hash}`, { raw: png })).status).toBe(200);
+    expect((await request(f, 'POST', 'images/missing', { body: { hashes: [hash] } })).body).toEqual(
+      {
+        missing: [],
+      },
+    );
+    const read = await request(f, 'GET', `images/${hash}`);
+    expect(read).toMatchObject({ status: 200, type: 'image/png' });
+    expect(read.body).toEqual(png);
+    // An upload must be the image its name says, and an image at all.
+    expect((await request(f, 'PUT', `images/${hash}`, { raw: otherPng })).status).toBe(400);
+    const text = Buffer.from('not an image at all');
+    expect((await request(f, 'PUT', `images/${sha256(text)}`, { raw: text })).status).toBe(400);
+    expect((await request(f, 'GET', `images/${sha256(otherPng)}`)).status).toBe(404);
+    expect((await request(f, 'PUT', 'images/not-a-hash', { raw: png })).status).toBe(400);
+    // Nothing unauthenticated reads an image.
+    expect(
+      (
+        await f.call(
+          'GET',
+          `images/${hash}`,
+          undefined,
+          f.source,
+          'wrong-key-wrong-key-wrong-key-wrong',
+        )
+      ).status,
+    ).toBe(401);
+  });
+
+  it('stores images an older app sends inline and hands them back to it inline', async () => {
+    const f = await fixture();
+    const id = crypto.randomUUID();
+    const workspace = emptyShared();
+    workspace.conversations.push(withImages([inline(png, id)]) as never);
+    const put = await request(f, 'PUT', 'state', {
+      body: { revision: 0, workspace },
+      references: false,
+    });
+    expect(put.status).toBe(200);
+    // The older app reads its own image back as it sent it.
+    expect(put.body.workspace.conversations[0].messages[0].images).toEqual([inline(png, id)]);
+    // The relay keeps the reference, and the bytes once.
+    const current = await request(f, 'GET', 'state');
+    expect(current.body.workspace.conversations[0].messages[0].images).toEqual([stored(png, id)]);
+    expect((await request(f, 'GET', `images/${sha256(png)}`)).body).toEqual(png);
+    const old = await request(f, 'GET', 'state', { references: false });
+    expect(old.body.workspace.conversations[0].messages[0].images).toEqual([inline(png, id)]);
+    // A patch from the older app, and the conversations it asks for, work the same way.
+    const second = withImages([inline(otherPng, id)]);
+    const patch = await request(f, 'POST', 'state/patch', {
+      body: { revision: current.body.revision, upsert: [second] },
+      references: false,
+    });
+    expect(patch.status).toBe(200);
+    const chats = (references: boolean) =>
+      request(f, 'POST', 'state/chats', { body: { ids: [second.id] }, references });
+    expect((await chats(true)).body.chats[0].messages[0].images).toEqual([stored(otherPng, id)]);
+    expect((await chats(false)).body.chats[0].messages[0].images).toEqual([inline(otherPng, id)]);
+    // Uploading the same bytes again, inline or as a reference, changes nothing.
+    const revision = (await request(f, 'GET', 'state/revision')).body.revision;
+    const again = await request(f, 'POST', 'state/patch', {
+      body: {
+        revision,
+        upsert: [
+          { ...second, messages: [{ ...second.messages[0], images: [stored(otherPng, id)] }] },
+        ],
+      },
+    });
+    expect(again.body.chats[second.id]).toBe((await chats(true)).body.chatRevisions[second.id]);
+  });
+
+  it("keeps a run's images as references and gives them inline to an older host", async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const id = crypto.randomUUID();
+    const runId = crypto.randomUUID();
+    const job = {
+      id: runId,
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: {
+        connectionId: crypto.randomUUID(),
+        request: { runId, messages: [{ role: 'user', text: 'Look', images: [inline(png, id)] }] },
+      },
+    };
+    const posted = await request(f, 'POST', 'jobs', { body: job, references: false });
+    expect(posted.status).toBe(200);
+    expect(posted.body.args.request.messages[0].images).toEqual([stored(png, id)]);
+    // A retried submission is still the same request.
+    expect((await request(f, 'POST', 'jobs', { body: job, references: false })).status).toBe(200);
+    const claimed = await request(f, 'GET', 'jobs', { actor: f.target, references: false });
+    expect(claimed.body[0].args.request.messages[0].images).toEqual([inline(png, id)]);
+  });
+
+  it('refuses an image upload past 16 MB even without a declared length', async () => {
+    const f = await fixture();
+    const large = Buffer.alloc(16 * 1024 * 1024 + 1);
+    png.copy(large);
+    const hash = sha256(large);
+    const port = (f.server.address() as { port: number }).port;
+    const outcome = await new Promise<number | 'reset'>((resolve) => {
+      // Without a length the bytes arrive chunked, and the relay counts them as they come.
+      const upload = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'PUT',
+          path: `/v1/images/${hash}`,
+          headers: {
+            authorization: `Bearer ${f.token}`,
+            'x-environment-id': f.source,
+            'x-studio-images': '1',
+            'content-type': 'application/octet-stream',
+          },
+        },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode!);
+        },
+      );
+      // The relay stops reading past the limit, which may reset the connection instead.
+      upload.on('error', () => resolve('reset'));
+      for (let at = 0; at < large.length; at += 1 << 20)
+        upload.write(large.subarray(at, at + (1 << 20)));
+      upload.end();
+    });
+    expect([413, 'reset']).toContain(outcome);
+    // Nothing of it stays, not even the partial upload.
+    await vi.waitFor(() => expect(readdirSync(join(f.directory, 'images'))).toEqual([]));
+  });
+
+  it('refuses a run whose inline image is not the image it says', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const runId = crypto.randomUUID();
+    const text = Buffer.from('not an image at all');
+    const image = { ...inline(png), data: text.toString('base64') };
+    const job = {
+      id: runId,
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: {
+        connectionId: crypto.randomUUID(),
+        request: { runId, messages: [{ role: 'user', text: 'Look', images: [image] }] },
+      },
+    };
+    expect((await request(f, 'POST', 'jobs', { body: job, references: false })).status).toBe(400);
+    expect((await request(f, 'GET', `images/${sha256(text)}`)).status).toBe(404);
+  });
+
+  it('keeps an image a rewind, a waiting run or a fresh upload needs, and prunes it after', async () => {
+    const f = await fixture();
+    const path = (bytes: Buffer) => join(f.directory, 'images', sha256(bytes));
+    const kept = (bytes: Buffer) => existsSync(path(bytes));
+    const [rewound, running, old, fresh] = [1, 2, 3, 4].map((n) =>
+      Buffer.concat([png, Buffer.from([n])]),
+    );
+    const all = [rewound, running, old, fresh];
+    for (const bytes of all)
+      expect((await request(f, 'PUT', `images/${sha256(bytes)}`, { raw: bytes })).status).toBe(200);
+    // All but the fresh upload were uploaded more than a day ago.
+    const dayAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    for (const bytes of [rewound, running, old]) utimesSync(path(bytes), dayAgo, dayAgo);
+    // One is named only by the messages a rewind keeps to restore.
+    const workspace = emptyShared();
+    const removed = {
+      ...conversation('Removed').messages[0],
+      images: [stored(rewound, crypto.randomUUID())],
+    };
+    workspace.conversations.push({
+      ...conversation('Rewound'),
+      rewind: { removed: [removed], createdAt: '2026-09-27' },
+    } as never);
+    expect((await request(f, 'PUT', 'state', { body: { revision: 0, workspace } })).status).toBe(
+      200,
+    );
+    // Another only by a run waiting for its computer.
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const runId = crypto.randomUUID();
+    const run = {
+      id: runId,
+      source: f.source,
+      target: f.target,
+      method: 'run',
+      args: {
+        connectionId: crypto.randomUUID(),
+        request: {
+          runId,
+          messages: [
+            { role: 'user', text: 'Look', images: [stored(running, crypto.randomUUID())] },
+          ],
+        },
+      },
+    };
+    expect((await request(f, 'POST', 'jobs', { body: run })).status).toBe(200);
+    // The next sweep removes the old image nothing names, and keeps the fresh upload, which a
+    // message may name next. The run has waited too long by then, but the relay still has it.
+    f.advance(60 * 60 * 1000);
+    await request(f, 'GET', 'state/revision');
+    expect(all.map(kept)).toEqual([true, true, false, true]);
+    // Once the relay forgets the run, its image goes too.
+    f.advance(2 * 60 * 60 * 1000);
+    await request(f, 'GET', 'state/revision');
+    expect(all.map(kept)).toEqual([true, false, false, true]);
+  });
+
+  it('moves images saved inline into the store at startup and prunes what nothing refers to', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agent-studio-relay-'));
+    const token = 'synthetic-test-pairing-key-'.repeat(2);
+    let time = Date.now();
+    const id = crypto.randomUUID();
+    const workspace = emptyShared();
+    workspace.conversations.push(withImages([inline(png, id)]) as never);
+    const saved = { instanceId: crypto.randomUUID(), version: 1, revision: 3, workspace };
+    writeFileSync(join(directory, 'workspace.json'), JSON.stringify(saved));
+    const orphan = join(directory, 'images', sha256(otherPng));
+    const server = createRelay({ token, directory, now: () => time });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(async () => {
+      await new Promise<void>((resolve, reject) =>
+        server.close((e) => (e ? reject(e) : resolve())),
+      );
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const disk = JSON.parse(readFileSync(join(directory, 'workspace.json'), 'utf8'));
+    expect(disk.workspace.conversations[0].messages[0].images).toEqual([stored(png, id)]);
+    expect(readFileSync(join(directory, 'images', sha256(png)))).toEqual(png);
+    // The file it came from is kept once, unchanged.
+    expect(
+      JSON.parse(readFileSync(join(directory, 'workspace-before-images.json'), 'utf8')),
+    ).toEqual(saved);
+    // An image nothing refers to is removed once it is a day old; a referenced one stays.
+    writeFileSync(orphan, otherPng);
+    time += 25 * 60 * 60 * 1000;
+    const port = (server.address() as { port: number }).port;
+    await fetch(`http://127.0.0.1:${port}/v1/state/revision`, {
+      headers: { authorization: `Bearer ${token}`, 'x-environment-id': crypto.randomUUID() },
+    });
+    // The hourly sweep runs with the relay's regular expiry pass.
+    await vi.waitFor(() => expect(existsSync(orphan)).toBe(false));
+    expect(existsSync(join(directory, 'images', sha256(png)))).toBe(true);
+  });
+});
+
 describe('real HTTP relay', () => {
   it('names its workspace in the revision answer, so a computer pairs without the whole state', async () => {
     const f = await fixture();
     expect(await f.call('GET', 'state/revision')).toEqual({
       status: 200,
-      body: { instanceId: expect.any(String), workspaceId: 'owner', revision: 0 },
+      body: { instanceId: expect.any(String), workspaceId: 'owner', revision: 0, images: 1 },
     });
   });
 
@@ -698,6 +1040,7 @@ describe('real HTTP relay', () => {
       instanceId,
       workspaceId: 'owner',
       revision: 0,
+      images: 1,
     });
     const workspace = emptyShared();
     workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Desktop' });
@@ -706,6 +1049,7 @@ describe('real HTTP relay', () => {
       instanceId,
       workspaceId: 'owner',
       revision: 1,
+      images: 1,
     });
   });
   it('routes work to the exact environment, claims once, streams progress, cancels and deduplicates submissions', async () => {

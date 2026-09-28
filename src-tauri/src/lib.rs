@@ -1,6 +1,7 @@
 mod artifacts;
 mod background_work;
 mod badges;
+mod chat_images;
 mod cli_queries;
 mod cli_updates;
 mod context;
@@ -434,9 +435,21 @@ fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, 
         .map_err(|_| "Cannot locate app data")?
         .join("sync-state.json");
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| "Sync checkpoint is unreadable".into()),
+        Ok(bytes) => {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "Sync checkpoint is unreadable".to_string())?;
+            // Its baseline holds images inline if it was written before the image store.
+            let root = chat_images::root(app)?;
+            if let Some(conversations) = value
+                .get_mut("base")
+                .and_then(|base| base.get_mut("conversations"))
+            {
+                if chat_images::store_inline(&root, conversations) {
+                    write_sync_state(app, &value)?;
+                }
+            }
+            Ok(Some(value))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err("Cannot read sync checkpoint".into()),
     }
@@ -488,9 +501,29 @@ fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, S
         .map_err(|_| "Cannot locate app data")?
         .join("workspace.json");
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
-            "Saved workspace is unreadable. Your existing file has been preserved.".into()
-        }),
+        Ok(bytes) => {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                "Saved workspace is unreadable. Your existing file has been preserved.".to_string()
+            })?;
+            // Images saved inline before the image store move into it once; the file they came
+            // from is kept beside it.
+            let root = chat_images::root(app)?;
+            let moved = value["version"] == 3
+                && value
+                    .get_mut("conversations")
+                    .is_some_and(|conversations| chat_images::store_inline(&root, conversations));
+            if moved {
+                let backup = path.with_file_name("workspace-before-images.json");
+                if !backup.exists() {
+                    std::fs::write(&backup, &bytes)
+                        .map_err(|_| "Cannot keep the workspace before moving its images")?;
+                }
+                let storage = app.state::<Storage>();
+                let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+                write_workspace(app, &mut state, value.clone())?;
+            }
+            Ok(Some(value))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err("Cannot read the saved workspace. Check your app data permissions.".into()),
     }
@@ -634,6 +667,24 @@ async fn run_agent(
     connection_id: Option<String>,
 ) -> Result<String, String> {
     request.validate()?;
+    // A request from an app older than the image store carries its images inline: keep them
+    // and send references on, as every other request does.
+    let request = if request
+        .messages
+        .iter()
+        .flat_map(|message| &message.images)
+        .any(|image| image.data.is_some())
+    {
+        let root = chat_images::root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut request = request;
+            chat_images::store_request(&root, &mut request).map(|_| request)
+        })
+        .await
+        .map_err(|_| "Cannot keep the images of this message")??
+    } else {
+        request
+    };
     // A request from a window or device that has not received a later rewind or file Undo
     // must not continue the replaced history. A newer request may arrive before sync does.
     if let Some(id) = &request.conversation_id {
@@ -670,6 +721,7 @@ async fn run_agent(
     let _ = on_event.send(protocol::RunEvent::Activity {
         text: "Starting the provider CLI".into(),
     });
+    let handle = app.clone();
     let result = profiles::scope(
         profile,
         runner::run(app, request, on_event, cancel, connection_id),
@@ -678,7 +730,41 @@ async fn run_agent(
     if let Ok(mut active) = runs.0.lock() {
         active.remove(&id);
     }
+    prune_chat_images(&handle);
     result
+}
+/// Removes stored chat images no saved chat names any more, off the UI thread.
+fn prune_chat_images(app: &tauri::AppHandle) {
+    if let Ok(root) = chat_images::root(app) {
+        tauri::async_runtime::spawn_blocking(move || chat_images::prune(&root));
+    }
+}
+/// Keeps an attached image, sent as the raw request body, in the image store.
+#[tauri::command]
+async fn store_chat_image(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<chat_images::Stored, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Send the image bytes".into());
+    };
+    let bytes = bytes.clone();
+    let root = chat_images::root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || chat_images::store(&root, &bytes))
+        .await
+        .map_err(|_| "Cannot keep the image")?
+}
+/// Uploads the images of `hashes` the relay lacks from this computer, returning those it still
+/// lacks because this computer does not hold them either.
+#[tauri::command]
+async fn upload_chat_images(
+    app: tauri::AppHandle,
+    hashes: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if hashes.len() > 100_000 {
+        return Err("Too many images".into());
+    }
+    chat_images::upload(&app, hashes).await
 }
 #[tauri::command]
 async fn cancel_run(
@@ -898,14 +984,39 @@ async fn sign_in(
     profiles::scope(profile, providers::sign_in(&provider, &directory)).await
 }
 
+/// Where an export went, and how many of its images neither this computer nor the relay held.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Export {
+    path: String,
+    missing_images: usize,
+}
 #[tauri::command]
 async fn export_workspace(
     app: tauri::AppHandle,
-    workspace: serde_json::Value,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || write_export(&app, &workspace))
-        .await
-        .map_err(|_| "Cannot write workspace export")?
+    mut workspace: serde_json::Value,
+) -> Result<Export, String> {
+    // An export stands on its own: its images carry their bytes. Those this computer does not
+    // hold are read from the relay first.
+    if let Some(conversations) = workspace.get_mut("conversations") {
+        for hash in chat_images::hashes(conversations) {
+            let _ = chat_images::ensure(&app, &hash).await;
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = chat_images::root(&app)?;
+        let missing_images = workspace
+            .get_mut("conversations")
+            .map_or(0, |conversations| {
+                chat_images::inline_all(&root, conversations)
+            });
+        Ok(Export {
+            path: write_export(&app, &workspace)?,
+            missing_images,
+        })
+    })
+    .await
+    .map_err(|_| "Cannot write workspace export")?
 }
 fn write_export(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result<String, String> {
     if workspace["version"] != 3 {
@@ -998,6 +1109,14 @@ pub fn run() {
         .register_uri_scheme_protocol("studio-artifact", |_context, request| {
             artifacts::response(request.uri().path())
         })
+        // Chat images for windows, by hash, from this computer or the relay.
+        .register_asynchronous_uri_scheme_protocol("studio-image", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                responder.respond(chat_images::serve(&app, &path).await);
+            });
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::Updates::new(version))
@@ -1030,6 +1149,7 @@ pub fn run() {
                     })
                     .await;
                 }
+                prune_chat_images(&handle);
             });
             // Release parked CLI processes that stayed idle past their limit.
             let handle = app.handle().clone();
@@ -1135,6 +1255,8 @@ pub fn run() {
             load_workspace,
             save_workspace,
             save_workspace_patch,
+            store_chat_image,
+            upload_chat_images,
             drafts::load_drafts,
             drafts::save_drafts,
             run_agent,

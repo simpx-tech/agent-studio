@@ -9,8 +9,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
       const callbacks = new Map<number, (value: unknown) => void>();
       let next = 0;
       let pending: (() => void) | undefined;
+      // The host's image store: images kept by hash, persisted across reloads like the
+      // workspace (tests keep them small), read back through the studio-image protocol.
+      const storedImages = (): Record<string, { mediaType: string; data: string }> =>
+        JSON.parse(localStorage.getItem('test-images') ?? '{}');
       (window as any).__TAURI_INTERNALS__ = {
-        convertFileSrc: () => '/artifact-preview',
+        convertFileSrc: (path: string, protocol?: string) => {
+          if (protocol !== 'studio-image') return '/artifact-preview';
+          const image = storedImages()[path];
+          return image ? `data:${image.mediaType};base64,${image.data}` : 'data:,';
+        },
         metadata: { currentWindow: { label: 'main' } },
         transformCallback(fn: (v: unknown) => void) {
           const id = ++next;
@@ -240,6 +248,21 @@ export async function mockDesktop(page: Page, mode = 'success') {
               detail: 'Fixture connection',
             };
           }
+          if (command === 'store_chat_image') {
+            const bytes = new Uint8Array(args as ArrayBuffer);
+            const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+            const hash = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+            const mediaType =
+              bytes[0] === 0x89 ? 'image/png' : bytes[0] === 0xff ? 'image/jpeg' : 'image/webp';
+            let binary = '';
+            for (let at = 0; at < bytes.length; at += 0x8000)
+              binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+            const images = storedImages();
+            images[hash] = { mediaType, data: btoa(binary) };
+            localStorage.setItem('test-images', JSON.stringify(images));
+            return { hash, bytes: bytes.length, mediaType };
+          }
+          if (command === 'upload_chat_images') return [];
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
           if (command === 'save_workspace') {

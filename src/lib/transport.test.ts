@@ -716,8 +716,9 @@ it('keeps a pending question when an older relay drops it from a successful save
   }
 });
 
-// A paired desktop whose relay keeps revisions like the real one.
-async function settledRelay(revisionEndpoint = true) {
+// A paired desktop whose relay keeps revisions like the real one. Given `lacking`, the relay
+// keeps an image store, and those are the hashes it still lacks after this computer uploads.
+async function settledRelay(revisionEndpoint = true, lacking?: Set<string>) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();
   workspace.conversations.push({
@@ -787,6 +788,10 @@ async function settledRelay(revisionEndpoint = true) {
     if (command === 'load_sync_state')
       return { url: 'https://relay.example.com', instanceId: 'same-relay', base: relay.workspace };
     if (command === 'save_sync_state') requests.push('save_sync_state');
+    if (command === 'upload_chat_images') {
+      requests.push('upload_chat_images');
+      return args.hashes.filter((hash: string) => lacking?.has(hash));
+    }
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
     // A relay without the incremental routes. Its whole-state path is what these cases cover.
@@ -794,7 +799,14 @@ async function settledRelay(revisionEndpoint = true) {
       return { status: 404, body: { error: 'Unknown relay operation.' } };
     if (args.path === 'v1/state/revision')
       return revisionEndpoint
-        ? { status: 200, body: { instanceId: 'same-relay', revision: relay.revision } }
+        ? {
+            status: 200,
+            body: {
+              instanceId: 'same-relay',
+              revision: relay.revision,
+              ...(lacking ? { images: 1 } : {}),
+            },
+          }
         : { status: 404, body: { error: 'Unknown relay operation.' } };
     if (args.path === 'v1/state' && args.method === 'PUT') {
       relay.revision++;
@@ -1086,6 +1098,12 @@ async function incrementalRelay(
     onCheckpoint?: (live: { workspace: Workspace; mark: (chatId?: string) => void }) => void;
     flush?: () => Promise<void>;
     started?: boolean;
+    // Whether the relay keeps an image store, and which of the hashes this computer is asked
+    // to upload the relay still lacks afterwards.
+    images?: boolean;
+    upload?: (hashes: string[]) => string[];
+    // Changes this device makes before its first sync, which the relay does not have.
+    prepare?: (workspace: Workspace) => void;
   } = {},
 ) {
   const transport = await import('./transport');
@@ -1170,6 +1188,10 @@ async function incrementalRelay(
         },
       });
     }
+    if (command === 'upload_chat_images') {
+      requests.push('upload_chat_images');
+      return options.upload?.(args.hashes) ?? [];
+    }
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
     if (args.path === 'v1/state/manifest') return { status: 200, body: manifest() };
@@ -1208,7 +1230,14 @@ async function incrementalRelay(
       return { status: 200, body: manifest() };
     }
     if (args.path === 'v1/state/revision')
-      return { status: 200, body: { instanceId: 'same-relay', revision: relay.revision } };
+      return {
+        status: 200,
+        body: {
+          instanceId: 'same-relay',
+          revision: relay.revision,
+          ...(options.images ? { images: 1 } : {}),
+        },
+      };
     if (args.path === 'v1/state')
       return {
         status: 200,
@@ -1222,6 +1251,7 @@ async function incrementalRelay(
       };
     return { status: 200, body: args.path === 'v1/heartbeat' ? [] : [] };
   });
+  options.prepare?.(workspace);
   expect(await transport.resumeRelay()).toBe(true);
   // The first poll takes the whole-state path and learns the relay's per-conversation revisions.
   expect(await transport.pollRelay()).toEqual([]);
@@ -1233,6 +1263,202 @@ async function incrementalRelay(
   };
   return { transport, workspace, relay, local, requests, polls, marks, checkpoint: () => saved };
 }
+
+/** A message naming one image in the image store. */
+const imageMessage = (hash: string) => ({
+  id: crypto.randomUUID(),
+  role: 'user' as const,
+  blocks: [],
+  images: [
+    { id: crypto.randomUUID(), name: 'shot.png', mediaType: 'image/png' as const, hash, bytes: 68 },
+  ],
+  status: 'complete' as const,
+  createdAt: '2026-09-27',
+});
+
+it('publishes a conversation with images once the relay holds them, asking about each once', async () => {
+  const lacking = new Set<string>();
+  const { transport, workspace, relay, local, requests, polls, marks } = await incrementalRelay({
+    images: true,
+    upload: (hashes) => hashes.filter((hash) => lacking.has(hash)),
+  });
+  const [first, second] = workspace.conversations;
+  const hash = 'c'.repeat(64);
+  first.messages.push(imageMessage(hash));
+  second.title = 'Renamed with it';
+  lacking.add(hash);
+  local.changes++;
+  marks.mark(first.id);
+  marks.mark(second.id);
+  later();
+  await polls(1);
+  // This computer cannot give the relay the image, so its conversation waits here while the
+  // other one goes out.
+  const published = (id: string) => relay.workspace.conversations.find((c) => c.id === id);
+  expect(published(first.id)?.messages).toEqual([]);
+  expect(published(second.id)?.title).toBe('Renamed with it');
+  expect(transport.relaySyncNotice()).toContain('names images the relay does not have yet');
+  // Once the image is there, the next poll publishes the conversation.
+  lacking.delete(hash);
+  await polls(1);
+  expect(published(first.id)?.messages).toHaveLength(1);
+  expect(transport.relaySyncNotice()).toBe('');
+  // The relay holds the image now, so later changes do not ask about it again.
+  requests.length = 0;
+  first.title = 'Renamed';
+  local.changes++;
+  marks.mark(first.id);
+  await polls(1);
+  expect(published(first.id)?.title).toBe('Renamed');
+  expect(requests).not.toContain('upload_chat_images');
+});
+
+it('hands a conversation the first whole sync held to the incremental polls after it', async () => {
+  const lacking = new Set(['c'.repeat(64)]);
+  const { transport, workspace, relay, polls } = await incrementalRelay({
+    images: true,
+    upload: (hashes) => hashes.filter((hash) => lacking.has(hash)),
+    prepare: (workspace) => workspace.conversations[0].messages.push(imageMessage('c'.repeat(64))),
+  });
+  const [first] = workspace.conversations;
+  const published = () => relay.workspace.conversations.find((c) => c.id === first.id)!;
+  expect(published().messages).toEqual([]);
+  expect(transport.relaySyncNotice()).toContain('names images the relay does not have yet');
+  // Nothing changes here again, but the next poll sends it once the relay has the image.
+  lacking.clear();
+  await polls(1);
+  expect(published().messages).toHaveLength(1);
+  expect(transport.relaySyncNotice()).toBe('');
+});
+
+it('keeps conversations with images here while the relay predates the image store', async () => {
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first] = workspace.conversations;
+  first.messages.push(imageMessage('d'.repeat(64)));
+  local.changes++;
+  marks.mark(first.id);
+  later();
+  await polls(1);
+  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.messages).toEqual([]);
+  expect(transport.relaySyncNotice()).toContain(
+    'Update the relay to sync conversations with images.',
+  );
+});
+
+it('syncs the whole workspace but a conversation whose images the relay lacks, which waits here', async () => {
+  const lacking = new Set<string>();
+  const { transport, workspace, relay, local, requests } = await settledRelay(true, lacking);
+  const hash = 'e'.repeat(64);
+  // One conversation the relay has gains an image, a new one names another, and a third
+  // changes without images.
+  const [settled] = workspace.conversations;
+  settled.messages.push(imageMessage(hash));
+  const added = { ...structuredClone(settled), id: crypto.randomUUID(), title: 'New with image' };
+  added.messages = [imageMessage('b'.repeat(64))];
+  const plain = { ...structuredClone(settled), id: crypto.randomUUID(), title: 'Plain' };
+  plain.messages = [];
+  workspace.conversations.push(added, plain);
+  lacking.add(hash).add('b'.repeat(64));
+  local.changes++;
+  requests.length = 0;
+  expect(await transport.pollRelay()).not.toBeNull();
+  expect(requests).toContain('upload_chat_images');
+  // Everything else went out; the relay keeps its copy of the first and has no second.
+  const published = () => relay.workspace.conversations.map((c) => c.title);
+  expect(published()).toEqual(['Settled chat', 'Plain']);
+  expect(relay.workspace.conversations[0].messages).toEqual([]);
+  expect(transport.relaySyncNotice()).toBe(
+    '“Settled chat”, “New with image” name images the relay does not have yet. They sync once the computer that attached them is connected.',
+  );
+  // Neither was changed here by the relay's copy, or by its absence.
+  expect(workspace.conversations.map((c) => c.title)).toEqual([
+    'Settled chat',
+    'New with image',
+    'Plain',
+  ]);
+  expect(workspace.conversations[0].messages).toHaveLength(1);
+  // Once the relay has the images, the next poll sends both.
+  lacking.clear();
+  requests.length = 0;
+  expect(await transport.pollRelay()).not.toBeNull();
+  expect(requests).toContain('PUT v1/state');
+  // The relay lists the conversation it did not have after the others.
+  expect(published()).toEqual(['Settled chat', 'Plain', 'New with image']);
+  expect(relay.workspace.conversations[0].messages[0].images).toEqual(
+    workspace.conversations[0].messages[0].images,
+  );
+  expect(transport.relaySyncNotice()).toBe('');
+  await transport.disconnectRelay();
+});
+
+it('syncs the whole workspace with a relay from before the image store, keeping image chats here', async () => {
+  const { transport, workspace, relay, local } = await settledRelay();
+  workspace.conversations[0].messages.push(imageMessage('e'.repeat(64)));
+  const plain = {
+    ...structuredClone(workspace.conversations[0]),
+    id: crypto.randomUUID(),
+    title: 'Plain',
+  };
+  plain.messages = [];
+  workspace.conversations.push(plain);
+  local.changes++;
+  expect(await transport.pollRelay()).not.toBeNull();
+  expect(relay.workspace.conversations.map((c) => c.title)).toEqual(['Settled chat', 'Plain']);
+  expect(relay.workspace.conversations[0].messages).toEqual([]);
+  expect(workspace.conversations[0].messages).toHaveLength(1);
+  expect(transport.relaySyncNotice()).toBe(
+    '“Settled chat” stays on this device. Update the relay to sync conversations with images.',
+  );
+  await transport.disconnectRelay();
+});
+
+/** A reply to run on the other computer, naming one image by hash. */
+const imageRun = (workspace: Workspace, connectionId: string, hash: string) => ({
+  runId: crypto.randomUUID(),
+  agent: { ...settingsFor(workspace.preferences, 'codex'), connectionId },
+  messages: [
+    { role: 'user' as const, text: 'What does this show?', images: imageMessage(hash).images },
+  ],
+});
+
+it('sends a reply naming images to another computer only once the relay holds them', async () => {
+  const lacking = new Set<string>();
+  const { transport, workspace, requests, there } = await settledRelay(true, lacking);
+  const hash = 'f'.repeat(64);
+  // The computer that runs the reply reads its images from the relay, so none may be missing.
+  lacking.add(hash);
+  requests.length = 0;
+  await expect(transport.runAgent(imageRun(workspace, there, hash), () => {})).rejects.toThrow(
+    'An image in this chat is not on the relay yet.',
+  );
+  expect(requests).toEqual(['upload_chat_images']);
+  // Once it is there, the reply goes out naming the image by reference.
+  lacking.delete(hash);
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path.startsWith('v1/jobs/'))
+      return { status: 200, body: { status: 'complete', events: [], result: 'complete' } };
+    return original(command, args);
+  });
+  expect(await transport.runAgent(imageRun(workspace, there, hash), () => {})).toBe('complete');
+  const job = native.invoke.mock.calls.find(
+    ([, args]) => args?.method === 'POST' && args?.path === 'v1/jobs',
+  );
+  expect(job?.[1].body.args.request.messages[0].images).toEqual([
+    { id: expect.any(String), name: 'shot.png', mediaType: 'image/png', hash, bytes: 68 },
+  ]);
+  await transport.disconnectRelay();
+});
+
+it('keeps a reply naming images here while the relay predates the image store', async () => {
+  const { transport, workspace, requests, there } = await settledRelay();
+  requests.length = 0;
+  await expect(
+    transport.runAgent(imageRun(workspace, there, 'a'.repeat(64)), () => {}),
+  ).rejects.toThrow('Update the relay to sync conversations with images.');
+  expect(requests).toEqual([]);
+  await transport.disconnectRelay();
+});
 
 it('publishes only the conversation that changed, and takes in only what moved', async () => {
   const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
@@ -1310,8 +1536,7 @@ it('sends replicated settings only when they move, and deletes on both sides', a
 });
 
 it('resumes from its checkpoint without syncing the whole workspace again', async () => {
-  const { transport, workspace, relay, local, polls, marks, checkpoint } =
-    await incrementalRelay();
+  const { transport, workspace, relay, local, polls, marks, checkpoint } = await incrementalRelay();
   const [first] = workspace.conversations;
   first.title = 'Renamed here';
   local.changes++;

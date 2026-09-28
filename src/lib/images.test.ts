@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { imageSchema, imageByteLength, maxImageBytes, maxImagesPerMessage } from './images';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { imageStore, storeInlineImages } from '../../relay/images';
+import {
+  imageHashes,
+  imageSchema,
+  imageByteLength,
+  maxImageBytes,
+  maxImagesPerMessage,
+  referenceInline,
+} from './images';
 import {
   historyFor,
   initialWorkspace,
@@ -97,5 +109,51 @@ describe('portable image attachments', () => {
     expect(
       messageSchema.safeParse(message(Array(maxImagesPerMessage + 1).fill(image))).success,
     ).toBe(false);
+  });
+});
+
+describe('image store references', () => {
+  const bytes = Buffer.from(image.data, 'base64');
+  const stored = {
+    id: image.id,
+    name: image.name,
+    mediaType: image.mediaType,
+    hash: createHash('sha256').update(bytes).digest('hex'),
+    bytes: bytes.length,
+  };
+  it('keeps a reference, and the same one wherever an inline image is turned into it', async () => {
+    expect(imageSchema.parse(stored)).toEqual(stored);
+    for (const patch of [{ hash: 'A'.repeat(64) }, { hash: 'a'.repeat(63) }, { bytes: 0 }])
+      expect(imageSchema.safeParse({ ...stored, ...patch }).success).toBe(false);
+    // A browser and the relay each turn the same inline image into exactly this record, so
+    // their copies of a message never conflict.
+    expect((await referenceInline(image)).image).toEqual(stored);
+    const conversations = [{ messages: [{ images: [structuredClone(image)] as unknown[] }] }];
+    const directory = mkdtempSync(join(tmpdir(), 'studio-images-'));
+    try {
+      storeInlineImages(conversations, imageStore(directory));
+      expect(conversations[0].messages[0].images).toEqual([stored]);
+      expect(JSON.stringify(conversations[0].messages[0].images[0])).toBe(JSON.stringify(stored));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it('carries references, not bytes, through history and names them for publishing', () => {
+    const now = new Date().toISOString();
+    const message = (images: unknown[]) =>
+      messageSchema.parse({
+        id: crypto.randomUUID(),
+        role: 'user',
+        blocks: [],
+        images,
+        status: 'complete',
+        createdAt: now,
+      });
+    const conversation = {
+      messages: [message([stored])],
+      rewind: { removed: [message([{ ...stored, hash: 'b'.repeat(64) }]), message([image])] },
+    };
+    expect(imageHashes(conversation)).toEqual([stored.hash, 'b'.repeat(64)]);
+    expect(JSON.stringify(conversation.messages[0])).not.toContain(image.data.slice(0, 20));
   });
 });

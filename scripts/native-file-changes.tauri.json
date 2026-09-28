@@ -14,7 +14,7 @@
       }
     ],
     "security": {
-      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src ipc: blob: data: http://ipc.localhost http://localhost:1442 ws://localhost:1442 http://127.0.0.1:1442 ws://127.0.0.1:1442; object-src 'none'; base-uri 'none'; frame-src studio-artifact: http://studio-artifact.localhost"
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: studio-image: http://studio-image.localhost; font-src 'self' data:; connect-src ipc: blob: data: http://ipc.localhost http://localhost:1442 ws://localhost:1442 http://127.0.0.1:1442 ws://127.0.0.1:1442; object-src 'none'; base-uri 'none'; frame-src studio-artifact: http://studio-artifact.localhost"
     }
   }
 }

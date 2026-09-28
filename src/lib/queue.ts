@@ -1,6 +1,6 @@
 import type { SkillReference } from './domain';
 import type { Mention } from './mentions';
-import type { ChatImage } from './images';
+import type { DraftImage } from './images';
 
 /**
  * Messages written while a reply is still running. Each conversation keeps its own
@@ -11,7 +11,7 @@ import type { ChatImage } from './images';
 export type QueuedMessage = {
   id: string;
   text: string;
-  images: ChatImage[];
+  images: DraftImage[];
   skills?: SkillReference[];
   mentions?: Mention[];
   mentionConnectionId?: string;
@@ -49,9 +49,9 @@ export function enqueueMessage(
 export function restoreToDraft(
   queue: QueuedMessage[],
   draft: string,
-  images: ChatImage[],
+  images: DraftImage[],
   maxImages: number,
-): { draft: string; images: ChatImage[]; droppedImages: number } {
+): { draft: string; images: DraftImage[]; droppedImages: number } {
   const texts = queue.map((message) => message.text.trim()).filter(Boolean);
   const merged = [...texts, draft.trim()].filter(Boolean).join('\n\n');
   const all = [...queue.flatMap((message) => message.images), ...images];

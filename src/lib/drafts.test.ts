@@ -19,15 +19,18 @@ import {
   type SavedDraft,
   type SavedScratch,
 } from './drafts';
-import type { ChatImage } from './images';
+import type { DraftImage } from './images';
 import { locationKey } from './locations';
 import type { Mention } from './mentions';
 
-const image = (name: string): ChatImage => ({
+// An attached image, whose bytes stay in memory until its message is sent.
+const image = (name: string): DraftImage => ({
   id: crypto.randomUUID(),
   name,
   mediaType: 'image/png',
-  data: 'iVBORw0KGgo=',
+  hash: 'a'.repeat(64),
+  bytes: 8,
+  blob: new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])]),
 });
 const file: Mention = {
   kind: 'file',

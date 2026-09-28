@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { chatSettingsSchema, locationSchema, type ChatLocation, type ChatSettings } from './domain';
-import type { ChatImage } from './images';
+import type { DraftImage } from './images';
 import { hasMention, maxMentions, mentionSchema, retainMentions, type Mention } from './mentions';
 
 /**
@@ -10,7 +10,7 @@ import { hasMention, maxMentions, mentionSchema, retainMentions, type Mention } 
  */
 export type Draft = {
   text: string;
-  images: ChatImage[];
+  images: DraftImage[];
   mentions: Mention[];
   staleMentions: string[];
   mentionScope: string;
