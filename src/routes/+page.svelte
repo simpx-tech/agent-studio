@@ -40,6 +40,7 @@
     RefreshCw,
     LoaderCircle,
     MessageCircleQuestionMark,
+    Activity,
     CircleStop,
     X,
     Pencil,
@@ -818,6 +819,18 @@
     if (!reply) return;
     applyRunEvent(reply, { kind: 'tool', tool: event.tool });
     saveSoon(event.conversationId);
+  }
+  // A chat whose reply ended stays active while its monitors run, until each reports its
+  // outcome or its process is released.
+  const runningMonitors = (conversationId: string) =>
+    hostBackground[conversationId]?.runs.filter((run) => run.kind === 'monitor').length ?? 0;
+  // What a sidebar row adds to its chat's title, on hover and for assistive technology.
+  function rowNotes(finished: boolean, monitors: number): string[] {
+    return [
+      ...(finished ? ['New reply'] : []),
+      ...(monitors === 1 ? ['Monitor still running'] : []),
+      ...(monitors > 1 ? [`${monitors} monitors still running`] : []),
+    ];
   }
   const switchNotices = $derived(
     replySwitches(active?.messages ?? [], (id) => accountName(workspace.fleet, id)),
@@ -3853,7 +3866,11 @@
                           >{/each}
                         {#each folder.conversations as c}{@const runningReply = c.messages.find(
                             (m) => m.status === 'running',
-                          )}{@const finished = !runningReply && !!finishedChats[c.id]}
+                          )}{@const finished = !runningReply && !!finishedChats[c.id]}{@const monitors =
+                            runningReply ? 0 : runningMonitors(c.id)}{@const notes = rowNotes(
+                            finished,
+                            monitors,
+                          )}
                           <div class="conversation-row">
                             <button
                               class="conversation-item"
@@ -3880,8 +3897,10 @@
                                   longPressedConversation = undefined;
                                 } else openConversation(c);
                               }}
-                              title={finished ? `${c.title} · New reply` : c.title}
-                              aria-label={finished ? `${c.title}, new reply` : undefined}
+                              title={[c.title, ...notes].join(' · ')}
+                              aria-label={notes.length
+                                ? [c.title, ...notes.map((note) => note.toLowerCase())].join(', ')
+                                : undefined}
                               >{#if finished}<i class="conversation-finished" aria-hidden="true"
                                 ></i>{/if}<span>{c.title}</span
                               >{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
@@ -3898,7 +3917,11 @@
                                     size={14}
                                     class="spinning conversation-running"
                                     aria-hidden="true"
-                                  />{/if}{/if}</button
+                                  />{/if}{:else if monitors}<Activity
+                                  size={14}
+                                  class="conversation-monitoring"
+                                  aria-hidden="true"
+                                />{/if}</button
                             >{#if !c.archived && !conversationRunning(c)}<button
                                 class="conversation-archive"
                                 title="Move to history"

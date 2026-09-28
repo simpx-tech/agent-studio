@@ -1,5 +1,32 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
+
+// Lets a test send the host's background work events as `hostBackground(event)`; a window
+// that loads asks for the lists stored under `test-background-work`.
+async function mockHostBackground(page: Page) {
+  await page.addInitScript(() => {
+    const state = window as any,
+      native = state.__TAURI_INTERNALS__;
+    const invoke = native.invoke,
+      transform = native.transformCallback;
+    const callbacks = new Map<number, (value: unknown) => void>();
+    let listener = 0;
+    native.transformCallback = (fn: (value: unknown) => void) => {
+      const id = transform(fn);
+      callbacks.set(id, fn);
+      return id;
+    };
+    native.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:event|listen' && args.event === 'studio-background-work')
+        listener = args.handler;
+      if (command === 'background_work')
+        return JSON.parse(localStorage.getItem('test-background-work') ?? '[]');
+      return invoke(command, args);
+    };
+    state.hostBackground = (payload: unknown) =>
+      callbacks.get(listener)!({ event: 'studio-background-work', id: 1, payload });
+  });
+}
 
 for (const mobile of [false, true])
   test(`background work is a toggle in its reply footer, never running in history ${mobile ? 'mobile' : 'desktop'}`, async ({
@@ -222,28 +249,7 @@ test('work left running stays listed after its reply and reports its outcome to 
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
-  await page.addInitScript(() => {
-    const state = window as any,
-      native = state.__TAURI_INTERNALS__;
-    const invoke = native.invoke,
-      transform = native.transformCallback;
-    const callbacks = new Map<number, (value: unknown) => void>();
-    let listener = 0;
-    native.transformCallback = (fn: (value: unknown) => void) => {
-      const id = transform(fn);
-      callbacks.set(id, fn);
-      return id;
-    };
-    native.invoke = async (command: string, args: any) => {
-      if (command === 'plugin:event|listen' && args.event === 'studio-background-work')
-        listener = args.handler;
-      if (command === 'background_work')
-        return JSON.parse(localStorage.getItem('test-background-work') ?? '[]');
-      return invoke(command, args);
-    };
-    state.hostBackground = (payload: unknown) =>
-      callbacks.get(listener)!({ event: 'studio-background-work', id: 1, payload });
-  });
+  await mockHostBackground(page);
   await page.goto('/');
   await page.getByLabel('Message', { exact: true }).fill('Start a preview server for me');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
@@ -365,4 +371,82 @@ test('work left running stays listed after its reply and reports its outcome to 
   await expect(toggle).toHaveText(/Background work\s*1/);
   await toggle.click();
   await expect(card.locator('li')).toHaveText([/Build failures\s*Monitor\s*\d+s/]);
+});
+
+test('a chat whose reply ended stays marked in the sidebar while its monitors run', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await mockHostBackground(page);
+  await page.goto('/');
+  await page.getByLabel('Message', { exact: true }).fill('Watch CI for me');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  const ids = () =>
+    page.evaluate(() => {
+      const chat = JSON.parse(localStorage.getItem('test-workspace') ?? '{}').conversations?.[0];
+      return { conversationId: chat?.id, runId: chat?.messages.at(-1).runId };
+    });
+  await expect.poll(async () => (await ids()).runId).toBeTruthy();
+  const { conversationId, runId } = await ids();
+  const snapshot = (runs: unknown[]) =>
+    page.evaluate((payload) => (window as any).hostBackground(payload), {
+      kind: 'snapshot',
+      conversationId,
+      runs,
+    });
+  const run = (id: string, kind: string, label: string) => ({
+    id,
+    runId,
+    kind,
+    label,
+    elapsedMs: 1000,
+  });
+  const row = page.locator('.conversation-item').first();
+  const title = (await row.locator('span').first().textContent())!;
+  const mark = row.locator('.conversation-monitoring');
+
+  // A running reply shows its time even while its monitor runs.
+  await snapshot([run('claude:ci', 'monitor', 'CI failures')]);
+  await expect(row.locator('.conversation-running')).toBeVisible();
+  await expect(mark).toHaveCount(0);
+
+  // The reply ends while another chat is open: the dot marks it unread, the pulse active.
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await expect(row.locator('.conversation-running')).toHaveCount(0);
+  await expect(row.locator('.conversation-finished')).toHaveCount(1);
+  await expect(mark).toBeVisible();
+  await expect(row).toHaveAttribute('title', `${title} · New reply · Monitor still running`);
+  await expect(row).toHaveAccessibleName(`${title}, new reply, monitor still running`);
+
+  // Reading the chat clears the dot; the monitor keeps it marked, beside Move to history.
+  await row.click();
+  await expect(row.locator('.conversation-finished')).toHaveCount(0);
+  await expect(mark).toBeVisible();
+  await expect(row).toHaveAccessibleName(`${title}, monitor still running`);
+  await row.hover();
+  const archive = page.getByRole('button', { name: `Move ${title} to history`, exact: true });
+  await expect(archive).toHaveCSS('opacity', '1');
+  const [markBox, archiveBox] = await Promise.all([mark.boundingBox(), archive.boundingBox()]);
+  expect(markBox!.x + markBox!.width).toBeLessThanOrEqual(archiveBox!.x);
+  await page.mouse.move(700, 400);
+  await snapshot([
+    run('claude:ci', 'monitor', 'CI failures'),
+    run('claude:deploy', 'monitor', 'Deploy status'),
+    run('claude:server', 'command', 'Preview server'),
+  ]);
+  await expect(row).toHaveAttribute('title', `${title} · 2 monitors still running`);
+  await page.screenshot({ path: 'artifacts/background-work/sidebar-monitor.png' });
+
+  // Commands left running, such as servers, never mark a chat; neither does finished work.
+  await snapshot([run('claude:server', 'command', 'Preview server')]);
+  await expect(mark).toHaveCount(0);
+  await expect(row).toHaveAttribute('title', title);
+  await expect(row).not.toHaveAttribute('aria-label');
+  await snapshot([run('claude:ci', 'monitor', 'CI failures')]);
+  await expect(mark).toBeVisible();
+  await snapshot([]);
+  await expect(mark).toHaveCount(0);
+  await expect(row).toHaveAccessibleName(title);
 });

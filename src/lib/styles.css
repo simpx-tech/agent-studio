@@ -809,6 +809,11 @@ pre {
 .conversation-item .conversation-waiting {
   color: var(--warning);
 }
+/* After its reply ends, a chat whose monitors still run shows the pulse Work history gives
+   Monitor calls, until each reports its outcome. */
+.conversation-item .conversation-monitoring {
+  color: var(--accent-strong);
+}
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch
    screens. The title makes room for it while it shows. */
 .conversation-row {
