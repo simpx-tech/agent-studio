@@ -44,6 +44,7 @@ async function open() {
       const page = await nativePage(port);
       assert.equal(await page.invoke('plugin:app|identifier'), identifier);
       await page.waitFor(() => document.querySelector('.template-button')?.disabled === false);
+      await page.quitOnClose();
       return page;
     } catch (error) {
       if (Date.now() > deadline) throw error;

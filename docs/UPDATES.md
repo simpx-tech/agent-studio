@@ -21,12 +21,14 @@ public, so no GitHub token is involved.
 - **Restart to update.** When an update is ready, the sidebar footer and Settings offer
   **Restart to update**. It is disabled while a reply runs on this computer, and the native side
   refuses it too. The app saves the workspace, stops background work, and releases parked CLI
-  processes (as the close button does), then starts the installer. On Windows, the installer
+  processes (as Quit does), then starts the installer. On Windows, the installer
   closes the app, shows a progress bar without questions, and reopens it. macOS and Linux replace
   the app in place and relaunch it.
-- **Idle close.** Closing an idle app with a downloaded update installs it without reopening the
-  app. Closing while a reply runs keeps the ordinary close; the next launch downloads the update
-  again.
+- **Idle quit.** Quitting an idle app with a downloaded update installs it without reopening the
+  app: **Quit Agent Studio** in the tray menu, or closing the window when **Settings → Background**
+  has it quit. Quitting while a reply runs keeps the ordinary quit; the next launch downloads the
+  update again. Closing the window to the tray installs nothing, since the app keeps running. See
+  [running in the background](BACKGROUND.md).
 - **Other Agent Studio windows.** The Windows installer closes every running process named
   `agent-studio.exe` for your user, including development and QA builds that use that name.
 - **Data.** Updates keep the identifier `com.vinicius.agentstudio`, so the workspace, accounts,

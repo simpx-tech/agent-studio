@@ -14,7 +14,7 @@ Build the application first. For a development binary, keep its Vite server runn
 npm run start:windows
 ```
 
-The repository launcher uses a unique one-shot Task Scheduler task, the current interactive user's normal token, and limited privileges. It checks the built executable before starting it, verifies that a window opens, and removes the task. It never installs a recurring task, copies credentials, changes identities, or stops existing app instances. An already running executable is reported without relaunching it. The launcher does not compile the app or start its frontend server.
+The repository launcher uses a unique one-shot Task Scheduler task, the current interactive user's normal token, and limited privileges. It checks the built executable before starting it, verifies that a window opens, and removes the task. It never installs a recurring task, copies credentials, changes identities, or stops existing app instances. An already running executable is reported without relaunching it, unless `-SecondInstance` asks for another launch: the new process must hand over to the running app, which shows its window, and exit within 20 seconds (see [running in the background](BACKGROUND.md)). The launcher does not compile the app or start its frontend server.
 
 ```powershell
 # Verify without opening the application.
@@ -22,6 +22,9 @@ npm run start:windows -- -CheckOnly
 
 # Use an alternate build, including an isolated native QA identifier.
 npm run start:windows -- -Executable "C:\path\to\agent-studio.exe"
+
+# Launch a running build again; it should show the running window and exit.
+npm run start:windows -- -Executable "C:\path\to\agent-studio.exe" -SecondInstance
 ```
 
 Launch results contain only status, process ID, or a startup error under ignored `artifacts/startup/`. If launch completion is unconfirmed, inspect the existing process before retrying; do not stop every process named Agent Studio. Keep the canonical and any redirected data copies intact. Recovery must not rewrite installation IDs or remap chats to make the wrong storage copy appear local.

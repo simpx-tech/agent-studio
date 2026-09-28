@@ -74,6 +74,19 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-cli-updates', JSON.stringify(updates));
             return updates;
           }
+          if (command === 'window_behavior' || command === 'set_close_to_tray') {
+            const behavior = JSON.parse(
+              localStorage.getItem('test-window-behavior') ??
+                '{"closeToTray":true,"area":"tray","clickOpens":true}',
+            );
+            if (command === 'set_close_to_tray') {
+              const error = localStorage.getItem('test-window-behavior-error');
+              if (error) throw error;
+              behavior.closeToTray = args.enabled;
+              localStorage.setItem('test-window-behavior', JSON.stringify(behavior));
+            }
+            return behavior;
+          }
           // The native version deliberately differs from package.json's.
           if (command === 'plugin:app|version') return '0.2.0';
           if (command === 'save_artifact') {

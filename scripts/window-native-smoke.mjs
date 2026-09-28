@@ -8,6 +8,7 @@ import { nativePage } from './native-page.mjs';
 const qaProcessId = process.argv[2];
 assert(/^\d+$/.test(qaProcessId ?? ''), 'Pass the isolated QA process ID.');
 const page = await nativePage(9438);
+await page.quitOnClose();
 const helper = (action, args = {}) =>
   execFileSync(
     'powershell.exe',

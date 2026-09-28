@@ -75,6 +75,7 @@ async function connect() {
       const page = await nativePage(port);
       assert.equal(await page.invoke('plugin:app|identifier'), identifier);
       await page.waitFor(ready);
+      await page.quitOnClose();
       return page;
     } catch (error) {
       if (Date.now() > deadline) throw error;

@@ -358,13 +358,10 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
 }
 
 fn open(app: &tauri::AppHandle, id: Option<&str>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        if let Some(id) = id {
-            let _ = window.emit("studio-notification-open", id);
-        }
+    // The window may be hidden in the tray.
+    crate::tray::show_window(app);
+    if let (Some(window), Some(id)) = (app.get_webview_window("main"), id) {
+        let _ = window.emit("studio-notification-open", id);
     }
 }
 

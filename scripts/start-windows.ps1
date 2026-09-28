@@ -2,6 +2,9 @@ param(
     [string]$Executable,
     [switch]$CheckOnly,
     [switch]$DesktopLaunch,
+    # Launch again while the app runs, to check that the new process hands over to the
+    # running one (which shows its window) and exits instead of opening a second copy.
+    [switch]$SecondInstance,
     [string]$ResultPath
 )
 
@@ -15,7 +18,7 @@ if ($DesktopLaunch) {
     try {
         # This branch runs under Task Scheduler's normal interactive user token, not
         # the calling application's inherited MSIX file virtualization context.
-        if (!$CheckOnly) {
+        if (!$CheckOnly -and !$SecondInstance) {
             $existing = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($appPath)) -ErrorAction SilentlyContinue |
                 Where-Object { $_.Path -eq $appPath }
             if ($existing) {
@@ -35,6 +38,12 @@ if ($DesktopLaunch) {
             $result = @{ status = 'verified' }
         } else {
             $app = Start-Process -FilePath $appPath -WorkingDirectory $repoRoot -WindowStyle Normal -PassThru
+            if ($SecondInstance) {
+                if (!$app.WaitForExit(20000)) { throw "The second launch kept running as process $($app.Id) instead of handing over to the running app." }
+                @{ status = 'handed-over'; processId = $app.Id; exitCode = $app.ExitCode } |
+                    ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+                exit 0
+            }
             $deadline = (Get-Date).AddSeconds(25)
             do {
                 Start-Sleep -Milliseconds 250
@@ -77,6 +86,7 @@ $action.Path = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerS
 # literal arguments; no path or account data is interpolated into shell code.
 $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" -DesktopLaunch -Executable "' + $appPath + '" -ResultPath "' + $resultPath + '"'
 if ($CheckOnly) { $action.Arguments += ' -CheckOnly' }
+if ($SecondInstance) { $action.Arguments += ' -SecondInstance' }
 $action.WorkingDirectory = $repoRoot
 $name = 'AgentStudio-Launch-' + $runId
 $task = $folder.RegisterTaskDefinition($name, $definition, 2, $null, $null, 3)

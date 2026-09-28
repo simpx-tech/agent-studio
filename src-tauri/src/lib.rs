@@ -29,6 +29,7 @@ mod startup;
 mod structured_output;
 mod titles;
 mod tool_output;
+mod tray;
 mod undo;
 mod updates;
 mod usage;
@@ -1105,7 +1106,12 @@ pub fn run() {
         return;
     }
     app_session_started();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // First, so a second launch shows the running window and exits before anything else
+        // starts on the same data.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_window(app)
+        }))
         .register_uri_scheme_protocol("studio-artifact", |_context, request| {
             artifacts::response(request.uri().path())
         })
@@ -1134,7 +1140,9 @@ pub fn run() {
         .manage(live_usage::LiveUsage::default())
         .manage(background_work::Registry::default())
         .manage(std::sync::Arc::new(tool_output::Pending::default()))
+        .manage(tray::Tray::default())
         .setup(|app| {
+            tray::setup(app.handle());
             // Remove kept tool results of deleted chats and old runs once startup settles.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1187,6 +1195,13 @@ pub fn run() {
                 // Restart to update is already stopping work; its installer ends the app.
                 if updates::installing(&app) {
                     api.prevent_close();
+                    return;
+                }
+                // The app keeps running in the tray, with its replies, relay jobs and parked
+                // CLIs, until Quit is chosen there.
+                if tray::hides_on_close(&app) {
+                    api.prevent_close();
+                    let _ = window.hide();
                     return;
                 }
                 // An idle app installs a downloaded update as it closes, without relaunching.
@@ -1269,10 +1284,25 @@ pub fn run() {
             manage_elicitation,
             steer_run,
             sign_in,
-            export_workspace
+            export_workspace,
+            tray::window_behavior,
+            tray::set_close_to_tray
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application");
+    app.run(|handle, event| {
+        // The Dock icon brings back a window kept running in the menu bar.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } = event
+        {
+            tray::show_window(handle);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (handle, event);
+    });
 }
 
 #[cfg(test)]

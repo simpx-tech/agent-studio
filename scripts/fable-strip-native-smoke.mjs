@@ -36,6 +36,7 @@ for (const deadline = Date.now() + 60_000; ;) {
   try {
     page = await nativePage(port);
     assert.equal(await page.invoke('plugin:app|identifier'), identifier);
+    await page.quitOnClose();
     break;
   } catch (error) {
     if (Date.now() > deadline) throw error;

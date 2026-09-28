@@ -8,6 +8,7 @@ import { version as packageVersion } from '../../package.json';
 
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
 import { cliUpdatesSchema, type CliUpdates, type UpdatedCli } from './cli-updates';
+import { windowBehaviorSchema, type WindowBehavior } from './window-behavior';
 import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, asksTheUser, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
@@ -243,6 +244,13 @@ export async function watchCliUpdates(
   }
   return unlisten;
 }
+export type { WindowBehavior } from './window-behavior';
+/** Whether closing this computer's window keeps Agent Studio running in the tray. */
+export const windowBehavior = async (): Promise<WindowBehavior> =>
+  windowBehaviorSchema.parse(await invoke('window_behavior'));
+/** Keeps Agent Studio running in the tray when its window closes, or quits on close. */
+export const setCloseToTray = async (enabled: boolean): Promise<WindowBehavior> =>
+  windowBehaviorSchema.parse(await invoke('set_close_to_tray', { enabled }));
 // An alert waiting for its question asks for another look once the wait is over, taken at
 // the workspace this window last saved.
 let noticeWorkspace: Pick<Workspace, 'conversations'> | undefined;

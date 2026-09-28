@@ -64,6 +64,10 @@ async function attach() {
     window.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),
   );
   expect(config).toBe(identifier);
+  // Closing must quit the app (docs/BACKGROUND.md); builds from before the tray quit anyway.
+  await native.evaluate(() =>
+    window.__TAURI_INTERNALS__.invoke('set_close_to_tray', { enabled: false }).catch(() => {}),
+  );
   await native.getByRole('button', { name: 'Connections', exact: true }).click();
 }
 async function closeNative() {

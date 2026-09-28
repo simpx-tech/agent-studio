@@ -63,7 +63,7 @@ The readers launch installed CLIs in hidden, bounded processes and let each CLI 
 | Claude | Stream-JSON control `get_usage`, with `skip_behaviors: true` | 5-hour and 7-day `utilization` are percentages used. Fable comes from the server-labelled `model_scoped` array. Do not interpret undocumented internal bucket names. |
 | Gemini | Antigravity `--print /usage --output-format json` | Use only the Gemini Models group. Convert `remaining_fraction` to percentage used. An account can omit its 5-hour window. |
 
-Claude's structured usage interface is marked **experimental** by its SDK. The implementation was verified against installed Claude Code 2.1.263 and the official `@anthropic-ai/claude-agent-sdk` 0.3.263 types. Unavailable/changed responses produce an unavailable or last-reported state. Occasionally `rate_limits_available: true` arrives with `rate_limits: null`; this is a failed reading, not a zeroed account. Read-only queries time out after 25 seconds and are cancelled on app close.
+Claude's structured usage interface is marked **experimental** by its SDK. The implementation was verified against installed Claude Code 2.1.263 and the official `@anthropic-ai/claude-agent-sdk` 0.3.263 types. Unavailable/changed responses produce an unavailable or last-reported state. Occasionally `rate_limits_available: true` arrives with `rate_limits: null`; this is a failed reading, not a zeroed account. Read-only queries time out after 25 seconds and are cancelled when the app quits.
 
 ## Quota pace and context guidance
 

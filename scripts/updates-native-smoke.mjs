@@ -197,7 +197,11 @@ async function connect() {
   return until(
     async () => {
       const page = await nativePage(debugPort);
-      if (await page.evaluate(() => !!document.querySelector('.sidebar-tools'))) return page;
+      if (await page.evaluate(() => !!document.querySelector('.sidebar-tools'))) {
+        // Closing must quit, and install on an idle close, instead of keeping the tray.
+        await page.quitOnClose();
+        return page;
+      }
       page.close();
     },
     'The QA app did not open its window.',

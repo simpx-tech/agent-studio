@@ -159,6 +159,8 @@ test('the web viewer has no desktop update controls', async ({ page }) => {
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'App updates' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Restart to update' })).toHaveCount(0);
+    // A browser tab has no window of its own to keep running in a tray.
+    await expect(page.getByRole('heading', { name: 'Background' })).toHaveCount(0);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -86,6 +86,8 @@ export async function nativePage(port, expectedUrl) {
       if (!control || control.disabled) throw new Error(`Button unavailable: ${name}`);
       control.click();
     }, name);
+  const invoke = (command, args) =>
+    evaluate((command, args) => window.__TAURI_INTERNALS__.invoke(command, args), command, args);
   await cdp('Runtime.enable');
   return {
     cdp,
@@ -95,7 +97,10 @@ export async function nativePage(port, expectedUrl) {
     button,
     errors,
     close: () => socket.close(),
-    invoke: (command, args) =>
-      evaluate((command, args) => window.__TAURI_INTERNALS__.invoke(command, args), command, args),
+    invoke,
+    // Closing the window keeps the app in the system tray by default (docs/BACKGROUND.md), so a
+    // driver that ends the app from the title bar turns that off for its QA identity once it
+    // connects. Builds from before the tray have no such command and quit on close anyway.
+    quitOnClose: () => invoke('set_close_to_tray', { enabled: false }).catch(() => {}),
   };
 }
