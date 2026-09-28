@@ -59,7 +59,7 @@ it(`replaces a mark with the chat's later reply and drops it once the run is gon
   const first = observe([conversation], {});
   expect(first).toEqual({ [conversation.id]: reply(conversation).runId });
 
-  // A reply running again in that chat shows its spinner instead of a stale dot.
+  // A reply running again in that chat shows its elapsed time instead of a stale dot.
   const next = { ...reply(conversation), id: crypto.randomUUID(), runId: crypto.randomUUID() };
   conversation.messages.push(next as Message);
   next.status = 'running';

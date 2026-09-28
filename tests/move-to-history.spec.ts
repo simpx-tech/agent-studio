@@ -5,10 +5,13 @@ import { chooseTestFolder } from './folder-helper';
 const input = (page: Page) => page.getByLabel('Message', { exact: true });
 const title = (page: Page) => page.locator('.page-title');
 const activeTab = (page: Page) => page.getByRole('tab', { name: /^Active/ });
-const activeRows = (page: Page) =>
-  page.locator('#conversation-panel-active .conversation-item').allTextContents();
-const historyRows = (page: Page) =>
-  page.locator('#conversation-panel-history .conversation-item').allTextContents();
+// Row titles, without the elapsed time a running reply shows beside its title.
+const titles = (page: Page, panel: string) =>
+  page
+    .locator(`#conversation-panel-${panel} .conversation-item > span:not(.conversation-running)`)
+    .allTextContents();
+const activeRows = (page: Page) => titles(page, 'active');
+const historyRows = (page: Page) => titles(page, 'history');
 const row = (page: Page, name: string) =>
   page.locator('.conversation-row').filter({
     has: page.getByRole('button', { name, exact: true }),

@@ -767,8 +767,8 @@ pre {
 .scratch-item.current > svg {
   color: var(--text-secondary);
 }
-/* The open chat or draft has an accent bar at its left edge, distinct from the spinner of a
-   running reply. */
+/* The open chat or draft has an accent bar at its left edge, distinct from the elapsed time of
+   a running reply. */
 .conversation-list .conversation-item.current::before,
 .conversation-list .scratch-item.current::before {
   content: '';
@@ -794,10 +794,17 @@ pre {
   background: var(--success);
   box-shadow: 0 0 0 3px var(--success-soft);
 }
-/* A running reply spins like running calls and plan steps, and shows an orange question
-   instead while it waits for your answer. */
+/* A running reply counts its time so far, as running calls do, and shows an orange question
+   instead while it waits for your answer. A reply whose start cannot be read keeps a spinner. */
 .conversation-item .conversation-running {
   color: var(--accent-strong);
+}
+.conversation-item > span.conversation-running {
+  flex: none;
+  color: var(--accent-text);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 .conversation-item .conversation-waiting {
   color: var(--warning);

@@ -60,7 +60,7 @@ test('replies in different conversations run side by side and stop independently
   await expect(stop).toBeVisible();
   await expect(chat(page, 'First task').locator('.conversation-running')).toBeVisible();
   await expect(chat(page, 'Second task').locator('.conversation-running')).toBeVisible();
-  // The open chat is marked by a bar, never a dot, beside its running spinner.
+  // The open chat is marked by a bar, never a dot, beside its running time.
   const mark = await chat(page, 'Second task').evaluate((row) => {
     const style = getComputedStyle(row, '::before');
     return { width: parseFloat(style.width), height: parseFloat(style.height) };
@@ -83,6 +83,47 @@ test('replies in different conversations run side by side and stop independently
   await expect(page.getByText('First answer')).toBeVisible();
   await expect(send).toBeVisible();
   await expect(chat(page, 'First task').locator('.conversation-running')).toHaveCount(0);
+});
+
+test('a running chat shows how long its reply has run instead of a spinner', async ({ page }) => {
+  await page.clock.install();
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Timed task');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => heldRuns(page).then((runs) => runs.length)).toBe(1);
+  const [run] = await heldRuns(page);
+  const row = chat(page, 'Timed task');
+  const time = row.locator('.conversation-running');
+  await expect(time).toHaveText(/^\d+s$/);
+  await expect(row.locator('.spinning')).toHaveCount(0);
+
+  // The row and the reply's footer read one clock, so they always show the same second.
+  const readings = () =>
+    page.evaluate(() => {
+      const text = (selector: string) =>
+        document.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim();
+      return {
+        row: text('.conversation-item .conversation-running'),
+        footer: text('.running-reply-time'),
+      };
+    });
+  await page.clock.fastForward(72_000);
+  await expect(time).toHaveText(/^1m \d{1,2}s$/);
+  const shown = await readings();
+  expect(shown.footer).toBe(`${shown.row} elapsed`);
+  // Past an hour the row keeps hours and minutes, as running calls do.
+  await page.clock.fastForward(3_600_000);
+  await expect(time).toHaveText('1h 1m');
+  await expect(page.getByRole('timer', { name: 'Current reply elapsed time' })).toHaveText(
+    /^\s*1h 1m \d{1,2}s elapsed\s*$/,
+  );
+  await page.screenshot({ path: 'artifacts/sidebar-reply-time.png' });
+
+  await finish(page, run.runId, 'complete', 'Timed answer');
+  await expect(page.getByText('Timed answer')).toBeVisible();
+  await expect(time).toHaveCount(0);
 });
 
 test('a chat that is not open sends its queued message when its own reply completes', async ({

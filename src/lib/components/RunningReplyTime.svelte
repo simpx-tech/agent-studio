@@ -1,20 +1,14 @@
 <script lang="ts">
   import { Clock3 } from '@lucide/svelte';
+  import { clock } from '$lib/clock';
 
   let { createdAt }: { createdAt: string } = $props();
-  let now = $state(Date.now());
   const started = $derived(Date.parse(createdAt));
-  const elapsed = $derived(Math.max(0, Math.floor((now - started) / 1000)));
+  // The sidebar row of this chat counts from the same clock, so both show the same second.
+  const elapsed = $derived(Math.max(0, Math.floor((clock.now - started) / 1000)));
   const hours = $derived(Math.floor(elapsed / 3600));
   const minutes = $derived(Math.floor((elapsed % 3600) / 60));
   const seconds = $derived(elapsed % 60);
-
-  $effect(() => {
-    if (!Number.isFinite(started)) return;
-    now = Date.now();
-    const timer = setInterval(() => (now = Date.now()), 1000);
-    return () => clearInterval(timer);
-  });
 </script>
 
 <div

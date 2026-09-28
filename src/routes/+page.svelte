@@ -130,7 +130,8 @@
   import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
-  import { applyRunEvent, savesAtOnce } from '$lib/activity';
+  import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
+  import { clock } from '$lib/clock';
   import { awaitingAnswer } from '$lib/questions';
   import {
     messageBackgroundWork,
@@ -3887,11 +3888,17 @@
                                   size={14}
                                   class="conversation-waiting"
                                   aria-hidden="true"
-                                />{:else if runningReply}<LoaderCircle
-                                  size={14}
-                                  class="spinning conversation-running"
-                                  aria-hidden="true"
-                                />{/if}</button
+                                />{:else if runningReply}{@const started = Date.parse(
+                                  runningReply.createdAt,
+                                )}{#if Number.isFinite(started)}<span
+                                    class="conversation-running"
+                                    aria-hidden="true"
+                                    >{toolElapsed(Math.max(0, clock.now - started))}</span
+                                  >{:else}<LoaderCircle
+                                    size={14}
+                                    class="spinning conversation-running"
+                                    aria-hidden="true"
+                                  />{/if}{/if}</button
                             >{#if !c.archived && !conversationRunning(c)}<button
                                 class="conversation-archive"
                                 title="Move to history"
