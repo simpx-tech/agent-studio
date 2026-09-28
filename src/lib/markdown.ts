@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { Marked, type Token, type TokensList } from 'marked';
 import type { Visualization } from './visualizations';
-import type { SentFiles } from './sent-files';
+import { loneImage, type SentFiles } from './sent-files';
 import { siteLink } from './link-marks';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
@@ -75,7 +75,7 @@ export function renderMarkdown(text: string): string {
 type ReplyPart = { key: string } & (
   | { type: 'text'; html: string }
   | { type: 'visual'; visual: Visualization }
-  | { type: 'files'; files: SentFiles }
+  | { type: 'files'; groups: SentFiles[] }
 );
 
 // Only standalone, top-level markers can position a visual or a group of files already
@@ -105,6 +105,18 @@ export function replyContent(
     key = `text:${part.key}`;
     return true;
   }
+  /** Places a group, joining single pictures sent one call at a time into one gallery. */
+  function placeFiles(group: SentFiles) {
+    const id = `files:${group.id}`;
+    if (placed.has(id)) return;
+    flush();
+    const last = result.at(-1);
+    if (last?.type === 'files' && loneImage(group) && last.groups.every(loneImage))
+      last.groups.push(group);
+    else result.push({ key: id, type: 'files', groups: [group] });
+    placed.add(id);
+    key = `text:${id}`;
+  }
   for (const token of tokens) {
     const marker =
       token.type === 'html' &&
@@ -119,7 +131,7 @@ export function replyContent(
       continue;
     }
     const group = files.find((f) => f.id === marker[2]);
-    if (group) place({ key: `files:${group.id}`, type: 'files', files: group });
+    if (group) placeFiles(group);
   }
   flush();
   // Older replies and content received before its prose keep an inline fallback.
@@ -127,10 +139,7 @@ export function replyContent(
     if (!placed.has(`visual:${visual.id}`))
       result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
   }
-  for (const group of files) {
-    if (!placed.has(`files:${group.id}`))
-      result.push({ key: `files:${group.id}`, type: 'files', files: group });
-  }
+  for (const group of files) placeFiles(group);
   return result;
 }
 

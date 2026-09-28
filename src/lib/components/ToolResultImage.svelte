@@ -1,14 +1,7 @@
-<script module lang="ts">
-  import { createFetchCache, imageSize, type ToolOutputImage } from '$lib/tool-output';
-  import { readToolOutputImage } from '$lib/transport';
-  // Images a window already loaded, bounded so a long run of screenshots cannot pile up.
-  const images = createFetchCache<ToolOutputImage>(imageSize, { entries: 64, bytes: 96_000_000 });
-</script>
-
 <script lang="ts">
-  import { untrack } from 'svelte';
   import { ImageOff, RotateCcw } from '@lucide/svelte';
-  import { formatBytes, toolOutputImageUrl, type ToolOutputImageInfo } from '$lib/tool-output';
+  import { imageLabel, toolOutputImageUrl, type ToolOutputImageInfo } from '$lib/tool-output';
+  import { KeptImage } from '$lib/tool-output-images.svelte';
 
   let {
     runId,
@@ -17,6 +10,7 @@
     info,
     name,
     open,
+    tile = false,
   }: {
     runId: string;
     toolId: string;
@@ -24,61 +18,37 @@
     info: ToolOutputImageInfo;
     /** The tool that returned the image, for its description. */
     name: string;
-    open: (image: ToolOutputImage, label: string) => void;
+    /** Opens the image full size, from the button that was clicked. */
+    open: (from: HTMLElement) => void;
+    /** A gallery tile: the image fills the positioned box its gallery shapes, uncaptioned. */
+    tile?: boolean;
   } = $props();
 
-  let image = $state<ToolOutputImage>();
-  let error = $state('');
-  let attempt = $state(0);
-  // Only the image's identity selects it; relay updates of the call do not reload it.
-  const key = $derived(`${runId}\n${toolId}\n${info.index}`);
-  $effect(() => {
-    const current = key;
-    void attempt;
-    let live = true;
-    error = '';
-    untrack(() =>
-      images.get(current, () => readToolOutputImage(runId, toolId, info.index, connectionId)),
-    ).then(
-      (value) => {
-        if (live) image = value;
-      },
-      (reason) => {
-        if (live) error = String(reason instanceof Error ? reason.message : reason);
-      },
-    );
-    return () => {
-      live = false;
-    };
-  });
-  const label = $derived(
-    [info.width && info.height ? `${info.width} × ${info.height}` : '', formatBytes(info.bytes)]
-      .filter(Boolean)
-      .join(' · '),
-  );
+  const kept = new KeptImage(() => ({ runId, toolId, index: info.index, connectionId }));
+  const label = $derived(imageLabel(info));
   // Icons and other tiny images are enlarged with crisp pixels.
   const small = $derived((info.width ?? 64) < 64 && (info.height ?? 64) < 64);
 </script>
 
-<figure class="result-image" class:small>
-  {#if image}
+<figure class="result-image" class:small class:tile>
+  {#if kept.image}
     <button
       type="button"
-      title="Open image"
+      title={tile ? `${name} · ${label}` : 'Open image'}
       aria-label={`Open image ${info.index + 1}, ${label}`}
-      onclick={() => open(image!, label)}
+      onclick={(event) => open(event.currentTarget)}
     >
       <img
-        src={toolOutputImageUrl(image)}
+        src={toolOutputImageUrl(kept.image)}
         alt={`Image ${info.index + 1} returned by ${name}`}
         width={info.width}
         height={info.height}
       />
     </button>
-  {:else if error}
+  {:else if kept.error}
     <div class="image-state failed" role="alert">
-      <ImageOff size={16} aria-hidden="true" /><span>{error}</span>
-      <button type="button" class="image-retry" onclick={() => attempt++}
+      <ImageOff size={16} aria-hidden="true" /><span>{kept.error}</span>
+      <button type="button" class="image-retry" onclick={() => kept.retry()}
         ><RotateCcw size={12} aria-hidden="true" />Retry</button
       >
     </div>
@@ -87,13 +57,17 @@
     <div
       class="image-state"
       role="status"
-      style:aspect-ratio={info.width && info.height ? `${info.width} / ${info.height}` : undefined}
-      style:width={info.width ? `min(100%, ${Math.max(info.width, small ? 64 : 0)}px)` : undefined}
+      style:aspect-ratio={!tile && info.width && info.height
+        ? `${info.width} / ${info.height}`
+        : undefined}
+      style:width={!tile && info.width
+        ? `min(100%, ${Math.max(info.width, small ? 64 : 0)}px)`
+        : undefined}
     >
       Loading image…
     </div>
   {/if}
-  <figcaption>{label}</figcaption>
+  {#if !tile}<figcaption>{label}</figcaption>{/if}
 </figure>
 
 <style>
@@ -132,6 +106,34 @@
     min-width: 64px;
     image-rendering: pixelated;
   }
+  /* A gallery tile fills the box its gallery gives it, which already has the image's shape. */
+  .result-image.tile {
+    position: absolute;
+    inset: 0;
+    display: block;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: none;
+    overflow: hidden;
+  }
+  .tile button:not(.image-retry) {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+  }
+  .tile button:not(.image-retry):hover,
+  .tile button:not(.image-retry):focus-visible {
+    outline: 1px solid var(--border-hover);
+    outline-offset: -1px;
+  }
+  .tile img {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    min-width: 0;
+    object-fit: contain;
+  }
   .image-state {
     display: flex;
     flex-wrap: wrap;
@@ -147,6 +149,14 @@
     background: var(--hover);
     font-size: var(--text-xs);
     text-align: center;
+  }
+  .tile .image-state {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    max-height: none;
+    overflow: hidden;
   }
   .image-state.failed {
     color: var(--danger);

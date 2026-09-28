@@ -19,7 +19,6 @@
 </script>
 
 <script lang="ts">
-  import { tick } from 'svelte';
   import {
     Box,
     ChevronLeft,
@@ -28,7 +27,6 @@
     Pause,
     Play,
     RotateCcw,
-    X,
     ZoomIn,
     ZoomOut,
   } from '@lucide/svelte';
@@ -47,6 +45,7 @@
     type ModelViewer,
     type ViewerStatus,
   } from '$lib/model-viewer';
+  import type { FileViewer, ViewedModel } from '$lib/file-viewer.svelte';
   import ChoicePicker from './ChoicePicker.svelte';
 
   let {
@@ -54,16 +53,22 @@
     toolId,
     connectionId,
     file,
+    caption,
+    viewer,
   }: {
     runId: string;
     toolId: string;
     connectionId?: string;
     file: SentFile;
+    /** The caption of the group the model came in. */
+    caption?: string;
+    /** The viewer that connects this model with the chat's other files. */
+    viewer: FileViewer;
   } = $props();
 
   type View = 'inline' | 'expanded';
+  // Whether the file viewer shows this model, whose inline view then gives up its scene.
   let expanded = $state(false);
-  let dialog = $state<HTMLDialogElement>();
   const format = $derived(modelFormats[file.mediaType as ToolOutputModelType] ?? 'glb');
   const label = $derived(`${format.toUpperCase()} · ${formatBytes(file.bytes)}`);
   // Only the model's identity selects it: relay updates of the reply do not reload it, while
@@ -110,9 +115,13 @@
         },
       );
   }
-  /** Views are read once their stage comes near the screen, as a model is. */
-  function viewsStage(stage: HTMLElement) {
-    return { destroy: whenNear(stage, loadViews) };
+  /**
+   * Views are read once their stage comes near the screen, as a model is; the file viewer shows
+   * its stage at once, even when the viewer stepped to a model far from the chat's view.
+   */
+  function viewsStage(stage: HTMLElement, view: View) {
+    if (view === 'inline') return { destroy: whenNear(stage, loadViews) };
+    loadViews();
   }
   function step(by: number) {
     turn = (turn + by + modelViewCount) % modelViewCount;
@@ -163,7 +172,7 @@
   const viewers: Partial<Record<View, ModelViewer>> = {};
 
   /** Each stage builds its scene through a viewer that keeps it only while it is on screen. */
-  function viewer(stage: HTMLElement, view: View) {
+  function scene(stage: HTMLElement, view: View) {
     statuses[view] = undefined;
     if (view === 'inline') {
       clips = [];
@@ -193,7 +202,7 @@
       },
     };
   }
-  const each = (act: (viewer: ModelViewer) => void) => Object.values(viewers).forEach(act);
+  const each = (act: (scene: ModelViewer) => void) => Object.values(viewers).forEach(act);
   function play(next: number) {
     clip = next;
     playing = true;
@@ -206,21 +215,27 @@
     playing = !playing;
     each((v) => v.setPlaying(playing));
   }
-  // The inline view keeps its place in the chat while the expanded one is open, so the reading
-  // position holds and focus returns to Expand on close; it only gives up its scene.
-  async function expand() {
-    expanded = true;
-    viewers.inline?.suspend(true);
-    await tick();
-    dialog?.showModal();
+  // The inline view keeps its place in the chat while the file viewer shows the model, so the
+  // reading position holds and focus returns to Expand on close; it only gives up its scene.
+  function shown(showing: boolean) {
+    expanded = showing;
+    viewers.inline?.suspend(showing);
   }
+  const viewed = $derived<ViewedModel>({
+    kind: 'model',
+    name: file.name,
+    label: viewsOnly ? `${label} · ${modelViewCount} views` : label,
+    caption,
+    view: expandedView,
+    shown,
+  });
 </script>
 
 {#snippet stage(view: View)}
   {@const status = statuses[view]}
   {#key key}
     <!-- The viewer adds the canvas that draws the parsed model; it runs no code from the file. -->
-    <div class="model-stage" use:viewer={view}>
+    <div class="model-stage" class:expanded={view === 'expanded'} use:scene={view}>
       {#if status?.phase === 'failed'}
         <p class="model-note failed" role="alert">
           {status.message}
@@ -237,8 +252,10 @@
 
 {#snippet bar(view: View)}
   <div class="model-bar">
-    <span class="model-name" title={file.name}><Box size={13} aria-hidden="true" />{file.name}</span
-    >
+    <!-- The file viewer's heading names the model it shows. -->
+    {#if view === 'inline'}<span class="model-name" title={file.name}
+        ><Box size={13} aria-hidden="true" />{file.name}</span
+      >{/if}
     {#if clips.length}
       <button
         type="button"
@@ -287,18 +304,18 @@
         class="model-action"
         aria-label={`Expand ${file.name}`}
         aria-haspopup="dialog"
-        onclick={expand}
+        onclick={(event) => viewer.open(event.currentTarget)}
       >
         <Maximize2 size={13} aria-hidden="true" />
       </button>
     {/if}
-    <span class="model-size">{label}</span>
+    {#if view === 'inline'}<span class="model-size">{label}</span>{/if}
   </div>
 {/snippet}
 
-{#snippet turntable()}
+{#snippet turntable(view: View)}
   {#key key}
-    <div class="model-stage" use:viewsStage>
+    <div class="model-stage" class:expanded={view === 'expanded'} use:viewsStage={view}>
       {#if views.phase === 'ready'}
         <div
           class="model-turntable"
@@ -330,8 +347,10 @@
 
 {#snippet turntableBar(view: View)}
   <div class="model-bar">
-    <span class="model-name" title={file.name}><Box size={13} aria-hidden="true" />{file.name}</span
-    >
+    <!-- The file viewer's heading names the model it shows. -->
+    {#if view === 'inline'}<span class="model-name" title={file.name}
+        ><Box size={13} aria-hidden="true" />{file.name}</span
+      >{/if}
     <span class="model-spacer"></span>
     <button
       type="button"
@@ -354,7 +373,7 @@
         class="model-action"
         aria-label={`Expand ${file.name}`}
         aria-haspopup="dialog"
-        onclick={expand}
+        onclick={(event) => viewer.open(event.currentTarget)}
       >
         <Maximize2 size={13} aria-hidden="true" />
       </button>
@@ -367,9 +386,22 @@
   </div>
 {/snippet}
 
-<figure class="model-view">
+<!-- The file viewer draws this at full size, beside the chat's other files. -->
+{#snippet expandedView()}
+  <div class="model-expanded">
+    {#if viewsOnly}
+      {@render turntable('expanded')}
+      {@render turntableBar('expanded')}
+    {:else}
+      {@render stage('expanded')}
+      {@render bar('expanded')}
+    {/if}
+  </div>
+{/snippet}
+
+<figure class="model-view" {@attach viewer.attach(viewed)}>
   {#if viewsOnly}
-    {@render turntable()}
+    {@render turntable('inline')}
     {@render turntableBar('inline')}
   {:else}
     {@render stage('inline')}
@@ -377,39 +409,11 @@
   {/if}
 </figure>
 
-<dialog
-  bind:this={dialog}
-  class="model-preview"
-  aria-label="Model preview"
-  onclose={() => {
-    expanded = false;
-    viewers.inline?.suspend(false);
-  }}
->
-  {#if expanded}
-    <div class="model-preview-heading">
-      <span>{file.name} · {label}</span><button
-        type="button"
-        class="icon-button"
-        aria-label="Close model preview"
-        onclick={() => dialog?.close()}><X size={18} /></button
-      >
-    </div>
-    {#if viewsOnly}
-      {@render turntable()}
-      {@render turntableBar('expanded')}
-    {:else}
-      {@render stage('expanded')}
-      {@render bar('expanded')}
-    {/if}
-  {/if}
-</dialog>
-
 <style>
   .model-view {
     display: grid;
     gap: 4px;
-    max-width: 100%;
+    width: 100%;
     margin: 0;
     padding: 4px;
     border: 1px solid var(--border);
@@ -426,8 +430,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: min(100%, 420px);
-    height: 280px;
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    min-height: 220px;
+    max-height: min(560px, 70vh);
     border-radius: var(--radius-xs);
     background: radial-gradient(120% 90% at 50% 0%, var(--hover), transparent 70%), var(--code-bg);
     overflow: hidden;
@@ -522,38 +528,24 @@
     background: var(--hover);
     color: var(--text);
   }
-  .model-preview {
-    width: min(94vw, 1100px);
-    max-height: 94vh;
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-lg);
-    background: var(--surface-overlay);
-    color: var(--text);
-    box-shadow: var(--shadow-xl);
-  }
-  .model-preview::backdrop {
-    background: var(--backdrop);
-  }
-  .model-preview-heading {
+  /* In the file viewer the stage takes the room its controls leave. */
+  .model-expanded {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 6px 6px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    overflow-wrap: anywhere;
-  }
-  .model-preview .model-stage {
-    width: 100%;
-    height: min(72vh, 720px);
-    border-radius: 0;
-  }
-  .model-preview .model-bar {
-    padding: 6px 10px;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
     color: var(--text-muted);
     font-size: var(--text-2xs);
+  }
+  .model-stage.expanded {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    aspect-ratio: auto;
+    border-radius: 0;
+  }
+  .model-expanded .model-bar {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
   }
 </style>

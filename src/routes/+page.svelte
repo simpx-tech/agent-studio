@@ -209,6 +209,8 @@
   import MessageView from '$lib/components/MessageView.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
   import SubagentPanel from '$lib/components/SubagentPanel.svelte';
+  import FileViewer from '$lib/components/FileViewer.svelte';
+  import { provideFileViewer } from '$lib/file-viewer.svelte';
   import { findSubagent, replyTools } from '$lib/subagents';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -417,6 +419,8 @@
   // Steering inputs still being delivered, by run.
   let steeringPending = $state<Record<string, boolean>>({});
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
+  // Every file the open chat's replies show, connected in one viewer that steps through them.
+  const shownFiles = provideFileViewer();
   let selectedArtifact = $state<Artifact | null>(null);
   let artifactMode = $state<'modal' | 'panel'>('modal');
   let artifactConversationId = $state<string | null>(null);
@@ -4608,6 +4612,7 @@
             open={(agentId) => subagentReply && openSubagent(subagentReply.id, agentId)}
             close={() => (subagentView = null)}
           />{/if}
+        <FileViewer viewer={shownFiles} />
       </div>
     {:else if view === 'connections'}
       {#key workspaceSession}

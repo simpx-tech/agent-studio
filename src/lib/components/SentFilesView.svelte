@@ -1,116 +1,195 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { X } from '@lucide/svelte';
-  import { imageInfo, isModel, type SentFiles } from '$lib/sent-files';
-  import { toolOutputImageUrl, type ToolOutputImage } from '$lib/tool-output';
+  import {
+    fileRuns,
+    galleryRows,
+    imageAspect,
+    imageInfo,
+    type FileRun,
+    type SentFiles,
+    type ShownFile,
+  } from '$lib/sent-files';
+  import { imageLabel } from '$lib/tool-output';
+  import { FileViewer as Viewer, fileViewer, type ViewedImage } from '$lib/file-viewer.svelte';
   import ToolResultImage from './ToolResultImage.svelte';
   import ModelView from './ModelView.svelte';
+  import FileViewer from './FileViewer.svelte';
 
   let {
-    files,
+    groups,
     connectionId,
   }: {
-    /** One accepted call: its images stay on the computer that ran the reply. */
-    files: SentFiles;
+    /**
+     * Accepted calls shown together: one group, or single images sent one call at a time and
+     * placed side by side. Their files stay on the computer that ran the reply.
+     */
+    groups: SentFiles[];
     connectionId?: string;
   } = $props();
 
-  let preview = $state<{ image: ToolOutputImage; label: string }>();
-  let dialog = $state<HTMLDialogElement>();
-  let previewName = $state('');
-  async function open(image: ToolOutputImage, label: string, name: string) {
-    preview = { image, label };
-    previewName = name;
-    await tick();
-    dialog?.showModal();
+  // The chat connects every reply's files in one viewer; elsewhere a group has its own.
+  const shared = fileViewer();
+  const viewer = shared ?? new Viewer();
+  const runs = $derived(fileRuns(groups));
+  // Single images from several calls keep each call's caption under its own tile.
+  const joined = $derived(groups.length > 1);
+  const tileCaptions = $derived(joined && groups.some((group) => group.caption));
+  /** A gallery row never grows taller than a lone image may stand in the chat. */
+  const rowHeight = 320;
+  // Between tiles, and the gallery's padding and border around them, as its styles set.
+  const gap = 4;
+  const frame = 5;
+  const itemKey = ({ group, file }: ShownFile) => `${group.id}:${file.index}`;
+  const runKey = (run: FileRun) =>
+    run.kind === 'model' ? `model:${itemKey(run.item)}` : `image:${itemKey(run.items[0])}`;
+
+  function viewed({ group, file }: ShownFile): ViewedImage {
+    const info = imageInfo(file);
+    return {
+      kind: 'image',
+      runId: group.runId,
+      toolId: group.toolId,
+      connectionId,
+      info,
+      name: file.name,
+      label: imageLabel(info),
+      caption: group.caption,
+      alt: `Full size ${file.name}`,
+    };
+  }
+  /** Consecutive images as rows of equal height that fill the gallery's width. */
+  function gallery(items: ShownFile[]) {
+    const aspects = items.map(({ file }) => imageAspect(file));
+    const rows = galleryRows(aspects).map((row) => ({
+      items: row.map((index) => ({ ...items[index], aspect: aspects[index] })),
+      // Its width at the tallest row height, gaps included.
+      widest: row.reduce((sum, index) => sum + aspects[index] * rowHeight, (row.length - 1) * gap),
+    }));
+    // A gallery whose rows all stop at that height is only as wide as its widest row.
+    return { rows, widest: Math.max(...rows.map((row) => row.widest)) + 2 * frame };
   }
 </script>
 
 <figure class="sent-files">
-  <div class="sent-images">
-    {#each files.files as file (`${file.mediaType}:${file.index}`)}
-      {#if isModel(file)}
-        <ModelView runId={files.runId} toolId={files.toolId} {connectionId} {file} />
-      {:else}
+  {#each runs as run (runKey(run))}
+    {#if run.kind === 'model'}
+      <ModelView
+        runId={run.item.group.runId}
+        toolId={run.item.group.toolId}
+        {connectionId}
+        file={run.item.file}
+        caption={run.item.group.caption}
+        {viewer}
+      />
+    {:else if run.items.length === 1}
+      {@const item = run.items[0]}
+      <div class="sent-image" {@attach viewer.attach(viewed(item))}>
         <ToolResultImage
-          runId={files.runId}
-          toolId={files.toolId}
+          runId={item.group.runId}
+          toolId={item.group.toolId}
           {connectionId}
-          info={imageInfo(file)}
-          name={file.name}
-          open={(image, label) => open(image, label, file.name)}
+          info={imageInfo(item.file)}
+          name={item.file.name}
+          open={(from) => viewer.open(from)}
         />
-      {/if}
-    {/each}
-  </div>
-  {#if files.caption}<figcaption>{files.caption}</figcaption>{/if}
-</figure>
-
-<dialog
-  bind:this={dialog}
-  class="image-preview"
-  aria-label="Image preview"
-  onclose={() => (preview = undefined)}
->
-  {#if preview}
-    <div class="image-preview-heading">
-      <span>{previewName} · {preview.label}</span><button
-        type="button"
-        class="icon-button"
-        aria-label="Close image preview"
-        onclick={() => dialog?.close()}><X size={18} /></button
+      </div>
+    {:else}
+      {@const layout = gallery(run.items)}
+      <div
+        class="sent-gallery"
+        role="group"
+        aria-label={`${run.items.length} images`}
+        style:max-width={`${layout.widest}px`}
       >
-    </div>
-    <img src={toolOutputImageUrl(preview.image)} alt={`Full size ${previewName}`} />
-  {/if}
-</dialog>
+        {#each layout.rows as row, index (index)}
+          <div class="gallery-row" style:max-width={`${row.widest}px`}>
+            {#each row.items as item (itemKey(item))}
+              <div
+                class="gallery-tile"
+                style:flex-grow={item.aspect}
+                {@attach viewer.attach(viewed(item))}
+              >
+                <div class="gallery-image" style:aspect-ratio={item.aspect}>
+                  <ToolResultImage
+                    runId={item.group.runId}
+                    toolId={item.group.toolId}
+                    {connectionId}
+                    info={imageInfo(item.file)}
+                    name={item.file.name}
+                    open={(from) => viewer.open(from)}
+                    tile
+                  />
+                </div>
+                {#if tileCaptions}<span class="gallery-caption" title={item.group.caption}
+                    >{item.group.caption ?? ''}</span
+                  >{/if}
+              </div>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  {/each}
+  {#if !joined && groups[0]?.caption}<figcaption>{groups[0].caption}</figcaption>{/if}
+</figure>
+{#if !shared}<FileViewer {viewer} />{/if}
 
 <style>
   .sent-files {
     display: grid;
-    gap: 6px;
-    margin: 0 0 14px;
-  }
-  .sent-images {
-    display: flex;
-    flex-wrap: wrap;
     gap: 8px;
     min-width: 0;
+    margin: 0 0 14px;
+  }
+  .sent-image {
+    display: flex;
+    min-width: 0;
+  }
+  /* Rows of equal height: each tile's width follows its image's shape, so none is cropped. */
+  .sent-gallery {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+  }
+  .sent-gallery:hover {
+    border-color: var(--border-hover);
+  }
+  .gallery-row {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+  }
+  .gallery-tile {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 1;
+    flex-basis: 0;
+    gap: 2px;
+    min-width: 0;
+  }
+  .gallery-image {
+    position: relative;
+    border-radius: var(--radius-xs);
+    background: var(--hover);
+    overflow: hidden;
+  }
+  /* One line under each tile, so the tiles of a row keep one height. */
+  .gallery-caption {
+    min-height: 1.5em;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   figcaption {
     color: var(--text-muted);
     font-size: var(--text-xs);
     line-height: 1.5;
-  }
-  .image-preview {
-    max-width: min(96vw, 1600px);
-    max-height: 94vh;
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-lg);
-    background: var(--surface-overlay);
-    color: var(--text);
-    box-shadow: var(--shadow-xl);
-  }
-  .image-preview::backdrop {
-    background: var(--backdrop);
-  }
-  .image-preview-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 6px 6px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    overflow-wrap: anywhere;
-  }
-  .image-preview img {
-    display: block;
-    max-width: min(96vw, 1600px);
-    max-height: calc(94vh - 48px);
-    margin: 0 auto;
-    object-fit: contain;
   }
 </style>

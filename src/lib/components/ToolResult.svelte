@@ -6,19 +6,16 @@
 </script>
 
 <script lang="ts">
-  import { untrack, tick } from 'svelte';
-  import { Check, Copy, ImageOff, LoaderCircle, RotateCcw, X } from '@lucide/svelte';
+  import { untrack } from 'svelte';
+  import { Check, Copy, ImageOff, LoaderCircle, RotateCcw } from '@lucide/svelte';
   import type { ToolActivity } from '$lib/activity';
   import type { Message } from '$lib/domain';
   import { highlightCode } from '$lib/markdown';
-  import {
-    formatBytes,
-    outputLines,
-    toolOutputImageUrl,
-    type ToolOutputImage,
-  } from '$lib/tool-output';
+  import { formatBytes, imageLabel, outputLines, type ToolOutputImageInfo } from '$lib/tool-output';
+  import { FileViewer as Viewer, type ViewedImage } from '$lib/file-viewer.svelte';
   import { fileLanguage, primaryCommand } from '$lib/tool-presentation';
   import ToolResultImage from './ToolResultImage.svelte';
+  import FileViewer from './FileViewer.svelte';
 
   let {
     tool,
@@ -160,12 +157,19 @@
     copyTimer = setTimeout(() => (copied = ''), 1500);
   }
 
-  let preview = $state<{ image: ToolOutputImage; label: string }>();
-  let dialog = $state<HTMLDialogElement>();
-  async function open(image: ToolOutputImage, label: string) {
-    preview = { image, label };
-    await tick();
-    dialog?.showModal();
+  // A call's images open full size in a viewer of their own, which steps through them.
+  const images = new Viewer();
+  function viewed(info: ToolOutputImageInfo): ViewedImage {
+    return {
+      kind: 'image',
+      runId: runId!,
+      toolId: tool.id,
+      connectionId,
+      info,
+      name: tool.path ?? tool.name,
+      label: imageLabel(info),
+      alt: `Full size image returned by ${tool.name}`,
+    };
   }
 </script>
 
@@ -328,14 +332,16 @@
             {#if output.images.length}
               <div class="result-images">
                 {#each output.images as info (info.index)}
-                  <ToolResultImage
-                    runId={runId!}
-                    toolId={tool.id}
-                    {connectionId}
-                    {info}
-                    name={tool.name}
-                    {open}
-                  />
+                  <div class="result-image-place" {@attach images.attach(viewed(info))}>
+                    <ToolResultImage
+                      runId={runId!}
+                      toolId={tool.id}
+                      {connectionId}
+                      {info}
+                      name={tool.name}
+                      open={(from) => images.open(from)}
+                    />
+                  </div>
                 {/each}
               </div>
             {/if}
@@ -360,24 +366,7 @@
     </div>{/if}
 </div>
 
-<dialog
-  bind:this={dialog}
-  class="image-preview"
-  aria-label="Image preview"
-  onclose={() => (preview = undefined)}
->
-  {#if preview}
-    <div class="image-preview-heading">
-      <span>{tool.path ?? tool.name} · {preview.label}</span><button
-        type="button"
-        class="icon-button"
-        aria-label="Close image preview"
-        onclick={() => dialog?.close()}><X size={18} /></button
-      >
-    </div>
-    <img src={toolOutputImageUrl(preview.image)} alt={`Full size image returned by ${tool.name}`} />
-  {/if}
-</dialog>
+<FileViewer viewer={images} />
 
 <style>
   .tool-result {
@@ -556,35 +545,7 @@
     gap: 8px;
     padding: 8px;
   }
-  .image-preview {
-    max-width: min(96vw, 1600px);
-    max-height: 94vh;
-    padding: 0;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-lg);
-    background: var(--surface-overlay);
-    color: var(--text);
-    box-shadow: var(--shadow-xl);
-  }
-  .image-preview::backdrop {
-    background: var(--backdrop);
-  }
-  .image-preview-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 6px 6px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    overflow-wrap: anywhere;
-  }
-  .image-preview img {
-    display: block;
-    max-width: min(96vw, 1600px);
-    max-height: calc(94vh - 48px);
-    margin: 0 auto;
-    object-fit: contain;
+  .result-image-place {
+    display: contents;
   }
 </style>

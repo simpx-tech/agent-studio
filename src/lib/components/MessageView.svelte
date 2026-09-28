@@ -194,7 +194,7 @@
         {#if part.type === 'visual'}
           <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
         {:else if part.type === 'files'}
-          <SentFilesView files={part.files} connectionId={author.connectionId} />
+          <SentFilesView groups={part.groups} connectionId={author.connectionId} />
         {:else}
           <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
           <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->

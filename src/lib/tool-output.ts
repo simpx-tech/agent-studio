@@ -190,3 +190,13 @@ export function formatBytes(bytes: number): string {
   const gb = mb / 1024;
   return `${gb < 10 ? gb.toFixed(1) : Math.round(gb)} GB`;
 }
+
+/** An image's dimensions and size, as its thumbnail and the viewer name them. */
+export function imageLabel(info: ToolOutputImageInfo): string {
+  return [
+    info.width && info.height ? `${info.width} × ${info.height}` : '',
+    formatBytes(info.bytes),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
