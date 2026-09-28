@@ -95,6 +95,7 @@
     runAgent,
     cancelRun,
     releaseConversation,
+    closeConversation,
     signIn,
     openLink,
     getInstallation,
@@ -1241,11 +1242,14 @@
               workspace.inputTemplates = value.inputTemplates;
               workspace.claudeInstructions = value.claudeInstructions;
               workspace.appSessions = value.appSessions;
+              const kept = new Set(value.conversations.map((c) => c.id));
+              const deleted = workspace.conversations.filter((c) => !kept.has(c.id));
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
                 return existing ? replaceFields(existing, incoming) : incoming;
               });
+              releaseDeleted(deleted.map((c) => c.id));
               // A conversation deleted on another device takes its unsent draft along.
               const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
               for (const key of [...drafts.keys()])
@@ -1277,6 +1281,7 @@
               const gone = new Set(remove);
               if (gone.size)
                 workspace.conversations = workspace.conversations.filter((c) => !gone.has(c.id));
+              releaseDeleted(gone);
               for (const incoming of upsert) {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
                 // Preserve active object identities while network responses arrive.
@@ -2365,6 +2370,11 @@
       selectingLocation = false;
     }
   }
+  // Chats deleted on another device leave no CLI process parked here. Deletion closes a chat
+  // wherever it happens; History moves arriving by sync may be another computer's startup.
+  function releaseDeleted(ids: Iterable<string>) {
+    for (const id of ids) void releaseConversation(id).catch(() => {});
+  }
   // Moves a conversation to History. The open chat gives way to the Active conversation listed
   // below it, else above it (a search match first), or to a new chat when none is left. From the
   // sidebar, the view and the phone drawer stay as they are.
@@ -2386,6 +2396,8 @@
     c.archived = true;
     c.updatedAt = new Date().toISOString();
     saveSoon(c.id);
+    // Closing a chat is the user's call, and it closes the chat's parked CLI process too.
+    void closeConversation(c.id, c.settings.connectionId).catch(() => {});
     if (!open) return;
     const shown = view,
       drawer = sidebarOpen;

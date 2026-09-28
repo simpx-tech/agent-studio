@@ -1159,7 +1159,8 @@ pub fn run() {
                 }
                 prune_chat_images(&handle);
             });
-            // Release parked CLI processes that stayed idle past their limit.
+            // Drop parked CLI processes that exited on their own. Idle ones stay until the
+            // user closes their chat.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {

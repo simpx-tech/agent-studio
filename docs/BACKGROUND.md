@@ -9,8 +9,8 @@ app does on this computer carries on:
   Clicking an alert shows the window at its chat.
 - Paired phones and other computers can still start chats that run here, because relay sync and
   presence continue.
-- Parked CLI processes stay ready for the next reply until their usual fifteen idle minutes pass,
-  and app and CLI update checks continue.
+- Parked CLI processes stay ready for the next reply until you move their chat to History,
+  delete it or quit, and app and CLI update checks continue.
 
 ## Getting back and quitting
 

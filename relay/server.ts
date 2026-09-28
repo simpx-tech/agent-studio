@@ -66,10 +66,16 @@ const jobInput = z
       'answer',
       'elicitation',
       'steer',
+      'release',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'release' &&
+      !z.object({ conversationId: uuid, connectionId: uuid }).strict().safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid release request' });
     if (job.method === 'mentions' && !mentionRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid mention search' });
     if (

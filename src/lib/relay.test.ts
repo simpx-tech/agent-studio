@@ -492,6 +492,33 @@ describe('real HTTP relay', () => {
     expect((await f.call('GET', 'jobs', undefined, f.source)).body).toEqual([]);
     expect((await f.call('GET', 'jobs', undefined, f.target)).body[0].args).toEqual(job.args);
   });
+  it('routes a chat closed on another device to its host with only its identities', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'release',
+      args: { conversationId: crypto.randomUUID(), connectionId: crypto.randomUUID() },
+    };
+    for (const args of [
+      { ...job.args, path: '/outside/process' },
+      { ...job.args, conversationId: 'every-conversation' },
+      { conversationId: job.args.conversationId },
+    ])
+      expect((await f.call('POST', 'jobs', { ...job, args })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.target)).body[0]).toMatchObject({
+      method: 'release',
+      args: job.args,
+    });
+  });
   it('routes explicit plan decisions to the owning host and retains proposed plans in checkpoints', async () => {
     const f = await fixture(),
       id = crypto.randomUUID(),

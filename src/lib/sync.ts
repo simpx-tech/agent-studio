@@ -504,7 +504,8 @@ export type RelayJob = {
     | 'undoFiles'
     | 'answer'
     | 'elicitation'
-    | 'steer';
+    | 'steer'
+    | 'release';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

@@ -1785,6 +1785,8 @@ async function localCall(
     }
     return result;
   }
+  if (method === 'release')
+    return invoke('release_conversation', { conversationId: args.conversationId });
   const commands = {
     models: 'list_models',
     usage: 'read_usage',
@@ -2611,12 +2613,22 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
   await invoke('cancel_run', { runId, waitForCompletion });
 }
 /**
- * Release the parked CLI process of a deleted conversation. Remote hosts keep no per-job
- * release route; their parked processes expire on the host's idle limit instead.
+ * Release the CLI process this computer keeps parked for a conversation deleted or rewound
+ * here, or deleted on another device and removed here by sync. Nothing else ends one: a
+ * parked process stays until the user closes its chat.
  */
 export async function releaseConversation(conversationId: string, connectionId?: string) {
   if (!desktop() || remoteTarget(connectionId)) return;
   await invoke('release_conversation', { conversationId });
+}
+/**
+ * The user moved a chat to History, which closes it: the computer that runs it releases its
+ * parked CLI process, asked through a relay job from another device. History moves arriving
+ * by sync close nothing, since another desktop's startup sends them too.
+ */
+export async function closeConversation(conversationId: string, connectionId?: string) {
+  if (!connectionId || !remoteTarget(connectionId)) return releaseConversation(conversationId);
+  await routed('release', { conversationId, connectionId }, connectionId);
 }
 export async function undoFiles(
   conversationId: string,

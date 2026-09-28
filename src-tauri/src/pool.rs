@@ -2,6 +2,9 @@
 //! Claude or Codex process waiting on stdin so the conversation's next reply can continue
 //! in the same process, keeping its integrations, background work, and token counters.
 //! A process is reused only when the launch identity still matches; anything else restarts.
+//! Closing a chat is the user's decision: a parked process stays until its chat moves to
+//! History or is deleted, a later reply needs a different launch, or the app quits. Nothing
+//! expires or evicts one, so background work such as a Monitor runs as long as it needs.
 use crate::providers::{Executable, RunRequest};
 use std::{
     collections::HashMap,
@@ -18,13 +21,8 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWrite, BufReader},
     process::{Child, ChildStdin},
     sync::mpsc,
-    time::Instant,
 };
 
-/// Parked processes are released after this much idle time.
-pub const IDLE_LIMIT: Duration = Duration::from_secs(15 * 60);
-/// Bound idle memory: each Claude process is a Node runtime plus its MCP servers.
-pub const MAX_PARKED: usize = 4;
 /// How long an in-band interrupt may take before the process tree is killed instead.
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
@@ -241,16 +239,12 @@ fn installed(exe: &Executable) -> Option<String> {
 }
 
 #[derive(Default)]
-pub struct Pool(Mutex<HashMap<String, (Process, Instant)>>);
+pub struct Pool(Mutex<HashMap<String, Process>>);
 
 impl Pool {
     /// Remove the conversation's parked process so a reply can decide to reuse or replace it.
     pub fn take(&self, conversation: &str) -> Option<Process> {
-        self.0
-            .lock()
-            .ok()?
-            .remove(conversation)
-            .map(|(process, _)| process)
+        self.0.lock().ok()?.remove(conversation)
     }
     pub fn len(&self) -> usize {
         self.0.lock().map(|parked| parked.len()).unwrap_or(0)
@@ -260,72 +254,49 @@ impl Pool {
         self.0.lock().map_or(true, |parked| {
             parked
                 .values()
-                .any(|(process, _)| process.exe.provider == provider && process.exe.wsl.is_none())
+                .any(|process| process.exe.provider == provider && process.exe.wsl.is_none())
         })
     }
-    /// Keep the process for the conversation's next reply, evicting the oldest idle
-    /// process beyond the bound and any previous process of the same conversation.
+    /// Keep the process for the conversation's next reply, replacing any previous process of
+    /// the same conversation. Every conversation keeps its own, however many are parked.
     pub async fn park(&self, conversation: &str, mut process: Process) {
         process.park();
-        let mut evicted = Vec::new();
-        {
-            let Ok(mut parked) = self.0.lock() else {
-                evicted.push(process);
-                for process in evicted.iter_mut() {
-                    process.kill().await;
-                }
-                return;
-            };
-            if let Some((previous, _)) = parked.remove(conversation) {
-                evicted.push(previous);
-            }
-            while parked.len() >= MAX_PARKED {
-                let oldest = parked
-                    .iter()
-                    .min_by_key(|(_, (_, at))| *at)
-                    .map(|(id, _)| id.clone());
-                match oldest.and_then(|id| parked.remove(&id)) {
-                    Some((process, _)) => evicted.push(process),
-                    None => break,
-                }
-            }
-            parked.insert(conversation.into(), (process, Instant::now()));
-        }
-        for process in evicted.iter_mut() {
-            process.kill().await;
+        let replaced = match self.0.lock() {
+            Ok(mut parked) => parked.insert(conversation.into(), process),
+            Err(_) => Some(process),
+        };
+        if let Some(mut replaced) = replaced {
+            replaced.kill().await;
         }
     }
-    /// Release a conversation's process, for deletion or an explicit restart.
+    /// Release a conversation's process when its chat is closed (moved to History or
+    /// deleted) or changes under it (a rewind or a file Undo).
     pub async fn release(&self, conversation: &str) {
         if let Some(mut process) = self.take(conversation) {
             process.kill().await;
         }
     }
-    /// Kill processes idle beyond the limit and any that exited on their own.
+    /// Drop processes that exited on their own, recording the background work that ended
+    /// with them. Idle processes stay parked however long their chat waits.
     pub async fn sweep(&self) {
-        let mut expired = Vec::new();
+        let mut exited = Vec::new();
         if let Ok(mut parked) = self.0.lock() {
-            let now = Instant::now();
-            let mut ids = Vec::new();
-            for (id, (process, at)) in parked.iter_mut() {
-                if now.duration_since(*at) >= IDLE_LIMIT || !process.alive() {
-                    ids.push(id.clone());
-                }
-            }
+            let ids: Vec<String> = parked
+                .iter_mut()
+                .filter_map(|(id, process)| (!process.alive()).then(|| id.clone()))
+                .collect();
             for id in ids {
-                if let Some((process, _)) = parked.remove(&id) {
-                    expired.push(process);
-                }
+                exited.extend(parked.remove(&id));
             }
         }
-        for process in expired.iter_mut() {
+        for process in exited.iter_mut() {
             process.kill().await;
         }
     }
     pub async fn shutdown(&self) {
         let mut all = Vec::new();
         if let Ok(mut parked) = self.0.lock() {
-            all.extend(parked.drain().map(|(_, (process, _))| process));
+            all.extend(parked.drain().map(|(_, process)| process));
         }
         for process in all.iter_mut() {
             process.kill().await;
@@ -473,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_reuses_by_conversation_bounds_idle_processes_and_expires_them() {
+    async fn pool_reuses_by_conversation_and_keeps_every_parked_process() {
         let pool = Pool::default();
         assert!(!pool.holds_native("codex"));
         let first = process("a");
@@ -491,17 +462,14 @@ mod tests {
         assert_eq!(current.fingerprint, "fingerprint-a2");
         assert!(pool.take("a").is_none());
         pool.park("a", current).await;
-        for id in ["b", "c", "d", "e"] {
+        // Only the user closes a chat: parking more conversations evicts none of them.
+        for id in ["b", "c", "d", "e", "f"] {
             pool.park(id, process(id)).await;
         }
-        assert_eq!(pool.len(), MAX_PARKED);
-        assert!(
-            pool.take("a").is_none(),
-            "the oldest process is evicted first"
-        );
-        let mut latest = pool.take("e").unwrap();
-        assert!(latest.alive());
-        latest.kill().await;
+        assert_eq!(pool.len(), 6);
+        let mut oldest = pool.take("a").unwrap();
+        assert!(oldest.alive());
+        oldest.kill().await;
         let released = pool.take("b").unwrap();
         let released_pid = released.child.id().unwrap();
         pool.park("b", released).await;
@@ -514,17 +482,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn sweep_releases_processes_past_the_idle_limit() {
+    async fn sweep_keeps_idle_processes_and_drops_exited_ones() {
         let pool = Pool::default();
-        pool.park("old", process("old")).await;
-        tokio::time::advance(IDLE_LIMIT / 2).await;
-        pool.park("young", process("young")).await;
-        tokio::time::advance(IDLE_LIMIT / 2).await;
+        pool.park("idle", process("idle")).await;
+        let mut exited = process("exited");
+        exited.child.kill().await.unwrap();
+        pool.park("exited", exited).await;
+        // A day without a reply closes nothing; the user decides when a chat is done.
+        tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
         pool.sweep().await;
-        assert!(pool.take("old").is_none());
-        let mut young = pool.take("young").unwrap();
-        assert!(young.alive());
-        young.kill().await;
+        assert!(pool.take("exited").is_none());
+        let mut idle = pool.take("idle").unwrap();
+        assert!(idle.alive());
+        idle.kill().await;
     }
 
     #[tokio::test]

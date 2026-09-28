@@ -64,9 +64,9 @@ keeps both current itself (`src-tauri/src/cli_updates.rs`).
 - **Codex in use.** A package manager replaces a Windows installation's files in place, which fails
   while a process runs them. So a newer Codex installed that way waits, shown as waiting and looked
   at again every half hour, until no reply runs on this computer and no Codex process is parked
-  for a chat's next message; parked processes are released after fifteen idle minutes. The
-  standalone installer adds each release beside the running one and never waits, and Linux keeps
-  running files open while they are replaced.
+  for a chat's next message; a parked process stays until its chat is moved to History or deleted,
+  or the app quits. The standalone installer adds each release beside the running one and never
+  waits, and Linux keeps running files open while they are replaced.
 - **Settings.** **Settings → CLI updates** has **Update Claude Code automatically** and **Update
   Codex automatically** (both on by default, stored per device in `cli-updates.json` in app data),
   each installation's last result, and **Check for updates**, which checks every installation at
