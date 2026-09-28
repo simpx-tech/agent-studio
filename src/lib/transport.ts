@@ -24,12 +24,16 @@ import {
 import { retainRunEvent } from './activity';
 import {
   blobBase64,
+  imageByteLength,
+  imageHash,
   imageHashes,
   imageLists,
+  inlineBytes,
   isInline,
   storedImage,
   type ChatImage,
   type DraftImage,
+  type InlineImage,
   type StoredImage,
 } from './images';
 import {
@@ -472,9 +476,7 @@ let revisionEndpoint = true;
 // What one upload may carry, in serialized characters, below the relay's own limit
 // (`stateUploadLimit` in relay/server.ts), which counts bytes.
 const uploadBudget = 48_000_000;
-const tooLargeHint =
-  'Images live inside a conversation for now, so one holding many of them grows past what a sync can carry. Other conversations still sync.';
-const tooLarge = `This workspace change is too large to sync. ${tooLargeHint}`;
+const tooLarge = 'This workspace change is too large to sync.';
 // A problem the last sync met that did not stop it, such as a conversation too large to send.
 let syncNotice = '';
 /** What the last sync could not do while still syncing everything else, or an empty string. */
@@ -1078,6 +1080,31 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     const saved = await readBrowserWorkspace(store, scope);
     if (!current()) return false;
     await discardOtherBrowserWorkspaces(store, localStorage, scope);
+    // A copy saved before the image store holds its images inline. Once the relay holds their
+    // bytes they become the references the relay keeps, in this copy and in the checkpoint it
+    // merges against, so neither is sent or kept inline again.
+    if (saved && relayStoresImages) {
+      try {
+        if (await referenceLegacyImages([saved.base, saved.workspace], current))
+          await store.put(
+            [
+              [
+                `${browserScopeKey(scope)}:sync`,
+                JSON.stringify({
+                  url,
+                  instanceId,
+                  base: saved.base,
+                  ...(saved.revisions !== undefined ? { revisions: saved.revisions } : {}),
+                }),
+              ],
+            ],
+            current,
+          );
+      } catch {
+        // They stay inline, which the relay still accepts.
+      }
+      if (!current()) return false;
+    }
     let remote: SharedWorkspace | undefined;
     let revisions: CheckpointRevisions | undefined;
     if (!saved) {
@@ -1355,7 +1382,7 @@ async function syncIncremental(
     published = true;
     syncNotice = [
       oversized.length
-        ? `${chatNames(oversized)} ${oversized.length === 1 ? 'is' : 'are'} too large to sync. ${tooLargeHint}`
+        ? `${chatNames(oversized)} ${oversized.length === 1 ? 'is' : 'are'} too large to sync. Other conversations still sync.`
         : '',
       heldNotice(held),
     ]
@@ -2334,6 +2361,63 @@ export async function portableWorkspace(workspace: { conversations: Conversation
         }
       }
   return missing;
+}
+/**
+ * Turns the images a Viewer copy saved before the image store holds inline into references once
+ * the relay holds their bytes, uploading those it lacks from the copy. They are the references
+ * the relay made of the same images, so the checkpoint still matches the relay's copy. Images
+ * that could not be uploaded stay inline. Changes the copies given; true when any image did.
+ */
+async function referenceLegacyImages(
+  copies: { conversations: Parameters<typeof imageLists>[0][] }[],
+  current: () => boolean,
+): Promise<boolean> {
+  const places: { images: ChatImage[]; index: number; image: InlineImage }[] = [];
+  for (const copy of copies)
+    for (const conversation of copy.conversations)
+      for (const images of imageLists(conversation) as ChatImage[][])
+        images.forEach((image, index) => {
+          if (isInline(image)) places.push({ images, index, image });
+        });
+  if (!places.length) return false;
+  // Each image is hashed once, however many copies and messages hold it.
+  const hashes = new Map<string, string>();
+  const sources = new Map<string, InlineImage>();
+  for (const { image } of places) {
+    if (hashes.has(image.data)) continue;
+    const hash = await imageHash(inlineBytes(image));
+    hashes.set(image.data, hash);
+    sources.set(hash, image);
+    if (!current()) return false;
+  }
+  const held = new Set<string>();
+  const all = [...sources.keys()];
+  for (let at = 0; at < all.length; at += 1000) {
+    const batch = all.slice(at, at + 1000);
+    const answer = await relayApi<{ missing: string[] }>('POST', 'v1/images/missing', {
+      hashes: batch,
+    });
+    const lacking = new Set(answer.missing);
+    for (const hash of batch) {
+      if (lacking.has(hash)) {
+        const image = sources.get(hash)!;
+        const bytes = new Blob([inlineBytes(image)], { type: image.mediaType });
+        if ((await relayImage('PUT', hash, bytes)).status >= 300) continue;
+      }
+      held.add(hash);
+    }
+    if (!current()) return false;
+  }
+  const known = knownOnRelay();
+  let changed = false;
+  for (const { images, index, image } of places) {
+    const hash = hashes.get(image.data)!;
+    if (!held.has(hash)) continue;
+    known.add(hash);
+    images[index] = storedImage({ ...image, hash, bytes: imageByteLength(image) });
+    changed = true;
+  }
+  return changed;
 }
 export type FolderListing = {
   path: string;

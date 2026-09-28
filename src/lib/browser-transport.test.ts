@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createChangeMarks, type ChangeSet } from './change-marks';
 import { initialWorkspace, type Conversation, type Workspace } from './domain';
 import { sharedChatSchema, sharedMeta, sharedWorkspace, type SharedMeta } from './sync';
-import { browserSessionSignal } from './browser-workspace';
+import { browserScopeKey, browserSessionSignal, saveBrowserWorkspace } from './browser-workspace';
+import { browserWorkspaceStore } from './browser-store';
+import { createHash } from 'node:crypto';
 
 // What changed on this device since the last sync, tracked as the page tracks it. Like a
 // window that has just synced, it starts with nothing waiting.
@@ -36,7 +38,6 @@ function chatRuntime(get: () => Workspace, marks = chatMarks()) {
     },
   };
 }
-
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -243,4 +244,97 @@ it('preserves an initial notification target only while restoring an authenticat
   expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, true);
   await transport.connectRelay(window.location.origin, 'bob');
   expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, false);
+});
+
+it('turns images a Viewer copy saved inline into the references the relay keeps', async () => {
+  const { transport, session, replace, fetcher } = await fixture();
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+    'base64',
+  );
+  // One image the relay moved into its store, one only this browser has, and one it refuses.
+  const [kept, local, refused] = [0, 1, 2].map((n) => Buffer.concat([png, Buffer.from([n])]));
+  const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+  const relayImages = new Map([[sha(kept), kept]]);
+  const inline = (bytes: Buffer) => ({
+    id: crypto.randomUUID(),
+    name: 'shot.png',
+    mediaType: 'image/png' as const,
+    data: bytes.toString('base64'),
+  });
+  const images = [inline(kept), inline(local), inline(refused)];
+  const saved = initialWorkspace();
+  const chat: Conversation = {
+    id: crypto.randomUUID(),
+    title: 'Legacy',
+    createdAt: '2026-09-27',
+    updatedAt: '2026-09-27',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        blocks: [],
+        images,
+        status: 'complete',
+        createdAt: '2026-09-27',
+      },
+    ],
+  };
+  saved.conversations.push(chat);
+  // The copy and checkpoint an earlier release of the Viewer saved.
+  const scope = {
+    url: 'https://relay.example.com',
+    workspaceId: 'alice',
+    instanceId: 'instance-alice',
+  };
+  const key = browserScopeKey(scope);
+  await saveBrowserWorkspace(browserWorkspaceStore, key, saved, undefined, () => true);
+  const revisions = { revision: 3, chats: { [chat.id]: 3 }, metaRevision: 3 };
+  cache.set(
+    `${key}:sync`,
+    JSON.stringify({
+      url: scope.url,
+      instanceId: scope.instanceId,
+      base: sharedWorkspace(saved),
+      revisions,
+    }),
+  );
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const original = fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async (path: string, options: RequestInit) => {
+    if (path === '/v1/state/revision')
+      return json({ instanceId: 'instance-alice', workspaceId: 'alice', revision: 3, images: 1 });
+    if (path === '/v1/images/missing') {
+      const { hashes } = JSON.parse(String(options.body)) as { hashes: string[] };
+      return json({ missing: hashes.filter((hash) => !relayImages.has(hash)) });
+    }
+    const hash = /^\/v1\/images\/([0-9a-f]{64})$/.exec(path)?.[1];
+    if (hash && options.method === 'PUT') {
+      if (hash === sha(refused)) return json({ error: 'Refused.' }, 400);
+      relayImages.set(hash, Buffer.from(await (options.body as Blob).arrayBuffer()));
+      return json({ hash });
+    }
+    return original(path, options);
+  });
+  session('alice');
+  expect(await transport.resumeBrowserRelay()).toBe(true);
+  // The relay now holds the image only this browser had, as its bytes.
+  expect(relayImages.get(sha(local))).toEqual(local);
+  expect(relayImages.has(sha(refused))).toBe(false);
+  const reference = (image: (typeof images)[number], bytes: Buffer) => ({
+    id: image.id,
+    name: 'shot.png',
+    mediaType: 'image/png',
+    hash: sha(bytes),
+    bytes: bytes.length,
+  });
+  // Both the copy and the checkpoint name the images as the relay does; the refused one stays
+  // inline, and the checkpoint keeps its revisions.
+  const expected = [reference(images[0], kept), reference(images[1], local), images[2]];
+  expect(replace.mock.calls.at(-1)![0].conversations[0].messages[0].images).toEqual(expected);
+  const checkpoint = JSON.parse(cache.get(`${key}:sync`)!);
+  expect(checkpoint.base.conversations[0].messages[0].images).toEqual(expected);
+  expect(checkpoint.revisions).toEqual(revisions);
 });

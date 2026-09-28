@@ -100,8 +100,10 @@ export async function imageHash(bytes: BufferSource): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
-/** Decodes an inline image's base64 into its bytes. */
+/** Decodes an inline image's base64 into its bytes, natively where the engine can. */
 export function inlineBytes(image: InlineImage): Uint8Array<ArrayBuffer> {
+  const native = Uint8Array as unknown as { fromBase64?(data: string): Uint8Array<ArrayBuffer> };
+  if (typeof native.fromBase64 === 'function') return native.fromBase64(image.data);
   const binary = atob(image.data);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
