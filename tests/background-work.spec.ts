@@ -101,13 +101,21 @@ for (const mobile of [false, true])
     await command('tests', { detail: 'Run unit tests', command: 'npm test' });
 
     // A compact toggle beside the running reply's elapsed time; the composer stays uncluttered.
+    // A sub-agent launched in the background is listed with the reply's sub-agents instead.
     const toggle = page.locator('.reply-footer .progress-toggle', { hasText: 'Background work' });
-    await expect(toggle).toHaveText(/Background work\s*3/);
+    await expect(toggle).toHaveText(/Background work\s*2/);
+    const subagents = page.locator('.reply-footer .progress-toggle', { hasText: 'Sub-agents' });
+    await expect(subagents).toHaveText(/Sub-agents\s*1/);
+    await subagents.click();
+    await expect(page.getByRole('region', { name: 'Sub-agents' }).getByRole('button')).toHaveText(
+      /Review the Dockerfile\s*In background\s*0 calls/,
+    );
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('.background-work')).toHaveCount(0);
     await expect(page.locator('.response-extras')).toHaveCount(0);
+    // The toggles follow the elapsed time in its row, wrapping on narrow screens.
     const timer = await page.locator('.reply-footer .running-reply-time').boundingBox();
-    const button = await toggle.boundingBox();
+    const button = await subagents.boundingBox();
     expect(Math.abs(timer!.y + timer!.height / 2 - (button!.y + button!.height / 2))).toBeLessThan(
       4,
     );
@@ -117,7 +125,6 @@ for (const mobile of [false, true])
     await expect(runs).toHaveText([
       /Build the Docker image\s*Command\s*13m 13s/,
       /Start the preview server\s*Command\s*5s/,
-      /Review the Dockerfile\s*Sub-agent/,
     ]);
     // The list names work by its description; the call in history shows the command.
     await expect(work).not.toContainText('docker build');
@@ -140,9 +147,9 @@ for (const mobile of [false, true])
     await expect(buildCard).toContainText('Background work below this reply tracks it.');
     // A launch that moved to the background has no output to wait for.
     await expect(buildCard).not.toContainText('The output appears when the command finishes.');
-    const agentsCard = group.locator('.tool-card', { hasText: 'Sub-agents' });
-    await agentsCard.locator(':scope > summary').click();
-    await expect(agentsCard.locator('.subagent')).toContainText('In background');
+    await expect(group.locator('.subagent-row', { hasText: 'Review the Dockerfile' })).toContainText(
+      'In background',
+    );
     await page.screenshot({
       path: `artifacts/background-work/live-${mobile ? 'mobile' : 'desktop'}.png`,
     });
@@ -167,6 +174,7 @@ for (const mobile of [false, true])
     });
     await expect(toggle).toHaveText(/Background work\s*1/);
     await expect(runs).toHaveText([/Start the preview server\s*Command\s*5s/]);
+    await expect(subagents).toHaveCount(0);
     await expect(buildCard.locator('summary')).toContainText('13m 20s');
     await expect(buildCard.locator('summary')).toContainText('Completed');
     await expect(buildCard).toContainText('Ran in the background.');

@@ -7,7 +7,7 @@
   import { appearance } from '$lib/appearance.svelte';
   import { highlightCode } from '$lib/markdown';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
-  import ArtifactResize from './ArtifactResize.svelte';
+  import PanelResize from './PanelResize.svelte';
   let {
     artifact,
     mode = 'modal',
@@ -111,9 +111,12 @@
     close();
   }}
 >
-  {#if docked}<ArtifactResize
+  {#if docked}<PanelResize
       availableWidth={workspaceWidth}
       onresize={(width) => (panelWidth = width)}
+      storageKey="agent-studio.artifact-panel-width"
+      label="Resize artifact panel"
+      controls="artifact-viewer"
     />{/if}
   <header>
     <div>

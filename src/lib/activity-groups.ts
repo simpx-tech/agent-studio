@@ -19,6 +19,8 @@ type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & 
   tool?: ToolActivity;
 };
 type ActivityEntry = CommentEntry | ReasoningBlock;
+/** A reply's saved blocks, or activity arranged like them, such as a sub-agent's conversation. */
+export type ActivitySource = ContentBlock | CommentEntry;
 type ActivityGroup =
   | { kind: 'tools'; key: string; tools: ToolActivity[] }
   | { kind: 'comment'; key: string; entry: CommentEntry }
@@ -29,7 +31,7 @@ const toolNotes = /^(Using |Running command|Editing files|Searching the web|Usin
 
 /** Reasoning, progress comments and tool calls in their recorded order. */
 export function activityEntries(
-  blocks: ContentBlock[],
+  blocks: ActivitySource[],
   tools: ToolActivity[],
   finalText: string,
 ): ActivityEntry[] {

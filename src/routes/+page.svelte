@@ -208,6 +208,8 @@
   import { summarizeFileChanges } from '$lib/file-changes';
   import MessageView from '$lib/components/MessageView.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
+  import SubagentPanel from '$lib/components/SubagentPanel.svelte';
+  import { findSubagent, replyTools } from '$lib/subagents';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
   import {
@@ -439,6 +441,22 @@
     artifactMode = mode;
     artifactConversationId = activeId;
     selectedArtifact = artifact;
+    // One panel at a time sits beside the chat.
+    if (mode === 'panel') subagentView = null;
+  }
+  // The sub-agent whose conversation the side panel shows, by the reply that started it.
+  let subagentView = $state<{
+    conversationId: string;
+    messageId: string;
+    agentId: string;
+  } | null>(null);
+  $effect(() => {
+    if (view !== 'chat' || activeId !== subagentView?.conversationId) subagentView = null;
+  });
+  function openSubagent(messageId: string, agentId: string) {
+    if (!activeId) return;
+    if (selectedArtifact && artifactMode === 'panel') selectedArtifact = null;
+    subagentView = { conversationId: activeId, messageId, agentId };
   }
   // Conversations whose reply this window is stopping.
   let stopping = $state<Record<string, boolean>>({});
@@ -543,6 +561,17 @@
   });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
+  const subagentReply = $derived(
+    subagentView && active?.id === subagentView.conversationId
+      ? active.messages.find((m) => m.id === subagentView?.messageId)
+      : undefined,
+  );
+  // The side panel closes when its reply no longer holds the sub-agent, as after a rewind.
+  const subagentShown = $derived(
+    !!subagentView &&
+      !!subagentReply &&
+      !!findSubagent(replyTools(subagentReply), subagentView.agentId),
+  );
   const selectedSettings = $derived(active?.settings ?? draftSettings);
   const imagesSupported = $derived(supportsImages(selectedSettings.provider));
   const selectedLocation = $derived(
@@ -4023,7 +4052,7 @@
     {#if view === 'chat'}
       <div
         class="chat-workspace"
-        class:has-artifact-panel={selectedArtifact && artifactMode === 'panel'}
+        class:has-side-panel={(selectedArtifact && artifactMode === 'panel') || subagentShown}
       >
         <section
           class="chat-layout"
@@ -4294,6 +4323,10 @@
                       : undefined}
                     forkDisabled={forking || imagesLoading}
                     {openArtifact}
+                    openSubagent={(agentId) => openSubagent(m.id, agentId)}
+                    openedSubagent={subagentShown && subagentView?.messageId === m.id
+                      ? subagentView.agentId
+                      : undefined}
                   />{/each}
               {:else}<div class="chat-empty">
                   <span
@@ -4561,9 +4594,20 @@
         {#if selectedArtifact}{#key selectedArtifact.id}<ArtifactViewer
               artifact={selectedArtifact}
               mode={artifactMode}
-              changeMode={(mode) => (artifactMode = mode)}
+              changeMode={(mode) => {
+                artifactMode = mode;
+                if (mode === 'panel') subagentView = null;
+              }}
               close={() => (selectedArtifact = null)}
             />{/key}{/if}
+        {#if subagentShown && subagentReply && subagentView}<SubagentPanel
+            message={subagentReply}
+            agentId={subagentView.agentId}
+            folder={active?.location?.path}
+            connectionId={(subagentReply.settings ?? active?.settings)?.connectionId}
+            open={(agentId) => subagentReply && openSubagent(subagentReply.id, agentId)}
+            close={() => (subagentView = null)}
+          />{/if}
       </div>
     {:else if view === 'connections'}
       {#key workspaceSession}

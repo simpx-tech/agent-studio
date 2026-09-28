@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { ChevronDown, FileCode2, Layers, ListChecks, Workflow } from '@lucide/svelte';
+  import { Bot, ChevronDown, FileCode2, Layers, ListChecks, Workflow } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import type { Message } from '$lib/domain';
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
   import type { ChangeSummary } from '$lib/file-changes';
   import type { BackgroundRun } from '$lib/background-work';
+  import type { RunningSubagent } from '$lib/subagents';
   import { planProgress } from '$lib/plans';
   import { nativeWorkflowStatus } from '$lib/workflows';
   import FileChanges from './FileChanges.svelte';
@@ -12,6 +13,7 @@
   import PlanPanel from './PlanPanel.svelte';
   import NativeWorkflowPanel from './NativeWorkflowPanel.svelte';
   import BackgroundWork from './BackgroundWork.svelte';
+  import RunningSubagents from './RunningSubagents.svelte';
   import RunningReplyTime from './RunningReplyTime.svelte';
   import { money } from '$lib/spend';
   let {
@@ -21,6 +23,9 @@
     chatChanges,
     folder,
     background = [],
+    subagents = [],
+    openSubagent,
+    openedSubagent,
   }: {
     message: Message;
     timeTotal?: ReplyTimeTotal;
@@ -29,9 +34,16 @@
     folder?: string;
     /** Background work this reply started that still runs. */
     background?: BackgroundRun[];
+    /** Sub-agents this reply still runs. */
+    subagents?: RunningSubagent[];
+    /** Opens a sub-agent's conversation in the side panel. */
+    openSubagent?: (agentId: string) => void;
+    /** The sub-agent whose conversation the side panel shows. */
+    openedSubagent?: string;
   } = $props();
   // A running reply's row starts with its live elapsed time; a finished reply's with its
-  // timing and files. Plans, workflows and background work follow as compact toggles.
+  // timing and files. Plans, workflows, sub-agents and background work follow as compact
+  // toggles.
   const running = $derived(message.status === 'running');
   const plan = $derived(planProgress(message));
   const workflows = $derived(message.nativeWorkflows?.runs ?? []);
@@ -49,6 +61,7 @@
       ...(running ? [] : ['usage', 'files']),
       ...(plan ? ['plan'] : []),
       ...workflows.map((run) => `workflow:${run.id}`),
+      ...(subagents.length ? ['subagents'] : []),
       ...(background.length ? ['background'] : []),
     ];
     if (expanded && !sections.includes(expanded)) expanded = null;
@@ -114,6 +127,23 @@
           >{nativeWorkflowStatus(run.status, message.status)}</span
         >
       </button>{/each}
+    {#if subagents.length}<button
+        type="button"
+        class="footer-toggle progress-toggle"
+        id={message.id + '-subagents-toggle'}
+        aria-expanded={expanded === 'subagents'}
+        aria-controls={message.id + '-subagents'}
+        title={subagents.length === 1
+          ? '1 sub-agent running'
+          : `${subagents.length} sub-agents running`}
+        onclick={() => toggle('subagents')}
+      >
+        <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+        <Bot size={13} aria-hidden="true" />
+        <span class="progress-label">Sub-agents</span><span class="count"
+          >{subagents.length}</span
+        >
+      </button>{/if}
     {#if background.length}<button
         type="button"
         class="footer-toggle progress-toggle"
@@ -149,6 +179,20 @@
     >
       {#if opened.has(`workflow:${run.id}`)}<NativeWorkflowPanel {message} {run} />{/if}
     </div>{/each}
+  {#if subagents.length}<div
+      class="progress-panel"
+      id={message.id + '-subagents'}
+      role="region"
+      aria-labelledby={message.id + '-subagents-toggle'}
+      hidden={expanded !== 'subagents'}
+    >
+      {#if opened.has('subagents')}<RunningSubagents
+          agents={subagents}
+          {folder}
+          opened={openedSubagent}
+          open={(id) => openSubagent?.(id)}
+        />{/if}
+    </div>{/if}
   {#if background.length}<div
       class="progress-panel"
       id={message.id + '-background'}

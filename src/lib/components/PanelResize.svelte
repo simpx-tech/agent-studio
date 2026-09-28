@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  // The left divider of a docked right-side panel, which remembers its width on this device.
   let {
     availableWidth,
     onresize,
+    storageKey,
+    label,
+    controls,
   }: {
     availableWidth: number;
     onresize: (width: number) => void;
+    storageKey: string;
+    label: string;
+    /** The id of the panel it resizes. */
+    controls: string;
   } = $props();
-  const storageKey = 'agent-studio.artifact-panel-width';
   const minWidth = 360;
   let preferredWidth = $state<number>();
   let handle = $state<HTMLDivElement>();
@@ -27,8 +34,8 @@
   $effect(() => {
     if (!drag) return;
     const root = document.documentElement;
-    root.classList.add('artifact-resizing');
-    return () => root.classList.remove('artifact-resizing');
+    root.classList.add('panel-resizing');
+    return () => root.classList.remove('panel-resizing');
   });
 
   onMount(() => {
@@ -100,12 +107,12 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (This focusable separator is a window splitter with range values and keyboard controls.) -->
 <div
   bind:this={handle}
-  class="artifact-resizer"
+  class="panel-resizer"
   class:dragging={!!drag}
   role="separator"
   tabindex="0"
-  aria-label="Resize artifact panel"
-  aria-controls="artifact-viewer"
+  aria-label={label}
+  aria-controls={controls}
   aria-orientation="vertical"
   aria-valuemin={minWidth}
   aria-valuemax={maxWidth}
@@ -124,7 +131,7 @@
 ></div>
 
 <style>
-  .artifact-resizer {
+  .panel-resizer {
     position: absolute;
     inset: 0 auto 0 0;
     width: 8px;
@@ -133,24 +140,24 @@
     touch-action: none;
     outline: none;
   }
-  .artifact-resizer::after {
+  .panel-resizer::after {
     content: '';
     position: absolute;
     inset: 0 auto 0 0;
     width: 2px;
     background: transparent;
   }
-  .artifact-resizer:hover::after,
-  .artifact-resizer:focus-visible::after,
-  .artifact-resizer.dragging::after {
+  .panel-resizer:hover::after,
+  .panel-resizer:focus-visible::after,
+  .panel-resizer.dragging::after {
     background: var(--accent-border);
   }
-  :global(:root.artifact-resizing),
-  :global(:root.artifact-resizing *) {
+  :global(:root.panel-resizing),
+  :global(:root.panel-resizing *) {
     cursor: col-resize !important;
     user-select: none !important;
   }
-  :global(:root.artifact-resizing iframe) {
+  :global(:root.panel-resizing iframe) {
     pointer-events: none;
   }
 </style>

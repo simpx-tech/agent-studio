@@ -4,7 +4,7 @@ import type { Message } from './domain';
 
 export type BackgroundRun = {
   id: string;
-  kind: 'command' | 'monitor' | 'agent';
+  kind: 'command' | 'monitor';
   label: string;
   elapsedMs?: number;
   /** When the host measured elapsedMs, so the time keeps advancing between its lists. */
@@ -12,16 +12,14 @@ export type BackgroundRun = {
 };
 
 /**
- * Work the CLI moved to the background that still runs, in launch order: shell commands,
- * Monitor watches and sub-agents whose launch returned to the model while they kept going.
- * Only reported descriptions label them; commands themselves stay private.
+ * Work the CLI moved to the background that still runs, in launch order: shell commands and
+ * Monitor watches whose launch returned to the model while they kept going. Sub-agents launched
+ * in the background are listed with the reply's other sub-agents instead. Only reported
+ * descriptions label them; commands themselves stay private.
  */
 export function runningBackgroundWork(tools: ToolActivity[]): BackgroundRun[] {
   const runs: BackgroundRun[] = [];
   for (const tool of tools) {
-    for (const agent of tool.agents)
-      if (agent.background && agent.status === 'running')
-        runs.push({ id: agent.id, kind: 'agent', label: agent.name });
     if (!tool.background || tool.status !== 'running') continue;
     const monitor = tool.operation === 'monitor';
     runs.push({

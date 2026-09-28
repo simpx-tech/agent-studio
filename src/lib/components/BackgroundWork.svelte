@@ -4,7 +4,7 @@
   import type { BackgroundRun } from '$lib/background-work';
   // A reply's running background work, opened from the Background work toggle in its footer.
   let { runs, live = true }: { runs: BackgroundRun[]; live?: boolean } = $props();
-  const kinds = { command: 'Command', monitor: 'Monitor', agent: 'Sub-agent' };
+  const kinds = { command: 'Command', monitor: 'Monitor' };
   let now = $state(Date.now());
   // Host lists arrive when work starts or ends; advance their times in between while shown.
   $effect(() => {

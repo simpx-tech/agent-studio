@@ -83,6 +83,8 @@ export const toolActivitySchema = z.object({
               id: z.string().max(220),
               text: z.string().max(4000),
               complete: z.boolean(),
+              // The child's own calls recorded before this message began; older replies lack it.
+              after: z.number().int().nonnegative().max(100_000).optional(),
             }),
           )
           .max(16)

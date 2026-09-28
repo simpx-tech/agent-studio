@@ -20,7 +20,7 @@ const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
 });
 
 describe('background work', () => {
-  it('lists running background launches in order with reported labels only', () => {
+  it('lists running background commands and monitors in order with reported labels only', () => {
     const runs = runningBackgroundWork([
       tool('foreground', { commandRun: true, detail: 'Run the tests' }),
       tool('build', {
@@ -43,9 +43,9 @@ describe('background work', () => {
       tool('finished', { commandRun: true, background: true, status: 'complete' }),
       tool('failed', { commandRun: true, background: true, status: 'error' }),
     ]);
+    // Background sub-agents are listed with the reply's other sub-agents instead.
     expect(runs).toEqual([
       { id: 'build', kind: 'command', label: 'Build the image', elapsedMs: 793_000 },
-      { id: 'reader', kind: 'agent', label: 'Reader' },
       { id: 'watch', kind: 'monitor', label: 'Monitor' },
       { id: 'unnamed', kind: 'command', label: 'Background command' },
     ]);

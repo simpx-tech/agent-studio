@@ -24,6 +24,7 @@
   import ReplyFooter from './ReplyFooter.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import type { BackgroundRun } from '$lib/background-work';
+  import { replyTools, runningSubagents } from '$lib/subagents';
   import VisualizationView from './VisualizationView.svelte';
   import SentFilesView from './SentFilesView.svelte';
   import QuestionForm from './QuestionForm.svelte';
@@ -48,6 +49,8 @@
     fork,
     forkDisabled = false,
     background = [],
+    openSubagent,
+    openedSubagent,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -66,6 +69,10 @@
     forkDisabled?: boolean;
     /** Background work this reply started that still runs. */
     background?: BackgroundRun[];
+    /** Opens one of this reply's sub-agents in the side panel. */
+    openSubagent?: (agentId: string) => void;
+    /** This reply's sub-agent whose conversation the side panel shows. */
+    openedSubagent?: string;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
@@ -81,9 +88,8 @@
         ? (message.blocks.filter((b) => b.type === 'activity' && b.progress).at(-1)?.text ?? '')
         : ''),
   );
-  const tools = $derived(
-    message.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : [])),
-  );
+  const tools = $derived(replyTools(message));
+  const subagents = $derived(runningSubagents(tools, message.status));
   const artifacts = $derived(messageArtifacts(message));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   // A structured reply's text is its JSON, shown whole above; its visuals and files follow it.
@@ -153,6 +159,8 @@
         connectionId={author.connectionId}
         {folder}
         fileChanges={message.fileChanges}
+        {openSubagent}
+        {openedSubagent}
       />
       {#if message.compactions?.length}
         <div class="compaction-history" aria-label="Context compaction">
@@ -257,7 +265,7 @@
               </div>{/each}
           </div>
         </div>{/if}
-      <!-- Elapsed time, then plan, workflow and background work toggles in the same row. -->
+      <!-- Elapsed time, then plan, workflow, sub-agent and background work toggles in the same row. -->
       <ReplyFooter
         {message}
         {timeTotal}
@@ -265,6 +273,9 @@
         chatChanges={chatChanges ?? responseChanges}
         {folder}
         {background}
+        {subagents}
+        {openSubagent}
+        {openedSubagent}
       />
       {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError || undoEdits || message.filesUndone)}<div
           class="message-actions"

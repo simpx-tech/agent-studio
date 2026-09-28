@@ -6,6 +6,9 @@ pub(super) struct AgentMessage {
     id: String,
     text: String,
     complete: bool,
+    /// How many of the child's own calls were recorded before this message began, which
+    /// places it among them in the child's conversation.
+    after: usize,
 }
 
 fn identity(value: &Value) -> Option<&str> {
@@ -26,7 +29,7 @@ fn text_units(text: &str, limit: usize) -> String {
 }
 
 impl AgentActivity {
-    fn message(&mut self, id: &str, text: &str, append: bool, complete: bool) {
+    fn message(&mut self, id: &str, text: &str, append: bool, complete: bool, after: usize) {
         let index = match self.messages.iter().position(|m| m.id == id) {
             Some(index) => index,
             None => {
@@ -38,6 +41,7 @@ impl AgentActivity {
                     id: id.into(),
                     text: String::new(),
                     complete: false,
+                    after,
                 });
                 self.messages.len() - 1
             }
@@ -68,10 +72,20 @@ impl AgentActivity {
 }
 
 impl ToolDecoder {
+    /// The calls a child has made so far, among those this reply recorded.
+    fn child_calls(&self, agent: &str) -> usize {
+        self.tools
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(agent))
+            .count()
+    }
+
     pub(super) fn claude_child_text(&mut self, v: &Value, out: &mut Vec<ToolActivity>) {
         let Some(parent) = identity(&v["parent_tool_use_id"]) else {
             return;
         };
+        // Text comes before the calls of its own line, which are decoded after it.
+        let calls = self.child_calls(parent);
         let mut group = self.group("claude");
         let Some(agent) = group.agents.iter_mut().find(|a| a.id == parent) else {
             return;
@@ -94,7 +108,7 @@ impl ToolDecoder {
                     if agent.messages.iter().any(|m| m.id == id) {
                         return;
                     }
-                    agent.message(id, &text, false, true);
+                    agent.message(id, &text, false, true, calls);
                 }
                 // Compatibility with CLI versions that omit message identities.
                 agent.result = Some(text_units(&text, 8000));
@@ -196,6 +210,7 @@ impl ToolDecoder {
             || (method == "item/completed"
                 && matches!(item["type"].as_str(), Some("agentMessage" | "userMessage")))
         {
+            let calls = self.child_calls(thread);
             let mut group = self.group("codex");
             if let Some(agent) = Self::agent(&mut group, thread) {
                 match method {
@@ -207,7 +222,7 @@ impl ToolDecoder {
                         if let (Some(id), Some(text)) =
                             (identity(&p["itemId"]), p["delta"].as_str())
                         {
-                            agent.message(id, text, true, false);
+                            agent.message(id, text, true, false, calls);
                         }
                     }
                     "item/completed" if item["type"] == "agentMessage" => {
@@ -216,7 +231,7 @@ impl ToolDecoder {
                                 if agent.messages.iter().any(|m| m.id == id && m.complete) {
                                     return true;
                                 }
-                                agent.message(id, &text, false, true);
+                                agent.message(id, &text, false, true, calls);
                             }
                             agent.result = Some(text_units(&text, 8000));
                         }
@@ -328,6 +343,10 @@ mod tests {
         let group = d.group("claude");
         assert_eq!(group.agents[0].messages.len(), 2);
         assert_eq!(group.agents[0].messages[1].text, "Found it");
+        // Each block keeps its place among the child's calls: the first line's text came
+        // before its own read, the second after it.
+        assert_eq!(group.agents[0].messages[0].after, 0);
+        assert_eq!(group.agents[0].messages[1].after, 1);
         assert_eq!(group.agents[0].result.as_deref(), Some("Found it"));
         assert_eq!(group.agents[0].status, "running");
         let unrelated = d.decode(
@@ -383,11 +402,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_child_messages_keep_their_place_among_the_childs_calls() {
+        let mut d = ToolDecoder::default();
+        d.codex_server(&json!({"method":"item/started","params":{"threadId":"root","item":{
+            "id":"spawn","type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/root/reader"}}}), "root");
+        d.codex_server(
+            &json!({"method":"turn/started","params":{"threadId":"child","turn":{"id":"turn"}}}),
+            "root",
+        );
+        let message = |id: &str| json!({"method":"item/agentMessage/delta","params":{"threadId":"child","turnId":"turn","itemId":id,"delta":"Text"}});
+        d.codex_server(&message("before"), "root");
+        let command = d.codex_server(
+            &json!({"method":"item/started","params":{"threadId":"child","turnId":"turn","item":{
+            "id":"list","type":"commandExecution","command":"ls","status":"inProgress"}}}),
+            "root",
+        );
+        assert_eq!(command[0].parent_id.as_deref(), Some("child"));
+        d.codex_server(&message("after"), "root");
+        // The root thread's own calls never count for the child.
+        d.codex_server(&json!({"method":"item/started","params":{"threadId":"root","turnId":"root-turn","item":{
+            "id":"root-list","type":"commandExecution","command":"ls","status":"inProgress"}}}), "root");
+        d.codex_server(&message("later"), "root");
+        let group = d.group("codex");
+        let places = group.agents[0]
+            .messages
+            .iter()
+            .map(|m| (m.id.as_str(), m.after))
+            .collect::<Vec<_>>();
+        assert_eq!(places, [("before", 0), ("after", 1), ("later", 1)]);
+    }
+
+    #[test]
     fn child_messages_are_bounded_in_utf16_and_updates_survive_limits() {
         let mut group = fresh("agents".into(), "agent", "Sub-agents");
         let agent = ToolDecoder::agent(&mut group, "child").unwrap();
         for i in 0..40 {
-            agent.message(&i.to_string(), &"😀".repeat(5000), false, false);
+            agent.message(&i.to_string(), &"😀".repeat(5000), false, false, 0);
         }
         assert_eq!(agent.messages.len(), 16);
         assert!(agent.messages_truncated);
@@ -403,7 +453,9 @@ mod tests {
             .messages
             .iter()
             .all(|m| m.text.encode_utf16().count() <= 4000));
-        agent.message("0", "Final", false, true);
+        agent.message("0", "Final", false, true, 3);
+        // A message keeps the place it began at.
+        assert_eq!(agent.messages[0].after, 0);
         assert_eq!(agent.messages[0].text, "Final");
     }
 

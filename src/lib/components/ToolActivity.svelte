@@ -9,6 +9,7 @@
     CornerDownRight,
     ExternalLink,
     Layers,
+    PanelRightOpen,
   } from '@lucide/svelte';
   import { cubicOut } from 'svelte/easing';
   import type { TransitionConfig } from 'svelte/transition';
@@ -30,9 +31,10 @@
     liveAction,
     liveGroupItems,
     liveMemory,
+    type ActivitySource,
     type LiveGroupItem,
   } from '$lib/activity-groups';
-  import type { Message, ContentBlock } from '$lib/domain';
+  import type { Message } from '$lib/domain';
   import { relativeFilePath, type FileChanges } from '$lib/file-changes';
   import { renderMarkdown } from '$lib/markdown';
   import { toolVisual } from '$lib/tool-presentation';
@@ -50,16 +52,28 @@
     connectionId,
     folder,
     fileChanges,
+    history = true,
+    owner,
+    openSubagent,
+    openedSubagent,
   }: {
     tools: ToolActivity[];
     replyStatus: Message['status'];
-    blocks?: ContentBlock[];
+    blocks?: ActivitySource[];
     finalText?: string;
     /** The reply's run, which finds results kept on the computer that ran it. */
     runId?: string;
     connectionId?: string;
     folder?: string;
     fileChanges?: FileChanges;
+    /** A finished reply keeps its activity in a collapsed Work history disclosure. */
+    history?: boolean;
+    /** The sub-agent whose conversation this is; its own calls need no attribution. */
+    owner?: string;
+    /** Opens a sub-agent's conversation in the side panel. */
+    openSubagent?: (agentId: string) => void;
+    /** The sub-agent whose conversation the side panel shows. */
+    openedSubagent?: string;
   } = $props();
   let linkError = $state('');
   const labels = {
@@ -223,12 +237,11 @@
   </span>
 {/snippet}
 
-{#snippet toolCard(tool: ToolActivity, nested = false)}
+{#snippet toolCard(tool: ToolActivity)}
   {@const status = toolDisplayStatus(tool, replyStatus)}
   {@const visual = toolVisual(tool, { folder, newFile: newFile(tool) })}
   <details
     class="tool-card"
-    class:nested
     data-category={tool.category}
     ontoggle={disclosures.opened(`tool:${tool.id}`)}
   >
@@ -255,12 +268,12 @@
       </span>
       <ChevronDown size={13} class="disclosure" />
     </summary>
-    {@render toolBody(tool, nested)}
+    {@render toolBody(tool)}
   </details>
 {/snippet}
 
 <!-- A call's recorded details, rendered once its row is first expanded. -->
-{#snippet toolBody(tool: ToolActivity, nested = false)}
+{#snippet toolBody(tool: ToolActivity)}
   {@const edit = editOf(tool)}
   {@const visual = toolVisual(tool, { folder, newFile: newFile(tool) })}
   <!-- A description the row already shows is not repeated. -->
@@ -273,7 +286,7 @@
         >
           {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
         </p>{/if}
-      {#if tool.parentId && !nested}<p class="tool-note">
+      {#if tool.parentId && tool.parentId !== owner}<p class="tool-note">
           By {tools.flatMap((t) => t.agents).find((a) => a.id === tool.parentId)?.name ??
             'sub-agent'}
         </p>{/if}
@@ -349,54 +362,38 @@
             </li>
           {/each}
         </ul>{/if}
-      {#each tool.agents as agent (agent.id)}
-        <section class="subagent" aria-label={`Sub-agent: ${agent.name}`}>
-          <div class="agent-heading">
-            <Bot size={14} /><strong>{agent.name}</strong>{@render statusMark(
-              activityDisplayStatus(agent, replyStatus),
-            )}
-          </div>
-          {#if agent.parentId && tool.agents.some((a) => a.id === agent.parentId)}
-            <p class="tool-note">
-              Delegated by {tool.agents.find((a) => a.id === agent.parentId)?.name}
-            </p>
-          {/if}
-          {#if agent.task}<p class="agent-task">{agent.task}</p>{/if}
-          {#if agent.messages?.length}<details
-              class="agent-result"
-              ontoggle={disclosures.opened(`messages:${agent.id}`)}
-            >
-              <summary onclick={disclosures.reveal(`messages:${agent.id}`)}
-                ><ChevronDown size={12} />Messages</summary
-              >
-              {#if disclosures.has(`messages:${agent.id}`)}
-                {#each agent.messages as message (message.id)}
-                  <p>{message.text}</p>
-                  {#if !message.complete && replyStatus !== 'running'}<p class="tool-note">
-                      Message incomplete
-                    </p>{/if}
-                {/each}
-                {#if agent.messagesTruncated}<p class="tool-note">
-                    Additional child text was omitted at the activity limit.
-                  </p>{/if}
-              {/if}
-            </details>{/if}
-          {#each tools.filter((t) => t.parentId === agent.id) as child (child.id)}{@render toolCard(
-              child,
-              true,
-            )}{/each}
-          {#if agent.result}<details
-              class="agent-result"
-              ontoggle={disclosures.opened(`result:${agent.id}`)}
-            >
-              <summary onclick={disclosures.reveal(`result:${agent.id}`)}
-                ><ChevronDown size={12} />Result</summary
-              >
-              {#if disclosures.has(`result:${agent.id}`)}<p>{agent.result}</p>{/if}
-            </details>{/if}
-        </section>
-      {/each}
+      {#if tool.agents.length}{@render subagentRows(tool)}{/if}
     </div>{/if}
+{/snippet}
+
+<!-- Each sub-agent opens its own conversation in the side panel beside the chat. -->
+{#snippet subagentRows(tool: ToolActivity)}
+  <ul class="subagents" aria-label="Sub-agents">
+    {#each tool.agents as agent (agent.id)}
+      {@const parent = agent.parentId
+        ? tool.agents.find((a) => a.id === agent.parentId)
+        : undefined}
+      <li>
+        <button
+          type="button"
+          class="subagent-row"
+          class:delegated={!!parent}
+          aria-current={openedSubagent === agent.id ? 'true' : undefined}
+          title="Open this sub-agent’s conversation beside the chat"
+          onclick={() => openSubagent?.(agent.id)}
+        >
+          <Bot size={14} aria-hidden="true" />
+          <span class="subagent-text">
+            <span class="subagent-name">{agent.name}</span>
+            {#if parent}<span class="subagent-detail">Delegated by {parent.name}</span>
+            {:else if agent.task}<span class="subagent-detail">{agent.task}</span>{/if}
+          </span>
+          {@render statusMark(activityDisplayStatus(agent, replyStatus))}
+          <PanelRightOpen size={14} class="subagent-open" aria-hidden="true" />
+        </button>
+      </li>
+    {/each}
+  </ul>
 {/snippet}
 
 <!-- `calls` are the group's own calls and those of its sub-agents; `counted` animates the label. -->
@@ -425,7 +422,12 @@
       <ChevronDown size={13} class="disclosure" aria-hidden="true" />
     </summary>
     {#if disclosures.has(key)}<div class="group-tools">
-        {#each visible as tool (tool.id)}{@render toolCard(tool)}{/each}
+        {#each visible as tool (tool.id)}
+          <!-- The call that holds sub-agents lists them directly, one row each. -->
+          {#if tool.category === 'agent' && tool.agents.length}{@render subagentRows(tool)}
+            {#if tool.detail}<p class="tool-note group-note">{tool.detail}</p>{/if}
+          {:else}{@render toolCard(tool)}{/if}
+        {/each}
       </div>{/if}
   </details>
 {/snippet}
@@ -555,7 +557,7 @@
     aria-label="Tools, hooks and sub-agents"
     bind:this={root}
   >
-    {#if replyStatus === 'running'}{@render timeline()}
+    {#if replyStatus === 'running' || !history}{@render timeline()}
     {:else}
       <details class="activity-summary" ontoggle={disclosures.opened('history')}>
         <summary aria-label="Work history" onclick={disclosures.reveal('history')}>
@@ -1113,49 +1115,79 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .subagent {
-    padding: 10px 0;
-    border-top: 1px solid var(--border);
+  /* Sub-agents are quiet rows like calls; each opens its conversation beside the chat. */
+  .subagents {
+    display: grid;
+    /* Long tasks shorten with an ellipsis instead of widening the row. */
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    min-width: 0;
   }
-  .subagent:first-child {
-    border-top: 0;
+  .tool-body > .subagents {
+    margin: 4px 0;
   }
-  .agent-heading {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 7px;
-  }
-  .agent-heading strong {
-    flex: 1;
-    min-width: 80px;
-    font-weight: 500;
-    overflow-wrap: anywhere;
-    color: var(--text);
-  }
-  .agent-task {
-    font-size: var(--text-xs);
-  }
-  .agent-result > summary {
-    font-size: var(--text-xs);
-    font-weight: 500;
+  .subagent-row {
     display: flex;
     align-items: center;
-    gap: 5px;
-    width: fit-content;
+    justify-content: flex-start;
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--text-sm);
+    text-align: left;
     cursor: pointer;
-    padding: 5px 0;
+    transition: background-color var(--duration-fast) ease;
+  }
+  .subagent-row:hover {
+    background: var(--hover);
+  }
+  .subagent-row[aria-current='true'] {
+    background: var(--selected);
+  }
+  .subagent-row.delegated {
+    padding-left: 24px;
+  }
+  .subagent-row > :global(svg) {
+    flex-shrink: 0;
     color: var(--text-muted);
   }
-  .agent-result > summary:hover {
+  .subagent-row > :global(.subagent-open) {
+    color: var(--text-faint);
+  }
+  .subagent-row:hover > :global(.subagent-open),
+  .subagent-row[aria-current='true'] > :global(.subagent-open) {
+    color: var(--text-muted);
+  }
+  .subagent-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .subagent-name {
+    display: block;
+    font-weight: 500;
     color: var(--text);
+    overflow-wrap: anywhere;
   }
-  .agent-result p {
-    max-height: 280px;
-    overflow: auto;
+  .subagent-detail {
+    display: block;
+    margin-top: 1px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .nested {
-    margin-top: 6px;
+  .group-note {
+    margin: 4px 8px;
   }
   :global(.disclosure) {
     transition: transform var(--duration) var(--ease-out);

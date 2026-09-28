@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 
 for (const mobile of [false, true]) {
-  test(`child messages retain disclosure, draft and history ${mobile ? 'mobile' : 'desktop'}`, async ({
+  test(`child messages open in the sub-agent's panel and keep the draft and history ${mobile ? 'mobile' : 'desktop'}`, async ({
     page,
   }) => {
     if (mobile) await page.setViewportSize({ width: 390, height: 844 });
@@ -67,29 +67,44 @@ for (const mobile of [false, true]) {
         { revision, complete },
       );
     await emit(1, false);
-    // A running sub-agent has a row of its own, which opens like a call and stays open.
+    // A running sub-agent has a row of its own, which lists the sub-agents it runs.
     const row = page.locator('.live-row[data-category="agent"]');
     await expect(row.locator(':scope > summary')).toContainText('Working with');
     await row.locator(':scope > summary').click();
-    const child = page.getByRole('region', { name: 'Sub-agent: Fixture reader', exact: true });
-    const messages = child.locator('.agent-result').filter({ hasText: 'Messages' });
-    await expect(messages).not.toHaveAttribute('open', '');
-    await messages.locator('summary').click();
-    await expect(messages).toContainText('Checking the marker');
-    await expect(page.getByRole('region', { name: 'Sub-agent: Verifier' })).toContainText(
+    await expect(row.locator('.subagent-row', { hasText: 'Verifier' })).toContainText(
       'Delegated by Fixture reader',
     );
+    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+
+    // Its row opens what it was asked and what it said so far beside the chat.
+    await row.locator('.subagent-row', { hasText: 'Inspect fixture' }).click();
+    const child = page.getByRole('dialog', { name: 'Fixture reader' });
+    await expect(child.getByRole('region', { name: 'Task' })).toHaveText(/Inspect fixture/);
+    await expect(child).toContainText('Checking the marker');
     await emit(3, true);
     await emit(2, false);
-    await expect(messages).toHaveAttribute('open', '');
-    await expect(messages).toContainText('Found the marker.');
-    await expect(messages).toContainText('Additional child text was omitted');
+    await expect(child.locator('header')).toContainText('Completed');
+    await expect(child).toContainText('Found the marker.');
+    await expect(child).not.toContainText('Checking the marker');
+    await expect(child).toContainText('Additional sub-agent text was omitted');
+    await expect(child.getByRole('region', { name: 'Result' })).toHaveText('Child result');
+    // Child text is sanitized Markdown.
+    await expect(child).toContainText('Inspecting');
+    await expect(child.locator('script')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).childExecuted)).toBeUndefined();
-    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.screenshot({
       path: `artifacts/subagent-detail/live-${mobile ? 'mobile' : 'desktop'}.png`,
     });
+
+    // A sub-agent it delegated to opens in its place.
+    await child.locator('.activity-group > summary').click();
+    await child.getByRole('button', { name: /Verifier/ }).click();
+    const nested = page.getByRole('dialog', { name: 'Verifier' });
+    await expect(nested.locator('header')).toContainText('Delegated by Fixture reader');
+    await nested.getByRole('button', { name: 'Close sub-agent' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
     await page.evaluate(() => {
       (window as any).emitCapability({ kind: 'text', text: 'Parent final answer.' });
       (window as any).finishCapabilities('complete');
@@ -110,20 +125,19 @@ for (const mobile of [false, true]) {
     await page.locator('.conversation-item').first().click();
     await page.getByLabel('Work history', { exact: true }).click();
     const group = page.locator('.activity-group').last();
-    const card = group.locator('.tool-card').filter({ hasText: 'Sub-agents' });
     await group.locator(':scope > summary').click();
-    await card.locator(':scope > summary').click();
-    await expect(messages).not.toHaveAttribute('open', '');
-    await messages.locator('summary').click();
-    await expect(messages).toContainText('Found the marker.');
     const send = group.locator('.tool-card').filter({ hasText: 'Confirm the marker' });
     await send.locator(':scope > summary').click();
     await expect(send).toContainText('Recipient');
-    await expect(page.locator('.message:not(.user) .message-content > .prose').last()).toHaveText(
-      'Parent final answer.',
-    );
+    await group.locator('.subagent-row', { hasText: 'Inspect fixture' }).click();
+    await expect(child).toContainText('Found the marker.');
+    await expect(child.getByRole('region', { name: 'Result' })).toHaveText('Child result');
     await page.screenshot({
       path: `artifacts/subagent-detail/history-${mobile ? 'mobile' : 'desktop'}.png`,
     });
+    await child.getByRole('button', { name: 'Close sub-agent' }).click();
+    await expect(page.locator('.message:not(.user) .message-content > .prose').last()).toHaveText(
+      'Parent final answer.',
+    );
   });
 }

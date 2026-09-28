@@ -1231,8 +1231,12 @@ impl ToolDecoder {
                 }
                 let mut group = self.group("claude");
                 if let Some(agent) = Self::agent(&mut group, &id) {
-                    if let Some(name) = field(v, "description", 200) {
-                        agent.name = name;
+                    // Progress describes what the child does now ("Reading beta.txt"), never
+                    // what it is; only its start names it.
+                    if v["subtype"] == "task_started" {
+                        if let Some(name) = field(v, "description", 200) {
+                            agent.name = name;
+                        }
                     }
                     if v["subtype"] == "task_notification" {
                         agent.status = status(v["status"].as_str().unwrap_or_default()).into();
@@ -1510,7 +1514,11 @@ mod tests {
         assert_eq!(d.group("claude").agents[0].status, "running");
         assert!(d.group("claude").agents[0].background);
         d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"task1","tool_use_id":"agent1","description":"Fixture reader"}));
+        // Progress describes the child's current step; its name stays what it was started as.
+        d.decode("claude", &json!({"type":"system","subtype":"task_progress","task_id":"task1","tool_use_id":"agent1","description":"Reading private.txt","last_tool_name":"Read"}));
+        assert_eq!(d.group("claude").agents[0].name, "Fixture reader");
         let done = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"task1","status":"completed","summary":"Fixture verified","output_file":"DO_NOT_OPEN"}));
+        assert_eq!(done[0].agents[0].name, "Fixture reader");
         assert_eq!(done[0].agents[0].status, "complete");
         assert!(done[0].agents[0].background);
         assert_eq!(

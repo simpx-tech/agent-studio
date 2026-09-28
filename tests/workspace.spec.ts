@@ -2545,12 +2545,14 @@ test('skills, web searches, and child agents keep progress, results, and saved h
     }),
   );
   await emit(tool('read', 'tool', 'Read', { parentId: 'child1' }));
-  // Running calls have rows of their own, which open like calls.
+  // Running calls have rows of their own, which open like calls; a sub-agent's row opens its
+  // conversation beside the chat.
   await page.locator('[data-category="agent"] > summary').click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
-  await expect(page.getByRole('region', { name: 'Sub-agent: Fixture reader' })).toContainText(
-    'Read',
-  );
+  await page.getByRole('button', { name: /Fixture reader/ }).click();
+  const reader = page.getByRole('dialog', { name: 'Fixture reader' });
+  await expect(reader).toContainText('Read the marker');
+  await expect(reader.locator('.live-row')).toContainText('Read');
   await page.screenshot({ path: 'artifacts/capabilities-running-browser.png' });
   await emit(
     tool('skill', 'skill', 'Skill: capability-check', { revision: 2, status: 'complete' }),
@@ -2595,22 +2597,19 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
   await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
   await page.getByLabel('Work history', { exact: true }).click();
-  await page.locator('.activity-group > summary').click();
-  await page.locator('[data-category="agent"] > summary').click();
+  await page.locator('.chat-scroll .activity-group > summary').click();
   const searches = page.locator('[data-category="search"]');
   await expect(searches.first()).toContainText('Completed');
   await searches.first().locator(':scope > summary').click();
   await expect(searches.first().getByRole('link', { name: 'IANA example domains' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Unsafe' })).toHaveCount(0);
-  await page
-    .getByRole('region', { name: 'Sub-agent: Fixture reader' })
-    .locator('.agent-result > summary')
-    .click();
-  await expect(page.getByRole('region', { name: 'Sub-agent: Fixture reader' })).toContainText(
-    'Marker verified <script>',
-  );
+  // Sub-agents are rows of their group; the result closes each one's conversation.
+  await page.locator('.subagent-row', { hasText: 'Fixture reader' }).click();
+  await expect(reader.getByRole('region', { name: 'Result' })).toHaveText('Marker verified');
+  await expect(reader.locator('script')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).pwned)).toBeUndefined();
   await page.screenshot({ path: 'artifacts/capabilities-complete-browser.png' });
+  await reader.getByRole('button', { name: 'Close sub-agent' }).click();
   await page.setViewportSize({ width: 880, height: 720 });
   expect(
     await page.locator('.tool-activity').evaluate((el) => el.scrollWidth <= el.clientWidth),
@@ -2632,8 +2631,7 @@ test('skills, web searches, and child agents keep progress, results, and saved h
   await page.getByLabel('Work history', { exact: true }).click();
   await page.locator('.activity-group > summary').click();
   await expect(page.locator('[data-category="search"]')).toHaveCount(2);
-  await page.locator('[data-category="agent"] > summary').click();
-  await expect(page.getByRole('region', { name: 'Sub-agent: Source checker' })).toContainText(
+  await expect(page.locator('.subagent-row', { hasText: 'Source checker' })).toContainText(
     'Failed',
   );
 });
