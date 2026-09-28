@@ -5,6 +5,47 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.6.0 - 2026-09-28
+
+Closing the window now keeps Agent Studio running in the system tray, Claude Code and Codex keep
+themselves up to date, and chat images no longer travel inside every save and sync.
+
+### Added
+
+- Keep Agent Studio running in the system tray (the menu bar on macOS) when you close its window,
+  so replies, alerts and chats started from your phone carry on. Click the tray icon to come back,
+  or choose Quit Agent Studio in its menu; opening Agent Studio again shows the running window.
+  Settings → Background turns this off
+- Keep Claude Code and Codex up to date: the app runs their own updaters a minute after it starts
+  and every six hours, with a switch for each in Settings → CLI updates and the installed version
+  in Connections
+- Show each model's version beside a small print of its line in the Model picker, the toolbar and
+  every reply, and say under a reply's heading when it ran a different model from the one picked
+
+### Changed
+
+- Keep chat images once on each computer and once on the relay instead of inside the chats, so
+  saving and syncing a conversation no longer carries its images
+
+### Fixed
+
+- Name Claude models for what the installed Claude Code runs, such as Opus 5.5, instead of
+  promising "(latest)"
+- Show a reply on your other devices as it is written again, not only at its plans, questions and
+  end
+- Stop a finished reply from flipping back to running, and an undone rewind from returning, on
+  other devices
+- Put the question itself in the alert for a reply's first question, instead of a generic line
+- Alert for, and mark with a green dot, a reply that was still running on another computer when
+  this app started, once it finishes
+- Keep 3D models from going blank when a chat shows many of them, and name the reason when one
+  cannot be opened, such as a compressed model
+- Keep the files a reply shows in their numbered places, and open large tool results from another
+  computer through the relay
+- Let a Viewer tab open its saved copy after another tab removed a conversation
+- Tell the model which fields to fix when it calls the image or visualization tools wrongly, so it
+  retries instead of giving up
+
 ## 0.5.1 - 2026-09-27
 
 ### Fixed
