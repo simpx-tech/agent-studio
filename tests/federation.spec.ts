@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
 import { createHash } from 'node:crypto';
+import { triangleGlbBase64 } from './model-fixture';
 
 test('shared account context is explicit, scoped, cancellable and saved across reloads', async ({
   page,
@@ -345,6 +346,29 @@ async function host(page: Page, relay: string, token: string, name: string, plat
               ),
             );
           }
+          // A model this computer keeps, with the views its window renders of it for others.
+          if (command === 'read_tool_output_model_file') {
+            w.modelFileReads = (w.modelFileReads ?? 0) + 1;
+            const data = localStorage.getItem('fixture-model');
+            if (!data) throw 'This output was not kept on the computer that ran it.';
+            return Uint8Array.from(atob(data), (c) => c.charCodeAt(0)).buffer;
+          }
+          if (command === 'read_tool_output_model_views') {
+            const kept = JSON.parse(localStorage.getItem('fixture-model-views') ?? 'null');
+            return { format: 'glb', bytes: 40 * 1024 * 1024, ...kept, views: kept?.views ?? [] };
+          }
+          if (command === 'store_tool_output_model_views') {
+            const views = (args.views as string[]).map((data) => ({
+              mediaType: 'image/webp',
+              data,
+              bytes: Math.floor((data.length * 3) / 4),
+            }));
+            localStorage.setItem(
+              'fixture-model-views',
+              JSON.stringify({ renderer: args.renderer, views }),
+            );
+            return;
+          }
           if (command === 'generate_title') throw new Error('Synthetic title unavailable');
           if (command === 'cancel_title') return;
           if (command === 'sign_in') {
@@ -415,6 +439,25 @@ async function host(page: Page, relay: string, token: string, name: string, plat
                 },
               });
             emit({ kind: 'text', text: `Response from ${identity.name}, completed.` });
+            // A model kept at full detail, far larger than one relay request carries.
+            if (localStorage.getItem('fixture-model'))
+              emit({
+                kind: 'sentfiles',
+                sentFiles: {
+                  id: 'figure',
+                  revision: 1,
+                  runId: args.request.runId,
+                  toolId: 'toolu_figure',
+                  files: [
+                    {
+                      index: 0,
+                      name: 'figure.glb',
+                      mediaType: 'model/gltf-binary',
+                      bytes: 40 * 1024 * 1024,
+                    },
+                  ],
+                },
+              });
             emit({ kind: 'usage', input: 2400, output: 50, costUsd: 0.012345 });
             return 'complete';
           }
@@ -1529,6 +1572,106 @@ test('two app environments pair, share accounts, route chats, retain progress an
       )
       .toBe(1);
     expect(await desktop.evaluate(() => JSON.stringify(localStorage))).not.toContain(token);
+  } finally {
+    await a.close();
+    await b.close();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('another computer shows a model too large for the relay as eight views its own computer draws', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
+  const token = 'synthetic-relay-key-for-browser-checks-123456';
+  const relay = createRelay({ token, directory });
+  await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(relay.address() as { port: number }).port}`;
+  const a = await browser.newContext(),
+    b = await browser.newContext();
+  try {
+    const desktop = await a.newPage(),
+      mac = await b.newPage();
+    await host(desktop, url, token, 'Desktop', 'windows');
+    await host(mac, url, token, 'MacBook', 'macos');
+    // The MacBook keeps the model its reply sends, at 40 MB by its record.
+    await mac.evaluate(
+      (data) => localStorage.setItem('fixture-model', data),
+      triangleGlbBase64({ animated: false }),
+    );
+    await mac.getByRole('button', { name: 'Add account', exact: true }).click();
+    await mac.getByLabel('Account name', { exact: true }).fill('Claude personal 1');
+    await mac.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
+    await expect(mac.getByRole('heading', { name: 'Claude personal 1' })).toBeVisible();
+    for (const page of [mac, desktop]) {
+      await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
+      await page.getByLabel('Relay URL', { exact: true }).fill(url);
+      await page.getByLabel('Relay pairing key', { exact: true }).fill(token);
+      await page.getByRole('button', { name: 'Pair & sync', exact: true }).click();
+      await expect(page.getByText(/^Synced /)).toBeVisible({ timeout: 15_000 });
+    }
+    await expect(desktop.getByRole('heading', { name: 'Claude personal 1' })).toBeVisible();
+    await desktop
+      .locator('.fleet-account')
+      .filter({ hasText: 'Claude personal 1' })
+      .getByRole('button', { name: 'Chat', exact: true })
+      .click();
+    await chooseTestFolder(desktop);
+    await desktop.getByRole('combobox', { name: 'Agent', exact: true }).click();
+    await desktop.getByRole('option', { name: 'Claude · Claude personal 1', exact: true }).click();
+    await desktop.getByRole('textbox', { name: 'Message', exact: true }).fill('Show me the figure');
+    await expect(desktop.getByRole('button', { name: 'Send message' })).toBeEnabled({
+      timeout: 15_000,
+    });
+    await desktop.getByRole('button', { name: 'Send message' }).click();
+    const answer = desktop
+      .getByTestId('message')
+      .filter({ hasText: 'Response from MacBook, completed.' });
+    await expect(answer).toHaveAttribute('data-status', 'complete', { timeout: 20_000 });
+    // The desktop asks for views, which the MacBook's window draws from the model it keeps.
+    const turntable = answer.getByRole('slider', { name: 'Turn figure.glb' });
+    await expect(turntable).toHaveAttribute('aria-valuetext', 'View 1 of 8', { timeout: 30_000 });
+    await expect(answer.getByText('GLB · 40 MB · 8 views')).toBeVisible();
+    await answer.locator('.model-view').screenshot({ path: 'artifacts/model-views/turntable.png' });
+    const first = await turntable.locator('img').getAttribute('src');
+    expect(first).toMatch(/^data:image\/webp;base64,/);
+    await turntable.focus();
+    await desktop.keyboard.press('ArrowRight');
+    await expect(turntable).toHaveAttribute('aria-valuetext', 'View 2 of 8');
+    expect(await turntable.locator('img').getAttribute('src')).not.toBe(first);
+    await answer.getByRole('button', { name: 'Turn left' }).click();
+    await answer.getByRole('button', { name: 'Turn left' }).click();
+    await expect(turntable).toHaveAttribute('aria-valuetext', 'View 8 of 8');
+    // Dragging to the right turns on, as it turns the 3D viewer.
+    const box = (await turntable.boundingBox())!;
+    await desktop.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await desktop.mouse.down();
+    await desktop.mouse.move(box.x + box.width / 2 + 70, box.y + box.height / 2, { steps: 5 });
+    await desktop.mouse.up();
+    await expect(turntable).toHaveAttribute('aria-valuetext', 'View 1 of 8');
+    expect(await turntable.locator('img').getAttribute('src')).toBe(first);
+    // Expanded, the same views turn at full size without asking again.
+    await answer.getByRole('button', { name: 'Expand figure.glb' }).click();
+    const preview = desktop.getByRole('dialog', { name: 'Model preview' });
+    await expect(preview.getByRole('slider', { name: 'Turn figure.glb' })).toBeVisible();
+    await preview.getByRole('button', { name: 'Turn right' }).click();
+    await preview.screenshot({ path: 'artifacts/model-views/turntable-expanded.png' });
+    await expect(preview.getByRole('slider', { name: 'Turn figure.glb' })).toHaveAttribute(
+      'aria-valuetext',
+      'View 2 of 8',
+    );
+    await desktop.getByRole('button', { name: 'Close model preview' }).click();
+    // The model never left the MacBook: it read it once, and keeps the views it drew.
+    expect(await mac.evaluate(() => (window as any).modelFileReads)).toBe(1);
+    expect(await desktop.evaluate(() => (window as any).modelFileReads)).toBeUndefined();
+    const kept = await mac.evaluate(() =>
+      JSON.parse(localStorage.getItem('fixture-model-views') ?? 'null'),
+    );
+    expect(kept.renderer).toBe(1);
+    expect(kept.views).toHaveLength(8);
+    expect(new Set(kept.views.map((view: { data: string }) => view.data)).size).toBeGreaterThan(1);
   } finally {
     await a.close();
     await b.close();

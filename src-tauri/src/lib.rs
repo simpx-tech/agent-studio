@@ -122,7 +122,8 @@ async fn read_tool_output(
     )
     .await
 }
-/// One 3D model a finished tool call kept, whole, for the viewer that shows it.
+/// One 3D model a finished tool call kept, whole, for a viewer on another device: as base64,
+/// within what one relay request carries.
 #[tauri::command]
 async fn read_tool_output_model(
     app: tauri::AppHandle,
@@ -133,6 +134,57 @@ async fn read_tool_output_model(
 ) -> Result<tool_output::ModelData, String> {
     let root = tool_output::root(&app)?;
     tool_output::read_model(root, pending.inner().clone(), run_id, tool_id, index).await
+}
+/// One 3D model a finished tool call kept, whole and however large, as raw bytes for this
+/// computer's window.
+#[tauri::command]
+async fn read_tool_output_model_file(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<tauri::ipc::Response, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_model_file(root, pending.inner().clone(), run_id, tool_id, index)
+        .await
+        .map(tauri::ipc::Response::new)
+}
+/// The views this computer keeps of one of its models for other devices, with the model's
+/// format and size for rendering them when none are kept.
+#[tauri::command]
+async fn read_tool_output_model_views(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<tool_output::ModelViews, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_model_views(root, pending.inner().clone(), run_id, tool_id, index).await
+}
+/// Keeps the views this computer's window rendered of one of its models.
+#[tauri::command]
+async fn store_tool_output_model_views(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    renderer: u32,
+    views: Vec<String>,
+) -> Result<(), String> {
+    let root = tool_output::root(&app)?;
+    tool_output::store_model_views(
+        root,
+        pending.inner().clone(),
+        run_id,
+        tool_id,
+        index,
+        renderer,
+        views,
+    )
+    .await
 }
 /// One image of a finished tool call's result.
 #[tauri::command]
@@ -1268,6 +1320,9 @@ pub fn run() {
             read_tool_output,
             read_tool_output_image,
             read_tool_output_model,
+            read_tool_output_model_file,
+            read_tool_output_model_views,
+            store_tool_output_model_views,
             load_workspace,
             save_workspace,
             save_workspace_patch,

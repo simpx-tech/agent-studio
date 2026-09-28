@@ -16,6 +16,7 @@ import type {
   Texture,
   WebGLRenderer,
 } from 'three';
+import { blobBase64 } from './images';
 
 export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'stl' | 'fbx';
 
@@ -86,34 +87,34 @@ const modules = () =>
 
 /** An animation alone draws at most 60 frames a second, whatever the display's rate. */
 const FRAME_MS = 1000 / 60 - 1;
+/** Where the camera starts: in front of the model, a little to its right and above it. */
+const START: [number, number, number] = [0.9, 0.65, 1.6];
 
-export async function createModelScene(
+/** A renderer drawing on a transparent background with the viewer's tone. */
+function createRenderer(
+  THREE: typeof import('three'),
   canvas: HTMLCanvasElement,
-  bytes: ArrayBuffer,
-  format: ModelFormat,
-  options: SceneOptions = {},
-): Promise<ModelScene> {
-  const THREE = await modules();
-  const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
-  const object = await parse(THREE, bytes, format, surface(canvas));
-  let renderer: WebGLRenderer;
-  try {
-    renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha: true,
-      powerPreference: 'low-power',
-    });
-  } catch (cause) {
-    release(object);
-    throw cause;
-  }
+  preserveDrawingBuffer = false,
+): WebGLRenderer {
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: true,
+    powerPreference: 'low-power',
+    preserveDrawingBuffer,
+  });
   renderer.setClearAlpha(0);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  const scene: Scene = new THREE.Scene();
-  const camera: PerspectiveCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
-  // A small studio of lights, so a model looks the same on every computer and needs no
-  // environment file. Physically based materials still read as rounded volumes.
+  return renderer;
+}
+
+/**
+ * Puts a model in a small studio of lights, centred on the origin at a size the camera can
+ * frame, so it looks the same on every computer and in every view and needs no environment
+ * file. Physically based materials still read as rounded volumes. Returns how far the scaled
+ * model reaches from its centre, which the camera frames whole.
+ */
+function studio(THREE: typeof import('three'), scene: Scene, object: Object3D): number {
   scene.add(new THREE.HemisphereLight(0xf2f4ff, 0x30302f, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.4);
   key.position.set(3, 5, 4);
@@ -130,12 +131,41 @@ export async function createModelScene(
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const extent = Math.max(size.x, size.y, size.z) || 1;
-  // Centre the model on the origin and view it at a size the camera can frame.
   object.position.sub(center);
   root.scale.setScalar(1 / extent);
-  // How far the scaled model reaches from its centre, which the camera frames whole.
   const reach = size.length() / 2 / extent;
-  const radius = Number.isFinite(reach) && reach > 0.05 ? reach : 0.5;
+  return Number.isFinite(reach) && reach > 0.05 ? reach : 0.5;
+}
+
+/**
+ * The distance that fits a model reaching `radius` whole in the narrower of the camera's two
+ * directions, so a wide model still fits a tall view.
+ */
+function fitDistance(THREE: typeof import('three'), camera: PerspectiveCamera, radius: number) {
+  const vertical = THREE.MathUtils.degToRad(camera.fov) / 2;
+  const horizontal = Math.atan(Math.tan(vertical) * camera.aspect);
+  return (radius / Math.sin(Math.min(vertical, horizontal))) * 1.05;
+}
+
+export async function createModelScene(
+  canvas: HTMLCanvasElement,
+  bytes: ArrayBuffer,
+  format: ModelFormat,
+  options: SceneOptions = {},
+): Promise<ModelScene> {
+  const THREE = await modules();
+  const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
+  const object = await parse(THREE, bytes, format, surface(canvas));
+  let renderer: WebGLRenderer;
+  try {
+    renderer = createRenderer(THREE, canvas);
+  } catch (cause) {
+    release(object);
+    throw cause;
+  }
+  const scene: Scene = new THREE.Scene();
+  const camera: PerspectiveCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+  const radius = studio(THREE, scene, object);
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
@@ -149,16 +179,9 @@ export async function createModelScene(
     if (wheel) canvas.removeEventListener('wheel', wheel);
     canvas.style.touchAction = 'pan-y';
   }
-  const direction = new THREE.Vector3(0.9, 0.65, 1.6).normalize();
-  // The distance that fits the whole model in the narrower of the two directions, so a wide
-  // model still fits a tall view.
-  const fit = () => {
-    const vertical = THREE.MathUtils.degToRad(camera.fov) / 2;
-    const horizontal = Math.atan(Math.tan(vertical) * camera.aspect);
-    return (radius / Math.sin(Math.min(vertical, horizontal))) * 1.05;
-  };
+  const direction = new THREE.Vector3(...START).normalize();
   const start = () => {
-    camera.position.copy(direction).multiplyScalar(fit());
+    camera.position.copy(direction).multiplyScalar(fitDistance(THREE, camera, radius));
     controls.target.set(0, 0, 0);
     camera.lookAt(0, 0, 0);
     controls.update();
@@ -295,6 +318,108 @@ export async function createModelScene(
       renderer.forceContextLoss();
     },
   };
+}
+
+/** A drawn view of a model, as the computer keeping the model hands it to other devices. */
+export type ModelViewImage = {
+  mediaType: 'image/png' | 'image/webp';
+  data: string;
+  bytes: number;
+  width: number;
+  height: number;
+};
+export type ViewOptions = {
+  count: number;
+  width: number;
+  height: number;
+  /** The largest view, and all of them together; past either, they are drawn again smaller. */
+  viewBytes: number;
+  totalBytes: number;
+};
+/**
+ * The grey of a model without colours of its own in its views, which other devices show on
+ * either theme: between the dark and light themes' `--model-surface`.
+ */
+const VIEW_SURFACE = '#9a9ea8';
+
+/**
+ * Pictures of a model from `count` directions a turn apart around it, for devices that do not
+ * read the model itself. The first is the viewer's starting view, and each next one turns the
+ * model as dragging the viewer to the right does. An animated model holds the opening pose of
+ * its first animation, as the viewer shows it before playing. Views are WebP where the engine
+ * encodes it and PNG otherwise, on a transparent background.
+ */
+export async function renderModelViews(
+  bytes: ArrayBuffer,
+  format: ModelFormat,
+  options: ViewOptions,
+): Promise<ModelViewImage[]> {
+  const THREE = await modules();
+  const object = await parse(THREE, bytes, format, VIEW_SURFACE);
+  const canvas = document.createElement('canvas');
+  let renderer: WebGLRenderer;
+  try {
+    renderer = createRenderer(THREE, canvas, true);
+  } catch (cause) {
+    release(object);
+    throw cause;
+  }
+  const scene: Scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, options.width / options.height, 0.01, 1000);
+  const radius = studio(THREE, scene, object);
+  const clips = object.animations ?? [];
+  const mixer = clips.length ? new THREE.AnimationMixer(object) : null;
+  if (mixer) {
+    mixer.clipAction(clips[0]).play();
+    mixer.update(0);
+  }
+  const up = new THREE.Vector3(0, 1, 0);
+  const start = new THREE.Vector3(...START).normalize();
+  const distance = fitDistance(THREE, camera, radius);
+  try {
+    renderer.setPixelRatio(1);
+    // A model whose views come out too large, as PNG can, is drawn again smaller.
+    for (const scale of [1, 0.7, 0.5]) {
+      const width = Math.round(options.width * scale);
+      const height = Math.round(options.height * scale);
+      renderer.setSize(width, height, false);
+      const views: ModelViewImage[] = [];
+      let total = 0;
+      for (let view = 0; view < options.count; view++) {
+        const turn = (-view * 2 * Math.PI) / options.count;
+        camera.position.copy(start).applyAxisAngle(up, turn).multiplyScalar(distance);
+        camera.lookAt(0, 0, 0);
+        renderer.render(scene, camera);
+        const image = await encode(canvas, width, height);
+        total += image.bytes;
+        if (image.bytes > options.viewBytes || total > options.totalBytes) break;
+        views.push(image);
+      }
+      if (views.length === options.count) return views;
+    }
+    throw new Error('The views of this model are too large to send to another device.');
+  } finally {
+    mixer?.stopAllAction();
+    mixer?.uncacheRoot(object);
+    release(scene);
+    renderer.dispose();
+    renderer.forceContextLoss();
+  }
+}
+
+/** The canvas as it was just drawn, as an image another device can show. */
+async function encode(
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+): Promise<ModelViewImage> {
+  // The canvas is read at once, before the next view is drawn on it.
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, 'image/webp', 0.9),
+  );
+  if (!blob) throw new Error('This model could not be drawn as an image here.');
+  const mediaType = blob.type === 'image/webp' ? 'image/webp' : 'image/png';
+  return { mediaType, data: await blobBase64(blob), bytes: blob.size, width, height };
 }
 
 /** The colour of a model that carries none, from the theme, so it reads on either background. */

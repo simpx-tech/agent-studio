@@ -60,6 +60,7 @@ const jobInput = z
       'toolOutput',
       'toolOutputImage',
       'toolOutputModel',
+      'toolOutputModelViews',
       'mcp',
       'plugins',
       'undoFiles',
@@ -153,7 +154,7 @@ const jobInput = z
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid tool output image request' });
     if (
-      job.method === 'toolOutputModel' &&
+      (job.method === 'toolOutputModel' || job.method === 'toolOutputModelViews') &&
       !z
         .object({
           runId: uuid,
@@ -242,7 +243,8 @@ export const stateUploadLimit = 64_000_000;
 const chatsAnswerBudget = 32_000_000;
 /**
  * The largest update of one request. A finished read of a kept tool result carries a whole
- * image (16 MiB, a third larger as base64) or model, or both streams of its full output.
+ * image (16 MiB, a third larger as base64), a model of up to 12 MiB or the views of a larger
+ * one (12 MiB together), or both streams of its full output.
  */
 export const jobUpdateLimit = 24_000_000;
 /** What one workspace's requests may hold at once, their results included. */
@@ -252,7 +254,10 @@ const jobStorageBudget = 64_000_000;
  * them, or a minute after they finish when it never asks.
  */
 const resultRead = (method: string) =>
-  method === 'toolOutput' || method === 'toolOutputImage' || method === 'toolOutputModel';
+  method === 'toolOutput' ||
+  method === 'toolOutputImage' ||
+  method === 'toolOutputModel' ||
+  method === 'toolOutputModelViews';
 class TooLargeError extends Error {
   constructor() {
     super('Request exceeds its size limit.');

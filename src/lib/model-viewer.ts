@@ -83,6 +83,23 @@ function scroller(element: HTMLElement): HTMLElement | null {
   }
   return null;
 }
+/**
+ * Calls `near` once, when `stage` comes within 600 px of view. The margin is measured from the
+ * chat's own scroller: seen from the window, that scroller hides the stage however wide the
+ * margin. Returns what stops watching.
+ */
+export function whenNear(stage: HTMLElement, near: () => void): () => void {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      near();
+    },
+    { root: scroller(stage), rootMargin: '600px 0px' },
+  );
+  observer.observe(stage);
+  return () => observer.disconnect();
+}
 
 export type ViewerStatus = {
   phase: 'loading' | 'ready' | 'failed';
@@ -107,6 +124,11 @@ export function createModelViewer(
     label: string;
     /** The model's bytes, read once and shared by every stage that shows it. */
     load(): Promise<{ format: ModelFormat; bytes: ArrayBuffer }>;
+    /**
+     * Whether to read the bytes ahead, as the stage nears the screen. A model too large to
+     * keep between reads is read only when its scene is built.
+     */
+    readAhead: boolean;
     wheelZoom: boolean;
     clip(): number;
     playing(): boolean;
@@ -264,18 +286,10 @@ export function createModelViewer(
     }
   });
   visible.observe(stage);
-  // The bytes are read ahead of the stage reaching the screen, once. The margin is measured
-  // from the chat's own scroller: seen from the window, that scroller hides the stage however
-  // wide the margin.
-  const near = new IntersectionObserver(
-    (entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      near.disconnect();
-      options.load().catch(() => {});
-    },
-    { root: scroller(stage), rootMargin: '600px 0px' },
-  );
-  near.observe(stage);
+  // The bytes are read ahead of the stage reaching the screen, once.
+  const stopReading = options.readAhead
+    ? whenNear(stage, () => void options.load().catch(() => {}))
+    : () => {};
 
   return {
     setClip: (clip) => scene?.setClip(clip),
@@ -298,7 +312,7 @@ export function createModelViewer(
       destroyed = true;
       clearTimeout(settle);
       visible.disconnect();
-      near.disconnect();
+      stopReading();
       release(false);
       sizes.disconnect();
       places.give(place);

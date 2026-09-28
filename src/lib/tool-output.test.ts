@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createFetchCache,
   formatBytes,
+  keptModelViewsSchema,
+  modelViewCount,
+  modelViewsSchema,
   outputLines,
   outputSize,
   toolOutputImageSchema,
@@ -51,6 +54,26 @@ describe('tool output', () => {
       { ...data, mediaType: 'text/html' },
     ])
       expect(toolOutputImageSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it('accepts a model’s views only as a whole turn of pictures', () => {
+    const view = { mediaType: 'image/webp', data: 'UklGRg==', bytes: 4, width: 1600, height: 1600 };
+    expect(modelViewCount).toBe(8);
+    expect(modelViewsSchema.safeParse({ views: Array(8).fill(view) }).success).toBe(true);
+    for (const views of [
+      Array(7).fill(view),
+      Array(9).fill(view),
+      [...Array(7).fill(view), { ...view, mediaType: 'model/gltf-binary' }],
+      [...Array(7).fill(view), { ...view, data: 'javascript:alert(1)' }],
+    ])
+      expect(modelViewsSchema.safeParse({ views }).success).toBe(false);
+    // The computer keeping a model reports what it holds, which may be nothing yet.
+    expect(keptModelViewsSchema.parse({ format: 'glb', bytes: 40 * 1024 ** 2, views: [] })).toEqual(
+      { format: 'glb', bytes: 40 * 1024 ** 2, views: [] },
+    );
+    expect(keptModelViewsSchema.safeParse({ format: 'blend', bytes: 1, views: [] }).success).toBe(
+      false,
+    );
   });
 
   it('caches fetches, retries failures and stays within its bounds', async () => {

@@ -915,6 +915,19 @@ describe('real HTTP relay', () => {
     expect((await f.call('POST', 'jobs', { ...image, args: { ...args, index: 0 } })).status).toBe(
       200,
     );
+    // Views of a model too large for one request name the model the same way, and nothing else:
+    // the computer keeping it draws them itself.
+    const views = { ...job, id: crypto.randomUUID(), method: 'toolOutputModelViews' };
+    for (const invalid of [
+      { ...args, index: -1 },
+      { ...args, index: 0, renderer: 1 },
+      { ...args, index: 0, views: ['UklGRg=='] },
+      args,
+    ])
+      expect((await f.call('POST', 'jobs', { ...views, args: invalid })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', { ...views, args: { ...args, index: 0 } })).status).toBe(
+      200,
+    );
     expect(
       (
         await f.call('POST', 'jobs', {
@@ -937,6 +950,25 @@ describe('real HTTP relay', () => {
     );
     // The requester has its result, and nothing else reads it, so it leaves at once.
     expect((await f.call('GET', `jobs/${job.id}`)).status).toBe(404);
+    const drawn = {
+      views: Array.from({ length: 8 }, () => ({
+        mediaType: 'image/webp',
+        data: 'UklGRg==',
+        bytes: 4,
+      })),
+    };
+    expect(
+      (
+        await f.call(
+          'PUT',
+          `jobs/${views.id}`,
+          { status: 'complete', events: [], result: drawn },
+          f.target,
+        )
+      ).status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${views.id}`)).body.result).toEqual(drawn);
+    expect((await f.call('GET', `jobs/${views.id}`)).status).toBe(404);
   });
   it('keeps large read results only until they are read, within the storage budget', async () => {
     const f = await fixture({ jobUpdate: 3_000, jobStorage: 6_000 });

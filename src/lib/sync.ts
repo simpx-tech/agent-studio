@@ -499,6 +499,7 @@ export type RelayJob = {
     | 'toolOutput'
     | 'toolOutputImage'
     | 'toolOutputModel'
+    | 'toolOutputModelViews'
     | 'mcp'
     | 'plugins'
     | 'undoFiles'

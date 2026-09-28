@@ -51,7 +51,7 @@ const modelReads = (page: Page) =>
   page.evaluate(
     () =>
       ((window as any).toolOutputCalls ?? []).filter(
-        (call: { command: string }) => call.command === 'read_tool_output_model',
+        (call: { command: string }) => call.command === 'read_tool_output_model_file',
       ).length,
   );
 
@@ -299,4 +299,103 @@ test('a structured-output reply shows the files it sent after its JSON', async (
   const image = page.getByAltText('Image 1 returned by chart.png');
   await expect(image).toBeVisible();
   expect((await image.boundingBox())!.y).toBeGreaterThan((await json.boundingBox())!.y);
+});
+
+test('a model larger than the relay carries opens whole on the computer that keeps it', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript((data) => {
+    (window as any).toolOutputs = { toolu_large: { models: [{ format: 'glb', data, bytes: 1 }] } };
+  }, still);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Show me the full model');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.emitCapability({ kind: 'text', text: 'Here it is.\n\n<!-- files:large -->' });
+    w.emitCapability({
+      kind: 'sentfiles',
+      sentFiles: {
+        id: 'large',
+        revision: 1,
+        runId: Object.keys(w.capabilityRuns)[0],
+        toolId: 'toolu_large',
+        files: [
+          { index: 0, name: 'scan.glb', mediaType: 'model/gltf-binary', bytes: 300 * 1024 ** 2 },
+        ],
+      },
+    });
+    w.finishCapabilities('complete');
+  });
+  const answer = page.locator('.message:not(.user)');
+  await expect(answer.getByLabel('3D model scan.glb')).toBeVisible();
+  await expect(answer.getByText('GLB · 300 MB', { exact: true })).toBeVisible();
+  await expect(answer.getByRole('slider')).toHaveCount(0);
+  // Read raw from this computer's store, and only when its scene is built: too large to keep
+  // between scenes, it is not read ahead.
+  expect(await modelReads(page)).toBe(1);
+  expect(
+    await page.evaluate(() =>
+      ((window as any).toolOutputCalls ?? []).some(
+        (call: { command: string }) => call.command === 'read_tool_output_model',
+      ),
+    ),
+  ).toBe(false);
+});
+
+test('views of a model start where the viewer starts and turn as dragging right does', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const result = await page.evaluate(async (data) => {
+    const modulePath = '/src/lib/model-scene.ts';
+    const { renderModelViews } = await import(/* @vite-ignore */ modulePath);
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    const views = await renderModelViews(bytes.buffer, 'glb', {
+      count: 8,
+      width: 240,
+      height: 160,
+      viewBytes: 4 * 1024 * 1024,
+      totalBytes: 12 * 1024 * 1024,
+    });
+    // How much of each view the model covers, read back from its pixels.
+    const covered = [];
+    for (const view of views) {
+      const image = new Image();
+      image.src = `data:${view.mediaType};base64,${view.data}`;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let opaque = 0;
+      for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 0) opaque++;
+      covered.push(opaque / (pixels.length / 4));
+    }
+    return {
+      views: views.map(({ mediaType, width, height, data }: any) => ({
+        mediaType,
+        width,
+        height,
+        data,
+      })),
+      covered,
+    };
+  }, still);
+  expect(result.views).toHaveLength(8);
+  for (const view of result.views)
+    expect(view).toMatchObject({ mediaType: 'image/webp', width: 240, height: 160 });
+  // The one-sided triangle faces the viewer's starting camera. Each view turns the camera 45°
+  // as a drag to the right does, so views 1, 2 and 3 (of 8) and view 8 see its front, and the
+  // four between see its back, which is not drawn.
+  const front = [0, 1, 2, 7];
+  for (const [index, covered] of result.covered.entries())
+    if (front.includes(index)) expect(covered, `view ${index + 1}`).toBeGreaterThan(0.01);
+    else expect(covered, `view ${index + 1}`).toBe(0);
+  expect(new Set(front.map((index) => result.views[index].data)).size).toBe(4);
 });

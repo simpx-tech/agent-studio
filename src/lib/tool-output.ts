@@ -73,16 +73,45 @@ export const modelFormats = {
   'model/stl': 'stl',
   'model/fbx': 'fbx',
 } as const satisfies Record<ToolOutputModelType, string>;
+const modelFormat = z.enum(['glb', 'gltf', 'obj', 'stl', 'fbx']);
 export const toolOutputModelSchema = z.object({
-  format: z.enum(['glb', 'gltf', 'obj', 'stl', 'fbx']),
+  format: modelFormat,
   data: base64,
   bytes: size,
 });
 export type ToolOutputModel = z.infer<typeof toolOutputModelSchema>;
 /**
- * Model bytes for a loader. A model runs to 12 MiB, and decoding it a character at a time
- * held the page for a long frame, so the engine decodes it: natively where it can, otherwise
- * through a data: URL fetched away from the page.
+ * The largest model another device reads whole, which one relay request carries. The computer
+ * that keeps a model opens it whole up to 1 GiB (`MODEL_BYTES` in src-tauri/src/tool_output.rs);
+ * other devices see a larger one through views that computer renders.
+ */
+export const relayModelBytes = 12 * 1024 * 1024;
+/** Views of a model, a turn apart, starting where the viewer's camera starts. */
+export const modelViewCount = 8;
+/** The version of the views a window renders; views kept by an earlier one are drawn again. */
+export const modelViewsRenderer = 1;
+/**
+ * The largest view, and all of a model's views together, that the computer keeping the model
+ * stores and one relay request carries (`VIEW_BYTES` and `VIEWS_BYTES` in tool_output.rs).
+ */
+export const modelViewBytes = 4 * 1024 * 1024;
+export const modelViewsBytes = 12 * 1024 * 1024;
+/** A model's views as another device receives them. */
+export const modelViewsSchema = z.object({
+  views: z.array(toolOutputImageSchema).length(modelViewCount),
+});
+export type ModelViews = z.infer<typeof modelViewsSchema>;
+/** What the computer keeping a model holds of its views, and what rendering them needs. */
+export const keptModelViewsSchema = z.object({
+  format: modelFormat,
+  bytes: size,
+  renderer: z.number().int().nonnegative().optional(),
+  views: z.array(toolOutputImageSchema).max(modelViewCount),
+});
+/**
+ * Model bytes for a loader, from a model read through the relay. Decoding it a character at a
+ * time held the page for a long frame, so the engine decodes it: natively where it can,
+ * otherwise through a data: URL fetched away from the page.
  */
 export async function modelBytes(model: ToolOutputModel): Promise<ArrayBuffer> {
   const native = Uint8Array as unknown as { fromBase64?(data: string): Uint8Array };

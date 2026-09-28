@@ -30,8 +30,20 @@ pub const FULL_BYTES: u64 = 8 * 1024 * 1024;
 const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
 /// A call's `meta.json` larger than this is not read.
 const META_LIMIT: u64 = 64 * 1024 * 1024;
-/// The largest model file a reply shows, so one relay request carries it whole.
-pub const MODEL_BYTES: u64 = 12 * 1024 * 1024;
+/// The largest model file a reply shows: what a window on this computer loads whole, as raw
+/// bytes. Senders keep their models at full detail below it instead of shrinking them.
+pub const MODEL_BYTES: u64 = 1024 * 1024 * 1024;
+/// The largest model another device reads whole, so one relay request carries it. Other
+/// devices see a larger one through views this computer's window renders (`MODEL_VIEWS`).
+pub const RELAY_MODEL_BYTES: u64 = 12 * 1024 * 1024;
+/// Views of a model, a turn apart, for devices that do not read the model itself.
+pub const MODEL_VIEWS: usize = 8;
+/// The largest view kept, and all of a model's views together, which one relay request
+/// carries as base64 with room to spare.
+const VIEW_BYTES: u64 = 4 * 1024 * 1024;
+const VIEWS_BYTES: u64 = 12 * 1024 * 1024;
+/// The widest or tallest view kept.
+const VIEW_SIDE: u32 = 4096;
 /// The largest image a reply shows, matching one chat attachment.
 pub const IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes read to recognize an image file and its dimensions.
@@ -163,6 +175,25 @@ pub struct ImageData {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+/// A model's kept views, with what rendering them needs: the model's own format and size.
+/// `views` stays empty until this computer's window has rendered and kept them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelViews {
+    pub format: String,
+    pub bytes: u64,
+    /// The version of the window's renderer that drew the kept views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<u32>,
+    pub views: Vec<ImageData>,
+}
+/// The views kept beside a model, written once they all are.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewsMeta {
+    renderer: u32,
+    views: Vec<ImageMeta>,
 }
 
 #[derive(Default)]
@@ -390,16 +421,11 @@ pub fn inspect_model(path: &Path, limit: u64) -> Result<ModelFile, String> {
         "is not a glTF, GLB, OBJ, STL or FBX model, or its content does not match its name",
     )?;
     if format == "gltf" {
-        // The whole document is text within the size limit already checked above.
-        let text =
-            std::fs::read_to_string(path).map_err(|_| "cannot be read as text".to_string())?;
-        // A byte-order mark may come before the document, as the viewer reads past it.
-        let document: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .map_err(|_| "is not a readable glTF document".to_string())?;
+        let document = gltf_document(&mut file)?;
         gltf_is_viewable(&document, "glTF document")?;
     } else if format == "glb" {
         // A GLB carries the same document in its first chunk, which may be larger than the
-        // sniffed head, so it is read whole from the file.
+        // sniffed head, so it is read from the file.
         let document = glb_document(&mut file, &head, size)?;
         gltf_is_viewable(&document, "GLB")?;
     }
@@ -442,13 +468,69 @@ fn model_format(head: &[u8], size: u64) -> Option<&'static str> {
     }
     None
 }
+/// What decides whether a glTF document can be shown: where its buffers and images come from
+/// and which extensions it lists. Everything else is skipped as the document is read, so a
+/// document of hundreds of megabytes with its buffers inline is never held whole.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GltfDocument {
+    #[serde(default)]
+    buffers: Vec<Resource>,
+    #[serde(default)]
+    images: Vec<Resource>,
+    #[serde(default)]
+    extensions_used: Vec<serde_json::Value>,
+    #[serde(default)]
+    extensions_required: Vec<serde_json::Value>,
+}
+#[derive(Debug, Deserialize)]
+struct Resource {
+    #[serde(default)]
+    uri: Option<Uri>,
+}
+/// Where a resource of a glTF document comes from, told without keeping a `data:` URI's bytes.
+#[derive(Debug, PartialEq)]
+enum Uri {
+    Inline,
+    Beside,
+}
+impl<'de> Deserialize<'de> for Uri {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Uri;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a URI")
+            }
+            fn visit_str<E: serde::de::Error>(self, uri: &str) -> Result<Uri, E> {
+                Ok(if uri.starts_with("data:") {
+                    Uri::Inline
+                } else {
+                    Uri::Beside
+                })
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+/// A glTF document read from the start of its file, past a byte-order mark as the viewer reads.
+fn gltf_document(file: &mut std::fs::File) -> Result<GltfDocument, String> {
+    use std::io::BufRead;
+    let unreadable = || "is not a readable glTF document".to_string();
+    file.seek(SeekFrom::Start(0)).map_err(|_| unreadable())?;
+    let mut reader = std::io::BufReader::new(file);
+    let marked = reader
+        .fill_buf()
+        .map_err(|_| unreadable())?
+        .starts_with("\u{feff}".as_bytes());
+    if marked {
+        reader.consume(3);
+    }
+    serde_json::from_reader(reader).map_err(|_| unreadable())
+}
 /// The document of a GLB. The container is a 12-byte header (magic, version, total length)
 /// and then length-prefixed chunks, the first of which is the document.
-fn glb_document(
-    file: &mut std::fs::File,
-    head: &[u8],
-    size: u64,
-) -> Result<serde_json::Value, String> {
+fn glb_document(file: &mut std::fs::File, head: &[u8], size: u64) -> Result<GltfDocument, String> {
     let invalid = || "is not a readable GLB file".to_string();
     let word = |at: usize| {
         head.get(at..at + 4)
@@ -467,10 +549,8 @@ fn glb_document(
     if total > size || total < 20 + length || head.get(16..20) != Some(b"JSON".as_slice()) {
         return Err(invalid());
     }
-    let mut document = vec![0; length as usize];
     file.seek(SeekFrom::Start(20)).map_err(|_| invalid())?;
-    file.read_exact(&mut document).map_err(|_| invalid())?;
-    serde_json::from_slice(&document).map_err(|_| invalid())
+    serde_json::from_reader(std::io::BufReader::new(file.take(length))).map_err(|_| invalid())
 }
 
 /// An extension the document cannot be read without, and the viewer cannot read. The viewer
@@ -489,37 +569,35 @@ fn undecodable_extension(name: &str) -> Option<&'static str> {
 
 /// A glTF document renders only when its buffers and images are inside it and nothing it
 /// requires needs a decoder the viewer does not carry.
-fn gltf_is_viewable(document: &serde_json::Value, kind_name: &str) -> Result<(), String> {
-    for kind in ["buffers", "images"] {
-        for entry in document[kind].as_array().into_iter().flatten() {
-            match entry["uri"].as_str() {
-                None => continue,
-                Some(uri) if uri.starts_with("data:") => continue,
-                Some(_) => return Err(format!(
-                    "is a {kind_name} that loads its {kind} from files beside it; send a self-contained .glb instead"
-                )),
-            }
+fn gltf_is_viewable(document: &GltfDocument, kind_name: &str) -> Result<(), String> {
+    for (kind, entries) in [("buffers", &document.buffers), ("images", &document.images)] {
+        if entries.iter().any(|entry| entry.uri == Some(Uri::Beside)) {
+            return Err(format!(
+                "is a {kind_name} that loads its {kind} from files beside it; send a self-contained .glb instead"
+            ));
         }
     }
-    let names = |key: &str| {
-        document[key]
-            .as_array()
-            .into_iter()
-            .flatten()
+    let names = |list: &[serde_json::Value]| {
+        list.iter()
             .filter_map(serde_json::Value::as_str)
+            .map(String::from)
             .collect::<Vec<_>>()
     };
     // meshopt and Basis fall back to data the document carries unless it requires them, but
     // three.js sets up Draco for any document that lists it as used and fails without a
     // decoder, so Draco is refused whenever it is listed.
-    let draco = names("extensionsUsed")
+    let draco = names(&document.extensions_used)
         .into_iter()
-        .filter(|name| *name == "KHR_draco_mesh_compression");
-    for name in names("extensionsRequired").into_iter().chain(draco) {
-        if let Some(human) = undecodable_extension(name) {
+        .filter(|name| name == "KHR_draco_mesh_compression");
+    for name in names(&document.extensions_required)
+        .into_iter()
+        .chain(draco)
+    {
+        if let Some(compression) = undecodable_extension(&name) {
             return Err(format!(
-                "needs {human} ({name}), which the 3D viewer cannot decode; \
-                 export it uncompressed, reducing the mesh if that goes over the size limit"
+                "needs {compression} ({name}), which the 3D viewer cannot decode; \
+                 export it uncompressed, at full detail: a reply shows models up to {}",
+                human(MODEL_BYTES)
             ));
         }
     }
@@ -870,7 +948,16 @@ fn human(bytes: u64) -> String {
     if kb < 1024.0 {
         return format!("{kb:.0} KB");
     }
-    format!("{:.1} MB", kb / 1024.0)
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return format!("{mb:.1} MB");
+    }
+    let gb = mb / 1024.0;
+    if gb.fract() == 0.0 {
+        format!("{gb:.0} GB")
+    } else {
+        format!("{gb:.1} GB")
+    }
 }
 /// A stream as a window shows it: whole when it fits in `limit`, otherwise its beginning and
 /// end on line boundaries with a marker for what is not shown.
@@ -1001,7 +1088,36 @@ pub async fn read_image(
     .map_err(|_| "Cannot read the tool output".to_string())?
 }
 
-/// One 3D model of a call's result, whole, for the window that shows the reply.
+/// A kept model of a call and the path of its file, which is never larger than `limit`.
+fn kept_model(
+    directory: &Path,
+    tool_id: &str,
+    index: usize,
+    limit: u64,
+) -> Result<(ModelMeta, PathBuf), String> {
+    let meta = read_meta(directory, tool_id)?;
+    let model = meta.models.into_iter().nth(index).ok_or(NOT_KEPT)?;
+    // Stored names only; a name never reaches outside the call's folder.
+    if model.file.contains(['/', '\\']) || !model.file.starts_with("model-") {
+        return Err(NOT_KEPT.to_string());
+    }
+    let path = directory.join(&model.file);
+    let size = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
+    if size > MODEL_BYTES {
+        return Err(NOT_KEPT.to_string());
+    }
+    if size > limit {
+        return Err(format!(
+            "This model is {}, larger than the {} another device reads whole; it shows views of it instead.",
+            human(size),
+            human(limit)
+        ));
+    }
+    Ok((model, path))
+}
+
+/// One 3D model of a call's result, whole, for a window on another device: as base64 within
+/// what one relay request carries.
 pub async fn read_model(
     root: PathBuf,
     pending: Arc<Pending>,
@@ -1013,26 +1129,167 @@ pub async fn read_model(
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        let meta = read_meta(&directory, &tool_id)?;
-        let model = meta.models.get(index).ok_or(NOT_KEPT)?;
-        // Stored names only; a name never reaches outside the call's folder.
-        if model.file.contains(['/', '\\']) || !model.file.starts_with("model-") {
-            return Err(NOT_KEPT.to_string());
-        }
-        let path = directory.join(&model.file);
-        let size = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
-        if size > MODEL_BYTES {
-            return Err(NOT_KEPT.to_string());
-        }
+        let (model, path) = kept_model(&directory, &tool_id, index, RELAY_MODEL_BYTES)?;
         let bytes = std::fs::read(&path).map_err(|_| NOT_KEPT)?;
         Ok(ModelData {
-            format: model.format.clone(),
+            format: model.format,
             data: base64::engine::general_purpose::STANDARD.encode(&bytes),
             bytes: bytes.len() as u64,
         })
     })
     .await
     .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// One 3D model of a call's result, whole and however large, as raw bytes for a window on
+/// this computer, which loads it without the base64 a relay request needs.
+pub async fn read_model_file(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<Vec<u8>, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, path) = kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        std::fs::read(&path).map_err(|_| NOT_KEPT.to_string())
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// The file listing a model's kept views, written after them.
+fn views_file(index: usize) -> String {
+    format!("model-{index}-views.json")
+}
+/// Views kept beside a model, whole, or none when any of them is missing or unreadable.
+fn kept_views(directory: &Path, index: usize) -> Option<(u32, Vec<ImageData>)> {
+    let path = directory.join(views_file(index));
+    if std::fs::metadata(&path).ok()?.len() > META_LIMIT {
+        return None;
+    }
+    let meta: ViewsMeta = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let prefix = format!("model-{index}-view-");
+    let views = meta
+        .views
+        .iter()
+        .map(|view| {
+            // Stored names only; a name never reaches outside the call's folder.
+            if view.file.contains(['/', '\\']) || !view.file.starts_with(&prefix) {
+                return None;
+            }
+            let bytes = std::fs::read(directory.join(&view.file)).ok()?;
+            let (media_type, _) = sniff(&bytes)?;
+            Some(ImageData {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                bytes: bytes.len() as u64,
+                width: view.width,
+                height: view.height,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (views.len() == MODEL_VIEWS).then_some((meta.renderer, views))
+}
+
+/// A model's views as this computer keeps them for other devices, with the model's format and
+/// size, which rendering them needs when none are kept yet.
+pub async fn read_model_views(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<ModelViews, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (model, path) = kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        let bytes = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
+        let (renderer, views) = kept_views(&directory, index).unzip();
+        Ok(ModelViews {
+            format: model.format,
+            bytes,
+            renderer,
+            views: views.unwrap_or_default(),
+        })
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// Keeps the views this computer's window rendered of one of its models, beside the model,
+/// so other devices get them without another rendering until the call's result goes. Each
+/// must be a PNG, JPEG or WebP image within the size one relay request carries for all of
+/// them, and there must be exactly `MODEL_VIEWS`.
+pub async fn store_model_views(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    renderer: u32,
+    views: Vec<String>,
+) -> Result<(), String> {
+    valid_request(&run_id, &tool_id)?;
+    if views.len() != MODEL_VIEWS {
+        return Err(format!("A model has {MODEL_VIEWS} views"));
+    }
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        let mut decoded = vec![];
+        let mut total = 0;
+        for data in &views {
+            if data.len() as u64 > VIEW_BYTES / 3 * 4 + 4 {
+                return Err("A view is too large to keep".to_string());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| "A view is not an image")?;
+            let (media_type, size) = sniff(&bytes)
+                .filter(|(media_type, _)| *media_type != "image/gif")
+                .ok_or("A view is not a PNG, JPEG or WebP image")?;
+            let (width, height) = size.ok_or("A view has no readable size")?;
+            if width == 0 || height == 0 || width > VIEW_SIDE || height > VIEW_SIDE {
+                return Err("A view is too large to keep".into());
+            }
+            total += bytes.len() as u64;
+            if bytes.len() as u64 > VIEW_BYTES || total > VIEWS_BYTES {
+                return Err("The views are too large to keep".into());
+            }
+            decoded.push((bytes, media_type, width, height));
+        }
+        // Earlier views are unlisted before any is replaced, so none is read half replaced.
+        let _ = std::fs::remove_file(directory.join(views_file(index)));
+        let mut kept = vec![];
+        for (view, (bytes, media_type, width, height)) in decoded.into_iter().enumerate() {
+            let file = format!("model-{index}-view-{view}.{}", extension(media_type));
+            write_file(&directory.join(&file), &bytes)?;
+            kept.push(ImageMeta {
+                file,
+                media_type: media_type.into(),
+                bytes: bytes.len() as u64,
+                width: Some(width),
+                height: Some(height),
+            });
+        }
+        write_json(
+            &directory.join(views_file(index)),
+            &ViewsMeta {
+                renderer,
+                views: kept,
+            },
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Cannot keep the views".to_string())?
 }
 
 /// Runs the saved workspace still references, or `None` when it cannot be read.
@@ -1337,6 +1594,56 @@ mod tests {
     }
 
     #[test]
+    fn a_document_is_checked_as_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // A buffer inline for megabytes is only seen to be inline, and a texture beside the
+        // document after it is still found.
+        let data = "A".repeat(3 * 1024 * 1024);
+        let inline = dir.path().join("inline.gltf");
+        std::fs::write(
+            &inline,
+            format!(
+                r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"data:application/octet-stream;base64,{data}"}}],"images":[{{"uri":"texture.png"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let error = inspect_model(&inline, MODEL_BYTES).unwrap_err();
+        assert!(error.contains("loads its images"), "{error}");
+        let embedded = dir.path().join("embedded.glb");
+        std::fs::write(
+            &embedded,
+            glb(&format!(
+                r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"data:application/octet-stream;base64,{data}"}}]}}"#
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_model(&embedded, MODEL_BYTES).map(|m| m.format),
+            Ok("glb".into())
+        );
+        // A URI that is not text, or a document cut short, is no readable document.
+        for (name, document) in [
+            (
+                "number.gltf",
+                r#"{"asset":{"version":"2.0"},"buffers":[{"uri":5}]}"#,
+            ),
+            ("cut.gltf", r#"{"asset":{"version":"2.0"},"buffers":["#),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, document).unwrap();
+            let error = inspect_model(&path, MODEL_BYTES).unwrap_err();
+            assert!(
+                error.contains("not a readable glTF document"),
+                "{name}: {error}"
+            );
+        }
+        // Sizes past a megabyte read in the unit a person would use.
+        assert_eq!(human(MODEL_BYTES), "1 GB");
+        assert_eq!(human(3 * MODEL_BYTES / 2), "1.5 GB");
+        assert_eq!(human(RELAY_MODEL_BYTES), "12.0 MB");
+    }
+
+    #[test]
     fn only_places_for_ordinary_files_are_offered() {
         assert!(!plain_path(Path::new("relative.png")));
         #[cfg(windows)]
@@ -1419,6 +1726,128 @@ mod tests {
             .await
             .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn a_model_larger_than_one_relay_request_opens_only_on_its_computer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
+        let mut captured = output("claude:large");
+        captured.images.clear();
+        // Kept whole at full detail, a little past what one relay request carries.
+        let mut bytes = glb(r#"{"asset":{"version":"2.0"}}"#);
+        bytes.resize(RELAY_MODEL_BYTES as usize + 4096, 0);
+        let model = dir.path().join("large.glb");
+        std::fs::write(&model, &bytes).unwrap();
+        assert_eq!(
+            inspect_model(&model, MODEL_BYTES).map(|m| m.bytes),
+            Ok(bytes.len() as u64)
+        );
+        captured.models = vec![model.to_string_lossy().into()];
+        let directory = root.join(RUN).join(key("claude:large"));
+        write_call(&directory, &captured, &[], &[Some(model)]).unwrap();
+        // This computer's window reads the raw bytes.
+        let raw = read_model_file(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:large".into(),
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(raw == bytes);
+        // Another device is told to show views instead of receiving it through the relay.
+        let error = read_model(
+            root.clone(),
+            pending.clone(),
+            RUN.into(),
+            "claude:large".into(),
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("another device reads whole"), "{error}");
+        assert!(error.contains("views"), "{error}");
+        assert!(
+            read_model_file(root, pending, RUN.into(), "claude:large".into(), 1)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn views_are_kept_beside_their_model_for_other_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
+        let mut captured = output("claude:views");
+        captured.images.clear();
+        let model = dir.path().join("figure.glb");
+        std::fs::write(&model, glb(r#"{"asset":{"version":"2.0"}}"#)).unwrap();
+        captured.models = vec![model.to_string_lossy().into()];
+        let directory = root.join(RUN).join(key("claude:views"));
+        write_call(
+            &directory,
+            &captured,
+            &[],
+            &[Some(model), Some(dir.path().join("gone.glb"))],
+        )
+        .unwrap();
+        let read = |index| {
+            read_model_views(
+                root.clone(),
+                pending.clone(),
+                RUN.into(),
+                "claude:views".into(),
+                index,
+            )
+        };
+        let store = |index, views: Vec<String>| {
+            store_model_views(
+                root.clone(),
+                pending.clone(),
+                RUN.into(),
+                "claude:views".into(),
+                index,
+                1,
+                views,
+            )
+        };
+        // None are kept at first, and the window learns what it needs to draw them.
+        let first = read(0).await.unwrap();
+        assert_eq!(first.format, "glb");
+        assert_eq!((first.renderer, first.views.len()), (None, 0));
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let png = encode(PNG);
+        // Exactly eight PNG, JPEG or WebP pictures are kept, and only beside a kept model.
+        assert!(store(0, vec![png.clone(); 7]).await.is_err());
+        let mut animated = vec![png.clone(); 7];
+        animated.push(encode(b"GIF89a\x04\x00\x03\x00rest"));
+        assert!(store(0, animated).await.is_err());
+        assert!(store(0, vec!["not base64!".into(); 8]).await.is_err());
+        assert!(store(1, vec![png.clone(); 8]).await.is_err());
+        assert!(store(2, vec![png.clone(); 8]).await.is_err());
+        let mut large = PNG.to_vec();
+        large.resize(VIEWS_BYTES as usize / 7, 0);
+        let error = store(0, vec![encode(&large); 8]).await.unwrap_err();
+        assert!(error.contains("too large"), "{error}");
+        assert!(read(0).await.unwrap().views.is_empty());
+        store(0, vec![png.clone(); 8]).await.unwrap();
+        let kept = read(0).await.unwrap();
+        assert_eq!(kept.renderer, Some(1));
+        assert_eq!(kept.views.len(), MODEL_VIEWS);
+        assert!(kept.views.iter().all(|view| view.media_type == "image/png"
+            && view.data == png
+            && (view.width, view.height) == (Some(4), Some(3))));
+        // A view that goes missing leaves none listed, so the window draws them again.
+        std::fs::remove_file(directory.join("model-0-view-3.png")).unwrap();
+        assert!(read(0).await.unwrap().views.is_empty());
+        // Views go with the call's result when it is recorded again.
+        store(0, vec![png.clone(); 8]).await.unwrap();
+        write_call(&directory, &captured, &[], &[]).unwrap();
+        assert!(read(0).await.is_err());
     }
 
     #[tokio::test]

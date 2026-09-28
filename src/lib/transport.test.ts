@@ -57,6 +57,9 @@ vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
   Channel: class {},
 }));
+// Views of a model are drawn with WebGL in a real window; here the drawing is counted.
+const scene = vi.hoisted(() => ({ renderModelViews: vi.fn() }));
+vi.mock('./model-scene', () => ({ renderModelViews: scene.renderModelViews }));
 
 beforeEach(() => {
   vi.resetModules();
@@ -245,6 +248,91 @@ it('ends a read whose result the relay refuses with the reason, not an expiry', 
   });
   expect(updates.at(-1).result).toBeUndefined();
   await transport.disconnectRelay();
+});
+
+it('draws the views of a model it keeps once for other devices, and answers later requests with them', async () => {
+  const connectionId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  const request = { runId, toolId: 'claude:figure', index: 0 };
+  const job = {
+    id: crypto.randomUUID(),
+    method: 'toolOutputModelViews',
+    args: { ...request, connectionId },
+  };
+  const { transport, updates } = await hostOf(job);
+  const view = { mediaType: 'image/webp', data: 'UklGRg==', bytes: 4, width: 1600, height: 1600 };
+  let kept: (typeof view)[] = [];
+  const stored: unknown[] = [];
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'read_tool_output_model_views')
+      return {
+        format: 'glb',
+        bytes: 40 * 1024 ** 2,
+        ...(kept.length ? { renderer: 1 } : {}),
+        views: kept,
+      };
+    if (command === 'read_tool_output_model_file') return new ArrayBuffer(16);
+    if (command === 'store_tool_output_model_views') {
+      stored.push(args);
+      kept = (args.views as string[]).map((data) => ({ ...view, data }));
+      return;
+    }
+    return original(command, args);
+  });
+  let drawn = () => {};
+  scene.renderModelViews.mockReset();
+  scene.renderModelViews.mockImplementation(
+    () => new Promise((resolve) => (drawn = () => resolve(Array(8).fill(view)))),
+  );
+  await transport.pollRelay();
+  // A request from this computer's own window for the same model shares the drawing.
+  const same = transport.readToolOutputModelViews(runId, 'claude:figure', 0, connectionId);
+  await vi.waitFor(() => expect(scene.renderModelViews).toHaveBeenCalledOnce());
+  expect(scene.renderModelViews.mock.calls[0][1]).toBe('glb');
+  drawn();
+  await vi.waitFor(() => expect(updates.at(-1)?.status).toBe('complete'));
+  expect(updates.at(-1).result.views).toEqual(Array(8).fill(view));
+  expect((await same).views).toHaveLength(8);
+  expect(scene.renderModelViews).toHaveBeenCalledOnce();
+  expect(stored).toEqual([{ ...request, renderer: 1, views: Array(8).fill('UklGRg==') }]);
+  // Kept views answer the next request without reading the model again.
+  const reads = () =>
+    native.invoke.mock.calls.filter(([command]) => command === 'read_tool_output_model_file')
+      .length;
+  expect(reads()).toBe(1);
+  expect(
+    (await transport.readToolOutputModelViews(runId, 'claude:figure', 0, connectionId)).views,
+  ).toHaveLength(8);
+  expect(reads()).toBe(1);
+  expect(scene.renderModelViews).toHaveBeenCalledOnce();
+  // Views an earlier renderer kept are drawn again.
+  native.invoke.mockImplementation(async (command, args) =>
+    command === 'read_tool_output_model_views'
+      ? { format: 'glb', bytes: 40 * 1024 ** 2, renderer: 0, views: kept }
+      : command === 'read_tool_output_model_file'
+        ? new ArrayBuffer(16)
+        : command === 'store_tool_output_model_views'
+          ? undefined
+          : original(command, args),
+  );
+  scene.renderModelViews.mockResolvedValue(Array(8).fill(view));
+  await transport.readToolOutputModelViews(runId, 'claude:figure', 0, connectionId);
+  expect(scene.renderModelViews).toHaveBeenCalledTimes(2);
+  // A model this computer keeps opens whole here however large, as raw bytes.
+  expect(transport.modelShownAsViews(connectionId, 900 * 1024 ** 2)).toBe(false);
+  const model = await transport.readToolOutputModel(runId, 'claude:figure', 0, 'glb', connectionId);
+  expect(model.format).toBe('glb');
+  expect(model.bytes.byteLength).toBe(16);
+  await transport.disconnectRelay();
+});
+
+it('shows another computer’s model as views only when one relay request cannot carry it', async () => {
+  const remote = crypto.randomUUID();
+  const transport = await fixture(remote);
+  expect(transport.modelShownAsViews(remote, 12 * 1024 ** 2)).toBe(false);
+  expect(transport.modelShownAsViews(remote, 12 * 1024 ** 2 + 1)).toBe(true);
+  expect(transport.modelShownAsViews(remote, 900 * 1024 ** 2)).toBe(true);
 });
 
 it("sends a job's question at once and its other events shortly after they arrive", async () => {

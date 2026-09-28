@@ -39,13 +39,22 @@ import {
 } from './images';
 import {
   createFetchCache,
+  keptModelViewsSchema,
+  modelBytes,
+  modelViewBytes,
+  modelViewCount,
+  modelViewsBytes,
+  modelViewsRenderer,
+  modelViewsSchema,
+  relayModelBytes,
   toolOutputImageSchema,
   toolOutputModelSchema,
-  type ToolOutputModel,
   toolOutputSchema,
+  type ModelViews,
   type ToolOutput,
   type ToolOutputImage,
 } from './tool-output';
+import { renderModelViews, type ModelFormat } from './model-scene';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
@@ -507,6 +516,7 @@ function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, un
     method === 'toolOutput' ||
     method === 'toolOutputImage' ||
     method === 'toolOutputModel' ||
+    method === 'toolOutputModelViews' ||
     (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
   );
 }
@@ -1787,6 +1797,12 @@ async function localCall(
   }
   if (method === 'release')
     return invoke('release_conversation', { conversationId: args.conversationId });
+  if (method === 'toolOutputModelViews')
+    return hostModelViews({
+      runId: String(args.runId),
+      toolId: String(args.toolId),
+      index: Number(args.index),
+    });
   const commands = {
     models: 'list_models',
     usage: 'read_usage',
@@ -1858,7 +1874,10 @@ async function routed<T>(
         ? 660_000
         : method === 'folders'
           ? 30_000
-          : method === 'toolOutput' || method === 'toolOutputImage' || method === 'toolOutputModel'
+          : method === 'toolOutput' ||
+              method === 'toolOutputImage' ||
+              method === 'toolOutputModel' ||
+              method === 'toolOutputModelViews'
             ? 120_000
             : runTimeoutMs(
                 method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
@@ -2169,18 +2188,107 @@ export async function readToolOutput(
     routed('toolOutput', { runId, toolId, connectionId, ...(full ? { full } : {}) }, connectionId);
   return toolOutputSchema.parse(await (full ? largeRead(connectionId, read) : read()));
 }
-/** One 3D model of a finished tool call's result, read like `readToolOutput`. */
+/**
+ * One 3D model of a finished tool call's result, whole: as raw bytes from this computer's own
+ * store however large it is, or as base64 through the relay from the computer that ran it, up
+ * to what one relay request carries. `format` is the one the reply recorded, which that
+ * computer recognized in the file.
+ */
 export async function readToolOutputModel(
   runId: string,
   toolId: string,
   index: number,
+  format: ModelFormat,
   connectionId?: string,
-): Promise<ToolOutputModel> {
-  return toolOutputModelSchema.parse(
+): Promise<{ format: ModelFormat; bytes: ArrayBuffer }> {
+  if (desktop() && !remoteTarget(connectionId)) {
+    const bytes = await invoke<ArrayBuffer>('read_tool_output_model_file', {
+      runId,
+      toolId,
+      index,
+    });
+    return { format, bytes };
+  }
+  const model = toolOutputModelSchema.parse(
     await largeRead(connectionId, () =>
       routed('toolOutputModel', { runId, toolId, index, connectionId }, connectionId),
     ),
   );
+  return { format: model.format, bytes: await modelBytes(model) };
+}
+/**
+ * Whether this window shows a model only through views: one of another computer, larger than
+ * a relay request carries. A model this computer keeps opens whole however large it is.
+ */
+export function modelShownAsViews(connectionId: string | undefined, bytes: number): boolean {
+  if (bytes <= relayModelBytes) return false;
+  try {
+    return !desktop() || !!remoteTarget(connectionId);
+  } catch {
+    // A connection that no longer exists fails either read with its reason.
+    return !desktop();
+  }
+}
+/**
+ * Views of a model, a turn apart, rendered by the window of the computer that keeps it,
+ * which sends them instead of a model too large for the relay.
+ */
+export async function readToolOutputModelViews(
+  runId: string,
+  toolId: string,
+  index: number,
+  connectionId?: string,
+): Promise<ModelViews> {
+  return modelViewsSchema.parse(
+    await largeRead(connectionId, () =>
+      routed('toolOutputModelViews', { runId, toolId, index, connectionId }, connectionId),
+    ),
+  );
+}
+/** One model's views at a time: each rendering loads the whole model into this window. */
+const viewRenders = createLimiter(1);
+const viewsInProgress = new Map<string, Promise<ModelViews>>();
+/**
+ * Views of a model this computer keeps, for another device: those kept beside it, or drawn
+ * here from the model, which never leaves this computer, and kept for the next request until
+ * the call's result goes. Requests for the same model share one rendering.
+ */
+function hostModelViews(request: { runId: string; toolId: string; index: number }) {
+  const key = `${request.runId}\n${request.toolId}\n${request.index}`;
+  let views = viewsInProgress.get(key);
+  if (!views) {
+    views = keptOrRenderedViews(request).finally(() => viewsInProgress.delete(key));
+    viewsInProgress.set(key, views);
+  }
+  return views;
+}
+async function keptOrRenderedViews(request: {
+  runId: string;
+  toolId: string;
+  index: number;
+}): Promise<ModelViews> {
+  const kept = keptModelViewsSchema.parse(await invoke('read_tool_output_model_views', request));
+  if (kept.renderer === modelViewsRenderer && kept.views.length === modelViewCount)
+    return { views: kept.views };
+  return viewRenders(async () => {
+    const bytes = await invoke<ArrayBuffer>('read_tool_output_model_file', request);
+    // Square, so a model fills the inline stage and keeps its height in the wider expanded
+    // one, and sharp there on a high-density display at tens of kilobytes a view.
+    const views = await renderModelViews(bytes, kept.format, {
+      count: modelViewCount,
+      width: 1600,
+      height: 1600,
+      viewBytes: modelViewBytes,
+      totalBytes: modelViewsBytes,
+    });
+    // Views that cannot be kept are still sent; the next request draws them again.
+    await invoke('store_tool_output_model_views', {
+      ...request,
+      renderer: modelViewsRenderer,
+      views: views.map((view) => view.data),
+    }).catch(() => {});
+    return { views };
+  });
 }
 /** One image of a finished tool call's result, read like `readToolOutput`. */
 export async function readToolOutputImage(
