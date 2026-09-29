@@ -75,20 +75,20 @@ export const toolActivitySchema = z.object({
         name: z.string().max(200),
         status: activityStatusSchema,
         parentId: z.string().max(240).optional(),
-        task: z.string().max(2048).optional(),
-        result: z.string().max(8000).optional(),
+        // A sub-agent's task, messages and result are kept whole. Replies saved before
+        // 2026-09-29 kept 16 messages of up to 16,000 UTF-16 units and marked the rest.
+        task: z.string().optional(),
+        result: z.string().optional(),
         messages: z
           .array(
             z.object({
               id: z.string().max(220),
-              text: z.string().max(4000),
+              text: z.string(),
               complete: z.boolean(),
               // The child's own calls recorded before this message began; older replies lack it.
-              after: z.number().int().nonnegative().max(100_000).optional(),
+              after: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
             }),
           )
-          .max(16)
-          .refine((messages) => messages.reduce((sum, m) => sum + m.text.length, 0) <= 16000)
           .optional(),
         messagesTruncated: z.boolean().optional(),
         background: z.boolean().optional(),

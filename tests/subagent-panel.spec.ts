@@ -248,6 +248,26 @@ test('a sub-agent that carried on past failed calls reads as done, with its fail
   await expect(page.getByText('Outcome unconfirmed')).toHaveCount(0);
 });
 
+test('a sub-agent keeps every message it wrote, however many and long', async ({ page }) => {
+  const emit = await start(page, false);
+  // Replies saved before 2026-09-29 kept 16 messages of up to 16,000 UTF-16 units in all.
+  const long = 'All of it. '.repeat(900);
+  const written = Array.from({ length: 40 }, (_, i) =>
+    message(`m${i}`, i === 39 ? `Step 40: ${long}` : `Step ${i + 1} done.`, 0),
+  );
+  await emit(agents(1, { status: 'complete', messages: written, result: 'Every step is done.' }));
+  await emit({ kind: 'text', text: 'Done.' });
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await page.getByLabel('Work history', { exact: true }).click();
+  const group = page.locator('.activity-group').first();
+  await group.locator(':scope > summary').click();
+  await group.locator('.subagent-row').first().click();
+  const panel = page.getByRole('dialog', { name: 'Explore the auth flow' });
+  await expect(panel.locator('.progress-message')).toHaveCount(40);
+  await expect(panel.locator('.progress-message').last()).toContainText(long.trim());
+  await expect(panel.getByText('not recorded')).toHaveCount(0);
+});
+
 test('sub-agents in Work history open their saved conversation', async ({ page }) => {
   const emit = await start(page, false);
   await emit(agents(1, { messages: early.slice(0, 1) }));

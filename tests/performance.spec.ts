@@ -206,6 +206,8 @@ async function desktop(page: Page) {
                     await new Promise((resolve) => setTimeout(resolve, everyMs));
                 }
               };
+              // Any other event, as a test writes it.
+              w.emitEvent = emit;
               return new Promise((resolve) => (w.finishReply = () => resolve('complete')));
             }
             case 'cancel_run':
@@ -473,6 +475,91 @@ test('a reply with thousands of calls streams and opens its history within budge
         'Longest task opening the Work history of 3,100 calls; see docs/PERFORMANCE.md',
       ).toBeLessThan(budgets.selection);
     }
+  } finally {
+    await host.close();
+  }
+});
+
+test('an open sub-agent conversation of 300 messages stays responsive while it streams', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const timed = !process.env.CI;
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    await page.getByLabel('Message', { exact: true }).fill('Delegate the survey');
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).emitEvent === 'function'), {
+        timeout: 20_000,
+      })
+      .toBe(true);
+    // Sub-agents kept 16 messages until 2026-09-29. Each update of one sends its whole record,
+    // and its open conversation used to render every message again.
+    const text = (i: number) =>
+      `Step ${i}: checked **module ${i}** and \`src/file-${i}.ts\` against [the notes](https://example.com/${i}).\n\n- first point ${i}\n- second point ${i}\n\n\`\`\`ts\nconst value${i} = compute(${i});\n\`\`\``;
+    const group = (revision: number, tail: string) => ({
+      kind: 'tool',
+      tool: {
+        id: 'claude:agents',
+        name: 'Sub-agents',
+        category: 'agent',
+        revision,
+        status: 'running',
+        sources: [],
+        agents: [
+          {
+            id: 'surveyor',
+            name: 'Surveyor',
+            status: 'running',
+            task: 'Survey the modules',
+            messages: [
+              ...Array.from({ length: 300 }, (_, i) => ({
+                id: `m${i}`,
+                text: text(i),
+                complete: true,
+                after: 0,
+              })),
+              { id: 'live', text: tail, complete: false, after: 0 },
+            ],
+          },
+        ],
+      },
+    });
+    await page.evaluate((event) => (window as any).emitEvent(event), group(1, 'Starting'));
+    await page.locator('.reply-footer .progress-toggle', { hasText: 'Sub-agents' }).click();
+    await page.getByRole('region', { name: 'Sub-agents' }).getByRole('button').first().click();
+    const panel = page.getByRole('dialog', { name: 'Surveyor' });
+    await panel.locator('.progress-message').nth(299).waitFor();
+    // Main-thread time from each update until the frame after it is drawn.
+    const updates = Array.from({ length: 60 }, (_, i) =>
+      group(i + 2, `Surveying ${'more '.repeat(i + 1)}`),
+    );
+    const busy = await page.evaluate(async (events) => {
+      const times: number[] = [];
+      for (const event of events) {
+        const at = performance.now();
+        (window as any).emitEvent(event);
+        await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        times.push(performance.now() - at);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      return times;
+    }, updates);
+    await expect(panel.locator('.progress-message').last()).toContainText('more '.repeat(60).trim());
+    const average = busy.reduce((sum, ms) => sum + ms, 0) / busy.length;
+    test.info().annotations.push({
+      type: 'sub-agent panel update (ms)',
+      description: JSON.stringify({ average: Math.round(average), worst: Math.round(Math.max(...busy)) }),
+    });
+    if (timed)
+      expect(
+        average,
+        'Average time per update of an open 300-message sub-agent conversation; see docs/PERFORMANCE.md',
+      ).toBeLessThan(25);
   } finally {
     await host.close();
   }

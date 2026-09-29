@@ -19,6 +19,7 @@ The app freezes whenever one of two threads stays busy: the page's main thread, 
 - **Native commands are async.** A synchronous `#[tauri::command] fn` runs on the UI thread. Declare commands `async` and move file, process, network and lock waits into `tauri::async_runtime::spawn_blocking` or async I/O. Only commands that return from memory in constant time stay synchronous.
 - **Collapsed content stays out of the page.** Work history, tool groups and calls, Files edited and each file diff render on first expansion through `revealedDisclosures` (`src/lib/disclosures.ts`), and `styles.css` keeps closed `<details>` content `display: none` through `::details-content`. A sub-agent's messages and calls render only in its side panel, which exists only while it is open.
 - **Streamed updates measure only what moves.** A running reply's activity keeps the items of groups whose calls did not change (`liveGroupItems`), and `ToolActivity.svelte` measures its rows only in updates that fold some away. Svelte's `animate:` directive would measure every item of a list on each of its updates, so live rows slide with their own animation instead. Animations there use opacity and transforms, which stay on the compositor: a running call's sheen costs no main-thread frames.
+- **Work per update does not grow with what a reply already holds.** Replies record every call and a sub-agent's whole conversation, so anything that runs on each streamed event stays linear in a reply's calls: `mergeActivityBlocks` matches blocks through one index, the timeline's `topLevel` reads a set of sub-agent ids, `activityGroupSummary` reads each sub-agent's distinct call states from an index built once per list of calls, and `runningSubagents` passes over the calls once. Every update of a sub-agent sends its group's whole record, so streamed Codex child text goes out at most every 250 ms (`STREAMED_TEXT_EVERY`), with the rest sent on the decoder's next tick. `renderMarkdown` keeps the HTML of recently rendered text, least recently used first, within four million characters, so an update renders only the text that changed instead of every progress comment, reasoning block and sub-agent message again.
 - **Selectors stay local.** Never pair `:has()` with a universal selector such as `.app-shell:has(…) *`; see [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md).
 
 ## Guards
@@ -40,6 +41,8 @@ The app freezes whenever one of two threads stays busy: the page's main thread, 
 - **Answer text reaches other devices**, on every run including CI: a reply that streams answer text alone, with no reasoning, plan or question to save, is on the relay before it ends.
 - **Sending a message**, on every run including CI: every save after it is a patch of that conversation and every upload carries it alone; locally, no task after it may exceed the streaming budget, which a sync comparing all 24 conversations did (171 ms, with a 183 ms frame gap).
 - **Following another computer's reply**, on every run including CI: six updates published elsewhere in two-second steps are each saved as a patch, and none of them rewrites the whole sync checkpoint.
+- **A reply with thousands of calls**: a running reply makes 3,000 calls, every other one by a background sub-agent, then 100 more while measured, and afterwards its Work history opens; every call reaches the relay.
+- **An open sub-agent conversation of 300 messages**: 60 updates stream into the sub-agent while its panel is open.
 - **Responsiveness**: Connections shows all 12 accounts, the longest chat keeps fewer than 500 elements inside collapsed disclosures, and the selection covers the chat. Local runs also hold the longest main-thread task within these budgets on the development server; CI skips them because hosted runners share CPUs unpredictably:
 
 | Interaction | Budget | Current code | Regression it catches |
@@ -48,6 +51,8 @@ The app freezes whenever one of two threads stays busy: the page's main thread, 
 | Opening Connections | 250 ms | about 60 ms | fleet lookups copying the workspace: 1.9 s |
 | Dragging a selection, then Ctrl+A | 150 ms | no task over 50 ms | a general safety net |
 | Streaming 120 reported events | 150 ms | no task over 50 ms | saves that copy or resend the workspace, or one save per event |
+| 100 more calls into a reply of 3,000, then opening its Work history | 150 ms | 53 ms, then no task over 50 ms | work per event that grows with the calls a reply holds |
+| Each update of an open 300-message sub-agent conversation, on average | 25 ms | about 14 ms | rendering every message again on each update: 45 ms |
 
 Rendering collapsed content up front put about 8,500 elements inside closed disclosures. The element count catches that regression, because current style rules keep even that selection under 50 ms. Tighten a budget when the code gets faster, and keep them loose enough for a full parallel run.
 

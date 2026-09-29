@@ -68,8 +68,31 @@ const markdown = new Marked({
   },
 });
 
+// Recently rendered text, the least recently used first. A reply's progress and reasoning and a
+// sub-agent's conversation render their unchanged text again on every update, which parsed and
+// sanitized each message again as the conversation grew. The same text always renders the same
+// HTML: a link's site mark is assigned once per site for the session.
+const rendered = new Map<string, string>();
+let renderedSize = 0;
+const maxRenderedSize = 4_000_000;
+
 export function renderMarkdown(text: string): string {
-  return sanitizeMarkdown(markdown.parse(text, { async: false }));
+  const kept = rendered.get(text);
+  if (kept !== undefined) {
+    rendered.delete(text);
+    rendered.set(text, kept);
+    return kept;
+  }
+  const html = sanitizeMarkdown(markdown.parse(text, { async: false }));
+  rendered.set(text, html);
+  renderedSize += text.length + html.length;
+  // Text streamed a delta at a time leaves versions nothing asks for again; they go first.
+  for (const [oldest, value] of rendered) {
+    if (renderedSize <= maxRenderedSize) break;
+    rendered.delete(oldest);
+    renderedSize -= oldest.length + value.length;
+  }
+  return html;
 }
 
 type ReplyPart = { key: string } & (

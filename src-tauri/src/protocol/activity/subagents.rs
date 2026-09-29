@@ -1,5 +1,10 @@
-//! Child-authored text is bounded activity, never parent answer/reasoning/usage.
+//! Child-authored text is activity kept whole, never parent answer/reasoning/usage.
 use super::*;
+use std::time::Duration;
+
+/// How often a child's streamed text is sent on while it grows: every update carries the
+/// sub-agents' whole record, which grows with everything they have written.
+pub(super) const STREAMED_TEXT_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(super) struct AgentMessage {
@@ -17,26 +22,13 @@ fn identity(value: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty() && s.len() <= 220 && !s.chars().any(char::is_control))
 }
 
-fn text_units(text: &str, limit: usize) -> String {
-    let mut units = 0;
-    text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .take_while(|c| {
-            units += c.len_utf16();
-            units <= limit
-        })
-        .collect()
-}
-
 impl AgentActivity {
+    /// Every message a child writes is kept whole, however many it writes. A streamed one
+    /// grows by its new text alone.
     fn message(&mut self, id: &str, text: &str, append: bool, complete: bool, after: usize) {
         let index = match self.messages.iter().position(|m| m.id == id) {
             Some(index) => index,
             None => {
-                if self.messages.len() >= 16 {
-                    self.messages_truncated = true;
-                    return;
-                }
                 self.messages.push(AgentMessage {
                     id: id.into(),
                     text: String::new(),
@@ -46,27 +38,14 @@ impl AgentActivity {
                 self.messages.len() - 1
             }
         };
-        if self.messages[index].complete {
+        let message = &mut self.messages[index];
+        if message.complete {
             return;
         }
-        let used: usize = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != index)
-            .map(|(_, m)| m.text.encode_utf16().count())
-            .sum();
-        let available = 16_000usize.saturating_sub(used).min(4000);
-        let message = &mut self.messages[index];
-        let next = if append {
-            format!("{}{text}", message.text)
-        } else {
-            text.into()
-        };
-        if next.encode_utf16().count() > available {
-            self.messages_truncated = true;
+        if !append {
+            message.text.clear();
         }
-        message.text = text_units(&next, available);
+        message.text.push_str(&clean(text, WHOLE));
         message.complete = complete;
     }
 }
@@ -111,7 +90,7 @@ impl ToolDecoder {
                     agent.message(id, &text, false, true, calls);
                 }
                 // Compatibility with CLI versions that omit message identities.
-                agent.result = Some(text_units(&text, 8000));
+                agent.result = Some(clean(&text, WHOLE));
             }
         } else {
             return;
@@ -219,18 +198,18 @@ impl ToolDecoder {
                         }
                     }
                     "item/completed" if item["type"] == "agentMessage" => {
-                        if let Some(text) = field(item, "text", 8000) {
+                        if let Some(text) = field(item, "text", WHOLE) {
                             if let Some(id) = identity(&item["id"]) {
                                 if agent.messages.iter().any(|m| m.id == id && m.complete) {
                                     return true;
                                 }
                                 agent.message(id, &text, false, true, calls);
                             }
-                            agent.result = Some(text_units(&text, 8000));
+                            agent.result = Some(text);
                         }
                     }
                     "item/completed" => {
-                        let task = text_content(&item["content"], 2048);
+                        let task = text_content(&item["content"], WHOLE);
                         if !task.is_empty() {
                             agent.task = Some(task);
                         }
@@ -238,7 +217,11 @@ impl ToolDecoder {
                     _ => {}
                 }
             }
-            self.publish_group(group, out);
+            if method == "item/agentMessage/delta" {
+                self.publish_streamed_group(group, out);
+            } else {
+                self.publish_group(group, out);
+            }
             return true;
         }
         false
@@ -426,30 +409,68 @@ mod tests {
     }
 
     #[test]
-    fn child_messages_are_bounded_in_utf16_and_updates_survive_limits() {
+    fn child_messages_are_kept_whole_however_many_and_long() {
         let mut group = fresh("agents".into(), "agent", "Sub-agents");
         let agent = ToolDecoder::agent(&mut group, "child").unwrap();
         for i in 0..40 {
-            agent.message(&i.to_string(), &"😀".repeat(5000), false, false, 0);
+            agent.message(&i.to_string(), &"😀".repeat(5000), false, false, i);
         }
-        assert_eq!(agent.messages.len(), 16);
-        assert!(agent.messages_truncated);
-        assert_eq!(
-            agent
-                .messages
-                .iter()
-                .map(|m| m.text.encode_utf16().count())
-                .sum::<usize>(),
-            16000
-        );
+        assert_eq!(agent.messages.len(), 40);
         assert!(agent
             .messages
             .iter()
-            .all(|m| m.text.encode_utf16().count() <= 4000));
+            .all(|m| m.text.chars().count() == 5000));
+        // A streamed message grows by each delta, without control characters.
+        for _ in 0..3 {
+            agent.message("39", "more\u{7}", true, false, 99);
+        }
+        assert!(agent.messages[39].text.ends_with("moremoremore"));
         agent.message("0", "Final", false, true, 3);
-        // A message keeps the place it began at.
+        // A message keeps the place it began at, and a completed one no longer changes.
         assert_eq!(agent.messages[0].after, 0);
         assert_eq!(agent.messages[0].text, "Final");
+        agent.message("0", "Late echo", false, false, 5);
+        assert_eq!(agent.messages[0].text, "Final");
+    }
+
+    #[test]
+    fn streamed_child_text_goes_out_a_few_times_a_second_and_nothing_is_lost() {
+        let mut d = ToolDecoder::default();
+        d.codex_server(&json!({"method":"item/started","params":{"threadId":"root","item":{
+            "id":"spawn","type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/root/reader"}}}), "root");
+        d.codex_server(
+            &json!({"method":"turn/started","params":{"threadId":"child","turn":{"id":"turn"}}}),
+            "root",
+        );
+        let delta = |text: &str| json!({"method":"item/agentMessage/delta","params":{"threadId":"child","turnId":"turn","itemId":"m1","delta":text}});
+        let text = |events: &[ToolActivity]| events[0].agents[0].messages[0].text.clone();
+        // The first delta after the group last went out is sent; the next ones wait.
+        d.group_sent.clear();
+        assert_eq!(text(&d.codex_server(&delta("One "), "root")), "One ");
+        for word in ["two ", "three "] {
+            assert!(d.codex_server(&delta(word), "root").is_empty());
+        }
+        // The held text goes out with the next tick, or the next delta once it is due.
+        let ticked = d.tick();
+        assert_eq!(text(&ticked), "One two three ");
+        assert!(d.tick().is_empty());
+        assert!(d.codex_server(&delta("four"), "root").is_empty());
+        d.group_sent
+            .values_mut()
+            .for_each(|at| *at -= STREAMED_TEXT_EVERY);
+        assert_eq!(
+            text(&d.codex_server(&delta(" five"), "root")),
+            "One two three four five"
+        );
+        // Its completion goes out at once, whole.
+        assert!(d.codex_server(&delta(" six"), "root").is_empty());
+        let done = d.codex_server(&json!({"method":"item/completed","params":{"threadId":"child","turnId":"turn","item":{"id":"m1","type":"agentMessage","text":"One two three four five six"}}}), "root");
+        assert_eq!(
+            done[0].agents[0].messages[0].text,
+            "One two three four five six"
+        );
+        assert!(done[0].agents[0].messages[0].complete);
+        assert!(d.tick().is_empty());
     }
 
     #[test]

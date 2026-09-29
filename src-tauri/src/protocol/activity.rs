@@ -35,8 +35,6 @@ pub struct AgentActivity {
     result: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     messages: Vec<subagents::AgentMessage>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    messages_truncated: bool,
     /// Claude reported the launch as asynchronous: the child works on in the background.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     background: bool,
@@ -115,6 +113,8 @@ fn fact(tool: &mut ToolActivity, label: &str, value: impl ToString) {
         });
     }
 }
+/// No limit: a sub-agent's task, messages and result are kept whole.
+const WHOLE: usize = usize::MAX;
 fn clean(value: &str, limit: usize) -> String {
     value
         .chars()
@@ -303,6 +303,10 @@ pub struct ToolDecoder {
     /// Complete commands and inputs of calls whose records show shortened ones.
     full_commands: HashMap<String, String>,
     full_inputs: HashMap<String, String>,
+    /// Records whose newest state a streamed update held back, and when each sub-agent
+    /// group last went out.
+    held: std::collections::HashSet<String>,
+    group_sent: HashMap<String, std::time::Instant>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -409,7 +413,12 @@ impl ToolDecoder {
     fn existing(&self, id: &str) -> Option<ToolActivity> {
         self.tools.iter().find(|t| t.id == id).cloned()
     }
-    fn publish(&mut self, mut tool: ToolActivity, out: &mut Vec<ToolActivity>) {
+    fn publish(&mut self, tool: ToolActivity, out: &mut Vec<ToolActivity>) {
+        self.record(tool, out, false);
+    }
+    /// Keeps the newest state of `tool` and sends it on, unless `hold`: a held update waits
+    /// for the next one sent for the same record, or for `tick`.
+    fn record(&mut self, mut tool: ToolActivity, out: &mut Vec<ToolActivity>, hold: bool) {
         if let Some(previous) = self.existing(&tool.id) {
             if tool.category != "agent" && previous.status != "running" && tool.status == "running"
             {
@@ -426,6 +435,11 @@ impl ToolDecoder {
         if let Some(index) = self.tools.iter().position(|t| t.id == tool.id) {
             tool.revision = self.tools[index].revision;
             if tool == self.tools[index] {
+                // An update that changes nothing still sends what an earlier one held.
+                if !hold && self.held.remove(&tool.id) {
+                    let tool = self.tools[index].clone();
+                    self.sent(&tool, out);
+                }
                 return;
             }
             tool.revision += 1;
@@ -436,14 +450,46 @@ impl ToolDecoder {
             tool.revision = 1;
             self.tools.push(tool.clone());
         }
-        out.push(tool);
+        if hold {
+            self.held.insert(tool.id);
+        } else {
+            self.held.remove(&tool.id);
+            self.sent(&tool, out);
+        }
+    }
+    fn sent(&mut self, tool: &ToolActivity, out: &mut Vec<ToolActivity>) {
+        if tool.category == "agent" {
+            self.group_sent
+                .insert(tool.id.clone(), std::time::Instant::now());
+        }
+        out.push(tool.clone());
+    }
+    /// Sends what streamed updates held back.
+    fn release_held(&mut self, out: &mut Vec<ToolActivity>) {
+        for id in std::mem::take(&mut self.held) {
+            if let Some(tool) = self.existing(&id) {
+                self.sent(&tool, out);
+            }
+        }
     }
     fn group(&self, provider: &str) -> ToolActivity {
         let id = format!("{provider}:agents");
         self.existing(&id)
             .unwrap_or_else(|| fresh(id, "agent", "Sub-agents"))
     }
-    fn publish_group(&mut self, mut group: ToolActivity, out: &mut Vec<ToolActivity>) {
+    fn publish_group(&mut self, group: ToolActivity, out: &mut Vec<ToolActivity>) {
+        self.record_group(group, out, false);
+    }
+    /// A group whose child text is streaming goes out at most every `STREAMED_TEXT_EVERY`.
+    fn publish_streamed_group(&mut self, group: ToolActivity, out: &mut Vec<ToolActivity>) {
+        self.record_group(group, out, true);
+    }
+    fn record_group(
+        &mut self,
+        mut group: ToolActivity,
+        out: &mut Vec<ToolActivity>,
+        streamed: bool,
+    ) {
         if !group.agents.is_empty() {
             group.status = if group.agents.iter().any(|a| a.status == "running") {
                 "running"
@@ -458,7 +504,12 @@ impl ToolDecoder {
             }
             .into();
         }
-        self.publish(group, out);
+        let hold = streamed
+            && self
+                .group_sent
+                .get(&group.id)
+                .is_some_and(|at| at.elapsed() < subagents::STREAMED_TEXT_EVERY);
+        self.record(group, out, hold);
     }
     fn agent<'a>(group: &'a mut ToolActivity, id: &str) -> Option<&'a mut AgentActivity> {
         if let Some(index) = group.agents.iter().position(|a| a.id == id) {
@@ -477,7 +528,6 @@ impl ToolDecoder {
             task: None,
             result: None,
             messages: vec![],
-            messages_truncated: false,
             background: false,
         });
         group.agents.last_mut()
@@ -526,7 +576,7 @@ impl ToolDecoder {
             for id in ids {
                 if let Some(agent) = Self::agent(&mut group, &id) {
                     if action == "spawn_agent" {
-                        if let Some(task) = field(item, "prompt", 2048) {
+                        if let Some(task) = field(item, "prompt", WHOLE) {
                             agent.task = Some(task);
                         }
                         agent.parent_id = field(item, "sender_thread_id", 240);
@@ -535,7 +585,7 @@ impl ToolDecoder {
                     if let Some(reported) = state["status"].as_str() {
                         agent.status = status(reported).into();
                     }
-                    if let Some(result) = field(state, "message", 8000) {
+                    if let Some(result) = field(state, "message", WHOLE) {
                         agent.result = Some(result);
                     }
                     if action == "close_agent"
@@ -729,7 +779,7 @@ impl ToolDecoder {
                 {
                     agent.name = name;
                 }
-                if let Some(task) = field(input, "prompt", 2048) {
+                if let Some(task) = field(input, "prompt", WHOLE) {
                     agent.task = Some(task);
                 }
                 agent.parent_id = parent;
@@ -1051,9 +1101,9 @@ impl ToolDecoder {
                                 agent.status = if failed { "error" } else { "complete" }.into();
                             }
                             if !background {
-                                let result = text_content(&v["tool_use_result"]["content"], 8000);
+                                let result = text_content(&v["tool_use_result"]["content"], WHOLE);
                                 agent.result = Some(if result.is_empty() {
-                                    text_content(&block["content"], 8000)
+                                    text_content(&block["content"], WHOLE)
                                 } else {
                                     result
                                 });
@@ -1248,7 +1298,7 @@ impl ToolDecoder {
                     }
                     if v["subtype"] == "task_notification" {
                         agent.status = status(v["status"].as_str().unwrap_or_default()).into();
-                        if let Some(result) = field(v, "summary", 8000) {
+                        if let Some(result) = field(v, "summary", WHOLE) {
                             agent.result = Some(result);
                         }
                     }

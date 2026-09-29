@@ -86,6 +86,7 @@ impl ToolDecoder {
         for tool in running {
             self.publish(tool, &mut out);
         }
+        self.release_held(&mut out);
         out
     }
 

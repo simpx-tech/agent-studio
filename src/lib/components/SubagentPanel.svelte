@@ -205,7 +205,8 @@
             Waiting for the sub-agent’s first update…
           </p>{/if}
         {#if agent.messagesTruncated}<p class="note">
-            Additional sub-agent text was omitted at the activity limit.
+            Some of this sub-agent’s text was not recorded: earlier versions kept only 16 of its
+            messages.
           </p>{/if}
         {#if interruptedMessage(agent)}<p class="note">
             A message stopped before it finished.

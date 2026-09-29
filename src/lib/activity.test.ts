@@ -21,7 +21,7 @@ import {
   type Message,
   type RunEvent,
 } from './domain';
-import { emptyShared, mergeShared } from './sync';
+import { emptyShared, mergeShared, sharedSchema, sharedWorkspace } from './sync';
 
 const tool = (
   id = 'search1',
@@ -87,23 +87,52 @@ describe('structured tool activity', () => {
     expect(restored.conversations[0].messages[0].blocks).toEqual(m.blocks);
     expect(JSON.stringify(m.blocks)).toContain('Child detail 3');
     expect(JSON.stringify(historyFor(restored.conversations[0]))).not.toContain('Child detail');
-    expect(
-      toolActivitySchema.safeParse({
-        ...tool(),
-        agents: [
-          {
-            id: 'bad',
-            name: 'Bad',
-            status: 'running',
-            messages: Array.from({ length: 5 }, (_, id) => ({
-              id: String(id),
-              text: 'x'.repeat(4000),
-              complete: true,
-            })),
-          },
-        ],
-      }).success,
-    ).toBe(false);
+  });
+  it('keeps a sub-agent’s whole conversation through save, sync and export', () => {
+    // Replies saved before 2026-09-29 kept 16 messages and 16,000 UTF-16 units of them.
+    const writer: ToolActivity = {
+      ...tool('claude:agents'),
+      category: 'agent',
+      name: 'Sub-agents',
+      agents: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          status: 'complete',
+          task: 't'.repeat(20_000),
+          result: 'r'.repeat(50_000),
+          messages: Array.from({ length: 40 }, (_, id) => ({
+            id: String(id),
+            text: `${id} ${'x'.repeat(5000)}`,
+            complete: true,
+            after: id * 10_000,
+          })),
+        },
+      ],
+    };
+    expect(toolActivitySchema.safeParse(writer).success).toBe(true);
+    const m = message();
+    applyRunEvent(m, { kind: 'tool', tool: writer });
+    const w = initialWorkspace();
+    w.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(w.preferences),
+      title: 'Writer',
+      createdAt: '',
+      updatedAt: '',
+      messages: [{ ...m, status: 'complete' }],
+    });
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(w)));
+    const synced = sharedSchema.parse(JSON.parse(JSON.stringify(sharedWorkspace(restored))));
+    for (const copy of [restored, synced]) {
+      const [block] = copy.conversations[0].messages[0].blocks;
+      const agent = block.type === 'activity' ? block.tool?.agents[0] : undefined;
+      expect(agent?.messages).toHaveLength(40);
+      expect(agent?.messages?.at(-1)?.text).toHaveLength(5003);
+      expect(agent?.messages?.at(-1)?.after).toBe(390_000);
+      expect(agent?.task).toHaveLength(20_000);
+      expect(agent?.result).toHaveLength(50_000);
+    }
   });
   it('retains bounded tool progress through revisions, relay, restore and export, never prompts', () => {
     const m = message();

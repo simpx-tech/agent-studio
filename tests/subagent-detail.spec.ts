@@ -87,7 +87,7 @@ for (const mobile of [false, true]) {
     await expect(child.locator('header')).toContainText('Completed');
     await expect(child).toContainText('Found the marker.');
     await expect(child).not.toContainText('Checking the marker');
-    await expect(child).toContainText('Additional sub-agent text was omitted');
+    await expect(child).toContainText('Some of this sub-agent’s text was not recorded');
     await expect(child.getByRole('region', { name: 'Result' })).toHaveText('Child result');
     // Child text is sanitized Markdown.
     await expect(child).toContainText('Inspecting');
