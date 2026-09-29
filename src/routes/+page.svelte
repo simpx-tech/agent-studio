@@ -193,6 +193,7 @@
     computerViewId,
     computerViews,
     type CliInventory,
+    type Connection,
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
@@ -289,6 +290,8 @@
   let environmentLogins = $state<Record<string, Partial<Record<ProviderId, ProviderStatus>>>>({});
   let cliInventories = $state<Record<string, CliInventory>>({});
   const connectionChecks = new Map<string, Promise<void>>();
+  // When each connection's sign-in was last checked, so opening the Agent picker often stays cheap.
+  const connectionCheckedAt = new Map<string, number>();
   let presence = $state<Presence[]>([]);
   let paired = $state(false);
   let workspaceSession = $state(0);
@@ -297,6 +300,8 @@
   );
   let syncError = $state('');
   let view = $state<View>('chat');
+  // The account Connections was opened for, shown there with its sign-in on that visit.
+  let connectionsHighlight = $state('');
   let sidebarWidth = $state<number>();
   let viewportWidth = $state(1024);
   let sidebarOpen = $state(false);
@@ -834,19 +839,31 @@
       if (!preview && !candidates.length && !(active && provider === selectedSettings.provider))
         return [];
       const base = { mark: providers[provider].mark, color: providers[provider].color };
+      // An account to sign in to says so, and choosing it also opens Connections at it.
+      const signIn = (attention: boolean) => ({
+        attention,
+        title: attention ? 'Choosing this account opens Connections to sign in to it' : undefined,
+      });
       if (candidates.length > 1)
-        return candidates.map((c) => ({
-          ...base,
-          id: `connection:${c.id}`,
-          provider,
-          connectionId: c.id,
-          name: `${providers[provider].name} · ${workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ?? 'Account'}`,
-          detail: connectionStatus(c.id)?.installed
-            ? providers[provider].company
-            : canChooseConnection(c.id)
-              ? 'Checking availability…'
-              : 'Unavailable connection',
-        }));
+        return candidates.map((c) => {
+          const attention = needsSignIn(c.id);
+          return {
+            ...base,
+            id: `connection:${c.id}`,
+            provider,
+            connectionId: c.id,
+            name: `${providers[provider].name} · ${workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ?? 'Account'}`,
+            detail: attention
+              ? 'Sign-in needed'
+              : connectionStatus(c.id)?.installed
+                ? providers[provider].company
+                : canChooseConnection(c.id)
+                  ? 'Checking availability…'
+                  : 'Unavailable connection',
+            ...signIn(attention),
+          };
+        });
+      const attention = candidates.length === 1 && needsSignIn(candidates[0].id);
       return [
         {
           ...base,
@@ -859,7 +876,10 @@
               ? 'Unavailable on this computer'
               : candidates.some((c) => !connectionStatus(c.id))
                 ? 'Checking availability…'
-                : providers[provider].company,
+                : attention
+                  ? 'Sign-in needed'
+                  : providers[provider].company,
+          ...signIn(attention),
         },
       ];
     });
@@ -871,6 +891,30 @@
         option.connectionId === selectedSettings.connectionId,
     )?.id ?? (active ? selectedSettings.provider : ''),
   );
+  let agentPickerOpen = $state(false);
+  // Opening the Agent picker checks the sign-in of the Claude and Codex accounts it lists on
+  // this computer. It also reads the usage of its Claude accounts, which renews each login and
+  // so finds one that expired since; readings are kept for a minute, so reopening stays cheap.
+  $effect(() => {
+    if (!agentPickerOpen) return;
+    untrack(() => {
+      const listed = agentOptions.flatMap((option) =>
+        option.connectionId ? [option.connectionId] : [],
+      );
+      void recheckConnections(listed);
+      for (const id of listed) {
+        const connection = workspace.fleet.connections.find((c) => c.id === id);
+        if (
+          connection &&
+          executionHost(workspace.fleet, connection.environmentId) === installation?.id &&
+          workspace.fleet.accounts.some(
+            (a) => a.id === connection.accountId && a.provider === 'claude',
+          )
+        )
+          void refreshUsage({ provider: 'claude', model: '', connectionId: id });
+      }
+    });
+  });
   // A chat's account connection, whether another computer runs it, and its reported status.
   function replyConnection(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
     const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
@@ -1320,7 +1364,10 @@
       if (!loaded || document.visibilityState === 'hidden') return;
       if (paired) void syncNow();
       else void restoreRelayConnection();
-      if (localRunning) return;
+      if (localRunning) {
+        if (pendingSignIn) void checkSignIn();
+        return;
+      }
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
         void refresh();
@@ -1339,7 +1386,7 @@
     window.addEventListener('pagehide', saveDraftsOnLeave);
     document.addEventListener('visibilitychange', saveDraftsWhenHidden);
     const loginPoll = setInterval(() => {
-      if (pendingSignIn && Date.now() < signInDeadline && !localRunning) void refresh();
+      if (pendingSignIn && Date.now() < signInDeadline) void checkSignIn();
     }, 5000);
     const usagePoll = setInterval(() => {
       today = startOfDay(Date.now());
@@ -2098,17 +2145,36 @@
         await refreshConnections(undefined, true);
       }
       if (view === 'connections') void refreshAccountUsage(forceUsage);
-      const loginStatus = pendingSignIn?.connectionId
-        ? connectionStatuses[pendingSignIn.connectionId]
-        : statuses.find((s) => s.id === pendingSignIn?.provider);
-      if (pendingSignIn && loginStatus?.auth === 'ready') {
-        notice = `${providers[pendingSignIn.provider].name} is connected. You're ready to chat.`;
-        pendingSignIn = null;
-      }
+      noteSignIn();
     } catch (e) {
       notice = String(e);
     } finally {
       refreshing = false;
+    }
+  }
+  // Sign-in finishes in its own console, whatever replies run meanwhile, so an account's
+  // sign-in is followed by checking that account alone until it reports ready.
+  async function checkSignIn() {
+    const connection = workspace.fleet.connections.find(
+      (c) => c.id === pendingSignIn?.connectionId,
+    );
+    if (
+      !connection ||
+      executionHost(workspace.fleet, connection.environmentId) !== installation?.id
+    )
+      return refresh();
+    await connectionChecks.get(connection.id);
+    await checkConnection(connection);
+    noteSignIn();
+  }
+  function noteSignIn() {
+    const pending = pendingSignIn;
+    const status = pending?.connectionId
+      ? connectionStatuses[pending.connectionId]
+      : statuses.find((s) => s.id === pending?.provider);
+    if (pending && status?.auth === 'ready') {
+      notice = `${providers[pending.provider].name} is connected. You're ready to chat.`;
+      pendingSignIn = null;
     }
   }
   async function refreshWsl() {
@@ -2137,29 +2203,56 @@
             (!location || c.environmentId === locationExecutionId(location)) &&
             (!missingOnly || !connectionStatuses[c.id]),
         )
-        .map((c) => {
-          const pending = connectionChecks.get(c.id);
-          if (pending) return pending;
-          const account = workspace.fleet.accounts.find((a) => a.id === c.accountId);
-          if (!account) return;
-          const check = detectConnection(account.provider, c.id)
-            .then((status) => {
-              connectionStatuses[c.id] = status;
-            })
-            .catch((e) => {
-              connectionStatuses[c.id] = {
-                id: account.provider,
-                installed: false,
-                auth: 'unknown',
-                version: null,
-                detail: String(e),
-              };
-            })
-            .finally(() => {
-              connectionChecks.delete(c.id);
-            });
-          connectionChecks.set(c.id, check);
-          return check;
+        .map(checkConnection),
+    );
+  }
+  function checkConnection(c: Connection) {
+    const pending = connectionChecks.get(c.id);
+    if (pending) return pending;
+    const account = workspace.fleet.accounts.find((a) => a.id === c.accountId);
+    if (!account) return;
+    connectionCheckedAt.set(c.id, Date.now());
+    const check = detectConnection(account.provider, c.id)
+      .then((status) => {
+        connectionStatuses[c.id] = status;
+      })
+      .catch((e) => {
+        connectionStatuses[c.id] = {
+          id: account.provider,
+          installed: false,
+          auth: 'unknown',
+          version: null,
+          detail: String(e),
+        };
+      })
+      .finally(() => {
+        connectionChecks.delete(c.id);
+      });
+    connectionChecks.set(c.id, check);
+    return check;
+  }
+  // A Claude or Codex login can lapse between refreshes, which wait for replies running here:
+  // the CLI finds out when a reply or a usage reading next tries to renew it, and reports the
+  // account signed out from then on. These checks of named accounts on this computer run
+  // whatever replies do, at most every ten seconds each unless `force`d after such a failure.
+  async function recheckConnections(ids: string[], force = false) {
+    if (!desktop() || !installation) return;
+    const now = Date.now();
+    await Promise.all(
+      workspace.fleet.connections
+        .filter(
+          (c) =>
+            ids.includes(c.id) &&
+            executionHost(workspace.fleet, c.environmentId) === installation?.id &&
+            workspace.fleet.accounts.some(
+              (a) => a.id === c.accountId && (a.provider === 'claude' || a.provider === 'codex'),
+            ) &&
+            (force || now - (connectionCheckedAt.get(c.id) ?? 0) >= 10_000),
+        )
+        .map(async (c) => {
+          // A check already under way may have read the login before the renewal failed.
+          if (force) await connectionChecks.get(c.id);
+          await checkConnection(c);
         }),
     );
   }
@@ -2258,6 +2351,12 @@
       : presence
           .find((p) => p.environmentId === host && p.online)
           ?.connections.find((c) => c.connectionId === id);
+  }
+  // The CLI reports this account signed out, as it also does once a reply or a usage reading
+  // could not renew an expired login.
+  function needsSignIn(id: string | undefined) {
+    const status = id ? connectionStatus(id) : undefined;
+    return !!status?.installed && status.auth === 'login';
   }
   function canChooseConnection(id: string) {
     const status = connectionStatus(id);
@@ -2383,6 +2482,8 @@
       usageErrors[key] = '';
     } catch (e) {
       if (current()) usageErrors[key] = String(e);
+      // Reading usage renews an expired login first, so a failure can mean it lapsed.
+      if (settings.connectionId) void recheckConnections([settings.connectionId], true);
     } finally {
       if (scope === workspaceStorageScope()) {
         usageLoading[key] = false;
@@ -2518,6 +2619,11 @@
   function chooseAgent(value: string) {
     const option = agentOptions.find((option) => option.id === value);
     if (!option) return;
+    selectAgent(option);
+    // An account that needs signing in is chosen and shown in Connections, where its sign-in is.
+    if (option.attention && option.connectionId) openConnections(option.connectionId);
+  }
+  function selectAgent(option: (typeof agentOptions)[number]) {
     if (active) {
       // Only another account of the same agent may take over an existing conversation.
       if (
@@ -2529,7 +2635,7 @@
       changeSettings({ ...selectedSettings, connectionId: option.connectionId }, true, true);
       return;
     }
-    if (!value.startsWith('connection:')) {
+    if (!option.id.startsWith('connection:')) {
       chooseProvider(option.provider);
       return;
     }
@@ -2549,6 +2655,15 @@
       true,
     );
   }
+  // Connections opened for an account scrolls to it and marks it until the page is left, so
+  // the chat and its draft are kept for the way back.
+  function openConnections(connectionId?: string) {
+    connectionsHighlight = connectionId ?? '';
+    view = 'connections';
+  }
+  $effect(() => {
+    if (view !== 'connections') untrack(() => (connectionsHighlight = ''));
+  });
   function chooseModel(model: string) {
     const reasoning =
       workspace.preferences.reasoningByProvider[selectedSettings.provider]?.[model] ??
@@ -4714,6 +4829,7 @@
                         : 'Fixed for this conversation. Start a new conversation to change it, or connect another account of this agent to switch accounts between replies. '
                       : ''
                   }${selectedSettings.planMode ? 'Plan mode: explore and propose changes before implementation. Claude asks for plan-mode approval; Codex returns a proposed plan.' : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts, except explicit plan-mode decisions.'}`}
+                  bind:open={agentPickerOpen}
                   value={selectedAgentOption}
                   options={agentOptions}
                   fallbackToFirst={false}
@@ -4907,7 +5023,7 @@
             {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
                 <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
                   class="text-button"
-                  onclick={() => (view = 'connections')}
+                  onclick={() => openConnections(selectedSettings.connectionId)}
                   >Open Connections<ArrowRight size={13} /></button
                 >
               </div>
@@ -4916,11 +5032,14 @@
                 role="status"
               >
                 <Plug size={15} />
-                {#if selectedStatus.auth === 'login'}Connect to {providers[selectedAgent.provider]
-                    .name} before sending a message.
+                {#if selectedStatus.auth === 'login'}Sign in to {agentOptions.find(
+                    (option) => option.id === selectedAgentOption,
+                  )?.name ?? providers[selectedAgent.provider].name} before sending a message.
                 {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection. Open
                   Connections to check it before sending.{/if}
-                <button class="text-button" onclick={() => (view = 'connections')}
+                <button
+                  class="text-button"
+                  onclick={() => openConnections(selectedSettings.connectionId)}
                   >Open Connections<ArrowRight size={13} /></button
                 >
               </div>{/if}
@@ -5183,6 +5302,7 @@
           providerStatuses={statuses}
           {login}
           running={localRunning}
+          highlight={connectionsHighlight}
         />
       {/key}
     {:else if view === 'settings'}

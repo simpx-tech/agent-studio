@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick, untrack, type Snippet } from 'svelte';
-  import { Check, ChevronDown } from '@lucide/svelte';
+  import { Check, ChevronDown, CircleAlert } from '@lucide/svelte';
   import { anchorPopover } from '$lib/anchorPopover';
   type Option = {
     id: string;
@@ -9,6 +9,8 @@
     title?: string;
     mark?: string;
     color?: string;
+    /** The option needs the user's attention, as its detail says (an account to sign in to). */
+    attention?: boolean;
   };
 
   let {
@@ -225,7 +227,9 @@
             type="button"
             role="option"
             aria-selected={option.id === value}
-            aria-label={option.name}
+            aria-label={option.attention && option.detail
+              ? `${option.name}, ${option.detail}`
+              : option.name}
             title={option.title}
             tabindex="-1"
             onpointermove={() => (highlighted = index)}
@@ -239,7 +243,12 @@
               >{/if}
             <span class="option-copy">
               <span class="option-name">{option.name}</span>
-              {#if option.detail}<span class="option-detail">{option.detail}</span>{/if}
+              {#if option.detail}<span class="option-detail" class:attention={option.attention}
+                  >{#if option.attention}<CircleAlert
+                      size={12}
+                      aria-hidden="true"
+                    />{/if}{option.detail}</span
+                >{/if}
             </span>
             <span class="option-check" aria-hidden="true">
               {#if option.id === value}<Check size={15} strokeWidth={2} />{/if}
@@ -411,6 +420,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .option-detail.attention {
+    color: var(--warning);
+  }
+  .option-detail.attention > :global(svg) {
+    margin-right: 4px;
+    vertical-align: -2px;
   }
   .option-check {
     display: flex;

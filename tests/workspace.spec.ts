@@ -393,9 +393,12 @@ test('signed-out Gemini warns before submission and preserves the draft through 
   await mockDesktop(page, 'login-flow');
   await page.goto('/');
   await chooseTestFolder(page);
-  await pick(page, 'Agent', 'Gemini');
+  // Choosing it also opens Connections at its account.
+  await pick(page, 'Agent', 'Gemini, Sign-in needed');
+  await expect(page.locator('.fleet-account.highlighted')).toContainText('Gemini CLI login');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const message = page.getByLabel('Message', { exact: true });
-  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
   await message.fill('Keep this Gemini draft until connected');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await message.press('Enter');
@@ -444,7 +447,7 @@ test('signed-out Gemini warns before submission and preserves the draft through 
     localStorage.removeItem('test-google-login');
     window.dispatchEvent(new Event('focus'));
   });
-  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
   await message.fill('Do not restore while signed out');
   await message.press('Enter');
   await expect(page.getByRole('tab', { name: /^History/ })).toHaveAttribute(
@@ -491,23 +494,23 @@ test('external Google sign-in updates on focus and survives reload without a cha
   const card = page
     .locator('.connection-card')
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
-  await expect(card).toContainText('Sign in or refresh');
+  await expect(card).toContainText('Sign-in needed');
   await card.getByRole('button', { name: 'Open sign-in' }).click();
-  await expect(card).toContainText('Sign in or refresh');
+  await expect(card).toContainText('Sign-in needed');
   await page.evaluate(() => {
     localStorage.setItem('test-google-login', 'ready');
     window.dispatchEvent(new Event('focus'));
   });
-  await expect(card).not.toContainText('Sign in or refresh');
+  await expect(card).not.toContainText('Sign-in needed');
   await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(card.getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
-  await expect(card).not.toContainText('Sign in or refresh');
+  await expect(card).not.toContainText('Sign-in needed');
   await page.evaluate(() => localStorage.removeItem('test-google-login'));
   await page.getByRole('button', { name: 'Refresh connections' }).click();
-  await expect(card).toContainText('Sign in or refresh');
+  await expect(card).toContainText('Sign-in needed');
 });
 
 test('sign-in completion is polled while the external console remains open', async ({ page }) => {
@@ -519,7 +522,7 @@ test('sign-in completion is polled while the external console remains open', asy
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
   await card.getByRole('button', { name: 'Open sign-in' }).click();
   await page.evaluate(() => localStorage.setItem('test-google-login', 'ready'));
-  await expect(card).not.toContainText('Sign in or refresh', {
+  await expect(card).not.toContainText('Sign-in needed', {
     timeout: 8000,
   });
   await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
@@ -583,7 +586,7 @@ test('login errors never masquerade as a completed answer', async ({ page }) => 
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-status="error"]')).toContainText('login needs attention');
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled();
-  await expect(page.locator('.setup-hint')).toContainText('Connect to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
   await expect(page.locator('[data-testid="message"]')).toHaveCount(2);
 });
 

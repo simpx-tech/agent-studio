@@ -251,6 +251,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   !localStorage.getItem('test-wsl-missing')),
               location: wsl ? 'WSL · Ubuntu' : 'Windows',
               auth:
+                localStorage.getItem(`test-auth-connection-${args.connectionId}`) ??
                 localStorage.getItem(`test-auth-${args.provider}`) ??
                 (mode === 'login-flow' &&
                 args.provider === 'gemini' &&
@@ -370,6 +371,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
             }));
           if (command === 'sign_in') {
             localStorage.setItem('test-sign-in-provider', args.provider);
+            localStorage.setItem('test-sign-in-connection', args.connectionId ?? '');
             return;
           }
           if (command === 'read_native_instructions') {
@@ -557,6 +559,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
             const requests = JSON.parse(localStorage.getItem('test-usage-requests') ?? '[]');
             requests.push(args);
             localStorage.setItem('test-usage-requests', JSON.stringify(requests));
+            // A login whose renewal fails: Claude answers without limits and reports the
+            // account signed out from then on.
+            if (localStorage.getItem(`test-usage-expired-${args.connectionId}`)) {
+              localStorage.setItem(`test-auth-connection-${args.connectionId}`, 'login');
+              throw new Error('Claude did not return its usage limits. Try refreshing shortly.');
+            }
             const limitWindow = (
               id: string,
               minutes: number,

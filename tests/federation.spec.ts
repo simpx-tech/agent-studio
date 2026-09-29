@@ -892,7 +892,7 @@ test('account creation shows progress, retries the same connection, and tracks i
     page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
   ).toHaveCount(0);
   const account = computer.locator('.fleet-account').filter({ hasText: 'Second Claude' });
-  await expect(account).toContainText('Sign in or refresh');
+  await expect(account).toContainText('Sign-in needed');
   await page.evaluate(() => {
     localStorage.removeItem('fixture-pending-auth');
     window.dispatchEvent(new Event('focus'));
@@ -900,7 +900,7 @@ test('account creation shows progress, retries the same connection, and tracks i
   await expect(
     page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
   ).toBeVisible();
-  await expect(account).not.toContainText('Sign in or refresh');
+  await expect(account).not.toContainText('Sign-in needed');
 });
 
 test('the additional-account modal offers supported providers without login choices', async ({

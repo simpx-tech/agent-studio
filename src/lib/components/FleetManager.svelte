@@ -8,7 +8,9 @@
     Settings2,
     ArrowUpRight,
     LoaderCircle,
+    CircleAlert,
   } from '@lucide/svelte';
+  import { tick, untrack } from 'svelte';
   import {
     providers,
     providerIds,
@@ -63,6 +65,7 @@
     providerStatuses,
     login,
     running,
+    highlight = '',
   }: {
     workspace: Workspace;
     installation: Installation | undefined;
@@ -88,15 +91,37 @@
     providerStatuses: ProviderStatus[];
     login: (provider: ProviderId, connectionId?: string) => Promise<void>;
     running: boolean;
+    /** The connection this visit was opened for, shown and marked until it is connected. */
+    highlight?: string;
   } = $props();
   let provider = $state<ProviderId>('claude');
   let name = $state('');
   let linkedAccountId = $state('');
   let createdConnectionId = $state('');
   let creationStage = $state('');
-  let signingInConnection = $state('');
+  // The connection or provider whose sign-in is opening.
+  let signingIn = $state('');
+  let refreshingConnections = $state(false);
   let error = $state('');
   let busy = $state(false);
+  let page = $state<HTMLElement>();
+  // Opened for an account: scroll to it and put its sign-in within reach of the keyboard.
+  $effect(() => {
+    const id = highlight;
+    const root = page;
+    if (!id || !root) return;
+    untrack(() =>
+      tick().then(() => {
+        const row = root.querySelector<HTMLElement>(`[data-connection="${CSS.escape(id)}"]`);
+        const card = row?.closest<HTMLElement>('.fleet-account');
+        if (!row || !card) return;
+        card.scrollIntoView({ block: 'center' });
+        (row.querySelector<HTMLButtonElement>('.sign-in:not(:disabled)') ?? card).focus({
+          preventScroll: true,
+        });
+      }),
+    );
+  });
   let url = $state(desktop() ? 'http://127.0.0.1:4317' : window.location.origin);
   let key = $state('');
   let computerName = $state('');
@@ -213,7 +238,20 @@
     } finally {
       busy = false;
       creationStage = '';
-      signingInConnection = '';
+    }
+  }
+  // Sign-in opens a console of its own, so neither other actions here nor replies running in
+  // any chat hold it back.
+  async function openSignIn(id: ProviderId, connectionId?: string) {
+    if (signingIn) return;
+    signingIn = connectionId ?? id;
+    error = '';
+    try {
+      await login(id, connectionId);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      signingIn = '';
     }
   }
   async function add() {
@@ -280,15 +318,23 @@
         ? 'Checking…'
         : statuses[id]?.auth === 'ready'
           ? 'Connected'
-          : statuses[id]?.installed
-            ? 'Sign in or refresh'
-            : 'Install the CLI';
+          : !statuses[id]?.installed
+            ? 'Install the CLI'
+            : statuses[id]?.auth === 'login'
+              ? 'Sign-in needed'
+              : 'Sign in or refresh';
     const host = presenceFor(environmentId);
     if (!paired || !host?.online) return 'Offline';
-    return host.connections.find((c) => c.connectionId === id)?.auth === 'ready'
+    const reported = host.connections.find((c) => c.connectionId === id);
+    return reported?.auth === 'ready'
       ? 'Connected'
-      : 'Needs attention on host';
+      : reported?.installed && reported.auth === 'login'
+        ? 'Sign-in needed on its computer'
+        : 'Needs attention on host';
   }
+  // A status that asks for the user, as an account to sign in to does.
+  const needsAttention = (status: string) =>
+    status.startsWith('Sign-in needed') || status === 'Needs attention on host';
 
   function closeDialog() {
     dialog = null;
@@ -418,7 +464,16 @@
 </script>
 
 {#snippet accountCard(account: Account, computerId: string | null)}
-  <div class="fleet-account">
+  {@const connections = workspace.fleet.connections.filter(
+    (c) => c.accountId === account.id && onComputer(c.environmentId, computerId),
+  )}
+  {@const target = connections.find((c) => c.id === highlight)}
+  <div
+    class="fleet-account"
+    class:highlighted={!!target &&
+      connectionStatus(target.id, target.environmentId) !== 'Connected'}
+    tabindex="-1"
+  >
     <div class="fleet-account-heading">
       <div>
         <h4>{account.name}</h4>
@@ -432,8 +487,9 @@
         onclick={() => manageAccount(account, computerId)}><Settings2 size={16} /></button
       >
     </div>
-    {#each workspace.fleet.connections.filter((c) => c.accountId === account.id && onComputer(c.environmentId, computerId)) as connection}
+    {#each connections as connection}
       {@const status = connectionStatus(connection.id, connection.environmentId)}
+      {@const attention = needsAttention(status)}
       {@const usageSettings = {
         provider: account.provider,
         model: '',
@@ -442,26 +498,23 @@
       {@const key = usageKey(usageSettings)}
       <div
         class="account-connection"
+        data-connection={connection.id}
         aria-label={'Account actions in ' + locationName(connection.environmentId)}
       >
         <div class="connection-controls">
-          {#if status !== 'Connected'}<p class="connection-hint">{status}</p>{/if}
+          {#if status !== 'Connected'}<p class="connection-hint" class:attention>
+              {#if attention}<CircleAlert size={14} aria-hidden="true" />{/if}{status}
+            </p>{/if}
           <div class="fleet-actions">
             <button class="secondary" onclick={() => chat(account.provider, connection.id)}
               >Chat<ArrowUpRight size={13} /></button
             >
             {#if localEnvironment(connection.environmentId)}<button
-                class="text-button"
-                disabled={busy || !desktop() || running || !statuses[connection.id]?.installed}
-                onclick={() =>
-                  action(async () => {
-                    signingInConnection = connection.id;
-                    await login(account.provider, connection.id);
-                  })}
-                >{#if signingInConnection === connection.id}<LoaderCircle
-                    size={13}
-                    class="spinning"
-                  />Opening sign-in…{:else}Open sign-in{/if}</button
+                class={['sign-in', attention ? 'secondary' : 'text-button']}
+                disabled={!!signingIn || !desktop() || !statuses[connection.id]?.installed}
+                onclick={() => openSignIn(account.provider, connection.id)}
+                >{#if signingIn === connection.id}<LoaderCircle size={13} class="spinning" />Opening
+                  sign-in…{:else}Open sign-in{/if}</button
               >{/if}
           </div>
           {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.detail && statuses[connection.id]?.auth !== 'ready'}<p
@@ -481,7 +534,7 @@
             ? ''
             : status === 'Offline'
               ? 'Computer offline. Usage is unavailable.'
-              : status === 'Sign in or refresh'
+              : status === 'Sign-in needed' || status === 'Sign in or refresh'
                 ? 'Sign in to read usage.'
                 : status === 'Checking…'
                   ? 'Checking account availability…'
@@ -494,15 +547,28 @@
   </div>
 {/snippet}
 
-<div class="page-scroll">
+<div class="page-scroll" bind:this={page}>
   <div class="page-content fleet-page">
     <section class="page-heading">
       <div>
         <h1>Connections</h1>
         <p>Choose a computer to manage its accounts and CLIs.</p>
       </div>
-      <button class="secondary refresh-connections" disabled={busy} onclick={() => action(refresh)}
-        ><RefreshCw size={15} />Refresh connections</button
+      <button
+        class="secondary refresh-connections"
+        disabled={busy}
+        aria-busy={refreshingConnections}
+        onclick={() =>
+          action(async () => {
+            refreshingConnections = true;
+            try {
+              await refresh();
+            } finally {
+              refreshingConnections = false;
+            }
+          })}
+        ><RefreshCw size={15} class={refreshingConnections ? 'spinning' : undefined} />Refresh
+        connections</button
       >
     </section>
     {#if error && !dialog}<div class="error-banner" role="alert">{error}</div>{/if}
@@ -650,7 +716,7 @@
                           </p>
                           {#if id !== 'gemini' && cliInstalled(environments[0].id, id)}<button
                               class="secondary"
-                              disabled={busy || !desktop() || running}
+                              disabled={busy || !desktop()}
                               onclick={() => openAccount(id, computer.id)}>Add account</button
                             >{/if}
                         </div>
@@ -666,11 +732,12 @@
                           <div class="fleet-actions">
                             <button
                               class="text-button"
-                              disabled={busy ||
-                                !desktop() ||
-                                !providerStatus(id)?.installed ||
-                                running}
-                              onclick={() => action(() => login(id))}>Open sign-in</button
+                              disabled={!!signingIn || !desktop() || !providerStatus(id)?.installed}
+                              onclick={() => openSignIn(id)}
+                              >{#if signingIn === id}<LoaderCircle
+                                  size={13}
+                                  class="spinning"
+                                />Opening sign-in…{:else}Open sign-in{/if}</button
                             >{#if providerStatus(id)?.auth === 'ready'}<button
                                 class="secondary"
                                 onclick={() => chat(id, undefined, computer.id)}
@@ -1391,6 +1458,18 @@
     border-top: 1px solid var(--border);
     padding: 14px 16px 16px;
   }
+  .provider-group > .fleet-account:last-child {
+    border-radius: 0 0 calc(var(--radius-xl) - 1px) calc(var(--radius-xl) - 1px);
+  }
+  /* The account Connections was opened for, while it still needs attention. */
+  .fleet-account.highlighted {
+    background: var(--warning-soft);
+    box-shadow: inset 3px 0 0 var(--warning);
+  }
+  .fleet-account:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
   .fleet-account-heading {
     display: flex;
     align-items: center;
@@ -1434,6 +1513,16 @@
     font-size: var(--text-sm);
     color: var(--text-muted);
     line-height: var(--leading-normal);
+  }
+  .connection-hint.attention {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--warning);
+    font-weight: 500;
+  }
+  .connection-hint.attention > :global(svg) {
+    flex-shrink: 0;
   }
   .remote-empty {
     padding: 0 16px 12px;
