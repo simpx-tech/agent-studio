@@ -549,4 +549,23 @@ describe('activity groups', () => {
       running: false,
     });
   });
+
+  it('finds a sub-agent’s calls among thousands, including calls added since the last look', () => {
+    const parent = tool('parent', {
+      category: 'agent',
+      name: 'Sub-agents',
+      agents: [{ id: 'child', name: 'Builder', status: 'complete' }],
+    });
+    const calls = [
+      parent,
+      ...Array.from({ length: 5000 }, (_, i) =>
+        tool(`call-${i}`, { name: 'Run command', parentId: i % 2 ? 'child' : undefined }),
+      ),
+    ];
+    const reads = Array.from({ length: 5000 }, (_, i) => tool(`read-${i}`, { path: `f${i % 7}` }));
+    expect(activityGroupSummary(reads, 'complete', calls).label).toBe('Read 7 files');
+    expect(activityGroupSummary([parent], 'complete', calls).issue).toBeUndefined();
+    calls.push(tool('failed', { name: 'Run command', parentId: 'child', status: 'error' }));
+    expect(activityGroupSummary([parent], 'complete', calls).issue).toBe('error');
+  });
 });

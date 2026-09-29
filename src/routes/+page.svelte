@@ -6,6 +6,7 @@
   import { trackMobileViewport } from '$lib/mobileViewport';
   import { trackDrawerSwipe } from '$lib/drawerSwipe';
   import {
+    asksTheUser,
     notificationConversation,
     requestsAttention,
     pendingChatCount,
@@ -3603,7 +3604,14 @@
               if (session !== workspaceSession) return;
               if (stopping[conversation.id]) void cancelRun(runId).catch(() => {});
               const m = message();
-              const hadQuestion = requestsAttention(m);
+              // Only a question tool can start asking, so other calls skip reading every block
+              // of a reply that may hold thousands.
+              const questionTool =
+                event.kind === 'tool' &&
+                !!event.tool &&
+                !event.tool.parentId &&
+                asksTheUser(event.tool.name);
+              const hadQuestion = questionTool && requestsAttention(m);
               applyRunEvent(m, event);
               localChanges++;
               // Every event goes out with the next sync, so other devices follow the text and
@@ -3613,7 +3621,7 @@
               const asks =
                 event.kind === 'question' ||
                 event.kind === 'elicitation' ||
-                (event.kind === 'tool' && !hadQuestion && requestsAttention(m));
+                (questionTool && !hadQuestion && requestsAttention(m));
               if (
                 savesAtOnce(event) ||
                 asks ||

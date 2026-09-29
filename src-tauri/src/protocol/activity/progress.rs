@@ -60,7 +60,7 @@ impl ToolDecoder {
                 });
                 self.clocks.remove(&tool.id);
             }
-        } else if tool.status == "running" && self.tools.len() < 200 {
+        } else if tool.status == "running" {
             let elapsed = tool.elapsed_ms.unwrap_or(0);
             self.clocks.insert(
                 tool.id.clone(),
@@ -76,12 +76,14 @@ impl ToolDecoder {
 
     pub fn tick(&mut self) -> Vec<ToolActivity> {
         let mut out = vec![];
-        for tool in self
+        // Only running calls advance, so the rest of a long reply is not copied every second.
+        let running: Vec<_> = self
             .tools
-            .clone()
-            .into_iter()
+            .iter()
             .filter(|t| t.status == "running")
-        {
+            .cloned()
+            .collect();
+        for tool in running {
             self.publish(tool, &mut out);
         }
         out
@@ -114,7 +116,7 @@ impl ToolDecoder {
         if let Some((bound_turn, _)) = self.progress_bindings.get(&key) {
             return bound_turn == turn;
         }
-        if method == "item/started" && self.progress_bindings.len() < 200 {
+        if method == "item/started" {
             self.progress_bindings.insert(
                 key,
                 (
@@ -343,6 +345,44 @@ mod tests {
         assert_eq!(events[0].elapsed_ms, Some(12000));
         assert_eq!(events[0].progress.as_ref().unwrap().kind, "heartbeat");
         assert!(d.decode("claude", &event).is_empty());
+    }
+
+    #[test]
+    fn long_replies_keep_timing_progress_task_outcomes_and_child_turns() {
+        let mut d = ToolDecoder::default();
+        let started = |id: &str| json!({"method":"item/started","params":{"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":id,"status":"inProgress"}}});
+        for index in 0..300 {
+            d.codex_server(&started(&format!("call{index}")), "root");
+        }
+        assert_eq!(
+            d.codex_server(&started("late"), "root")[0].elapsed_ms,
+            Some(0)
+        );
+        let mut delta = update("item/commandExecution/outputDelta");
+        delta["params"]["itemId"] = json!("late");
+        assert_eq!(
+            d.codex_server(&delta, "root")[0]
+                .progress
+                .as_ref()
+                .unwrap()
+                .kind,
+            "output"
+        );
+        for index in 0..100 {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":format!("shell{index}"),"name":"Bash","input":{"run_in_background":true}}]}}));
+            d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":format!("task{index}"),"tool_use_id":format!("shell{index}"),"task_type":"local_bash"}));
+        }
+        let done = d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"task99","status":"completed"}));
+        assert_eq!(done[0].id, "claude:shell99");
+        assert_eq!(done[0].status, "complete");
+        d.codex_server(&json!({"method":"item/started","params":{"threadId":"root","item":{"type":"subAgentActivity","agentThreadId":"child","kind":"started"}}}), "root");
+        for index in 0..300 {
+            d.codex_server(&json!({"method":"turn/started","params":{"threadId":"child","turn":{"id":format!("turn{index}")}}}), "root");
+        }
+        assert_eq!(
+            d.child_turns.get("child").map(String::as_str),
+            Some("turn299")
+        );
     }
 
     #[test]

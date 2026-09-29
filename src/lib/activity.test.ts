@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyRunEvent,
+  mergeActivityBlocks,
   retainRunEvent,
   visibleActivityStatus,
   activityDisplayStatus,
@@ -16,6 +17,7 @@ import {
   settingsFor,
   restoreWorkspace,
   historyFor,
+  type ContentBlock,
   type Message,
   type RunEvent,
 } from './domain';
@@ -365,15 +367,86 @@ describe('structured tool activity', () => {
       expect(tools.find((t) => t.id === 'search1')?.progress?.kind).toBe('heartbeat');
     }
   });
-  it('retains every bounded operation over relay plus its newest terminal state', () => {
+  it('delivers every call of a long remote reply while each job update fits the relay', () => {
     const events: RunEvent[] = [];
-    for (let i = 0; i < 200; i++) retainRunEvent(events, { kind: 'tool', tool: tool(String(i)) });
-    retainRunEvent(events, { kind: 'text', text: 'Answer' });
-    retainRunEvent(events, { kind: 'tool', tool: tool('0', 2, 'error') });
-    retainRunEvent(events, { kind: 'tool', tool: tool('0', 1) });
-    expect(events).toHaveLength(201);
-    expect(events[0].tool?.status).toBe('error');
+    const host = message();
+    const sender = message();
+    const late = message();
+    // The device that sent the reply applies each job update as the relay client does: the
+    // events whose place in the list changed since its last read. `late` reads rarely.
+    const reader = (reply: Message) => {
+      const previous: string[] = [];
+      return () =>
+        events.forEach((event, index) => {
+          const json = JSON.stringify(event);
+          if (previous[index] !== json) applyRunEvent(reply, event);
+          previous[index] = json;
+        });
+    };
+    const [follow, followLate] = [reader(sender), reader(late)];
+    const run = (event: RunEvent) => {
+      retainRunEvent(events, event);
+      // The computer running the reply saves every event in its own copy.
+      applyRunEvent(host, event);
+      expect(events.length).toBeLessThanOrEqual(448);
+    };
+    run({ kind: 'tool', tool: tool('watch') });
+    for (let i = 0; i < 1000; i++) {
+      run({ kind: 'tool', tool: tool(String(i)) });
+      run({ kind: 'tool', tool: tool(String(i), 2, 'complete') });
+      if (i % 100 === 0) run({ kind: 'progress', id: `step${i}`, revision: 0, text: `Step ${i}` });
+      follow();
+      if (i % 150 === 0) followLate();
+    }
+    run({ kind: 'tool', tool: tool('0', 3, 'error') });
+    run({ kind: 'tool', tool: tool('0', 1) });
+    run({ kind: 'text', text: 'Answer' });
+    follow();
+    followLate();
+    const calls = (reply: Message) =>
+      reply.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+    const ids = ['watch', ...Array.from({ length: 1000 }, (_, i) => String(i))];
+    for (const reply of [host, sender]) {
+      expect(calls(reply).map((t) => t.id)).toEqual(ids);
+      expect(calls(reply)[1]).toMatchObject({ status: 'error', revision: 3 });
+      expect(calls(reply).slice(2).every((t) => t.status === 'complete')).toBe(true);
+      expect(reply.blocks.filter((b) => b.type === 'activity' && b.progress)).toHaveLength(10);
+    }
+    // The job holds its newest calls and every running one, however long ago it started.
+    expect(events.filter((e) => e.kind === 'tool').length).toBeLessThanOrEqual(160);
+    expect(events.some((e) => e.tool?.id === 'watch')).toBe(true);
+    expect(events.find((e) => e.tool?.id === '0')?.tool?.status).toBe('error');
     expect(events.at(-1)?.text).toBe('Answer');
+    // A reader that missed calls the job moved out gets them with the saved conversation.
+    expect(calls(late).length).toBeLessThan(ids.length);
+    const merged = mergeActivityBlocks(late.blocks, host.blocks);
+    const tools = merged.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+    expect(new Set(tools.map((t) => t.id))).toEqual(new Set(ids));
+    expect(tools.find((t) => t.id === '0')?.status).toBe('error');
+  });
+  it('merges the copies of a reply with thousands of calls in one pass', () => {
+    const blocks = (revision: number): ContentBlock[] =>
+      Array.from({ length: 40_000 }, (_, i) => ({
+        type: 'activity',
+        text: 'Web search',
+        tool: { ...tool(String(i), revision, revision > 1 ? 'complete' : 'running'), facts: [] },
+      }));
+    const started = performance.now();
+    const merged = mergeActivityBlocks(blocks(1), [
+      ...blocks(2).reverse(),
+      { type: 'activity', text: 'Checked', progress: { id: 'step', revision: 1 } },
+    ]);
+    // Matching each block by scanning the others took seconds at this size.
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(merged).toHaveLength(40_001);
+    expect(merged.slice(0, 3).map((b) => b.type === 'activity' && b.tool?.id)).toEqual([
+      '0',
+      '1',
+      '2',
+    ]);
+    expect(merged.every((b) => b.type !== 'activity' || !b.tool || b.tool.revision === 2)).toBe(
+      true,
+    );
   });
   it('keeps background launches through restore and reads them by reply state', () => {
     const m = message();

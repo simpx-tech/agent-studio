@@ -90,8 +90,15 @@
   const entries = $derived(activityEntries(blocks, tools, finalText));
   const groups = $derived(groupActivityEntries(entries));
   const disclosures = revealedDisclosures();
+  // The sub-agents these calls hold, whose own calls show in their conversations.
+  const agentIds = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const tool of tools)
+      if (tool.agents.length) for (const agent of tool.agents) ids.add(agent.id);
+    return ids;
+  });
   function topLevel(tool: ToolActivity) {
-    return !tool.parentId || !tools.some((p) => p.agents.some((a) => a.id === tool.parentId));
+    return !tool.parentId || !agentIds.has(tool.parentId);
   }
   // While the reply runs, each call shows what it is doing in a row of its own until it folds
   // into its group's summary.

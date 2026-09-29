@@ -172,7 +172,41 @@ async function desktop(page: Page) {
                   await new Promise((resolve) => setTimeout(resolve, everyMs));
                 }
               };
-              return new Promise(() => {});
+              // Calls of a long session, every other one by a background sub-agent, each
+              // started and then finished, `batch` of them between pauses.
+              let calls = 0;
+              w.streamCalls = async (count: number, everyMs: number, batch = 1) => {
+                if (!calls)
+                  emit({
+                    kind: 'tool',
+                    tool: {
+                      id: 'claude:agents',
+                      revision: 1,
+                      category: 'agent',
+                      name: 'Sub-agents',
+                      status: 'running',
+                      agents: [{ id: 'builder', name: 'Builder', status: 'running', background: true }],
+                    },
+                  });
+                for (let step = 0; step < count; step++) {
+                  const n = calls++;
+                  const call = {
+                    id: `claude:call-${n}`,
+                    category: 'tool',
+                    name: 'Run command',
+                    commandRun: true,
+                    command: `node build.mjs --part ${n}`,
+                    ...(n % 2 ? { parentId: 'builder' } : {}),
+                  };
+                  emit({ kind: 'tool', tool: { ...call, revision: 1, status: 'running' } });
+                  emit({ kind: 'tool', tool: { ...call, revision: 2, status: 'complete' } });
+                  if (n % 60 === 59)
+                    emit({ kind: 'progress', id: `part-${n}`, revision: 0, text: `Built ${n + 1} parts.` });
+                  if (step % batch === batch - 1)
+                    await new Promise((resolve) => setTimeout(resolve, everyMs));
+                }
+              };
+              return new Promise((resolve) => (w.finishReply = () => resolve('complete')));
             }
             case 'cancel_run':
               return;
@@ -382,6 +416,63 @@ test('a streaming reply saves the whole workspace far less often than it reports
         tasks[0] ?? 0,
         'Longest task while a reply streams; see docs/PERFORMANCE.md to profile it',
       ).toBeLessThan(budgets.streaming);
+  } finally {
+    await host.close();
+  }
+});
+
+test('a reply with thousands of calls streams and opens its history within budget', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const timed = !process.env.CI;
+  const host = await desktop(page);
+  try {
+    await settle(page, host.requests);
+    await page.getByRole('tab', { name: /^History/ }).click();
+    await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
+    await page.getByLabel('Message', { exact: true }).fill('Build every part');
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).streamCalls === 'function'), {
+        timeout: 20_000,
+      })
+      .toBe(true);
+    // Replies kept only their first 200 calls until 2026-09-29. This one makes 3,000 first,
+    // then 100 more while it is measured.
+    await page.evaluate(() => (window as any).streamCalls(3_000, 0, 50));
+    const streaming = await longTasks(page, async () => {
+      await page.evaluate(() => (window as any).streamCalls(100, 40));
+      await page.waitForTimeout(500);
+    });
+    // The last call reaches other devices with the rest.
+    await expect
+      .poll(() => host.relayHas('node build.mjs --part 3099'), { timeout: 20_000 })
+      .toBe(true);
+    await page.evaluate(() => (window as any).finishReply());
+    const reply = page.getByTestId('message').last();
+    await expect(reply).toHaveAttribute('data-status', 'complete');
+    const history = await longTasks(page, async () => {
+      await reply.locator('summary[aria-label="Work history"]').click();
+      await expect(reply.getByText('Built 3000 parts.')).toBeVisible();
+    });
+    test.info().annotations.push({
+      type: 'long tasks (ms)',
+      description: JSON.stringify({
+        streaming: streaming.slice(0, 5),
+        history: history.slice(0, 5),
+      }),
+    });
+    if (timed) {
+      expect(
+        streaming[0] ?? 0,
+        'Longest task while a reply with 3,000 calls makes 100 more; see docs/PERFORMANCE.md',
+      ).toBeLessThan(budgets.streaming);
+      expect(
+        history[0] ?? 0,
+        'Longest task opening the Work history of 3,100 calls; see docs/PERFORMANCE.md',
+      ).toBeLessThan(budgets.selection);
+    }
   } finally {
     await host.close();
   }

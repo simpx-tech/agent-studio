@@ -294,7 +294,6 @@ pub struct ToolDecoder {
     tools: Vec<ToolActivity>,
     partial: HashMap<String, PartialTool>,
     tasks: HashMap<String, String>,
-    overflow: bool,
     clocks: HashMap<String, ToolClock>,
     progress_bindings: HashMap<String, (String, String)>,
     child_turns: HashMap<String, String>,
@@ -431,19 +430,11 @@ impl ToolDecoder {
             }
             tool.revision += 1;
             self.tools[index] = tool.clone();
-        } else if self.tools.len() < 200 {
+        } else {
+            // Every call a reply makes is recorded, however long it runs: each record is bounded
+            // metadata, and results stay on the executing computer.
             tool.revision = 1;
             self.tools.push(tool.clone());
-        } else {
-            if !self.overflow {
-                self.overflow = true;
-                let mut limit = fresh("activity-limit".into(), "tool", "Activity limit reached");
-                limit.status = "unknown".into();
-                limit.detail = Some("Additional operations are not shown after 200 entries. Updates to existing operations are still retained.".into());
-                limit.revision = 1;
-                out.push(limit);
-            }
-            return;
         }
         out.push(tool);
     }
@@ -1198,24 +1189,21 @@ impl ToolDecoder {
             let id = field(v, "tool_use_id", 240).or_else(|| self.tasks.get(&task).cloned());
             if let Some(id) = id {
                 // A workflow is an orchestrator, not another child agent.
+                let key = format!("claude:{id}");
                 if v["task_type"] == "local_workflow"
                     || self
                         .tools
                         .iter()
-                        .any(|t| t.id == format!("claude:{id}") && t.name == "Workflow")
+                        .any(|t| t.id == key && t.name == "Workflow")
                 {
-                    if self.tasks.len() < 64 {
-                        self.tasks.insert(task, id);
-                    }
+                    self.tasks.insert(task, id);
                     return;
                 }
-                if self.tasks.len() < 64 {
-                    self.tasks.insert(task, id.clone());
-                }
+                self.tasks.insert(task, id.clone());
                 // CLI shell tasks use the same task lifecycle as delegated work.
                 // They belong to the existing tool, never a sub-agent result: their
                 // summary can contain raw stdout/stderr and must not cross the boundary.
-                if let Some(mut tool) = self.existing(&format!("claude:{id}")) {
+                if let Some(mut tool) = self.existing(&key) {
                     if v["subtype"] == "task_notification" {
                         tool.status = status(v["status"].as_str().unwrap_or_default()).into();
                         tool.elapsed_ms = None;
@@ -1634,20 +1622,23 @@ mod tests {
             .contains("PRIVATE_SKILL_BODY"));
     }
     #[test]
-    fn activity_limit_is_visible_and_does_not_drop_existing_completion() {
+    fn every_call_is_recorded_and_earlier_ones_keep_updating() {
         let mut d = ToolDecoder::default();
-        for index in 0..200 {
+        for index in 0..1000 {
             d.decode("codex", &json!({"type":"item.started","item":{"id":index.to_string(),"type":"command_execution","status":"in_progress"}}));
         }
-        let limit = d.decode(
+        let later = d.decode(
             "codex",
-            &json!({"type":"item.started","item":{"id":"over","type":"command_execution"}}),
+            &json!({"type":"item.started","item":{"id":"later","type":"command_execution"}}),
         );
-        assert_eq!(limit[0].id, "activity-limit");
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].id, "codex:later");
+        assert_eq!(later[0].revision, 1);
         let done = d.decode("codex", &json!({"type":"item.completed","item":{"id":"0","type":"command_execution","status":"completed","aggregated_output":"PRIVATE"}}));
         assert_eq!(done[0].status, "complete");
         assert!(!serde_json::to_string(&done).unwrap().contains("PRIVATE"));
-        assert_eq!(d.tools.len(), 200);
+        assert_eq!(d.tools.len(), 1001);
+        assert!(d.tools.iter().all(|t| t.id != "activity-limit"));
     }
     #[test]
     fn combined_reads_retain_both_targets_and_claude_resumes_share_agent_identity() {

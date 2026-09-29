@@ -249,14 +249,15 @@ mod tests {
     }
 
     #[test]
-    fn hooks_share_activity_bounds_and_child_attribution() {
+    fn hooks_are_recorded_like_calls_with_child_attribution() {
         let mut d = ToolDecoder::default();
         let event = |id: usize, method: &str| json!({"method":method,"params":{"threadId":"root","run":{"id":id.to_string(),"eventName":"stop","status":"completed"}}});
-        for id in 0..200 {
+        for id in 0..300 {
             d.codex_server(&event(id, "hook/started"), "root");
         }
-        let overflow = d.codex_server(&event(201, "hook/started"), "root");
-        assert_eq!(overflow[0].id, "activity-limit");
+        let later = d.codex_server(&event(300, "hook/started"), "root");
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].name, "Stop hook");
         assert_eq!(
             d.codex_server(&event(0, "hook/completed"), "root")[0].status,
             "complete"

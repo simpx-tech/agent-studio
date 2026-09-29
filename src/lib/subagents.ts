@@ -66,18 +66,24 @@ export function runningSubagents(
   if (replyStatus !== 'running') return none;
   const running: RunningSubagent[] = [];
   for (const holder of tools)
-    for (const agent of holder.agents) {
-      if (agent.status !== 'running') continue;
-      const own = tools.filter((tool) => tool.parentId === agent.id);
-      running.push({
-        id: agent.id,
-        name: agent.name,
-        background: !!agent.background,
-        latest: own.at(-1),
-        calls: own.length,
-      });
+    for (const agent of holder.agents)
+      if (agent.status === 'running')
+        running.push({
+          id: agent.id,
+          name: agent.name,
+          background: !!agent.background,
+          calls: 0,
+        });
+  if (!running.length) return none;
+  // One pass over the reply's calls, however many sub-agents still run.
+  const byId = new Map<string, RunningSubagent[]>();
+  for (const agent of running) byId.set(agent.id, [...(byId.get(agent.id) ?? []), agent]);
+  for (const tool of tools)
+    for (const agent of (tool.parentId && byId.get(tool.parentId)) || []) {
+      agent.latest = tool;
+      agent.calls++;
     }
-  return running.length ? running : none;
+  return running;
 }
 
 /**

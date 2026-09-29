@@ -205,6 +205,35 @@ function count(kind: keyof typeof phrases, tools: ToolActivity[]) {
   return files.size + unnamed;
 }
 
+// A state among a sub-agent's own calls. `own` states are its calls' and run in the background
+// with a background sub-agent; the others belong to sub-agents one of its calls holds.
+type CallState = { status: ToolActivity['status']; background?: boolean; own: boolean };
+type AgentStates = { length: number; states: Map<string, Map<string, CallState>> };
+const agentStates = new WeakMap<ToolActivity[], AgentStates>();
+/**
+ * The distinct states of each sub-agent's own calls in a reply's list of calls, found once per
+ * list, so that every group of a reply with thousands of calls summarizes its sub-agents' work
+ * without reading all of their calls again.
+ */
+function callStatesByAgent(tools: ToolActivity[]) {
+  let index = agentStates.get(tools);
+  if (index?.length !== tools.length) {
+    const states = new Map<string, Map<string, CallState>>();
+    for (const tool of tools) {
+      if (!tool.parentId) continue;
+      let own = states.get(tool.parentId);
+      if (!own) states.set(tool.parentId, (own = new Map()));
+      // A call that holds sub-agents only summarizes them.
+      for (const state of tool.agents.length
+        ? tool.agents.map((a) => ({ status: a.status, background: a.background, own: false }))
+        : [{ status: tool.status, background: tool.background, own: true }])
+        own.set(`${state.status} ${!!state.background} ${state.own}`, state);
+    }
+    agentStates.set(tools, (index = { length: tools.length, states }));
+  }
+  return index.states;
+}
+
 export function activityGroupSummary(
   tools: ToolActivity[],
   replyStatus: Message['status'],
@@ -213,25 +242,29 @@ export function activityGroupSummary(
   const kinds = new Map<keyof typeof phrases, ToolActivity[]>();
   for (const tool of tools) {
     const kind = action(tool);
-    kinds.set(kind, [...(kinds.get(kind) ?? []), tool]);
+    const calls = kinds.get(kind);
+    if (calls) calls.push(tool);
+    else kinds.set(kind, [tool]);
   }
   const children = new Set(tools.flatMap((tool) => tool.agents.map((agent) => agent.id)));
   // A background sub-agent's own calls run in the background with it.
   const background = new Set(
     tools.flatMap((tool) => tool.agents.filter((a) => a.background).map((a) => a.id)),
   );
+  const childStates = callStatesByAgent(allTools);
   const statuses = [
-    ...tools,
-    ...allTools
-      .filter((tool) => tool.parentId && children.has(tool.parentId))
-      .map((tool) => ({ ...tool, background: tool.background || background.has(tool.parentId!) })),
-  ]
-    .flatMap((tool) => [
+    ...tools.flatMap((tool) => [
       // A sub-agent group's own status only summarizes its agents.
       ...(tool.agents.length ? [] : [tool]),
       ...tool.agents,
-    ])
-    .map((item) => activityDisplayStatus(item, replyStatus));
+    ]),
+    ...[...children].flatMap((id) =>
+      [...(childStates.get(id)?.values() ?? [])].map((state) => ({
+        status: state.status,
+        background: state.background || (state.own && background.has(id)),
+      })),
+    ),
+  ].map((item) => activityDisplayStatus(item, replyStatus));
   const running = statuses.includes('running');
   const issue = (['error', 'blocked', 'cancelled', 'unknown'] as const).find((status) =>
     statuses.includes(status),

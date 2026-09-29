@@ -128,30 +128,39 @@ export function safeSourceUrl(value: string): string | undefined {
   }
 }
 
+// The saved block an incoming one updates: reasoning, a call or a progress message by its id, a
+// note by its text.
+function blockKey(block: ContentBlock) {
+  if (block.type === 'reasoning') return `reasoning\n${block.id}`;
+  if (block.type !== 'activity') return;
+  if (block.tool) return `tool\n${block.tool.id}`;
+  if (block.progress) return `progress\n${block.progress.id}`;
+  return `note\n${block.text}`;
+}
+
 export function mergeActivityBlocks(left: ContentBlock[], right: ContentBlock[]): ContentBlock[] {
   const result = [...left];
+  // Where each block sits, so that a reply with thousands of calls merges in one pass.
+  const places = new Map<string, number>();
+  const place = (block: ContentBlock, index: number) => {
+    const key = blockKey(block);
+    if (key !== undefined && !places.has(key)) places.set(key, index);
+  };
+  result.forEach(place);
   const reasoning = mergeReasoningBlocks(
     left.filter((b) => b.type === 'reasoning'),
     right.filter((b) => b.type === 'reasoning'),
   );
   for (const block of reasoning) {
-    const index = result.findIndex((b) => b.type === 'reasoning' && b.id === block.id);
-    if (index >= 0) result[index] = block;
-    else result.push(block);
+    const index = places.get(blockKey(block)!);
+    if (index !== undefined) result[index] = block;
+    else place(block, result.push(block) - 1);
   }
   for (const block of right) {
     if (block.type !== 'activity') continue;
     const tool = block.tool;
-    const index = result.findIndex(
-      (b) =>
-        b.type === 'activity' &&
-        (tool
-          ? b.tool?.id === tool.id
-          : block.progress
-            ? b.progress?.id === block.progress.id
-            : !b.tool && !b.progress && b.text === block.text),
-    );
-    if (index < 0) result.push(block);
+    const index = places.get(blockKey(block)!);
+    if (index === undefined) place(block, result.push(block) - 1);
     else if (tool && tool.revision > ((result[index] as typeof block).tool?.revision ?? -1))
       result[index] = block;
     else if (
@@ -264,7 +273,7 @@ export function applyRunEvent(message: Message, event: RunEvent) {
         block.tool = tool;
         block.text = tool.name;
       }
-    } else if (message.blocks.filter((b) => b.type === 'activity' && b.tool).length < 201) {
+    } else {
       message.blocks.push({
         type: 'activity',
         text: tool.name,
@@ -357,6 +366,34 @@ export function toolDisplayStatus(tool: ToolActivity, replyStatus: Message['stat
     { status: tool.status, background: tool.background || background },
     replyStatus,
   );
+}
+
+// A relay job sends every event it keeps with each update, and the relay accepts 448 of them.
+// Besides reasoning, a job keeps this many.
+const jobEvents = 336;
+// The other kinds of events are bounded on their own, 271 together at most, which leaves room
+// for this many calls.
+const jobCalls = 160;
+
+/**
+ * A reply records every call, but a remote run's job keeps only the calls one update carries.
+ * Once it holds as many as it can, a new call moves out the oldest finished ones, 64 at a time,
+ * so that the device following the job applies its shifted events again only now and then. That
+ * device has usually applied them already; otherwise they arrive with the conversation that the
+ * computer running the reply saves and syncs, which records every event.
+ */
+function makeRoomForCall(events: RunEvent[]) {
+  if (
+    events.filter((e) => e.kind === 'tool').length < jobCalls &&
+    events.filter((e) => e.kind !== 'reasoning').length < jobEvents
+  )
+    return;
+  let room = 64;
+  let kept = 0;
+  for (const event of events)
+    if (room > 0 && event.kind === 'tool' && event.tool?.status !== 'running') room--;
+    else events[kept++] = event;
+  events.length = kept;
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
@@ -511,8 +548,12 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
                 (event.tool?.revision ?? -1) > (events[index].tool?.revision ?? -1)
     )
       events[index] = event;
-  } else if (
-    events.filter((e) => e.kind !== 'reasoning').length < 336 &&
+    return;
+  }
+  if (event.kind === 'tool') makeRoomForCall(events);
+  if (
+    events.filter((e) => e.kind !== 'reasoning').length < jobEvents &&
+    (event.kind !== 'tool' || events.filter((e) => e.kind === 'tool').length < jobCalls) &&
     (event.kind !== 'progress' || events.filter((e) => e.kind === 'progress').length < 64) &&
     (event.kind !== 'activity' || events.filter((e) => e.kind === 'activity').length < 30)
   )

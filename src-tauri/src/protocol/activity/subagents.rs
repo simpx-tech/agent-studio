@@ -146,13 +146,8 @@ impl ToolDecoder {
             // A lifecycle item is sent both on start and completion. Observe it
             // once; a late duplicate must not revive a finished child.
             let key = format!("{thread}:{}:{kind}", identity(&item["id"]).unwrap_or(id));
-            if self.agent_lifecycle.contains(&key)
-                || (self.agent_lifecycle.len() >= 256 && matches!(kind, "started" | "interacted"))
-            {
+            if !self.agent_lifecycle.insert(key) {
                 return true;
-            }
-            if self.agent_lifecycle.len() < 256 {
-                self.agent_lifecycle.insert(key);
             }
             let mut group = self.group("codex");
             if let Some(agent) = Self::agent(&mut group, id) {
@@ -181,11 +176,9 @@ impl ToolDecoder {
         }
         if method == "turn/started" {
             if let Some(turn) = identity(&p["turn"]["id"]) {
-                let key = format!("turn:{thread}:{turn}");
-                if self.agent_lifecycle.contains(&key) || self.agent_lifecycle.len() >= 256 {
+                if !self.agent_lifecycle.insert(format!("turn:{thread}:{turn}")) {
                     return true;
                 }
-                self.agent_lifecycle.insert(key);
                 self.child_turns.insert(thread.into(), turn.into());
                 let mut group = self.group("codex");
                 if let Some(agent) = Self::agent(&mut group, thread) {
