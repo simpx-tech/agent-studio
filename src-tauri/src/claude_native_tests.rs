@@ -222,6 +222,194 @@ async fn installed_claude_background_work_outlives_its_reply() {
     eprintln!("Listed {listed:?}; the job finished after {elapsed} ms while parked.");
 }
 
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_message_takes_over_a_reply_waiting_for_a_background_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let ask = "This is an Agent Studio integration test in a disposable folder. Start exactly one sub-agent in the background with the Agent tool (run_in_background: true) whose task is: run the shell command sleep 40 && echo AGENT_DONE and report its output. Do not wait for it: end your turn right away, saying only that the agent started. When it reports back, reply with its output.";
+    let question = "A quick question while the agent works: what is 17 + 25? Answer with the number only, and do not wait for the agent for this answer.";
+    let mut first: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":conversation,"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":ask}]})).unwrap();
+    first.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &first).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&first, &runtime, &exe)
+        .await
+        .unwrap();
+    let (tx, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let watch = crate::background_work::Watch::new(
+        &conversation,
+        Box::new(move |event| {
+            let _ = tx.send(event);
+        }),
+    );
+    let mut next: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":conversation,"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":ask},{"role":"assistant","text":"Pending"},{"role":"user","text":question}]})).unwrap();
+    // The launch identity execute gives both replies, which the CLI's reported mode confirms.
+    let identity = crate::pool::fingerprint(&next, &exe).unwrap();
+    let mut process = crate::pool::Process::new_observed(
+        exe,
+        command.spawn().unwrap(),
+        identity.clone(),
+        first.native_session.as_ref().unwrap().id().to_string(),
+        crate::background_work::observer(None, Some(watch.clone())),
+    )
+    .unwrap();
+    process.background = Some(watch.clone());
+    let hub = Questions::default();
+    let (tx, mut first_events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = hub.open(&first.run_id, None, channel.clone()).unwrap();
+    let first_id = first.run_id.clone();
+    let task = tokio::spawn(async move {
+        let result = stream_turn(
+            &mut process,
+            &first,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut questions),
+            false,
+        )
+        .await;
+        (process, result, first)
+    });
+    let wait = tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(event) = first_events.recv().await {
+            if let RunEvent::BackgroundWait { wait: Some(wait) } = event {
+                return Some(wait);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    let started = std::time::Instant::now();
+    let next_id = next.run_id.clone();
+    let answered = Arc::new(Mutex::new(None));
+    let first_answer = answered.clone();
+    let (tx, mut next_events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        if matches!(&event, RunEvent::Progress { text, .. } | RunEvent::Text { text } if text.contains("42"))
+        {
+            first_answer
+                .lock()
+                .unwrap()
+                .get_or_insert(started.elapsed());
+        }
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut next_questions = hub.open(&next_id, None, channel.clone()).unwrap();
+    let offer = wait.map(|wait| {
+        next_questions
+            .take_over
+            .request(
+                &crate::providers::take_over::Target {
+                    run_id: first_id.clone(),
+                    wait,
+                },
+                identity.clone(),
+            )
+            .unwrap()
+    });
+    let (mut process, result, first) = task.await.unwrap();
+    let Some(offer) = offer else {
+        process.kill().await;
+        panic!("The model never ended its turn while the agent worked: {result:?}");
+    };
+    let Some(hand_off) = process.hand_off.take() else {
+        process.kill().await;
+        let mut seen = vec![];
+        while let Ok(event) = first_events.try_recv() {
+            seen.push(serde_json::to_string(&event).unwrap());
+        }
+        let refusal = offer.await.map(|offer| offer.err());
+        panic!(
+            "The reply did not hand over ({refusal:?}): {result:?}\n{}",
+            seen.join("\n")
+        );
+    };
+    let (status, waiting_text) = result.expect("Installed CLI failed");
+    process.turns += 1;
+    drop(first);
+    assert!(hand_off.send(Ok(process)).is_ok());
+    let mut process = offer.await.unwrap().ok().unwrap();
+    next.messages[1].text = waiting_text;
+    next.native_session = crate::providers::sessions::Session::prepare(root.path(), &next).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &next,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut next_questions),
+            true,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let ended = started.elapsed();
+    process.kill().await;
+    drop(channel);
+    let mut events = vec![];
+    while let Ok(event) = next_events.try_recv() {
+        events.push(event);
+    }
+    let mut earlier = vec![];
+    while let Ok(event) = reported.try_recv() {
+        if let crate::background_work::Event::Tool(outcome) = event {
+            if outcome.run_id == first_id {
+                earlier.push(serde_json::to_value(&outcome.tool).unwrap());
+            }
+        }
+    }
+    assert_eq!(status, "complete");
+    let (status, text) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let answered = answered
+        .lock()
+        .unwrap()
+        .expect("The question was never answered");
+    // The question was answered at once, and the reply then waited for the agent's report.
+    assert!(answered < Duration::from_secs(30), "{answered:?}");
+    assert!(
+        ended > answered + Duration::from_secs(5),
+        "{answered:?} {ended:?}"
+    );
+    let waits: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::BackgroundWait { wait } => Some(*wait),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waits.first(), Some(&Some(1)), "{waits:?}");
+    assert_eq!(waits.last(), Some(&None), "{waits:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RunEvent::Tool { tool } if tool.id == "claude:agents")),
+        "the agent stays with the reply that started it"
+    );
+    let group = earlier
+        .iter()
+        .rfind(|tool| tool["id"] == "claude:agents")
+        .expect("The agent's progress never reached the reply that started it");
+    assert_eq!(group["agents"][0]["status"], "complete", "{group}");
+    eprintln!(
+        "Answered after {answered:?}, ended after {ended:?} with {text:?}; {} updates reached the earlier reply.",
+        earlier.len()
+    );
+}
+
 async fn reply_cost(
     process: &mut crate::pool::Process,
     request: &RunRequest,

@@ -9,7 +9,7 @@ pub mod proposed_plan;
 mod reasoning;
 #[cfg(test)]
 mod reasoning_tests;
-mod workflow;
+pub(crate) mod workflow;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +97,14 @@ pub enum RunEvent {
     Activity {
         text: String,
     },
+    /// Claude's turn ended while background work the reply waits for continues, so the CLI
+    /// is idle until that work reports: `wait` numbers that idle stretch, in which the next
+    /// message may take over the reply. `None` once a turn has started again.
+    BackgroundWait {
+        wait: Option<u64>,
+    },
+    /// This reply took over the process, and the wait, of the reply it continues.
+    TakeOver,
     Tool {
         tool: Box<activity::ToolActivity>,
     },
@@ -268,6 +276,23 @@ impl Decoder {
     /// Tool results decoded since the last call, for the executing computer's store.
     pub fn take_tool_outputs(&mut self) -> Vec<activity::CapturedOutput> {
         self.tools.take_outputs()
+    }
+    /// The records of this reply's calls and native workflows, for whatever follows its
+    /// sub-agents and workflows once it handed its process to the next reply.
+    pub fn hand_over(&mut self) -> (activity::ToolDecoder, workflow::WorkflowDecoder) {
+        (
+            std::mem::take(&mut self.tools),
+            std::mem::take(&mut self.workflows),
+        )
+    }
+    /// A line about an earlier reply's sub-agents. That reply keeps their calls, while file
+    /// edits they make from now on are this reply's to show and undo.
+    pub fn decode_file_changes(&mut self, provider: &str, value: &Value) -> Vec<RunEvent> {
+        self.file_changes
+            .decode(provider, value)
+            .map(|file_changes| RunEvent::FileChanges { file_changes })
+            .into_iter()
+            .collect()
     }
     pub fn tool_tick(&mut self) -> Vec<RunEvent> {
         self.tools

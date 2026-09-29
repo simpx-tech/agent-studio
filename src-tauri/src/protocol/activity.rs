@@ -472,6 +472,70 @@ impl ToolDecoder {
             }
         }
     }
+    /// What streamed updates held back, for a reply whose calls no longer tick.
+    pub fn flush(&mut self) -> Vec<ToolActivity> {
+        let mut out = vec![];
+        self.release_held(&mut out);
+        out
+    }
+    /// Whether a Claude line reports on this reply's sub-agents or native workflows: their
+    /// own calls and messages, or their tasks. Background shells and monitors are left to the
+    /// background work watch, which reports their outcomes itself.
+    pub fn owns_claude_line(&self, value: &Value) -> bool {
+        let agents = self
+            .tools
+            .iter()
+            .find(|t| t.id == "claude:agents")
+            .map(|group| &group.agents);
+        let agent = |id: &str| agents.is_some_and(|agents| agents.iter().any(|a| a.id == id));
+        if let Some(parent) = value["parent_tool_use_id"].as_str() {
+            return agent(parent);
+        }
+        if value["type"] != "system" {
+            return false;
+        }
+        let owned = |id: &str| {
+            agent(id) || {
+                let key = format!("claude:{id}");
+                self.tools
+                    .iter()
+                    .any(|t| t.id == key && t.name == "Workflow")
+            }
+        };
+        value["tool_use_id"].as_str().is_some_and(owned)
+            || value["task_id"]
+                .as_str()
+                .and_then(|task| self.tasks.get(task))
+                .is_some_and(|call| owned(call))
+    }
+    /// Whether a sub-agent of this reply still runs.
+    pub fn agents_running(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| t.category == "agent" && t.agents.iter().any(|a| a.status == "running"))
+    }
+    /// The CLI process ended, taking this reply's running sub-agents and calls with it.
+    pub fn stop_running(&mut self) -> Vec<ToolActivity> {
+        let mut out = vec![];
+        let running: Vec<_> = self
+            .tools
+            .iter()
+            .filter(|t| t.status == "running" || t.agents.iter().any(|a| a.status == "running"))
+            .cloned()
+            .collect();
+        for mut tool in running {
+            for agent in tool.agents.iter_mut().filter(|a| a.status == "running") {
+                agent.status = "cancelled".into();
+            }
+            if tool.agents.is_empty() {
+                tool.status = "cancelled".into();
+                self.publish(tool, &mut out);
+            } else {
+                self.publish_group(tool, &mut out);
+            }
+        }
+        out
+    }
     fn group(&self, provider: &str) -> ToolActivity {
         let id = format!("{provider}:agents");
         self.existing(&id)

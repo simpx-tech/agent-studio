@@ -672,6 +672,20 @@ export async function mockDesktop(page: Page, mode = 'success') {
             const emit = (message: unknown) => callbacks.get(id)?.({ message, index: index++ });
             emit({ kind: 'activity', text: 'Connected' });
             if (mode === 'capabilities') {
+              const takeOver = args.request.takeOver;
+              if (takeOver) {
+                // The waiting reply hands over its process and ends, or refuses.
+                const w = window as any;
+                (w.takeOvers ??= []).push(takeOver);
+                const waiting = w.capabilityRuns?.[takeOver.runId];
+                if (w.refuseTakeOver || !waiting)
+                  throw new Error(
+                    w.refuseTakeOver ??
+                      'The reply had already moved on, so your message waits for it to finish.',
+                  );
+                waiting.finish('complete');
+                emit({ kind: 'takeover' });
+              }
               (window as any).emitCapability = emit;
               return await new Promise((resolve) => {
                 (window as any).finishCapabilities = resolve;

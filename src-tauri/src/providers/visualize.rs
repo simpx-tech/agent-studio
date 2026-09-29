@@ -233,6 +233,12 @@ fn placement(id: &str) -> String {
     format!("Visualization accepted. Place <!-- visualize:{id} --> on its own line between blank lines in your final answer, between the paragraphs it helps explain. Do not repeat the HTML or add a separate attachment heading.")
 }
 
+/// Background work a Claude reply waited for when it handed its process to the next reply.
+pub struct Carried {
+    tasks: HashSet<String>,
+    awaited: super::background::AwaitedTasks,
+}
+
 // Mirror the SDK's stdin lifetime: a result with background tasks still running
 // is an intermediate result. Wait for their follow-up result before closing.
 pub struct ClaudeInputLifetime {
@@ -276,6 +282,14 @@ impl ClaudeInputLifetime {
         if value["type"] == "assistant" && value["parent_tool_use_id"].is_null() {
             self.context_pending = false;
         }
+        self.track(value);
+        value["type"] == "result"
+            && value["parent_tool_use_id"].is_null()
+            && self.tasks.is_empty()
+            && !self.awaited.holds_reply()
+    }
+    /// Follows the background tasks the reply waits for, without ending it.
+    pub fn track(&mut self, value: &Value) {
         self.awaited.observe(value);
         if value["type"] == "system" {
             if let Some(id) = value["task_id"].as_str() {
@@ -303,10 +317,20 @@ impl ClaudeInputLifetime {
                 }
             }
         }
-        value["type"] == "result"
-            && value["parent_tool_use_id"].is_null()
-            && self.tasks.is_empty()
-            && !self.awaited.holds_reply()
+    }
+    /// The background work this reply still waits for, handed to the reply that takes over
+    /// its process.
+    pub fn carry(&mut self) -> Carried {
+        Carried {
+            tasks: std::mem::take(&mut self.tasks),
+            awaited: std::mem::take(&mut self.awaited),
+        }
+    }
+    /// Waits for work an earlier reply handed over as for this reply's own. Call it before
+    /// this reply observes anything.
+    pub fn inherit(&mut self, carried: Carried) {
+        self.tasks.extend(carried.tasks);
+        self.awaited = carried.awaited;
     }
     /// Delegated and declared work that Stop ends with the reply.
     pub fn stoppable(&self) -> Vec<String> {

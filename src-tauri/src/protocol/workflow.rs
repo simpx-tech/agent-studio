@@ -237,6 +237,38 @@ impl WorkflowDecoder {
         self.snapshot.revision += 1;
         Some(self.snapshot.clone())
     }
+    /// Whether a CLI line reports on the task of one of these workflows.
+    pub fn owns(&self, v: &Value) -> bool {
+        let task = v["task_id"].as_str().unwrap_or_default();
+        v["type"] == "system"
+            && !task.is_empty()
+            && self.snapshot.runs.iter().any(|run| run.task_id == task)
+    }
+    /// Whether one of these workflows may still report.
+    pub fn running(&self) -> bool {
+        self.snapshot.runs.iter().any(|run| unfinished(&run.status))
+    }
+    /// The workflows that still ran ended with their CLI process.
+    pub fn stop(&mut self) -> Option<Snapshot> {
+        let mut stopped = false;
+        for run in self
+            .snapshot
+            .runs
+            .iter_mut()
+            .filter(|run| unfinished(&run.status))
+        {
+            run.status = "cancelled".into();
+            stopped = true;
+        }
+        if !stopped {
+            return None;
+        }
+        self.snapshot.revision += 1;
+        Some(self.snapshot.clone())
+    }
+}
+fn unfinished(status: &str) -> bool {
+    matches!(status, "pending" | "running" | "paused")
 }
 
 #[cfg(test)]

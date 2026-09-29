@@ -223,6 +223,9 @@ export const messageSchema = z
     workflow: workflowProgressSchema.optional(),
     workflowDefinition: workflowSchema.optional(),
     nativeWorkflows: nativeWorkflowsSchema.optional(),
+    // A running Claude reply whose turn ended while background work it waits for continues:
+    // the number of that idle stretch, in which the next message takes the reply over.
+    backgroundWait: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .refine(
     (message) =>
@@ -317,10 +320,14 @@ export type RunEvent = TokenUsage & {
     | 'steering'
     | 'compaction'
     | 'workflow'
-    | 'nativeworkflow';
+    | 'nativeworkflow'
+    | 'backgroundwait'
+    | 'takeover';
   id?: string;
   accountUsage?: AccountUsage;
   revision?: number;
+  // The idle stretch a Claude reply waits in for background work, or null once a turn started.
+  wait?: number | null;
   text?: string;
   truncated?: boolean;
   tool?: ToolActivity;
@@ -350,6 +357,10 @@ export type RunRequest = {
   agent: ChatSettings;
   // Workspace-wide Claude chat instructions, appended to the CLI's system prompt.
   claudeInstructions?: string;
+  // A message sent while the conversation's Claude reply only waits for background work: that
+  // reply hands this one its process and ends. `messages` are the user message and the reply
+  // placeholder the conversation gains once the host confirms, on the executing host as well.
+  takeOver?: { runId: string; wait: number; messages: Message[] };
   messages: {
     role: 'user' | 'assistant';
     text: string;
@@ -454,6 +465,7 @@ export function restoreWorkspace(value: unknown): Workspace {
       if (m.status === 'running') {
         m.status = 'cancelled';
         m.error = interruptedReplyError;
+        delete m.backgroundWait;
       }
   }
   return data;

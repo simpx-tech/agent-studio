@@ -9,6 +9,7 @@
     Rewind,
     Undo2,
     LoaderCircle,
+    Hourglass,
     MessageCircleQuestionMark,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
@@ -51,6 +52,7 @@
     background = [],
     openSubagent,
     openedSubagent,
+    idle = false,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -73,6 +75,8 @@
     openSubagent?: (agentId: string) => void;
     /** This reply's sub-agent whose conversation the side panel shows. */
     openedSubagent?: string;
+    /** It runs, but its turn ended and it only waits for background work. */
+    idle?: boolean;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   let linkError = $state('');
@@ -131,8 +135,17 @@
           hour: '2-digit',
           minute: '2-digit',
         })}</span
-      >{#if message.status === 'running'}<span class="live-label" class:waiting
-          >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else}<LoaderCircle
+      >{#if message.status === 'running'}<span
+          class="live-label"
+          class:waiting
+          class:idle={!waiting && idle}
+          title={!waiting && idle
+            ? 'Claude’s turn ended and it waits for background work to report. A message you send now goes at once.'
+            : undefined}
+          >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if idle}<Hourglass
+              size={13}
+              aria-hidden="true"
+            />Waiting for background work{:else}<LoaderCircle
               size={13}
               class="spinning"
               aria-hidden="true"

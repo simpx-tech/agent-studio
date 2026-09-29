@@ -4,9 +4,12 @@ import {
   maxQueuedMessages,
   queuedPreview,
   restoreToDraft,
+  sameProcess,
+  takeOverTarget,
   type QueuedMessage,
 } from './queue';
 import type { DraftImage } from './images';
+import type { ChatSettings, Conversation, Message } from './domain';
 
 // An attached image, whose bytes stay in memory until its message is sent.
 const image = (name: string): DraftImage => ({
@@ -67,5 +70,86 @@ describe('message queue', () => {
     const both = enqueueMessage([], { text: 'look', images: [image('x.png'), image('y.png')] })
       .queue[0];
     expect(queuedPreview(both)).toBe('look (2 images)');
+  });
+});
+
+describe('taking over a reply that waits for background work', () => {
+  const settings: ChatSettings = {
+    provider: 'claude',
+    model: 'opus',
+    reasoning: 'high',
+    instructions: '',
+    connectionId: crypto.randomUUID(),
+  };
+  const conversation = (reply: Partial<Message> = {}): Conversation => ({
+    id: crypto.randomUUID(),
+    settings: { ...settings },
+    title: 'Plan',
+    createdAt: '2026-09-29T00:00:00.000Z',
+    updatedAt: '2026-09-29T00:00:00.000Z',
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        blocks: [{ type: 'markdown', text: 'Plan it' }],
+        status: 'complete',
+        createdAt: '2026-09-29T00:00:00.000Z',
+      },
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        runId: crypto.randomUUID(),
+        settings: { ...settings },
+        blocks: [{ type: 'markdown', text: 'Waiting for the agents' }],
+        status: 'running',
+        createdAt: '2026-09-29T00:00:01.000Z',
+        backgroundWait: 2,
+        ...reply,
+      },
+    ],
+  });
+
+  it('names the running Claude reply only while its turn waits for background work', () => {
+    const waiting = conversation();
+    const run = waiting.messages[1].runId!;
+    expect(takeOverTarget(waiting)).toEqual({ reply: waiting.messages[1], wait: 2 });
+    for (const reply of [
+      { backgroundWait: undefined },
+      { status: 'complete' as const },
+      { compact: true },
+      { runId: undefined },
+      { settings: { ...settings, provider: 'codex' as const } },
+    ])
+      expect(takeOverTarget(conversation(reply))).toBeUndefined();
+    // A reply that refused a message in this idle stretch takes the next one in a later one.
+    const refused = { [run]: 2 };
+    expect(takeOverTarget(waiting, refused)).toBeUndefined();
+    waiting.messages[1].backgroundWait = 3;
+    expect(takeOverTarget(waiting, refused)?.wait).toBe(3);
+    // What the window heard from the reply's own events comes before the synced field.
+    expect(takeOverTarget(waiting, {}, { [run]: 5 })?.wait).toBe(5);
+    expect(takeOverTarget(waiting, {}, { [run]: null })).toBeUndefined();
+    delete waiting.messages[1].backgroundWait;
+    expect(takeOverTarget(waiting, {}, { [run]: 4 })?.wait).toBe(4);
+  });
+
+  it('keeps the process only for the same account and launch settings', () => {
+    expect(sameProcess(settings, { ...settings, model: 'sonnet', maxThinkingTokens: 4096 })).toBe(
+      true,
+    );
+    expect(sameProcess(settings, { ...settings, instructions: 'Be brief.' })).toBe(true);
+    for (const change of [
+      { connectionId: crypto.randomUUID() },
+      { reasoning: 'low' as const },
+      { planMode: true },
+      { fastMode: true },
+      { fallbackModel: 'sonnet' },
+      { outputSchema: '{"type":"object"}' },
+      { autoCompactTokens: 200_000 },
+    ])
+      expect(sameProcess(settings, { ...settings, ...change })).toBe(false);
+    const moved = conversation();
+    moved.settings.reasoning = 'low';
+    expect(takeOverTarget(moved)).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { toolActivitySchema, type ToolActivity } from './activity';
 import type { Message } from './domain';
+import { nativeWorkflowsSchema } from './workflows';
 
 export type BackgroundRun = {
   id: string;
@@ -49,7 +50,8 @@ const hostRunSchema = z.object({
   elapsedMs: z.number().int().min(0).max(31_536_000_000),
 });
 // The executing computer lists work its chat processes still run, including after the
-// reply that started it, and reports each later outcome for that saved reply.
+// reply that started it, and reports each later outcome for that saved reply. A reply that
+// handed its process to the next message also receives its sub-agents' and workflows' progress.
 export const backgroundWorkEventSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('snapshot'),
@@ -61,6 +63,12 @@ export const backgroundWorkEventSchema = z.discriminatedUnion('kind', [
     conversationId: identity,
     runId: identity,
     tool: toolActivitySchema,
+  }),
+  z.object({
+    kind: z.literal('workflow'),
+    conversationId: identity,
+    runId: identity,
+    nativeWorkflows: nativeWorkflowsSchema,
   }),
 ]);
 export type BackgroundWorkEvent = z.infer<typeof backgroundWorkEventSchema>;

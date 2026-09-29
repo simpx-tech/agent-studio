@@ -47,6 +47,38 @@ const message = (): Message => ({
 });
 
 describe('structured tool activity', () => {
+  it('marks the idle stretch a reply waits in for background work until a turn starts', () => {
+    const m = message();
+    applyRunEvent(m, { kind: 'backgroundwait', wait: 2 });
+    expect(m.backgroundWait).toBe(2);
+    applyRunEvent(m, { kind: 'takeover' });
+    expect(m.backgroundWait).toBe(2);
+    for (const wait of [null, 0, -1, 1.5]) {
+      applyRunEvent(m, { kind: 'backgroundwait', wait: 2 });
+      applyRunEvent(m, { kind: 'backgroundwait', wait });
+      expect(m.backgroundWait).toBeUndefined();
+    }
+    const user = { ...message(), role: 'user' as const };
+    applyRunEvent(user, { kind: 'backgroundwait', wait: 1 });
+    expect(user.backgroundWait).toBeUndefined();
+    // A relay job keeps only the latest reading.
+    const events: RunEvent[] = [];
+    for (const wait of [1, null, 2]) retainRunEvent(events, { kind: 'backgroundwait', wait });
+    retainRunEvent(events, { kind: 'takeover' });
+    expect(events).toEqual([{ kind: 'backgroundwait', wait: 2 }, { kind: 'takeover' }]);
+    // Saved replies keep it, and a restart ends it with the interrupted reply.
+    const workspace = initialWorkspace();
+    workspace.conversations.push({
+      id: crypto.randomUUID(),
+      settings: settingsFor(workspace.preferences, 'claude'),
+      title: 'Waiting',
+      createdAt: '',
+      updatedAt: '',
+      messages: [{ ...m, backgroundWait: 4 }],
+    });
+    expect(sharedWorkspace(workspace).conversations[0].messages[0].backgroundWait).toBe(4);
+    expect(restoreWorkspace(workspace).conversations[0].messages[0].backgroundWait).toBeUndefined();
+  });
   it('retains child messages through revision merge, relay and export without prompt replay', () => {
     const m = message();
     const events: RunEvent[] = [];

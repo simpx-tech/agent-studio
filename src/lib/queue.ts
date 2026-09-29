@@ -1,4 +1,4 @@
-import type { SkillReference } from './domain';
+import type { ChatSettings, Conversation, Message, SkillReference } from './domain';
 import type { Mention } from './mentions';
 import type { DraftImage } from './images';
 
@@ -57,6 +57,53 @@ export function restoreToDraft(
   const all = [...queue.flatMap((message) => message.images), ...images];
   const kept = all.slice(0, Math.max(0, maxImages));
   return { draft: merged, images: kept, droppedImages: all.length - kept.length };
+}
+
+/**
+ * The running Claude reply whose next queued message may go now, with the idle stretch it waits
+ * in. Its turn ended while background work it waits for continues, so the CLI is idle: it hands
+ * its process to the next reply, which answers at once and goes on waiting for that work. Only
+ * the same account and launch settings keep that process, so other settings wait for the reply
+ * as before, as does a message the reply refused during this stretch. What this window heard
+ * from the reply's own events (`heard`, null once a turn started) comes before the saved field,
+ * which a synced copy can hold late, or lack on an older relay.
+ */
+export function takeOverTarget(
+  conversation: Conversation,
+  refused: Readonly<Record<string, number>> = {},
+  heard: Readonly<Record<string, number | null>> = {},
+): { reply: Message; wait: number } | undefined {
+  const reply = conversation.messages.at(-1);
+  if (
+    reply?.role !== 'assistant' ||
+    reply.status !== 'running' ||
+    !reply.runId ||
+    reply.compact ||
+    reply.settings?.provider !== 'claude' ||
+    !sameProcess(reply.settings, conversation.settings)
+  )
+    return;
+  const known = heard[reply.runId];
+  const wait = known === undefined ? reply.backgroundWait : known;
+  if (!wait || refused[reply.runId] === wait) return;
+  return { reply, wait };
+}
+
+/**
+ * Whether a Claude reply with `next` settings keeps the process of one with `previous` ones.
+ * The model and thinking budget change in the running process; the rest needs a new one.
+ */
+export function sameProcess(previous: ChatSettings, next: ChatSettings): boolean {
+  return (
+    previous.provider === next.provider &&
+    previous.connectionId === next.connectionId &&
+    previous.reasoning === next.reasoning &&
+    !!previous.planMode === !!next.planMode &&
+    previous.fastMode === next.fastMode &&
+    (previous.fallbackModel ?? '') === (next.fallbackModel ?? '') &&
+    (previous.outputSchema ?? '') === (next.outputSchema ?? '') &&
+    previous.autoCompactTokens === next.autoCompactTokens
+  );
 }
 
 export function queuedPreview(message: QueuedMessage, limit = 120): string {

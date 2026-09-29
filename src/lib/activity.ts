@@ -193,6 +193,14 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
 }
 
 export function applyRunEvent(message: Message, event: RunEvent) {
+  if (event.kind === 'backgroundwait') {
+    if (message.role !== 'assistant') return;
+    if (Number.isSafeInteger(event.wait) && event.wait! > 0) message.backgroundWait = event.wait!;
+    else delete message.backgroundWait;
+    return;
+  }
+  // The reply that sent it takes its place in the conversation when it arrives.
+  if (event.kind === 'takeover') return;
   if (event.kind === 'proposedplan') {
     const parsed = proposedPlanSchema.safeParse(event.proposedPlan);
     if (message.role === 'assistant' && parsed.success)

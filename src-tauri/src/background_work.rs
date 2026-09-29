@@ -3,8 +3,12 @@
 //! running stays with the parked process, whose output Agent Studio still observes, until
 //! the CLI reports each outcome or the process tree is terminated. The running list is
 //! transient state for this computer's window; only final outcomes update the saved reply.
+//! A reply that hands its process to the conversation's next reply while its sub-agents or
+//! native workflows still run leaves their records here: the replies after it route the lines
+//! about that work here, and its saved reply receives their calls, messages and outcomes.
 use crate::pool::OutputObserver;
-use crate::protocol::activity::{status, ToolActivity};
+use crate::protocol::activity::{status, ToolActivity, ToolDecoder};
+use crate::protocol::workflow::{Snapshot as Workflows, WorkflowDecoder};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -18,6 +22,7 @@ pub const EVENT: &str = "studio-background-work";
 const MAX_TRACKED: usize = 32;
 const MAX_TASKS: usize = 256;
 const MAX_ELAPSED_MS: u64 = 31_536_000_000;
+const MAX_HANDED: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,12 +51,39 @@ pub struct Outcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowOutcome {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub native_workflows: Workflows,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Event {
     /// The conversation's running background work, replacing its previous list.
     Snapshot(Snapshot),
     /// The outcome of work that finished after its reply ended, for that saved reply.
+    /// Sub-agents of a reply that handed over its process also report their progress so.
     Tool(Box<Outcome>),
+    /// The native workflows of a reply that handed over its process, for that saved reply.
+    Workflow(Box<WorkflowOutcome>),
+}
+
+/// A reply that handed its process to the conversation's next reply while its sub-agents or
+/// native workflows still ran, with the records the rest of their work updates.
+struct Handed {
+    run_id: String,
+    tools: ToolDecoder,
+    workflows: WorkflowDecoder,
+    /// Keeps the results of the sub-agents' later calls with that reply's other results.
+    outputs: Option<crate::tool_output::Recorder>,
+}
+
+impl Handed {
+    fn running(&self) -> bool {
+        self.tools.agents_running() || self.workflows.running()
+    }
 }
 
 struct Tracked {
@@ -100,6 +132,7 @@ struct State {
     tracked: Vec<Tracked>,
     /// CLI task identities and the tool call that launched each one.
     tasks: HashMap<String, String>,
+    handed: Vec<Handed>,
 }
 
 pub type Emit = Box<dyn Fn(Event) + Send + Sync>;
@@ -262,6 +295,100 @@ impl Watch {
                 }
                 events.push(self.list(&state));
             }
+            for mut handed in std::mem::take(&mut state.handed) {
+                let tools = handed.tools.stop_running();
+                let workflows = handed.workflows.stop();
+                events.extend(self.reports(&handed.run_id, tools, workflows));
+            }
+        }
+        self.send(events);
+    }
+    fn reports(
+        &self,
+        run_id: &str,
+        tools: Vec<ToolActivity>,
+        workflows: Option<Workflows>,
+    ) -> Vec<Event> {
+        let mut events: Vec<_> = tools
+            .into_iter()
+            .map(|tool| {
+                Event::Tool(Box::new(Outcome {
+                    conversation_id: self.conversation.clone(),
+                    run_id: run_id.into(),
+                    tool,
+                }))
+            })
+            .collect();
+        events.extend(workflows.map(|native_workflows| {
+            Event::Workflow(Box::new(WorkflowOutcome {
+                conversation_id: self.conversation.clone(),
+                run_id: run_id.into(),
+                native_workflows,
+            }))
+        }));
+        events
+    }
+    /// A reply handed its process to the next reply while its sub-agents or native workflows
+    /// still ran: the rest of their work updates its saved record from here.
+    pub fn adopt(
+        &self,
+        run_id: &str,
+        (tools, workflows): (ToolDecoder, WorkflowDecoder),
+        outputs: Option<crate::tool_output::Recorder>,
+    ) {
+        let handed = Handed {
+            run_id: run_id.into(),
+            tools,
+            workflows,
+            outputs,
+        };
+        if let Ok(mut state) = self.state.lock() {
+            if handed.running() && state.handed.len() < MAX_HANDED {
+                state.handed.push(handed);
+            }
+        }
+    }
+    /// Reports a CLI line about the sub-agents or workflows of a reply that handed over the
+    /// process to that reply. Returns whether the line was one, which the running reply then
+    /// leaves out of its own calls.
+    pub fn route(&self, value: &Value) -> bool {
+        let mut events = vec![];
+        {
+            let Ok(mut state) = self.state.lock() else {
+                return false;
+            };
+            let Some(index) = state
+                .handed
+                .iter()
+                .position(|h| h.tools.owns_claude_line(value) || h.workflows.owns(value))
+            else {
+                return false;
+            };
+            let handed = &mut state.handed[index];
+            let tools = handed.tools.decode("claude", value);
+            let outputs = handed.tools.take_outputs();
+            if let Some(recorder) = &handed.outputs {
+                for output in outputs {
+                    recorder.record(output);
+                }
+            }
+            let workflows = handed.workflows.decode(value);
+            events.extend(self.reports(&handed.run_id, tools, workflows));
+            if !handed.running() {
+                state.handed.remove(index);
+            }
+        }
+        self.send(events);
+        true
+    }
+    /// Sends the streamed sub-agent text that handed-over records held back.
+    pub fn tick(&self) {
+        let mut events = vec![];
+        if let Ok(mut state) = self.state.lock() {
+            for handed in state.handed.iter_mut() {
+                let tools = handed.tools.flush();
+                events.extend(self.reports(&handed.run_id, tools, None));
+            }
         }
         self.send(events);
     }
@@ -349,7 +476,7 @@ mod tests {
                 .iter()
                 .map(|r| (r.id.as_str(), r.kind, r.label.as_str()))
                 .collect(),
-            Event::Tool(_) => panic!("expected a snapshot"),
+            Event::Tool(_) | Event::Workflow(_) => panic!("expected a snapshot"),
         }
     }
     /// Launch a background call through the real decoder, as a reply reports it.
@@ -518,6 +645,99 @@ mod tests {
             ("claude:server", "cancelled")
         );
         assert!(runs(&ended[1]).is_empty());
+        watch.ended();
+        assert!(taken(&events).is_empty());
+    }
+
+    /// A reply's sub-agent launched in the background, as its reply decoded it.
+    fn background_agent() -> ToolDecoder {
+        let mut decoder = ToolDecoder::default();
+        for line in [
+            json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"description":"Researcher","run_in_background":true}}]}}),
+            json!({"type":"system","subtype":"task_started","task_id":"agent-task","tool_use_id":"agent-call","task_type":"local_agent"}),
+            json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"agent-call","content":"Launched"}]},"tool_use_result":{"isAsync":true}}),
+            json!({"type":"assistant","parent_tool_use_id":"agent-call","message":{"content":[{"type":"tool_use","id":"child","name":"Read","input":{"file_path":"notes.txt"}}]}}),
+        ] {
+            decoder.decode("claude", &line);
+        }
+        decoder
+    }
+    fn outcomes(events: Vec<Event>) -> Vec<Value> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Tool(outcome) if outcome.run_id == "run-1" => {
+                    Some(serde_json::to_value(&outcome.tool).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_that_handed_over_its_process_keeps_its_sub_agents_work() {
+        let (watch, events) = watch();
+        let child = json!({"type":"user","parent_tool_use_id":"agent-call","message":{"content":[{"type":"tool_result","tool_use_id":"child","content":"PRIVATE_NOTES"}]}});
+        // Nothing is routed before a reply hands its process over.
+        assert!(!watch.route(&child));
+        watch.adopt(
+            "run-1",
+            (background_agent(), WorkflowDecoder::default()),
+            None,
+        );
+        // The next reply's own lines and tasks stay with it.
+        for own in [
+            json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"Own answer"}]}}),
+            json!({"type":"system","subtype":"task_started","task_id":"own","tool_use_id":"own-call","task_type":"local_agent"}),
+            json!({"type":"assistant","parent_tool_use_id":"own-call","message":{"content":[]}}),
+        ] {
+            assert!(!watch.route(&own));
+        }
+        assert!(taken(&events).is_empty());
+        // The agent's calls and outcome update the reply that started it.
+        assert!(watch.route(&child));
+        assert!(watch.route(&json!({"type":"system","subtype":"task_notification","task_id":"agent-task","status":"completed","summary":"Research done"})));
+        let reported = outcomes(taken(&events));
+        assert!(reported
+            .iter()
+            .any(|tool| tool["id"] == "claude:child" && tool["status"] == "complete"));
+        let group = reported
+            .iter()
+            .rfind(|tool| tool["id"] == "claude:agents")
+            .unwrap();
+        assert_eq!(group["agents"][0]["status"], "complete");
+        assert_eq!(group["agents"][0]["result"], "Research done");
+        assert!(!serde_json::to_string(&reported)
+            .unwrap()
+            .contains("PRIVATE"));
+        // Once its work finished, the reply is let go.
+        assert!(!watch.route(&child));
+    }
+
+    #[test]
+    fn handed_over_sub_agents_stop_with_their_process() {
+        let (watch, events) = watch();
+        watch.adopt(
+            "run-1",
+            (background_agent(), WorkflowDecoder::default()),
+            None,
+        );
+        // A reply whose sub-agents had all finished is not kept.
+        watch.adopt(
+            "run-2",
+            (ToolDecoder::default(), WorkflowDecoder::default()),
+            None,
+        );
+        watch.ended();
+        let reported = outcomes(taken(&events));
+        let group = reported
+            .iter()
+            .find(|tool| tool["id"] == "claude:agents")
+            .unwrap();
+        assert_eq!(group["agents"][0]["status"], "cancelled");
+        assert!(reported
+            .iter()
+            .any(|tool| tool["id"] == "claude:child" && tool["status"] == "cancelled"));
         watch.ended();
         assert!(taken(&events).is_empty());
     }

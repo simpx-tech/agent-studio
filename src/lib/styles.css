@@ -1315,6 +1315,10 @@ pre {
 .message-heading > .live-label.waiting {
   color: var(--warning);
 }
+/* One that only waits for background work is idle, and quiet. */
+.message-heading > .live-label.idle {
+  color: var(--text-muted);
+}
 /* Your messages read as right-aligned bubbles with their images above them; the heading stays
    for assistive technology. */
 .message.user {

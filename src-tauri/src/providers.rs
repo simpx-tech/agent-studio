@@ -19,6 +19,7 @@ pub mod questions;
 pub mod sent_files;
 pub mod sessions;
 pub mod steering;
+pub mod take_over;
 pub mod visualize;
 
 #[derive(Clone, Debug)]
@@ -457,6 +458,9 @@ pub struct RunRequest {
     // Workspace-wide instructions appended to the system prompt of Claude chats.
     #[serde(default)]
     pub claude_instructions: Option<String>,
+    // The next message of a Claude chat whose reply only waits for background work.
+    #[serde(default)]
+    pub take_over: Option<take_over::Target>,
     pub messages: Vec<ChatMessage>,
 }
 #[derive(Clone, Deserialize)]
@@ -573,6 +577,17 @@ impl RunRequest {
                 }))
         {
             return Err("Compaction requires an existing Claude or Codex conversation and a plain /compact request.".into());
+        }
+        if let Some(target) = &self.take_over {
+            if self.conversation_only
+                || self.compact
+                || self.conversation_id.is_none()
+                || self.agent.provider != "claude"
+                || target.run_id == self.run_id
+                || uuid::Uuid::parse_str(&target.run_id).is_err()
+            {
+                return Err("Only the next message of a Claude chat can continue a reply that waits for background work.".into());
+            }
         }
         if self.history_revision > 9_007_199_254_740_991 {
             return Err("Invalid history revision".into());
@@ -1474,6 +1489,7 @@ mod tests {
             location: None,
             run_id: uuid::Uuid::new_v4().to_string(),
             claude_instructions: None,
+            take_over: None,
             agent: Agent {
                 fast_mode: None,
                 fallback_model: None,

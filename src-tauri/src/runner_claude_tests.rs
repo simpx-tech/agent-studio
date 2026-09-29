@@ -15,6 +15,7 @@ function Cost([decimal]$amount) {
     return $script:total.ToString([Globalization.CultureInfo]::InvariantCulture)
 }
 $open = $false
+$agent = $false
 while ($null -ne ($line = [Console]::ReadLine())) {
     $value = $line | ConvertFrom-Json
     $settingsLog = Join-Path (Split-Path $PSCommandPath) 'settings.jsonl'
@@ -69,7 +70,34 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             continue
         }
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+        if ($value.uuid -and (Test-Path -LiteralPath (Join-Path (Split-Path $PSCommandPath) 'replay-prompts'))) {
+            # Like --replay-user-messages, the CLI replays the human message it takes.
+            [Console]::WriteLine('{"type":"user","uuid":"' + $value.uuid + '","parent_tool_use_id":null,"isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Replayed"}]}}')
+        }
         $mode = $value.message.content[0].text
+        if ($mode -eq 'Agents') {
+            # A background agent works on after the turn ends.
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"launch","content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"description":"Researcher","prompt":"Research","run_in_background":true}}]}}')
+            [Console]::WriteLine('{"type":"system","subtype":"task_started","task_id":"agent-task","tool_use_id":"agent-call","task_type":"local_agent","description":"Researcher"}')
+            [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"agent-call","content":"Launched"}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1"}}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"waiting","content":[{"type":"text","text":"I will write the plan once the agent reports back."}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"I will write the plan once the agent reports back.","usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":' + (Cost 0.001d) + '}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":"agent-call","message":{"id":"child","content":[{"type":"tool_use","id":"child-read","name":"Read","input":{"file_path":"notes.txt"}}]}}')
+            $agent = $true
+            continue
+        }
+        if ($agent) {
+            # A message while the agent works starts a turn at once; the agent reports after it.
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"answer","content":[{"type":"text","text":"Answering ' + $mode + '"}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Answering ' + $mode + '","usage":{"input_tokens":5,"output_tokens":1},"total_cost_usd":' + (Cost 0.001d) + '}')
+            $agent = $false
+            [Console]::WriteLine('{"type":"user","parent_tool_use_id":"agent-call","message":{"content":[{"type":"tool_result","tool_use_id":"child-read","content":"PRIVATE_NOTES"}]}}')
+            [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"agent-task","tool_use_id":"agent-call","status":"completed","summary":"Research done"}')
+            [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"plan","content":[{"type":"text","text":"The plan is ready."}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"The plan is ready.","usage":{"input_tokens":5,"output_tokens":1},"total_cost_usd":' + (Cost 0.001d) + ',"origin":{"kind":"task-notification"}}')
+            continue
+        }
         if ($mode -like 'Await*') {
             # A dev server and a test run go to the background; only the tests are declared.
             foreach ($task in @('server', 'tests')) {
@@ -345,6 +373,157 @@ async fn stop_while_waiting_stops_only_declared_work_and_keeps_the_process() {
         .map(|v| v["request"]["task_id"].clone())
         .collect();
     assert_eq!(stopped, ["tests"], "the dev server keeps running");
+    process.kill().await;
+}
+
+#[tokio::test]
+async fn a_message_takes_over_a_reply_that_only_waits_for_a_background_agent() {
+    use crate::background_work::{Event, Watch};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("replay-prompts"), "on").unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let first = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Agents"}]),
+    );
+    let first_id = first.run_id.clone();
+    let session = first.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let earlier = Arc::new(Mutex::new(vec![]));
+    let sink = earlier.clone();
+    process.background = Some(Watch::new(
+        &conversation,
+        Box::new(move |event| sink.lock().unwrap().push(event)),
+    ));
+    let hub = Questions::default();
+    let (tx, mut first_events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let mut questions = hub.open(&first.run_id, None, channel.clone()).unwrap();
+    let task = tokio::spawn(async move {
+        let result = stream_turn(
+            &mut process,
+            &first,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut questions),
+            false,
+        )
+        .await;
+        (process, result, first)
+    });
+    // The turn ended while the agent works: the CLI is idle in the first stretch.
+    let mut seen = vec![];
+    while let Some(event) = first_events.recv().await {
+        let idle = matches!(event, RunEvent::BackgroundWait { wait: Some(1) });
+        seen.push(event);
+        if idle {
+            break;
+        }
+    }
+    let next_id = uuid::Uuid::new_v4().to_string();
+    let (tx, mut next_events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let mut next_questions = hub.open(&next_id, None, channel.clone()).unwrap();
+    let target = |wait| crate::providers::take_over::Target {
+        run_id: first_id.clone(),
+        wait,
+    };
+    // Another stretch, or a launch identity that needs a new process, keeps the reply going.
+    for (wait, identity, reason) in [
+        (2, "fixture", take_over::BUSY),
+        (1, "other", take_over::CHANGED),
+    ] {
+        let offer = next_questions
+            .take_over
+            .request(&target(wait), identity.into())
+            .unwrap();
+        assert_eq!(offer.await.unwrap().err().as_deref(), Some(reason));
+    }
+    let offer = next_questions
+        .take_over
+        .request(&target(1), "fixture".into())
+        .unwrap();
+    let (mut process, result, first) = task.await.unwrap();
+    assert_eq!(
+        result.unwrap(),
+        (
+            "complete".into(),
+            "I will write the plan once the agent reports back.".into()
+        )
+    );
+    // What execute does next: release the session and hand over the process.
+    process.turns += 1;
+    drop(first);
+    assert!(process.carried.is_some());
+    assert!(process.hand_off.take().unwrap().send(Ok(process)).is_ok());
+    let mut process = offer.await.unwrap().ok().unwrap();
+    let mut next = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Agents"},{"role":"assistant","text":"I will write the plan once the agent reports back."},{"role":"user","text":"Next"}]),
+    );
+    next.run_id = next_id;
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream_turn(
+            &mut process,
+            &next,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut next_questions),
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+    // The reply that took over answered at once, then waited for the agent's report.
+    assert_eq!(
+        result.unwrap(),
+        ("complete".into(), "The plan is ready.".into())
+    );
+    assert!(process.alive() && process.healthy && process.carried.is_none());
+    drop(channel);
+    let mut events = vec![];
+    while let Ok(event) = next_events.try_recv() {
+        events.push(event);
+    }
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RunEvent::Progress { text, .. } if text == "Answering Next")));
+    let waits: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::BackgroundWait { wait } => Some(*wait),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waits, [Some(1), None]);
+    // The agent's later call and outcome belong to the reply that started it.
+    assert!(!events.iter().any(|e| matches!(e, RunEvent::Tool { .. })));
+    let earlier: Vec<_> = earlier
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Tool(outcome) if outcome.run_id == first_id => {
+                Some(serde_json::to_value(&outcome.tool).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(earlier
+        .iter()
+        .any(|tool| tool["id"] == "claude:child-read" && tool["status"] == "complete"));
+    let group = earlier
+        .iter()
+        .rfind(|tool| tool["id"] == "claude:agents")
+        .unwrap();
+    assert_eq!(group["agents"][0]["status"], "complete");
+    assert_eq!(group["agents"][0]["result"], "Research done");
+    assert!(!serde_json::to_string(&earlier).unwrap().contains("PRIVATE"));
     process.kill().await;
 }
 

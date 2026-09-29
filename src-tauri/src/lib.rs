@@ -768,6 +768,10 @@ async fn run_agent(
         &request.run_id,
         request.conversation_id.as_deref(),
         cancel.clone(),
+        request
+            .take_over
+            .as_ref()
+            .map(|target| target.run_id.as_str()),
     )
     .await?;
     let id = request.run_id.clone();
@@ -878,8 +882,13 @@ async fn undo_files(
     commit: bool,
 ) -> Result<undo::Preview, String> {
     let operation = uuid::Uuid::new_v4().to_string();
-    runs.begin(&operation, Some(&conversation_id), CancellationToken::new())
-        .await?;
+    runs.begin(
+        &operation,
+        Some(&conversation_id),
+        CancellationToken::new(),
+        None,
+    )
+    .await?;
     let result = async {
         let root = app
             .path()

@@ -114,5 +114,19 @@ describe('background work', () => {
       tool: { ...tool('claude:a', { status: 'complete', background: true }), stdout: 'PRIVATE' },
     });
     expect(JSON.stringify(outcome)).not.toContain('PRIVATE');
+    // A reply that handed over its process also receives its native workflows' progress.
+    const workflows = { revision: 3, runs: [], limited: false };
+    expect(
+      backgroundWorkEventSchema.parse({
+        kind: 'workflow',
+        conversationId: 'chat',
+        runId: 'run',
+        nativeWorkflows: workflows,
+      }),
+    ).toMatchObject({ kind: 'workflow', nativeWorkflows: workflows });
+    expect(
+      backgroundWorkEventSchema.safeParse({ kind: 'workflow', conversationId: 'chat', runId: 'run' })
+        .success,
+    ).toBe(false);
   });
 });

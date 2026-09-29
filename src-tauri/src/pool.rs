@@ -88,6 +88,11 @@ pub struct Process {
     pub cost_total: f64,
     /// Claude background work this process keeps running after the replies that started it.
     pub background: Option<Arc<crate::background_work::Watch>>,
+    /// Background work an earlier reply still waited for when it handed this process to the
+    /// conversation's next reply, which goes on waiting for it.
+    pub carried: Option<crate::providers::visualize::Carried>,
+    /// The next reply that takes this process over once its current reply returns it.
+    pub hand_off: Option<tokio::sync::oneshot::Sender<Result<Process, String>>>,
 }
 
 impl Process {
@@ -156,6 +161,8 @@ impl Process {
             turns: 0,
             cost_total: 0.0,
             background: None,
+            carried: None,
+            hand_off: None,
         })
     }
     pub fn alive(&mut self) -> bool {
@@ -182,6 +189,9 @@ impl Process {
     pub fn park(&mut self) {
         self.idle.store(true, Ordering::Relaxed);
         self.drain();
+        // Parked output is dropped, so the next reply could not tell when handed-over work
+        // reports and must not wait for it.
+        self.carried = None;
     }
     /// Resume forwarding output for the next reply.
     pub fn claim(&mut self) {

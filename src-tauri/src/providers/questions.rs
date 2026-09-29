@@ -258,6 +258,7 @@ pub struct Questions(
     Arc<Mutex<HashMap<String, Run>>>,
     pub super::steering::Hub,
     pub super::elicitation::Hub,
+    pub super::take_over::Hub,
 );
 pub struct Delivery {
     pub payload: Value,
@@ -268,6 +269,7 @@ pub struct Session {
     approvals: plan_approval::Tracker,
     pub steering: super::steering::Session,
     pub elicitation: super::elicitation::Session,
+    pub take_over: super::take_over::Session,
     hub: Questions,
     run_id: String,
     channel: EventSink,
@@ -301,6 +303,7 @@ impl Questions {
         Ok(Session {
             approvals: plan_approval::Tracker::default(),
             elicitation: self.2.open(run_id, connection.clone(), channel.clone()),
+            take_over: self.3.open(run_id, connection.clone()),
             steering: self.1.open(run_id, connection, channel.clone()),
             hub: self.clone(),
             run_id: run_id.into(),

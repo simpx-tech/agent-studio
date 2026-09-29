@@ -1,6 +1,6 @@
 use crate::{
     protocol::{Decoder, RunEvent},
-    providers::{chat_command, RunRequest},
+    providers::{chat_command, take_over, RunRequest},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -35,12 +35,15 @@ impl Runs {
 
     /// Admit work for a conversation. Different conversations run side by side; one
     /// conversation admits a single reply or file Undo, and a stopped one keeps its place
-    /// until its process has exited and released the conversation's native session.
+    /// until its process has exited and released the conversation's native session. A reply
+    /// that continues one waiting for background work (`after`) is admitted beside that
+    /// reply only while it runs, and takes over its process once it hands it over.
     pub async fn begin(
         &self,
         id: &str,
         conversation: Option<&str>,
         cancel: CancellationToken,
+        after: Option<&str>,
     ) -> Result<(), String> {
         let generation = self.1.load(Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -53,6 +56,24 @@ impl Runs {
                 let same = |run: &Run| {
                     conversation.is_some() && run.conversation.as_deref() == conversation
                 };
+                if let Some(previous) = after {
+                    let mut others = active.iter().filter(|(_, run)| same(run));
+                    let waiting = matches!(
+                        (others.next(), others.next()),
+                        (Some((running, run)), None) if running == previous && !run.cancel.is_cancelled()
+                    );
+                    if !waiting {
+                        return Err(crate::providers::take_over::ENDED.into());
+                    }
+                    active.insert(
+                        id.into(),
+                        Run {
+                            conversation: conversation.map(Into::into),
+                            cancel,
+                        },
+                    );
+                    return Ok(());
+                }
                 if active
                     .values()
                     .any(|run| same(run) && !run.cancel.is_cancelled())
@@ -184,7 +205,9 @@ pub async fn run(
     };
     let provider = request.agent.provider.clone();
     let model = request.agent.model.clone();
-    if tracking {
+    // A message that takes over a reply waiting for background work goes out at once. The
+    // reading the waiting reply takes as it ends marks the same moment.
+    if tracking && request.take_over.is_none() {
         observation.before = crate::usage::read_cancellable(
             app.clone(),
             &app.state::<crate::usage::UsageState>(),
@@ -341,22 +364,71 @@ pub(crate) async fn execute(
         request.shared_context =
             crate::shared_context::load(&request.agent.provider, &folder).await?;
     }
-    request.native_session =
-        crate::providers::sessions::Session::prepare(root.parent().unwrap(), &request)?;
-    // Only conversation-bound Claude/Codex chats keep their process between replies.
-    let parkable = request.native_session.is_some();
-    let fingerprint = if parkable {
-        crate::pool::fingerprint(&request, &exe)?
-    } else {
-        String::new()
+    // A message that continues a reply waiting for background work takes over that reply's
+    // process first: the waiting reply holds the conversation's native session until it hands
+    // the process over at its idle point, where it ends.
+    let mut handed = None;
+    if let (Some(target), Some(conversation)) =
+        (request.take_over.clone(), request.conversation_id.clone())
+    {
+        let session = questions.as_ref().ok_or(take_over::ENDED)?;
+        let mut offer = session
+            .take_over
+            .request(&target, crate::pool::fingerprint(&request, &exe)?)?;
+        let outcome = tokio::select! {
+            outcome = &mut offer => outcome,
+            _ = cancel.cancelled() => {
+                // A process handed over as this reply stopped stays with its conversation.
+                offer.close();
+                if let Ok(Ok(process)) = offer.try_recv() {
+                    pool.park(&conversation, process).await;
+                }
+                return Ok(("cancelled".into(), String::new()));
+            }
+        };
+        handed = Some(outcome.map_err(|_| take_over::ENDED.to_string())??);
+    }
+    let prepared = async {
+        request.native_session =
+            crate::providers::sessions::Session::prepare(root.parent().unwrap(), &request)?;
+        // Only conversation-bound Claude/Codex chats keep their process between replies.
+        let parkable = request.native_session.is_some();
+        let fingerprint = if parkable {
+            crate::pool::fingerprint(&request, &exe)?
+        } else {
+            String::new()
+        };
+        // The images this reply sends its provider, read here or from the relay. The request
+        // keeps them in memory only, after its session was fingerprinted on references.
+        crate::chat_images::materialize(&app, &mut request).await?;
+        Ok::<_, String>((parkable, fingerprint))
+    }
+    .await;
+    let (parkable, fingerprint) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // The work a handed-over process carries runs on for the conversation.
+            if let (Some(process), Some(conversation)) = (handed, &request.conversation_id) {
+                pool.park(conversation, process).await;
+            }
+            return Err(error);
+        }
     };
-    // The images this reply sends its provider, read here or from the relay. The request keeps
-    // them in memory only, after its session was fingerprinted on references.
-    crate::chat_images::materialize(&app, &mut request).await?;
     let mut reused = None;
     if let Some(conversation) = request.conversation_id.as_deref().filter(|_| parkable) {
-        if let Some(mut parked) = pool.take(conversation) {
-            let session = request.native_session.as_ref().expect("parkable session");
+        let session = request.native_session.as_ref().expect("parkable session");
+        if let Some(mut process) = handed.take() {
+            if !process.serves(&fingerprint, session) {
+                pool.park(conversation, process).await;
+                return Err("The reply could not continue this conversation's native session. Send the message again once the reply finishes.".into());
+            }
+            // Its output was never parked: what the work it carries reports is this reply's
+            // to read.
+            reused = Some(process);
+            if let Some(channel) = &channel {
+                let _ = channel.send(RunEvent::TakeOver);
+            }
+        } else if let Some(mut parked) = pool.take(conversation) {
             if parked.serves(&fingerprint, session) {
                 parked.claim();
                 reused = Some(parked);
@@ -366,6 +438,10 @@ pub(crate) async fn execute(
                 parked.kill().await;
             }
         }
+    }
+    if let (Some(process), Some(conversation)) = (handed, &request.conversation_id) {
+        pool.park(conversation, process).await;
+        return Err(take_over::ENDED.into());
     }
     let mut config_cwd = None;
     if let Some(mut session) = request.native_session.take() {
@@ -479,7 +555,13 @@ pub(crate) async fn execute(
         match result {
             Ok(model) => request.claude_default_model = Some(model),
             Err(error) => {
-                process.kill().await;
+                match request.conversation_id.as_deref() {
+                    // Work an earlier reply handed over with this process runs on.
+                    Some(conversation) if process.carried.is_some() => {
+                        pool.park(conversation, process).await
+                    }
+                    _ => process.kill().await,
+                }
                 return if cancel.is_cancelled() {
                     Ok(("cancelled".into(), String::new()))
                 } else {
@@ -523,6 +605,18 @@ pub(crate) async fn execute(
     process.turns += 1;
     if let Some(watch) = &process.background {
         watch.detach(&request.run_id);
+    }
+    // The next message took this reply's process over while it waited for background work.
+    if let Some(next) = process.hand_off.take() {
+        // Its native session lock goes first, so the next reply can prepare its own.
+        request.native_session = None;
+        if let Err(Ok(process)) = next.send(Ok(process)) {
+            // The next reply stopped meanwhile: the process stays with the conversation.
+            if let Some(conversation) = request.conversation_id.as_deref() {
+                pool.park(conversation, process).await;
+            }
+        }
+        return result;
     }
     // A finished or cleanly interrupted turn leaves the CLI waiting for the next reply.
     let park = parkable
@@ -610,6 +704,19 @@ async fn stream_turn(
     let mut input_lifetime = crate::providers::visualize::ClaudeInputLifetime::with_context(
         request.native_session.is_none() || request.native_context().is_some(),
     );
+    // Background work an earlier reply handed over with this process, which this reply goes on
+    // waiting for as for its own.
+    let took_over = process.carried.is_some();
+    if let Some(carried) = process.carried.take() {
+        input_lifetime.inherit(carried);
+    }
+    // That work may start a turn before the CLI takes this reply's message, which it replays
+    // when it does: only a result after the replay can end such a reply.
+    let mut prompt_replayed = !took_over;
+    // The idle stretch this reply waits in, by number: its turn ended while background work it
+    // waits for continues, and no turn has started since. The next message may take over here.
+    let mut waiting: Option<u64> = None;
+    let mut stretches = 0;
     let mut session_received = false;
     let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(initialization_deadline);
@@ -628,13 +735,14 @@ async fn stream_turn(
     let deadline = response_deadline(timeout);
     tokio::pin!(deadline);
     loop {
-        let (answer_rx, steering_rx, elicitation_rx) = match questions.as_mut() {
+        let (answer_rx, steering_rx, elicitation_rx, take_over_rx) = match questions.as_mut() {
             Some(q) => (
                 Some(&mut q.rx),
                 Some(&mut q.steering.rx),
                 Some(&mut q.elicitation.rx),
+                Some(&mut q.take_over.rx),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
         let mut turn_ended = false;
         tokio::select! {
@@ -644,6 +752,7 @@ async fn stream_turn(
                     if let (Some(watch), RunEvent::Tool { tool }) = (&process.background, &event) { watch.tool(&request.run_id, tool); }
                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                 }
+                if let Some(watch) = &process.background { watch.tick(); }
             }
             _ = cancel.cancelled(), if !interrupting => {
                 if let Some(q) = &questions { q.close(); }
@@ -680,7 +789,7 @@ async fn stream_turn(
                 // No turn came to report the finished tasks, so the model already has them.
                 awaiting_follow_up = false;
                 input_lifetime.awaited.release();
-                turn_ended = true;
+                turn_ended = prompt_replayed;
             }
             _ = &mut initialization_deadline, if claude_visualizer && !initialized => { process.healthy = false; break Err("Claude did not initialize conversation tools within two minutes. Check its CLI and configured integrations.".into()); }
             _ = &mut settings_deadline, if claude_visualizer && initialized && !prompt_sent => { process.healthy = false; break Err("Claude did not acknowledge the next-reply settings within 30 seconds. No message was sent. Retry to resume with a fresh process.".into()); }
@@ -723,6 +832,7 @@ async fn stream_turn(
                 }
                 Some(Line::Out(line)) => {
                     if line.len() > output_limit { process.healthy = false; break Err("Provider output exceeded the message limit".into()); }
+                    let mut routed = false;
                     if claude_visualizer {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                             if initialized && !prompt_sent {
@@ -736,7 +846,14 @@ async fn stream_turn(
                                 }
                                 // Late prior-turn text/results must not complete this reply
                                 // or bind its history before the settings are acknowledged.
-                                if value["type"] != "control_request" { continue; }
+                                if value["type"] != "control_request" {
+                                    // Work taken over with the process keeps reporting meanwhile.
+                                    if took_over {
+                                        if let Some(watch) = &process.background { watch.route(&value); }
+                                        input_lifetime.track(&value);
+                                    }
+                                    continue;
+                                }
                                 // Only SDK tool discovery is needed between turns. Never
                                 // accept an old question or visualization as this reply's work.
                                 let discovery = value["request"]["subtype"] == "mcp_message"
@@ -747,6 +864,26 @@ async fn stream_turn(
                                 };
                                 process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
                                 continue;
+                            }
+                            // Lines about the sub-agents of a reply that handed this process over
+                            // belong to that reply, apart from file edits, which are this reply's.
+                            routed = process.background.as_ref().is_some_and(|watch| watch.route(&value));
+                            if routed {
+                                for event in decoder.decode_file_changes(&request.agent.provider, &value) {
+                                    if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                                }
+                            }
+                            if value["parent_tool_use_id"].is_null()
+                                && (matches!(value["type"].as_str(), Some("assistant" | "stream_event" | "user"))
+                                    || (value["type"] == "system" && value["subtype"] == "init"))
+                            {
+                                if value["type"] == "user" && value["uuid"].as_str() == Some(request.run_id.as_str()) {
+                                    prompt_replayed = true;
+                                }
+                                // A turn started, so the reply's text may change from here.
+                                if waiting.take().is_some() {
+                                    if let Some(channel) = channel { let _ = channel.send(RunEvent::BackgroundWait { wait: None }); }
+                                }
                             }
                             if value["type"] == "user" && value["parent_tool_use_id"].is_null() {
                                 if let Some(delivery) = value["uuid"].as_str().and_then(|id| steering.remove(id)) {
@@ -820,7 +957,9 @@ async fn stream_turn(
                                 continue;
                             }
                             let context_result = input_lifetime.is_context_result(&value);
-                            turn_ended = input_lifetime.ended(&value);
+                            // A turn the CLI began for taken-over work before this reply's
+                            // message never ends the reply.
+                            turn_ended = input_lifetime.ended(&value) && prompt_replayed;
                             // A zero-turn acknowledgement of injected history is not a reply.
                             if context_result { continue; }
                             let result = value["type"] == "result" && value["parent_tool_use_id"].is_null();
@@ -838,13 +977,20 @@ async fn stream_turn(
                                 }
                             } else if result && !turn_ended {
                                 if let Some(channel) = channel { let _ = channel.send(RunEvent::Activity { text: "Waiting for background work to finish".into() }); }
+                                // The CLI is idle until the work reports: the next message may
+                                // take over this reply from here.
+                                if persistent && !request.compact && prompt_replayed {
+                                    stretches += 1;
+                                    waiting = Some(stretches);
+                                    if let Some(channel) = channel { let _ = channel.send(RunEvent::BackgroundWait { wait: waiting }); }
+                                }
                             }
                             let expecting = !interrupting && input_lifetime.expects_follow_up();
                             if expecting && !awaiting_follow_up { follow_up_deadline.as_mut().reset(tokio::time::Instant::now() + FOLLOW_UP_GRACE); }
                             awaiting_follow_up = expecting;
                         }
                     }
-                    for event in decoder.decode(&request.agent.provider, &line) {
+                    for event in if routed { vec![] } else { decoder.decode(&request.agent.provider, &line) } {
                         if let (Some(watch), RunEvent::Tool { tool }) = (&process.background, &event) { watch.tool(&request.run_id, tool); }
                         if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
                     }
@@ -864,6 +1010,36 @@ async fn stream_turn(
                     if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
                     break Ok(("complete".to_string(), decoder.text));
                 }
+            },
+            // After the output branch, so a turn the CLI already reported refuses the request.
+            Some(next) = async { match take_over_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                let refusal = if waiting != Some(next.wait) || !steering.is_empty() {
+                    Some(take_over::BUSY)
+                } else if next.fingerprint != process.fingerprint {
+                    Some(take_over::CHANGED)
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    let _ = next.reply.send(Err(reason.into()));
+                    continue;
+                }
+                if next.reply.is_closed() {
+                    continue;
+                }
+                // The CLI is idle, so the next message starts a turn at once. This reply ends
+                // here and hands over its process and the work it still waits for.
+                if let Some(q) = &questions {
+                    q.close();
+                    q.elicitation.close();
+                    q.steering.ready(false);
+                }
+                process.carried = Some(input_lifetime.carry());
+                if let Some(watch) = &process.background {
+                    watch.adopt(&request.run_id, decoder.hand_over(), channel.and_then(EventSink::recorder));
+                }
+                process.hand_off = Some(next.reply);
+                break Ok(("complete".into(), decoder.text));
             }
         }
         if turn_ended {
@@ -1014,23 +1190,23 @@ mod tests {
         let other_app = Runs::default();
         let current = CancellationToken::new();
         let unrelated = CancellationToken::new();
-        runs.begin("current", Some("a"), current.clone())
+        runs.begin("current", Some("a"), current.clone(), None)
             .await
             .unwrap();
         other_app
-            .begin("other", Some("a"), unrelated.clone())
+            .begin("other", Some("a"), unrelated.clone(), None)
             .await
             .unwrap();
         assert!(runs
-            .begin("next", Some("a"), CancellationToken::new())
+            .begin("next", Some("a"), CancellationToken::new(), None)
             .await
             .unwrap_err()
             .contains("already responding"));
         let beside = CancellationToken::new();
-        runs.begin("beside", Some("b"), beside.clone())
+        runs.begin("beside", Some("b"), beside.clone(), None)
             .await
             .unwrap();
-        runs.begin("unscoped", None, CancellationToken::new())
+        runs.begin("unscoped", None, CancellationToken::new(), None)
             .await
             .unwrap();
         assert!(!current.is_cancelled() && !beside.is_cancelled());
@@ -1041,21 +1217,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_message_that_continues_a_reply_runs_beside_only_that_running_reply() {
+        let runs = Runs::default();
+        let waiting = CancellationToken::new();
+        runs.begin("waiting", Some("a"), waiting.clone(), None)
+            .await
+            .unwrap();
+        let refused = |result: Result<(), String>| result.unwrap_err() == take_over::ENDED;
+        // A reply that is not the conversation's running one cannot be continued.
+        assert!(refused(
+            runs.begin("stray", Some("a"), CancellationToken::new(), Some("other"))
+                .await
+        ));
+        assert!(refused(
+            runs.begin(
+                "elsewhere",
+                Some("b"),
+                CancellationToken::new(),
+                Some("waiting")
+            )
+            .await
+        ));
+        runs.begin("next", Some("a"), CancellationToken::new(), Some("waiting"))
+            .await
+            .unwrap();
+        // Only one message continues it, and nothing else starts meanwhile.
+        assert!(refused(
+            runs.begin(
+                "again",
+                Some("a"),
+                CancellationToken::new(),
+                Some("waiting")
+            )
+            .await
+        ));
+        assert!(runs
+            .begin("plain", Some("a"), CancellationToken::new(), None)
+            .await
+            .unwrap_err()
+            .contains("already responding"));
+        runs.0.lock().unwrap().remove("next");
+        // A stopping reply no longer waits for anything.
+        waiting.cancel();
+        assert!(refused(
+            runs.begin("late", Some("a"), CancellationToken::new(), Some("waiting"))
+                .await
+        ));
+    }
+
+    #[tokio::test]
     async fn replacement_waits_for_owned_process_cleanup_after_reload() {
         let runs = Runs::default();
-        runs.begin("old", Some("a"), CancellationToken::new())
+        runs.begin("old", Some("a"), CancellationToken::new(), None)
             .await
             .unwrap();
         runs.interrupt_for_reload();
         let replacement = CancellationToken::new();
-        let next = runs.begin("new", Some("a"), replacement.clone());
+        let next = runs.begin("new", Some("a"), replacement.clone(), None);
         tokio::pin!(next);
         assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
             .await
             .is_err());
         assert!(!runs.0.lock().unwrap().contains_key("new"));
         // Another conversation does not wait for this one's process to exit.
-        runs.begin("elsewhere", Some("b"), CancellationToken::new())
+        runs.begin("elsewhere", Some("b"), CancellationToken::new(), None)
             .await
             .unwrap();
         runs.0.lock().unwrap().remove("old");
@@ -1067,11 +1292,11 @@ mod tests {
     #[tokio::test]
     async fn another_reload_invalidates_a_request_waiting_in_the_previous_document() {
         let runs = Runs::default();
-        runs.begin("old", Some("a"), CancellationToken::new())
+        runs.begin("old", Some("a"), CancellationToken::new(), None)
             .await
             .unwrap();
         runs.interrupt_for_reload();
-        let next = runs.begin("stale", Some("a"), CancellationToken::new());
+        let next = runs.begin("stale", Some("a"), CancellationToken::new(), None);
         tokio::pin!(next);
         assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
             .await
@@ -1080,7 +1305,7 @@ mod tests {
         runs.0.lock().unwrap().remove("old");
         assert!(next.await.unwrap_err().contains("app reloaded"));
         assert!(runs.0.lock().unwrap().is_empty());
-        runs.begin("current", Some("a"), CancellationToken::new())
+        runs.begin("current", Some("a"), CancellationToken::new(), None)
             .await
             .unwrap();
     }

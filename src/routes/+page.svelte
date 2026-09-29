@@ -72,6 +72,7 @@
     providerIds,
     providers,
     historyFor,
+    messageSchema,
     settingsFor,
     rememberSettings,
     rememberAgent,
@@ -81,6 +82,8 @@
     type Message,
     type ProviderId,
     type ProviderStatus,
+    type RunEvent,
+    type RunRequest,
     type Workspace,
     type ChatLocation,
   } from '$lib/domain';
@@ -238,6 +241,7 @@
     maxQueuedMessages,
     queuedPreview,
     restoreToDraft,
+    takeOverTarget,
     type QueuedMessage,
   } from '$lib/queue';
   import {
@@ -424,6 +428,22 @@
   let runs = $state<Record<string, string>>({});
   // Messages waiting for the running reply, per conversation. Session-only: never saved or relayed.
   let queued = $state<Record<string, QueuedMessage[]>>({});
+  // The queued message going out now to a Claude reply that only waits for background work, by
+  // conversation, and the idle stretch in which each such reply refused one, by run.
+  let takingOver = $state<Record<string, string>>({});
+  let takeOverRefused = $state<Record<string, number>>({});
+  // The idle stretch each reply this window follows reported last, by run: null once a turn
+  // started. A synced copy of the saved field can lag behind, or lack it on an older relay.
+  let heardWaits = $state<Record<string, number | null>>({});
+  function hearWait(runId: string, event: RunEvent) {
+    if (event.kind === 'backgroundwait')
+      heardWaits[runId] = Number.isSafeInteger(event.wait) && event.wait! > 0 ? event.wait! : null;
+  }
+  // Whether a running reply only waits for background work, as this window last heard.
+  function waitsForWork(m: Message) {
+    const heard = m.runId ? heardWaits[m.runId] : undefined;
+    return m.status === 'running' && !!(heard === undefined ? m.backgroundWait : heard);
+  }
   // Steering inputs still being delivered, by run.
   let steeringPending = $state<Record<string, boolean>>({});
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
@@ -1004,8 +1024,13 @@
     const id = view === 'chat' ? activeId : null;
     if (id && untrack(() => finishedChats[id])) delete finishedChats[id];
   });
+  // The newest, as a reply that takes over another runs beside it until that one ends.
   const observedReply = $derived(
-    active?.messages.find((m) => m.role === 'assistant' && m.status === 'running'),
+    active?.messages.findLast((m) => m.role === 'assistant' && m.status === 'running'),
+  );
+  // It only waits for background work, so a message sent now goes at once.
+  const waitingReply = $derived(
+    active ? takeOverTarget(active, takeOverRefused, heardWaits) : undefined,
   );
   const activeRunning = $derived((!!activeId && !!runs[activeId]) || !!observedReply);
   const activeStopping = $derived(!!activeId && !!stopping[activeId]);
@@ -1023,14 +1048,28 @@
       else delete hostBackground[event.conversationId];
       return;
     }
-    // A task that finished after its reply ended records its outcome in that reply.
+    // A task that finished after its reply ended records its outcome in that reply, as do the
+    // sub-agents and workflows of a reply that handed its process to the next message.
     const reply = workspace.conversations
       .find((c) => c.id === event.conversationId)
       ?.messages.find((m) => m.role === 'assistant' && m.runId === event.runId);
     if (!reply) return;
-    applyRunEvent(reply, { kind: 'tool', tool: event.tool });
-    saveSoon(event.conversationId);
+    if (event.kind === 'workflow')
+      applyRunEvent(reply, { kind: 'nativeworkflow', nativeWorkflows: event.nativeWorkflows });
+    else applyRunEvent(reply, { kind: 'tool', tool: event.tool });
+    // Outcomes are saved at once; sub-agents' progress goes out with the next sync and save.
+    if (
+      (event.kind === 'tool' && !event.tool.parentId && event.tool.status !== 'running') ||
+      Date.now() - earlierSavedAt >= streamSaveInterval()
+    ) {
+      earlierSavedAt = Date.now();
+      saveSoon(event.conversationId);
+    } else {
+      localChanges++;
+      marks.chat(event.conversationId);
+    }
   }
+  let earlierSavedAt = 0;
   // A chat whose reply ended stays active while its monitors run, until each reports its
   // outcome or its process is released.
   const runningMonitors = (conversationId: string) =>
@@ -1428,12 +1467,21 @@
               const conversation = workspace.conversations.find(
                 (c) => c.id === request.conversationId,
               );
+              // A message that took over a reply waiting for background work joins the
+              // conversation as the host confirms, here as on the device that sent it.
+              if (conversation && event?.kind === 'takeover')
+                joinTakeOver(conversation, request);
               const message = conversation?.messages.find((m) => m.id === request.assistantId);
               if (!conversation || !message) return;
-              if (event) applyRunEvent(message, event);
+              if (event) {
+                hearWait(request.runId, event);
+                applyRunEvent(message, event);
+              }
               if (status) {
                 message.status = status;
                 message.error = error;
+                delete message.backgroundWait;
+                delete heardWaits[request.runId];
                 conversation.updatedAt = new Date().toISOString();
                 noteFinishedChats();
                 if (activeId === conversation.id) void scrollToEnd();
@@ -3359,7 +3407,7 @@
   $effect(() => {
     const id = activeId;
     const items = id ? queued[id] : undefined;
-    const busy = activeRunning || activeStopping || activeSteering;
+    const busy = activeRunning || activeStopping || activeSteering || (!!id && !!takingOver[id]);
     if (!id || !items?.length || busy) return;
     const last = active?.messages.at(-1);
     const ready = last?.role === 'assistant' && last.status === 'complete';
@@ -3381,7 +3429,7 @@
   $effect(() => {
     const open = activeId;
     const ready = Object.keys(queued).filter((id) => {
-      if (id === open) return false;
+      if (id === open || takingOver[id]) return false;
       const conversation = workspace.conversations.find((c) => c.id === id);
       const next = queued[id]?.[0];
       const last = conversation?.messages.at(-1);
@@ -3397,14 +3445,88 @@
     });
     if (ready.length) untrack(() => ready.forEach(sendQueued));
   });
+  // A Claude reply that only waits for background work takes the next queued message at once,
+  // open or not: it hands its process to the new reply and ends. A refused message waits.
+  $effect(() => {
+    for (const id of Object.keys(queued)) {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      const next = queued[id]?.[0];
+      if (!conversation || !next || takingOver[id] || stopping[id]) continue;
+      const target = takeOverTarget(conversation, takeOverRefused, heardWaits);
+      if (
+        target &&
+        !steeringPending[target.reply.runId!] &&
+        (!next.mentions?.length ||
+          next.mentionConnectionId === conversation.settings.connectionId) &&
+        readyToSend(conversation)
+      )
+        untrack(() => void takeOverQueued(conversation, target.reply, next));
+    }
+  });
+  // The message and reply placeholder of a take-over this computer runs for another device,
+  // added once as the host confirms it, exactly as that device adds them.
+  function joinTakeOver(conversation: Conversation, request: RunRequest) {
+    const added = request.takeOver?.messages.map((m) => messageSchema.safeParse(m));
+    if (added?.length !== 2 || !added[0].success || !added[1].success) return;
+    const [user, reply] = [added[0].data, added[1].data];
+    if (
+      user.role !== 'user' ||
+      reply.role !== 'assistant' ||
+      reply.id !== request.assistantId ||
+      reply.runId !== request.runId ||
+      conversation.messages.some((m) => m.id === user.id || m.id === reply.id)
+    )
+      return;
+    conversation.messages.push(user, reply);
+    conversation.updatedAt = reply.createdAt;
+  }
+  async function takeOverQueued(conversation: Conversation, reply: Message, next: QueuedMessage) {
+    const id = conversation.id;
+    takingOver[id] = next.id;
+    const session = workspaceSession;
+    let images: StoredImage[] = [];
+    try {
+      images = await storeChatImages(next.images);
+    } catch {
+      // It waits for the reply instead, like any queued message.
+      if (session === workspaceSession) {
+        const target = takeOverTarget(conversation, takeOverRefused, heardWaits);
+        if (target?.reply === reply) takeOverRefused[reply.runId!] = target.wait;
+        delete takingOver[id];
+      }
+      return;
+    }
+    if (session !== workspaceSession) return;
+    const target = takeOverTarget(conversation, takeOverRefused, heardWaits);
+    if (queued[id]?.[0]?.id !== next.id || target?.reply !== reply) {
+      if (takingOver[id] === next.id) delete takingOver[id];
+      return;
+    }
+    const { wait } = target;
+    const now = new Date().toISOString();
+    const { provider, model } = conversation.settings;
+    const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
+    void startReply(conversation, {
+      now,
+      modelName: selectedModelName(model, modelChoices(catalog, provider, model)),
+      remember: activeId === id,
+      takeOver: { reply, wait, user: userMessage({ ...next, images }, now), itemId: next.id },
+    });
+  }
   // The composer's checks for a saved conversation, without the composer's own state.
   function canSendQueued(conversation: Conversation) {
+    return (
+      !conversationRunning(conversation) &&
+      !stopping[conversation.id] &&
+      readyToSend(conversation)
+    );
+  }
+  // Whether the conversation's computer and account can take its next message.
+  function readyToSend(conversation: Conversation) {
     const { settings, location } = conversation;
     const target = replyConnection(settings);
     return (
       loaded &&
-      !conversationRunning(conversation) &&
-      !stopping[conversation.id] &&
       (!location ||
         !!settings.connectionId ||
         executionHost(workspace.fleet, location.environmentId) === installation?.id) &&
@@ -3627,7 +3749,13 @@
     input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & { images: StoredImage[] },
     now: string,
   ) {
-    conversation.messages.push({
+    conversation.messages.push(userMessage(input, now));
+  }
+  function userMessage(
+    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & { images: StoredImage[] },
+    now: string,
+  ): Message {
+    return {
       id: crypto.randomUUID(),
       role: 'user',
       ...(input.skills?.length ? { skills: input.skills } : {}),
@@ -3641,10 +3769,13 @@
       ...(input.images.length ? { images: input.images.map(storedImage) } : {}),
       status: 'complete',
       createdAt: now,
-    });
+    };
   }
   // Answer the conversation's latest messages and follow the reply until it ends. A reply sent
   // from the queue of a conversation that is not open leaves remembered choices unchanged.
+  // A message that takes over a reply waiting for background work (`takeOver`) joins the
+  // conversation only once the host confirms that reply handed over its process; until then it
+  // stays queued, and a refusal leaves it there.
   async function startReply(
     conversation: Conversation,
     options: {
@@ -3653,11 +3784,25 @@
       compact?: boolean;
       created?: boolean;
       remember?: boolean;
+      takeOver?: { reply: Message; wait: number; user: Message; itemId: string };
     },
   ) {
-    const { now, compact } = options;
+    const { now, compact, takeOver } = options;
     const session = workspaceSession;
-    const history = historyFor(conversation);
+    // The reply taken over ends as it hands over, with the text it has now.
+    const history = historyFor(
+      takeOver
+        ? {
+            ...conversation,
+            messages: [
+              ...conversation.messages.map((m) =>
+                m.id === takeOver.reply.id ? { ...m, status: 'complete' as const } : m,
+              ),
+              takeOver.user,
+            ],
+          }
+        : conversation,
+    );
     const assistantId = crypto.randomUUID();
     const responseSettings = structuredClone($state.snapshot(conversation.settings));
     const runId = crypto.randomUUID();
@@ -3671,7 +3816,7 @@
           m.settings.connectionId !== responseSettings.connectionId,
       );
     if (options.remember) rememberSettings(workspace.preferences, responseSettings);
-    conversation.messages.push({
+    const placeholder: Message = {
       id: assistantId,
       role: 'assistant',
       settings: responseSettings,
@@ -3685,17 +3830,41 @@
       blocks: [],
       status: 'running',
       createdAt: now,
-    });
-    conversation.updatedAt = now;
+    };
+    const added = takeOver
+      ? [structuredClone($state.snapshot(takeOver.user)), structuredClone(placeholder)]
+      : [];
+    let joined = !takeOver;
+    const join = () => {
+      joined = true;
+      if (takeOver) {
+        const items = (queued[conversation.id] ?? []).filter((m) => m.id !== takeOver.itemId);
+        if (items.length) queued[conversation.id] = items;
+        else delete queued[conversation.id];
+        delete takingOver[conversation.id];
+        if (conversation.archived) {
+          conversation.archived = false;
+          if (activeId === conversation.id) revealConversation(conversation);
+        }
+        delete conversation.rewind;
+        rewoundDrafts.delete(conversation.id);
+        conversation.messages.push(takeOver.user);
+      }
+      conversation.messages.push(placeholder);
+      conversation.updatedAt = now;
+      runs[conversation.id] = runId;
+    };
+    if (joined) join();
     const message = () => conversation.messages.find((m) => m.id === assistantId)!;
-    runs[conversation.id] = runId;
     const started = performance.now();
     let reasoningSavedAt = 0;
     // The computer that runs a reply publishes its progress; a reply routed to another computer
     // is published by that computer, so this copy of it is only saved here.
     const publishes = runsHere(responseSettings.connectionId);
+    // Events of a take-over wait for the host to confirm it.
+    const early: RunEvent[] = [];
     try {
-      await persistChat(conversation.id);
+      if (joined) await persistChat(conversation.id);
       if (session !== workspaceSession) return;
       if (options.created)
         void nameConversation(
@@ -3707,6 +3876,14 @@
         );
       const instructions =
         responseSettings.provider === 'claude' ? claudeInstructions(workspace) : '';
+      const receive = (event: RunEvent) => {
+        if (joined) return apply(event);
+        if (event.kind !== 'takeover') return void early.push(event);
+        join();
+        void persistChat(conversation.id);
+        if (activeId === conversation.id) void scrollToEnd(true);
+        for (const event of early.splice(0)) apply(event);
+      };
       const result = stopping[conversation.id]
         ? 'cancelled'
         : await runAgent(
@@ -3722,46 +3899,21 @@
               location: conversation.location?.path ? { ...conversation.location } : undefined,
               ...(accountSwitch ? { accountSwitch: true } : {}),
               ...(conversation.forked ? { forked: true } : {}),
+              ...(takeOver
+                ? {
+                    takeOver: {
+                      runId: takeOver.reply.runId!,
+                      wait: takeOver.wait,
+                      messages: added,
+                    },
+                  }
+                : {}),
             },
             (event) => {
-              if (session !== workspaceSession) return;
-              if (stopping[conversation.id]) void cancelRun(runId).catch(() => {});
-              const m = message();
-              // Only a question tool can start asking, so other calls skip reading every block
-              // of a reply that may hold thousands.
-              const questionTool =
-                event.kind === 'tool' &&
-                !!event.tool &&
-                !event.tool.parentId &&
-                asksTheUser(event.tool.name);
-              const hadQuestion = questionTool && requestsAttention(m);
-              applyRunEvent(m, event);
-              localChanges++;
-              // Every event goes out with the next sync, so other devices follow the text and
-              // tool calls as they stream; saving to disk keeps its own, slower rate.
-              if (publishes) marks.chat(conversation.id);
-              else marks.received(conversation.id);
-              const asks =
-                event.kind === 'question' ||
-                event.kind === 'elicitation' ||
-                (questionTool && !hadQuestion && requestsAttention(m));
-              if (
-                savesAtOnce(event) ||
-                asks ||
-                (event.kind === 'reasoning' &&
-                  Date.now() - reasoningSavedAt >= streamSaveInterval())
-              ) {
-                if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
-                if (publishes) saveSoon(conversation.id);
-                else saveLocalSoon();
-              }
-              // A question waits for the reader, so it reaches the relay, and the phone alert,
-              // at once rather than on a poll that a hidden window runs about once a minute.
-              if (asks && publishes && paired) void syncNow(true);
-              if (activeId === conversation.id) void scrollToEnd(true);
+              if (session === workspaceSession) receive(event);
             },
           );
-      if (session !== workspaceSession) return;
+      if (session !== workspaceSession || !joined) return;
       message().status = result;
       if (result === 'complete') {
         const s = responseSettings.connectionId
@@ -3774,6 +3926,14 @@
       }
     } catch (e) {
       if (session !== workspaceSession) return;
+      if (!joined) {
+        // The message stays queued for the reply's next idle stretch or its end.
+        takeOverRefused[takeOver!.reply.runId!] = takeOver!.wait;
+        delete takingOver[conversation.id];
+        if (activeId === conversation.id && /new CLI process/.test(String(e)))
+          notice = String(e).replace(/^Error: /, '');
+        return;
+      }
       message().status = 'error';
       message().error = String(e);
       if (String(e).includes('login needs attention')) {
@@ -3791,8 +3951,10 @@
         if (s) s.auth = 'unknown';
       }
     } finally {
-      if (session === workspaceSession) {
+      if (session === workspaceSession && joined) {
         message().durationMs = message().accountUsage?.runDurationMs ?? performance.now() - started;
+        delete message().backgroundWait;
+        delete heardWaits[runId];
         conversation.updatedAt = new Date().toISOString();
         if (runs[conversation.id] === runId) {
           delete runs[conversation.id];
@@ -3807,7 +3969,41 @@
         if (paired) void syncNow(true);
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
+      } else if (session === workspaceSession && takingOver[conversation.id] === takeOver?.itemId)
+        delete takingOver[conversation.id];
+    }
+    function apply(event: RunEvent) {
+      hearWait(runId, event);
+      if (stopping[conversation.id]) void cancelRun(runId).catch(() => {});
+      const m = message();
+      // Only a question tool can start asking, so other calls skip reading every block
+      // of a reply that may hold thousands.
+      const questionTool =
+        event.kind === 'tool' && !!event.tool && !event.tool.parentId && asksTheUser(event.tool.name);
+      const hadQuestion = questionTool && requestsAttention(m);
+      applyRunEvent(m, event);
+      localChanges++;
+      // Every event goes out with the next sync, so other devices follow the text and
+      // tool calls as they stream; saving to disk keeps its own, slower rate.
+      if (publishes) marks.chat(conversation.id);
+      else marks.received(conversation.id);
+      const asks =
+        event.kind === 'question' ||
+        event.kind === 'elicitation' ||
+        (questionTool && !hadQuestion && requestsAttention(m));
+      if (
+        savesAtOnce(event) ||
+        asks ||
+        (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= streamSaveInterval())
+      ) {
+        if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
+        if (publishes) saveSoon(conversation.id);
+        else saveLocalSoon();
       }
+      // A question waits for the reader, so it reaches the relay, and the phone alert,
+      // at once rather than on a poll that a hidden window runs about once a minute.
+      if (asks && publishes && paired) void syncNow(true);
+      if (activeId === conversation.id) void scrollToEnd(true);
     }
   }
   async function nameConversation(
@@ -4627,6 +4823,7 @@
               {#if active?.messages.length}
                 {#each active.messages as m, i (m.id)}<MessageView
                     message={m}
+                    idle={waitsForWork(m)}
                     background={messageBackgroundWork(m, hostBackground[active.id])}
                     {chatChanges}
                     folder={active.location?.path}
@@ -4741,7 +4938,13 @@
                   aria-label="Queued messages"
                 >
                   {#each activeQueue as item (item.id)}<li class="queued-message" role="listitem">
-                      <span class="queued-badge">{activeRunning ? 'After this reply' : 'Queued'}</span>
+                      <span class="queued-badge"
+                        >{activeId && takingOver[activeId] === item.id
+                          ? 'Sending now'
+                          : activeRunning
+                            ? 'After this reply'
+                            : 'Queued'}</span
+                      >
                       <span class="queued-text" title={item.text}>{queuedPreview(item)}</span>
                       <button
                         type="button"
@@ -4778,7 +4981,7 @@
                 bind:this={composerInput}
                 aria-label="Message"
                 title="Enter to send · Shift + Enter for a new line · / commands · @ files · $ apps in Codex"
-                placeholder={activeRunning
+                placeholder={activeRunning && !waitingReply
                   ? `Message ${selectedAgent.name} after this reply… Type / for commands`
                   : `Message ${selectedAgent.name}… Type / for commands`}
                 bind:value={prompt}
@@ -4899,8 +5102,10 @@
                     class="send-button"
                     type="submit"
                     disabled={!canQueue || (!prompt.trim() && !attachedImages.length)}
-                    aria-label="Queue message"
-                    title="Send after the current reply"><ArrowUp size={19} /></button
+                    aria-label={waitingReply ? 'Send message' : 'Queue message'}
+                    title={waitingReply
+                      ? 'Send now: Claude only waits for background work, which the new reply keeps waiting for'
+                      : 'Send after the current reply'}><ArrowUp size={19} /></button
                   >{:else}<button
                     class="send-button"
                     type="submit"
