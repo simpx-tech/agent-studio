@@ -2418,8 +2418,13 @@ const chatImages = createFetchCache<Blob>((blob) => blob.size, {
   entries: 64,
   bytes: 160_000_000,
 });
-/** A stored image's bytes for a browser, from the relay's image store. */
+/**
+ * A stored image's bytes: on the desktop from this computer's image store, or the relay when it
+ * lacks them; in a browser from the relay's image store.
+ */
 export function readChatImage(hash: string): Promise<Blob> {
+  if (desktop())
+    return invoke<ArrayBuffer>('read_chat_image', { hash }).then((bytes) => new Blob([bytes]));
   return chatImages.get(hash, async () => {
     const answer = await relayImage('GET', hash);
     if (answer.status !== 200 || !answer.blob)

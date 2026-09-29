@@ -2,7 +2,13 @@
   import { onMount, tick, untrack } from 'svelte';
   import RewindDialog from '$lib/components/RewindDialog.svelte';
   import UndoFilesDialog from '$lib/components/UndoFilesDialog.svelte';
-  import { rewindConversation, undoRewind } from '$lib/rewind';
+  import {
+    returnedDraft,
+    rewindConversation,
+    rewoundMessage,
+    sameReturned,
+    undoRewind,
+  } from '$lib/rewind';
   import { trackMobileViewport } from '$lib/mobileViewport';
   import { trackDrawerSwipe } from '$lib/drawerSwipe';
   import {
@@ -120,6 +126,7 @@
     BrowserWorkspaceStorageError,
     OfflineHostError,
     portableWorkspace,
+    readChatImage,
     storeChatImages,
   } from '$lib/transport';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
@@ -319,7 +326,6 @@
     kind: 'rewind' | 'files';
     conversationId: string;
     session: number;
-    messageId?: string;
     runId?: string;
   }>();
   let historyBusy = $state(false);
@@ -1767,10 +1773,18 @@
       return;
     }
     historyError = '';
+    // A clicked message is the one to return to, so it rewinds at once: Undo rewind takes it
+    // back. /rewind asks which message.
+    if (messageId) {
+      const id = active.id;
+      void changeHistory(messageId).catch((e) => {
+        if (activeId === id) historyError = String(e);
+      });
+      return;
+    }
     historyAction = {
       kind: 'rewind',
       conversationId: active.id,
-      messageId,
       session: workspaceSession,
     };
   }
@@ -1796,15 +1810,117 @@
       session: workspaceSession,
     };
   }
+  // What a rewind in this window put in a conversation's composer and what it replaced there,
+  // so Undo rewind can take back a returned message left as it was.
+  const rewoundDrafts = new Map<
+    string,
+    { rewind: string; before: DraftContent; after: DraftContent }
+  >();
+  // A conversation's composer content, whether it is open or kept for its return.
+  function draftOf(id: string): DraftContent {
+    const key = draftKey.chat(id);
+    return (
+      (key === composerDraftKey ? composerContent() : drafts.get(key)) ?? {
+        text: '',
+        images: [],
+        mentions: [],
+        staleMentions: [],
+        mentionScope: '',
+      }
+    );
+  }
+  function setDraftOf(id: string, content: DraftContent) {
+    const key = draftKey.chat(id);
+    if (key === composerDraftKey) applyComposer(content);
+    else if (hasDraft(content)) {
+      drafts.set(key, { ...content, updatedAt: Date.now() });
+      draftChanged(key);
+    } else forgetDraft(key);
+  }
+  // A rewound message returns to its open composer ahead of the draft, replacing one an earlier
+  // rewind returned there that is still as it was. The function given back undoes this, for a
+  // rewind that could not be saved.
+  function returnToComposer(
+    before: Conversation,
+    next: Conversation,
+    returning: Awaited<ReturnType<typeof rewoundMessage>>,
+  ) {
+    const draft = draftOf(next.id),
+      earlier = rewoundDrafts.get(next.id);
+    const base =
+      earlier && earlier.rewind === before.rewind?.createdAt && sameReturned(draft, earlier.after)
+        ? earlier.before
+        : draft;
+    const restored = returnedDraft(
+      base,
+      returning.message,
+      { connectionId: selectedSettings.connectionId, mentionScope: mentionSelection },
+      maxImagesPerMessage,
+    );
+    setDraftOf(next.id, restored.draft);
+    rewoundDrafts.set(next.id, {
+      rewind: next.rewind!.createdAt,
+      before: base,
+      after: restored.draft,
+    });
+    const { unread } = returning,
+      dropped = restored.droppedImages;
+    attachmentError = [
+      unread
+        ? `${unread} image${unread === 1 ? '' : 's'} of the rewound message could not be read. Undo rewind restores the message with ${unread === 1 ? 'it' : 'them'}.`
+        : '',
+      dropped
+        ? `${dropped} image${dropped === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return () => {
+      if (sameReturned(draftOf(next.id), restored.draft)) setDraftOf(next.id, draft);
+      if (earlier) rewoundDrafts.set(next.id, earlier);
+      else rewoundDrafts.delete(next.id);
+    };
+  }
+  // Undo rewind takes the returned message back out of the composer while it is as the rewind
+  // left it. The function given back returns it again, for an undo that could not be saved.
+  function takeBackReturned(before: Conversation) {
+    const placed = rewoundDrafts.get(before.id);
+    rewoundDrafts.delete(before.id);
+    const taken =
+      !!placed &&
+      placed.rewind === before.rewind?.createdAt &&
+      sameReturned(draftOf(before.id), placed.after);
+    if (placed && taken) {
+      setDraftOf(before.id, placed.before);
+      attachmentError = '';
+    }
+    return () => {
+      if (!placed) return;
+      if (taken && sameReturned(draftOf(before.id), placed.before))
+        setDraftOf(before.id, placed.after);
+      rewoundDrafts.set(before.id, placed);
+    };
+  }
   async function changeHistory(messageId?: string) {
     if (!active || activeRunning || historyBusy || activeQueue.length)
       throw new Error('Wait for the response to finish before rewinding.');
-    const before = $state.snapshot(active),
+    const id = active.id,
       session = workspaceSession;
-    const next = messageId ? rewindConversation(before, messageId) : undoRewind(before);
+    let before: Conversation | undefined,
+      restoreComposer = () => {};
     historyBusy = true;
     try {
+      // A rewound message returns to the composer, its images read back into memory first.
+      const returning = messageId
+        ? await rewoundMessage(active, messageId, readChatImage)
+        : undefined;
+      if (session !== workspaceSession || active?.id !== id) return;
+      before = $state.snapshot(active);
+      const next = messageId ? rewindConversation(before, messageId) : undoRewind(before);
       workspace.conversations = workspace.conversations.map((c) => (c.id === next.id ? next : c));
+      restoreComposer = returning
+        ? returnToComposer(before, next, returning)
+        : takeBackReturned(before);
       await persistChat(next.id);
       if (session !== workspaceSession) return;
       await releaseConversation(next.id, next.settings.connectionId).catch(() => {});
@@ -1822,10 +1938,13 @@
         }),
       );
     } catch (e) {
-      if (session === workspaceSession)
+      if (session === workspaceSession && before) {
+        const saved = before;
         workspace.conversations = workspace.conversations.map((c) =>
-          c.id === before.id ? before : c,
+          c.id === saved.id ? saved : c,
         );
+        restoreComposer();
+      }
       throw e;
     } finally {
       if (session === workspaceSession) historyBusy = false;
@@ -2926,6 +3045,7 @@
       if (session !== workspaceSession) return;
       // Its unsent draft is deleted with the conversation.
       forgetDraft(draftKey.chat(target.id));
+      rewoundDrafts.delete(target.id);
       if (activeId === target.id) {
         composerDraftKey = '';
         newChat();
@@ -3077,6 +3197,7 @@
     draftTimer = undefined;
     drafts.clear();
     changedDrafts.clear();
+    rewoundDrafts.clear();
     composerDraftKey = '';
     draftsReady = false;
     draftSaveFailed = false;
@@ -3317,6 +3438,7 @@
     const now = new Date().toISOString();
     if (conversation.archived) conversation.archived = false;
     delete conversation.rewind;
+    rewoundDrafts.delete(conversation.id);
     addUserMessage(conversation, { ...next, images }, now);
     const { provider, model } = conversation.settings;
     const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
@@ -3461,6 +3583,7 @@
     }
     // Any submission, including a retry, ends the chance to undo a rewind.
     delete conversation.rewind;
+    rewoundDrafts.delete(conversation.id);
     if (retry && conversation.messages.at(-1)?.role === 'assistant') {
       if (conversation.messages.at(-1)?.steering?.length) {
         // Preserve the steered attempt and its accepted inputs for portable history.
@@ -4557,7 +4680,8 @@
           <div class="composer-area" bind:this={composerArea}>
             {#if active?.rewind}<div class="setup-hint neutral" role="status">
                 <Rewind size={15} aria-hidden="true" /><span
-                  >Conversation rewound. Send a new message to continue from here.</span
+                  >Conversation rewound. Files stay as they are, and the next reply starts a new
+                  agent session without earlier tool details.</span
                 ><button
                   class="text-button"
                   disabled={historyBusy || activeRunning}
@@ -4975,7 +5099,6 @@
     {#if historyAction.kind === 'rewind'}
       <RewindDialog
         conversation={active}
-        messageId={historyAction.messageId}
         close={() => {
           if (historyAction === action) historyAction = undefined;
         }}

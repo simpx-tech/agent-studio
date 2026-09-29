@@ -155,6 +155,31 @@ export async function readImage(file: File): Promise<DraftImage> {
     blob,
   };
 }
+/**
+ * A sent message's image attached in the composer again, its bytes back in memory: read by
+ * `read` from the image store, or decoded from a message an earlier release saved inline.
+ */
+export async function draftImage(
+  image: ChatImage,
+  read: (hash: string) => Promise<Blob>,
+): Promise<DraftImage> {
+  const { name, mediaType } = image;
+  if (!isInline(image))
+    return {
+      ...storedImage(image),
+      id: crypto.randomUUID(),
+      blob: new Blob([await read(image.hash)], { type: mediaType }),
+    };
+  const bytes = inlineBytes(image);
+  return {
+    id: crypto.randomUUID(),
+    name,
+    mediaType,
+    hash: await imageHash(bytes),
+    bytes: bytes.byteLength,
+    blob: new Blob([bytes], { type: mediaType }),
+  };
+}
 
 type WithImages = { images?: readonly ChatImage[] };
 /**

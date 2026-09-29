@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { conversationSchema, historyFor, type Conversation } from './domain';
-import { rewindConversation, undoRewind } from './rewind';
+import type { DraftContent } from './drafts';
+import type { DraftImage } from './images';
+import type { QueuedMessage } from './queue';
+import {
+  returnedDraft,
+  rewindConversation,
+  rewoundMessage,
+  sameReturned,
+  undoRewind,
+} from './rewind';
 import { emptyShared, mergeShared } from './sync';
 import { forkConversation } from './forks';
 
@@ -23,6 +32,30 @@ function chat(): Conversation {
     ),
   };
 }
+// A 1×1 PNG of 68 bytes.
+const png =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=';
+const mention = {
+  kind: 'file' as const,
+  name: 'src/app.ts',
+  path: 'C:\\Projects\\studio\\src\\app.ts',
+  token: '@src/app.ts',
+};
+const image = (name: string): DraftImage => ({
+  id: crypto.randomUUID(),
+  name,
+  mediaType: 'image/png',
+  hash: 'a'.repeat(64),
+  bytes: 8,
+  blob: new Blob([]),
+});
+const noDraft = (): DraftContent => ({
+  text: '',
+  images: [],
+  mentions: [],
+  staleMentions: [],
+  mentionScope: 'scope',
+});
 describe('rewinding saved conversations', () => {
   it('forks only retained messages and leaves the source rewind independently recoverable', () => {
     const original = chat();
@@ -118,6 +151,96 @@ describe('rewinding saved conversations', () => {
     const original = chat();
     original.messages[1].filesUndone = true;
     expect(historyFor(original)[1].text).toContain('user undid');
+  });
+  it('reads the rewound message back with its images and mentions, leaving out unreadable images', async () => {
+    const conversation = chat();
+    const sent = conversation.messages[2];
+    const connectionId = crypto.randomUUID();
+    const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const hash = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+    sent.mentions = [mention];
+    sent.images = [
+      { id: crypto.randomUUID(), name: 'kept.png', mediaType: 'image/png', hash, bytes: 68 },
+      {
+        id: crypto.randomUUID(),
+        name: 'gone.png',
+        mediaType: 'image/png',
+        hash: 'b'.repeat(64),
+        bytes: 8,
+      },
+      // Saved inline by a release before the image store.
+      { id: crypto.randomUUID(), name: 'inline.png', mediaType: 'image/png', data: png },
+    ];
+    conversation.messages[3].settings = { ...conversation.settings, connectionId };
+    const reads: string[] = [];
+    const { message, unread } = await rewoundMessage(conversation, sent.id, async (wanted) => {
+      reads.push(wanted);
+      if (wanted !== hash) throw new Error('This image is not on the relay.');
+      return new Blob([bytes]);
+    });
+    expect(reads).toEqual([hash, 'b'.repeat(64)]);
+    expect(unread).toBe(1);
+    expect(message.text).toBe('Second question');
+    expect(message.mentions).toEqual([mention]);
+    expect(message.mentionConnectionId).toBe(connectionId);
+    expect(message.images.map((i) => [i.name, i.mediaType, i.hash, i.bytes])).toEqual([
+      ['kept.png', 'image/png', hash, 68],
+      ['inline.png', 'image/png', hash, 68],
+    ]);
+    // Attached again as new images, their bytes in memory for the next send.
+    const sentIds = sent.images.map((i) => i.id);
+    expect(message.images.some((i) => sentIds.includes(i.id))).toBe(false);
+    for (const image of message.images) {
+      expect(new Uint8Array(await image.blob.arrayBuffer())).toEqual(bytes);
+      expect(image.blob.type).toBe('image/png');
+    }
+    await expect(
+      rewoundMessage(conversation, conversation.messages[1].id, async () => new Blob()),
+    ).rejects.toThrow(/no longer/);
+  });
+  it('returns the message ahead of the draft, with mentions only for the account that answered it', () => {
+    const connectionId = crypto.randomUUID();
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      text: 'Second question',
+      images: [image('returned.png'), image('second.png')],
+      mentions: [mention],
+      mentionConnectionId: connectionId,
+    };
+    const draft = { ...noDraft(), text: 'Keep my draft\n', images: [image('draft.png')] };
+    const same = returnedDraft(draft, message, { connectionId, mentionScope: 'scope' }, 2);
+    expect(same.draft.text).toBe('Second question\n\nKeep my draft');
+    expect(same.draft.images.map((i) => i.name)).toEqual(['returned.png', 'second.png']);
+    expect(same.droppedImages).toBe(1);
+    expect(same.draft.mentions).toEqual([mention]);
+    expect(same.draft.staleMentions).toEqual([]);
+    // Under another account they are chosen again, like mentions left from another scope.
+    const other = returnedDraft(
+      noDraft(),
+      message,
+      { connectionId: crypto.randomUUID(), mentionScope: 'scope' },
+      16,
+    );
+    expect(other.draft.text).toBe('Second question');
+    expect(other.draft.mentions).toEqual([]);
+    expect(other.draft.staleMentions).toEqual([mention.token]);
+    const moved = returnedDraft(
+      { ...noDraft(), text: mention.token, mentions: [mention], mentionScope: 'earlier' },
+      { ...message, mentions: undefined },
+      { connectionId, mentionScope: 'scope' },
+      16,
+    );
+    expect(moved.draft.mentions).toEqual([]);
+    expect(moved.draft.staleMentions).toEqual([mention.token]);
+    expect(moved.draft.mentionScope).toBe('scope');
+  });
+  it('recognizes a returned message left as it was', () => {
+    const returned = { text: 'Second question', images: [image('a.png')] };
+    expect(sameReturned({ ...returned }, returned)).toBe(true);
+    expect(sameReturned({ ...returned, text: 'Second question, edited' }, returned)).toBe(false);
+    expect(sameReturned({ ...returned, images: [] }, returned)).toBe(false);
+    expect(sameReturned({ ...returned, images: [image('a.png')] }, returned)).toBe(false);
   });
   it('preserves concurrent rewinds as separate histories even at the same revision', () => {
     const original = chat();

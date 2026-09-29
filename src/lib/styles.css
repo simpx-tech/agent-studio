@@ -1886,6 +1886,7 @@ pre {
   color: var(--warning);
 }
 .setup-hint .text-button {
+  flex-shrink: 0;
   margin-left: auto;
 }
 /* Informational state, such as a rewound conversation that can still be restored. */

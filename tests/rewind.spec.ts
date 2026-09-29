@@ -35,28 +35,64 @@ async function conversation(page: Page) {
   return input;
 }
 
-test('rewind preserves drafts, can be undone after reload, and replaces discarded native context', async ({
+test('Rewind here returns its message to the composer at once, and Undo rewind takes it back', async ({
   page,
 }) => {
   const input = await conversation(page);
   await input.fill('Keep my draft');
   await page.getByRole('button', { name: 'Rewind here' }).last().click();
-  await expect(page.getByRole('dialog')).toContainText('2 messages');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  // The clicked message is the one to return to, so nothing asks which.
+  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(input).toHaveValue('Second prompt\n\nKeep my draft');
+  await expect(input).toBeFocused();
+  await expect(page.getByRole('status').filter({ hasText: 'Conversation rewound' })).toContainText(
+    'new agent session without earlier tool details',
+  );
+  await page.screenshot({ path: 'artifacts/rewind/rewound-desktop.png' });
+  expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+  // Undo rewind takes the message, as it was returned, back out of the composer.
+  await page.getByRole('button', { name: 'Undo rewind', exact: true }).click();
   await expect(page.locator('.message')).toHaveCount(4);
   await expect(input).toHaveValue('Keep my draft');
+  // Rewinding further back replaces a returned message left as it was.
   await page.getByRole('button', { name: 'Rewind here' }).last().click();
-  await page.getByRole('button', { name: 'Rewind', exact: true }).click();
-  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(input).toHaveValue('Second prompt\n\nKeep my draft');
+  await page.getByRole('button', { name: 'Rewind here' }).last().click();
+  await expect(page.locator('.message')).toHaveCount(0);
+  await expect(input).toHaveValue('First prompt\n\nKeep my draft');
+  await page.getByRole('button', { name: 'Undo rewind', exact: true }).click();
+  await expect(page.locator('.message')).toHaveCount(4);
   await expect(input).toHaveValue('Keep my draft');
+  // An edited message stays when the rewind is undone.
+  await page.getByRole('button', { name: 'Rewind here' }).last().click();
+  await input.fill('Second prompt, edited');
+  await page.getByRole('button', { name: 'Undo rewind', exact: true }).click();
+  await expect(page.locator('.message')).toHaveCount(4);
+  await expect(input).toHaveValue('Second prompt, edited');
   expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+});
+
+test('a rewind is saved with its returned message, can be undone after reload, and replaces discarded native context', async ({
+  page,
+}) => {
+  const input = await conversation(page);
+  await page.getByRole('button', { name: 'Rewind here' }).last().click();
+  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(input).toHaveValue('Second prompt');
+  // The returned message is the conversation's draft, which a reload keeps.
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('test-drafts') ?? ''))
+    .toContain('Second prompt');
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('.conversation-item').first().click();
+  await expect(input).toHaveValue('Second prompt');
   await page.getByRole('button', { name: 'Undo rewind', exact: true }).click();
   await expect(page.locator('.message')).toHaveCount(4);
+  await input.fill('');
   await page.getByRole('button', { name: 'Rewind here' }).last().click();
-  await page.getByRole('button', { name: 'Rewind', exact: true }).click();
+  await expect(input).toHaveValue('Second prompt');
   await input.fill('Replacement prompt');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
@@ -71,10 +107,20 @@ test('rewind handles the first message, storage failure, slash commands, and pho
   page,
 }) => {
   const input = await conversation(page);
+  // A rewind that cannot be saved leaves the chat and the composer as they were.
+  await input.fill('Keep my draft');
+  await page.evaluate(() => ((window as any).saveFailure = true));
+  await page.getByRole('button', { name: 'Rewind here' }).last().click();
+  await expect(page.locator('.composer-area').getByRole('alert')).toContainText('Disk full');
+  await expect(page.locator('.message')).toHaveCount(4);
+  await expect(input).toHaveValue('Keep my draft');
+  await page.evaluate(() => ((window as any).saveFailure = false));
   await page.setViewportSize({ width: 390, height: 844 });
+  // /rewind asks which message, since none was clicked.
   await input.fill('/rewind');
   await input.press('Enter');
   await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('dialog')).toContainText('put it back in the message box');
   await page.getByRole('combobox', { name: 'Rewind to message' }).click();
   await page.getByRole('option', { name: /1. First prompt/ }).click();
   await expect(page.getByRole('button', { name: 'Rewind', exact: true })).toBeInViewport();
@@ -83,11 +129,55 @@ test('rewind handles the first message, storage failure, slash commands, and pho
   await page.getByRole('button', { name: 'Rewind', exact: true }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Disk full');
   await expect(page.locator('.message')).toHaveCount(4);
+  await expect(input).toHaveValue('');
   await page.evaluate(() => ((window as any).saveFailure = false));
   await page.getByRole('button', { name: 'Rewind', exact: true }).click();
   await expect(page.locator('.message')).toHaveCount(0);
+  await expect(input).toHaveValue('First prompt');
   await expect(page.getByRole('button', { name: 'Undo rewind' })).toBeVisible();
+  await page.screenshot({ path: 'artifacts/rewind/rewound-mobile.png' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('a rewound message brings its images back to the composer and sends them again', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const input = page.getByLabel('Message', { exact: true });
+  await page.getByLabel('Image files').setInputFiles({
+    name: 'pixel.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+      'base64',
+    ),
+  });
+  await input.fill('Describe this');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  const sent = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('test-last-request')!).messages[0].images,
+  );
+  expect(sent).toHaveLength(1);
+  await page.getByRole('button', { name: 'Rewind here' }).click();
+  await expect(page.locator('.message')).toHaveCount(0);
+  await expect(input).toHaveValue('Describe this');
+  // Its bytes were read back from this computer's image store.
+  await expect(page.getByRole('button', { name: 'Remove pixel.png' })).toBeVisible();
+  await expect(page.getByLabel('Attached images').getByRole('img', { name: 'pixel.png' })).toHaveJSProperty(
+    'naturalWidth',
+    1,
+  );
+  expect(await page.evaluate(() => (window as any).chatImageReads)).toEqual([sent[0].hash]);
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(request.messages.map((m: any) => m.text)).toEqual(['Describe this']);
+  expect(request.messages[0].images).toEqual([{ ...sent[0], id: expect.any(String) }]);
+  expect(request.messages[0].images[0].id).not.toBe(sent[0].id);
+  await expect(page.getByRole('button', { name: 'Remove pixel.png' })).toHaveCount(0);
 });
 
 test('Undo previews host files, requires confirmation, and keeps changed files and history intact on failure', async ({
@@ -160,7 +250,6 @@ test('a retry after rewinding ends Undo rewind so removed messages cannot return
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.locator('.conversation-item').first().click();
   await page.getByRole('button', { name: 'Rewind here' }).last().click();
-  await page.getByRole('button', { name: 'Rewind', exact: true }).click();
   await expect(page.locator('.message')).toHaveCount(2);
   await expect(page.getByRole('button', { name: 'Undo rewind' })).toBeVisible();
   await page.getByRole('button', { name: 'Retry', exact: true }).click();

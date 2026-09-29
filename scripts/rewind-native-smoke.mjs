@@ -74,6 +74,7 @@ async function screenshot(name) {
   const shot = await page.cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(`${output}/${name}.png`, Buffer.from(shot.data, 'base64'));
 }
+// Rewind here rewinds at once, returning its message to the composer.
 async function rewindAt(position = -1) {
   await page.waitFor(
     (position) =>
@@ -90,8 +91,8 @@ async function rewindAt(position = -1) {
         .click(),
     position,
   );
-  await page.waitFor(() => !!document.querySelector('dialog[open]'));
 }
+const composer = () => page.evaluate(() => document.querySelector('[aria-label="Message"]').value);
 try {
   assert.equal(await page.invoke('plugin:app|identifier'), identifier);
   await page.waitFor(
@@ -155,32 +156,23 @@ try {
     assert(first.fileChanges?.edits.length, 'Provider did not report a file edit');
     const initial = await binding(chat);
     const marker = `DISCARDED_${crypto.randomUUID().slice(0, 8)}`;
-    await submit(
-      chat,
-      `Remember this codeword: ${marker}. Reply REMEMBERED. Do not use tools or change any files.`,
-    );
+    const remember = `Remember this codeword: ${marker}. Reply REMEMBERED. Do not use tools or change any files.`;
+    await submit(chat, remember);
     await type('Draft survives rewind');
     await rewindAt();
+    await page.waitFor(() => document.querySelectorAll('.message').length === 2);
     await screenshot(`native-${chat.provider}-rewind`);
-    await page.button('Rewind');
-    await page.waitFor(
-      () =>
-        !document.querySelector('dialog[open]') &&
-        document.querySelectorAll('.message').length === 2,
-    );
-    assert.equal(
-      await page.evaluate(() => document.querySelector('[aria-label="Message"]').value),
-      'Draft survives rewind',
-    );
+    assert.equal(await composer(), `${remember}\n\nDraft survives rewind`);
     await page.button('Undo rewind');
     await page.waitFor(() => document.querySelectorAll('.message').length === 4);
+    assert.equal(await composer(), 'Draft survives rewind');
     // Undo rewind restores exactly the history the native session received, so it resumes.
     const resumed = await submit(chat, 'Reply RESUMED. Do not use tools or change any files.');
     assert(text(resumed).includes('RESUMED'), text(resumed));
     assert.equal((await binding(chat)).id, initial.id);
     await rewindAt(-2);
-    await page.button('Rewind');
     await page.waitFor(() => document.querySelectorAll('.message').length === 2);
+    assert.equal(await composer(), remember);
     const next = await submit(
       chat,
       'Did I give you a codeword to remember? If no codeword is in this conversation, reply exactly NO_CODEWORD. Do not use tools or inspect old sessions.',
@@ -224,6 +216,7 @@ try {
       originalSession: initial.id,
       rewoundSession: revised.id,
       discardedContextAbsent: true,
+      messageReturnedAheadOfDraft: true,
       draftRetained: true,
       rewindRestored: true,
       undoRewindResumedSession: true,

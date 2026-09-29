@@ -176,6 +176,28 @@ test('mentions survive queue restoration and the mobile picker fits the viewport
   ).toBe(1);
 });
 
+test('a rewound message returns to the composer with its native mention identity', async ({
+  page,
+}) => {
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Review @src');
+  await expect(page.getByRole('option', { name: 'src/my file.ts', exact: true })).toBeVisible();
+  await input.press('Tab');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Rewind here' }).click();
+  await expect(page.locator('.message')).toHaveCount(0);
+  await expect(input).toHaveValue('Review @"src/my file.ts"');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+  const mentions = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('test-last-request') ?? '{}').messages.at(-1).mentions,
+  );
+  expect(mentions.map((m: any) => m.path)).toEqual(['C:\\Projects\\studio/src/my file.ts']);
+});
+
 test('selected app identity cannot cross an agent change and keyboard caret movement opens the picker', async ({
   page,
 }) => {

@@ -275,6 +275,13 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-images', JSON.stringify(images));
             return { hash, bytes: bytes.length, mediaType };
           }
+          if (command === 'read_chat_image') {
+            ((window as any).chatImageReads ??= []).push(args.hash);
+            const image = storedImages()[args.hash];
+            if (!image)
+              throw 'This image is not on this computer, and the relay cannot provide it.';
+            return Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0)).buffer;
+          }
           if (command === 'upload_chat_images') return [];
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('test-workspace') ?? 'null');

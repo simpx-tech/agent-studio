@@ -3,19 +3,18 @@
   import { messageText, type Conversation } from '$lib/domain';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
+  // /rewind asks which message to return to; Rewind here below a message rewinds at once.
   let {
     conversation,
-    messageId,
     close,
     apply,
   }: {
     conversation: Conversation;
-    messageId?: string;
     close: () => void;
     apply: (id: string) => Promise<void>;
   } = $props();
   let selected = $state(
-    untrack(() => messageId ?? conversation.messages.findLast((m) => m.role === 'user')?.id ?? ''),
+    untrack(() => conversation.messages.findLast((m) => m.role === 'user')?.id ?? ''),
   );
   let busy = $state(false);
   let error = $state('');
@@ -53,7 +52,10 @@
       void confirm();
     }}
   >
-    <p>Return to before this message. Your draft stays as it is.</p>
+    <p>
+      Return to before this message and put it back in the message box. A draft there stays after
+      it.
+    </p>
     <ChoicePicker
       field
       label="Rewind to message"

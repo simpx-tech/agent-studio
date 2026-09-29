@@ -807,6 +807,17 @@ async fn store_chat_image(
         .await
         .map_err(|_| "Cannot keep the image")?
 }
+/// A kept image's bytes, from this computer or the relay, for a window that attaches a sent
+/// message's images again, as a rewind returning the message to the composer does.
+#[tauri::command]
+async fn read_chat_image(
+    app: tauri::AppHandle,
+    hash: String,
+) -> Result<tauri::ipc::Response, String> {
+    chat_images::ensure(&app, &hash)
+        .await
+        .map(tauri::ipc::Response::new)
+}
 /// Uploads the images of `hashes` the relay lacks from this computer, returning those it still
 /// lacks because this computer does not hold them either.
 #[tauri::command]
@@ -1327,6 +1338,7 @@ pub fn run() {
             save_workspace,
             save_workspace_patch,
             store_chat_image,
+            read_chat_image,
             upload_chat_images,
             drafts::load_drafts,
             drafts::save_drafts,
