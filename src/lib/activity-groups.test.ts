@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   activityEntries,
   activityGroupSummary,
+  activityLimitNote,
+  childIssueLabel,
   groupActivityEntries,
   groupIcon,
   liveAction,
@@ -248,12 +250,20 @@ describe('activity groups', () => {
     expect(activityGroupSummary(messages, 'complete').icon).toBe('message');
   });
 
-  it('marks calls past the activity limit without counting the notice as a call', () => {
+  it('shows an older reply’s activity limit as a note after its calls, not as a call', () => {
+    const run = tool('run', { name: 'Run command' });
     const limit = tool('activity-limit', { name: 'Activity limit reached', status: 'unknown' });
-    expect(
-      activityGroupSummary([tool('run', { name: 'Run command' }), limit], 'complete'),
-    ).toMatchObject({ label: '1 command and later calls not shown', issue: 'unknown' });
-    expect(activityGroupSummary([limit], 'complete').label).toBe('Later calls not shown');
+    const groups = groupActivityEntries(activityEntries([entry(run), entry(limit)], [run], ''));
+    expect(groups.map((g) => g.kind)).toEqual(['tools', 'comment']);
+    expect(groups[1].kind === 'comment' && groups[1].entry).toMatchObject({
+      text: activityLimitNote,
+    });
+    expect(groups[1].kind === 'comment' && groups[1].entry.tool).toBeUndefined();
+    const calls = groups[0].kind === 'tools' ? groups[0].tools : [];
+    expect(activityGroupSummary(calls, 'complete')).toMatchObject({
+      label: 'Ran 1 command',
+      issue: undefined,
+    });
   });
 
   it('keeps failures visible during other running work and avoids claiming an unconfirmed success', () => {
@@ -530,7 +540,7 @@ describe('activity groups', () => {
     });
   });
 
-  it('surfaces incomplete child status in the collapsed sub-agent group', () => {
+  it('keeps a sub-agent’s own outcome apart from the calls it made', () => {
     const parent = tool('parent', {
       category: 'agent',
       name: 'Sub-agents',
@@ -541,12 +551,27 @@ describe('activity groups', () => {
       issue: 'unknown',
       running: false,
     });
+    // A sub-agent that carried on past failed calls finished; its group counts the failures.
     parent.agents[0].status = 'complete';
-    const child = tool('child-read', { parentId: 'child', status: 'error' });
-    expect(activityGroupSummary([parent], 'complete', [parent, child])).toMatchObject({
+    const failed = ['a', 'b'].map((id) =>
+      tool(`child-${id}`, { parentId: 'child', status: 'error' }),
+    );
+    const stopped = tool('child-c', { parentId: 'child', status: 'cancelled' });
+    const summary = activityGroupSummary([parent], 'complete', [parent, ...failed, stopped]);
+    expect(summary).toMatchObject({
+      label: 'Worked with 1 sub-agent',
+      issue: undefined,
+      childIssue: { status: 'error', count: 2 },
+      running: false,
+    });
+    expect(childIssueLabel(summary.childIssue!)).toBe('2 calls failed');
+    expect(childIssueLabel({ status: 'cancelled', count: 1 })).toBe('1 call stopped');
+    // The sub-agent's own failure is the group's, and its calls add nothing to it.
+    parent.agents[0].status = 'error';
+    expect(activityGroupSummary([parent], 'complete', [parent, ...failed])).toMatchObject({
       label: '1 sub-agent',
       issue: 'error',
-      running: false,
+      childIssue: undefined,
     });
   });
 
@@ -564,8 +589,11 @@ describe('activity groups', () => {
     ];
     const reads = Array.from({ length: 5000 }, (_, i) => tool(`read-${i}`, { path: `f${i % 7}` }));
     expect(activityGroupSummary(reads, 'complete', calls).label).toBe('Read 7 files');
-    expect(activityGroupSummary([parent], 'complete', calls).issue).toBeUndefined();
+    expect(activityGroupSummary([parent], 'complete', calls).childIssue).toBeUndefined();
     calls.push(tool('failed', { name: 'Run command', parentId: 'child', status: 'error' }));
-    expect(activityGroupSummary([parent], 'complete', calls).issue).toBe('error');
+    expect(activityGroupSummary([parent], 'complete', calls).childIssue).toEqual({
+      status: 'error',
+      count: 1,
+    });
   });
 });

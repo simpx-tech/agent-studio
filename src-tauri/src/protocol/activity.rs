@@ -1186,7 +1186,18 @@ impl ToolDecoder {
                 self.publish_group(group, out);
             }
             let task = field(v, "task_id", 240).unwrap_or_default();
-            let id = field(v, "tool_use_id", 240).or_else(|| self.tasks.get(&task).cloned());
+            let reported = field(v, "tool_use_id", 240);
+            // SendMessage reports the task of a sub-agent it resumes under its own call, while
+            // the child still answers the call that started it, so the task stays with that
+            // sub-agent.
+            let agents = self.group("claude").agents;
+            let holds = |id: &String| agents.iter().any(|a| &a.id == id);
+            let id = reported
+                .clone()
+                .filter(|id| holds(id))
+                .or_else(|| self.tasks.get(&task).filter(|id| holds(id)).cloned())
+                .or_else(|| reported.clone())
+                .or_else(|| self.tasks.get(&task).cloned());
             if let Some(id) = id {
                 // A workflow is an orchestrator, not another child agent.
                 let key = format!("claude:{id}");
@@ -1218,12 +1229,21 @@ impl ToolDecoder {
                     return;
                 }
                 let mut group = self.group("claude");
+                let existed = group.agents.iter().any(|a| a.id == id);
                 if let Some(agent) = Self::agent(&mut group, &id) {
-                    // Progress describes what the child does now ("Reading beta.txt"), never
-                    // what it is; only its start names it.
                     if v["subtype"] == "task_started" {
-                        if let Some(name) = field(v, "description", 200) {
-                            agent.name = name;
+                        // Progress describes what the child does now ("Reading beta.txt"), never
+                        // what it is, and an older CLI resumed a child under that description:
+                        // only a start names a child its own call left unnamed.
+                        if unnamed(&agent.name) {
+                            if let Some(name) = field(v, "description", 200) {
+                                agent.name = name;
+                            }
+                        }
+                        // A child that had finished starts again when a call such as
+                        // SendMessage resumes it.
+                        if existed {
+                            agent.status = "running".into();
                         }
                     }
                     if v["subtype"] == "task_notification" {
@@ -1237,6 +1257,11 @@ impl ToolDecoder {
             }
         }
     }
+}
+/// Whether a sub-agent still has the placeholder name `ToolDecoder::agent` gave it.
+fn unnamed(name: &str) -> bool {
+    name.strip_prefix("Sub-agent ")
+        .is_some_and(|n| n.parse::<usize>().is_ok())
 }
 /// A short description of the git operation Claude Code reports for a shell call.
 fn git_operation(value: &Value) -> Option<String> {
@@ -1519,6 +1544,45 @@ mod tests {
         let wait = d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"wait1","name":"mcp__agent_studio__await_background_tasks","input":{"task_ids":["task2","task3"]}}]}}));
         assert_eq!(wait[0].name, "Wait for background tasks");
         assert_eq!(wait[0].facts[0].value, "task2, task3");
+    }
+    #[test]
+    fn a_resumed_sub_agent_keeps_its_entry_and_name_and_runs_again() {
+        // As Claude Code 2.1.284 reports it, the resumed task keeps its id but starts and ends
+        // under the SendMessage call, while the child answers the Agent call. An older CLI
+        // started it under the Agent call with the child's current step as its description.
+        // `false` is a SendMessage call the reply did not record, as past the old 200-call
+        // limit, which used to add a second sub-agent.
+        for (resumer, record_message) in [("resume", true), ("resume", false), ("launch", false)] {
+            let mut d = ToolDecoder::default();
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"launch","name":"Agent","input":{"description":"Builder","prompt":"Build it","run_in_background":true}}]}}));
+            d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"launch","task_type":"local_agent","description":"Builder"}));
+            d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"launch","content":"Launched"}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1"}}));
+            d.decode("claude", &json!({"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"launch","description":"Running Stop my Blender instance","last_tool_name":"Bash"}));
+            d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"launch","status":"completed","summary":"First pass"}));
+            assert_eq!(d.group("claude").agents[0].status, "complete");
+            if record_message {
+                d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"resume","name":"SendMessage","input":{"to":"a1","message":"Second pass","summary":"Resume the builder","type":"message"}}]}}));
+            }
+            d.decode("claude", &json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":resumer,"task_type":"local_agent","description":"Running Stop my Blender instance"}));
+            if record_message {
+                d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"resume","content":"Resuming agent a1"}]},"tool_use_result":{"success":true,"resumedAgentId":"a1"}}));
+            }
+            let group = d.group("claude");
+            assert_eq!(group.agents.len(), 1);
+            assert_eq!(group.agents[0].name, "Builder");
+            assert_eq!(group.agents[0].status, "running");
+            assert!(group.agents[0].background);
+            d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":resumer,"status":"completed","summary":"Second pass done"}));
+            let group = d.group("claude");
+            assert_eq!(group.agents.len(), 1);
+            assert_eq!(group.agents[0].status, "complete");
+            assert_eq!(group.agents[0].result.as_deref(), Some("Second pass done"));
+            if record_message {
+                let message = d.existing("claude:resume").unwrap();
+                assert_eq!(message.name, "Message agent");
+                assert_eq!(message.status, "complete");
+            }
+        }
     }
     #[test]
     fn background_launches_follow_their_task_without_reviving_or_exposing_it() {

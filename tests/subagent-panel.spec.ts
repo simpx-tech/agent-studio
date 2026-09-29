@@ -204,6 +204,50 @@ for (const mobile of [false, true])
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
   });
 
+test('a sub-agent that carried on past failed calls reads as done, with its failures counted', async ({
+  page,
+}) => {
+  const emit = await start(page, false);
+  await emit(agents(1, {}));
+  await emit(call('r1', { path: '/fixture/src/session.ts' }));
+  for (const [id, command] of [
+    ['bad1', 'tail -3 a.log b.log'],
+    ['bad2', 'sleep 60; tail a.log'],
+  ])
+    await emit(
+      call(id, { name: 'Run command', operation: 'command', commandRun: true, command, status: 'error' }),
+    );
+  await emit(agents(2, { status: 'complete', result }));
+  // The record a reply ended with past the 200 calls replies kept before 2026-09-29.
+  await emit({
+    kind: 'tool',
+    tool: {
+      id: 'activity-limit',
+      name: 'Activity limit reached',
+      category: 'tool',
+      revision: 1,
+      status: 'unknown',
+      detail: 'Additional operations are not shown after 200 entries.',
+      sources: [],
+      agents: [],
+    },
+  });
+  await emit({ kind: 'text', text: 'Sessions expire after 30 minutes.' });
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await page.getByLabel('Work history', { exact: true }).click();
+  const group = page.locator('.activity-group').first();
+  await expect(group.locator(':scope > summary')).toHaveText(
+    /^\s*Worked with 1 sub-agent\s*2 calls failed\s*$/,
+  );
+  await group.locator(':scope > summary').click();
+  await expect(group.locator('.subagent-row')).toHaveText([/Explore the auth flow.*Completed/]);
+  await expect(page.locator('.timeline-note').last()).toHaveText(
+    'Calls after the first 200 were not recorded: earlier versions kept only 200 per reply.',
+  );
+  await expect(page.getByText('Later calls not shown')).toHaveCount(0);
+  await expect(page.getByText('Outcome unconfirmed')).toHaveCount(0);
+});
+
 test('sub-agents in Work history open their saved conversation', async ({ page }) => {
   const emit = await start(page, false);
   await emit(agents(1, { messages: early.slice(0, 1) }));

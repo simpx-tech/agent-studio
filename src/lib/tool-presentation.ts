@@ -772,7 +772,6 @@ export function toolVisual(
   const path = tool.path ? relativeFilePath(tool.path, options.folder) : undefined;
   const commandish =
     tool.commandRun || tool.operation === 'command' || ['Run command', 'Bash'].includes(tool.name);
-  if (tool.id === 'activity-limit') return { icon: 'tool', title: tool.name };
   if (tool.category === 'hook')
     return {
       icon: 'hook',

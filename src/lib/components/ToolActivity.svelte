@@ -26,6 +26,7 @@
   import {
     activityEntries,
     activityGroupSummary,
+    childIssueLabel,
     groupActivityEntries,
     groupIcon,
     liveAction,
@@ -227,7 +228,7 @@
   }
 </script>
 
-{#snippet statusMark(current: ActivityDisplayStatus)}
+{#snippet statusMark(current: ActivityDisplayStatus, label = labels[current])}
   <span
     class="tool-status"
     class:failed={current === 'error' || current === 'blocked'}
@@ -239,7 +240,7 @@
     {:else if current === 'complete'}<Check size={13} />
     {:else if current === 'background' || current === 'left'}<Layers size={13} />
     {:else}<CircleAlert size={13} />{/if}<span class:sr-only={current === 'complete'}
-      >{labels[current]}</span
+      >{label}</span
     >
   </span>
 {/snippet}
@@ -425,7 +426,11 @@
             >{toolElapsed(elapsed)}</span
           >
         </span>{/if}
-      {#if summary.issue}{@render statusMark(summary.issue)}{/if}
+      {#if summary.issue}{@render statusMark(summary.issue)}
+      {:else if summary.childIssue}{@render statusMark(
+          summary.childIssue.status,
+          childIssueLabel(summary.childIssue),
+        )}{/if}
       <ChevronDown size={13} class="disclosure" aria-hidden="true" />
     </summary>
     {#if disclosures.has(key)}<div class="group-tools">

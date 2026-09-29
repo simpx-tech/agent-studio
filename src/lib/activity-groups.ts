@@ -28,6 +28,10 @@ type ActivityGroup =
 
 const lifecycleNotes = ['Starting the provider CLI', 'Connected to Claude'];
 const toolNotes = /^(Using |Running command|Editing files|Searching the web|Using connected tool)/;
+// Replies saved before 2026-09-29 kept at most 200 calls and ended their activity with a record
+// standing for the calls that were never recorded. It reads as a note, not as a call.
+export const activityLimitNote =
+  'Calls after the first 200 were not recorded: earlier versions kept only 200 per reply.';
 
 /** Reasoning, progress comments and tool calls in their recorded order. */
 export function activityEntries(
@@ -39,19 +43,25 @@ export function activityEntries(
     ? blocks.filter((b) => b.type !== 'markdown')
     : tools.map((tool) => ({ type: 'activity' as const, text: tool.name, tool }));
   const reasoning = new Set<string>();
-  return source.filter((b) => {
-    if (b.type === 'reasoning') {
-      // Older Claude replies saved each streamed thinking block again from its snapshot,
-      // numbered within the same message ("message:index").
-      const key = `${b.id.replace(/:\d+$/, '')}\n${b.text}`;
-      if (reasoning.has(key)) return false;
-      reasoning.add(key);
-      return true;
-    }
-    if (b.progress && b.text.trim() === finalText.trim()) return false;
-    if (b.tool || b.progress) return true;
-    return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
-  });
+  return source
+    .filter((b) => {
+      if (b.type === 'reasoning') {
+        // Older Claude replies saved each streamed thinking block again from its snapshot,
+        // numbered within the same message ("message:index").
+        const key = `${b.id.replace(/:\d+$/, '')}\n${b.text}`;
+        if (reasoning.has(key)) return false;
+        reasoning.add(key);
+        return true;
+      }
+      if (b.progress && b.text.trim() === finalText.trim()) return false;
+      if (b.tool || b.progress) return true;
+      return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
+    })
+    .map((b) =>
+      b.type === 'activity' && b.tool?.id === 'activity-limit'
+        ? { type: 'activity' as const, text: activityLimitNote, order: b.order }
+        : b,
+    );
 }
 
 /** Consecutive tool calls share a group; reasoning and comments remain chronological boundaries. */
@@ -93,7 +103,6 @@ const kindIcons: Record<keyof typeof phrases, ToolIconKey> = {
   skill: 'skill',
   image: 'image',
   tool: 'tool',
-  limit: 'tool',
 };
 
 /**
@@ -104,8 +113,7 @@ export function groupIcon(tools: ToolActivity[]): ToolIconKey {
   const first = tools[0];
   if (!first) return 'tool';
   const kind = action(first);
-  if (kind === 'background' || kind === 'backgroundAgent' || kind === 'limit')
-    return kindIcons[kind];
+  if (kind === 'background' || kind === 'backgroundAgent') return kindIcons[kind];
   const icons = new Set(
     tools.filter((tool) => action(tool) === kind).map((tool) => toolVisual(tool).icon),
   );
@@ -114,7 +122,6 @@ export function groupIcon(tools: ToolActivity[]): ToolIconKey {
 
 // Use only reported operation/category/name metadata, never infer actions from output or paths.
 function action(tool: ToolActivity): keyof typeof phrases {
-  if (tool.id === 'activity-limit') return 'limit';
   if (tool.category === 'hook') return tool.operation === 'hookContext' ? 'hookContext' : 'hook';
   // Launches that returned while their work continued, shown running in Background work.
   if (tool.background) return 'background';
@@ -175,8 +182,6 @@ const phrases = {
   skill: ['skill', 'skills', 'used #', 'using #', '#'],
   image: ['image', 'images', 'viewed #', 'viewing #', '#'],
   tool: ['tool', 'tools', 'used #', 'using #', '#'],
-  // The activity limit notice stands for calls that were never recorded, so none can be counted.
-  limit: ['', '', 'later calls not shown', 'later calls not shown', 'later calls not shown'],
 } as const;
 
 // A file counts once however often it was read or edited, and a resumed sub-agent counts once.
@@ -205,9 +210,15 @@ function count(kind: keyof typeof phrases, tools: ToolActivity[]) {
   return files.size + unnamed;
 }
 
-// A state among a sub-agent's own calls. `own` states are its calls' and run in the background
-// with a background sub-agent; the others belong to sub-agents one of its calls holds.
-type CallState = { status: ToolActivity['status']; background?: boolean; own: boolean };
+// A state among a sub-agent's own calls and how many share it. `own` states are its calls' and
+// run in the background with a background sub-agent; the others belong to sub-agents one of its
+// calls holds.
+type CallState = {
+  status: ToolActivity['status'];
+  background?: boolean;
+  own: boolean;
+  count: number;
+};
 type AgentStates = { length: number; states: Map<string, Map<string, CallState>> };
 const agentStates = new WeakMap<ToolActivity[], AgentStates>();
 /**
@@ -226,12 +237,30 @@ function callStatesByAgent(tools: ToolActivity[]) {
       // A call that holds sub-agents only summarizes them.
       for (const state of tool.agents.length
         ? tool.agents.map((a) => ({ status: a.status, background: a.background, own: false }))
-        : [{ status: tool.status, background: tool.background, own: true }])
-        own.set(`${state.status} ${!!state.background} ${state.own}`, state);
+        : [{ status: tool.status, background: tool.background, own: true }]) {
+        const key = `${state.status} ${!!state.background} ${state.own}`;
+        const seen = own.get(key);
+        if (seen) seen.count++;
+        else own.set(key, { ...state, count: 1 });
+      }
     }
     agentStates.set(tools, (index = { length: tools.length, states }));
   }
   return index.states;
+}
+
+const issues = ['error', 'blocked', 'cancelled', 'unknown'] as const;
+type Issue = (typeof issues)[number];
+
+/** How many of a group's sub-agent calls failed, stopped or have an unconfirmed outcome. */
+export function childIssueLabel({ status, count }: { status: Issue; count: number }) {
+  const outcome = {
+    error: 'failed',
+    blocked: 'blocked',
+    cancelled: 'stopped',
+    unknown: 'unconfirmed',
+  };
+  return `${count} ${count === 1 ? 'call' : 'calls'} ${outcome[status]}`;
 }
 
 export function activityGroupSummary(
@@ -251,24 +280,31 @@ export function activityGroupSummary(
   const background = new Set(
     tools.flatMap((tool) => tool.agents.filter((a) => a.background).map((a) => a.id)),
   );
-  const childStates = callStatesByAgent(allTools);
-  const statuses = [
-    ...tools.flatMap((tool) => [
+  const statuses = tools
+    .flatMap((tool) => [
       // A sub-agent group's own status only summarizes its agents.
       ...(tool.agents.length ? [] : [tool]),
       ...tool.agents,
-    ]),
-    ...[...children].flatMap((id) =>
-      [...(childStates.get(id)?.values() ?? [])].map((state) => ({
-        status: state.status,
-        background: state.background || (state.own && background.has(id)),
-      })),
-    ),
-  ].map((item) => activityDisplayStatus(item, replyStatus));
-  const running = statuses.includes('running');
-  const issue = (['error', 'blocked', 'cancelled', 'unknown'] as const).find((status) =>
-    statuses.includes(status),
+    ])
+    .map((item) => activityDisplayStatus(item, replyStatus));
+  // A sub-agent's own calls keep their outcomes apart: one that carried on past a failed
+  // command shows how many of its calls failed, never that it failed itself.
+  const childStates = callStatesByAgent(allTools);
+  const childCalls = [...children].flatMap((id) =>
+    [...(childStates.get(id)?.values() ?? [])].map((state) => ({
+      status: activityDisplayStatus(
+        {
+          status: state.status,
+          background: state.background || (state.own && background.has(id)),
+        },
+        replyStatus,
+      ),
+      count: state.count,
+    })),
   );
+  const running = statuses.includes('running') || childCalls.some((c) => c.status === 'running');
+  const issue = issues.find((status) => statuses.includes(status));
+  const childIssue = issue ? undefined : issues.find((s) => childCalls.some((c) => c.status === s));
   // Nouns avoid claiming success for failed, stopped, or unconfirmed operations.
   const tense = issue ? 2 : running ? 1 : 0;
   const descriptions = [...kinds].map(([kind, calls]) => {
@@ -285,6 +321,10 @@ export function activityGroupSummary(
     icon: [...kinds.keys()][0] ?? 'tool',
     running,
     issue,
+    childIssue: childIssue && {
+      status: childIssue,
+      count: childCalls.reduce((sum, c) => sum + (c.status === childIssue ? c.count : 0), 0),
+    },
   };
 }
 
@@ -338,7 +378,7 @@ export function liveGroupItems(
   const latest = tools.at(-1);
   const current = (tool: ToolActivity) =>
     !memory.folded.has(tool.id) &&
-    ((last && tool === latest && tool.id !== 'activity-limit') || opened.has(tool.id));
+    ((last && tool === latest) || opened.has(tool.id));
   const folded = tools.filter(
     (tool) => memory.folded.has(tool.id) || (!running(tool) && !current(tool)),
   );
@@ -396,7 +436,6 @@ const liveForms: Record<keyof typeof phrases, Forms> = {
   skill: ['Using skill', 'Used skill', 'Skill'],
   image: ['Viewing', 'Viewed', 'Image'],
   tool: ['Using', 'Used', ''],
-  limit: ['', '', ''],
 };
 const namedForms: Record<string, Forms> = {
   Write: ['Writing', 'Wrote', 'Write to'],
