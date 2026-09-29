@@ -18,8 +18,10 @@ named colors, so every surface follows the selected theme.
 - **Motion is feedback.** Hover and state transitions use `--duration-fast`; overlays fade in
   with opacity only, so measured layout never moves during an animation. A running reply's
   calls enter, fold into their group and slide into place with `--duration-slow`, animating
-  only opacity and transforms: layout changes at once and the animation plays over it. The
-  global reduced-motion rule stops CSS animations; script animations check it themselves.
+  only opacity and transforms: layout changes at once and the animation plays over it. Sending
+  a message from the end of a chat glides the conversation to it, while following streamed
+  output stays instant. The global reduced-motion rule stops CSS animations; script animations,
+  that glide included, check it themselves.
 - **Cheap selectors.** Every hover change and transition frame restyles elements, so never pair
   `:has()` with a universal selector such as `.app-shell:has(…) *`: Chromium would search the
   whole app again on each recalculation. Mark app-wide states, such as the resize cursor while a

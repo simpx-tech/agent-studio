@@ -256,8 +256,9 @@ test('folding rows keep a followed chat in place until new content fills the spa
       };
     });
   await settled(page);
+  // The chat glides to its end after the first message.
+  await expect.poll(async () => (await measure()).end).toBeLessThan(1);
   const before = await measure();
-  expect(before.end).toBeLessThan(2);
   for (const name of ['a', 'b', 'c'])
     await emit(
       page,

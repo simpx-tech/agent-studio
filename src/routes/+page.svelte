@@ -529,6 +529,11 @@
   }
   // Runs after the reader scrolls, expands, or collapses content.
   function readingPosition() {
+    if (glide) {
+      // The glide's own scrolling keeps the chat following; any other scroll ends it here.
+      if (!glide.frame || Math.abs((chatScroll?.scrollTop ?? 0) - glide.top) < 1) return;
+      stopGlide();
+    }
     const hold = virtualSpace?.scrolled() ?? 'free';
     // Scrolling up through held space is a deliberate reading position too. While space
     // holds the position, new content fills it before the chat follows.
@@ -548,6 +553,61 @@
     // A key press leaves no button to keep focus on: continue in the composer.
     if (!event.detail) composerInput?.focus();
   }
+  // A message sent at the end glides there instead of jumping: each frame covers a share of
+  // the distance left, so content arriving meanwhile speeds the glide up rather than making
+  // it jump. Until it ends, the paths that keep a followed chat at its end leave the
+  // scrolling to it, and the reader's own wheel, pointer or keys, or any scroll the glide did
+  // not make, end it where it is.
+  let glide:
+    | { conversation: string; frame: number; at: number; start: number; top: number }
+    | undefined;
+  const reducedMotion = () =>
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function stickToEnd(scroll: HTMLElement) {
+    if (!glide) scroll.scrollTop = scroll.scrollHeight;
+  }
+  function startGlide(conversation: string) {
+    if (glide?.conversation !== conversation || glide.frame || !chatScroll) return;
+    glide.at = glide.start = performance.now();
+    glide.top = chatScroll.scrollTop;
+    glide.frame = requestAnimationFrame(glideFrame);
+  }
+  function glideFrame(now: number) {
+    const current = glide,
+      scroll = chatScroll;
+    if (!current) return;
+    if (!scroll?.isConnected) {
+      glide = undefined;
+      return;
+    }
+    if (Math.abs(scroll.scrollTop - current.top) >= 1) {
+      takeOver();
+      return;
+    }
+    const gap = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop;
+    // Output that keeps arriving cannot hold the glide open; following takes over from it.
+    if (gap < 1 || now - current.start > 700) {
+      glide = undefined;
+      scroll.scrollTop = scroll.scrollHeight;
+      return;
+    }
+    const share = 1 - Math.exp(-Math.max(0, now - current.at) / 80);
+    current.at = now;
+    // At least a pixel a frame, so rounding cannot stall the last few.
+    scroll.scrollTop += Math.max(gap * share, Math.min(gap, 1));
+    current.top = scroll.scrollTop;
+    current.frame = requestAnimationFrame(glideFrame);
+  }
+  function stopGlide() {
+    if (!glide) return;
+    cancelAnimationFrame(glide.frame);
+    glide = undefined;
+  }
+  function takeOver() {
+    if (!glide) return;
+    stopGlide();
+    readingPosition();
+  }
   $effect(() => {
     if (!chatScroll || !chatColumn || !chatSpace) return;
     // Expanding or collapsing content keeps the chat in place.
@@ -564,16 +624,26 @@
     followedHeight = 0;
     // Another chat opens at its end.
     jumpShown = false;
+    if (glide && glide.conversation !== activeId) stopGlide();
   });
   $effect(() => {
     const scroll = chatScroll;
     if (!scroll) return;
     // Passive, so a busy main thread never delays the start of a scroll.
     const wheel = (event: WheelEvent) => {
-      if (event.deltaY < 0 && !event.ctrlKey) nearBottom = false;
+      if (event.ctrlKey || !event.deltaY) return;
+      if (event.deltaY < 0) nearBottom = false;
+      takeOver();
     };
     scroll.addEventListener('wheel', wheel, { passive: true });
-    return () => scroll.removeEventListener('wheel', wheel);
+    scroll.addEventListener('pointerdown', takeOver, { passive: true });
+    scroll.addEventListener('keydown', takeOver);
+    return () => {
+      scroll.removeEventListener('wheel', wheel);
+      scroll.removeEventListener('pointerdown', takeOver);
+      scroll.removeEventListener('keydown', takeOver);
+      stopGlide();
+    };
   });
   $effect(() => {
     const scroll = chatScroll,
@@ -589,7 +659,7 @@
       // While following, keep its end in view instead of pushing it under the composer.
       if (next < height && nearBottom) {
         virtualSpace?.trim();
-        scroll.scrollTop = scroll.scrollHeight;
+        stickToEnd(scroll);
       }
       height = next;
       showJump();
@@ -612,7 +682,7 @@
       height = next;
       if (grew && nearBottom) {
         virtualSpace?.trim();
-        scroll.scrollTop = scroll.scrollHeight;
+        stickToEnd(scroll);
         followedHeight = next;
       }
       // Replies arriving below a reading position move the end away without a scroll.
@@ -2714,7 +2784,7 @@
       else if (live) virtualSpace?.pad(followedHeight - height);
       // The conversation now ends elsewhere, as when a reply's activity becomes Work history.
       else virtualSpace?.clear();
-      chatScroll.scrollTop = chatScroll.scrollHeight;
+      stickToEnd(chatScroll);
       followedHeight = height;
     }
   }
@@ -3354,7 +3424,12 @@
       // quick now that they are.
       if (!queuedMessage && (prompt.trim() !== text || attachedImages !== images)) return;
     }
-    nearBottom = true;
+    // A chat at its end, including one that fits in its view, glides to the new message and
+    // follows the reply; a reading position above the end stays where it is.
+    const scroll = chatScroll;
+    if (scroll && !nearBottom)
+      nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2;
+    const glides = !!scroll && nearBottom && !reducedMotion();
     const now = new Date().toISOString();
     const isNewConversation = !active;
     const sentDraft = composerDraftKey;
@@ -3373,6 +3448,12 @@
       activeId = c.id;
     }
     const conversation = workspace.conversations.find((c) => c.id === activeId)!;
+    if (glides) {
+      // Armed before the message renders, so nothing jumps to it first.
+      stopGlide();
+      glide = { conversation: conversation.id, frame: 0, at: 0, start: 0, top: 0 };
+      void tick().then(() => startGlide(conversation.id));
+    }
     if (conversation.archived) {
       conversation.archived = false;
       revealConversation(conversation);

@@ -157,7 +157,8 @@ test('expanding at the end of a running reply stops following it', async ({ page
     const end = await measure(page, summary);
     return end.max - end.top;
   };
-  expect(await atEnd()).toBeLessThan(2);
+  // The chat glides there after the first message.
+  await expect.poll(atEnd).toBeLessThan(2);
   // Expanding and collapsing again returns to the end, where following continues. The latest
   // call keeps a row of its own until the next step, so the group lists the other 29.
   await page.locator(summary).click();

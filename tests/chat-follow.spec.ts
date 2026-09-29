@@ -230,6 +230,171 @@ for (const phone of [false, true])
     await expect(jump).not.toHaveClass(/live/);
   });
 
+// A chat whose first reply has ended, long enough to scroll.
+async function finishedChat(page: Page) {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true });
+  await composer.fill('Long task');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => heldRuns(page).then((runs) => runs.length)).toBe(1);
+  const [first] = await heldRuns(page);
+  await emit(page, first.runId, { kind: 'text', text: paragraphs('Answer', 60) });
+  await page.evaluate((id) => (window as any).capabilityRuns[id].finish('complete'), first.runId);
+  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+  const second = async () => {
+    await expect.poll(() => heldRuns(page).then((runs) => runs.length)).toBe(2);
+    return (await heldRuns(page)).find((run) => run.runId !== first.runId)!;
+  };
+  return { composer, first, second, scroll: page.locator('.chat-scroll') };
+}
+// Records the conversation's scroll position and its distance from the end on every frame.
+const recordFrames = (page: Page) =>
+  page.evaluate(() => {
+    const scroll = document.querySelector<HTMLElement>('.chat-scroll')!;
+    const w = window as any;
+    w.scrollFrames = [];
+    const frame = () => {
+      w.scrollFrames.push({
+        top: scroll.scrollTop,
+        below: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+      });
+      w.scrollFrame = requestAnimationFrame(frame);
+    };
+    w.scrollFrame = requestAnimationFrame(frame);
+  });
+const recordedFrames = (page: Page) =>
+  page.evaluate(() => {
+    const w = window as any;
+    cancelAnimationFrame(w.scrollFrame);
+    return w.scrollFrames as { top: number; below: number }[];
+  });
+
+test('sending at the end of a chat glides to the new message and follows its reply', async ({
+  page,
+}) => {
+  const { composer, first } = await finishedChat(page);
+  await recordFrames(page);
+  await composer.fill('Next question');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  // The reply starts writing while the chat glides, which takes in the text instead of
+  // jumping to it.
+  const reply = paragraphs('Reply', 12);
+  await page.evaluate(
+    ({ first, reply }) =>
+      new Promise<void>((resolve) => {
+        const started = () => {
+          const runs = (window as any).capabilityRuns;
+          const id = Object.keys(runs).find((id) => id !== first);
+          if (!id) return requestAnimationFrame(started);
+          runs[id].emit({ kind: 'text', text: reply });
+          resolve();
+        };
+        started();
+      }),
+    { first: first.runId, reply },
+  );
+  await expect(page.getByText('Reply paragraph 12.', { exact: true })).toBeInViewport();
+  await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+  await page.waitForTimeout(200);
+  const frames = await recordedFrames(page);
+  // Before the fix the chat jumped: at most a frame or two showed the new message below.
+  expect(frames.filter((frame) => frame.below > 2).length).toBeGreaterThan(5);
+  for (let i = 1; i < frames.length; i++)
+    expect(frames[i].top).toBeGreaterThanOrEqual(frames[i - 1].top - 1);
+  expect(frames.at(-1)!.below).toBeLessThan(2);
+
+  // Following continues once the glide has ended.
+  const second = (await heldRuns(page)).find((run) => run.runId !== first.runId)!;
+  await emit(page, second.runId, {
+    kind: 'text',
+    text: `${reply}\n\n${paragraphs('More', 30)}`,
+  });
+  await expect(page.getByText('More paragraph 30.', { exact: true })).toBeInViewport();
+  await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+});
+
+test('with reduced motion, sending at the end of a chat shows the new message at once', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const { composer } = await finishedChat(page);
+  await recordFrames(page);
+  await composer.fill('Next question');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByText('Next question', { exact: true })).toBeInViewport();
+  await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+  await page.waitForTimeout(300);
+  const frames = await recordedFrames(page);
+  expect(frames.filter((frame) => frame.below > 2).length).toBeLessThanOrEqual(3);
+});
+
+test('sending while reading above the end of a chat leaves the reading position in place', async ({
+  page,
+}) => {
+  const { composer, second, scroll } = await finishedChat(page);
+  const top = () => scroll.evaluate((el) => el.scrollTop);
+  await scroll.hover();
+  await page.mouse.wheel(0, -900);
+  await expect.poll(() => fromEnd(page)).toBeGreaterThan(600);
+  const reading = await top();
+  await composer.fill('A question from above');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const sent = page.getByText('A question from above', { exact: true });
+  await expect(sent).toBeAttached();
+  // Before the fix sending always showed the end.
+  await page.waitForTimeout(500);
+  expect(Math.abs((await top()) - reading)).toBeLessThan(2);
+  await expect(sent).not.toBeInViewport();
+  // Its reply arrives below without moving the reader either, and the button leads down to it.
+  const run = await second();
+  await emit(page, run.runId, { kind: 'text', text: paragraphs('Reply', 20) });
+  await expect(page.getByText('Reply paragraph 20.', { exact: true })).toBeAttached();
+  await page.waitForTimeout(300);
+  expect(Math.abs((await top()) - reading)).toBeLessThan(2);
+  const jump = page.getByRole('button', { name: 'Jump to latest', exact: true });
+  await expect(jump).toHaveClass(/live/);
+  await jump.click();
+  await expect(page.getByText('Reply paragraph 20.', { exact: true })).toBeInViewport();
+  await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+});
+
+for (const by of ['wheel', 'elsewhere'] as const)
+  test(`${by === 'wheel' ? "the reader's wheel" : 'a scroll from elsewhere, such as find in page,'} ends a glide where it is`, async ({
+    page,
+  }) => {
+    const { composer, second, scroll } = await finishedChat(page);
+    const top = () => scroll.evaluate((el) => el.scrollTop);
+    // The pointer rests over the conversation, and Enter sends a message long enough to glide
+    // for a while.
+    await scroll.hover();
+    await composer.fill(paragraphs('Question', 30));
+    await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+    const start = await top();
+    await composer.press('Enter');
+    await page.waitForFunction(
+      (start) => document.querySelector('.chat-scroll')!.scrollTop > start + 10,
+      start,
+      { polling: 'raf' },
+    );
+    if (by === 'wheel') await page.mouse.wheel(0, -400);
+    // No wheel, pointer or key reaches the conversation, as when find in page shows a match.
+    else await scroll.evaluate((el) => (el.scrollTop -= 400));
+    await expect.poll(() => fromEnd(page)).toBeGreaterThan(300);
+    // The glide does not resume, and the reply arrives below without moving the reader.
+    await page.waitForTimeout(800);
+    const reading = await top();
+    await expect.poll(() => fromEnd(page)).toBeGreaterThan(300);
+    const run = await second();
+    await emit(page, run.runId, { kind: 'text', text: paragraphs('Reply', 20) });
+    await expect(page.getByText('Reply paragraph 20.', { exact: true })).toBeAttached();
+    await page.waitForTimeout(300);
+    expect(Math.abs((await top()) - reading)).toBeLessThan(2);
+    await expect(page.getByRole('button', { name: 'Jump to latest', exact: true })).toBeVisible();
+  });
+
 test('a chat whose last reply holds a visualization opens at its end once the visual sizes itself', async ({
   page,
 }) => {
