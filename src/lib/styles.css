@@ -1174,6 +1174,40 @@ pre {
 .chat-virtual-space {
   overflow-anchor: none;
 }
+/* Returns a reader above the end to the latest messages from the conversation's lower left, in
+   the avatars' column rather than over the prose. The rail after the messages has no height and
+   sticks to the bottom of the view, so wheel and touch scrolling pass through the button. */
+.jump-to-end-rail {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  height: 0;
+  overflow-anchor: none;
+}
+.jump-to-end {
+  position: absolute;
+  bottom: 8px;
+  left: 0;
+  width: var(--control-md);
+  height: var(--control-md);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface-overlay);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-md);
+  animation: fade-in var(--duration-fast) ease;
+}
+.jump-to-end:hover {
+  background: var(--surface-3);
+  border-color: var(--border-hover);
+}
+/* The open chat's reply is still running below. */
+.jump-to-end.live,
+.jump-to-end.live:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+}
 .chat-empty {
   text-align: center;
   padding: 16px 0;
@@ -2469,6 +2503,12 @@ pre {
   .composer .attach-button {
     width: 44px;
     height: 44px;
+  }
+  /* A full touch target around the button, which stays small to keep clear of the prose. */
+  .jump-to-end::after {
+    content: '';
+    position: absolute;
+    inset: -7px;
   }
   .chat-configuration {
     overflow-x: auto;

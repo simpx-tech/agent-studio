@@ -27,6 +27,7 @@
   import { modelMark } from '$lib/model-marks';
   import {
     ArrowUp,
+    ArrowDown,
     ArrowRight,
     Plus,
     Bot,
@@ -509,6 +510,23 @@
   // The message a reader above the end was reading when Connections or Settings replaced the
   // chat, and how far below the top of the conversation it was.
   let readingPlace: { conversation: string; message: string; offset: number } | undefined;
+  // Offers a way back to the end while the chat does not follow it and more than a few lines
+  // lie below the view.
+  let jumpShown = $state(false);
+  function showJump() {
+    const scroll = chatScroll,
+      space = chatSpace;
+    jumpShown =
+      !nearBottom &&
+      !!scroll &&
+      !!space &&
+      // The virtual space starts where the conversation ends.
+      space.getBoundingClientRect().top -
+        scroll.getBoundingClientRect().top -
+        scroll.clientTop -
+        scroll.clientHeight >
+        64;
+  }
   // Runs after the reader scrolls, expands, or collapses content.
   function readingPosition() {
     const hold = virtualSpace?.scrolled() ?? 'free';
@@ -519,6 +537,16 @@
       // Only follow at the end. A reading position just above it is still deliberate.
       nearBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 2;
     followedHeight = chatColumn?.getBoundingClientRect().height ?? 0;
+    showJump();
+  }
+  // Returns to the end and follows it again, as scrolling there does.
+  function jumpToEnd(event: MouseEvent) {
+    nearBottom = true;
+    jumpShown = false;
+    virtualSpace?.clear();
+    void scrollToEnd();
+    // A key press leaves no button to keep focus on: continue in the composer.
+    if (!event.detail) composerInput?.focus();
   }
   $effect(() => {
     if (!chatScroll || !chatColumn || !chatSpace) return;
@@ -534,6 +562,8 @@
     void activeId;
     untrack(() => virtualSpace?.clear());
     followedHeight = 0;
+    // Another chat opens at its end.
+    jumpShown = false;
   });
   $effect(() => {
     const scroll = chatScroll;
@@ -562,6 +592,7 @@
         scroll.scrollTop = scroll.scrollHeight;
       }
       height = next;
+      showJump();
     });
     observer.observe(scroll);
     return () => observer.disconnect();
@@ -579,10 +610,13 @@
       const next = column.getBoundingClientRect().height;
       const grew = next > height;
       height = next;
-      if (!grew || !nearBottom) return;
-      virtualSpace?.trim();
-      scroll.scrollTop = scroll.scrollHeight;
-      followedHeight = next;
+      if (grew && nearBottom) {
+        virtualSpace?.trim();
+        scroll.scrollTop = scroll.scrollHeight;
+        followedHeight = next;
+      }
+      // Replies arriving below a reading position move the end away without a scroll.
+      showJump();
     });
     observer.observe(column);
     return () => observer.disconnect();
@@ -4407,6 +4441,16 @@
                       ? subagentView.agentId
                       : undefined}
                   />{/each}
+                {#if jumpShown}<div class="jump-to-end-rail">
+                    <button
+                      type="button"
+                      class="jump-to-end"
+                      class:live={activeRunning}
+                      title="Jump to latest"
+                      aria-label="Jump to latest"
+                      onclick={jumpToEnd}><ArrowDown size={16} /></button
+                    >
+                  </div>{/if}
               {:else}<div class="chat-empty">
                   <span
                     class="large-provider"

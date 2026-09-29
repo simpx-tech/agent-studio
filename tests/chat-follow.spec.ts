@@ -132,6 +132,104 @@ test('returning from Settings or Connections keeps the end of a followed chat or
   expect(Math.abs((await top()) - reading)).toBeLessThan(2);
 });
 
+for (const phone of [false, true])
+  test(`a button at the lower left returns a reader above the end to the latest messages${phone ? ' on a phone' : ''}`, async ({
+    page,
+  }) => {
+    if (phone) await page.setViewportSize({ width: 390, height: 844 });
+    await mockDesktop(page, 'capabilities');
+    await page.goto('/');
+    await chooseTestFolder(page);
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true });
+    await composer.fill('Long task');
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await expect.poll(() => heldRuns(page).then((runs) => runs.length)).toBe(1);
+    const [run] = await heldRuns(page);
+    let answer = paragraphs('Answer', 100);
+    await emit(page, run.runId, { kind: 'text', text: answer });
+    await expect(page.getByText('Answer paragraph 100.', { exact: true })).toBeVisible();
+    await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+    const jump = page.getByRole('button', { name: 'Jump to latest', exact: true });
+    // A chat following its end needs no way back to it.
+    await expect(jump).toHaveCount(0);
+
+    // Reading above the end offers it at the bottom of the view, in the avatars' column on the
+    // left rather than in the middle, marked while the reply still runs.
+    const scroll = page.locator('.chat-scroll');
+    const top = () => scroll.evaluate((el) => el.scrollTop);
+    await scroll.hover();
+    await page.mouse.wheel(0, -900);
+    await expect.poll(() => fromEnd(page)).toBeGreaterThan(600);
+    await expect(jump).toBeVisible();
+    await expect(jump).toHaveClass(/live/);
+    const button = (await jump.boundingBox())!;
+    const avatar = (await page.locator('.message-avatar.model').first().boundingBox())!;
+    const view = (await scroll.boundingBox())!;
+    const prose = (await page.getByText('Answer paragraph 1.', { exact: true }).boundingBox())!;
+    expect(Math.abs(button.x - avatar.x)).toBeLessThan(1);
+    expect(Math.abs(view.y + view.height - (button.y + button.height) - 8)).toBeLessThan(1);
+    // It stays clear of the reply's text, and a phone gets a full touch target around it.
+    expect(button.width).toBe(32);
+    expect(button.x + button.width).toBeLessThan(prose.x);
+    const hit = (x: number, y: number) =>
+      page.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest('.jump-to-end'), [x, y]);
+    expect(await hit(button.x + button.width + 4, button.y + button.height / 2)).toBe(phone);
+    await page.screenshot({ path: `artifacts/jump-to-latest-${phone ? 'phone' : 'desktop'}.png` });
+    // It stays at the bottom of the view while the reader scrolls, and the wheel scrolls the
+    // conversation over it too.
+    const reached = await top();
+    await jump.hover();
+    await page.mouse.wheel(0, -300);
+    await expect.poll(top).toBeLessThan(reached - 100);
+    expect(Math.abs((await jump.boundingBox())!.y - button.y)).toBeLessThan(1);
+
+    // Output arriving below leaves the reading position and the button in place.
+    const reading = await top();
+    answer += `\n\n${paragraphs('More', 10)}`;
+    await emit(page, run.runId, { kind: 'text', text: answer });
+    await expect(page.getByText('More paragraph 10.', { exact: true })).toBeAttached();
+    await page.waitForTimeout(300);
+    expect(Math.abs((await top()) - reading)).toBeLessThan(2);
+    await expect(jump).toBeVisible();
+
+    // The button shows the end and follows the reply from there.
+    await jump.click();
+    await expect(page.getByText('More paragraph 10.', { exact: true })).toBeInViewport();
+    await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+    await expect(jump).toHaveCount(0);
+    answer += `\n\n${paragraphs('Later', 20)}`;
+    await emit(page, run.runId, { kind: 'text', text: answer });
+    await expect(page.getByText('Later paragraph 20.', { exact: true })).toBeInViewport();
+    await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+
+    // A small movement stops following without offering the button, until output moves the
+    // end further away.
+    await scroll.hover();
+    await page.mouse.wheel(0, -30);
+    await expect.poll(() => fromEnd(page)).toBeGreaterThan(10);
+    await page.waitForTimeout(300);
+    await expect(jump).toHaveCount(0);
+    answer += `\n\n${paragraphs('Unread', 10)}`;
+    await emit(page, run.runId, { kind: 'text', text: answer });
+    await expect(jump).toBeVisible();
+
+    // Pressed from the keyboard, it leaves focus in the composer.
+    await jump.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Unread paragraph 10.', { exact: true })).toBeInViewport();
+    await expect.poll(() => fromEnd(page)).toBeLessThan(2);
+    await expect(jump).toHaveCount(0);
+    await expect(composer).toBeFocused();
+
+    // Once the reply ends, the button no longer marks a running reply.
+    await page.evaluate((id) => (window as any).capabilityRuns[id].finish('complete'), run.runId);
+    await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+    await scroll.hover();
+    await page.mouse.wheel(0, -900);
+    await expect(jump).toBeVisible();
+    await expect(jump).not.toHaveClass(/live/);
+  });
+
 test('a chat whose last reply holds a visualization opens at its end once the visual sizes itself', async ({
   page,
 }) => {
