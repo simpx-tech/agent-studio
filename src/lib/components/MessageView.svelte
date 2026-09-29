@@ -111,6 +111,7 @@
   class="message"
   class:user={message.role === 'user'}
   data-testid="message"
+  data-message-id={message.id}
   data-status={message.status}
 >
   {#if switchNotice && message.role === 'assistant'}

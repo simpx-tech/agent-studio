@@ -506,6 +506,9 @@
   let nearBottom = true;
   // The conversation's height when the chat last followed its end or the reader moved.
   let followedHeight = 0;
+  // The message a reader above the end was reading when Connections or Settings replaced the
+  // chat, and how far below the top of the conversation it was.
+  let readingPlace: { conversation: string; message: string; offset: number } | undefined;
   // Runs after the reader scrolls, expands, or collapses content.
   function readingPosition() {
     const hold = virtualSpace?.scrolled() ?? 'free';
@@ -562,6 +565,69 @@
     });
     observer.observe(scroll);
     return () => observer.disconnect();
+  });
+  $effect(() => {
+    const scroll = chatScroll,
+      column = chatColumn;
+    if (!scroll || !column) return;
+    // Content that sizes itself after it renders, such as a visual reporting its height, grows
+    // the conversation below the reader. While following, keep its end in view. A toggle updates
+    // following in an animation frame, before resize observers run, so what it reveals is not
+    // followed.
+    let height = 0;
+    const observer = new ResizeObserver(() => {
+      const next = column.getBoundingClientRect().height;
+      const grew = next > height;
+      height = next;
+      if (!grew || !nearBottom) return;
+      virtualSpace?.trim();
+      scroll.scrollTop = scroll.scrollHeight;
+      followedHeight = next;
+    });
+    observer.observe(column);
+    return () => observer.disconnect();
+  });
+  // Connections and Settings replace the chat, so remember the message being read above the
+  // end before it goes.
+  $effect.pre(() => {
+    if (view === 'chat') return;
+    untrack(() => {
+      const scroll = chatScroll;
+      if (!scroll?.isConnected || !chatColumn || !activeId || nearBottom) return;
+      const top = scroll.getBoundingClientRect().top;
+      for (const element of chatColumn.children) {
+        const box = element.getBoundingClientRect();
+        const message = (element as HTMLElement).dataset.messageId;
+        if (message && box.bottom > top) {
+          readingPlace = { conversation: activeId, message, offset: box.top - top };
+          return;
+        }
+      }
+    });
+  });
+  // The chat mounts again at its top: return to the end while following, and otherwise to the
+  // message the reader left.
+  $effect(() => {
+    const scroll = chatScroll,
+      column = chatColumn;
+    if (!scroll || !column) return;
+    untrack(() => {
+      const place = readingPlace;
+      readingPlace = undefined;
+      const message =
+        place?.conversation === activeId && !nearBottom
+          ? [...column.children].find(
+              (element) => (element as HTMLElement).dataset.messageId === place.message,
+            )
+          : undefined;
+      if (place && message)
+        scroll.scrollTop +=
+          message.getBoundingClientRect().top - scroll.getBoundingClientRect().top - place.offset;
+      else {
+        nearBottom = true;
+        void scrollToEnd();
+      }
+    });
   });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
@@ -1259,6 +1325,7 @@
                 message.error = error;
                 conversation.updatedAt = new Date().toISOString();
                 noteFinishedChats();
+                if (activeId === conversation.id) void scrollToEnd();
                 await persistChat(conversation.id);
                 return;
               }
@@ -1268,6 +1335,7 @@
               localChanges++;
               marks.chat(conversation.id);
               if (event && savesAtOnce(event)) saveSoon(conversation.id);
+              if (activeId === conversation.id) void scrollToEnd(true);
             },
             apply: async (value) => {
               workspace.fleet = value.fleet;
@@ -1282,6 +1350,7 @@
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
                 return existing ? replaceFields(existing, incoming) : incoming;
               });
+              if (activeId && kept.has(activeId)) followReceived();
               releaseDeleted(deleted.map((c) => c.id));
               // A conversation deleted on another device takes its unsent draft along.
               const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
@@ -1321,6 +1390,7 @@
                 if (existing) replaceFields(existing, incoming);
                 else workspace.conversations.push(incoming);
               }
+              if (upsert.some((c) => c.id === activeId)) followReceived();
               // A conversation deleted on another device takes its unsent draft along.
               const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
               for (const key of [...drafts.keys()])
@@ -2434,10 +2504,8 @@
     if (!open) return;
     const shown = view,
       drawer = sidebarOpen;
-    if (next) {
-      nearBottom = true;
-      openConversation(next);
-    } else newChat();
+    if (next) openConversation(next);
+    else newChat();
     if (fromSidebar) {
       view = shown;
       sidebarOpen = drawer;
@@ -2479,6 +2547,8 @@
     });
   }
   function openConversation(c: Conversation) {
+    // Another chat opens at its end, however far up the reader was in this one.
+    if (activeId !== c.id) nearBottom = true;
     delete finishedChats[c.id];
     templatesOpen = false;
     sidebarOpen = false;
@@ -2557,7 +2627,6 @@
         return;
       }
       // The source chat keeps its draft for when it is reopened.
-      nearBottom = true;
       openConversation(fork);
       await tick();
       composerInput?.focus();
@@ -2614,6 +2683,12 @@
       chatScroll.scrollTop = chatScroll.scrollHeight;
       followedHeight = height;
     }
+  }
+  // Changes to the open chat that arrive through the relay, such as a reply another computer
+  // runs, are followed like a reply running here.
+  function followReceived() {
+    const open = workspace.conversations.find((c) => c.id === activeId);
+    if (open) void scrollToEnd(conversationRunning(open));
   }
   function conversationRunning(conversation: Conversation) {
     return (
