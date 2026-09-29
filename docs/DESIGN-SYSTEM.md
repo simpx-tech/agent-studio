@@ -51,10 +51,11 @@ line and version and sets `--provider-color` to the line's token, which is the s
 `--model-astra`, `--model-sol`, `--model-luna`, `--model-terra`, `--model-flash` and `--model-pro`.
 GPT and Gemini models of no named line keep the provider color. `ModelMark.svelte` sets the line's
 print beside its version in semibold tabular numerals, in three shapes: a pill in each Model picker
-choice (one width for the usual versions, so the names line up), a chip on the Model trigger, and a
-tile on reply avatars with the version beneath the print. The mark's edge is drawn over the print,
-so pale prints keep their shape on light surfaces. Without a version the mark shows the print
-alone; without a known line it shows the provider glyph.
+choice (one width for the usual versions, so the names line up), a tile on reply avatars with the
+version beneath the print, and a chip on the Model trigger that draws the print alone, since the
+selected name beside it already shows the version. The mark's edge is drawn over the print, so
+pale prints keep their shape on light surfaces. A pill without a version keeps that width, with
+its print at the start or, without a known line, the provider glyph in the middle.
 
 Model line prints (`ModelIcon.svelte`) are the one exception to the Lucide outline rule: small
 abstract compositions of flat shapes on a 64-unit canvas, like mid-century art prints, filling the

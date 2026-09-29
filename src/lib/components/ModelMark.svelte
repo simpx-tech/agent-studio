@@ -1,15 +1,17 @@
 <script lang="ts">
   import type { ModelMark } from '$lib/model-marks';
   import ModelIcon from './ModelIcon.svelte';
-  // A model's print beside its version: a chip in the toolbar, a pill in the Model picker, and
-  // a tile on a reply's avatar with the version beneath the print. The version always stays
-  // readable, and a model of no known line shows its provider's glyph in place of a print.
+  // A model's print beside its version: a pill in the Model picker, and a tile on a reply's
+  // avatar with the version beneath the print. The version always stays readable. The toolbar's
+  // chip draws the print alone, since the model's name beside it already shows the version. A
+  // model of no known line shows its provider's glyph in place of a print.
   let { mark, variant }: { mark: ModelMark; variant: 'chip' | 'pill' | 'tile' } = $props();
+  const version = $derived(variant === 'chip' ? undefined : mark.version);
 </script>
 
 <span
   class="model-mark {variant}"
-  class:versioned={!!mark.version}
+  class:versioned={!!version}
   data-line={mark.line ?? 'none'}
   style:--provider-color={mark.color}
   aria-hidden="true"
@@ -17,7 +19,7 @@
   <span class="art"
     >{#if mark.line}<ModelIcon line={mark.line} />{:else}<span class="glyph">{mark.glyph}</span
       >{/if}</span
-  >{#if mark.version}<span class="version">{mark.version}</span>{/if}
+  >{#if version}<span class="version">{version}</span>{/if}
 </span>
 
 <style>
@@ -60,10 +62,6 @@
   .chip {
     height: 20px;
     border-radius: var(--radius-sm);
-    font-size: var(--text-xs);
-  }
-  .chip .version {
-    padding: 0 6px 0 5px;
   }
   .chip .glyph {
     font-size: 13px;
@@ -83,18 +81,10 @@
   .pill .glyph {
     font-size: 15px;
   }
-  /* Without a version a pill keeps its width but draws only its print. */
-  .pill:not(.versioned) {
-    background: none;
-  }
-  .pill:not(.versioned) .art {
-    overflow: hidden;
-    border-radius: inherit;
-    background: var(--tint);
-  }
-  .pill:not(.versioned)::after {
-    inset: 0 auto 0 0;
-    aspect-ratio: 1;
+  /* Without a version a pill keeps the same width. A print stays at its start, in line with the
+     other prints, and a provider glyph moves to the middle. */
+  .pill:not(.versioned)[data-line='none'] {
+    justify-content: center;
   }
   .tile {
     flex: 1;

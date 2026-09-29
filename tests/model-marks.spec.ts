@@ -99,10 +99,12 @@ test('each Claude line has its own print and tint beside its version, and a repl
   expect(await tint(avatar(older))).toBe(await tint(avatar(newer)));
   await page.screenshot({ path: `${output}/replies.png` });
 
-  // The toolbar shows the selected model's mark, and every choice carries its own.
+  // The toolbar shows the selected model's print and leaves its version to the name beside it,
+  // and every choice carries its own mark.
   const picker = page.getByRole('combobox', { name: 'Model', exact: true });
   await expect(picker.locator('.model-mark')).toHaveAttribute('data-line', 'opus');
-  await expect(picker.locator('.model-mark .version')).toHaveText('5.5');
+  await expect(picker.locator('.model-mark svg')).toBeVisible();
+  await expect(picker.locator('.model-mark .version')).toHaveCount(0);
   await expect(picker.locator('.selected-name')).toHaveText('Opus 5.5');
   await picker.click();
   const options = page.getByRole('option');
@@ -111,10 +113,24 @@ test('each Claude line has its own print and tint beside its version, and a repl
   expect(
     await marks.evaluateAll((all) => all.map((mark) => mark.getAttribute('data-line'))),
   ).toEqual(['none', 'opus', 'sonnet', 'fable', 'haiku']);
-  // CLI default keeps the provider glyph, since which model it runs is unknown.
+  // CLI default keeps the provider glyph, since which model it runs is unknown, centered in a
+  // mark as wide as the others, so every name starts at the same place.
   await expect(marks.first()).toHaveText('✳');
   await expect(marks.first().locator('svg')).toHaveCount(0);
   await expect(marks.locator('.version')).toHaveText(['5.5', '5', '5.1', '4.5']);
+  const boxes = await marks.evaluateAll((all) =>
+    all.map((mark) => {
+      const { left, width } = mark.getBoundingClientRect();
+      return { left, width };
+    }),
+  );
+  expect(new Set(boxes.map(({ width }) => width)).size).toBe(1);
+  const glyph = (await marks.first().locator('.glyph').boundingBox())!;
+  expect(Math.abs(glyph.x + glyph.width / 2 - boxes[0].left - boxes[0].width / 2)).toBeLessThan(1);
+  const starts = await options
+    .locator('.option-name')
+    .evaluateAll((all) => all.map((name) => name.getBoundingClientRect().left));
+  expect(new Set(starts).size).toBe(1);
   // Every line draws a different print.
   const icons = await marks.locator('svg').evaluateAll((all) => all.map((icon) => icon.innerHTML));
   expect(icons).toHaveLength(4);
@@ -136,7 +152,7 @@ test('each Claude line has its own print and tint beside its version, and a repl
   await page.screenshot({ path: `${output}/picker.png` });
   await page.getByRole('option', { name: 'Haiku 4.5', exact: true }).click();
   await expect(picker.locator('.model-mark')).toHaveAttribute('data-line', 'haiku');
-  await expect(picker.locator('.model-mark .version')).toHaveText('4.5');
+  await expect(picker.locator('.model-mark .version')).toHaveCount(0);
   await expect(picker.locator('.selected-name')).toHaveText('Haiku 4.5');
   expect(await tint(picker.locator('.model-mark'))).toBe(tints[3]);
 });

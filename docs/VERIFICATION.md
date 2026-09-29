@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## The Model trigger shows the print alone, and CLI default's mark is as wide as the others — 2026-09-29
+
+The user asked for the collapsed Model dropdown to drop the version from its mark, since the selected name beside it already shows the number, while the picker's choices and the reply avatars keep theirs, and for CLI default's mark to be as wide as the others. `ModelMark.svelte` no longer draws the version in its `chip` variant, so the trigger shows the selected line's 20px print before its name; a model of unknown line keeps the chip icon there, since without a version its mark would only repeat the provider. A pill without a version used to draw only its 26px print square inside the shared width; it now keeps the tint and edge across that whole width. The provider glyph of CLI default and older names sits in the middle, and an unresolved alias keeps its print at the start, in line with the other prints, leaving the version's place empty. Centering that print too was tried and dropped, because it broke the column of prints.
+
+Validation: `npm run verify` (zero Svelte/TypeScript diagnostics, 551 unit/HTTP tests in 74 files, production build, 289 browser scenarios on the first run), Rust formatting, Clippy with warnings denied, and 345 Rust tests with 12 opt-in cases ignored (Rust is unchanged). Logs: `artifacts/model-marks-trigger/`. `tests/model-marks.spec.ts` now checks that the trigger shows Opus's print without a version, and Haiku's after choosing Haiku 4.5, that every picker mark has one width with CLI default's glyph centered in it, and that every choice's name starts at the same place. Screenshots of the Claude picker (resolved and unresolved aliases), Codex and Gemini pickers and their triggers were reviewed at 2x in dark and light, in Edge; a native `tauri dev` session was not run.
+
 ## A chat opens at its end and keeps following it — 2026-09-29
 
 The user reported that opening a chat often showed their latest message instead of the end, where the agent was still answering. Four paths left a chat there, and each reproduced in a new browser scenario before the fix:

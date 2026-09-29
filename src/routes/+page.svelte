@@ -4296,7 +4296,7 @@
                     (desktop() && (locationPending || (!selectedLocation && !active)))}
                   onchange={chooseModel}
                 >
-                  {#snippet icon()}{#if selectedModelMark.line || selectedModelMark.version}<ModelMark
+                  {#snippet icon()}{#if selectedModelMark.line}<ModelMark
                         mark={selectedModelMark}
                         variant="chip"
                       />{:else}<Cpu size={16} />{/if}{/snippet}
