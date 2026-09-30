@@ -889,7 +889,9 @@ test('account creation shows progress, retries the same connection, and tracks i
   expect(calls[0]).toEqual(calls[1]);
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
   await expect(
-    page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
+    page.getByText("Claude · Second Claude is connected. You're ready to chat.", {
+      exact: true,
+    }),
   ).toHaveCount(0);
   const account = computer.locator('.fleet-account').filter({ hasText: 'Second Claude' });
   await expect(account).toContainText('Sign-in needed');
@@ -898,7 +900,9 @@ test('account creation shows progress, retries the same connection, and tracks i
     window.dispatchEvent(new Event('focus'));
   });
   await expect(
-    page.getByText("Claude is connected. You're ready to chat.", { exact: true }),
+    page.getByText("Claude · Second Claude is connected. You're ready to chat.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(account).not.toContainText('Sign-in needed');
 });

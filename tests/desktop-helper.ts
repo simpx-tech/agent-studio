@@ -234,6 +234,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
             };
           }
           if (command === 'detect_connection') {
+            // One account's check can fail outright, as a native error, or find no CLI.
+            const failure = localStorage.getItem(`test-check-error-${args.connectionId}`);
+            if (failure) throw failure;
+            const missing = !!localStorage.getItem(`test-cli-missing-${args.connectionId}`);
             const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
             const connection = fleet.connections.find((c: any) => c.id === args.connectionId);
             const wsl = connection?.environmentId === '33333333-3333-4333-8333-333333333333';
@@ -245,21 +249,25 @@ export async function mockDesktop(page: Page, mode = 'success') {
               account: account ?? undefined,
               id: args.provider,
               installed:
-                !wsl ||
-                (args.provider === 'codex' &&
-                  mode !== 'wsl-empty' &&
-                  !localStorage.getItem('test-wsl-missing')),
+                !missing &&
+                (!wsl ||
+                  (args.provider === 'codex' &&
+                    mode !== 'wsl-empty' &&
+                    !localStorage.getItem('test-wsl-missing'))),
               location: wsl ? 'WSL · Ubuntu' : 'Windows',
-              auth:
-                localStorage.getItem(`test-auth-connection-${args.connectionId}`) ??
-                localStorage.getItem(`test-auth-${args.provider}`) ??
-                (mode === 'login-flow' &&
-                args.provider === 'gemini' &&
-                localStorage.getItem('test-google-login') !== 'ready'
-                  ? 'login'
-                  : 'ready'),
-              version: 'Test fixture',
-              detail: 'Fixture connection',
+              auth: missing
+                ? 'unknown'
+                : (localStorage.getItem(`test-auth-connection-${args.connectionId}`) ??
+                  localStorage.getItem(`test-auth-${args.provider}`) ??
+                  (mode === 'login-flow' &&
+                  args.provider === 'gemini' &&
+                  localStorage.getItem('test-google-login') !== 'ready'
+                    ? 'login'
+                    : 'ready')),
+              version: missing ? null : 'Test fixture',
+              detail: missing
+                ? `${args.provider} CLI was not found. Install it, then refresh Connections.`
+                : 'Fixture connection',
             };
           }
           if (command === 'store_chat_image') {
@@ -370,8 +378,13 @@ export async function mockDesktop(page: Page, mode = 'success') {
               detail: 'Fixture connection',
             }));
           if (command === 'sign_in') {
+            const state = window as any;
+            (state.signInCalls ??= []).push(args.connectionId ?? args.provider);
             localStorage.setItem('test-sign-in-provider', args.provider);
             localStorage.setItem('test-sign-in-connection', args.connectionId ?? '');
+            // Its console takes a moment to open, which a test can hold until it releases it.
+            if (state.holdSignIn)
+              await new Promise<void>((resolve) => (state.heldSignIns ??= []).push(resolve));
             return;
           }
           if (command === 'read_native_instructions') {

@@ -99,8 +99,9 @@
   let linkedAccountId = $state('');
   let createdConnectionId = $state('');
   let creationStage = $state('');
-  // The connection or provider whose sign-in is opening.
-  let signingIn = $state('');
+  // The connections, and providers' own logins, whose sign-in is opening. Each opens a console
+  // of its own, so one opening never holds back another.
+  let signingIn = $state<Record<string, boolean>>({});
   let refreshingConnections = $state(false);
   let error = $state('');
   let busy = $state(false);
@@ -240,19 +241,28 @@
       creationStage = '';
     }
   }
-  // Sign-in opens a console of its own, so neither other actions here nor replies running in
-  // any chat hold it back.
+  // Sign-in opens a console of its own, so neither other actions here, other sign-ins nor
+  // replies running in any chat hold it back.
   async function openSignIn(id: ProviderId, connectionId?: string) {
-    if (signingIn) return;
-    signingIn = connectionId ?? id;
+    const key = connectionId ?? id;
+    if (signingIn[key]) return;
+    signingIn[key] = true;
     error = '';
     try {
       await login(id, connectionId);
     } catch (e) {
       error = String(e);
     } finally {
-      signingIn = '';
+      delete signingIn[key];
     }
+  }
+  // Why sign-in cannot open, shown on its button. Only a check that found no CLI stops it:
+  // sign-in never waits for a check, and after a failed one the sign-in reports what stops it.
+  function signInUnavailable(status: ProviderStatus | undefined, provider: ProviderId) {
+    if (!desktop()) return 'Sign in on the computer that runs this account.';
+    return status && !status.installed && !status.checkFailed
+      ? `Install the ${providers[provider].name} CLI on this computer, then refresh Connections to sign in.`
+      : '';
   }
   async function add() {
     if (
@@ -318,11 +328,13 @@
         ? 'Checking…'
         : statuses[id]?.auth === 'ready'
           ? 'Connected'
-          : !statuses[id]?.installed
-            ? 'Install the CLI'
-            : statuses[id]?.auth === 'login'
-              ? 'Sign-in needed'
-              : 'Sign in or refresh';
+          : statuses[id]?.checkFailed
+            ? 'Could not check this account'
+            : !statuses[id]?.installed
+              ? 'Install the CLI'
+              : statuses[id]?.auth === 'login'
+                ? 'Sign-in needed'
+                : 'Sign in or refresh';
     const host = presenceFor(environmentId);
     if (!paired || !host?.online) return 'Offline';
     const reported = host.connections.find((c) => c.connectionId === id);
@@ -509,11 +521,14 @@
             <button class="secondary" onclick={() => chat(account.provider, connection.id)}
               >Chat<ArrowUpRight size={13} /></button
             >
-            {#if localEnvironment(connection.environmentId)}<button
+            {#if localEnvironment(connection.environmentId)}
+              {@const blocked = signInUnavailable(statuses[connection.id], account.provider)}
+              <button
                 class={['sign-in', attention ? 'secondary' : 'text-button']}
-                disabled={!!signingIn || !desktop() || !statuses[connection.id]?.installed}
+                disabled={!!signingIn[connection.id] || !!blocked}
+                title={blocked || undefined}
                 onclick={() => openSignIn(account.provider, connection.id)}
-                >{#if signingIn === connection.id}<LoaderCircle size={13} class="spinning" />Opening
+                >{#if signingIn[connection.id]}<LoaderCircle size={13} class="spinning" />Opening
                   sign-in…{:else}Open sign-in{/if}</button
               >{/if}
           </div>
@@ -540,7 +555,9 @@
                   ? 'Checking account availability…'
                   : status === 'Install the CLI'
                     ? 'Install the CLI to read usage.'
-                    : 'Connect the account on its computer to read usage.'}
+                    : status === 'Could not check this account'
+                      ? 'Refresh Connections to check this account and read its usage.'
+                      : 'Connect the account on its computer to read usage.'}
         />
       </div>
     {:else}<p class="connection-hint">No computers connected yet.</p>{/each}
@@ -721,6 +738,7 @@
                             >{/if}
                         </div>
                       {:else if local}
+                        {@const blocked = signInUnavailable(providerStatus(id), id)}
                         <div class="current-login">
                           {#if !providerStatus(id)}<p>Checking login…</p>
                           {:else if !providerStatus(id)?.installed}<p>
@@ -732,12 +750,11 @@
                           <div class="fleet-actions">
                             <button
                               class="text-button"
-                              disabled={!!signingIn || !desktop() || !providerStatus(id)?.installed}
+                              disabled={!!signingIn[id] || !!blocked}
+                              title={blocked || undefined}
                               onclick={() => openSignIn(id)}
-                              >{#if signingIn === id}<LoaderCircle
-                                  size={13}
-                                  class="spinning"
-                                />Opening sign-in…{:else}Open sign-in{/if}</button
+                              >{#if signingIn[id]}<LoaderCircle size={13} class="spinning" />Opening
+                                sign-in…{:else}Open sign-in{/if}</button
                             >{#if providerStatus(id)?.auth === 'ready'}<button
                                 class="secondary"
                                 onclick={() => chat(id, undefined, computer.id)}

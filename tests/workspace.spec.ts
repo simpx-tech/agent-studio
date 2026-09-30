@@ -502,7 +502,9 @@ test('external Google sign-in updates on focus and survives reload without a cha
     window.dispatchEvent(new Event('focus'));
   });
   await expect(card).not.toContainText('Sign-in needed');
-  await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    'Gemini · Gemini CLI login is connected',
+  );
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
@@ -525,7 +527,9 @@ test('sign-in completion is polled while the external console remains open', asy
   await expect(card).not.toContainText('Sign-in needed', {
     timeout: 8000,
   });
-  await expect(page.locator('.notice[role="status"]')).toContainText('Gemini is connected');
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    'Gemini · Gemini CLI login is connected',
+  );
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
 });
 

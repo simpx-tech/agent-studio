@@ -298,6 +298,8 @@ export type ProviderStatus = {
   location?: string | null;
   // Signed-in identity reported by the CLI itself (Claude's account email); session-only metadata.
   account?: string | null;
+  // The check itself failed, as its detail says, so installation and sign-in are unknown.
+  checkFailed?: boolean;
 };
 export type RunEvent = TokenUsage & {
   kind:

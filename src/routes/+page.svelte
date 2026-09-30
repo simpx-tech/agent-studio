@@ -329,8 +329,12 @@
   let restartingForUpdate = $state(false);
   let statuses = $state<ProviderStatus[]>([]);
   let refreshing = $state(false);
-  let pendingSignIn = $state<{ provider: ProviderId; connectionId?: string } | null>(null);
-  let signInDeadline = 0;
+  // Sign-ins opened here, by connection or by provider for its own login. Several may be open at
+  // once, and each is followed until its account reports ready or ten minutes pass.
+  const pendingSignIns = new Map<
+    string,
+    { provider: ProviderId; connectionId?: string; until: number }
+  >();
   let activeId = $state<string | null>(null);
   let historyAction = $state<{
     kind: 'rewind' | 'files';
@@ -960,6 +964,10 @@
   const selectedConnection = $derived(selectedReplyConnection.connection);
   const selectedRemote = $derived(selectedReplyConnection.remote);
   const selectedStatus = $derived(selectedReplyConnection.status);
+  // This computer could not check the selected account, which is then unverified, not missing.
+  const selectedCheckFailed = $derived(
+    !!selectedStatus && 'checkFailed' in selectedStatus && !!selectedStatus.checkFailed,
+  );
 
   const selectedUsageKey = $derived(usageKey(selectedSettings));
   const selectedUsage = $derived(snapshotFor(usageSnapshots, selectedSettings));
@@ -1392,7 +1400,7 @@
       if (paired) void syncNow();
       else void restoreRelayConnection();
       if (localRunning) {
-        if (pendingSignIn) void checkSignIn();
+        if (pendingSignIns.size) void checkSignIn();
         return;
       }
       clearTimeout(focusTimer);
@@ -1413,7 +1421,7 @@
     window.addEventListener('pagehide', saveDraftsOnLeave);
     document.addEventListener('visibilitychange', saveDraftsWhenHidden);
     const loginPoll = setInterval(() => {
-      if (pendingSignIn && Date.now() < signInDeadline) void checkSignIn();
+      if (pendingSignIns.size) void checkSignIn();
     }, 5000);
     const usagePoll = setInterval(() => {
       today = startOfDay(Date.now());
@@ -2179,29 +2187,45 @@
       refreshing = false;
     }
   }
-  // Sign-in finishes in its own console, whatever replies run meanwhile, so an account's
-  // sign-in is followed by checking that account alone until it reports ready.
+  // Sign-in finishes in its own console, whatever replies run meanwhile, so each account signed
+  // in to here is followed by checking that account alone until it reports ready. A provider's
+  // own login is followed by refreshing everything.
   async function checkSignIn() {
-    const connection = workspace.fleet.connections.find(
-      (c) => c.id === pendingSignIn?.connectionId,
+    const now = Date.now();
+    const accounts: Connection[] = [];
+    let everything = false;
+    for (const [key, pending] of pendingSignIns) {
+      if (pending.until <= now) {
+        pendingSignIns.delete(key);
+        continue;
+      }
+      const connection = workspace.fleet.connections.find((c) => c.id === pending.connectionId);
+      if (
+        connection &&
+        executionHost(workspace.fleet, connection.environmentId) === installation?.id
+      )
+        accounts.push(connection);
+      else everything = true;
+    }
+    if (everything) await refresh();
+    await Promise.all(
+      accounts.map(async (connection) => {
+        await connectionChecks.get(connection.id);
+        await checkConnection(connection);
+      }),
     );
-    if (
-      !connection ||
-      executionHost(workspace.fleet, connection.environmentId) !== installation?.id
-    )
-      return refresh();
-    await connectionChecks.get(connection.id);
-    await checkConnection(connection);
     noteSignIn();
   }
   function noteSignIn() {
-    const pending = pendingSignIn;
-    const status = pending?.connectionId
-      ? connectionStatuses[pending.connectionId]
-      : statuses.find((s) => s.id === pending?.provider);
-    if (pending && status?.auth === 'ready') {
-      notice = `${providers[pending.provider].name} is connected. You're ready to chat.`;
-      pendingSignIn = null;
+    for (const [key, pending] of pendingSignIns) {
+      const status = pending.connectionId
+        ? connectionStatuses[pending.connectionId]
+        : statuses.find((s) => s.id === pending.provider);
+      if (status?.auth !== 'ready') continue;
+      pendingSignIns.delete(key);
+      const connection = workspace.fleet.connections.find((c) => c.id === pending.connectionId);
+      const account = workspace.fleet.accounts.find((a) => a.id === connection?.accountId);
+      notice = `${providers[pending.provider].name}${account ? ` · ${account.name}` : ''} is connected. You're ready to chat.`;
     }
   }
   async function refreshWsl() {
@@ -2250,6 +2274,7 @@
           auth: 'unknown',
           version: null,
           detail: String(e),
+          checkFailed: true,
         };
       })
       .finally(() => {
@@ -2404,7 +2429,24 @@
   function applyCliUpdates(next: CliUpdates) {
     const updated = newlyUpdated(cliUpdates, next);
     cliUpdates = next;
-    if (updated.length) forgetCatalogs(updated);
+    if (!updated.length) return;
+    forgetCatalogs(updated);
+    // A check made while the update replaced the CLI may have found none there, which keeps
+    // its accounts from signing in until they are checked again.
+    void recheckConnections(
+      workspace.fleet.connections
+        .filter((c) =>
+          updated.some(
+            (update) =>
+              update.environmentId === c.environmentId &&
+              workspace.fleet.accounts.some(
+                (a) => a.id === c.accountId && a.provider === update.provider,
+              ),
+          ),
+        )
+        .map((c) => c.id),
+      true,
+    );
   }
   // An updated CLI can offer newer models (Claude Code also resolves its aliases anew), so the
   // catalogs of that CLI in that environment are stale.
@@ -4221,8 +4263,11 @@
   async function login(id: ProviderId, connectionId?: string) {
     try {
       await signIn(id, connectionId);
-      pendingSignIn = { provider: id, connectionId };
-      signInDeadline = Date.now() + 10 * 60_000;
+      pendingSignIns.set(connectionId ?? id, {
+        provider: id,
+        connectionId,
+        until: Date.now() + 10 * 60_000,
+      });
       notice = `Finish signing in through ${providers[id].name}. We'll update the connection automatically; you can leave the sign-in window open.`;
       void refresh();
     } catch (e) {
@@ -5053,14 +5098,16 @@
                   />This CLI connection is no longer available. Choose another connection.
                 {:else}<RefreshCw size={15} class="spinning" />Checking this computer’s CLIs…{/if}
               </div>
-            {:else if !selectedStatus?.installed && desktop()}<div class="setup-hint">
+            {:else if !selectedStatus?.installed && !selectedCheckFailed && desktop()}<div
+                class="setup-hint"
+              >
                 <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
                   class="text-button"
                   onclick={() => openConnections(selectedSettings.connectionId)}
                   >Open Connections<ArrowRight size={13} /></button
                 >
               </div>
-            {:else if selectedStatus?.installed && selectedStatus.auth !== 'ready'}<div
+            {:else if selectedStatus && (selectedStatus.installed || selectedCheckFailed) && selectedStatus.auth !== 'ready'}<div
                 class="setup-hint"
                 role="status"
               >
