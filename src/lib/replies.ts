@@ -1,5 +1,6 @@
 import type { ChatSettings, Message } from './domain';
 import { reasoningName, type ModelInfo } from './models';
+import { syntheticModel } from './usage-limits';
 
 export type ReplyTimeTotal = { durationMs: number | null; missing: number };
 
@@ -59,8 +60,13 @@ export function selectedModelName(model: string, catalog: ModelInfo[]): string {
   return name?.replace(/^CLI default\s*·\s*/, '') || formatModelName(model);
 }
 
+// The model a reply reported. Replies saved before 2026-09-30 could report the one Claude Code
+// names its own messages with, such as its line about a usage limit, which ran no model.
+const reportedModel = (message: Message) =>
+  message.usage?.model === syntheticModel ? undefined : message.usage?.model;
+
 export function replyModelName(message: Message): string {
-  const reported = message.usage?.model;
+  const reported = reportedModel(message);
   if (reported && reported !== message.settings?.model) return formatModelName(reported);
   return message.modelName || formatModelName(reported || message.settings?.model || '');
 }
@@ -72,7 +78,7 @@ const versionedClaudeName = /^[A-Z][a-z]+ \d+(?:\.\d+)*$/;
  * as an older CLI resolving an alias to an older model or a fallback model answering. Replies
  * sent before the picker named versions have nothing to compare and stay quiet. */
 export function replyModelMismatch(message: Message): { picked: string; ran: string } | undefined {
-  const reported = message.usage?.model;
+  const reported = reportedModel(message);
   const picked = message.modelName;
   if (message.settings?.provider !== 'claude' || !reported || !picked) return undefined;
   if (reported === message.settings.model) return undefined;

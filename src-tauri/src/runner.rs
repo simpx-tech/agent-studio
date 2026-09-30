@@ -1002,6 +1002,7 @@ async fn stream_turn(
                     process.healthy = false;
                     let success = process.child.wait().await.map_err(|_| "Could not collect the provider process result")?.success();
                     if !success || decoder.failure.is_some() {
+                        if let Some(limit) = decoder.usage_limit { break Err(limit.text); }
                         let diagnostic = format!("{} {}", diagnostics, decoder.failure.unwrap_or_default()).to_lowercase();
                         break Err(provider_error(&diagnostic).into());
                     }
@@ -1069,7 +1070,11 @@ async fn stream_turn(
                 }
                 if let Some(failure) = decoder.failure.take() {
                     process.healthy = false;
-                    break Err(provider_error(&format!("{diagnostics} {failure}")).into());
+                    // The provider's own line names the limit that stopped the reply and its reset.
+                    break Err(match decoder.usage_limit.take() {
+                        Some(limit) => limit.text,
+                        None => provider_error(&format!("{diagnostics} {failure}")).into(),
+                    });
                 }
                 if request.compact {
                     if !decoder.compactions.completed() {

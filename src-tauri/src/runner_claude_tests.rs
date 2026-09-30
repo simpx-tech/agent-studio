@@ -75,6 +75,15 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"type":"user","uuid":"' + $value.uuid + '","parent_tool_use_id":null,"isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Replayed"}]}}')
         }
         $mode = $value.message.content[0].text
+        if ($mode -eq 'Limit') {
+            # The API refuses a request at the account's limit: the CLI answers with a synthetic
+            # message of its own and ends the turn with an error result.
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg-work","model":"fixture-model","content":[{"type":"text","text":"Reading the generator."}],"usage":{"input_tokens":40,"cache_read_input_tokens":60,"output_tokens":2}}}')
+            [Console]::WriteLine('{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1759254600,"rateLimitType":"five_hour"},"uuid":"limit-event","session_id":"' + $env:STUDIO_TEST_SESSION + '"}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"message":{"id":"b5b9d6d0-8fe4-4efb-a83a-4c65d0b3ef48","model":"<synthetic>","role":"assistant","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"You''ve hit your session limit \u00b7 resets 1:50pm (America/Sao_Paulo)"}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":true,"num_turns":2,"result":"You''ve hit your session limit \u00b7 resets 1:50pm (America/Sao_Paulo)","usage":{"input_tokens":40,"output_tokens":2},"total_cost_usd":' + (Cost 0.001d) + '}')
+            continue
+        }
         if ($mode -eq 'Agents') {
             # A background agent works on after the turn ends.
             [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"launch","content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"description":"Researcher","prompt":"Research","run_in_background":true}}]}}')
@@ -190,6 +199,45 @@ async fn claude_tool_progress_native_loop_ticks_without_output_or_late_revival()
     assert!(tools.last().unwrap()["elapsedMs"].as_u64().unwrap() < 90000);
     assert_eq!(tools.last().unwrap()["status"], "complete");
     assert_eq!(tools.last().unwrap()["progress"]["kind"], "heartbeat");
+}
+
+#[tokio::test]
+async fn a_usage_limit_ends_the_reply_with_claude_codes_own_line() {
+    let root = tempfile::tempdir().unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Limit"}]),
+    );
+    let session = request.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let (result, events) = turn(
+        &mut process,
+        &request,
+        CancellationToken::new(),
+        false,
+        false,
+    )
+    .await;
+    assert!(!process.healthy);
+    process.kill().await;
+    let line = "You've hit your session limit \u{b7} resets 1:50pm (America/Sao_Paulo)";
+    assert_eq!(result.unwrap_err(), line);
+    let limits: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::UsageLimit { usage_limit } => Some(usage_limit.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(limits.len(), 1);
+    assert_eq!((limits[0].revision, limits[0].text.as_str()), (1, line));
+    // The line is neither progress nor the answer, and the reply keeps the model that ran.
+    assert!(!events.iter().any(|e| matches!(e,
+        RunEvent::Progress { text, .. } | RunEvent::Text { text } if text.contains("hit your"))));
+    assert!(events.iter().any(|e| matches!(e, RunEvent::Usage { usage }
+        if usage.model.as_deref() == Some("fixture-model") && usage.context_input == Some(100))));
 }
 
 #[tokio::test]

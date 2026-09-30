@@ -7,6 +7,7 @@ import {
   type RunRequest,
 } from './domain';
 import type { ModelInfo } from './models';
+import { syntheticModel } from './usage-limits';
 
 // User-provided pack prices (2026-09-14): USD 100/2,500, 200/5,000, 1,000/25,000.
 // This is a displayed-price estimate; the screenshot does not establish checkout discounts.
@@ -320,8 +321,12 @@ export function contextFor(
   const compacted = latest?.compactions?.some(
     (c) => c.status === 'complete' && (c.usageRevision ?? 0) >= (latest.usage?.revision ?? 0),
   );
+  // A reply saved before 2026-09-30 whose last message was Claude Code's own, such as its line
+  // about a usage limit, reported that message's zero request as its context.
   const reported =
-    compatible && !compacted && !latest?.compact ? (latest?.usage?.contextInput ?? null) : null;
+    compatible && !compacted && !latest?.compact && latest?.usage?.model !== syntheticModel
+      ? (latest?.usage?.contextInput ?? null)
+      : null;
   const measuredCapacity = reported != null ? latest?.usage?.contextWindow : null;
   const previous = conversation?.messages.findLast(
     (m) =>

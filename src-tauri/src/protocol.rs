@@ -9,6 +9,7 @@ pub mod proposed_plan;
 mod reasoning;
 #[cfg(test)]
 mod reasoning_tests;
+pub mod usage_limit;
 pub(crate) mod workflow;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -105,6 +106,11 @@ pub enum RunEvent {
     },
     /// This reply took over the process, and the wait, of the reply it continues.
     TakeOver,
+    /// The account reached a usage limit, so the provider refused the reply's request.
+    UsageLimit {
+        #[serde(rename = "usageLimit")]
+        usage_limit: usage_limit::UsageLimit,
+    },
     Tool {
         tool: Box<activity::ToolActivity>,
     },
@@ -137,6 +143,8 @@ pub struct Decoder {
     reasoning: reasoning::ReasoningDecoder,
     current_message: String,
     message_number: u64,
+    /// The usage limit that stopped this reply, in the provider's words.
+    pub usage_limit: Option<usage_limit::UsageLimit>,
 }
 fn string(value: &Value, pointer: &str) -> String {
     value
@@ -174,6 +182,22 @@ impl Decoder {
             text: item.1.clone(),
         })
     }
+    fn limit_reached(&mut self, text: String) -> Option<RunEvent> {
+        if self
+            .usage_limit
+            .as_ref()
+            .is_some_and(|limit| limit.text == text)
+        {
+            return None;
+        }
+        let revision = self
+            .usage_limit
+            .as_ref()
+            .map_or(1, |limit| limit.revision + 1);
+        let usage_limit = usage_limit::UsageLimit { revision, text };
+        self.usage_limit = Some(usage_limit.clone());
+        Some(RunEvent::UsageLimit { usage_limit })
+    }
     pub fn reported_model(&mut self, model: Option<&str>) {
         self.model = model.map(|value| value.chars().take(200).collect());
     }
@@ -204,6 +228,17 @@ impl Decoder {
         events.extend(self.reasoning.codex_server(value));
         if let Some(proposed_plan) = self.proposed_plans.codex(value) {
             events.push(RunEvent::ProposedPlan { proposed_plan });
+        }
+        // A turn refused at the account's usage limit reports it as it fails, then with its end.
+        let failure = match value["method"].as_str().unwrap_or_default() {
+            "error" if params["willRetry"] != true => Some(&params["error"]),
+            "turn/completed" if params["turn"]["status"] == "failed" => {
+                Some(&params["turn"]["error"])
+            }
+            _ => None,
+        };
+        if let Some(text) = failure.and_then(usage_limit::codex) {
+            events.extend(self.limit_reached(text));
         }
         match value["method"].as_str().unwrap_or_default() {
             "turn/plan/updated" => {
@@ -243,9 +278,12 @@ impl Decoder {
                     text: String::new(),
                 });
             }
-            "turn/completed" if !self.text.is_empty() => events.push(RunEvent::Text {
-                text: self.text.clone(),
-            }),
+            // Commentary before a usage limit stays in Work history rather than becoming the answer.
+            "turn/completed" if !self.text.is_empty() && self.usage_limit.is_none() => {
+                events.push(RunEvent::Text {
+                    text: self.text.clone(),
+                })
+            }
             "thread/tokenUsage/updated" => {
                 let usage = &params["tokenUsage"];
                 events.push(RunEvent::Usage {
@@ -338,7 +376,12 @@ impl Decoder {
                 events.push(RunEvent::Plan { plan });
             }
         }
-        if provider == "claude" && kind == "assistant" {
+        // Claude Code's own messages ran no request: the reply keeps the model and context of
+        // its last one.
+        if provider == "claude"
+            && kind == "assistant"
+            && v["message"]["model"] != usage_limit::SYNTHETIC_MODEL
+        {
             self.context_input = input_with_cache(&v["message"]["usage"]);
             self.model = v["message"]["model"].as_str().map(String::from);
         }
@@ -435,7 +478,9 @@ impl Decoder {
                     }
                 }
                 "assistant" => {
-                    if let Some(blocks) = v["message"]["content"].as_array() {
+                    if let Some(text) = usage_limit::claude(&v) {
+                        events.extend(self.limit_reached(text));
+                    } else if let Some(blocks) = v["message"]["content"].as_array() {
                         let text = blocks
                             .iter()
                             .filter(|b| b["type"] == "text")
@@ -455,7 +500,12 @@ impl Decoder {
                     }
                 }
                 "result" => {
-                    if v["is_error"].as_bool().unwrap_or(false) {
+                    // A turn refused at a usage limit ends with Claude Code's line as its result,
+                    // which is never the reply's answer.
+                    let limited = self.usage_limit.as_ref().is_some_and(|limit| {
+                        usage_limit::line(&string(&v, "/result")).as_ref() == Some(&limit.text)
+                    });
+                    if v["is_error"].as_bool().unwrap_or(false) || limited {
                         self.failure = Some(
                             v["errors"]
                                 .as_array()
@@ -919,6 +969,76 @@ mod tests {
             d.decode(p, line);
             assert!(d.failure.as_deref().unwrap().contains("quota"));
         }
+    }
+    #[test]
+    fn claude_usage_limits_stay_apart_from_the_reply_its_model_and_context() {
+        let mut d = Decoder::default();
+        d.decode("claude", r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":100,"cache_read_input_tokens":900},"content":[{"type":"text","text":"Reading the generator."}]}}"#);
+        let limit = r#"{"type":"assistant","parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"message":{"id":"b5b9d6d0","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"You've hit your session limit · resets 1:50pm (America/Sao_Paulo)"}]}}"#;
+        let events = d.decode("claude", limit);
+        let [RunEvent::UsageLimit { usage_limit }] = events.as_slice() else {
+            panic!("Expected only the limit: {events:?}")
+        };
+        let line = "You've hit your session limit · resets 1:50pm (America/Sao_Paulo)";
+        assert_eq!((usage_limit.revision, usage_limit.text.as_str()), (1, line));
+        assert_eq!(
+            serde_json::to_value(&events[0]).unwrap(),
+            serde_json::json!({"kind":"usagelimit","usageLimit":{"revision":1,"text":line}})
+        );
+        // A later turn stopped by the same limit adds nothing.
+        assert!(d.decode("claude", limit).is_empty());
+        assert_eq!(d.text, "Reading the generator.");
+        // Even a result that did not say it failed is not the answer.
+        let events = d.decode("claude", &serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":line,"usage":{"input_tokens":5}}).to_string());
+        let Some(RunEvent::Usage { usage }) = events.last() else {
+            panic!("Missing usage")
+        };
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(usage.context_input, Some(1000));
+        assert!(d.failure.is_some());
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Text { .. })));
+        let next = d.decode("claude", &limit.replace("session limit", "weekly limit"));
+        let [RunEvent::UsageLimit { usage_limit }] = next.as_slice() else {
+            panic!("A new limit follows")
+        };
+        assert_eq!(usage_limit.revision, 2);
+        // Other messages Claude Code writes itself keep their text, but not the model.
+        let mut d = Decoder::default();
+        d.decode("claude", r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":7},"content":[]}}"#);
+        let events = d.decode("claude", r#"{"type":"assistant","message":{"id":"s","model":"<synthetic>","usage":{"input_tokens":0},"content":[{"type":"text","text":"No response requested."}]}}"#);
+        assert!(matches!(events.as_slice(), [RunEvent::Progress { .. }]));
+        assert_eq!(d.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(d.context_input, Some(7));
+        assert!(d.usage_limit.is_none());
+    }
+    #[test]
+    fn codex_usage_limits_come_from_the_failed_turn_of_the_root_thread() {
+        let line = "You’ve hit your usage limit. Try again at 3:05 PM.";
+        let error = serde_json::json!({"message":line,"codexErrorInfo":"usageLimitExceeded","additionalDetails":null});
+        let mut d = Decoder::default();
+        let decode = |d: &mut Decoder, value: Value| d.decode_codex_server(&value, "root");
+        let retrying = serde_json::json!({"method":"error","params":{"threadId":"root","turnId":"t","willRetry":true,"error":error}});
+        assert!(decode(&mut d, retrying).is_empty());
+        let child = serde_json::json!({"method":"error","params":{"threadId":"child","turnId":"c","willRetry":false,"error":error}});
+        assert!(decode(&mut d, child).is_empty());
+        let failed = serde_json::json!({"method":"error","params":{"threadId":"root","turnId":"t","willRetry":false,"error":error}});
+        let events = decode(&mut d, failed);
+        assert!(
+            matches!(events.as_slice(), [RunEvent::UsageLimit { usage_limit }] if usage_limit.text == line)
+        );
+        decode(
+            &mut d,
+            serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"root","itemId":"note","delta":"Widening the map next."}}),
+        );
+        let ended = serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"t","status":"failed","error":error}}});
+        // The same limit is not reported twice, and commentary before it is not the answer.
+        assert!(!decode(&mut d, ended)
+            .iter()
+            .any(|e| matches!(e, RunEvent::UsageLimit { .. } | RunEvent::Text { .. })));
+        let mut d = Decoder::default();
+        let other = serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"t","status":"failed","error":{"message":"Too many requests","codexErrorInfo":"rateLimitExceeded"}}}});
+        assert!(decode(&mut d, other).is_empty());
+        assert!(d.usage_limit.is_none());
     }
     #[test]
     fn gemini_non_success_results_are_failures_even_with_partial_text() {

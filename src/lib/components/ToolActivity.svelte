@@ -54,6 +54,7 @@
     folder,
     fileChanges,
     history = true,
+    limited = false,
     owner,
     openSubagent,
     openedSubagent,
@@ -69,6 +70,8 @@
     fileChanges?: FileChanges;
     /** A finished reply keeps its activity in a collapsed Work history disclosure. */
     history?: boolean;
+    /** The reply stopped at a usage limit, so its Work history stays open as the reply left it. */
+    limited?: boolean;
     /** The sub-agent whose conversation this is; its own calls need no attribution. */
     owner?: string;
     /** Opens a sub-agent's conversation in the side panel. */
@@ -571,14 +574,15 @@
   >
     {#if replyStatus === 'running' || !history}{@render timeline()}
     {:else}
-      <details class="activity-summary" ontoggle={disclosures.opened('history')}>
+      <details class="activity-summary" open={limited} ontoggle={disclosures.opened('history')}>
         <summary aria-label="Work history" onclick={disclosures.reveal('history')}>
           <ChevronDown size={14} class="disclosure" />
           <span class="history-title">Work history</span>
           {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
+            >{:else if limited}<span class="tool-status limited">Limit reached</span
             >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
         </summary>
-        {#if disclosures.has('history')}{@render timeline()}{/if}
+        {#if limited || disclosures.has('history')}{@render timeline()}{/if}
       </details>
     {/if}
     {#if linkError}<p role="alert">{linkError}</p>{/if}
@@ -1017,6 +1021,9 @@
   }
   .tool-status.failed {
     color: var(--danger);
+  }
+  .tool-status.limited {
+    color: var(--warning);
   }
   .sr-only {
     position: absolute;

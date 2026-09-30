@@ -216,6 +216,7 @@
   const hasComposerMentions = $derived(!!draftMentions.length || !!staleMentionTokens.length);
   let modelPicker = $state<ChoicePicker>();
   let reasoningPicker = $state<ChoicePicker>();
+  let agentPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
   let preparingCommand = false;
   import { summarizeFileChanges } from '$lib/file-changes';
@@ -4893,6 +4894,7 @@
               </div>
               <div class="chat-setting agent-setting">
                 <ChoicePicker
+                  bind:this={agentPicker}
                   label="Agent"
                   title={`${
                     active
@@ -5029,6 +5031,11 @@
                       !activeRunning}
                     retry={() => void send(true)}
                     retryDisabled={!canSend}
+                    switchAccount={i === active.messages.length - 1 &&
+                    switchableConnections.length &&
+                    !activeRunning
+                      ? () => agentPicker?.showPicker()
+                      : undefined}
                     rewind={m.role === 'user' ? () => openRewind(m.id) : undefined}
                     undoEdits={m.runId && m.fileChanges?.edits.length
                       ? () => openUndoFiles(m.runId)

@@ -16,6 +16,7 @@ import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
 import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
+import { usageLimitSchema, type UsageLimit } from './usage-limits.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
@@ -226,6 +227,8 @@ export const messageSchema = z
     // A running Claude reply whose turn ended while background work it waits for continues:
     // the number of that idle stretch, in which the next message takes the reply over.
     backgroundWait: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    // The usage limit that stopped the reply, in the provider's words; never replayed.
+    usageLimit: usageLimitSchema.optional(),
   })
   .refine(
     (message) =>
@@ -324,7 +327,8 @@ export type RunEvent = TokenUsage & {
     | 'workflow'
     | 'nativeworkflow'
     | 'backgroundwait'
-    | 'takeover';
+    | 'takeover'
+    | 'usagelimit';
   id?: string;
   accountUsage?: AccountUsage;
   revision?: number;
@@ -344,6 +348,7 @@ export type RunEvent = TokenUsage & {
   fileChanges?: FileChanges;
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
+  usageLimit?: UsageLimit;
 };
 export type RunRequest = {
   compact?: boolean;

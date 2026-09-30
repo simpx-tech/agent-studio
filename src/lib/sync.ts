@@ -18,6 +18,7 @@ import { mergeCompactions } from './compaction.ts';
 import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
+import { latestUsageLimit } from './usage-limits.ts';
 import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
 
@@ -116,6 +117,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           !previous.fileChanges &&
           !previous.filesUndone &&
           !previous.accountUsage &&
+          !previous.usageLimit &&
           previous.usage?.revision == null)
       )
         return message;
@@ -149,6 +151,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
           : {}),
         ...(message.fileChanges || previous.fileChanges
           ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
+          : {}),
+        ...(message.usageLimit || previous.usageLimit
+          ? { usageLimit: latestUsageLimit(message.usageLimit, previous.usageLimit) }
           : {}),
       };
     }),
@@ -232,6 +237,9 @@ function sameRun(
       blocks: mergeActivityBlocks(selected.blocks, other.blocks),
       ...(a.fileChanges || b.fileChanges
         ? { fileChanges: latestFileChanges(a.fileChanges, b.fileChanges) }
+        : {}),
+      ...(a.usageLimit || b.usageLimit
+        ? { usageLimit: latestUsageLimit(a.usageLimit, b.usageLimit) }
         : {}),
       ...(a.questions || b.questions
         ? { questions: mergeQuestions(a.questions, b.questions) }

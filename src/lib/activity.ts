@@ -12,6 +12,7 @@ import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
 import { steeringReceiptSchema, mergeSteering } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, maxReasoningBlocks, mergeReasoningBlocks } from './reasoning.ts';
+import { usageLimitSchema, latestUsageLimit } from './usage-limits.ts';
 
 export const activityStatusSchema = z.enum([
   'running',
@@ -189,6 +190,7 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
     'elicitation',
     'steering',
     'compaction',
+    'usagelimit',
   ].includes(event.kind);
 }
 
@@ -232,6 +234,12 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     const parsed = steeringReceiptSchema.safeParse(event.steering);
     if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
       message.steering = mergeSteering(message.steering, [parsed.data]);
+    return;
+  }
+  if (event.kind === 'usagelimit') {
+    const parsed = usageLimitSchema.safeParse(event.usageLimit);
+    if (message.role === 'assistant' && parsed.success)
+      message.usageLimit = latestUsageLimit(message.usageLimit, parsed.data);
     return;
   }
   if (event.kind === 'reasoning') {

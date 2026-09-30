@@ -708,8 +708,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
                 emit({ kind: 'takeover' });
               }
               (window as any).emitCapability = emit;
-              return await new Promise((resolve) => {
+              return await new Promise((resolve, reject) => {
                 (window as any).finishCapabilities = resolve;
+                // A failed reply rejects with its error, which Tauri delivers as a string.
+                (window as any).failCapabilities = reject;
                 pending = () => resolve('cancelled');
                 // Replies of different conversations run side by side, each held until finished.
                 ((window as any).capabilityRuns ??= {})[args.request.runId] = {

@@ -333,6 +333,9 @@ pub async fn run(
                     if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::SkillsChanged); }
                     continue;
                 }
+                // A failure another turn reports is not this reply's.
+                if value["method"] == "error" && value["params"]["threadId"] == thread
+                    && value["params"]["turnId"].as_str().is_some_and(|id| !turn.is_empty() && id != turn) { continue; }
                 if let Some(id) = value["id"].as_u64().filter(|_| value.get("method").is_none()) {
                     let Some(kind) = pending.remove(&id) else { continue; };
                     if kind == Kind::Steer {
@@ -484,7 +487,13 @@ pub async fn run(
                     let status = value["params"]["turn"]["status"].as_str().unwrap_or_default();
                     // An interrupted turn leaves the thread loaded for the next reply.
                     if status == "interrupted" { return Ok(("cancelled".into(), decoder.text)); }
-                    if status != "completed" { process.healthy = false; return Err("Codex could not complete the reply. Check its login, model access, and connection.".into()); }
+                    if status != "completed" {
+                        process.healthy = false;
+                        return Err(match decoder.usage_limit.take() {
+                            Some(limit) => limit.text,
+                            None => "Codex could not complete the reply. Check its login, model access, and connection.".into(),
+                        });
+                    }
                     if request.compact {
                         if !decoder.compactions.completed() { process.healthy = false; return Err("Codex ended without confirming compaction. The conversation was preserved.".into()); }
                         if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }

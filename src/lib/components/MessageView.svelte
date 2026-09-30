@@ -17,6 +17,7 @@
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
+  import { limitResets, replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
@@ -53,6 +54,7 @@
     openSubagent,
     openedSubagent,
     idle = false,
+    switchAccount,
   }: {
     message: Message;
     agent: ChatSettings;
@@ -77,8 +79,19 @@
     openedSubagent?: string;
     /** It runs, but its turn ended and it only waits for background work. */
     idle?: boolean;
+    /** Opens the Agent picker to choose another account for the next message. */
+    switchAccount?: () => void;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
+  // A usage limit that stopped the reply: its Work history stays open, and a card of its own
+  // follows it instead of the provider's line standing in for the answer.
+  const limit = $derived(replyUsageLimit(message));
+  // Replies saved before 2026-09-30 kept that line among their progress comments.
+  const blocks = $derived(
+    limit && !message.usageLimit
+      ? message.blocks.filter((block) => !savedLimitComment(block))
+      : message.blocks,
+  );
   let linkError = $state('');
   const author = $derived(message.settings ?? agent);
   // The model that ran, as the picker shows it: its version on its family's tint.
@@ -87,6 +100,7 @@
   const text = $derived(
     messageText(message) ||
       (message.status !== 'running' &&
+      !limit &&
       !message.proposedPlans?.length &&
       !message.settings?.outputSchema
         ? (message.blocks.filter((b) => b.type === 'activity' && b.progress).at(-1)?.text ?? '')
@@ -167,7 +181,8 @@
       <ToolActivity
         {tools}
         replyStatus={message.status}
-        blocks={message.blocks}
+        {blocks}
+        limited={!!limit}
         finalText={text}
         runId={message.runId}
         connectionId={author.connectionId}
@@ -254,7 +269,23 @@
         >
           <span></span><span></span><span></span><small>Making room for a good answer…</small>
         </div>{/if}
-      {#if message.error}<div class="message-error" role="status">
+      {#if limit}<div class="usage-limit" role="status">
+          <Hourglass size={15} aria-hidden="true" />
+          <div class="usage-limit-text">
+            <p>{limit.text}</p>
+            {#if message.status !== 'running' && limitResets(limit)}<p class="usage-limit-hint">
+                Send a message once the limit resets to continue.
+              </p>{/if}
+          </div>
+          {#if switchAccount}<button
+              type="button"
+              class="secondary"
+              title="Choose another account of this agent for the next message"
+              onclick={switchAccount}
+              ><ArrowRightLeft size={14} aria-hidden="true" />Switch account</button
+            >{/if}
+        </div>
+      {:else if message.error}<div class="message-error" role="status">
           <CircleAlert size={15} />{message.error}
         </div>{/if}
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
@@ -371,6 +402,45 @@
     margin: 2px 0;
     font-size: var(--text-base);
     color: var(--text);
+  }
+  /* The usage limit that stopped a reply follows its open Work history, in place of an error. */
+  .usage-limit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px 10px;
+    margin: 12px 0 4px;
+    padding: 10px 13px;
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius-lg);
+    background: var(--warning-soft);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+  }
+  .usage-limit > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--warning);
+  }
+  .usage-limit-text {
+    flex: 1 1 220px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .usage-limit-text p {
+    margin: 0;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .usage-limit-text .usage-limit-hint {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 400;
+  }
+  .usage-limit button {
+    margin-left: auto;
+    align-self: center;
   }
   .response-extras {
     display: flex;
