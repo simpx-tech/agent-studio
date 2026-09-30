@@ -270,6 +270,7 @@
     replyTimeTotals,
   } from '$lib/replies';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
+  import QuotaBars from '$lib/components/QuotaBars.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import BrandMark from '$lib/components/BrandMark.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
@@ -893,28 +894,54 @@
   );
   let agentPickerOpen = $state(false);
   // Opening the Agent picker checks the sign-in of the Claude and Codex accounts it lists on
-  // this computer. It also reads the usage of its Claude accounts, which renews each login and
-  // so finds one that expired since; readings are kept for a minute, so reopening stays cheap.
+  // this computer.
   $effect(() => {
     if (!agentPickerOpen) return;
     untrack(() => {
-      const listed = agentOptions.flatMap((option) =>
-        option.connectionId ? [option.connectionId] : [],
+      void recheckConnections(
+        agentOptions.flatMap((option) => (option.connectionId ? [option.connectionId] : [])),
       );
-      void recheckConnections(listed);
-      for (const id of listed) {
-        const connection = workspace.fleet.connections.find((c) => c.id === id);
-        if (
-          connection &&
-          executionHost(workspace.fleet, connection.environmentId) === installation?.id &&
-          workspace.fleet.accounts.some(
-            (a) => a.id === connection.accountId && a.provider === 'claude',
-          )
-        )
-          void refreshUsage({ provider: 'claude', model: '', connectionId: id });
-      }
     });
   });
+  // While open, it reads the usage of every account it lists that can be read, also one whose
+  // check finishes meanwhile, for the bars beside them. A reading renews a Claude login and so
+  // also finds one that expired since; readings are kept for a minute, so reopening stays cheap.
+  const readableAccounts = $derived(
+    agentPickerOpen
+      ? agentOptions.flatMap(({ provider, connectionId }) =>
+          connectionId && canQueryConnection(connectionId, provider)
+            ? [{ provider, connectionId }]
+            : [],
+        )
+      : [],
+  );
+  const readableAccountsKey = $derived(readableAccounts.map((a) => a.connectionId).join(' '));
+  $effect(() => {
+    const key = readableAccountsKey;
+    if (key)
+      untrack(() => {
+        for (const { provider, connectionId } of readableAccounts)
+          void refreshUsage({ provider, model: '', connectionId });
+      });
+  });
+  // A listed account's 5-hour and weekly usage, as the bars below the composer show it: while
+  // its first reading loads, and afterwards as last reported when it can no longer be read. An
+  // account to sign in to says so instead.
+  function listedUsage(id: string) {
+    const option = agentOptions.find((option) => option.id === id);
+    if (!option?.connectionId || option.attention) return undefined;
+    const settings = { provider: option.provider, model: '', connectionId: option.connectionId };
+    const key = usageKey(settings);
+    const snapshot = snapshotFor(usageSnapshots, settings);
+    const ready = canQueryConnection(option.connectionId, option.provider);
+    if (!snapshot && !ready) return undefined;
+    return {
+      provider: option.provider,
+      snapshot,
+      loading: !!usageLoading[key] || (ready && !snapshot && !usageErrors[key]),
+      failed: !!usageErrors[key] || !ready,
+    };
+  }
   // A chat's account connection, whether another computer runs it, and its reported status.
   function replyConnection(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
     const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
@@ -4832,6 +4859,9 @@
                   bind:open={agentPickerOpen}
                   value={selectedAgentOption}
                   options={agentOptions}
+                  width={agentPickerOpen && agentOptions.some((option) => listedUsage(option.id))
+                    ? 560
+                    : undefined}
                   fallbackToFirst={false}
                   placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                   disabled={!loaded ||
@@ -4842,6 +4872,9 @@
                   onchange={chooseAgent}
                 >
                   {#snippet icon()}<Bot size={16} />{/snippet}
+                  {#snippet optionAside(option)}{@const usage = listedUsage(option.id)}{#if usage}<QuotaBars
+                        {...usage}
+                      />{/if}{/snippet}
                 </ChoicePicker>
               </div>
               <div class="chat-setting model-setting">

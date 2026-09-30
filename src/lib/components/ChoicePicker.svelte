@@ -21,6 +21,8 @@
     placeholder,
     icon,
     optionMark,
+    optionAside,
+    width,
     disabled = false,
     field = false,
     fallbackToFirst = true,
@@ -38,6 +40,11 @@
     icon?: Snippet;
     /** Draws each option's mark in place of its text `mark`. */
     optionMark?: Snippet<[Option]>;
+    /** Draws more about each option beside its name, or below it in a narrow list, and
+     * describes the option with it. */
+    optionAside?: Snippet<[Option]>;
+    /** The list's width when that is wider than the trigger, within the viewport. */
+    width?: number;
     disabled?: boolean;
     field?: boolean;
     fallbackToFirst?: boolean;
@@ -213,11 +220,21 @@
   {/if}
 
   {#if open}
-    <div class="picker-popover" popover="manual" use:anchorPopover={anchor ?? trigger!}>
+    <div
+      class="picker-popover"
+      popover="manual"
+      use:anchorPopover={{ trigger: anchor ?? trigger!, width }}
+    >
       <div class="picker-heading" id={`${id}-label`}>
         {heading ?? `Choose ${label.toLowerCase()}`}
       </div>
-      <div id={`${id}-list`} role="listbox" aria-labelledby={`${id}-label`} class="picker-options">
+      <div
+        id={`${id}-list`}
+        role="listbox"
+        aria-labelledby={`${id}-label`}
+        class="picker-options"
+        class:with-aside={!!optionAside}
+      >
         {#if !options.length}<p class="picker-empty" role="status">{emptyMessage}</p>{/if}
         {#each options as option, index (option.id)}
           <button
@@ -230,6 +247,7 @@
             aria-label={option.attention && option.detail
               ? `${option.name}, ${option.detail}`
               : option.name}
+            aria-describedby={optionAside ? `${id}-option-${index}-aside` : undefined}
             title={option.title}
             tabindex="-1"
             onpointermove={() => (highlighted = index)}
@@ -250,6 +268,9 @@
                     />{/if}{option.detail}</span
                 >{/if}
             </span>
+            {#if optionAside}<span class="option-aside" id={`${id}-option-${index}-aside`}
+                >{@render optionAside(option)}</span
+              >{/if}
             <span class="option-check" aria-hidden="true">
               {#if option.id === value}<Check size={15} strokeWidth={2} />{/if}
             </span>
@@ -427,6 +448,42 @@
   .option-detail.attention > :global(svg) {
     margin-right: 4px;
     vertical-align: -2px;
+  }
+  /* What an option shows beside its name sits before the check mark, or below the name when
+     the list is too narrow for both. */
+  .picker-options.with-aside {
+    container-type: inline-size;
+  }
+  .with-aside .picker-option {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    row-gap: 6px;
+  }
+  .with-aside .option-copy {
+    grid-column: 2;
+  }
+  .option-aside {
+    grid-column: 3;
+    min-width: 0;
+  }
+  .option-aside:empty {
+    display: none;
+  }
+  .with-aside .option-check {
+    grid-column: 4;
+  }
+  @container (max-width: 459px) {
+    .with-aside .picker-option {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+    .option-aside {
+      grid-column: 2;
+      grid-row: 2;
+    }
+    .with-aside .option-check {
+      grid-column: 3;
+      grid-row: 1;
+    }
   }
   .option-check {
     display: flex;

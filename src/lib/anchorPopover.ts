@@ -1,6 +1,8 @@
 // A top-layer popover escapes the horizontally scrolling settings toolbar and
-// modal clipping, while remaining in the trigger's DOM/accessibility scope.
-export function anchorPopover(node: HTMLElement, trigger: HTMLElement) {
+// modal clipping, while remaining in the trigger's DOM/accessibility scope. It is as wide as
+// its trigger and at least `width`, within the viewport.
+type Anchor = { trigger: HTMLElement; width?: number };
+export function anchorPopover(node: HTMLElement, { trigger, width: least = 288 }: Anchor) {
   node.showPopover();
   const viewport = window.visualViewport;
   let frame = 0;
@@ -13,7 +15,7 @@ export function anchorPopover(node: HTMLElement, trigger: HTMLElement) {
     const height = viewport?.height ?? window.innerHeight;
     const margin = 8;
     const gap = 6;
-    const panelWidth = Math.min(Math.max(288, anchor.width), width - margin * 2);
+    const panelWidth = Math.min(Math.max(least, anchor.width), width - margin * 2);
     node.style.width = `${panelWidth}px`;
     const below = Math.max(0, top + height - margin - anchor.bottom - gap);
     const above = Math.max(0, anchor.top - gap - top - margin);
@@ -47,6 +49,10 @@ export function anchorPopover(node: HTMLElement, trigger: HTMLElement) {
   viewport?.addEventListener('resize', schedule);
   viewport?.addEventListener('scroll', schedule);
   return {
+    update(next: Anchor) {
+      least = next.width ?? 288;
+      schedule();
+    },
     destroy() {
       cancelAnimationFrame(frame);
       observer.disconnect();
