@@ -1,6 +1,6 @@
 {
   "name": "agent-studio",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A local workspace for your AI agents, powered by your existing CLI subscriptions.",
   "type": "module",
   "scripts": {

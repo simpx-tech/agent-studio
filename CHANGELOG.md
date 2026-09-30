@@ -5,6 +5,48 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.7.0 - 2026-09-30
+
+Sub-agents now open in a panel beside the chat, a chat's images and 3D models share one viewer, and
+the Agent picker shows each account's usage and sign-in, so you can see which account to use next.
+
+### Added
+
+- Open a sub-agent's conversation in a panel beside the chat: its task, its messages among its own
+  calls, the sub-agents it started and its result, kept whole however long. A running reply lists
+  its sub-agents in its footer, with what each one is doing
+- Show a chat's images and 3D models in one viewer that steps through all of them, with galleries
+  for images sent together, zoom and pan, and 3D models at full detail. Other devices turn a large
+  model through eight views of it
+- Show each account's 5-hour and weekly usage in the Agent picker, and mark the accounts that need
+  signing in; choosing one opens Connections at its Open sign-in
+- Keep a reply that hit a usage limit open where it stopped, with the provider's line (such as
+  "You've hit your session limit · resets 1:50pm") in a card instead of a failed answer, and Switch
+  account to carry on with another account
+- Send a message at once while a Claude reply only waits for background work: the message takes
+  the reply over instead of waiting in the queue
+- Go back to before a message with one click on Rewind here, which puts the message back in the
+  composer to edit or send again
+- Add a Jump to latest button, and glide down to a message you send from the end of a chat
+- Show how long a running reply has run in its sidebar row, and mark a chat whose Claude monitors
+  still run after its reply
+- Record every call of a reply, instead of only the first 200
+
+### Changed
+
+- Keep a chat's CLI process until you move the chat to History, delete it or quit, instead of
+  releasing it after fifteen idle minutes, so its next reply starts at once and its monitors keep
+  running
+
+### Fixed
+
+- Keep Open sign-in available while replies run, and say why when it cannot open
+- Keep a resumed sub-agent as one sub-agent, and stop showing one as failed because some of its
+  own calls failed
+- Open a chat at its end and keep following it, including replies that arrive from another device
+- Show the model's version once in the Model dropdown, and give CLI default a mark as wide as the
+  others
+
 ## 0.6.0 - 2026-09-28
 
 Closing the window now keeps Agent Studio running in the system tray, Claude Code and Codex keep
