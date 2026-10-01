@@ -92,16 +92,7 @@ export function mergeQuestions(left: QuestionRequest[] = [], right: QuestionRequ
   return result;
 }
 
-// A running reply waits for the user while one of its questions or MCP forms is pending.
-export function awaitingAnswer(message: {
-  questions?: { status: string }[];
-  elicitations?: { status: string }[];
-}) {
-  return !!(
-    message.questions?.some((q) => q.status === 'pending') ||
-    message.elicitations?.some((e) => e.status === 'pending')
-  );
-}
+export { awaitingAnswer } from './notifications.ts';
 
 // Replay actual user answers as data, never as another invocation of the tool.
 export function questionHistory(questions: QuestionRequest[] = []) {

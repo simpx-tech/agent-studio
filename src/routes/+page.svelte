@@ -4456,7 +4456,8 @@
         <span role="status" aria-live="polite" aria-label={`${pendingChats} pending chats`}>
           {#if pendingChats > 0}<span
               class="pending-chat-count"
-              title="Pending chats: active conversations that are not working">{pendingChats}</span
+              title="Pending chats: active conversations that are not working, or wait for your answer"
+              >{pendingChats}</span
             >{/if}
         </span>
       </span><button

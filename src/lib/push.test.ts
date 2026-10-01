@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import webpush from 'web-push';
-import { pushService, validPushEndpoint } from '../../relay/push';
+import { jobAwaitsAnswer, pushService, validPushEndpoint } from '../../relay/push';
 import { createRelay } from '../../relay/server';
 import { emptyShared, type RelayJob } from './sync';
 import type { Message } from './domain';
@@ -239,6 +239,37 @@ function runJob(
     args: { request: { runId: id, conversationId } },
   };
 }
+it('counts a remote reply as pending while its job reports a question waiting for an answer', () => {
+  const id = crypto.randomUUID();
+  const pending = {
+    kind: 'question',
+    question: {
+      id,
+      revision: 1,
+      status: 'pending',
+      questions: [{ id: 'q1', header: '', question: 'Which?', multiSelect: false, options: [] }],
+    },
+  };
+  const answered = {
+    kind: 'question',
+    question: {
+      ...pending.question,
+      revision: 2,
+      status: 'answered',
+      response: { requestId: id, answers: [{ id: 'q1', values: ['This'] }], skipped: false },
+    },
+  };
+  const chat = crypto.randomUUID();
+  expect(jobAwaitsAnswer(runJob(chat, 'running', [pending]))).toBe(true);
+  expect(jobAwaitsAnswer(runJob(chat, 'running', [answered]))).toBe(false);
+  expect(jobAwaitsAnswer(runJob(chat, 'running', []))).toBe(false);
+  expect(jobAwaitsAnswer(runJob(chat, 'complete', [pending]))).toBe(false);
+  expect(jobAwaitsAnswer({ ...runJob(chat, 'running', [pending]), method: 'usage' })).toBe(false);
+  // A malformed or another run's request waits for nothing.
+  expect(jobAwaitsAnswer(runJob(chat, 'running', [{ kind: 'question', question: {} }]))).toBe(
+    false,
+  );
+});
 it('notifies once for a finished local reply, never replays history, and persists identity/dedup across restart', async () => {
   const f = fixture();
   const running = workspace(),

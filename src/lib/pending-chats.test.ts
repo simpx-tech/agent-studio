@@ -27,6 +27,26 @@ it('counts all idle Active chats, including stopped and failed chats, independen
   expect(pendingChatCount(chats)).toBe(1);
   expect(pendingChatCount([])).toBe(0);
 });
+it('counts a running reply that waits for an answer to a question or an MCP form', () => {
+  const asking = chat('running');
+  const question = { status: 'pending' } as NonNullable<Message['questions']>[number];
+  asking.messages[0].questions = [question];
+  const form = chat('running');
+  form.messages[0].elicitations = [
+    { status: 'pending' } as NonNullable<Message['elicitations']>[number],
+  ];
+  const chats = [asking, form, chat('running'), chat('running', true)];
+  chats[3].messages[0].questions = [question];
+  expect(pendingChatCount(chats)).toBe(2);
+  // An answer sends the reply back to work.
+  asking.messages[0].questions = [{ ...question, status: 'answered' }];
+  form.messages[0].elicitations![0].status = 'accepted';
+  expect(pendingChatCount(chats)).toBe(0);
+  // A relay job that reports a waiting question is newer than the chat's checkpoint either way.
+  expect(pendingChatCount(chats, new Map([['run', 'waiting']]))).toBe(3);
+  asking.messages[0].questions = [question];
+  expect(pendingChatCount([asking], new Map([['run', 'running']]))).toBe(0);
+});
 it('uses a matching relay run result before its final checkpoint, never an unrelated job', () => {
   const chats = [chat('running'), chat('complete', true)];
   expect(pendingChatCount(chats, new Map([['other-run', 'complete']]))).toBe(0);

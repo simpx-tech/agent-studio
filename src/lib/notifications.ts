@@ -15,24 +15,33 @@ export type PushNotice = {
 export const noticeTitleLimit = 80;
 export const noticeBodyLimit = 180;
 
-// Pending means Active and not working. Reading/opening a chat is irrelevant.
-// The relay may know a run has ended before its final workspace checkpoint arrives.
+// Pending means Active and not working: idle, or waiting for your answer to a question or an
+// MCP form. Reading/opening a chat is irrelevant. The relay may know that a run has ended, or
+// waits for an answer (`waiting`), before its workspace checkpoint says so.
 export function pendingChatCount(
   conversations: readonly Pick<Conversation, 'archived' | 'messages'>[],
   runStatuses?: ReadonlyMap<string, string>,
 ): number {
   return conversations.filter(
-    (c) =>
-      !c.archived &&
-      !c.messages.some(
-        (m) =>
-          m.role === 'assistant' &&
-          m.status === 'running' &&
-          !['complete', 'cancelled', 'error'].includes(
-            runStatuses?.get(m.runId ?? '') ?? 'running',
-          ),
-      ),
+    (c) => !c.archived && !c.messages.some((m) => working(m, runStatuses)),
   ).length;
+}
+function working(m: Message, runStatuses?: ReadonlyMap<string, string>) {
+  if (m.role !== 'assistant' || m.status !== 'running') return false;
+  const run = runStatuses?.get(m.runId ?? '');
+  if (run) return !['complete', 'cancelled', 'error', 'waiting'].includes(run);
+  return !awaitingAnswer(m);
+}
+// A running reply waits for the user while one of its questions or MCP forms is pending.
+// Here rather than in questions.ts, which re-exports it, so the service worker stays small.
+export function awaitingAnswer(message: {
+  questions?: { status: string }[];
+  elicitations?: { status: string }[];
+}) {
+  return !!(
+    message.questions?.some((q) => q.status === 'pending') ||
+    message.elicitations?.some((e) => e.status === 'pending')
+  );
 }
 
 export async function applyAppBadge(

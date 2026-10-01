@@ -16,6 +16,7 @@ import type { Message } from '../src/lib/domain.ts';
 import { toolActivitySchema } from '../src/lib/activity.ts';
 import {
   attentionKeys,
+  awaitingAnswer,
   chatNotification,
   noticeBodyLimit,
   noticeTitleLimit,
@@ -25,6 +26,27 @@ import {
 import { questionRequestSchema, type QuestionRequest } from '../src/lib/questions.ts';
 import { elicitationReceiptSchema, type ElicitationReceipt } from '../src/lib/elicitations.ts';
 import { proposedPlanSchema, type ProposedPlan } from '../src/lib/proposed-plans.ts';
+
+/** The questions and MCP forms a run's job reports, newer than its conversation's checkpoint. */
+function jobRequests(job: RelayJob) {
+  const questions = job.events.flatMap((event) => {
+    const value = event as { kind?: string; question?: unknown };
+    const parsed = questionRequestSchema.safeParse(value?.question);
+    return value?.kind === 'question' && parsed.success ? [parsed.data] : [];
+  });
+  const elicitations = job.events.flatMap((event) => {
+    const value = event as { kind?: string; elicitation?: unknown };
+    const parsed = elicitationReceiptSchema.safeParse(value?.elicitation);
+    return value?.kind === 'elicitation' && parsed.success && parsed.data.runId === job.id
+      ? [parsed.data]
+      : [];
+  });
+  return { questions, elicitations };
+}
+/** A running reply's job waits for the user's answer, so its chat counts as pending. */
+export function jobAwaitsAnswer(job: RelayJob): boolean {
+  return job.method === 'run' && job.status === 'running' && awaitingAnswer(jobRequests(job));
+}
 
 const day = 24 * 60 * 60 * 1000;
 // A phone alert waits this long for the chat to be opened on a computer instead. A reply
@@ -485,18 +507,7 @@ export function pushService({
         .object({ runId: z.string().uuid(), conversationId: z.string().uuid() })
         .safeParse(job.args.request);
       if (!request.success || request.data.runId !== job.id) return;
-      const questions = job.events.flatMap((event) => {
-        const value = event as { kind?: string; question?: unknown };
-        const parsed = questionRequestSchema.safeParse(value?.question);
-        return value?.kind === 'question' && parsed.success ? [parsed.data] : [];
-      });
-      const elicitations = job.events.flatMap((event) => {
-        const value = event as { kind?: string; elicitation?: unknown };
-        const parsed = elicitationReceiptSchema.safeParse(value?.elicitation);
-        return value?.kind === 'elicitation' && parsed.success && parsed.data.runId === job.id
-          ? [parsed.data]
-          : [];
-      });
+      const { questions, elicitations } = jobRequests(job);
       const attention =
         questions.length || elicitations.length
           ? attentionKeys({ blocks: [], questions, elicitations }).length > 0

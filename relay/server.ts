@@ -19,7 +19,7 @@ import { serveDownloads } from './downloads.ts';
 import { siteIcons, siteOrigin, type SiteIcons } from './icons.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
-import { pushService, type PushSender } from './push.ts';
+import { jobAwaitsAnswer, pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
 import { answerSchema } from '../src/lib/questions.ts';
 import { elicitationInputSchema } from '../src/lib/elicitations.ts';
@@ -321,7 +321,7 @@ export function createRelay({
           new Map(
             [...jobs.values()]
               .filter((job) => job.method === 'run')
-              .map((job) => [job.id, job.status]),
+              .map((job) => [job.id, jobAwaitsAnswer(job) ? 'waiting' : job.status]),
           ),
         ),
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
