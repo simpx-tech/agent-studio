@@ -292,6 +292,23 @@ export async function mockDesktop(page: Page, mode = 'success') {
             return Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0)).buffer;
           }
           if (command === 'upload_chat_images') return [];
+          // Chats the CLIs saved on this computer: tests set `importSources`, `importListings`
+          // (by source id, a listing or an error message) and `importResults` (by key).
+          if (command === 'list_import_sources') return (window as any).importSources ?? [];
+          if (command === 'list_importable_chats') {
+            const listing = (window as any).importListings?.[args.source];
+            if (typeof listing === 'string') throw listing;
+            return listing ?? { source: args.source, chats: [] };
+          }
+          if (command === 'import_chat') {
+            const w = window as any;
+            (w.importCalls ??= []).push(args);
+            if (w.holdImport) await new Promise<void>((resolve) => (w.releaseImport = resolve));
+            const result = w.importResults?.[args.key];
+            if (typeof result === 'string') throw result;
+            if (!result) throw 'This list of chats is out of date. Refresh it and try again.';
+            return result;
+          }
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
           if (command === 'save_workspace') {

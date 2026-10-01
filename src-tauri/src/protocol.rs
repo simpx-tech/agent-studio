@@ -353,16 +353,20 @@ impl Decoder {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
-        let kind = string(&v, "/type");
+        self.decode_value(provider, &v)
+    }
+    /// A line already parsed, such as a record of a saved transcript.
+    pub fn decode_value(&mut self, provider: &str, v: &Value) -> Vec<RunEvent> {
+        let kind = string(v, "/type");
         let mut events: Vec<RunEvent> = self
             .tools
-            .decode(provider, &v)
+            .decode(provider, v)
             .into_iter()
             .map(|tool| RunEvent::Tool {
                 tool: Box::new(tool),
             })
             .collect();
-        if let Some(file_changes) = self.file_changes.decode(provider, &v) {
+        if let Some(file_changes) = self.file_changes.decode(provider, v) {
             events.push(RunEvent::FileChanges { file_changes });
         }
         // Child-agent text and usage belong to its activity, never the main reply.
@@ -370,17 +374,17 @@ impl Decoder {
             return events;
         }
         if provider == "claude" {
-            if let Some(compaction) = self.compactions.claude(&v) {
+            if let Some(compaction) = self.compactions.claude(v) {
                 if compaction.status == "complete" {
                     self.context_input = None;
                 }
                 events.push(RunEvent::Compaction { compaction });
             }
-            events.extend(self.reasoning.claude(&v, &self.current_message));
-            if let Some(native_workflows) = self.workflows.decode(&v) {
+            events.extend(self.reasoning.claude(v, &self.current_message));
+            if let Some(native_workflows) = self.workflows.decode(v) {
                 events.push(RunEvent::NativeWorkflow { native_workflows });
             }
-            if let Some(plan) = self.plan.claude(&v) {
+            if let Some(plan) = self.plan.claude(v) {
                 events.push(RunEvent::Plan { plan });
             }
         }
@@ -393,8 +397,8 @@ impl Decoder {
             self.context_input = input_with_cache(&v["message"]["usage"]);
             self.model = v["message"]["model"].as_str().map(String::from);
         }
-        if provider == "claude" && string(&v, "/event/content_block/type") == "tool_use" {
-            let name: String = string(&v, "/event/content_block/name")
+        if provider == "claude" && string(v, "/event/content_block/type") == "tool_use" {
+            let name: String = string(v, "/event/content_block/name")
                 .chars()
                 .filter(|c| !c.is_control())
                 .take(80)
@@ -415,7 +419,7 @@ impl Decoder {
                     }
                 }
                 "item.started" => {
-                    let activity = match string(&v, "/item/type").as_str() {
+                    let activity = match string(v, "/item/type").as_str() {
                         "command_execution" => Some("Running command"),
                         "file_change" => Some("Editing files"),
                         "mcp_tool_call" => Some("Using connected tool"),
@@ -427,9 +431,9 @@ impl Decoder {
                     }
                 }
                 "item.completed" | "item.updated" => {
-                    if string(&v, "/item/type") == "agent_message" {
-                        let id = string(&v, "/item/id");
-                        let text = string(&v, "/item/text");
+                    if string(v, "/item/type") == "agent_message" {
+                        let id = string(v, "/item/id");
+                        let text = string(v, "/item/text");
                         if let Some(item) = self.items.iter_mut().find(|i| i.0 == id) {
                             item.1 = text;
                         } else {
@@ -462,14 +466,14 @@ impl Decoder {
                         ..Default::default()
                     },
                 }),
-                "turn.failed" => self.failure = Some(string(&v, "/error/message")),
+                "turn.failed" => self.failure = Some(string(v, "/error/message")),
                 "error" => events.push(RunEvent::Activity {
                     text: "Provider reported an issue; waiting for the final outcome".into(),
                 }),
                 _ => {}
             },
             "claude" => match kind.as_str() {
-                "stream_event" if string(&v, "/event/type") == "message_start" => {
+                "stream_event" if string(v, "/event/type") == "message_start" => {
                     self.message_number += 1;
                     self.current_message = v["event"]["message"]["id"]
                         .as_str()
@@ -477,8 +481,8 @@ impl Decoder {
                         .unwrap_or_else(|| format!("claude-message-{}", self.message_number));
                     self.text.clear();
                 }
-                "stream_event" if string(&v, "/event/delta/type") == "text_delta" => {
-                    self.text.push_str(&string(&v, "/event/delta/text"));
+                "stream_event" if string(v, "/event/delta/type") == "text_delta" => {
+                    self.text.push_str(&string(v, "/event/delta/text"));
                     if let Some(event) =
                         self.progress_event(self.current_message.clone(), self.text.clone(), false)
                     {
@@ -486,7 +490,7 @@ impl Decoder {
                     }
                 }
                 "assistant" => {
-                    if let Some(text) = usage_limit::claude(&v) {
+                    if let Some(text) = usage_limit::claude(v) {
                         events.extend(self.limit_reached(text));
                     } else if let Some(blocks) = v["message"]["content"].as_array() {
                         let text = blocks
@@ -511,7 +515,7 @@ impl Decoder {
                     // A turn refused at a usage limit ends with Claude Code's line as its result,
                     // which is never the reply's answer.
                     let limited = self.usage_limit.as_ref().is_some_and(|limit| {
-                        usage_limit::line(&string(&v, "/result")).as_ref() == Some(&limit.text)
+                        usage_limit::line(&string(v, "/result")).as_ref() == Some(&limit.text)
                     });
                     if v["is_error"].as_bool().unwrap_or(false) || limited {
                         self.failure = Some(
@@ -526,7 +530,7 @@ impl Decoder {
                                 })
                                 .filter(|text| !text.is_empty())
                                 .unwrap_or_else(|| {
-                                    format!("{} {}", string(&v, "/subtype"), string(&v, "/result"))
+                                    format!("{} {}", string(v, "/subtype"), string(v, "/result"))
                                 }),
                         );
                     } else if self.expect_structured_output {
@@ -543,7 +547,7 @@ impl Decoder {
                             }
                         }
                     } else {
-                        let result = string(&v, "/result");
+                        let result = string(v, "/result");
                         if !result.is_empty() {
                             self.text = result;
                             events.push(RunEvent::Text {
@@ -588,19 +592,19 @@ impl Decoder {
                         },
                     });
                 }
-                "system" if string(&v, "/subtype") == "init" => events.push(RunEvent::Activity {
+                "system" if string(v, "/subtype") == "init" => events.push(RunEvent::Activity {
                     text: "Connected to Claude".into(),
                 }),
-                "system" if string(&v, "/subtype") == "api_retry" => {
+                "system" if string(v, "/subtype") == "api_retry" => {
                     events.push(RunEvent::Activity {
                         text: "Claude is retrying the request".into(),
                     })
                 }
                 _ => {}
             },
-            "gemini" => match string(&v, "/event").as_str() {
-                "step_update" if string(&v, "/step_update/step_type") == "agent_response" => {
-                    self.text.push_str(&string(&v, "/step_update/text_delta"));
+            "gemini" => match string(v, "/event").as_str() {
+                "step_update" if string(v, "/step_update/step_type") == "agent_response" => {
+                    self.text.push_str(&string(v, "/step_update/text_delta"));
                     events.push(RunEvent::Text {
                         text: self.text.clone(),
                     });
@@ -613,11 +617,11 @@ impl Decoder {
                     if v["result"]["status"] != "SUCCESS" {
                         self.failure = Some(format!(
                             "{} {}",
-                            string(&v, "/result/status"),
-                            string(&v, "/result/error")
+                            string(v, "/result/status"),
+                            string(v, "/result/error")
                         ));
                     } else {
-                        self.text = string(&v, "/result/response");
+                        self.text = string(v, "/result/response");
                         events.push(RunEvent::Text {
                             text: self.text.clone(),
                         });

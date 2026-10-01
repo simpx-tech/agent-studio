@@ -477,7 +477,23 @@ pub(crate) async fn execute(
                 .filter(|s| !s.resumed || s.switched_account)
             {
                 if let Some(channel) = &channel {
-                    if session.history_rewritten {
+                    if let Some(provider) = session.imported() {
+                        let app = if provider == "codex" {
+                            "Codex"
+                        } else {
+                            "Claude Code"
+                        };
+                        let text = if session.import_missing {
+                            format!("The {app} session this chat was imported from is no longer on this computer, so this reply continues from the imported messages. Earlier tool details are not carried over.")
+                        } else {
+                            format!("Continuing this imported chat from its {app} session, with its tool results and context. Agent Studio continues a copy, so the original stays as it was in {app}.")
+                        };
+                        let _ = channel.send(RunEvent::Progress {
+                            id: "studio-import".into(),
+                            revision: 1,
+                            text,
+                        });
+                    } else if session.history_rewritten {
                         if request.messages.len() > 1 {
                             let _ = channel.send(RunEvent::Progress { id: "studio-session-rewound".into(), revision: 1, text: "Starting a new native session from the retained messages after a rewind or file Undo. Earlier tool details and compacted context are not carried over.".into() });
                         }

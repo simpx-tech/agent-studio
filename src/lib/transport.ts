@@ -61,6 +61,14 @@ import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
+import {
+  importedChatSchema,
+  importSourceSchema,
+  sourceChatsSchema,
+  type ImportedChat,
+  type ImportSource,
+  type SourceChats,
+} from './imports';
 import { mcpActionSchema, type McpAction, type McpResult } from './mcp';
 import { pluginActionSchema, type PluginAction, type PluginResult } from './plugins';
 import {
@@ -2143,6 +2151,36 @@ export async function readNativeInstructions(
       connectionId: settings.connectionId,
     },
     settings.connectionId,
+  );
+}
+const importOnDesktop =
+  'Import chats in the desktop app on the computer that has them. The Viewer reads no CLI sessions.';
+/**
+ * The CLI session stores of this computer and its WSL distributions: each separate account
+ * profile and each environment's default CLI directory, which the terminal and the desktop apps
+ * share. Only the desktop app reads them.
+ */
+export async function listImportSources(): Promise<ImportSource[]> {
+  if (!desktop()) throw new Error(importOnDesktop);
+  return z.array(importSourceSchema).parse(await invoke('list_import_sources'));
+}
+/** One store's chats, newest first, each with an opaque key to import it by. */
+export async function listImportableChats(source: string): Promise<SourceChats> {
+  if (!desktop()) throw new Error(importOnDesktop);
+  return sourceChatsSchema.parse(await invoke('list_importable_chats', { source }));
+}
+/**
+ * Reads one listed chat whole for a new conversation; its images and tool results stay on this
+ * computer, and its first reply forks the chat's own session.
+ */
+export async function importChat(
+  key: string,
+  conversationId: string,
+  connectionId?: string,
+): Promise<ImportedChat> {
+  if (!desktop()) throw new Error(importOnDesktop);
+  return importedChatSchema.parse(
+    await invoke('import_chat', { key, conversationId, connectionId: connectionId ?? null }),
   );
 }
 /**

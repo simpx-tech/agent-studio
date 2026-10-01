@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import RewindDialog from '$lib/components/RewindDialog.svelte';
+  import ImportChats from '$lib/components/ImportChats.svelte';
   import UndoFilesDialog from '$lib/components/UndoFilesDialog.svelte';
   import {
     returnedDraft,
@@ -3018,6 +3019,36 @@
       )?.focus();
     });
   }
+  // Chats the Claude Code and Codex CLIs saved on this computer, imported into History.
+  let importOpen = $state(false);
+  function openImport() {
+    if (!desktop()) {
+      notice = 'Import chats in the desktop app on the computer that has them.';
+      return;
+    }
+    importOpen = true;
+  }
+  async function saveImported(conversation: Conversation) {
+    const session = workspaceSession;
+    if (!loaded) throw new Error('The workspace is still loading.');
+    workspace.conversations.push(conversation);
+    try {
+      await persistChat(conversation.id);
+    } catch (error) {
+      if (session === workspaceSession)
+        workspace.conversations = workspace.conversations.filter((c) => c.id !== conversation.id);
+      throw error;
+    }
+    if (session !== workspaceSession)
+      throw new Error('The workspace changed while this chat was imported.');
+  }
+  function openImported(id: string) {
+    const conversation = workspace.conversations.find((c) => c.id === id);
+    if (!conversation) return;
+    importOpen = false;
+    query = '';
+    openConversation(conversation);
+  }
   function openConversation(c: Conversation) {
     // Another chat opens at its end, however far up the reader was in this one.
     if (activeId !== c.id) nearBottom = true;
@@ -5268,6 +5299,7 @@
                   else if (name === 'undo') openUndoFiles();
                   else if (name === 'connections') view = 'connections';
                   else if (name === 'settings') view = 'settings';
+                  else if (name === 'import') openImport();
                   else if (name === 'new') {
                     const remaining = composerContent(),
                       from = composerDraftKey;
@@ -5429,6 +5461,7 @@
             'This computer'}
           claudeInstructions={workspace.claudeInstructions}
           {saveClaudeInstructions}
+          importChats={desktop() ? openImport : undefined}
         />
       {/key}
     {/if}
@@ -5524,6 +5557,16 @@
       close={closeConversationMenu}
       remove={requestScratchDiscard}
       removeLabel="Discard draft"
+    />
+  {/key}
+{/if}
+{#if importOpen}
+  {#key workspaceSession}
+    <ImportChats
+      fleet={workspace.fleet}
+      close={() => (importOpen = false)}
+      save={saveImported}
+      open={openImported}
     />
   {/key}
 {/if}

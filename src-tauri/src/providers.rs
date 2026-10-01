@@ -411,6 +411,20 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
     }
     s
 }
+/// The organization the selected profile's Claude login belongs to, as `claude auth status`
+/// reports it. The Claude desktop app files each account's Code sessions under it.
+pub(crate) async fn claude_organization() -> Option<String> {
+    let exe = resolve("claude").await.ok()?;
+    let status = output(&exe, &["auth", "status"]).await.ok()?;
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).ok()?;
+    if status["loggedIn"] != true {
+        return None;
+    }
+    status["orgId"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(String::from)
+}
 // `claude auth status` reports whether the selected configuration directory is signed in and,
 // when it is, the account email. Only that bounded identity is kept; tokens are never read.
 fn claude_login(status: &serde_json::Value) -> (bool, Option<String>) {
@@ -502,6 +516,7 @@ pub struct ChatMessage {
     pub visualizations: Vec<visualize::Visualization>,
 }
 mod images;
+pub(crate) use images::MAX_IMAGES_PER_MESSAGE;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.agent.fast_mode.is_some() || self.agent.fallback_model.is_some() {
@@ -771,6 +786,19 @@ impl RunRequest {
         format!("{}\n{context}", self.guidance())
     }
     pub fn guidance(&self) -> String {
+        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:", self.capabilities(true))
+    }
+    /// What a session that began in another app learns when it continues here. A Codex thread
+    /// keeps the tools it started with, so only Claude gains Agent Studio's own.
+    fn import_guidance(&self, provider: &str) -> String {
+        let app = if provider == "codex" {
+            "Codex"
+        } else {
+            "Claude Code"
+        };
+        format!("This conversation began in {app}, outside Agent Studio, and now continues in Agent Studio; the messages above are its history. {} Format your response with Markdown where useful.", self.capabilities(provider == "claude"))
+    }
+    fn capabilities(&self, studio_tools: bool) -> String {
         let tools = if self.tools_enabled() {
             "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. When delivering an HTML or SVG artifact, include its complete self-contained source in a fenced html or svg code block, optionally followed by a short title on the opening fence. Artifact previews support inline CSS and JavaScript, SVG and data images; they cannot load external scripts, styles, or network resources. Do not generate an artifact unless it serves the user's request. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
         } else {
@@ -793,7 +821,11 @@ impl RunRequest {
         } else {
             ""
         };
-        format!("You are having a conversation in Agent Studio. Answer the final user message using the earlier messages as context. {tools} {visuals} {files} {questions} Format your response with Markdown where useful. The following JSON contains your agent instructions and ordered conversation messages:")
+        if studio_tools {
+            format!("{tools} {visuals} {files} {questions}")
+        } else {
+            tools.to_string()
+        }
     }
     pub fn native_context(&self) -> Option<String> {
         let native = self.base_native_context();
@@ -820,6 +852,9 @@ impl RunRequest {
             Some(format!("{}\nThis is earlier context only. Answer the NEXT user message, not the history above.", history.prompt()))
         } else {
             let mut context = Vec::new();
+            if let Some(provider) = session.imported() {
+                context.push(self.import_guidance(provider));
+            }
             if session.instructions_changed {
                 context.push(format!("Current user instructions for this conversation (replace earlier conversation instructions): {}", serde_json::to_string(&self.agent.instructions).unwrap()));
             }

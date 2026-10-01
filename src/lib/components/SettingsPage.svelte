@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Download, ShieldCheck } from '@lucide/svelte';
+  import { Download, Import, ShieldCheck } from '@lucide/svelte';
   import AboutSettings from './AboutSettings.svelte';
   import AppUpdates from './AppUpdates.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
@@ -14,6 +14,7 @@
     paired,
     workspaceSession = 0,
     exportWorkspace,
+    importChats,
     appUpdate,
     restartToUpdate,
     cliUpdates,
@@ -25,6 +26,8 @@
     paired: boolean;
     workspaceSession?: number;
     exportWorkspace: () => Promise<void>;
+    /** Opens the chat importer; the desktop app only. */
+    importChats?: () => void;
     appUpdate?: AppUpdateStatus;
     restartToUpdate: () => Promise<void>;
     cliUpdates?: CliUpdateState;
@@ -91,10 +94,17 @@
           your workspace key can join it; the server administrator controls its storage.
           Conversation files and exports are plain text.
         </p>
+        {#if importChats}<p>
+            Import chats that Claude Code and Codex saved on this computer, from the terminal, the
+            desktop apps and each account's own profile.
+          </p>{/if}
         <div class="actions">
           <button class="secondary" disabled={busy} onclick={exportNow}
             ><Download size={14} />{busy ? 'Exporting…' : 'Export workspace'}</button
           >
+          {#if importChats}<button class="secondary" onclick={importChats}
+              ><Import size={14} />Import chats</button
+            >{/if}
         </div>
       </section>
       <AboutSettings />

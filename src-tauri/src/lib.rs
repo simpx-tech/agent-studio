@@ -7,6 +7,7 @@ mod cli_updates;
 mod context;
 mod drafts;
 mod folders;
+mod imports;
 mod live_usage;
 mod mcp;
 mod mentions;
@@ -102,6 +103,33 @@ async fn read_native_instructions(
     native_instructions::read(app, conversation_id, provider, connection_id).await
 }
 
+/// The CLI session stores of this computer and its WSL distributions: each separate account
+/// profile and each environment's default CLI directory, for importing their chats.
+#[tauri::command]
+async fn list_import_sources(app: tauri::AppHandle) -> Result<Vec<imports::SourceView>, String> {
+    imports::sources(&app).await
+}
+/// One source's chats, newest first, each with an opaque key to import it by.
+#[tauri::command]
+async fn list_importable_chats(
+    app: tauri::AppHandle,
+    catalog: State<'_, imports::Catalog>,
+    source: String,
+) -> Result<imports::SourceChats, String> {
+    imports::chats(&app, &catalog, &source).await
+}
+/// Reads one listed chat whole into a new conversation's messages; its first reply forks the
+/// chat's own session.
+#[tauri::command]
+async fn import_chat(
+    app: tauri::AppHandle,
+    catalog: State<'_, imports::Catalog>,
+    key: String,
+    conversation_id: String,
+    connection_id: Option<String>,
+) -> Result<imports::Imported, String> {
+    imports::import(&app, &catalog, &key, &conversation_id, connection_id).await
+}
 /// A finished tool call's result, kept on this computer by the run that made it: a preview
 /// of each stream, or all of it up to the full size when `full` is set.
 #[tauri::command]
@@ -1213,6 +1241,7 @@ pub fn run() {
         .manage(background_work::Registry::default())
         .manage(std::sync::Arc::new(tool_output::Pending::default()))
         .manage(tray::Tray::default())
+        .manage(imports::Catalog::default())
         .setup(|app| {
             tray::setup(app.handle());
             // Remove kept tool results of deleted chats and old runs once startup settles.
@@ -1337,6 +1366,9 @@ pub fn run() {
             manage_mcp,
             manage_plugins,
             read_native_instructions,
+            list_import_sources,
+            list_importable_chats,
+            import_chat,
             read_tool_output,
             read_tool_output_image,
             read_tool_output_model,

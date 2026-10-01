@@ -624,3 +624,135 @@ async fn installed_claude_shows_its_question_while_it_writes_it() {
         written.len()
     );
 }
+
+/// A session made outside Agent Studio, as the terminal makes one, continues in a chat imported
+/// from it: the first reply forks it with its context, and the original stays as it was.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity."]
+async fn installed_claude_continues_an_imported_session_as_a_fork() {
+    let folder = tempfile::tempdir().unwrap();
+    let source = uuid::Uuid::new_v4().to_string();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let made = exe
+        .command()
+        .current_dir(folder.path())
+        .args([
+            "-p",
+            "Remember the codeword HERON-4417 for later. Reply only OK.",
+            "--session-id",
+            &source,
+            "--model",
+            "haiku",
+        ])
+        .env_remove("CLAUDECODE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let profile = crate::context::native_profile_root("claude").await.unwrap();
+    let transcript = crate::native_instructions::find_record(&profile, "claude", &source)
+        .unwrap()
+        .expect("The terminal session was saved");
+    let original = std::fs::read(&transcript).unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),
+        "conversationId":uuid::Uuid::new_v4(),
+        "location":{"computerId":uuid::Uuid::new_v4(),"environmentId":uuid::Uuid::new_v4(),"path":folder.path()},
+        "agent":{"provider":"claude","model":"haiku","instructions":""},
+        "messages":[{"role":"user","text":"Remember the codeword HERON-4417 for later. Reply only OK."},
+            {"role":"assistant","text":"OK"},
+            {"role":"user","text":"What was the codeword? Reply with the codeword only."}]}))
+    .unwrap();
+    let conversation = request.conversation_id.clone().unwrap();
+    let record = crate::imports::Record {
+        version: 1,
+        source: crate::imports::Source {
+            provider: "claude".into(),
+            environment_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: None,
+        },
+        session: source.clone(),
+        imported_at: 1,
+        path: None,
+    };
+    crate::imports::write_record(root.path(), &conversation, &record).unwrap();
+    let mut session = crate::providers::sessions::Session::prepare(root.path(), &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.imported(), Some("claude"));
+    session
+        .fork_import(profile.clone(), profile.clone(), &request, record)
+        .await
+        .unwrap();
+    let fork = session.id().to_string();
+    assert_ne!(fork, source);
+    request.native_session = Some(session);
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process =
+        crate::pool::Process::new(exe, command.spawn().unwrap(), "import".into(), fork.clone())
+            .unwrap();
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    process.kill().await;
+    drop(channel);
+    while received.try_recv().is_ok() {}
+    let (status, text) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    assert!(text.contains("HERON-4417"), "{text}");
+    let bound: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join("native-sessions")
+                .join(format!("{conversation}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bound["id"],
+        fork.as_str(),
+        "The chat continues its own fork"
+    );
+    assert_eq!(
+        std::fs::read(&transcript).unwrap(),
+        original,
+        "The original is unchanged"
+    );
+    let forked = crate::native_instructions::find_record(&profile, "claude", &fork)
+        .unwrap()
+        .expect("The fork was saved in the profile");
+    eprintln!("Forked {source} into {fork}: {text}");
+    for path in [transcript, forked] {
+        std::fs::remove_file(path).unwrap();
+    }
+}
