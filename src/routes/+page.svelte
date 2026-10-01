@@ -166,6 +166,7 @@
     locationExecutionId,
     locationExecutionEnvironment,
     computerFolderEnvironments,
+    insideDistribution,
     folderName,
     ensureLocationConnections,
     ensureEnvironmentConnections,
@@ -2843,10 +2844,13 @@
       saveLocalSoon();
     }
   }
-  function preferredConnection(provider: ProviderId, location: ChatLocation) {
+  // On another computer a chat keeps its account when that account is connected there.
+  function preferredConnection(provider: ProviderId, location: ChatLocation, accountId?: string) {
     const candidates = locationConnections(workspace.fleet, location, provider);
     const remembered = workspace.preferences.connectionByProvider?.[provider];
+    const kept = accountId ? candidates.find((c) => c.accountId === accountId) : undefined;
     return (
+      kept?.id ??
       candidates.find((c) => c.id === remembered)?.id ??
       candidates.find((c) => c.profile === 'existing' && connectionStatus(c.id)?.installed)?.id ??
       candidates[0]?.id
@@ -2890,11 +2894,16 @@
       ...(provider === settings.provider ? settings : settingsFor(workspace.preferences, provider)),
       instructions: settings.instructions,
       outputSchema: provider === 'gemini' ? undefined : settings.outputSchema,
-      connectionId: preferredConnection(provider, location),
+      connectionId: preferredConnection(
+        provider,
+        location,
+        workspace.fleet.connections.find((c) => c.id === settings.connectionId)?.accountId,
+      ),
     };
   }
   async function chooseLocation(location: ChatLocation, verified = false) {
     if (active || activeRunning || selectingLocation) return;
+    location = insideDistribution(workspace.fleet, location);
     if (selectedLocation && locationKey(location) === locationKey(selectedLocation)) return;
     const generation = ++locationGeneration;
     const conversationId = activeId;

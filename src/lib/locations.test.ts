@@ -12,6 +12,7 @@ import {
   nextActiveConversation,
   rememberLocation,
   computerFolderEnvironments,
+  insideDistribution,
   scratchLocation,
   type LoginIdentity,
 } from './locations';
@@ -40,6 +41,21 @@ function fixture() {
   return { workspace, installation, location };
 }
 describe('computer and folder chat scope', () => {
+  it('runs a WSL folder chosen from the Windows computer inside its distribution', () => {
+    const { workspace, installation, location } = fixture();
+    const fromDesktop = { ...location, executionEnvironmentId: installation.id };
+    expect(insideDistribution(workspace.fleet, fromDesktop)).toEqual(location);
+    expect(insideDistribution(workspace.fleet, location)).toBe(location);
+    const windows = {
+      computerId: installation.computerId,
+      environmentId: installation.id,
+      path: 'C:\\work',
+    };
+    expect(insideDistribution(workspace.fleet, windows)).toBe(windows);
+    // Another computer's folder, or one of an environment no longer known, stays as it was chosen.
+    const unknown = { ...fromDesktop, environmentId: crypto.randomUUID() };
+    expect(insideDistribution(workspace.fleet, unknown)).toBe(unknown);
+  });
   it('uses the selected computer for the same WSL folder and preserves both routes across storage and sync', () => {
     const { workspace, installation, location } = fixture();
     const desktopFolder = { ...location, executionEnvironmentId: installation.id };

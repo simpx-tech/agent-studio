@@ -4,8 +4,8 @@
 // The QA identity sees the computer's CLI logins only; a signed-in Codex login is needed for the
 // continuation (IMPORTS_QA_CONTINUE=0 skips it). Afterwards the fork is archived in Codex and the QA
 // data folder, which holds copies of the imported chats, is removed. IMPORTS_QA_WSL=1 picks chats the
-// desktop apps ran in a WSL folder instead: they open on this computer with the distribution's
-// folder, and the Codex one continues with this computer's CLI through \\wsl.localhost.
+// desktop apps ran in a WSL folder instead, which open on that distribution in its folder, and
+// IMPORTS_QA_INSTALL=1 first installs Claude Code and Codex there through Connections.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -104,12 +104,60 @@ async function archiveCodex(threadId) {
   return !archived.error;
 }
 
+/**
+ * Installs, through Connections as a person would, each CLI the first WSL computer lacks. This
+ * installs Claude Code and Codex for the distribution's default user with their own installers.
+ */
+async function installInWsl(page) {
+  await page.button('Connections');
+  // The provider's card on the first WSL computer, read inside the page.
+  const read = (name) => {
+    const article = [...document.querySelectorAll('article.fleet-computer')]
+      .find((c) => c.getAttribute('aria-label')?.startsWith('WSL'))
+      ?.querySelector(`article[aria-label="${name} connections"]`);
+    return {
+      status: article?.querySelector('.installation-status')?.textContent ?? '',
+      error: article?.querySelector('.cli-install .sync-error')?.textContent.trim() ?? '',
+      path: article?.querySelector('.cli-location code')?.textContent ?? '',
+      add: [...(article?.querySelectorAll('.add-accounts button') ?? [])].map((b) =>
+        b.textContent.trim(),
+      ),
+    };
+  };
+  const card = (name) => page.evaluate(read, name);
+  for (const name of ['Claude', 'Codex']) {
+    const deadline = Date.now() + 60_000;
+    while (!/^(Installed|Not installed)$/.test((await card(name)).status)) {
+      assert(Date.now() < deadline, `${name} installation state never settled`);
+      await sleep(500);
+    }
+    if ((await card(name)).status === 'Installed') {
+      note('already installed in WSL', { name });
+      continue;
+    }
+    const started = Date.now();
+    await page.button(`Install ${name}`);
+    for (;;) {
+      const state = await card(name);
+      if (state.status === 'Installed' || state.error) break;
+      assert(Date.now() - started < 16 * 60_000, `${name} did not install in time`);
+      await sleep(1000);
+    }
+    const outcome = await card(name);
+    note('installed in WSL', { name, ms: Date.now() - started, ...outcome });
+    assert.equal(outcome.error, '');
+    assert.equal(outcome.status, 'Installed');
+  }
+  await shot(page, 'wsl-installed');
+}
+
 let page;
 let forked;
 try {
   launch();
   page = await open();
   note('opened');
+  if (wsl && process.env.IMPORTS_QA_INSTALL === '1') await installInWsl(page);
   // Every store, read the way the dialog reads it, with timings.
   const sources = await page.invoke('list_import_sources');
   const listings = [];
@@ -148,7 +196,8 @@ try {
           c.provider === provider &&
           c.origin === 'desktop' &&
           c.location &&
-          !c.unavailable &&
+          // An account not signed in inside the distribution still places the chat there.
+          (!c.unavailable || (wsl && c.unavailable.startsWith('Connect '))) &&
           !c.conversationId &&
           // Codex lists a thread it ran in WSL by the folder's \\wsl.localhost path.
           (wsl
@@ -178,22 +227,23 @@ try {
     ).length,
   });
   if (wsl) {
-    // A Windows app's WSL chat opens on this computer, with the distribution's folder.
+    // A Windows app's WSL chat runs inside the distribution, in its folder, with its CLI there.
     const fleet = (await page.invoke('load_workspace')).fleet;
     const environment = (id) => fleet.environments.find((e) => e.id === id);
     for (const chat of [claude, codex]) {
       const folder = environment(chat.location.environmentId);
-      const runs = environment(chat.location.executionEnvironmentId);
+      const runs = environment(chat.location.executionEnvironmentId ?? chat.location.environmentId);
       const account = fleet.connections.find((c) => c.id === chat.connectionId);
       note('placed', {
         provider: chat.provider,
         folder: folder?.platform,
         runs: runs?.platform,
         account: environment(account?.environmentId)?.platform,
+        unavailable: chat.unavailable ?? '',
       });
       assert.equal(folder?.platform, 'wsl');
-      assert.equal(runs?.platform, 'windows');
-      assert.equal(account?.environmentId, runs.id);
+      assert.equal(runs?.id, folder.id);
+      if (account) assert.equal(account.environmentId, runs.id);
     }
   }
 
@@ -295,7 +345,8 @@ try {
   note('tool result', { result });
 
   // Continue the Codex chat: its first reply forks the session and answers from its history.
-  if (process.env.IMPORTS_QA_CONTINUE !== '0') {
+  // A WSL chat continues only once an account is signed in inside the distribution.
+  if (process.env.IMPORTS_QA_CONTINUE !== '0' && !wsl) {
     await page.button('Settings');
     await page.button('Import chats');
     await waitLong(

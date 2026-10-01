@@ -213,14 +213,27 @@ export async function mockDesktop(page: Page, mode = 'success') {
                       mode !== 'wsl-empty' &&
                       !localStorage.getItem('test-wsl-missing')
                     ? '/usr/local/bin/codex'
-                    : null,
+                    : localStorage.getItem('test-wsl-installed-' + id)
+                      ? '/home/test/.local/bin/' + id
+                      : null,
             }));
+          // Installing a CLI in WSL: tests read `installCalls`, and `test-install-error` fails it.
+          if (command === 'install_cli') {
+            const w = window as any;
+            (w.installCalls ??= []).push(args);
+            if (w.holdInstall) await new Promise<void>((resolve) => (w.releaseInstall = resolve));
+            const failure = localStorage.getItem('test-install-error');
+            if (failure) throw failure;
+            localStorage.setItem('test-wsl-installed-' + args.provider, '1');
+            return '2.1.286';
+          }
           if (command === 'detect_environment_login') {
             const wsl = args.environmentId === '33333333-3333-4333-8333-333333333333';
             return {
               id: args.provider,
               installed:
                 !wsl ||
+                !!localStorage.getItem('test-wsl-installed-' + args.provider) ||
                 (args.provider === 'codex' &&
                   mode !== 'wsl-empty' &&
                   !localStorage.getItem('test-wsl-missing')),
@@ -251,6 +264,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
               installed:
                 !missing &&
                 (!wsl ||
+                  !!localStorage.getItem('test-wsl-installed-' + args.provider) ||
                   (args.provider === 'codex' &&
                     mode !== 'wsl-empty' &&
                     !localStorage.getItem('test-wsl-missing'))),
@@ -258,6 +272,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
               auth: missing
                 ? 'unknown'
                 : (localStorage.getItem(`test-auth-connection-${args.connectionId}`) ??
+                  (wsl ? localStorage.getItem(`test-auth-wsl-${args.provider}`) : null) ??
                   localStorage.getItem(`test-auth-${args.provider}`) ??
                   (mode === 'login-flow' &&
                   args.provider === 'gemini' &&

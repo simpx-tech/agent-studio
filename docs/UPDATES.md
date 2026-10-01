@@ -83,6 +83,15 @@ keeps both current itself (`src-tauri/src/cli_updates.rs`).
   process is replaced on its next reply because its launch identity includes the CLI file's size
   and modification time (see [native sessions](NATIVE-SESSIONS.md)); the new process resumes the
   native session. Parked WSL processes keep their version until they are released.
+- **Installing in WSL.** A WSL computer's card in Connections offers **Install** for a missing
+  Claude Code or Codex, since a chat in that distribution's folders runs with its own Linux CLI.
+  Only that click installs (`install_cli` in `src-tauri/src/cli_updates.rs`): the fixed
+  `wsl-install.sh` downloads the provider's own installer whole, then runs it non-interactively
+  for the distribution's default user, as their documentation says to (`claude.ai/install.sh`,
+  which verifies the build against its manifest; Codex's standalone `install.sh`, which checks
+  its archive's SHA-256). Both put the CLI in `~/.local/bin`, which the WSL lookup searches. One
+  install runs per CLI and distribution at a time, for at most fifteen minutes; a failure shows
+  the installer's own reason. The updates above then keep it current.
 
 ## Security
 

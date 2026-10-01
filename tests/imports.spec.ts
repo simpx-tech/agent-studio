@@ -257,12 +257,11 @@ test('keeps a chosen chat chosen when a newer copy of it arrives from another st
   await page.goto('/');
   const { claude } = await connections(page);
   // The Claude app keeps a chat it ran in WSL in the distribution and copies it here; both
-  // open on this computer with the distribution's folder.
+  // open on that distribution, in its folder.
   const wslEnvironmentId = '33333333-3333-4333-8333-333333333333';
   const location = {
     computerId,
     environmentId: wslEnvironmentId,
-    executionEnvironmentId: environmentId,
     path: '/home/me/olympus',
   };
   const copy = chat('Booking chat in React', {

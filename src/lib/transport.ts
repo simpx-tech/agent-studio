@@ -238,6 +238,17 @@ export const setCliAutoUpdate = async (
 /** Checks every Claude Code and Codex installation on this computer for an update now. */
 export const checkCliUpdates = async (): Promise<CliUpdates> =>
   cliUpdatesSchema.parse(await invoke('check_cli_updates'));
+/**
+ * Installs Claude Code or Codex inside one of this computer's WSL distributions with its
+ * provider's own installer, and returns the version it installed.
+ */
+export async function installCli(provider: UpdatedCli, environmentId: string): Promise<string> {
+  if (!desktop()) throw new Error('Install CLIs from Agent Studio on the computer that runs them.');
+  return z
+    .string()
+    .max(40)
+    .parse(await invoke('install_cli', { provider, environmentId }));
+}
 export async function watchCliUpdates(
   onChange: (updates: CliUpdates) => void,
 ): Promise<() => void> {

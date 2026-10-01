@@ -28,6 +28,8 @@ const TICK: Duration = Duration::from_secs(30 * 60);
 const CHECK_EVERY_MS: u64 = 6 * 60 * 60 * 1000;
 const RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// A first install downloads the whole CLI, about 240 MB for Claude Code.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: u64 = 64 * 1024;
 const MESSAGE_LIMIT: usize = 240;
@@ -145,6 +147,8 @@ struct Inner {
 pub struct CliUpdates {
     inner: Mutex<Inner>,
     checking: tokio::sync::Mutex<()>,
+    /// Installations under way, by provider and environment.
+    installing: Mutex<std::collections::BTreeSet<String>>,
 }
 impl CliUpdates {
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -717,6 +721,121 @@ pub async fn check_cli_updates(app: AppHandle) -> Result<Snapshot, String> {
     Ok(check(&app, true).await)
 }
 
+/// The version an installer run reported, from the launcher's last line.
+fn installed_version(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("agent-studio-installed "))
+        .and_then(parse_version)
+}
+
+/// Install Claude Code or Codex inside one of this computer's WSL distributions, where a chat in
+/// one of its folders runs, with the provider's own installer, as its documentation tells people
+/// to: Anthropic's `install.sh` and OpenAI's standalone Codex `install.sh`, each verifying the build
+/// it downloads into the default user's `~/.local/bin`. Only this explicit request installs;
+/// detection and update checks never do. Returns the installed version.
+#[tauri::command]
+pub async fn install_cli(
+    app: AppHandle,
+    provider: String,
+    environment_id: String,
+) -> Result<String, String> {
+    let Some(provider) = CLIS.iter().map(|(id, _)| *id).find(|id| *id == provider) else {
+        return Err("Agent Studio installs only Claude Code and Codex.".into());
+    };
+    let name = cli_name(provider);
+    let distribution = crate::folders::environment_distribution(&app, &environment_id)?
+        .ok_or("Agent Studio installs CLIs inside this computer's WSL distributions only.")?;
+    let state = app.state::<CliUpdates>();
+    let job = key(provider, &environment_id);
+    if !state
+        .installing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(job.clone())
+    {
+        return Err(format!("{name} is already being installed there."));
+    }
+    let result = install_in(provider, &distribution).await;
+    state
+        .installing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&job);
+    install_outcome(name, &result?)
+}
+
+/// The version an installer run installed, or why it did not install one.
+fn install_outcome(name: &str, output: &Output) -> Result<String, String> {
+    match installed_version(&output.text) {
+        Some(version) if output.success => Ok(version),
+        _ if output.success => Err(format!(
+            "{name} was installed, but it does not run in this distribution."
+        )),
+        _ => {
+            let reason = failure(&output.text, name);
+            Err(if reason == format!("{name} could not update.") {
+                format!("{name} could not be installed.")
+            } else {
+                reason
+            })
+        }
+    }
+}
+
+async fn install_in(provider: &'static str, distribution: &str) -> Result<Output, String> {
+    #[cfg(windows)]
+    {
+        let script = crate::wsl::embedded_script(&format!(
+            "{}\n{}",
+            include_str!("wsl-env.sh"),
+            include_str!("wsl-install.sh")
+        ));
+        let mut command = tokio::process::Command::new("wsl.exe");
+        command
+            .args([
+                "--distribution",
+                distribution,
+                "--cd",
+                "~",
+                "--exec",
+                "bash",
+                "-lc",
+                &script,
+                "agent-studio",
+                provider,
+            ])
+            .creation_flags(0x08000000)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let name = cli_name(provider);
+        let mut child = command
+            .spawn()
+            .map_err(|_| format!("Could not start WSL to install {name}."))?;
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let finished = tokio::time::timeout(INSTALL_TIMEOUT, async {
+            let (stdout, stderr) = tokio::join!(read(stdout), read(stderr));
+            (child.wait().await, stdout, stderr)
+        })
+        .await;
+        match finished {
+            Ok((Ok(status), stdout, stderr)) => Ok(Output {
+                success: status.success(),
+                text: plain(&format!("{stdout}\n{stderr}")),
+            }),
+            Ok((Err(_), ..)) => Err(format!("The {name} installer stopped unexpectedly.")),
+            Err(_) => Err(format!("The {name} installer did not finish in time.")),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (provider, distribution);
+        Err("CLIs are installed in WSL from its Windows computer.".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,6 +1098,49 @@ mod tests {
         }
         // A waiting update looks again on every half-hourly pass.
         assert!(due(Some(&status(Phase::Waiting, Some(10))), 10));
+    }
+
+    #[test]
+    fn an_install_reports_its_version_or_the_installers_reason() {
+        // What the launcher printed after Claude Code's installer on Ubuntu (2026-10-01).
+        let installed = ok(
+            true,
+            "Setting up Claude Code...\n\u{1b}[32m✔\u{1b}[0m Claude Code successfully installed!\n  Version: 2.1.287\n\n✅ Installation complete!\n\nagent-studio-installed 2.1.287 (Claude Code)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            install_outcome("Claude Code", &installed).as_deref(),
+            Ok("2.1.287")
+        );
+        let codex = ok(
+            true,
+            "==> Installing Codex CLI\nagent-studio-installed codex-cli 0.159.3\n",
+        )
+        .unwrap();
+        assert_eq!(install_outcome("Codex", &codex).as_deref(), Ok("0.159.3"));
+        // An installer that ended well but left nothing that runs.
+        let silent = ok(true, "✅ Installation complete!\nagent-studio-installed \n").unwrap();
+        assert_eq!(
+            install_outcome("Claude Code", &silent),
+            Err("Claude Code was installed, but it does not run in this distribution.".into())
+        );
+        let curl = ok(
+            false,
+            "curl is not installed in this distribution. Install it with its package manager, then try again.\n",
+        )
+        .unwrap();
+        assert!(install_outcome("Codex", &curl)
+            .unwrap_err()
+            .starts_with("curl is not installed"));
+        let checksum = ok(false, "Downloading...\nChecksum verification failed\n").unwrap();
+        assert_eq!(
+            install_outcome("Claude Code", &checksum),
+            Err("Checksum verification failed".into())
+        );
+        assert_eq!(
+            install_outcome("Codex", &ok(false, "").unwrap()),
+            Err("Codex could not be installed.".into())
+        );
     }
 
     #[test]

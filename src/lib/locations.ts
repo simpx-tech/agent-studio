@@ -45,6 +45,19 @@ export function locationExecutionEnvironment(fleet: Fleet, location: ChatLocatio
     ? execution
     : undefined;
 }
+/**
+ * Where a new chat in this folder runs: a folder inside a WSL distribution runs inside it, with
+ * that distribution's own CLI, as the Claude app runs one, so choosing it from the Windows
+ * computer moves the chat there. Other folders run where they were chosen.
+ */
+export function insideDistribution(fleet: Fleet, location: ChatLocation): ChatLocation {
+  if (locationExecutionId(location) === location.environmentId) return location;
+  const folder = fleet.environments.find((e) => e.id === location.environmentId);
+  if (folder?.platform !== 'wsl') return location;
+  const inside = { ...location };
+  delete inside.executionEnvironmentId;
+  return inside;
+}
 export function computerFolderEnvironments(fleet: Fleet, computerId: string) {
   const computer = computerViews(fleet).find((c) => c.id === computerId);
   if (!computer) return [];

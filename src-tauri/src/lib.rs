@@ -1340,6 +1340,7 @@ pub fn run() {
             cli_updates::cli_update_status,
             cli_updates::set_cli_auto_update,
             cli_updates::check_cli_updates,
+            cli_updates::install_cli,
             artifacts::save_artifact,
             site_icons::site_icon,
             app_session,

@@ -38,7 +38,7 @@
   import AccountUsage from './AccountUsage.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop, contextCache, type CliUpdates } from '$lib/transport';
+  import { desktop, contextCache, installCli, type CliUpdates } from '$lib/transport';
   import { cliUpdateSummary } from '$lib/cli-updates';
   let {
     workspace = $bindable(),
@@ -466,6 +466,92 @@
     if (!paired || !hosts.some((host) => host?.online)) return 'Offline';
     return hosts.some((host) => host?.online && host.running.length) ? 'Working' : 'Online';
   }
+  // CLIs installing in a WSL distribution, by environment and provider, and why the last attempt
+  // failed. An install never holds back the page's other actions.
+  let installing = $state<Record<string, boolean>>({});
+  let installErrors = $state<Record<string, string>>({});
+  const installKey = (environmentId: string, provider: ProviderId) =>
+    `${environmentId}:${provider}`;
+  function cliMissing(environmentId: string, provider: ProviderId) {
+    const inventory = cliInventories[environmentId];
+    return (
+      !inventory?.checking &&
+      !inventory?.error &&
+      !!inventory?.entries?.some((entry) => entry.id === provider && !entry.path)
+    );
+  }
+  async function install(environmentId: string, provider: ProviderId) {
+    const key = installKey(environmentId, provider);
+    if (installing[key] || provider === 'gemini') return;
+    installing[key] = true;
+    delete installErrors[key];
+    try {
+      await installCli(provider, environmentId);
+      await refresh();
+    } catch (e) {
+      installErrors[key] = String(e).replace(/^Error: /, '');
+    } finally {
+      delete installing[key];
+    }
+  }
+  // This agent's accounts on the Windows computer that manages a distribution, by a separate
+  // profile or a signed-in terminal login, and not yet in that distribution.
+  function accountsToAdd(environment: Environment, provider: ProviderId) {
+    const host = environment.discoveredOn;
+    if (!host || provider === 'gemini') return [];
+    return workspace.fleet.accounts.filter(
+      (account) =>
+        account.provider === provider &&
+        workspace.fleet.connections.some(
+          (c) =>
+            c.accountId === account.id &&
+            c.environmentId === host &&
+            (c.profile === 'isolated' || statuses[c.id]?.auth === 'ready'),
+        ) &&
+        !workspace.fleet.connections.some(
+          (c) => c.accountId === account.id && c.environmentId === environment.id,
+        ),
+    );
+  }
+  // Each account gets a separate profile of its own in the distribution, under the same name, and
+  // signs in there once: a login never moves between computers.
+  async function addAccounts(environment: Environment, provider: ProviderId) {
+    const accounts = accountsToAdd(environment, provider);
+    if (!accounts.length) return;
+    const created = accounts.map((account) => ({
+      id: crypto.randomUUID(),
+      environmentId: environment.id,
+      accountId: account.id,
+      profile: 'isolated' as const,
+    }));
+    workspace.fleet.connections.push(...created);
+    try {
+      await save();
+    } catch (e) {
+      workspace.fleet.connections = workspace.fleet.connections.filter(
+        (c) => !created.some((added) => added.id === c.id),
+      );
+      throw e;
+    }
+    for (const connection of created)
+      statuses[connection.id] = {
+        id: provider,
+        installed: true,
+        auth: 'login',
+        version: null,
+        detail: 'Sign in to use this account here.',
+      };
+  }
+  // The login an account's connection on the Windows computer reports, to sign the same account
+  // in inside one of its distributions.
+  function hostIdentity(connection: Connection) {
+    const environment = workspace.fleet.environments.find((e) => e.id === connection.environmentId);
+    if (!environment?.discoveredOn) return undefined;
+    const host = workspace.fleet.connections.find(
+      (c) => c.accountId === connection.accountId && c.environmentId === environment.discoveredOn,
+    );
+    return (host && statuses[host.id]?.account) || undefined;
+  }
   function inventoryLabel(environmentId: string, provider: ProviderId) {
     const inventory = cliInventories[environmentId];
     const entry = inventory?.entries?.find((entry) => entry.id === provider);
@@ -536,6 +622,12 @@
               class="connection-hint"
             >
               {statuses[connection.id].detail}
+            </p>{/if}
+          {#if statuses[connection.id]?.auth === 'login' && hostIdentity(connection)}<p
+              class="connection-hint"
+            >
+              Sign in as {hostIdentity(connection)}, the login this account uses on its Windows
+              computer.
             </p>{/if}
         </div>
         <AccountUsage
@@ -631,11 +723,11 @@
             </header>
             {#if computer.wsl}<p class="computer-hint">
                 Linux CLI installations in this distribution are shown below. Managed through {computer.hostName}.
-                Selecting this computer uses only its Linux CLI and login. Checking installations
-                can start WSL.
+                Chats in its folders run here, with only its Linux CLI and login. Checking
+                installations can start WSL.
               </p>{:else if local && installation?.platform === 'windows'}<p class="computer-hint">
-                Selecting this computer uses its Windows CLIs, including when you choose a WSL
-                folder.
+                Selecting this computer uses its Windows CLIs. Choosing a folder inside a WSL
+                distribution moves the chat to that distribution, which runs it with its own CLI.
               </p>{/if}
             {#if computer.id === ownComputer?.id && wslError}<p class="sync-error" role="alert">
                 {wslError}
@@ -714,6 +806,26 @@
                                       : 'Not updated automatically'}</span
                           >
                         </div>{/if}
+                      {#if cliEnvironment && computer.wsl && id !== 'gemini'}
+                        {@const key = installKey(cliEnvironment.id, id)}
+                        {#if cliMissing(cliEnvironment.id, id) || installing[key] || installErrors[key]}<div
+                            class="cli-install"
+                          >
+                            <p class:sync-error={!!installErrors[key]}>
+                              {installErrors[key] ||
+                                `Install ${providers[id].name} in ${computer.name} to run chats in its folders with its own Linux CLI. Its official installer downloads it.`}
+                            </p>
+                            <button
+                              class="secondary"
+                              disabled={!!installing[key] || !desktop()}
+                              onclick={() => install(cliEnvironment.id, id)}
+                              >{#if installing[key]}<LoaderCircle
+                                  size={13}
+                                  class="spinning"
+                                />Installing…{:else}Install {providers[id].name}{/if}</button
+                            >
+                          </div>{/if}
+                      {/if}
                     </div>
                     {#each accounts as account (account.id)}
                       {@render accountCard(account, computer.id)}
@@ -765,6 +877,25 @@
                       {:else}<p class="connection-hint remote-empty">
                           No account connected on this computer.
                         </p>{/if}{/each}
+                    {#if local && computer.wsl && cliEnvironment && cliInstalled(cliEnvironment.id, id)}
+                      {@const missing = accountsToAdd(cliEnvironment, id)}
+                      {#if missing.length}<div class="current-login add-accounts">
+                          <p>
+                            {missing.length === 1
+                              ? `${missing[0].name} is connected on ${computer.hostName} but not here yet. Add it to sign in here once.`
+                              : `${missing.length} of your ${providers[id].name} accounts on ${computer.hostName} are not here yet. Add them to sign each in here once.`}
+                            A login never moves between computers.
+                          </p>
+                          <button
+                            class="secondary"
+                            disabled={busy || !desktop()}
+                            onclick={() => action(() => addAccounts(cliEnvironment, id))}
+                            ><Plus size={14} />{missing.length === 1
+                              ? `Add ${missing[0].name} here`
+                              : `Add ${missing.length} accounts here`}</button
+                          >
+                        </div>{/if}
+                    {/if}
                   </article>
                 {/each}
               </div>
@@ -1249,6 +1380,26 @@
   .cli-location span {
     flex-shrink: 0;
   }
+  .cli-install {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px 14px 60px;
+  }
+  .cli-install p {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    line-height: var(--leading-normal);
+  }
+  .cli-install button {
+    flex-shrink: 0;
+  }
+  .add-accounts {
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
   .cli-location .cli-update {
     flex-shrink: 1;
     min-width: 0;
@@ -1683,6 +1834,10 @@
       justify-content: flex-end;
     }
     .cli-location {
+      padding-left: 16px;
+    }
+    .cli-install {
+      flex-wrap: wrap;
       padding-left: 16px;
     }
     .fleet-fields {

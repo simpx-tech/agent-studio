@@ -2295,7 +2295,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await expect(picker('Model').locator('.selected-name')).toHaveText('GPT-6 Astra');
 });
 
-test('Desktop uses its own Claude in a WSL folder and preserves that execution choice in history', async ({
+test('a WSL folder chosen on Desktop runs inside its distribution, and older Desktop chats keep their CLI', async ({
   page,
 }) => {
   await mockDesktop(page, 'computer-routing');
@@ -2305,50 +2305,69 @@ test('Desktop uses its own Claude in a WSL folder and preserves that execution c
   await pick(page, 'Folder environment', 'WSL · Ubuntu');
   await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await pick(page, 'Agent', 'Claude');
-  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Claude');
+  // As the Claude app does, the distribution runs a chat in its own folder with its own CLI.
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText(
+    'WSL · Ubuntu',
+  );
   await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
     'title',
     '/home/test/studio',
   );
-  await page
-    .getByLabel('Message', { exact: true })
-    .fill('Use my Windows Claude in this WSL project');
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Codex');
+  await page.getByLabel('Message', { exact: true }).fill('Run inside the WSL project');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
-  await expect(page.locator('.setup-hint')).toHaveCount(0);
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
-  expect(request.agent.provider).toBe('claude');
+  expect(request.agent.provider).toBe('codex');
   expect(request.location).toMatchObject({
+    environmentId: '33333333-3333-4333-8333-333333333333',
+    path: '/home/test/studio',
+  });
+  expect(request.location.executionEnvironmentId).toBeUndefined();
+  let saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  const provider = (accountId: string) =>
+    saved.fleet.accounts.find((a: any) => a.id === accountId)?.provider;
+  expect(
+    saved.fleet.connections.find((c: any) => c.id === saved.conversations[0].settings.connectionId)
+      .environmentId,
+  ).toBe('33333333-3333-4333-8333-333333333333');
+  // A chat an earlier release ran from Desktop in that folder keeps Desktop and its Windows CLI.
+  const windowsCodex = saved.fleet.connections.find(
+    (c: any) =>
+      c.environmentId === '11111111-1111-4111-8111-111111111111' && provider(c.accountId) === 'codex',
+  );
+  await page.evaluate((connectionId) => {
+    const workspace = JSON.parse(localStorage.getItem('test-workspace')!);
+    const chat = workspace.conversations[0];
+    chat.location.executionEnvironmentId = '11111111-1111-4111-8111-111111111111';
+    chat.settings.connectionId = connectionId;
+    for (const message of chat.messages)
+      if (message.settings) message.settings.connectionId = connectionId;
+    localStorage.setItem('test-workspace', JSON.stringify(workspace));
+  }, windowsCodex.id);
+  await page.reload();
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.getByRole('button', { name: 'Run inside the WSL project', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
+  await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
+    'title',
+    '/home/test/studio',
+  );
+  for (const name of ['Computer', 'Folder', 'Agent'])
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
+  await page.getByLabel('Message', { exact: true }).fill('Keep going from Desktop');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  const older = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(older.location).toMatchObject({
     environmentId: '33333333-3333-4333-8333-333333333333',
     executionEnvironmentId: '11111111-1111-4111-8111-111111111111',
     path: '/home/test/studio',
   });
-  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText('Desktop');
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
-  const connection = saved.fleet.connections.find(
-    (c: any) => c.id === saved.conversations[0].settings.connectionId,
-  );
-  expect(connection.environmentId).toBe('11111111-1111-4111-8111-111111111111');
-  await page.reload();
-  await page.getByRole('tab', { name: /^History/ }).click();
-  await page
-    .getByRole('button', { name: 'Use my Windows Claude in this WSL project', exact: true })
-    .click();
-  for (const name of ['Computer', 'Folder', 'Agent'])
-    await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
-  await page
-    .getByRole('button', { name: 'New conversation in studio on Desktop', exact: true })
-    .click();
-  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText('Claude');
-  await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
-    'title',
-    '/home/test/studio',
-  );
-  await page.getByLabel('Message', { exact: true }).fill('Another WSL draft');
-  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
-  await expect(page.locator('.setup-hint')).toHaveCount(0);
+  saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  expect(saved.conversations[0].settings.connectionId).toBe(windowsCodex.id);
 });
 
 test('a WSL computer without installed CLIs has an empty Agent dropdown', async ({ page }) => {
