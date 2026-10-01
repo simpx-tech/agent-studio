@@ -337,7 +337,7 @@ pub(crate) async fn execute(
                 location.path.clone()
             } else {
                 let (_, _, _, fallback) = crate::context::wsl_paths(
-                    wsl,
+                    &wsl.distribution,
                     &crate::profiles::current(),
                     &request.agent.provider,
                 )

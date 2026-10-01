@@ -7,6 +7,7 @@ import {
   importedConversation,
   importableChatSchema,
   matchesSearch,
+  newerCopy,
   originName,
   pickerModel,
   type ImportedChat,
@@ -224,5 +225,25 @@ describe('imported chats', () => {
     expect(matchesSearch(older, '  ')).toBe(true);
     expect(originName('claude', 'desktop')).toBe('Claude app');
     expect(originName('codex', 'exec')).toBe('codex exec');
+  });
+
+  it('keeps the newest copy of a session, and of copies as new the longest', () => {
+    const copy = (updatedAt: string, bytes?: number) =>
+      importableChatSchema.parse({
+        key: crypto.randomUUID().replaceAll('-', ''),
+        session: 'a'.repeat(32),
+        title: 'Booking chat',
+        path: '/home/me/olympus',
+        updatedAt,
+        origin: 'desktop',
+        ...(bytes === undefined ? {} : { bytes }),
+      });
+    // The Claude app's copy of a WSL chat, behind the transcript the distribution keeps.
+    const here = copy('2026-09-30T22:45:12Z', 9_000);
+    expect(newerCopy(copy('2026-10-01T15:04:21Z', 8_000), here)).toBe(true);
+    expect(newerCopy(copy('2026-09-30T22:45:12Z', 10_000), here)).toBe(true);
+    expect(newerCopy(copy('2026-09-30T22:45:12Z', 9_000), here)).toBe(false);
+    expect(newerCopy(copy('2026-09-29T10:00:00Z', 90_000), here)).toBe(false);
+    expect(newerCopy(copy('2026-09-30T22:45:12Z'), here)).toBe(false);
   });
 });

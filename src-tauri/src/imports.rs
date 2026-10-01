@@ -232,7 +232,7 @@ pub(crate) fn source_profile(
     }
 }
 
-/// The directory a source's sessions live in.
+/// The directory a source's sessions live in, found without its CLI.
 pub(crate) async fn source_root(
     app: &tauri::AppHandle,
     source: &Source,
@@ -240,7 +240,7 @@ pub(crate) async fn source_root(
     let profile = source_profile(app, source)?;
     let provider = source.provider.clone();
     crate::profiles::scope(profile, async move {
-        crate::context::native_profile_root(&provider).await
+        crate::context::profile_store(&provider).await
     })
     .await
 }
@@ -252,6 +252,7 @@ struct Entry {
     path: Option<PathBuf>,
     cwd: String,
     account: Option<String>,
+    maker: Maker,
 }
 
 /// Listings and the keys they handed out, for this run of the app.
@@ -260,6 +261,8 @@ pub struct Catalog {
     entries: Mutex<HashMap<String, Entry>>,
     summaries: Mutex<HashMap<PathBuf, (u64, u128, claude::Summary)>>,
     organizations: Mutex<HashMap<String, (std::time::Instant, Option<String>)>>,
+    /// Held while accounts report their organizations, so listings read together ask once.
+    checking: tokio::sync::Mutex<()>,
 }
 impl Default for Catalog {
     fn default() -> Self {
@@ -268,6 +271,7 @@ impl Default for Catalog {
             entries: Mutex::default(),
             summaries: Mutex::default(),
             organizations: Mutex::default(),
+            checking: tokio::sync::Mutex::default(),
         }
     }
 }
@@ -374,7 +378,14 @@ fn managed_environments(fleet: &Value, local: &str) -> Vec<Value> {
         .collect()
 }
 
-fn sources_in(fleet: &Value, local: &str, default_exists: &dyn Fn(&str) -> bool) -> Vec<Source> {
+/// `default_exists(provider, distribution)` says whether an environment's default CLI directory
+/// holds chats without an account connected there: this computer's (no distribution), or a
+/// distribution's that a Windows app ran chats in.
+fn sources_in(
+    fleet: &Value,
+    local: &str,
+    default_exists: &dyn Fn(&str, Option<&str>) -> bool,
+) -> Vec<Source> {
     let mut sources = vec![];
     for provider in ["claude", "codex"] {
         for environment in managed_environments(fleet, local) {
@@ -385,7 +396,12 @@ fn sources_in(fleet: &Value, local: &str, default_exists: &dyn Fn(&str) -> bool)
                         && connection_provider(fleet, c) == Some(provider)
                 })
                 .collect();
-            if !connections.is_empty() || (environment_id == local && default_exists(provider)) {
+            let distribution = environment["distribution"].as_str();
+            if !connections.is_empty()
+                || (environment_id == local && default_exists(provider, None))
+                || (environment_id != local
+                    && distribution.is_some_and(|d| default_exists(provider, Some(d))))
+            {
                 sources.push(Source {
                     provider: provider.into(),
                     environment_id: environment_id.into(),
@@ -408,7 +424,11 @@ fn sources_in(fleet: &Value, local: &str, default_exists: &dyn Fn(&str) -> bool)
     sources
 }
 
-fn default_exists(provider: &str) -> bool {
+fn default_exists(provider: &str, distribution: Option<&str>) -> bool {
+    if let Some(distribution) = distribution {
+        // The Claude desktop app keeps the chats it ran in WSL in the distribution's own directory.
+        return provider == "claude" && claude::desktop_distributions().contains(distribution);
+    }
     let variable = if provider == "codex" {
         "CODEX_HOME"
     } else {
@@ -433,11 +453,20 @@ fn default_exists(provider: &str) -> bool {
     })
 }
 
+/// The sources of this computer and its WSL distributions, read off the async runtime.
+async fn current_sources(fleet: &Value, local: &str) -> Result<Vec<Source>, String> {
+    let (fleet, local) = (fleet.clone(), local.to_string());
+    tauri::async_runtime::spawn_blocking(move || sources_in(&fleet, &local, &default_exists))
+        .await
+        .map_err(|_| "Cannot find this computer's chats".into())
+}
+
 /// The sources of this computer and its WSL distributions.
 pub async fn sources(app: &tauri::AppHandle) -> Result<Vec<SourceView>, String> {
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    Ok(sources_in(&fleet, &local.id, &default_exists)
+    Ok(current_sources(&fleet, &local.id)
+        .await?
         .into_iter()
         .map(|source| SourceView {
             id: source.id(),
@@ -448,10 +477,12 @@ pub async fn sources(app: &tauri::AppHandle) -> Result<Vec<SourceView>, String> 
         .collect())
 }
 
-/// Sessions already in this workspace: bound to a conversation's native session, or imported.
+/// Sessions already in this workspace: bound to a conversation's native session, or imported
+/// from any copy of the session (the desktop app keeps a WSL chat in two places).
 #[derive(Default)]
 struct Known {
     bound: HashMap<String, String>,
+    /// By provider and session.
     imported: HashMap<(String, String), String>,
 }
 impl Known {
@@ -494,13 +525,16 @@ impl Known {
             if let Ok(Some(record)) = record(root, &conversation) {
                 known
                     .imported
-                    .insert((record.source.id(), record.session), conversation);
+                    .insert((record.source.provider, record.session), conversation);
             }
         }
         known
     }
-    fn conversation(&self, source: &Source, session: &str) -> (Option<String>, bool) {
-        if let Some(conversation) = self.imported.get(&(source.id(), session.to_string())) {
+    fn conversation(&self, provider: &str, session: &str) -> (Option<String>, bool) {
+        if let Some(conversation) = self
+            .imported
+            .get(&(provider.to_string(), session.to_string()))
+        {
             return (Some(conversation.clone()), true);
         }
         (self.bound.get(session).cloned(), false)
@@ -542,6 +576,32 @@ fn share_path(distribution: &str, linux: &str) -> PathBuf {
     ))
 }
 
+/// The Windows folder of a path on a drive WSL mounts: `/mnt/c/Users` is `C:\Users`.
+fn mounted_drive(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/mnt/")?;
+    let mut chars = rest.chars();
+    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+    let folder = chars.as_str();
+    if !(folder.is_empty() || folder.starts_with('/')) {
+        return None;
+    }
+    Some(format!(
+        "{}:\\{}",
+        drive.to_ascii_uppercase(),
+        folder.trim_start_matches('/').replace('/', "\\")
+    ))
+}
+
+/// What a listing knows of the app that made a chat, beyond its folder.
+#[derive(Clone, Debug, Default)]
+struct Maker {
+    /// A Windows desktop app made the chat, so this computer's own CLI continues it, even when a
+    /// WSL distribution keeps its transcript.
+    windows_app: bool,
+    /// The WSL distribution that app recorded for a Linux folder.
+    distribution: Option<String>,
+}
+
 #[derive(Clone)]
 struct Placement {
     location: Value,
@@ -550,8 +610,10 @@ struct Placement {
     missing: bool,
 }
 
-/// Where imported chats open: the folder each session ran in, on the computer and environment
-/// that hold it. Chats recorded in WSL by a Windows app open on that distribution.
+/// Where imported chats open. The computer only decides which CLI continues a chat: the one of
+/// the computer whose app or CLI made it. Its folder stays where it ran, so a Windows app's chat
+/// in a WSL folder continues with this computer's CLI, which reaches the folder through
+/// `\\wsl.localhost` while the location keeps its Linux path.
 struct Places<'a> {
     fleet: &'a Value,
     local: &'a str,
@@ -577,68 +639,77 @@ impl<'a> Places<'a> {
     fn environment(&self, id: &str) -> Option<&Value> {
         list(self.fleet, "environments").find(|e| e["id"] == id)
     }
-    fn wsl(&self) -> Vec<&Value> {
+    /// The distributions this computer manages.
+    fn distributions(&self) -> Vec<String> {
         list(self.fleet, "environments")
             .filter(|e| e["platform"] == "wsl" && e["discoveredOn"] == self.local)
+            .filter_map(|e| e["distribution"].as_str().map(String::from))
             .collect()
     }
-    fn place(&mut self, source: &str, cwd: &str) -> Option<Placement> {
+    fn place(&mut self, source: &str, cwd: &str, maker: &Maker) -> Option<Placement> {
         let environment = self.environment(source)?.clone();
-        let computer = environment["computerId"].as_str()?.to_string();
         if cwd.is_empty() || cwd.len() > 4096 || cwd.chars().any(char::is_control) {
             return None;
         }
         if source == self.local {
-            if let Some((distribution, linux)) = wsl_share(cwd) {
-                let wsl = self
-                    .wsl()
-                    .into_iter()
-                    .find(|e| e["distribution"] == distribution.as_str())?
-                    .clone();
-                return Some(Placement {
-                    location: json!({"computerId":wsl["computerId"],"environmentId":wsl["id"],"executionEnvironmentId":self.local,"path":linux}),
-                    execution: self.local.to_string(),
-                    missing: !self.exists(PathBuf::from(cwd)),
-                });
-            }
-            if windows_absolute(cwd) {
-                return Some(Placement {
-                    location: json!({"computerId":computer,"environmentId":self.local,"path":cwd}),
-                    execution: self.local.to_string(),
-                    missing: !self.exists(PathBuf::from(cwd)),
-                });
-            }
-            if cwd.starts_with('/') {
-                // A Windows app ran this chat in a Linux folder, through WSL or a remote
-                // connection: it opens on the distribution that has the folder.
-                let candidates: Vec<Value> = self.wsl().into_iter().cloned().collect();
-                for wsl in &candidates {
-                    let distribution = wsl["distribution"].as_str().unwrap_or_default();
-                    if self.exists(share_path(distribution, cwd)) {
-                        return Some(Placement {
-                            location: json!({"computerId":wsl["computerId"],"environmentId":wsl["id"],"path":cwd}),
-                            execution: wsl["id"].as_str().unwrap_or_default().to_string(),
-                            missing: false,
-                        });
-                    }
-                }
-                let wsl = candidates.first()?;
-                return Some(Placement {
-                    location: json!({"computerId":wsl["computerId"],"environmentId":wsl["id"],"path":cwd}),
-                    execution: wsl["id"].as_str().unwrap_or_default().to_string(),
-                    missing: true,
-                });
-            }
+            return self.here(cwd, maker.distribution.as_deref());
+        }
+        let distribution = environment["distribution"].as_str()?.to_string();
+        if !cwd.starts_with('/') {
             return None;
+        }
+        if maker.windows_app && environment["discoveredOn"] == self.local {
+            return self.here(cwd, Some(&distribution));
+        }
+        Some(Placement {
+            location: json!({"computerId":environment["computerId"].as_str()?,"environmentId":source,"path":cwd}),
+            execution: source.to_string(),
+            missing: !self.exists(share_path(&distribution, cwd)),
+        })
+    }
+    /// A chat this computer's own CLI continues, in a Windows folder or a WSL distribution's: the
+    /// one the app recorded, or else the one that has the folder.
+    fn here(&mut self, cwd: &str, named: Option<&str>) -> Option<Placement> {
+        let computer = self.environment(self.local)?["computerId"]
+            .as_str()?
+            .to_string();
+        if let Some((distribution, linux)) = wsl_share(cwd) {
+            let missing = !self.exists(PathBuf::from(cwd));
+            return self.in_wsl(&distribution, &linux, missing);
+        }
+        let windows = mounted_drive(cwd).or_else(|| windows_absolute(cwd).then(|| cwd.to_string()));
+        if let Some(path) = windows {
+            return Some(Placement {
+                missing: !self.exists(PathBuf::from(&path)),
+                location: json!({"computerId":computer,"environmentId":self.local,"path":path}),
+                execution: self.local.to_string(),
+            });
         }
         if !cwd.starts_with('/') {
             return None;
         }
-        let distribution = environment["distribution"].as_str()?.to_string();
+        let distributions = self.distributions();
+        if let Some(named) = named.filter(|named| distributions.iter().any(|d| d == named)) {
+            let missing = !self.exists(share_path(named, cwd));
+            return self.in_wsl(named, cwd, missing);
+        }
+        for distribution in &distributions {
+            if self.exists(share_path(distribution, cwd)) {
+                return self.in_wsl(distribution, cwd, false);
+            }
+        }
+        self.in_wsl(distributions.first()?, cwd, true)
+    }
+    fn in_wsl(&self, distribution: &str, linux: &str, missing: bool) -> Option<Placement> {
+        let wsl = list(self.fleet, "environments").find(|e| {
+            e["platform"] == "wsl"
+                && e["discoveredOn"] == self.local
+                && e["distribution"] == distribution
+        })?;
         Some(Placement {
-            location: json!({"computerId":computer,"environmentId":source,"path":cwd}),
-            execution: source.to_string(),
-            missing: !self.exists(share_path(&distribution, cwd)),
+            location: json!({"computerId":wsl["computerId"],"environmentId":wsl["id"],"executionEnvironmentId":self.local,"path":linux}),
+            execution: self.local.to_string(),
+            missing,
         })
     }
 }
@@ -756,6 +827,7 @@ async fn organizations(
         })
         .filter_map(|c| Some((c["id"].as_str()?.into(), c["accountId"].as_str()?.into())))
         .collect();
+    let _checking = catalog.checking.lock().await;
     let mut found = HashMap::new();
     let mut checks = vec![];
     for (connection, account) in connections {
@@ -805,7 +877,7 @@ pub async fn chats(
     let source = Source::parse(source_id).ok_or("Unknown chat source")?;
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    if !sources_in(&fleet, &local.id, &default_exists).contains(&source) {
+    if !current_sources(&fleet, &local.id).await?.contains(&source) {
         return Err("This chat source is no longer on this computer".into());
     }
     let root = source_root(app, &source).await?;
@@ -813,9 +885,9 @@ pub async fn chats(
     let known = tauri::async_runtime::spawn_blocking(move || Known::read(&data))
         .await
         .map_err(|_| "Cannot read this workspace's chats")?;
-    let default_desktop = source.provider == "claude"
-        && source.connection_id.is_none()
-        && source.environment_id == local.id;
+    // The desktop app's chats are in an environment's default directory: this computer's, or a
+    // WSL distribution's for the chats it ran there.
+    let desktop_store = source.provider == "claude" && source.connection_id.is_none();
     let (sessions, truncated) = if source.provider == "claude" {
         let cached: HashMap<PathBuf, (u64, u128, claude::Summary)> = catalog
             .summaries
@@ -847,7 +919,7 @@ pub async fn chats(
                 cache.insert(path.clone(), (*bytes, *modified, summary.clone()));
             }
         }
-        let desktop = if default_desktop {
+        let desktop = if desktop_store {
             tauri::async_runtime::spawn_blocking(claude::desktop_index)
                 .await
                 .unwrap_or_default()
@@ -885,17 +957,37 @@ pub async fn chats(
                     archived: index.is_some_and(|d| d.archived),
                     bytes: Some(bytes),
                     account: index.and_then(|d| accounts.get(&d.organization).cloned()),
+                    maker: Maker {
+                        windows_app: index.is_some()
+                            || summary.entrypoint.as_deref() == Some("claude-desktop"),
+                        distribution: index.and_then(|d| d.distribution.clone()),
+                    },
                     path: Some(path),
                 }
             })
             .collect::<Vec<_>>();
         (sessions, truncated)
     } else {
+        // A profile without threads lists none, even where Codex is not installed.
+        let store = root.clone();
+        let empty = tauri::async_runtime::spawn_blocking(move || {
+            !store.join("sessions").is_dir() && !store.join("archived_sessions").is_dir()
+        })
+        .await
+        .map_err(|_| "Cannot read Codex's chats")?;
         let profile = source_profile(app, &source)?;
-        let (threads, truncated) = crate::profiles::scope(profile, codex::list(LISTED)).await?;
+        let (threads, truncated) = if empty {
+            (vec![], false)
+        } else {
+            crate::profiles::scope(profile, codex::list(LISTED)).await?
+        };
         let sessions = threads
             .into_iter()
             .map(|thread| Listed {
+                maker: Maker {
+                    windows_app: codex_origin(&thread) == "desktop",
+                    distribution: None,
+                },
                 title: thread
                     .name
                     .clone()
@@ -920,11 +1012,15 @@ pub async fn chats(
         let fleet = fleet.clone();
         let local = local.id.clone();
         let source = source.clone();
-        let cwds: Vec<String> = sessions.iter().map(|s| s.cwd.clone()).collect();
+        let chats: Vec<(String, Maker)> = sessions
+            .iter()
+            .map(|s| (s.cwd.clone(), s.maker.clone()))
+            .collect();
         tauri::async_runtime::spawn_blocking(move || {
             let mut places = Places::new(&fleet, &local);
-            cwds.iter()
-                .map(|cwd| places.place(&source.environment_id, cwd))
+            chats
+                .iter()
+                .map(|(cwd, maker)| places.place(&source.environment_id, cwd, maker))
                 .collect::<Vec<_>>()
         })
         .await
@@ -933,7 +1029,7 @@ pub async fn chats(
     let mut entries = vec![];
     let mut chats = vec![];
     for (listed, placement) in sessions.into_iter().zip(placed) {
-        let (conversation_id, imported) = known.conversation(&source, &listed.session);
+        let (conversation_id, imported) = known.conversation(&source.provider, &listed.session);
         let connection_id = placement.as_ref().and_then(|p| {
             choose_connection(
                 &fleet,
@@ -969,6 +1065,7 @@ pub async fn chats(
                 path: listed.path.clone(),
                 cwd: listed.cwd.clone(),
                 account: listed.account.clone(),
+                maker: listed.maker.clone(),
             },
         ));
         chats.push(Chat {
@@ -1019,6 +1116,7 @@ struct Listed {
     archived: bool,
     bytes: Option<u64>,
     account: Option<String>,
+    maker: Maker,
     path: Option<PathBuf>,
 }
 
@@ -1159,7 +1257,7 @@ pub async fn import(
     {
         return Err("Import each chat into a new conversation".into());
     }
-    let (source, session, path, listed_cwd, account) = {
+    let (source, session, path, listed_cwd, account, maker) = {
         let entries = catalog.entries.lock().map_err(|_| OUT_OF_DATE)?;
         let entry = entries.get(key).ok_or(OUT_OF_DATE)?;
         (
@@ -1168,15 +1266,16 @@ pub async fn import(
             entry.path.clone(),
             entry.cwd.clone(),
             entry.account.clone(),
+            entry.maker.clone(),
         )
     };
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    if !sources_in(&fleet, &local.id, &default_exists).contains(&source) {
+    if !current_sources(&fleet, &local.id).await?.contains(&source) {
         return Err("This chat source is no longer on this computer".into());
     }
     let profile = source_profile(app, &source)?;
-    let distribution = profile.distribution.clone();
+    let mut distribution = profile.distribution.clone();
     let root = source_root(app, &source).await?;
     let mut transcript = None;
     let conversion = if source.provider == "claude" {
@@ -1221,11 +1320,21 @@ pub async fn import(
         let environment = source.environment_id.clone();
         let cwd = cwd.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            Places::new(&fleet, &local).place(&environment, &cwd)
+            Places::new(&fleet, &local).place(&environment, &cwd, &maker)
         })
         .await
         .map_err(|_| "Cannot check this chat's folder")?
     };
+    // A Windows app that ran the chat in WSL named its files by their Linux paths there.
+    if distribution.is_none() {
+        distribution = placement.as_ref().and_then(|p| {
+            let environment = p.location["environmentId"].as_str()?;
+            list(&fleet, "environments")
+                .find(|e| e["id"] == environment && e["platform"] == "wsl")?["distribution"]
+                .as_str()
+                .map(String::from)
+        });
+    }
     let connection_id = match (connection_id, &placement) {
         (Some(requested), Some(placement)) => {
             let valid = list(&fleet, "connections").any(|c| {
@@ -1409,7 +1518,8 @@ mod tests {
             "environments": [
                 {"id": "e0000000-0000-4000-8000-000000000001", "computerId": "c0000000-0000-4000-8000-000000000001", "name": "Windows", "platform": "windows"},
                 {"id": "e0000000-0000-4000-8000-000000000002", "computerId": "c0000000-0000-4000-8000-000000000001", "name": "Ubuntu", "platform": "wsl", "distribution": "Ubuntu", "discoveredOn": "e0000000-0000-4000-8000-000000000001"},
-                {"id": "e0000000-0000-4000-8000-000000000003", "computerId": "c0000000-0000-4000-8000-000000000009", "name": "Laptop", "platform": "macos"}
+                {"id": "e0000000-0000-4000-8000-000000000003", "computerId": "c0000000-0000-4000-8000-000000000009", "name": "Laptop", "platform": "macos"},
+                {"id": "e0000000-0000-4000-8000-000000000004", "computerId": "c0000000-0000-4000-8000-000000000001", "name": "Debian", "platform": "wsl", "distribution": "Debian", "discoveredOn": "e0000000-0000-4000-8000-000000000001"}
             ],
             "accounts": [
                 {"id": "a1", "name": "Work", "provider": "claude", "purpose": "work"},
@@ -1424,12 +1534,20 @@ mod tests {
             ]
         })
     }
+    const COMPUTER: &str = "c0000000-0000-4000-8000-000000000001";
     const LOCAL: &str = "e0000000-0000-4000-8000-000000000001";
     const WSL: &str = "e0000000-0000-4000-8000-000000000002";
+    const DEBIAN: &str = "e0000000-0000-4000-8000-000000000004";
 
     #[test]
     fn every_account_profile_and_default_directory_on_this_computer_is_a_source() {
-        let sources = sources_in(&fleet(), LOCAL, &|provider| provider == "codex");
+        let sources = sources_in(&fleet(), LOCAL, &|provider, distribution| {
+            match distribution {
+                None => provider == "codex",
+                // The Claude desktop app ran chats in Debian, where no account is connected.
+                Some(distribution) => provider == "claude" && distribution == "Debian",
+            }
+        });
         let ids: Vec<String> = sources.iter().map(Source::id).collect();
         assert_eq!(
             ids,
@@ -1437,6 +1555,7 @@ mod tests {
                 format!("claude:{LOCAL}:default"),
                 format!("claude:{LOCAL}:10000000-0000-4000-8000-000000000002"),
                 format!("claude:{WSL}:default"),
+                format!("claude:{DEBIAN}:default"),
                 format!("codex:{LOCAL}:default"),
             ]
         );
@@ -1452,32 +1571,102 @@ mod tests {
     }
 
     #[test]
-    fn chats_open_where_they_ran_and_continue_with_their_own_account() {
+    fn chats_continue_with_the_cli_of_the_computer_whose_app_made_them() {
         let fleet = fleet();
-        let folders = |path: &Path| {
-            let path = path.to_string_lossy();
-            path.starts_with("C:") || path.ends_with("\\home\\me\\app")
-        };
+        let existing = [
+            "C:\\Projects\\game",
+            "C:\\Users\\me",
+            "\\\\wsl.localhost\\Ubuntu\\home\\me\\app",
+            "\\\\wsl.localhost\\Debian\\srv\\api",
+        ];
+        let folders = |path: &Path| existing.contains(&path.to_string_lossy().as_ref());
         let mut places = Places::new(&fleet, LOCAL);
         places.folder = &folders;
-        let windows = places.place(LOCAL, "C:\\Projects\\game").unwrap();
+        let made = Maker::default();
+        let windows = places.place(LOCAL, "C:\\Projects\\game", &made).unwrap();
         assert!(!windows.missing);
-        assert!(places.place(LOCAL, "D:\\Gone").unwrap().missing);
-        assert_eq!(windows.location["environmentId"], LOCAL);
+        assert_eq!(
+            windows.location,
+            json!({"computerId": COMPUTER, "environmentId": LOCAL, "path": "C:\\Projects\\game"})
+        );
         assert_eq!(windows.execution, LOCAL);
-        // A Windows app's chat in a WSL folder opens on that distribution with its Linux path.
-        let linux = places.place(LOCAL, "/home/me/app").unwrap();
-        assert_eq!(linux.location["environmentId"], WSL);
-        assert_eq!(linux.location["path"], "/home/me/app");
-        assert_eq!(linux.execution, WSL);
+        assert!(places.place(LOCAL, "D:\\Gone", &made).unwrap().missing);
+        // A Windows app's chat in a WSL folder continues with this computer's CLI, which reaches
+        // the folder through \\wsl.localhost; the folder keeps its Linux path.
+        let linux = places.place(LOCAL, "/home/me/app", &made).unwrap();
+        assert_eq!(
+            linux.location,
+            json!({"computerId": COMPUTER, "environmentId": WSL, "executionEnvironmentId": LOCAL, "path": "/home/me/app"})
+        );
+        assert_eq!(linux.execution, LOCAL);
+        assert!(!linux.missing);
         let share = places
-            .place(LOCAL, "\\\\wsl.localhost\\Ubuntu\\home\\me\\app")
+            .place(LOCAL, "\\\\wsl.localhost\\Ubuntu\\home\\me\\app", &made)
             .unwrap();
-        assert_eq!(share.location["environmentId"], WSL);
-        assert_eq!(share.location["executionEnvironmentId"], LOCAL);
-        assert_eq!(share.location["path"], "/home/me/app");
-        assert!(places.place(WSL, "C:\\Projects").is_none());
-        assert!(places.place(LOCAL, "relative/path").is_none());
+        assert_eq!(share.location, linux.location);
+        assert!(!share.missing);
+        // In the distribution the app recorded, even when another has a folder of that name.
+        let debian = Maker {
+            windows_app: true,
+            distribution: Some("Debian".into()),
+        };
+        let api = places.place(LOCAL, "/srv/api", &debian).unwrap();
+        assert_eq!(api.location["environmentId"], DEBIAN);
+        assert_eq!(api.execution, LOCAL);
+        assert!(!api.missing);
+        let moved = places.place(LOCAL, "/home/me/app", &debian).unwrap();
+        assert_eq!(moved.location["environmentId"], DEBIAN);
+        assert!(moved.missing);
+        // A distribution this computer no longer manages leaves the one that has the folder.
+        let gone = Maker {
+            windows_app: true,
+            distribution: Some("Arch".into()),
+        };
+        assert_eq!(
+            places.place(LOCAL, "/home/me/app", &gone).unwrap().location,
+            linux.location
+        );
+        // A folder no distribution has can still be imported to read.
+        let lost = places.place(LOCAL, "/opt/lost", &made).unwrap();
+        assert!(lost.missing);
+        assert_eq!(lost.location["environmentId"], WSL);
+        assert_eq!(lost.execution, LOCAL);
+        // A drive WSL mounts is this computer's own folder.
+        assert_eq!(
+            places
+                .place(LOCAL, "/mnt/c/Users/me", &made)
+                .unwrap()
+                .location,
+            json!({"computerId": COMPUTER, "environmentId": LOCAL, "path": "C:\\Users\\me"})
+        );
+        assert!(places
+            .place(LOCAL, "\\\\wsl$\\Fedora\\home", &made)
+            .is_none());
+        // A chat a WSL CLI made continues there. One the Windows desktop app made in WSL, whose
+        // transcript the distribution keeps, continues here like the app's own copy of it.
+        let terminal = places.place(WSL, "/home/me/app", &made).unwrap();
+        assert_eq!(
+            terminal.location,
+            json!({"computerId": COMPUTER, "environmentId": WSL, "path": "/home/me/app"})
+        );
+        assert_eq!(terminal.execution, WSL);
+        assert!(!terminal.missing);
+        let desktop = Maker {
+            windows_app: true,
+            distribution: None,
+        };
+        let kept = places.place(WSL, "/home/me/app", &desktop).unwrap();
+        assert_eq!(kept.location, linux.location);
+        assert_eq!(kept.execution, LOCAL);
+        assert_eq!(
+            places
+                .place(WSL, "/mnt/c/Users/me", &made)
+                .unwrap()
+                .location["path"],
+            "/mnt/c/Users/me"
+        );
+        assert!(places.place(WSL, "C:\\Projects", &made).is_none());
+        assert!(places.place(LOCAL, "relative/path", &made).is_none());
         // A separate profile continues with itself; the default directory with the account
         // that made the chat, or else the CLI login.
         assert_eq!(
@@ -1578,6 +1767,60 @@ mod tests {
         );
         assert_eq!(wsl_share("C:\\Users"), None);
         assert!(windows_absolute("D:/Unreal Projects") && !windows_absolute("/home/me"));
+        assert_eq!(mounted_drive("/mnt/c").as_deref(), Some("C:\\"));
+        assert_eq!(
+            mounted_drive("/mnt/d/Unreal Projects/Bluevox").as_deref(),
+            Some("D:\\Unreal Projects\\Bluevox")
+        );
+        assert_eq!(mounted_drive("/mnt/cdrom"), None);
+        assert_eq!(mounted_drive("/mnt/"), None);
+        assert_eq!(mounted_drive("/home/me"), None);
+    }
+
+    #[test]
+    fn a_chat_imported_from_one_copy_is_known_in_every_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let imported = uuid::Uuid::new_v4().to_string();
+        let bound = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            root.path().join("workspace.json"),
+            json!({"conversations": [{"id": imported}, {"id": bound}]}).to_string(),
+        )
+        .unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        // Imported from the original that WSL keeps; the Windows copy lists the same session.
+        write_record(
+            root.path(),
+            &imported,
+            &Record {
+                version: 1,
+                source: Source {
+                    provider: "claude".into(),
+                    environment_id: WSL.into(),
+                    connection_id: None,
+                },
+                session: session.clone(),
+                imported_at: 1,
+                path: Some(format!("projects/-home-me-app/{session}.jsonl")),
+            },
+        )
+        .unwrap();
+        let native = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(root.path().join("native-sessions")).unwrap();
+        std::fs::write(
+            root.path()
+                .join("native-sessions")
+                .join(format!("{bound}.json")),
+            json!({"id": native}).to_string(),
+        )
+        .unwrap();
+        let known = Known::read(root.path());
+        assert_eq!(
+            known.conversation("claude", &session),
+            (Some(imported.clone()), true)
+        );
+        assert_eq!(known.conversation("codex", &session), (None, false));
+        assert_eq!(known.conversation("claude", &native), (Some(bound), false));
     }
 
     /// Reads this computer's real Claude sessions (STUDIO_IMPORT_CLAUDE, default ~/.claude) and
@@ -1668,6 +1911,130 @@ mod tests {
                 Err(error) => println!("{:>7} KB  failed: {error}", bytes / 1024),
             }
         }
+    }
+
+    /// Reads this computer's Claude stores, its own and its WSL distributions' (found without
+    /// their CLI), against the installed app's Connections (STUDIO_IMPORT_DATA, default its app
+    /// data), and prints only counts: where each chat opens and how the copies of one compare.
+    /// cargo test --lib -- --ignored installed_wsl_chats --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn installed_wsl_chats_open_on_this_computer() {
+        let data = std::env::var_os("STUDIO_IMPORT_DATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+                    .join("com.vinicius.agentstudio")
+            });
+        let fleet = crate::saved::fleet(&data, "No workspace", "Unreadable workspace").unwrap();
+        let name = |id: &str| {
+            list(&fleet, "environments")
+                .find(|e| e["id"] == id)
+                .and_then(|e| e["name"].as_str())
+                .unwrap_or("?")
+                .to_string()
+        };
+        let local = list(&fleet, "environments")
+            .find(|e| e["platform"] == "windows")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let index = claude::desktop_index();
+        let mut stores = vec![(
+            local.clone(),
+            PathBuf::from(std::env::var_os("USERPROFILE").unwrap()).join(".claude"),
+        )];
+        for environment in list(&fleet, "environments").filter(|e| e["platform"] == "wsl") {
+            let profile = crate::profiles::Profile {
+                provider: "claude".into(),
+                distribution: environment["distribution"].as_str().map(String::from),
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let root = crate::profiles::scope(profile, crate::context::profile_store("claude"))
+                .await
+                .unwrap();
+            println!(
+                "{} keeps its chats in {} (found without its CLI in {:?})",
+                name(environment["id"].as_str().unwrap()),
+                root.display(),
+                started.elapsed()
+            );
+            stores.push((environment["id"].as_str().unwrap().into(), root));
+        }
+        // Each copy of a session: its store, when it was last used, its size and where it opens.
+        type Copy = (String, Option<String>, u64, Value);
+        let mut copies: HashMap<String, Vec<Copy>> = HashMap::new();
+        for (environment, root) in &stores {
+            let started = std::time::Instant::now();
+            let (files, _) = claude::sessions(root, LISTED);
+            let mut places = Places::new(&fleet, &local);
+            let mut placed: HashMap<String, usize> = HashMap::new();
+            for (path, bytes, _) in &files {
+                let Some(summary) = claude::summarize(path, *bytes) else {
+                    continue;
+                };
+                let desktop = index.get(&summary.session);
+                let maker = Maker {
+                    windows_app: desktop.is_some()
+                        || summary.entrypoint.as_deref() == Some("claude-desktop"),
+                    distribution: desktop.and_then(|d| d.distribution.clone()),
+                };
+                let cwd = summary
+                    .cwd
+                    .clone()
+                    .or_else(|| desktop.and_then(|d| d.cwd.clone()))
+                    .unwrap_or_default();
+                let placement = places.place(environment, &cwd, &maker);
+                let label = match &placement {
+                    None => "no folder".to_string(),
+                    Some(p) => format!(
+                        "{} folder run by {}{}",
+                        name(p.location["environmentId"].as_str().unwrap()),
+                        name(&p.execution),
+                        if p.missing { ", missing" } else { "" }
+                    ),
+                };
+                *placed.entry(label).or_default() += 1;
+                if environment != &local {
+                    assert!(transcript_in(root, path, &summary.session).is_some());
+                }
+                copies.entry(summary.session.clone()).or_default().push((
+                    environment.clone(),
+                    summary.updated.clone(),
+                    *bytes,
+                    placement.map_or(Value::Null, |p| {
+                        json!([
+                            p.location["environmentId"],
+                            p.location["executionEnvironmentId"]
+                        ])
+                    }),
+                ));
+            }
+            println!(
+                "{}: {} chats in {:?}: {placed:?}",
+                name(environment),
+                files.len(),
+                started.elapsed()
+            );
+        }
+        // The dialog keeps the copy used last, and of copies as recent the longest.
+        let (mut both, mut differ, mut original, mut shorter) = (0, 0, 0, 0);
+        for copies in copies.values().filter(|c| c.len() > 1) {
+            both += 1;
+            differ += usize::from(copies.iter().any(|c| c.3 != copies[0].3));
+            let kept = copies
+                .iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)))
+                .unwrap();
+            original += usize::from(kept.0 != local);
+            shorter += usize::from(copies.iter().any(|c| c.2 > kept.2));
+        }
+        println!(
+            "{both} chats in two stores: {differ} on another computer, {original} kept from WSL, {shorter} kept a shorter copy"
+        );
+        assert_eq!((differ, shorter), (0, 0));
     }
 
     /// Reads this computer's real Codex threads through its app-server and prints only counts.

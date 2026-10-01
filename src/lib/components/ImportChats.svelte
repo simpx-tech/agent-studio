@@ -13,6 +13,7 @@
     byRecency,
     importedConversation,
     matchesSearch,
+    newerCopy,
     originName,
     type ImportableChat,
     type ImportProvider,
@@ -101,9 +102,16 @@
             for (const chat of listed.chats) {
               const entry = { ...chat, provider: source.provider };
               const index = known.get(chat.session);
-              // An account switch copies a session into another profile: keep the newest copy.
+              // An account switch copies a session into another profile, and the Claude app
+              // keeps a WSL chat both in the distribution and here: keep the newest copy, with
+              // the choice made on the copy it replaces.
               if (index === undefined) known.set(chat.session, next.push(entry) - 1);
-              else if (byRecency(entry, next[index]) < 0) next[index] = entry;
+              else if (newerCopy(entry, next[index])) {
+                if (selected.delete(next[index].key)) selected.add(entry.key);
+                const done = imported.get(next[index].key);
+                if (done) imported.set(entry.key, done);
+                next[index] = entry;
+              }
             }
             chats = next;
             truncated ||= !!listed.truncated;

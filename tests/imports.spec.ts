@@ -249,3 +249,68 @@ test('reports a computer whose chats could not be read and keeps the rest usable
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(dialog).toHaveCount(0);
 });
+
+test('keeps a chosen chat chosen when a newer copy of it arrives from another store', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  const { claude } = await connections(page);
+  // The Claude app keeps a chat it ran in WSL in the distribution and copies it here; both
+  // open on this computer with the distribution's folder.
+  const wslEnvironmentId = '33333333-3333-4333-8333-333333333333';
+  const location = {
+    computerId,
+    environmentId: wslEnvironmentId,
+    executionEnvironmentId: environmentId,
+    path: '/home/me/olympus',
+  };
+  const copy = chat('Booking chat in React', {
+    connectionId: claude,
+    path: '/home/me/olympus',
+    location,
+    updatedAt: '2026-09-29T10:00:00Z',
+  });
+  const original = { ...copy, key: hex(), updatedAt: '2026-09-30T10:00:00Z' };
+  const windows = `claude:${environmentId}:default`;
+  const wsl = `claude:${wslEnvironmentId}:default`;
+  await page.evaluate(
+    ({ environmentId, wslEnvironmentId, windows, wsl, copy, original, imported }) => {
+      const w = window as any;
+      w.importSources = [
+        { id: windows, provider: 'claude', environmentId },
+        { id: wsl, provider: 'claude', environmentId: wslEnvironmentId },
+      ];
+      w.holdListings = [wsl];
+      w.importListings = {
+        [windows]: { source: windows, chats: [copy] },
+        [wsl]: { source: wsl, chats: [original] },
+      };
+      w.importResults = { [original.key]: imported };
+    },
+    {
+      environmentId,
+      wslEnvironmentId,
+      windows,
+      wsl,
+      copy,
+      original,
+      imported: { ...result(copy.title, claude, 'Done.'), location },
+    },
+  );
+  const dialog = await openImport(page);
+  const list = dialog.getByRole('list', { name: 'Chats to import' });
+  await expect(list.getByRole('listitem')).toHaveCount(1);
+  await expect(list.getByText('olympus', { exact: true })).toBeVisible();
+  await dialog.getByLabel(`Import ${copy.title}`).check();
+  await page.evaluate((wsl) => (window as any).releaseListing[wsl](), wsl);
+  await expect(dialog.getByRole('status')).toHaveText('1 chat');
+  await expect(list.getByRole('listitem')).toHaveCount(1);
+  await expect(dialog.getByLabel(`Import ${copy.title}`)).toBeChecked();
+  await dialog.getByRole('button', { name: 'Import 1 chat', exact: true }).click();
+  await expect(dialog.getByText('Imported 1 chat into History.')).toBeVisible();
+  const calls = await page.evaluate(() => (window as any).importCalls);
+  expect(calls.map((c: { key: string }) => c.key)).toEqual([original.key]);
+  const conversation = (await saved(page)).conversations.find((c) => c.title === copy.title)!;
+  expect(conversation.location).toEqual(location);
+});

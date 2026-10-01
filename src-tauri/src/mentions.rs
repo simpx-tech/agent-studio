@@ -346,7 +346,8 @@ pub async fn read(
     }
     let physical = if let Some(wsl) = &exe.wsl {
         let (_, _, bridge, _) =
-            crate::context::wsl_paths(wsl, &crate::profiles::current(), &provider).await?;
+            crate::context::wsl_paths(&wsl.distribution, &crate::profiles::current(), &provider)
+                .await?;
         bridge
             .map(|b| b.join(folder.trim_start_matches('/')))
             .unwrap_or_else(|| PathBuf::from(&folder))

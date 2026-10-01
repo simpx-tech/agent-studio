@@ -3,7 +3,9 @@
 // the Codex one, whose first reply forks its session. Build with scripts/native-imports.tauri.json.
 // The QA identity sees the computer's CLI logins only; a signed-in Codex login is needed for the
 // continuation (IMPORTS_QA_CONTINUE=0 skips it). Afterwards the fork is archived in Codex and the QA
-// data folder, which holds copies of the imported chats, is removed.
+// data folder, which holds copies of the imported chats, is removed. IMPORTS_QA_WSL=1 picks chats the
+// desktop apps ran in a WSL folder instead: they open on this computer with the distribution's
+// folder, and the Codex one continues with this computer's CLI through \\wsl.localhost.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -17,7 +19,8 @@ const executable = resolve(
   process.env.IMPORTS_QA_EXECUTABLE ?? 'src-tauri/target/debug/agent-studio.exe',
 );
 const data = join(process.env.LOCALAPPDATA, identifier);
-const output = 'artifacts/imports-qa';
+const wsl = process.env.IMPORTS_QA_WSL === '1';
+const output = wsl ? 'artifacts/imports-qa-wsl' : 'artifacts/imports-qa';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 await mkdir(output, { recursive: true });
 const report = { steps: [] };
@@ -137,6 +140,7 @@ try {
   const all = listings.flatMap(({ source, chats }) =>
     chats.map((chat) => ({ ...chat, provider: source.provider })),
   );
+  const ran = (c) => Date.parse(c.updatedAt ?? 0) - Date.parse(c.createdAt ?? 0);
   const pick = (provider) =>
     all
       .filter(
@@ -146,14 +150,52 @@ try {
           c.location &&
           !c.unavailable &&
           !c.conversationId &&
-          /^[A-Za-z]:\\/.test(c.path) &&
-          (c.bytes ?? 0) < 12 * 1024 * 1024,
+          // Codex lists a thread it ran in WSL by the folder's \\wsl.localhost path.
+          (wsl
+            ? /^\/home\//.test(c.path) || c.path.startsWith('\\\\wsl.localhost\\')
+            : /^[A-Za-z]:\\/.test(c.path)) &&
+          (c.bytes ?? 0) < 12 * 1024 * 1024 &&
+          // A short WSL thread keeps the continuation's context small.
+          (!wsl || provider === 'claude' || ran(c) < 30 * 60_000),
       )
       .sort((a, b) => Date.parse(b.updatedAt ?? 0) - Date.parse(a.updatedAt ?? 0))[0];
   const claude = pick('claude');
   const codex = pick('codex');
   assert(claude && codex, 'A Claude and a Codex desktop chat to import');
   note('picked', { claude: claude.title.length, codex: codex.title.length });
+  // Each session opens in one place, whichever of the stores that keep it is read.
+  const sessions = new Map();
+  for (const chat of all) sessions.set(chat.session, [...(sessions.get(chat.session) ?? []), chat]);
+  const copies = [...sessions.values()].filter((list) => list.length > 1);
+  note('copies', {
+    sessions: copies.length,
+    openDifferently: copies.filter((list) =>
+      list.some(
+        (c) =>
+          c.location?.environmentId !== list[0].location?.environmentId ||
+          c.location?.executionEnvironmentId !== list[0].location?.executionEnvironmentId,
+      ),
+    ).length,
+  });
+  if (wsl) {
+    // A Windows app's WSL chat opens on this computer, with the distribution's folder.
+    const fleet = (await page.invoke('load_workspace')).fleet;
+    const environment = (id) => fleet.environments.find((e) => e.id === id);
+    for (const chat of [claude, codex]) {
+      const folder = environment(chat.location.environmentId);
+      const runs = environment(chat.location.executionEnvironmentId);
+      const account = fleet.connections.find((c) => c.id === chat.connectionId);
+      note('placed', {
+        provider: chat.provider,
+        folder: folder?.platform,
+        runs: runs?.platform,
+        account: environment(account?.environmentId)?.platform,
+      });
+      assert.equal(folder?.platform, 'wsl');
+      assert.equal(runs?.platform, 'windows');
+      assert.equal(account?.environmentId, runs.id);
+    }
+  }
 
   // The dialog, from Settings.
   await page.button('Settings');
@@ -300,6 +342,23 @@ try {
     const binding = JSON.parse(
       await readFile(join(data, 'native-sessions', `${conversations[1].id}.json`), 'utf8'),
     );
+    if (wsl) {
+      // The fork's own record of the folder its turn ran in.
+      const { readdir } = await import('node:fs/promises');
+      const rollouts = await readdir(join(process.env.USERPROFILE, '.codex', 'sessions'), {
+        recursive: true,
+      });
+      const rollout = rollouts.find((name) => name.endsWith(`${binding.id}.jsonl`));
+      const cwd = rollout
+        ? (await readFile(join(process.env.USERPROFILE, '.codex', 'sessions', rollout), 'utf8'))
+            .split('\n')
+            .filter((line) => line.includes('"turn_context"'))
+            .map((line) => JSON.parse(line).payload?.cwd)
+            .at(-1)
+        : undefined;
+      note('codex ran in', { cwd, saved: conversations[1].location.path });
+      assert.match(cwd ?? '', /^\\\\wsl\.localhost\\/);
+    }
     forked = binding.id;
     note('codex fork', { forkedFromImport: true, differs: binding.id !== undefined });
     report.reply = reply.text;

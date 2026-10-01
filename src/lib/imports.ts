@@ -196,3 +196,13 @@ export function matchesSearch(chat: ImportableChat, query: string): boolean {
 export function byRecency(a: ImportableChat, b: ImportableChat): number {
   return (Date.parse(b.updatedAt ?? '') || 0) - (Date.parse(a.updatedAt ?? '') || 0);
 }
+
+/**
+ * Whether `a` is a newer copy of the session `b` holds: used later, or as recently and longer.
+ * The Claude app's copy of a chat it ran in WSL can lag behind the transcript the distribution
+ * keeps by records that carry no time.
+ */
+export function newerCopy(a: ImportableChat, b: ImportableChat): boolean {
+  const order = byRecency(a, b);
+  return order < 0 || (order === 0 && (a.bytes ?? 0) > (b.bytes ?? 0));
+}

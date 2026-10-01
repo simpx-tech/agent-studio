@@ -756,3 +756,171 @@ async fn installed_claude_continues_an_imported_session_as_a_fork() {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+/// A chat the Claude app ran in a WSL folder, whose transcript the distribution keeps,
+/// continues with this computer's CLI: the first reply forks the transcript read through
+/// `\\wsl.localhost` and runs in the folder's Windows path, and the original stays as it was.
+/// Needs a managed WSL distribution (STUDIO_TEST_DISTRIBUTION, default Ubuntu).
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and WSL."]
+async fn installed_claude_continues_a_wsl_chat_with_this_computers_cli() {
+    // A project folder the test made, with the empty memory folder Claude Code adds to it.
+    let tidy = |folder: &std::path::Path| {
+        let _ = std::fs::remove_dir(folder.join("memory"));
+        let _ = std::fs::remove_dir(folder);
+    };
+    let distribution =
+        std::env::var("STUDIO_TEST_DISTRIBUTION").unwrap_or_else(|_| "Ubuntu".into());
+    let source = uuid::Uuid::new_v4().to_string();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    // A session to stand for the app's: made here, then kept in the distribution as the
+    // app's Claude Code there keeps one, with the folder it ran in.
+    let made_in = tempfile::tempdir().unwrap();
+    let made = exe
+        .command()
+        .current_dir(made_in.path())
+        .args([
+            "-p",
+            "Remember the codeword KESTREL-2093 for later. Reply only OK.",
+            "--session-id",
+            &source,
+            "--model",
+            "haiku",
+        ])
+        .env_remove("CLAUDECODE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let profile = crate::context::native_profile_root("claude").await.unwrap();
+    let made_transcript = crate::native_instructions::find_record(&profile, "claude", &source)
+        .unwrap()
+        .expect("The session was saved");
+    let scratch = format!("studio-import-{}", uuid::Uuid::new_v4().simple());
+    let linux = format!("/tmp/{scratch}/work");
+    let share =
+        std::path::PathBuf::from(format!("\\\\wsl.localhost\\{distribution}\\tmp\\{scratch}"));
+    std::fs::create_dir_all(share.join("work")).unwrap();
+    let store = share.join(".claude");
+    let relative = format!("projects/-tmp-{scratch}-work/{source}.jsonl");
+    let original = store.join(&relative);
+    std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+    let mut kept = String::new();
+    for line in std::fs::read_to_string(&made_transcript).unwrap().lines() {
+        let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+        if record.get("cwd").is_some() {
+            record["cwd"] = json!(linux);
+        }
+        kept.push_str(&record.to_string());
+        kept.push('\n');
+    }
+    std::fs::write(&original, &kept).unwrap();
+    std::fs::remove_file(&made_transcript).unwrap();
+    tidy(made_transcript.parent().unwrap());
+
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),
+        "conversationId":uuid::Uuid::new_v4(),
+        "location":{"computerId":uuid::Uuid::new_v4(),"environmentId":uuid::Uuid::new_v4(),
+            "executionEnvironmentId":uuid::Uuid::new_v4(),"path":linux},
+        "agent":{"provider":"claude","model":"haiku","instructions":""},
+        "messages":[{"role":"user","text":"Remember the codeword KESTREL-2093 for later. Reply only OK."},
+            {"role":"assistant","text":"OK"},
+            {"role":"user","text":"What was the codeword, and what is your current working directory? Reply with both on one line."}]}))
+    .unwrap();
+    let conversation = request.conversation_id.clone().unwrap();
+    let record = crate::imports::Record {
+        version: 1,
+        source: crate::imports::Source {
+            provider: "claude".into(),
+            environment_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: None,
+        },
+        session: source.clone(),
+        imported_at: 1,
+        path: Some(relative),
+    };
+    crate::imports::write_record(root.path(), &conversation, &record).unwrap();
+    // This computer's CLI, with the folder in the distribution, as a Desktop chat runs it.
+    let selected = crate::profiles::Profile {
+        provider: "claude".into(),
+        folder_distribution: Some(distribution.clone()),
+        ..Default::default()
+    };
+    let (result, fork) = crate::profiles::scope(selected, async {
+        let mut session = crate::providers::sessions::Session::prepare(root.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.imported(), Some("claude"));
+        session
+            .fork_import(store.clone(), profile.clone(), &request, record)
+            .await
+            .unwrap();
+        let fork = session.id().to_string();
+        request.native_session = Some(session);
+        let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+            .await
+            .unwrap();
+        let mut process =
+            crate::pool::Process::new(exe, command.spawn().unwrap(), "import".into(), fork.clone())
+                .unwrap();
+        let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let channel = EventSink::new(move |event| {
+            let _ = tx.send(event);
+            Ok(())
+        });
+        let mut questions = Questions::default()
+            .open(&request.run_id, None, channel.clone())
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(300),
+            stream_turn(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                None,
+                Some(&mut questions),
+                false,
+            ),
+        )
+        .await
+        .expect("Installed CLI test timed out");
+        process.kill().await;
+        drop(channel);
+        while received.try_recv().is_ok() {}
+        (result, fork)
+    })
+    .await;
+    let forked = crate::native_instructions::find_record(&profile, "claude", &fork)
+        .unwrap()
+        .expect("The fork was saved in the profile");
+    let ran_in = std::fs::read_to_string(&forked)
+        .unwrap()
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let record: serde_json::Value = serde_json::from_str(line).ok()?;
+            record["cwd"].as_str().map(String::from)
+        });
+    let unchanged = std::fs::read_to_string(&original).unwrap() == kept;
+    std::fs::remove_file(&forked).unwrap();
+    tidy(forked.parent().unwrap());
+    std::fs::remove_dir_all(&share).unwrap();
+    let (status, text) = result.expect("Installed CLI failed");
+    eprintln!("Forked {source} into {fork}, ran in {ran_in:?}: {text}");
+    assert_eq!(status, "complete");
+    assert!(text.contains("KESTREL-2093"), "{text}");
+    assert!(unchanged, "The original is unchanged");
+    assert_eq!(
+        ran_in.as_deref(),
+        Some(format!("\\\\wsl.localhost\\{distribution}\\tmp\\{scratch}\\work").as_str())
+    );
+}

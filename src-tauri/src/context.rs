@@ -1051,7 +1051,8 @@ pub async fn read(
     let runtime = data.join(&relative);
     std::fs::create_dir_all(&runtime).map_err(|_| "Cannot prepare context query")?;
     let (home, config, bridge, fallback) = if let Some(wsl) = &exe.wsl {
-        let (home, config, bridge, fallback) = wsl_paths(wsl, &profile, &provider).await?;
+        let (home, config, bridge, fallback) =
+            wsl_paths(&wsl.distribution, &profile, &provider).await?;
         let fallback = if standalone == Some(crate::standalone::Directory::Dedicated) {
             Path::new(&fallback)
                 .parent()
@@ -1207,6 +1208,21 @@ pub async fn read(
 }
 
 type ContextPaths = (PathBuf, PathBuf, Option<PathBuf>, String);
+
+/// The selected profile's storage, without its CLI: a WSL distribution's is found from that
+/// distribution's own environment and read through `\\wsl.localhost`, so the chats it keeps
+/// are readable where the CLI that saved them is not installed.
+pub async fn profile_store(provider: &str) -> Result<PathBuf, String> {
+    let profile = crate::profiles::current();
+    let Some(distribution) = profile.distribution.clone() else {
+        return native_profile_root(provider).await;
+    };
+    let (_, config, bridge, _) = wsl_paths(&distribution, &profile, provider).await?;
+    Ok(bridge
+        .ok_or("The selected WSL profile is unavailable")?
+        .join(config.to_string_lossy().trim_start_matches('/')))
+}
+
 /// Resolve the selected profile's storage without starting a model or querying its tools.
 pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
     let profile = crate::profiles::current();
@@ -1216,7 +1232,7 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
             .wsl
             .as_ref()
             .ok_or("The selected WSL CLI is unavailable")?;
-        let (_, config, bridge, _) = wsl_paths(wsl, &profile, provider).await?;
+        let (_, config, bridge, _) = wsl_paths(&wsl.distribution, &profile, provider).await?;
         return Ok(bridge
             .ok_or("The selected WSL profile is unavailable")?
             .join(config.to_string_lossy().trim_start_matches('/')));
@@ -1253,7 +1269,7 @@ pub async fn native_global_config(provider: &str) -> Result<PathBuf, String> {
             .wsl
             .as_ref()
             .ok_or("The selected WSL CLI is unavailable")?;
-        let (home, config, bridge, _) = wsl_paths(wsl, &profile, provider).await?;
+        let (home, config, bridge, _) = wsl_paths(&wsl.distribution, &profile, provider).await?;
         let file = claude_global_config_file(&config, Some(&home));
         return Ok(bridge
             .ok_or("The selected WSL profile is unavailable")?
@@ -1277,7 +1293,7 @@ fn claude_global_config_file(config: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 pub(crate) async fn wsl_paths(
-    wsl: &crate::wsl::Launch,
+    distribution: &str,
     profile: &crate::profiles::Profile,
     provider: &str,
 ) -> Result<ContextPaths, String> {
@@ -1288,7 +1304,7 @@ pub(crate) async fn wsl_paths(
         command
             .args([
                 "--distribution",
-                &wsl.distribution,
+                distribution,
                 "--cd",
                 "~",
                 "--exec",
@@ -1327,14 +1343,14 @@ pub(crate) async fn wsl_paths(
             config,
             Some(PathBuf::from(format!(
                 "\\\\wsl.localhost\\{}",
-                wsl.distribution
+                distribution
             ))),
             root.join("runtime").to_string_lossy().replace('\\', "/"),
         ))
     }
     #[cfg(not(windows))]
     {
-        let _ = (wsl, profile, provider);
+        let _ = (distribution, profile, provider);
         Err("WSL context must be inspected on its Windows host".into())
     }
 }

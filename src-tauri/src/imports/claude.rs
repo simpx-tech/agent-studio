@@ -772,6 +772,38 @@ pub struct DesktopSession {
     pub title: Option<String>,
     pub archived: bool,
     pub cwd: Option<String>,
+    /// The WSL distribution the app ran the session in. Its Claude Code there keeps the
+    /// original transcript in the distribution's own directory, and the app a copy here.
+    pub distribution: Option<String>,
+}
+
+/// One index file's session, by its CLI session id.
+fn desktop_session(v: &Value, organization: &str) -> Option<(String, DesktopSession)> {
+    let id = v["cliSessionId"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())?;
+    Some((
+        id.to_string(),
+        DesktopSession {
+            organization: organization.to_string(),
+            title: v["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.chars().take(200).collect()),
+            archived: v["isArchived"] == true,
+            cwd: v["cwd"].as_str().map(String::from),
+            distribution: v["wslConfig"]["distro"]
+                .as_str()
+                .filter(|d| {
+                    !d.is_empty()
+                        && d.len() <= 64
+                        && d.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+                })
+                .map(String::from),
+        },
+    ))
 }
 
 /// Where the Claude desktop app keeps its per-account lists of Code sessions; their
@@ -808,9 +840,21 @@ fn desktop_roots() -> Vec<PathBuf> {
 /// The Claude desktop app's Code sessions by CLI session id, from its own bounded index files
 /// (`claude-code-sessions/<account>/<organization>/local_<id>.json`).
 pub fn desktop_index() -> HashMap<String, DesktopSession> {
+    desktop_index_in(&desktop_roots())
+}
+
+/// The WSL distributions the Claude desktop app ran Code sessions in.
+pub fn desktop_distributions() -> HashSet<String> {
+    desktop_index()
+        .into_values()
+        .filter_map(|session| session.distribution)
+        .collect()
+}
+
+fn desktop_index_in(roots: &[PathBuf]) -> HashMap<String, DesktopSession> {
     let mut sessions = HashMap::new();
     let mut read = 0;
-    for root in desktop_roots() {
+    for root in roots {
         let Ok(accounts) = std::fs::read_dir(root.join("claude-code-sessions")) else {
             continue;
         };
@@ -844,25 +888,9 @@ pub fn desktop_index() -> HashMap<String, DesktopSession> {
                     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
                         continue;
                     };
-                    let Some(id) = v["cliSessionId"]
-                        .as_str()
-                        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-                    else {
-                        continue;
-                    };
-                    sessions.insert(
-                        id.to_string(),
-                        DesktopSession {
-                            organization: org.clone(),
-                            title: v["title"]
-                                .as_str()
-                                .map(str::trim)
-                                .filter(|t| !t.is_empty())
-                                .map(|t| t.chars().take(200).collect()),
-                            archived: v["isArchived"] == true,
-                            cwd: v["cwd"].as_str().map(String::from),
-                        },
-                    );
+                    if let Some((id, session)) = desktop_session(&v, &org) {
+                        sessions.insert(id, session);
+                    }
                 }
             }
         }
@@ -1157,5 +1185,53 @@ mod tests {
         assert_eq!(read_line(&mut reader, &mut line, 8), Some((3, true)));
         assert_eq!(line, b"ok\n");
         assert_eq!(read_line(&mut reader, &mut line, 8), None);
+    }
+
+    #[test]
+    fn the_desktop_index_names_each_sessions_account_and_wsl_distribution() {
+        let root = tempfile::tempdir().unwrap();
+        let organization = "9a7f1fc2-0000-4000-8000-000000000001";
+        let folder = root
+            .path()
+            .join("claude-code-sessions/account")
+            .join(organization);
+        std::fs::create_dir_all(&folder).unwrap();
+        let wsl = "2a9bf331-d087-4fd2-9b1f-c72507ebf93e";
+        let windows = "00af4507-cf22-428b-aa77-11fe8c35ba28";
+        for (name, value) in [
+            (
+                "local_1.json",
+                json!({"cliSessionId":wsl,"cwd":"/home/me/app","title":" Booking ","isArchived":false,"wslConfig":{"distro":"Ubuntu-24.04"}}),
+            ),
+            (
+                "local_2.json",
+                json!({"cliSessionId":windows,"cwd":"C:\\work","isArchived":true}),
+            ),
+            (
+                "local_3.json",
+                json!({"cliSessionId":"not-a-session","cwd":"/srv"}),
+            ),
+            (
+                "local_4.json",
+                json!({"cliSessionId":"5f79341e-88e9-413d-a7b5-8d11fd36d861","wslConfig":{"distro":"..\\Ubuntu"}}),
+            ),
+            (
+                "other.json",
+                json!({"cliSessionId":"bf56c7fe-d51e-430c-be0f-108e8684875b"}),
+            ),
+        ] {
+            std::fs::write(folder.join(name), value.to_string()).unwrap();
+        }
+        let index = desktop_index_in(&[root.path().to_path_buf()]);
+        assert_eq!(index.len(), 3);
+        let session = &index[wsl];
+        assert_eq!(session.organization, organization);
+        assert_eq!(session.title.as_deref(), Some("Booking"));
+        assert_eq!(session.distribution.as_deref(), Some("Ubuntu-24.04"));
+        assert!(index[windows].archived && index[windows].distribution.is_none());
+        // A distribution name that is not one is ignored, never used to build a path.
+        assert!(index["5f79341e-88e9-413d-a7b5-8d11fd36d861"]
+            .distribution
+            .is_none());
     }
 }

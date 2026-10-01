@@ -441,7 +441,8 @@ pub(crate) async fn folder(
     };
     let profile = crate::profiles::current();
     let (fallback, bridge) = if let Some(wsl) = &exe.wsl {
-        let (_, _, bridge, fallback) = crate::context::wsl_paths(wsl, &profile, provider).await?;
+        let (_, _, bridge, fallback) =
+            crate::context::wsl_paths(&wsl.distribution, &profile, provider).await?;
         let fallback = Path::new(&fallback)
             .parent()
             .ok_or("Invalid CLI runtime")?

@@ -293,10 +293,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (command === 'upload_chat_images') return [];
           // Chats the CLIs saved on this computer: tests set `importSources`, `importListings`
-          // (by source id, a listing or an error message) and `importResults` (by key).
+          // (by source id, a listing or an error message) and `importResults` (by key), and hold
+          // the sources in `holdListings` until `releaseListing[source]()` is called.
           if (command === 'list_import_sources') return (window as any).importSources ?? [];
           if (command === 'list_importable_chats') {
-            const listing = (window as any).importListings?.[args.source];
+            const w = window as any;
+            if (w.holdListings?.includes(args.source))
+              await new Promise<void>((resolve) => {
+                (w.releaseListing ??= {})[args.source] = resolve;
+              });
+            const listing = w.importListings?.[args.source];
             if (typeof listing === 'string') throw listing;
             return listing ?? { source: args.source, chats: [] };
           }
