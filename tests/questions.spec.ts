@@ -507,3 +507,116 @@ test('explicit skip resumes the tool and cancelled runs cannot accept old answer
   await expect(page.getByRole('button', { name: 'Back', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).answersSent)).toHaveLength(1);
 });
+
+test('a Claude question appears as it is written, becomes answerable in place and counts as pending while it waits', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Help me pick a theme');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  const pending = async (n: number) => {
+    await expect
+      .poll(() => page.evaluate(() => Number(localStorage.getItem('test-badge-count'))))
+      .toBe(n);
+    await expect(page.getByRole('status', { name: `${n} pending chats`, exact: true })).toHaveCount(
+      1,
+    );
+  };
+  await pending(0);
+  // Claude announces the call before it writes the question, which then streams in.
+  await page.evaluate(() => {
+    const w = window as any;
+    w.draft = (revision: number, question: string, options: unknown[] = []) =>
+      w.emitCapability({
+        kind: 'questiondraft',
+        questionDraft: {
+          id: 'toolu_ask',
+          revision,
+          questions: [{ header: 'Theme', question, multiSelect: false, options }],
+        },
+      });
+    w.emitCapability({
+      kind: 'questiondraft',
+      questionDraft: { id: 'toolu_ask', revision: 1, questions: [] },
+    });
+    w.emitCapability({
+      kind: 'tool',
+      tool: {
+        id: 'claude:toolu_ask',
+        revision: 1,
+        name: 'mcp__agent_studio__studio_ask_user',
+        category: 'tool',
+        status: 'running',
+        sources: [],
+        agents: [],
+      },
+    });
+  });
+  const card = page.getByRole('region', { name: 'Agent questions' });
+  await expect(card).toHaveCount(1);
+  await expect(card.getByText('Writing…', { exact: true })).toBeVisible();
+  await expect(page.locator('.live-verb', { hasText: 'Writing a question' })).toBeVisible();
+  await page.evaluate(() => (window as any).draft(2, 'Which theme do'));
+  await expect(card.getByText('Which theme do', { exact: true })).toBeVisible();
+  const options = [
+    { label: 'Dark', description: 'Easy on the eyes' },
+    { label: 'Light', description: '' },
+  ];
+  await page.evaluate((o) => (window as any).draft(3, 'Which theme do you prefer?', o), options);
+  await expect(card.getByText('Which theme do you prefer?', { exact: true })).toBeVisible();
+  await expect(card.getByText('Easy on the eyes', { exact: true })).toBeVisible();
+  // It cannot be answered while it is written, and nobody waits for an answer yet.
+  const dark = card.getByRole('radio', { name: 'Dark' });
+  const spot = (await dark.boundingBox())!;
+  await page.mouse.click(spot.x + spot.width / 2, spot.y + spot.height / 2);
+  await expect(dark).not.toBeChecked();
+  await expect(card.getByRole('button', { name: 'Skip questions' })).not.toBeFocused();
+  await expect(page.getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await pending(0);
+  await page.screenshot({ path: 'artifacts/question-draft.png' });
+  const place = () =>
+    card.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const reply = element.closest('[data-testid="message"]')!.getBoundingClientRect();
+      return { top: Math.round(box.top - reply.top), height: Math.round(box.height) };
+    });
+  const before = await place();
+  // The recorded question replaces its draft, in the same place.
+  await page.evaluate((o) => {
+    const w = window as any;
+    w.testQuestion = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'theme',
+          header: 'Theme',
+          question: 'Which theme do you prefer?',
+          multiSelect: false,
+          options: o,
+        },
+      ],
+    };
+    w.emitCapability({ kind: 'question', question: w.testQuestion, draft: 'toolu_ask' });
+  }, options);
+  await expect(card.getByText('Writing…', { exact: true })).toHaveCount(0);
+  await expect(card).toHaveCount(1);
+  expect(await place()).toEqual(before);
+  await expect(page.locator('.live-verb', { hasText: 'Waiting for your answer' })).toBeVisible();
+  await expect(page.getByText('Waiting for you', { exact: true })).toBeVisible();
+  // A chat waiting for your answer counts as pending until you answer.
+  await pending(1);
+  await card.getByRole('radio', { name: 'Dark' }).check();
+  await card.getByRole('button', { name: 'Send answers' }).click();
+  await expect(card).toHaveCount(0);
+  await pending(0);
+  // A late draft of the recorded call never brings it back.
+  await page.evaluate(() => (window as any).draft(9, 'A stale draft'));
+  await expect(page.getByText('A stale draft')).toHaveCount(0);
+  await page.evaluate(() => (window as any).finishCapabilities('complete'));
+  await pending(1);
+});

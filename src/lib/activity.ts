@@ -8,6 +8,7 @@ import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
+import { applyQuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
 import { steeringReceiptSchema, mergeSteering } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
@@ -387,9 +388,12 @@ export function toolDisplayStatus(tool: ToolActivity, replyStatus: Message['stat
 // A relay job sends every event it keeps with each update, and the relay accepts 448 of them.
 // Besides reasoning, a job keeps this many.
 const jobEvents = 336;
-// The other kinds of events are bounded on their own, 271 together at most, which leaves room
-// for this many calls.
+// The other kinds of events are bounded on their own, 278 together at most, reasoning included,
+// which leaves room for this many calls.
 const jobCalls = 160;
+// A job keeps the latest event of each question Claude is writing, so the device that sent the
+// reply shows it as it is written. Closed drafts make room for new ones.
+const jobDrafts = 4;
 
 /**
  * A reply records every call, but a remote run's job keeps only the calls one update carries.
@@ -412,7 +416,34 @@ function makeRoomForCall(events: RunEvent[]) {
   events.length = kept;
 }
 
+function retainQuestionDraft(events: RunEvent[], event: RunEvent) {
+  const at = (id: string) =>
+    events.findIndex((e) => e.kind === 'questiondraft' && e.questionDraft?.id === id);
+  const drafts = events.flatMap((e) =>
+    e.kind === 'questiondraft' && e.questionDraft ? [e.questionDraft] : [],
+  );
+  const id = event.kind === 'question' ? event.draft : event.questionDraft?.id;
+  const draft = applyQuestionDraft(drafts, event)?.find((d) => d.id === id);
+  if (!draft) return;
+  const next: RunEvent = { kind: 'questiondraft', questionDraft: draft };
+  const index = at(draft.id);
+  if (index >= 0) events[index] = next;
+  // A question whose draft the job never kept has nothing to close in it.
+  else if (!draft.closed) {
+    if (drafts.length >= jobDrafts) {
+      const closed = drafts.find((d) => d.closed);
+      if (!closed) return;
+      events.splice(at(closed.id), 1);
+    }
+    if (events.filter((e) => e.kind !== 'reasoning').length < jobEvents) events.push(next);
+  }
+}
+
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
+  if (event.kind === 'questiondraft') {
+    retainQuestionDraft(events, event);
+    return;
+  }
   if (event.kind === 'proposedplan') {
     const parsed = proposedPlanSchema.safeParse(event.proposedPlan);
     if (!parsed.success) return;
@@ -513,6 +544,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
   if (event.kind === 'question') {
     const parsed = questionRequestSchema.safeParse(event.question);
     if (!parsed.success) return;
+    if (event.draft) retainQuestionDraft(events, event);
     const index = events.findIndex(
       (e) => e.kind === 'question' && e.question?.id === parsed.data.id,
     );

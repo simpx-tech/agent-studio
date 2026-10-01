@@ -311,7 +311,7 @@ async fn native_run_survives_two_hours_and_still_completes_or_cancels() {
         tokio::time::timeout(Duration::from_secs(15), async {
             while let Some(event) = received.recv().await {
                 match event {
-                    RunEvent::Question { question } => {
+                    RunEvent::Question { question, .. } => {
                         question_pending = question.status == "pending"
                     }
                     RunEvent::Progress { text, .. } if text == "READY1" => break,

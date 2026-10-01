@@ -14,6 +14,7 @@
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { awaitingAnswer } from '$lib/questions';
+  import { draftRequest, shownQuestionDrafts, type QuestionDraft } from '$lib/question-drafts';
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
@@ -36,6 +37,7 @@
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
   let {
     message,
+    questionDrafts,
     agent,
     retry,
     rewind,
@@ -57,6 +59,8 @@
     switchAccount,
   }: {
     message: Message;
+    /** Questions Claude is still writing in this reply, which this window heard. */
+    questionDrafts?: QuestionDraft[];
     agent: ChatSettings;
     retry: () => void;
     rewind?: () => void;
@@ -108,6 +112,16 @@
   );
   const tools = $derived(replyTools(message));
   const subagents = $derived(runningSubagents(tools, message.status));
+  // Shown where the question will be, so it appears as Claude writes it.
+  const drafts = $derived(
+    message.status === 'running' && questionDrafts?.length
+      ? shownQuestionDrafts(questionDrafts, tools)
+      : [],
+  );
+  // Their calls' live rows say the question is being written; this changes as a draft starts
+  // or ends, not with each streamed word.
+  const writingIds = $derived(drafts.map((draft) => `claude:${draft.id}`).join('\n'));
+  const writing = $derived(new Set(writingIds ? writingIds.split('\n') : []));
   const artifacts = $derived(messageArtifacts(message));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   // A structured reply's text is its JSON, shown whole above; its visuals and files follow it.
@@ -190,6 +204,7 @@
         fileChanges={message.fileChanges}
         {openSubagent}
         {openedSubagent}
+        {writing}
       />
       {#if message.compactions?.length}
         <div class="compaction-history" aria-label="Context compaction">
@@ -248,6 +263,9 @@
           />
         {/if}
       {/each}
+      {#each drafts as draft (draft.id)}
+        <QuestionForm request={draftRequest(draft)} runId={message.runId} running writing />
+      {/each}
       {#each message.proposedPlans ?? [] as proposal (proposal.id)}
         <ProposedPlan
           text={proposal.text}
@@ -264,7 +282,7 @@
           running={message.status === 'running'}
         />
       {/each}
-      {#if !content.length && !(structured && text) && message.status === 'running' && !message.blocks.length}<div
+      {#if !content.length && !(structured && text) && message.status === 'running' && !message.blocks.length && !drafts.length}<div
           class="reply-waiting"
         >
           <span></span><span></span><span></span><small>Making room for a good answer…</small>

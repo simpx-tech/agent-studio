@@ -462,9 +462,12 @@ const iconForms: Partial<Record<ToolIconKey, Forms>> = {
 export function liveAction(
   tool: ToolActivity,
   status: ActivityDisplayStatus,
-  options: { folder?: string; newFile?: boolean } = {},
+  // `writing`: Claude is still writing the call's question, which cannot be answered yet.
+  options: { folder?: string; newFile?: boolean; writing?: boolean } = {},
 ): LiveAction {
   const visual = toolVisual(tool, options);
+  if (options.writing && status === 'running' && visual.icon === 'question')
+    return { icon: visual.icon, verb: 'Writing a question' };
   const kind = action(tool);
   const forms =
     kind === 'background' || kind === 'backgroundAgent'

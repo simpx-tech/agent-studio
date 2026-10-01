@@ -10,11 +10,17 @@
     runId,
     connectionId,
     running,
+    writing = false,
   }: {
     request: QuestionRequest;
     runId?: string;
     connectionId?: string;
     running: boolean;
+    /**
+     * Claude is still writing these questions: shown as they arrive, not answerable yet, in the
+     * card the recorded question then fills, so it stays in place once it can be answered.
+     */
+    writing?: boolean;
   } = $props();
   const selected = new SvelteMap<string, string[]>();
   const custom = new SvelteMap<string, string>();
@@ -23,7 +29,16 @@
   let error = $state('');
   let step = $state(0);
   let questionHeading: HTMLLegendElement | undefined = $state();
-  const current = $derived(request.questions[step]);
+  // A question still being written may have no text yet.
+  const current = $derived(
+    request.questions[step] ?? {
+      id: '',
+      header: '',
+      question: '',
+      options: [],
+      multiSelect: false,
+    },
+  );
   const lastStep = $derived(step === request.questions.length - 1);
   const active = $derived(running && request.status === 'pending' && !!runId && !sent);
   const answer = $derived<QuestionAnswer>({
@@ -48,7 +63,7 @@
     ),
   );
   async function goToStep(next: number) {
-    if (!active || busy || next < 0 || next >= request.questions.length) return;
+    if (!active || writing || busy || next < 0 || next >= request.questions.length) return;
     step = next;
     await tick();
     questionHeading?.focus();
@@ -65,7 +80,7 @@
     if (!multiple) custom.set(id, '');
   }
   async function submit(skipped = false) {
-    if (!active || busy || !runId || (!skipped && !lastStep)) return;
+    if (!active || writing || busy || !runId || (!skipped && !lastStep)) return;
     const response = skipped ? { requestId: request.id, skipped, answers: [] } : answer;
     if (!validAnswer(request, response)) return;
     busy = true;
@@ -82,11 +97,18 @@
 </script>
 
 {#if request.status !== 'answered' && !sent}
-  <section class="question-card" class:active aria-label="Agent questions">
+  <section
+    class="question-card"
+    class:active
+    class:writing
+    aria-label="Agent questions"
+    aria-busy={writing || undefined}
+  >
     {#if active}
       <form
         onsubmit={(e) => {
           e.preventDefault();
+          if (writing) return;
           if (lastStep) void submit();
           else void goToStep(step + 1);
         }}
@@ -94,12 +116,14 @@
         <p class="question-status" role="status">
           <span><MessageCircleQuestionMark size={16} aria-hidden="true" />Your input is needed</span
           >
-          {#if request.questions.length > 1}
+          {#if writing}
+            <span class="question-count question-writing">Writing…</span>
+          {:else if request.questions.length > 1}
             <span class="question-count">Question {step + 1} of {request.questions.length}</span>
           {/if}
         </p>
         {#if request.questions.length > 1}
-          <nav class="question-steps" aria-label="Question navigation">
+          <nav class="question-steps" aria-label="Question navigation" inert={writing}>
             {#each request.questions as question, index (question.id)}
               <button
                 type="button"
@@ -119,7 +143,7 @@
         {/if}
         {#key current.id}
           {@const q = current}
-          <fieldset disabled={busy}>
+          <fieldset disabled={busy} inert={writing}>
             <legend bind:this={questionHeading} tabindex="-1">{q.question}</legend>
             {#if q.options.length}<p class="muted small">
                 {q.multiSelect ? 'Choose any that apply.' : 'Choose one.'}
@@ -159,7 +183,7 @@
           <p class="muted small">Answer all questions to send.</p>
         {/if}
         {#if error}<p class="question-error" role="alert">{error}</p>{/if}
-        <div class="question-actions">
+        <div class="question-actions" inert={writing}>
           {#if step > 0}
             <button
               type="button"
@@ -229,6 +253,13 @@
     font-size: var(--text-xs);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
+  }
+  .question-writing {
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  /* A question not written yet keeps its line, so the text arrives without moving the card. */
+  .writing legend {
+    min-height: 1lh;
   }
   .question-steps {
     display: flex;

@@ -485,6 +485,56 @@ describe('structured tool activity', () => {
     expect(new Set(tools.map((t) => t.id))).toEqual(new Set(ids));
     expect(tools.find((t) => t.id === '0')?.status).toBe('error');
   });
+  it('carries a question draft in a remote run’s job until its question replaces it', () => {
+    const draft = (id: string, revision: number, closed?: boolean): RunEvent => ({
+      kind: 'questiondraft',
+      questionDraft: {
+        id,
+        revision,
+        questions: closed
+          ? []
+          : [{ header: '', question: `Q${revision}`, multiSelect: false, options: [] }],
+        ...(closed ? { closed } : {}),
+      },
+    });
+    const events: RunEvent[] = [];
+    retainRunEvent(events, { kind: 'text', text: 'Before' });
+    for (const revision of [1, 2, 3]) retainRunEvent(events, draft('ask', revision));
+    retainRunEvent(events, draft('ask', 2));
+    // One event per draft, the latest, in its first place.
+    expect(events).toEqual([{ kind: 'text', text: 'Before' }, draft('ask', 3)]);
+    const question = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending' as const,
+      questions: [{ id: 'q1', header: '', question: 'Q3', multiSelect: false, options: [] }],
+    };
+    retainRunEvent(events, { kind: 'question', question, draft: 'ask' });
+    expect(events).toEqual([
+      { kind: 'text', text: 'Before' },
+      draft('ask', 4, true),
+      { kind: 'question', question, draft: 'ask' },
+    ]);
+    // A closed draft stays closed, and makes room once the job holds four.
+    retainRunEvent(events, draft('ask', 9));
+    for (const id of ['b', 'c', 'd']) retainRunEvent(events, draft(id, 1));
+    retainRunEvent(events, draft('e', 1));
+    const drafts = events.flatMap((e) => (e.kind === 'questiondraft' ? [e.questionDraft!] : []));
+    expect(drafts.map((d) => [d.id, !!d.closed])).toEqual([
+      ['b', false],
+      ['c', false],
+      ['d', false],
+      ['e', false],
+    ]);
+    // With four open drafts a fifth waits for its question, and drafts change no saved reply.
+    retainRunEvent(events, draft('f', 1));
+    expect(events.filter((e) => e.kind === 'questiondraft')).toHaveLength(4);
+    const m = message();
+    const before = structuredClone(m);
+    applyRunEvent(m, draft('b', 2));
+    applyRunEvent(m, { kind: 'question', question, draft: 'b' });
+    expect(m).toEqual({ ...before, questions: [question] });
+  });
   it('merges the copies of a reply with thousands of calls in one pass', () => {
     const blocks = (revision: number): ContentBlock[] =>
       Array.from({ length: 40_000 }, (_, i) => ({

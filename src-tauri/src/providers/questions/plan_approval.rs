@@ -149,7 +149,10 @@ impl Session {
                 submitted: None,
             },
         );
-        let _ = self.channel.send(RunEvent::Question { question: request });
+        let _ = self.channel.send(RunEvent::Question {
+            question: request,
+            draft: None,
+        });
         Some(None)
     }
 }
@@ -193,7 +196,7 @@ mod tests {
             let call = call(tool, input.clone());
             observed(&mut s, &call, false);
             assert!(s.claude_plan(&call, true).unwrap().is_none());
-            let RunEvent::Question { question: q } = events.recv().await.unwrap() else {
+            let RunEvent::Question { question: q, .. } = events.recv().await.unwrap() else {
                 panic!("approval")
             };
             assert!(!serde_json::to_string(&q)

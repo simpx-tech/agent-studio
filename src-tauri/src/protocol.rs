@@ -59,6 +59,14 @@ pub enum RunEvent {
     },
     Question {
         question: crate::providers::questions::Request,
+        /// The call whose draft this recorded question replaces.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        draft: Option<String>,
+    },
+    /// A question Claude is still writing, shown until its request is recorded.
+    QuestionDraft {
+        #[serde(rename = "questionDraft")]
+        question_draft: crate::providers::questions::Draft,
     },
     Elicitation {
         elicitation: crate::providers::elicitation::Receipt,

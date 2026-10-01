@@ -509,3 +509,118 @@ async fn installed_claude_reply_costs_follow_each_process_running_total() {
     assert!((costs[2] - totals[2]).abs() < 1e-9, "{costs:?} {totals:?}");
     eprintln!("Reply costs {costs:?} for running totals {totals:?}.");
 }
+
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_shows_its_question_while_it_writes_it() {
+    use crate::providers::questions::{Answer, AnswerItem};
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "Before writing anything else, call mcp__agent_studio__studio_ask_user once to ask which color theme I prefer for a dashboard, with four options that each have a one-sentence description. After my answer, reply with the theme I chose.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"opus","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-question-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let hub = Questions::default();
+    let started = std::time::Instant::now();
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (answering, run_id) = (hub.clone(), request.run_id.clone());
+    // The user picks the first choice as soon as the question can be answered.
+    let channel = EventSink::new(move |event| {
+        if let RunEvent::Question { question, .. } = &event {
+            if question.status == "pending" {
+                let answer = Answer {
+                    request_id: question.id.clone(),
+                    skipped: false,
+                    answers: question
+                        .questions
+                        .iter()
+                        .map(|q| AnswerItem {
+                            id: q.id.clone(),
+                            values: vec![q
+                                .options
+                                .first()
+                                .map_or("Dark".into(), |o| o.label.clone())],
+                        })
+                        .collect(),
+                };
+                let (hub, run_id) = (answering.clone(), run_id.clone());
+                tokio::spawn(async move { hub.answer(&run_id, None, answer).await });
+            }
+        }
+        let _ = tx.send((started.elapsed(), event));
+        Ok(())
+    });
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            None,
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    process.kill().await;
+    drop(channel);
+    let mut events = vec![];
+    while let Ok(event) = received.try_recv() {
+        events.push(event);
+    }
+    let (status, answer) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let (asked_at, call) = events
+        .iter()
+        .find_map(|(at, e)| match e {
+            RunEvent::Question { question, draft } if question.status == "pending" => {
+                Some((*at, draft.clone().expect("The question replaces its draft")))
+            }
+            _ => None,
+        })
+        .expect("Claude asked no question");
+    let written: Vec<(Duration, String)> = events
+        .iter()
+        .filter_map(|(at, e)| match e {
+            RunEvent::QuestionDraft { question_draft } if question_draft.id == call => Some((
+                *at,
+                question_draft
+                    .questions
+                    .first()
+                    .map(|q| q.question.clone())
+                    .unwrap_or_default(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let first = written.first().expect("No draft before the question").0;
+    let texts: std::collections::HashSet<_> = written.iter().map(|(_, t)| t).collect();
+    // The question showed as it was written, well before its call could be answered.
+    assert!(texts.len() >= 3, "{written:?}");
+    assert!(
+        asked_at > first + Duration::from_millis(500),
+        "{written:?} {asked_at:?}"
+    );
+    assert!(written.iter().all(|(at, _)| *at <= asked_at));
+    assert!(!answer.is_empty());
+    eprintln!(
+        "Draft shown at {first:?}, {} updates, question recorded at {asked_at:?}; answer: {answer}",
+        written.len()
+    );
+}

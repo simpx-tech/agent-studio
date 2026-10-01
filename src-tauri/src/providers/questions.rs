@@ -8,7 +8,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, oneshot};
+mod draft;
 mod plan_approval;
+pub use draft::Draft;
 pub use plan_approval::PlanApproval;
 
 pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask one to four concise questions with stable ids and optional choices. Set multiSelect=false for one answer (radio buttons), or true only when multiple answers are allowed (checkboxes), independently for each question. Multiple questions do not imply multiple answers per question. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
@@ -33,7 +35,7 @@ pub fn codex_tool() -> Value {
     value
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct OptionItem {
     pub label: String,
     #[serde(default)]
@@ -267,6 +269,7 @@ pub struct Delivery {
 }
 pub struct Session {
     approvals: plan_approval::Tracker,
+    drafts: draft::Drafts,
     pub steering: super::steering::Session,
     pub elicitation: super::elicitation::Session,
     pub take_over: super::take_over::Session,
@@ -302,6 +305,7 @@ impl Questions {
         );
         Ok(Session {
             approvals: plan_approval::Tracker::default(),
+            drafts: draft::Drafts::default(),
             elicitation: self.2.open(run_id, connection.clone(), channel.clone()),
             take_over: self.3.open(run_id, connection.clone()),
             steering: self.1.open(run_id, connection, channel.clone()),
@@ -407,6 +411,7 @@ impl Session {
                     entry.request.revision = 3;
                     let _ = self.channel.send(RunEvent::Question {
                         question: entry.request.clone(),
+                        draft: None,
                     });
                 }
             }
@@ -436,11 +441,21 @@ impl Session {
             }
             let _ = self.channel.send(RunEvent::Question {
                 question: delivery.request,
+                draft: None,
             });
         }
         let _ = delivery.ack.send(result);
     }
-    fn submit(&mut self, wire: Wire, args: &Value, native: bool, parent: bool) -> Option<Value> {
+    /// Records a question, or returns the provider's refusal. `draft` names the call whose
+    /// draft the recorded question replaces.
+    fn submit(
+        &mut self,
+        wire: Wire,
+        args: &Value,
+        native: bool,
+        parent: bool,
+        draft: Option<String>,
+    ) -> Option<Value> {
         let parsed = if parent {
             parse(args, native)
         } else {
@@ -483,7 +498,10 @@ impl Session {
                 submitted: None,
             },
         );
-        let _ = self.channel.send(RunEvent::Question { question: request });
+        let _ = self.channel.send(RunEvent::Question {
+            question: request,
+            draft,
+        });
         None
     }
     pub fn codex(&mut self, value: &Value, root: &str) -> Option<Option<Value>> {
@@ -502,10 +520,16 @@ impl Session {
             if dynamic { &p["arguments"] } else { p },
             false,
             parent,
+            None,
         ))
     }
     pub fn observe_claude(&mut self, value: &Value) {
         self.observe_plan(value);
+        for draft in self.drafts.observe(value) {
+            let _ = self.channel.send(RunEvent::QuestionDraft {
+                question_draft: draft,
+            });
+        }
         if value["type"] == "control_cancel_request" {
             if let Ok(mut runs) = self.hub.0.lock() {
                 if let Some(run) = runs.get_mut(&self.run_id) {
@@ -517,6 +541,7 @@ impl Session {
                             entry.request.revision = 3;
                             let _ = self.channel.send(RunEvent::Question {
                                 question: entry.request.clone(),
+                                draft: None,
                             });
                         }
                     }
@@ -572,12 +597,22 @@ impl Session {
         if let Some(id) = &parent {
             self.consumed.insert(id.clone());
         }
-        Some(self.submit(
+        // The question replaces the draft its call wrote, in the same event; a refused call
+        // closes its draft at once.
+        let draft = parent.as_deref().and_then(|id| self.drafts.take(id));
+        let response = self.submit(
             Wire::Claude(value.clone(), native),
             args,
             native,
             parent.is_some(),
-        ))
+            draft.as_ref().map(|d| d.id.clone()),
+        );
+        if let (Some(_), Some(draft)) = (&response, draft) {
+            let _ = self.channel.send(RunEvent::QuestionDraft {
+                question_draft: draft.closing(),
+            });
+        }
+        Some(response)
     }
     pub fn resolved_codex(&self, value: &Value, root: &str) {
         if value["method"] != "serverRequest/resolved" || value["params"]["threadId"] != root {
@@ -593,6 +628,7 @@ impl Session {
                         entry.request.revision = 3;
                         let _ = self.channel.send(RunEvent::Question {
                             question: entry.request.clone(),
+                            draft: None,
                         });
                     }
                 }
@@ -613,6 +649,7 @@ impl Drop for Session {
                     entry.request.revision = 3;
                     let _ = self.channel.send(RunEvent::Question {
                         question: entry.request,
+                        draft: None,
                     });
                 }
             }
@@ -764,6 +801,79 @@ mod tests {
                 .claude(&json!({"request":{"subtype":"can_use_tool","tool_name":"Bash"}}))
                 .is_none());
         }
+    }
+    #[test]
+    fn claude_shows_a_question_as_it_is_written_until_its_call_records_or_refuses_it() {
+        let hub = Questions::default();
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let mut session = hub
+            .open(
+                "run",
+                None,
+                EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string())),
+            )
+            .unwrap();
+        let stream =
+            |event: Value| json!({"type":"stream_event","parent_tool_use_id":null,"event":event});
+        let mut ask = |session: &mut Session, id: &str, input: &Value| {
+            let text = input.to_string();
+            let cut = text.find("Choose").map_or(text.len() / 2, |at| at + 3);
+            session.observe_claude(&stream(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":"mcp__agent_studio__studio_ask_user","input":{}}})));
+            for part in [&text[..cut], &text[cut..]] {
+                session.observe_claude(&stream(json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":part}})));
+            }
+            // Claude Code 2.1.286 calls the tool before it ends the streamed block.
+            session.observe_claude(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":id,"name":"mcp__agent_studio__studio_ask_user","input":input}]}}));
+            let call = json!({"type":"control_request","request_id":id,"request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"id":3,"method":"tools/call","params":{"name":"studio_ask_user","arguments":input}}}});
+            let response = session.claude(&call).unwrap();
+            session.observe_claude(&stream(json!({"type":"content_block_stop","index":0})));
+            let mut seen = vec![];
+            while let Ok(event) = events.try_recv() {
+                seen.push(event);
+            }
+            (response, seen)
+        };
+        let (response, seen) = ask(&mut session, "asked", &args());
+        assert!(response.is_none());
+        let texts: Vec<String> = seen
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::QuestionDraft { question_draft } => Some(
+                    question_draft
+                        .questions
+                        .first()
+                        .map(|q| q.question.clone())
+                        .unwrap_or_default(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["", "Cho", "Choose format"]);
+        // The page reads these names.
+        let wire = serde_json::to_value(&seen[2]).unwrap();
+        assert_eq!(wire["kind"], "questiondraft");
+        assert_eq!(wire["questionDraft"]["id"], "asked");
+        assert_eq!(wire["questionDraft"]["questions"][0]["multiSelect"], false);
+        assert!(wire["questionDraft"].get("closed").is_none());
+        assert_eq!(
+            serde_json::to_value(seen.last().unwrap()).unwrap()["draft"],
+            "asked"
+        );
+        let Some(RunEvent::Question { question, draft }) = seen.last() else {
+            panic!("the recorded question follows its drafts")
+        };
+        assert_eq!(
+            (question.status.as_str(), draft.as_deref()),
+            ("pending", Some("asked"))
+        );
+        // Invalid input is refused, and its draft closes with the refusal.
+        let (response, seen) = ask(&mut session, "refused", &json!({"questions":[]}));
+        assert!(response.is_some());
+        let Some(RunEvent::QuestionDraft { question_draft }) = seen.last() else {
+            panic!("the refused call closes its draft")
+        };
+        assert!(question_draft.closed && question_draft.id == "refused");
+        assert!(!seen.iter().any(|e| matches!(e, RunEvent::Question { .. })));
     }
     #[test]
     fn multi_select_and_explicit_skip_are_preserved() {

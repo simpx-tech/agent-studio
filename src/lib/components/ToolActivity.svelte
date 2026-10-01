@@ -58,6 +58,7 @@
     owner,
     openSubagent,
     openedSubagent,
+    writing,
   }: {
     tools: ToolActivity[];
     replyStatus: Message['status'];
@@ -78,6 +79,8 @@
     openSubagent?: (agentId: string) => void;
     /** The sub-agent whose conversation the side panel shows. */
     openedSubagent?: string;
+    /** Question calls whose question Claude is still writing. */
+    writing?: ReadonlySet<string>;
   } = $props();
   let linkError = $state('');
   const labels = {
@@ -466,7 +469,11 @@
 <!-- What a call is doing now, or has just done, before it folds into its group. -->
 {#snippet liveRow(tool: ToolActivity)}
   {@const status = toolDisplayStatus(tool, replyStatus)}
-  {@const act = liveAction(tool, status, { folder, newFile: newFile(tool) })}
+  {@const act = liveAction(tool, status, {
+    folder,
+    newFile: newFile(tool),
+    writing: writing?.has(tool.id),
+  })}
   {@const child = tool.category === 'agent' && status === 'running' ? latestChild(tool) : undefined}
   <details
     class="live-row"

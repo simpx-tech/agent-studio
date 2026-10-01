@@ -527,6 +527,13 @@ describe('activity groups', () => {
     expect(liveAction(tool('ask', { name: 'AskUserQuestion' }), 'running').verb).toBe(
       'Waiting for your answer',
     );
+    // Until its question is recorded, the call is still writing it.
+    const asking = tool('studio', { name: 'mcp__agent_studio__studio_ask_user' });
+    expect(liveAction(asking, 'running', { writing: true })).toEqual({
+      icon: 'question',
+      verb: 'Writing a question',
+    });
+    expect(liveAction(asking, 'complete', { writing: true }).verb).toBe('Received your answer');
     const server = tool('dev', {
       name: 'Run command',
       commandRun: true,

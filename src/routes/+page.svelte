@@ -147,6 +147,7 @@
   import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
   import { clock } from '$lib/clock';
   import { awaitingAnswer } from '$lib/questions';
+  import { applyQuestionDraft, type QuestionDraft } from '$lib/question-drafts';
   import {
     messageBackgroundWork,
     type BackgroundWorkEvent,
@@ -449,6 +450,15 @@
   function hearWait(runId: string, event: RunEvent) {
     if (event.kind === 'backgroundwait')
       heardWaits[runId] = Number.isSafeInteger(event.wait) && event.wait! > 0 ? event.wait! : null;
+  }
+  // Questions Claude is still writing in the replies this window follows, by run. They change
+  // nothing saved: the recorded question replaces each one.
+  let questionDrafts = $state<Record<string, QuestionDraft[]>>({});
+  /** Whether the event only drafts a question, after applying it to the run's drafts. */
+  function hearDraft(runId: string, event: RunEvent) {
+    const drafts = applyQuestionDraft(questionDrafts[runId], event);
+    if (drafts) questionDrafts[runId] = drafts;
+    return event.kind === 'questiondraft';
   }
   // Whether a running reply only waits for background work, as this window last heard.
   function waitsForWork(m: Message) {
@@ -1558,6 +1568,10 @@
               if (!conversation || !message) return;
               if (event) {
                 hearWait(request.runId, event);
+                if (hearDraft(request.runId, event)) {
+                  if (activeId === conversation.id) void scrollToEnd(true);
+                  return;
+                }
                 applyRunEvent(message, event);
               }
               if (status) {
@@ -1565,6 +1579,7 @@
                 message.error = error;
                 delete message.backgroundWait;
                 delete heardWaits[request.runId];
+                delete questionDrafts[request.runId];
                 conversation.updatedAt = new Date().toISOString();
                 noteFinishedChats();
                 if (activeId === conversation.id) void scrollToEnd();
@@ -4140,6 +4155,7 @@
         message().durationMs = message().accountUsage?.runDurationMs ?? performance.now() - started;
         delete message().backgroundWait;
         delete heardWaits[runId];
+        delete questionDrafts[runId];
         conversation.updatedAt = new Date().toISOString();
         if (runs[conversation.id] === runId) {
           delete runs[conversation.id];
@@ -4160,6 +4176,10 @@
     function apply(event: RunEvent) {
       hearWait(runId, event);
       if (stopping[conversation.id]) void cancelRun(runId).catch(() => {});
+      if (hearDraft(runId, event)) {
+        if (activeId === conversation.id) void scrollToEnd(true);
+        return;
+      }
       const m = message();
       // Only a question tool can start asking, so other calls skip reading every block
       // of a reply that may hold thousands.
@@ -5020,6 +5040,7 @@
               {#if active?.messages.length}
                 {#each active.messages as m, i (m.id)}<MessageView
                     message={m}
+                    questionDrafts={m.runId ? questionDrafts[m.runId] : undefined}
                     idle={waitsForWork(m)}
                     background={messageBackgroundWork(m, hostBackground[active.id])}
                     {chatChanges}

@@ -14,6 +14,7 @@ import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
+import type { QuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
 import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
 import { usageLimitSchema, type UsageLimit } from './usage-limits.ts';
@@ -321,6 +322,7 @@ export type RunEvent = TokenUsage & {
     | 'visualization'
     | 'sentfiles'
     | 'question'
+    | 'questiondraft'
     | 'elicitation'
     | 'steering'
     | 'compaction'
@@ -342,6 +344,9 @@ export type RunEvent = TokenUsage & {
   visualization?: Visualization;
   sentFiles?: SentFiles;
   question?: QuestionRequest;
+  // The call whose draft a recorded question replaces.
+  draft?: string;
+  questionDraft?: QuestionDraft;
   elicitation?: ElicitationReceipt;
   steering?: SteeringReceipt;
   compaction?: Compaction;
