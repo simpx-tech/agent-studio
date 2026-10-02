@@ -1990,11 +1990,20 @@ test('computer then folder scopes CLI choices and groups active and history with
   const historyTab = page.getByRole('tab', { name: /^History/ });
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
   await expect(history).toBeHidden();
+  // The tabs go Active, History, then Screens, and the arrows wrap around them.
+  const screensTab = page.getByRole('tab', { name: /^Screens/ });
   await activeTab.press('End');
+  await expect(screensTab).toBeFocused();
+  await expect(page.locator('#conversation-panel-screens')).toBeVisible();
+  await screensTab.press('ArrowLeft');
   await expect(historyTab).toBeFocused();
   await expect(history).toBeVisible();
   await expect(history).toContainText('No conversations in history.');
   await historyTab.press('ArrowLeft');
+  await expect(activeTab).toBeFocused();
+  await activeTab.press('ArrowLeft');
+  await expect(screensTab).toBeFocused();
+  await screensTab.press('ArrowRight');
   await expect(activeTab).toBeFocused();
   await expect(active).toBeVisible();
   await expect(active.locator('.conversation-item')).toHaveAttribute('aria-current', 'page');

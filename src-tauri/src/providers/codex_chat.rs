@@ -64,10 +64,21 @@ fn plan_response(
     ))
 }
 
+/// The tools Agent Studio itself answers in a Codex chat.
+fn dynamic_tools() -> Vec<Value> {
+    let mut tools = vec![
+        plan_tool(),
+        super::visualize::codex_tool(),
+        super::questions::codex_tool(),
+        super::sent_files::codex_tool(),
+    ];
+    tools.extend(crate::screens::tools::codex_tools());
+    tools
+}
 fn start_params(request: &RunRequest) -> Value {
     // `never` also silently declines MCP user input inside Codex. Allow only
     // that interaction category, keeping ordinary execution approvals disabled.
-    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":[plan_tool(), super::visualize::codex_tool(), super::questions::codex_tool(), super::sent_files::codex_tool()]});
+    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":dynamic_tools()});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -303,6 +314,8 @@ pub async fn run(
     };
     let mut visualizer = super::visualize::Visualizer::default();
     let mut sender = super::sent_files::FileSender::default();
+    let mut screen_tools = crate::screens::tools::Agent::default();
+    let screen_context = channel.and_then(EventSink::screens);
     // Files this reply shows are checked and kept where the conversation runs.
     let staging = super::sent_files::Staging::new(
         &request.run_id,
@@ -463,6 +476,11 @@ pub async fn run(
                         if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
                         continue;
                     }
+                    if let Some((response, event)) = screen_tools.codex(&value, &thread, screen_context.as_deref()).await {
+                        if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not answer the screen tool")?;
+                        continue;
+                    }
                     if let Some((response, event)) = sender.codex(&value, &thread, &staging).await {
                         if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
                         process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the files shown")?;
@@ -550,7 +568,7 @@ pub async fn run(
                         if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }
                         return Ok(("complete".into(), "Context compacted.".into()));
                     }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !screen_tools.has_screens() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     if request.agent.output_schema.is_some() {
                         let value = serde_json::from_str(&decoder.text).unwrap_or(Value::Null);
                         decoder.text = crate::structured_output::result(&value)?;
@@ -592,6 +610,10 @@ pub async fn run(
 #[cfg(test)]
 #[path = "codex_deadline_tests.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+#[path = "codex_native_tests.rs"]
+mod native_tests;
 
 #[cfg(test)]
 mod tests {
@@ -746,7 +768,7 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":[plan_tool(), super::super::visualize::codex_tool(), super::super::questions::codex_tool(), super::super::sent_files::codex_tool()]})
+            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":dynamic_tools()})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");

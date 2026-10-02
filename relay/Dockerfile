@@ -30,6 +30,7 @@ COPY src/lib/sent-files.ts ./src/lib/
 COPY src/lib/tool-output.ts ./src/lib/
 COPY src/lib/usage-limits.ts ./src/lib/
 COPY src/lib/question-drafts.ts ./src/lib/
+COPY src/lib/screens.ts ./src/lib/
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
 USER node
 EXPOSE 4317

@@ -823,6 +823,28 @@ pre {
 .conversation-item .conversation-monitoring {
   color: var(--accent-strong);
 }
+/* Screens sit under their computer, each marked by a page in the gutter; one whose actions
+   wait for the user's approval says so in the warning color. */
+.screen-item > svg {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  margin-top: -6.5px;
+  color: var(--text-faint);
+}
+.screen-item.current > svg {
+  color: var(--accent-strong);
+}
+.conversation-item .screen-waiting {
+  flex: none;
+  color: var(--warning);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.sidebar-empty.screen-problem {
+  padding-block: 4px;
+  overflow-wrap: anywhere;
+}
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch
    screens. The title makes room for it while it shows. */
 .conversation-row {

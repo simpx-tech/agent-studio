@@ -11,6 +11,7 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeSentFiles } from './sent-files.ts';
+import { mergeScreenCards } from './screens.ts';
 import { mergeQuestions } from './questions.ts';
 import { mergeElicitations } from './elicitations.ts';
 import { mergeSteering } from './steering.ts';
@@ -264,6 +265,7 @@ function sameRun(
       ...(a.sentFiles || b.sentFiles
         ? { sentFiles: mergeSentFiles(a.sentFiles, b.sentFiles) }
         : {}),
+      ...(a.screens || b.screens ? { screens: mergeScreenCards(a.screens, b.screens) } : {}),
       workflow:
         (a.workflow?.revision ?? -1) >= (b.workflow?.revision ?? -1) ? a.workflow : b.workflow,
       nativeWorkflows:
@@ -527,7 +529,8 @@ export type RelayJob = {
     | 'answer'
     | 'elicitation'
     | 'steer'
-    | 'release';
+    | 'release'
+    | 'screens';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

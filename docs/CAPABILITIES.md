@@ -118,6 +118,10 @@ The bytes stay on the executing computer with the run's other tool results, unde
 
 The tool is offered only to Codex and Claude chats with tools enabled; Gemini, background titles and other restricted queries never receive it. Other file types are not shown: mention their path in the reply instead.
 
+## Screens
+
+A chat can also build a lasting page with its own interface and commands, such as a dashboard of the pull requests you opened this week, with its `save_screen` tool. Screens stay on the computer that runs their commands, open from the reply's card or the sidebar's **Screens** tab, and run only the actions you reviewed and allowed. See [Screens](SCREENS.md).
+
 ## Slash commands and skills
 
 Start a message with `/` to search commands and skills for the selected agent. Use the arrow keys and Enter or Tab to complete a choice, or click/tap it. Escape closes suggestions. Completing a native command or skill inserts its name and a space without sending, so you can add arguments before submitting. You can also type the full `/name arguments` directly. Namespaced Claude commands, including plugin skills and saved native workflows, keep their CLI spelling.

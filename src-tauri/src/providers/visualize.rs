@@ -189,7 +189,14 @@ impl Visualizer {
             }
             "notifications/initialized" | "ping" => response["result"] = json!({}),
             "tools/list" => {
-                response["result"] = json!({"tools":[tool(), super::questions::tool(), super::sent_files::tool(), super::background::tool()]})
+                let mut tools = vec![
+                    tool(),
+                    super::questions::tool(),
+                    super::sent_files::tool(),
+                    super::background::tool(),
+                ];
+                tools.extend(crate::screens::tools::tools());
+                response["result"] = json!({ "tools": tools })
             }
             "tools/call" if m["params"]["name"] == "visualize" => {
                 let args = &m["params"]["arguments"];

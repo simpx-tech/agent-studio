@@ -7,6 +7,7 @@ import { planSchema } from './plans.ts';
 import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
+import { screenCardSchema, mergeScreenCards } from './screens.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { applyQuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
@@ -186,6 +187,7 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
     'proposedplan',
     'visualization',
     'sentfiles',
+    'screen',
     'filechanges',
     'question',
     'elicitation',
@@ -268,6 +270,10 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     // Files belong to the reply's own run on the computer that kept them.
     if (message.role === 'assistant' && parsed.success && message.runId === parsed.data.runId)
       message.sentFiles = mergeSentFiles(message.sentFiles, [parsed.data]);
+  } else if (event.kind === 'screen') {
+    const parsed = screenCardSchema.safeParse(event.screen);
+    if (message.role === 'assistant' && parsed.success)
+      message.screens = mergeScreenCards(message.screens, [parsed.data]);
   } else if (event.kind === 'nativeworkflow') {
     const parsed = nativeWorkflowsSchema.safeParse(event.nativeWorkflows);
     if (parsed.success && parsed.data.revision > (message.nativeWorkflows?.revision ?? -1))
@@ -563,6 +569,15 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
       if (parsed.data.revision > (events[index].visualization?.revision ?? -1))
         events[index] = event;
     } else if (events.filter((e) => e.kind === 'visualization').length < 12) events.push(event);
+    return;
+  }
+  if (event.kind === 'screen') {
+    const parsed = screenCardSchema.safeParse(event.screen);
+    if (!parsed.success) return;
+    const index = events.findIndex((e) => e.kind === 'screen' && e.screen?.id === parsed.data.id);
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].screen?.revision ?? -1)) events[index] = event;
+    } else if (events.filter((e) => e.kind === 'screen').length < 12) events.push(event);
     return;
   }
   if (event.kind === 'sentfiles') {

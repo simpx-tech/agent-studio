@@ -11,6 +11,7 @@
     LoaderCircle,
     Hourglass,
     MessageCircleQuestionMark,
+    LayoutDashboard,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { awaitingAnswer } from '$lib/questions';
@@ -35,6 +36,7 @@
   import ProposedPlan from './ProposedPlan.svelte';
   import ElicitationForm from './ElicitationForm.svelte';
   import { messageArtifacts, type Artifact } from '$lib/artifacts';
+  import type { ScreenCard } from '$lib/screens';
   let {
     message,
     questionDrafts,
@@ -57,6 +59,7 @@
     openedSubagent,
     idle = false,
     switchAccount,
+    openScreen,
   }: {
     message: Message;
     /** Questions Claude is still writing in this reply, which this window heard. */
@@ -85,6 +88,8 @@
     idle?: boolean;
     /** Opens the Agent picker to choose another account for the next message. */
     switchAccount?: () => void;
+    /** Opens a screen this reply saved, from the computer that keeps it. */
+    openScreen?: (card: ScreenCard) => void;
   } = $props();
   const responseChanges = $derived(summarizeFileChanges([message]));
   // A usage limit that stopped the reply: its Work history stays open, and a card of its own
@@ -309,24 +314,35 @@
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
           Response stopped. Partial text has been kept.
         </p>{/if}
-      {#if artifacts.length}<div class="response-extras">
-          <div class="response-artifacts" aria-label="Response artifacts">
-            {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
-                <button
-                  class="secondary artifact-open"
-                  onclick={() => openArtifact(artifact, 'modal')}
-                  ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                    >Open {artifact.language.toUpperCase()}</small
+      {#if artifacts.length || message.screens?.length}<div class="response-extras">
+          {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
+              {#each message.screens as card (card.id)}<button
+                  class="secondary screen-open"
+                  disabled={!openScreen}
+                  title={openScreen ? `Open ${card.title}` : undefined}
+                  onclick={() => openScreen?.(card)}
+                  ><LayoutDashboard size={16} aria-hidden="true" /><span>{card.title}</span><small
+                    >Open screen</small
                   ></button
-                ><button
-                  class="secondary artifact-side"
-                  aria-label={`Open ${artifact.title} in side panel`}
-                  title="Open in side panel"
-                  onclick={() => openArtifact(artifact, 'panel')}
-                  ><PanelRightOpen size={16} /></button
-                >
-              </div>{/each}
-          </div>
+                >{/each}
+            </div>{/if}
+          {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+              {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
+                  <button
+                    class="secondary artifact-open"
+                    onclick={() => openArtifact(artifact, 'modal')}
+                    ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                      >Open {artifact.language.toUpperCase()}</small
+                    ></button
+                  ><button
+                    class="secondary artifact-side"
+                    aria-label={`Open ${artifact.title} in side panel`}
+                    title="Open in side panel"
+                    onclick={() => openArtifact(artifact, 'panel')}
+                    ><PanelRightOpen size={16} /></button
+                  >
+                </div>{/each}
+            </div>{/if}
         </div>{/if}
       <!-- Elapsed time, then plan, workflow, sub-agent and background work toggles in the same row. -->
       <ReplyFooter
@@ -467,11 +483,28 @@
     gap: 8px;
     margin: 16px 0 4px;
   }
-  .response-artifacts {
+  .response-artifacts,
+  .response-screens {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     flex: 1 1 auto;
+  }
+  .screen-open {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+    border-radius: var(--radius-lg);
+  }
+  .screen-open > :global(svg) {
+    flex-shrink: 0;
+    color: var(--accent-strong);
+  }
+  .screen-open span {
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .artifact-card {
     display: flex;

@@ -31,7 +31,7 @@ pub struct Opened {
 const MAX_CODE: usize = 64 * 1024;
 
 // Characters a block cannot show: controls, and format characters that hide or reorder text.
-fn hidden(character: char) -> bool {
+pub(crate) fn hidden(character: char) -> bool {
     (character.is_control() && character != '\n' && character != '\t')
         || matches!(
             character,
@@ -215,6 +215,50 @@ fn git_bash(path: &[PathBuf], installations: &[PathBuf]) -> Option<PathBuf> {
         .find(|bash| bash.is_file())
 }
 
+/// The folders Git for Windows installs into, for a bash not found beside git on PATH.
+#[cfg(windows)]
+fn git_installations() -> Vec<PathBuf> {
+    [
+        ("ProgramFiles", "Git"),
+        ("ProgramFiles(x86)", "Git"),
+        ("LOCALAPPDATA", "Programs\\Git"),
+    ]
+    .into_iter()
+    .filter_map(|(variable, git)| Some(PathBuf::from(std::env::var_os(variable)?).join(git)))
+    .collect()
+}
+
+#[cfg(windows)]
+fn search_path() -> Vec<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect()
+}
+
+/// Git for Windows' bash on this computer, as a console or a screen's command runs it.
+#[cfg(windows)]
+pub(crate) fn installed_git_bash() -> Option<PathBuf> {
+    git_bash(&search_path(), &git_installations())
+}
+
+/// PowerShell 7 when it is on PATH, otherwise Windows PowerShell.
+#[cfg(windows)]
+pub(crate) fn powershell(path: &[PathBuf], system: &Path) -> PathBuf {
+    path.iter()
+        .map(|directory| directory.join("pwsh.exe"))
+        .find(|pwsh| pwsh.symlink_metadata().is_ok())
+        .unwrap_or_else(|| {
+            system
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+}
+
+/// This computer's PowerShell, as a console or a screen's command runs it.
+#[cfg(windows)]
+pub(crate) fn installed_powershell() -> Option<PathBuf> {
+    Some(powershell(&search_path(), &window::system_directory()?))
+}
+
 /// A console that was started, with the name its block's control shows.
 #[cfg(windows)]
 struct Launched {
@@ -302,18 +346,9 @@ fn launch_native(
     std::fs::create_dir_all(root).map_err(|_| "Cannot keep the code for the console")?;
     prune(root);
     let system = window::system_directory().ok_or("Cannot locate the Windows shells")?;
-    let path: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    let installations: Vec<PathBuf> = [
-        ("ProgramFiles", "Git"),
-        ("ProgramFiles(x86)", "Git"),
-        ("LOCALAPPDATA", "Programs\\Git"),
-    ]
-    .into_iter()
-    .filter_map(|(variable, git)| Some(PathBuf::from(std::env::var_os(variable)?).join(git)))
-    .collect();
+    let path = search_path();
     let bash = (shell == Shell::Posix)
-        .then(|| git_bash(&path, &installations))
+        .then(|| git_bash(&path, &git_installations()))
         .flatten();
     let id = uuid::Uuid::new_v4();
     // What PowerShell and Command Prompt read, named to them by this console's environment.
@@ -367,16 +402,7 @@ fn launch_native(
                 .flat_map(u16::to_le_bytes)
                 .collect::<Vec<_>>(),
         );
-        let application = path
-            .iter()
-            .map(|directory| directory.join("pwsh.exe"))
-            .find(|pwsh| pwsh.symlink_metadata().is_ok())
-            .unwrap_or_else(|| {
-                system
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe")
-            });
+        let application = powershell(&path, &system);
         (
             "PowerShell",
             application,

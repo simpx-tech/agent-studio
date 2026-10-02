@@ -29,6 +29,7 @@ import { pluginRequestSchema } from '../src/lib/plugins.ts';
 import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
+import { screenRequestMs, screenRequestSchema } from '../src/lib/screens.ts';
 import {
   ImageUploadError,
   imageStore,
@@ -69,10 +70,17 @@ const jobInput = z
       'elicitation',
       'steer',
       'release',
+      'screens',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
   .superRefine((job, ctx) => {
+    if (
+      job.method === 'screens' &&
+      !z.object({ environmentId: uuid, request: screenRequestSchema }).strict().safeParse(job.args)
+        .success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid screen request' });
     if (
       job.method === 'release' &&
       !z.object({ conversationId: uuid, connectionId: uuid }).strict().safeParse(job.args).success
@@ -265,10 +273,11 @@ export const jobUpdateLimit = 24_000_000;
 /** What one workspace's requests may hold at once, their results included. */
 const jobStorageBudget = 64_000_000;
 /**
- * Optional reads of a kept tool result, whose large results leave as soon as the requester has
- * them, or a minute after they finish when it never asks.
+ * Optional reads of a kept tool result, and screen requests, whose large results leave as soon
+ * as the requester has them, or a minute after they finish when it never asks.
  */
 const resultRead = (method: string) =>
+  method === 'screens' ||
   method === 'toolOutput' ||
   method === 'toolOutputImage' ||
   method === 'toolOutputModel' ||
@@ -467,11 +476,13 @@ export function createRelay({
             now() - job.created >
               (job.method === 'plugins'
                 ? 660_000
-                : runTimeoutMs(
-                    job.method === 'run'
-                      ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
-                      : undefined,
-                  )))
+                : job.method === 'screens'
+                  ? screenRequestMs(job.args.request as { op?: string })
+                  : runTimeoutMs(
+                      job.method === 'run'
+                        ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
+                        : undefined,
+                    )))
         ) {
           job.status = 'error';
           job.error =

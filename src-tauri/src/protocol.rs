@@ -78,6 +78,10 @@ pub enum RunEvent {
         #[serde(rename = "sentFiles")]
         sent_files: crate::providers::sent_files::SentFiles,
     },
+    /// A screen this reply saved, which its card opens.
+    Screen {
+        screen: crate::screens::Card,
+    },
     Plan {
         plan: plan::Plan,
     },

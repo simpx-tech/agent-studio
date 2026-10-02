@@ -177,8 +177,20 @@ fn studio_tool(name: &str) -> bool {
     name.starts_with("mcp__agent_studio__")
         || matches!(
             name,
-            "studio_ask_user" | "studio_update_plan" | "visualize" | "send_files"
+            "studio_ask_user"
+                | "studio_update_plan"
+                | "visualize"
+                | "send_files"
+                | "save_screen"
+                | "list_screens"
+                | "read_screen"
         )
+}
+/// The title of the screen a save_screen call saves, which its row shows.
+fn screen_title(name: &str, input: &Value) -> Option<String> {
+    name.ends_with("save_screen")
+        .then(|| field(input, "title", 100))
+        .flatten()
 }
 /// Claude tools whose inputs other panels show or that carry file bodies.
 fn claude_builtin(name: &str) -> bool {
@@ -356,7 +368,10 @@ impl ToolDecoder {
                 }
                 // Agent Studio's own tools show their arguments and results in other panels.
                 if studio_tool(&name) {
-                    tool.detail = Some("Application tool call reported by Codex.".into());
+                    tool.detail = Some(
+                        screen_title(&name, &item["arguments"])
+                            .unwrap_or_else(|| "Application tool call reported by Codex.".into()),
+                    );
                 } else {
                     self.set_input(&mut tool, &item["arguments"]);
                     if method == "item/completed" {
@@ -972,6 +987,7 @@ impl ToolDecoder {
                     fact(&mut tool, "Prompt", prompt);
                 }
             }
+            "mcp__agent_studio__save_screen" => tool.detail = screen_title(name, input),
             // Connected (MCP) and unrecognized tools show the arguments they were sent.
             _ if !claude_builtin(name) && !studio_tool(name) => self.set_input(&mut tool, input),
             _ => {}

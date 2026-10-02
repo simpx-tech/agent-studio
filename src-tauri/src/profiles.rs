@@ -23,7 +23,11 @@ pub fn installation(app: &tauri::AppHandle) -> Result<Installation, String> {
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    std::fs::create_dir_all(&root).map_err(|_| "Cannot create installation directory")?;
+    installation_in(&root)
+}
+/// This installation's identity, kept in the app data folder `root`.
+pub fn installation_in(root: &Path) -> Result<Installation, String> {
+    std::fs::create_dir_all(root).map_err(|_| "Cannot create installation directory")?;
     let path = root.join("installation.json");
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice::<Installation>(&bytes)

@@ -62,6 +62,7 @@ export type ToolIconKey =
   | 'question'
   | 'workflow'
   | 'chart'
+  | 'screen'
   | 'hook'
   | 'background'
   | 'tool';
@@ -864,6 +865,18 @@ export function toolVisual(
   if (tool.name === 'Workflow') return { icon: 'workflow', title: tool.name, detail: tool.detail };
   if (['visualize', 'mcp__agent_studio__visualize'].includes(tool.name))
     return { icon: 'chart', title: 'Visualize' };
+  // A saved screen's title is the one input its call shows.
+  const screenTool = {
+    save_screen: 'Save screen',
+    list_screens: 'List screens',
+    read_screen: 'Read screen',
+  }[tool.name.replace(/^mcp__agent_studio__/, '')];
+  if (screenTool)
+    return {
+      icon: 'screen',
+      title: screenTool,
+      detail: screenTool === 'Save screen' ? tool.detail : undefined,
+    };
   const connected = connectedTool(tool);
   if (connected) {
     const browser = browserTool(connected.server, connected.name);

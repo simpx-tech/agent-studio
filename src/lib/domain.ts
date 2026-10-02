@@ -11,6 +11,7 @@ import { planSchema, type Plan } from './plans.ts';
 import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
+import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
@@ -219,6 +220,8 @@ export const messageSchema = z
     proposedPlans: proposedPlansSchema.optional(),
     visualizations: visualizationsSchema.optional(),
     sentFiles: sentFileGroupsSchema.optional(),
+    // The screens the reply saved, which their cards open from the computer that keeps them.
+    screens: screenCardsSchema.optional(),
     questions: questionsSchema.optional(),
     elicitations: elicitationReceiptsSchema.optional(),
     steering: steeringSchema.optional(),
@@ -327,6 +330,7 @@ export type RunEvent = TokenUsage & {
     | 'filechanges'
     | 'visualization'
     | 'sentfiles'
+    | 'screen'
     | 'question'
     | 'questiondraft'
     | 'elicitation'
@@ -349,6 +353,7 @@ export type RunEvent = TokenUsage & {
   proposedPlan?: ProposedPlan;
   visualization?: Visualization;
   sentFiles?: SentFiles;
+  screen?: ScreenCard;
   question?: QuestionRequest;
   // The call whose draft a recorded question replaces.
   draft?: string;

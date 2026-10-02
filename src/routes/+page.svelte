@@ -66,6 +66,7 @@
     PenLine,
     RotateCcwClock,
     CalendarDays,
+    LayoutDashboard,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -133,7 +134,10 @@
     portableWorkspace,
     readChatImage,
     storeChatImages,
+    listScreens,
   } from '$lib/transport';
+  import ScreenView from '$lib/components/ScreenView.svelte';
+  import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import InputTemplates from '$lib/components/InputTemplates.svelte';
   import {
@@ -298,7 +302,7 @@
 
   initAppearance();
 
-  type View = 'chat' | 'connections' | 'settings';
+  type View = 'chat' | 'connections' | 'settings' | 'screen';
   let installation = $state<Installation>();
   let wslDiscovery = $state<WslDiscovery>();
   let wslError = $state('');
@@ -385,7 +389,17 @@
   let locationGeneration = 0;
   let settingsRevision = 0;
   let collapsedGroups = $state<Record<string, boolean>>({});
-  let conversationScope = $state<'active' | 'history'>('active');
+  let conversationScope = $state<'active' | 'history' | 'screens'>('active');
+  // Screens (docs/SCREENS.md): each computer keeps its own and lists them when asked. This window
+  // keeps the lists it read for the session, by the host that answered.
+  type ScreenShelf = {
+    screens: ScreenSummary[];
+    loading: boolean;
+    error?: string;
+    checkedAt?: number;
+  };
+  let screenShelves = $state<Record<string, ScreenShelf>>({});
+  let openedScreen = $state<{ environmentId: string; id: string }>();
   let modelGeneration = 0;
   let models = $state<ModelCatalog>(structuredClone(fallbackModels));
   let modelsLoading = $state(false);
@@ -1309,13 +1323,155 @@
       (desktop() || online) &&
       activeQueue.length < maxQueuedMessages,
   );
+  // The computers that answer for screens: every host, named by its own environment.
+  const screenHosts = $derived.by(() => {
+    const fleet = workspace.fleet;
+    return [...new Set(fleet.environments.map((e) => executionHost(fleet, e.id)))].filter((host) =>
+      fleet.environments.some((e) => e.id === host),
+    );
+  });
+  const screenSummary = (id: string) => {
+    for (const shelf of Object.values(screenShelves)) {
+      const screen = shelf.screens.find((s) => s.id === id);
+      if (screen) return screen;
+    }
+  };
+  const openedScreenSummary = $derived(openedScreen ? screenSummary(openedScreen.id) : undefined);
+  const screenCount = $derived(
+    Object.values(screenShelves).reduce((count, shelf) => count + shelf.screens.length, 0),
+  );
+  // The Screens tab lists each computer's screens, newest first, filtered by the search.
+  const screenGroups = $derived.by(() => {
+    const search = query.toLowerCase();
+    const groups = new Map<string, { id: string; name: string; screens: ScreenSummary[] }>();
+    for (const shelf of Object.values(screenShelves))
+      for (const screen of shelf.screens) {
+        const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId);
+        if (!environment) continue;
+        if (
+          search &&
+          !`${screen.title} ${screen.description} ${screen.project}`.toLowerCase().includes(search)
+        )
+          continue;
+        const id = computerViewId(environment);
+        const group = groups.get(id) ?? {
+          id,
+          name: computers.find((c) => c.id === id)?.name ?? environment.name,
+          screens: [],
+        };
+        group.screens.push(screen);
+        groups.set(id, group);
+      }
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+  });
+  const screenProblems = $derived(
+    Object.entries(screenShelves)
+      .filter(([, shelf]) => shelf.error)
+      .map(([host, shelf]) => ({
+        host,
+        name:
+          computers.find((c) => c.environments.some((e) => e.id === host))?.name ?? 'A computer',
+        error: shelf.error!,
+      })),
+  );
+  const screensLoading = $derived(Object.values(screenShelves).some((shelf) => shelf.loading));
+  // A count shows once a computer answered, so an unread list never reads as none.
+  const screensChecked = $derived(Object.values(screenShelves).some((shelf) => shelf.checkedAt));
   const viewTitle = $derived(
     {
       chat: active?.title ?? 'New conversation',
       connections: 'Connections',
       settings: 'Settings',
+      screen: openedScreenSummary?.title ?? 'Screen',
     }[view],
   );
+  /** Reads the screens of each reachable host again, unless it answered moments ago. */
+  function refreshScreens(hosts: string[] = screenHosts, force = false) {
+    const session = workspaceSession;
+    for (const host of hosts) {
+      if (!environmentOnline(host)) continue;
+      const shelf = (screenShelves[host] ??= { screens: [], loading: false });
+      if (shelf.loading || (!force && shelf.checkedAt && Date.now() - shelf.checkedAt < 15_000))
+        continue;
+      shelf.loading = true;
+      void listScreens(host).then(
+        (screens) => {
+          if (session === workspaceSession)
+            screenShelves[host] = { screens, loading: false, checkedAt: Date.now() };
+        },
+        (e) => {
+          if (session !== workspaceSession) return;
+          // The list it gave before stays, as last reported.
+          screenShelves[host] = {
+            screens: screenShelves[host]?.screens ?? [],
+            loading: false,
+            checkedAt: Date.now(),
+            error: (e instanceof Error ? e.message : String(e)).replace(/^Error: /, ''),
+          };
+        },
+      );
+    }
+  }
+  $effect(() => {
+    if (loaded && conversationScope === 'screens') untrack(() => refreshScreens());
+  });
+  // This computer's own screens are counted from the start; others' when the tab opens.
+  $effect(() => {
+    if (loaded && desktop())
+      untrack(() => refreshScreens(screenHosts.filter((host) => host === installation?.id)));
+  });
+  /** The host that keeps the screens of an environment. */
+  const screenHost = (environmentId: string) =>
+    workspace.fleet.environments.some((e) => e.id === environmentId)
+      ? executionHost(workspace.fleet, environmentId)
+      : undefined;
+  /** A reply saved a screen, so its computer's list changed. */
+  function screenSaved(environmentId: string) {
+    const host = screenHost(environmentId);
+    if (host) refreshScreens([host], true);
+  }
+  /** What a screen's computer last reported of it, kept in its list. */
+  function noteScreen(detail: ScreenDetail) {
+    const host = screenHost(detail.environmentId);
+    if (!host) return;
+    const { html: _html, actions: _actions, digest: _digest, ...summary } = detail;
+    const shelf = (screenShelves[host] ??= { screens: [], loading: false });
+    const index = shelf.screens.findIndex((s) => s.id === detail.id);
+    if (index >= 0) shelf.screens[index] = summary;
+    else shelf.screens.unshift(summary);
+  }
+  function openScreen(environmentId: string, id: string) {
+    openedScreen = { environmentId, id };
+    view = 'screen';
+    sidebarOpen = false;
+    const host = screenHost(environmentId);
+    if (host && !screenSummary(id)) refreshScreens([host]);
+  }
+  function screenDeleted() {
+    if (!openedScreen) return;
+    const host = screenHost(openedScreen.environmentId);
+    const shelf = host ? screenShelves[host] : undefined;
+    const id = openedScreen.id;
+    if (shelf) shelf.screens = shelf.screens.filter((s) => s.id !== id);
+    openedScreen = undefined;
+    view = 'chat';
+  }
+  /** `studio.chat`: a new conversation in the screen's folder, with the text as its draft. */
+  function chatFromScreen(text: string, screen: ScreenDetail) {
+    const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId);
+    if (!environment) {
+      notice = 'This screen’s computer is no longer in Connections.';
+      return;
+    }
+    newChat(undefined, undefined, {
+      computerId: environment.computerId,
+      environmentId: environment.id,
+      path: screen.project,
+    });
+    prompt = text;
+    keepDraft(composerContent());
+    void tick().then(() => composerInput?.focus());
+  }
 
   let relayRestorePending = $state(true);
   let notificationTarget = $state<string>();
@@ -1584,8 +1740,10 @@
               collapsedGroups = {};
               query = '';
               notice = '';
+              screenShelves = {};
+              openedScreen = undefined;
               newChat();
-              view = previousView;
+              view = previousView === 'screen' ? 'chat' : previousView;
               if (reason !== undefined) {
                 ++relaySelectionVersion;
                 paired = false;
@@ -1613,6 +1771,8 @@
                   return;
                 }
                 applyRunEvent(message, event);
+                if (event.kind === 'screen' && event.screen)
+                  screenSaved(event.screen.environmentId);
               }
               if (status) {
                 message.status = status;
@@ -3250,14 +3410,14 @@
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const tablist = (event.currentTarget as HTMLElement).parentElement;
+    const scopes = ['active', 'history', 'screens'] as const;
+    const index = scopes.indexOf(conversationScope);
     conversationScope =
       event.key === 'Home'
         ? 'active'
         : event.key === 'End'
-          ? 'history'
-          : conversationScope === 'active'
-            ? 'history'
-            : 'active';
+          ? 'screens'
+          : scopes[(index + (event.key === 'ArrowLeft' ? scopes.length - 1 : 1)) % scopes.length];
     await tick();
     tablist?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
   }
@@ -4319,6 +4479,7 @@
         event.kind === 'tool' && !!event.tool && !event.tool.parentId && asksTheUser(event.tool.name);
       const hadQuestion = questionTool && requestsAttention(m);
       applyRunEvent(m, event);
+      if (event.kind === 'screen' && event.screen) screenSaved(event.screen.environmentId);
       localChanges++;
       // Every event goes out with the next sync, so other devices follow the text and
       // tool calls as they stream; saving to disk keeps its own, slower rate.
@@ -4678,7 +4839,7 @@
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
-        placeholder="Search conversations"
+        placeholder={conversationScope === 'screens' ? 'Search screens' : 'Search conversations'}
         bind:value={query}
       />{#if query}<button
           class="icon-button"
@@ -4686,7 +4847,7 @@
           aria-label="Clear search"><X size={12} /></button
         >{/if}</label
     >
-    <div class="conversation-tabs" role="tablist" aria-label="Conversation status">
+    <div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
       {#each conversationGroups as group}
         <button
           id={`conversation-tab-${group.id}`}
@@ -4700,6 +4861,17 @@
           ></button
         >
       {/each}
+      <button
+        id="conversation-tab-screens"
+        role="tab"
+        aria-selected={conversationScope === 'screens'}
+        aria-controls="conversation-panel-screens"
+        tabindex={conversationScope === 'screens' ? 0 : -1}
+        onclick={() => (conversationScope = 'screens')}
+        onkeydown={conversationTabKey}
+        ><span>Screens</span
+        >{#if screensChecked}<span class="conversation-tab-count">{screenCount}</span>{/if}</button
+      >
     </div>
     <div class="conversation-list">
       {#each conversationGroups as group}
@@ -4907,6 +5079,71 @@
             </p>{/each}
         </div>
       {/each}
+      <div
+        id="conversation-panel-screens"
+        class="conversation-section"
+        role="tabpanel"
+        tabindex="0"
+        aria-labelledby="conversation-tab-screens"
+        hidden={conversationScope !== 'screens'}
+      >
+        {#each screenGroups as group (group.id)}
+          {@const groupKey = `screens/${group.id}`}
+          <div class="conversation-computer" aria-label={`${group.name} screens`}>
+            <div class="computer-group-row">
+              <button
+                class="computer-group-toggle"
+                title={group.name}
+                aria-expanded={!collapsedGroups[groupKey]}
+                onclick={() => (collapsedGroups[groupKey] = !collapsedGroups[groupKey])}
+                ><Laptop size={13} /><span>{group.name}</span
+                >{#if !computerOnline(group.id)}<small class="computer-offline">Offline</small
+                  >{/if}<ChevronRight
+                  size={12}
+                  class={!collapsedGroups[groupKey] ? 'expanded-chevron' : ''}
+                /></button
+              >
+            </div>
+            {#if !collapsedGroups[groupKey]}<div class="folder-conversations screen-list">
+                {#each group.screens as screen (screen.id)}{@const current =
+                    view === 'screen' && openedScreen?.id === screen.id}{@const waiting =
+                    screen.commands > 0 && !screen.allowed}
+                  <div class="conversation-row">
+                    <button
+                      class="conversation-item screen-item"
+                      class:current
+                      aria-current={current ? 'page' : undefined}
+                      title={[
+                        screen.title,
+                        screen.description,
+                        screenFolderName(screen),
+                        ...(waiting ? ['Its actions wait for your approval'] : []),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                      aria-label={waiting
+                        ? `${screen.title}, its actions wait for your approval`
+                        : undefined}
+                      onclick={() => openScreen(screen.environmentId, screen.id)}
+                      ><LayoutDashboard size={13} aria-hidden="true" /><span>{screen.title}</span
+                      >{#if waiting}<small class="screen-waiting" aria-hidden="true">Review</small
+                        >{/if}</button
+                    >
+                  </div>
+                {/each}
+              </div>{/if}
+          </div>
+        {:else}<p class="sidebar-empty">
+            {screensLoading
+              ? 'Reading screens…'
+              : query
+                ? 'No matching screens.'
+                : 'No screens yet. Ask a chat to build one, such as a page of the pull requests you opened this week.'}
+          </p>{/each}
+        {#each screenProblems as problem (problem.host)}<p class="sidebar-empty screen-problem">
+            Could not read the screens of {problem.name}: {problem.error}
+          </p>{/each}
+      </div>
     </div>
     <div class="sidebar-tools">
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
@@ -5268,6 +5505,7 @@
                     openedSubagent={subagentShown && subagentView?.messageId === m.id
                       ? subagentView.agentId
                       : undefined}
+                    openScreen={(card) => openScreen(card.environmentId, card.id)}
                   />{/each}
                 {#if jumpShown}<div class="jump-to-end-rail">
                     <button
@@ -5472,7 +5710,10 @@
                   else if (name === 'rewind') openRewind();
                   else if (name === 'undo') openUndoFiles();
                   else if (name === 'connections') view = 'connections';
-                  else if (name === 'settings') view = 'settings';
+                  else if (name === 'screens') {
+                    conversationScope = 'screens';
+                    if (mobile) void toggleSidebar(true);
+                  } else if (name === 'settings') view = 'settings';
                   else if (name === 'import') openImport();
                   else if (name === 'new') {
                     const remaining = composerContent(),
@@ -5636,6 +5877,27 @@
           claudeInstructions={workspace.claudeInstructions}
           {saveClaudeInstructions}
           importChats={desktop() ? openImport : undefined}
+        />
+      {/key}
+    {:else if view === 'screen' && openedScreen}
+      {@const screen = openedScreen}
+      {@const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId)}
+      {@const creator = workspace.conversations.find(
+        (c) => c.id === openedScreenSummary?.conversationId,
+      )}
+      {#key `${workspaceSession}/${screen.environmentId}/${screen.id}`}
+        <ScreenView
+          environmentId={screen.environmentId}
+          id={screen.id}
+          summary={openedScreenSummary}
+          computerName={(environment &&
+            computers.find((c) => c.id === computerViewId(environment))?.name) ??
+            'Its computer'}
+          online={environmentOnline(screen.environmentId)}
+          openConversation={creator ? () => openConversation(creator) : undefined}
+          chat={chatFromScreen}
+          changed={noteScreen}
+          deleted={screenDeleted}
         />
       {/key}
     {/if}

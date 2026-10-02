@@ -439,9 +439,19 @@ pub(crate) async fn working_folder(
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
+    working_folder_in(&root, provider, distribution, location, conversation).await
+}
+/// `working_folder`, for the app data folder `root`.
+pub(crate) async fn working_folder_in(
+    root: &Path,
+    provider: &str,
+    distribution: Option<&str>,
+    location: Option<&ChatLocation>,
+    conversation: Option<&str>,
+) -> Result<String, String> {
     let dedicated = if location.is_none() {
         conversation
-            .map(|id| crate::standalone::context_directory(&root, id, provider, false))
+            .map(|id| crate::standalone::context_directory(root, id, provider, false))
             .transpose()?
             .flatten()
     } else {

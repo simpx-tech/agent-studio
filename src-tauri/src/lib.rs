@@ -25,6 +25,7 @@ mod providers;
 mod relay;
 mod runner;
 mod saved;
+mod screens;
 mod shared_context;
 mod site_icons;
 mod spend;
@@ -1342,6 +1343,7 @@ pub fn run() {
         .manage(std::sync::Arc::new(tool_output::Pending::default()))
         .manage(tray::Tray::default())
         .manage(imports::Catalog::default())
+        .manage(std::sync::Arc::new(screens::Screens::default()))
         .setup(|app| {
             tray::setup(app.handle());
             lending::init(app.handle());
@@ -1497,6 +1499,7 @@ pub fn run() {
             steer_run,
             sign_in,
             run_in_console,
+            screens::manage_screen,
             export_workspace,
             tray::window_behavior,
             tray::set_close_to_tray

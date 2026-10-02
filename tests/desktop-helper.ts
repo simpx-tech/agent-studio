@@ -469,6 +469,78 @@ export async function mockDesktop(page: Page, mode = 'success') {
                     : 'PowerShell',
             };
           }
+          // Screens this computer keeps: tests seed `test-screens` with whole screens (with
+          // `allowed`, `digest` and saved `data`), read `screenRequests` and `screenRuns`, answer a
+          // run with `screenOutputs[action]`, and hold runs with `holdScreenRun`.
+          if (command === 'manage_screen') {
+            const w = window as any;
+            const request = args.request;
+            (w.screenRequests ??= []).push(request);
+            const screens: any[] = JSON.parse(localStorage.getItem('test-screens') ?? '[]');
+            const keep = () => localStorage.setItem('test-screens', JSON.stringify(screens));
+            const detail = ({ data: _data, ...screen }: any) => ({
+              ...screen,
+              commands: screen.actions.length,
+              allowed: !screen.actions.length || !!screen.allowed,
+            });
+            if (request.op === 'list')
+              return {
+                screens: screens.map((screen) => {
+                  const {
+                    html: _html,
+                    actions: _actions,
+                    digest: _digest,
+                    ...summary
+                  } = detail(screen);
+                  return summary;
+                }),
+              };
+            const screen = screens.find((s) => s.id === request.id);
+            if (!screen) throw 'This screen is no longer on this computer.';
+            if (request.op === 'read') return detail(screen);
+            if (request.op === 'approve') {
+              if (request.digest !== screen.digest)
+                throw 'This screen’s actions changed since they were shown. Review them again.';
+              screen.allowed = true;
+              keep();
+              return detail(screen);
+            }
+            if (request.op === 'revoke') {
+              screen.allowed = false;
+              keep();
+              return detail(screen);
+            }
+            if (request.op === 'delete') {
+              screens.splice(screens.indexOf(screen), 1);
+              keep();
+              return {};
+            }
+            if (request.op === 'load') return { values: screen.data ?? {} };
+            if (request.op === 'save') {
+              screen.data = { ...screen.data };
+              if (request.value === null) delete screen.data[request.key];
+              else screen.data[request.key] = request.value;
+              keep();
+              return { bytes: JSON.stringify(screen.data).length };
+            }
+            if (request.op === 'run') {
+              if (screen.actions.length && !screen.allowed)
+                throw 'The user has not allowed this screen’s actions yet. They can review and allow them above the screen.';
+              (w.screenRuns ??= []).push(request);
+              if (w.holdScreenRun)
+                await new Promise<void>((resolve) => (w.releaseScreenRun = resolve));
+              const output = w.screenOutputs?.[request.action];
+              return {
+                exitCode: 0,
+                stdout:
+                  typeof output === 'string' ? output : JSON.stringify(output ?? { ok: true }),
+                stderr: '',
+                truncated: false,
+                timedOut: false,
+                durationMs: 12,
+              };
+            }
+          }
           if (command === 'read_native_instructions') {
             const state = window as any;
             (state.nativeInstructionCalls ??= []).push(args);

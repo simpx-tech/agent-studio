@@ -68,6 +68,16 @@ import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
 import type { ConsoleShell } from './code-blocks';
+import {
+  screenDetailSchema,
+  screenOutcomeSchema,
+  screenRequestMs,
+  screenSummarySchema,
+  type ScreenDetail,
+  type ScreenOutcome,
+  type ScreenRequest,
+  type ScreenSummary,
+} from './screens';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import {
@@ -568,6 +578,8 @@ function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, un
     method === 'toolOutputImage' ||
     method === 'toolOutputModel' ||
     method === 'toolOutputModelViews' ||
+    // A screen's request ends with its page; a disconnect drops its answer.
+    method === 'screens' ||
     (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
   );
 }
@@ -1878,6 +1890,7 @@ async function localCall(
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
     steer: 'steer_run',
+    screens: 'manage_screen',
   };
   return invoke(commands[method], args);
 }
@@ -1890,7 +1903,7 @@ async function routed<T>(
 ): Promise<T> {
   const target = remoteTarget(
     connectionId,
-    method === 'folders' ? (args.environmentId as string) : undefined,
+    method === 'folders' || method === 'screens' ? (args.environmentId as string) : undefined,
   );
   if (!target) return localCall(method, args, onEvent);
   if (!relayConnected || !runtime)
@@ -1930,16 +1943,18 @@ async function routed<T>(
       Date.now() +
       (method === 'plugins'
         ? 660_000
-        : method === 'folders'
-          ? 30_000
-          : method === 'toolOutput' ||
-              method === 'toolOutputImage' ||
-              method === 'toolOutputModel' ||
-              method === 'toolOutputModelViews'
-            ? 120_000
-            : runTimeoutMs(
-                method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
-              ) + 10_000);
+        : method === 'screens'
+          ? screenRequestMs(args.request as ScreenRequest)
+          : method === 'folders'
+            ? 30_000
+            : method === 'toolOutput' ||
+                method === 'toolOutputImage' ||
+                method === 'toolOutputModel' ||
+                method === 'toolOutputModelViews'
+              ? 120_000
+              : runTimeoutMs(
+                  method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
+                ) + 10_000);
     let previous: string[] = [];
     while (Date.now() < deadline) {
       currentSession();
@@ -2036,14 +2051,12 @@ async function executeJob(job: RelayJob) {
     const connection = fleet?.connections.find(
       (c) => c.id === connectionId && owned(c.environmentId),
     );
-    const folderEnvironment =
-      job.method === 'folders' &&
+    // Folders and screens belong to an environment of this computer rather than an account.
+    const byEnvironment = job.method === 'folders' || job.method === 'screens';
+    const ownedEnvironment =
+      byEnvironment &&
       fleet?.environments.find((e) => e.id === job.args.environmentId && owned(e.id));
-    if (
-      job.method === 'folders'
-        ? !folderEnvironment
-        : !connection || typeof connectionId !== 'string'
-    )
+    if (byEnvironment ? !ownedEnvironment : !connection || typeof connectionId !== 'string')
       throw new Error('Remote requests must select a connection owned by this environment.');
     if (job.method === 'run' && (job.args.request as RunRequest)?.runId !== job.id)
       throw new Error('Remote run identity mismatch.');
@@ -2930,6 +2943,76 @@ export async function runInConsole(
   });
   const name = opened?.shell;
   return typeof name === 'string' && name.length <= 80 ? name : 'a console';
+}
+/**
+ * A screen's request, answered by the computer that keeps it (`manage_screen`, src-tauri/src/
+ * screens.rs): this one directly, another through its relay job. `environmentId` names that
+ * computer, or one of its WSL distributions; the request names the screen by its id alone.
+ */
+async function screenRequest(environmentId: string, request: ScreenRequest): Promise<unknown> {
+  try {
+    return await routed('screens', { environmentId, request });
+  } catch (e) {
+    // A relay older than screens refuses their requests as an invalid payload.
+    if (e instanceof RelayResponseError && e.status === 400)
+      throw new Error(
+        'The relay does not route screens yet. It does once it runs the Agent Studio release that brings them.',
+      );
+    throw e;
+  }
+}
+/** The screens one computer keeps, named by an environment it owns. */
+export async function listScreens(environmentId: string): Promise<ScreenSummary[]> {
+  const answer = (await screenRequest(environmentId, { op: 'list' })) as { screens?: unknown };
+  return z
+    .array(screenSummarySchema)
+    .max(1000)
+    .parse(answer?.screens ?? []);
+}
+export async function readScreen(environmentId: string, id: string): Promise<ScreenDetail> {
+  return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'read', id }));
+}
+export async function runScreenAction(
+  environmentId: string,
+  id: string,
+  action: string,
+  params: Record<string, unknown>,
+): Promise<ScreenOutcome> {
+  return screenOutcomeSchema.parse(
+    await screenRequest(environmentId, { op: 'run', id, action, params }),
+  );
+}
+/** Allows exactly the actions the user reviewed, named by their digest. */
+export async function allowScreen(
+  environmentId: string,
+  id: string,
+  digest: string,
+): Promise<ScreenDetail> {
+  return screenDetailSchema.parse(
+    await screenRequest(environmentId, { op: 'approve', id, digest }),
+  );
+}
+export async function revokeScreen(environmentId: string, id: string): Promise<ScreenDetail> {
+  return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'revoke', id }));
+}
+export async function deleteScreen(environmentId: string, id: string): Promise<void> {
+  await screenRequest(environmentId, { op: 'delete', id });
+}
+/** The values a screen keeps on its computer with `studio.save`. */
+export async function loadScreenData(
+  environmentId: string,
+  id: string,
+): Promise<Record<string, unknown>> {
+  const answer = (await screenRequest(environmentId, { op: 'load', id })) as { values?: unknown };
+  return z.record(z.string(), z.unknown()).parse(answer?.values ?? {});
+}
+export async function saveScreenData(
+  environmentId: string,
+  id: string,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  await screenRequest(environmentId, { op: 'save', id, key, value });
 }
 /**
  * The icon a linked site serves for itself, read on this computer for a reply's link marks.

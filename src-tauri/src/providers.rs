@@ -821,8 +821,16 @@ impl RunRequest {
         } else {
             ""
         };
+        // Screens belong to a saved conversation, whose computer keeps them.
+        let screens = if self.conversation_id.is_some()
+            && (self.uses_codex_server() || self.uses_claude_visualizer())
+        {
+            crate::screens::tools::GUIDANCE
+        } else {
+            ""
+        };
         if studio_tools {
-            format!("{tools} {visuals} {files} {questions}")
+            format!("{tools} {visuals} {files} {questions} {screens}")
         } else {
             tools.to_string()
         }

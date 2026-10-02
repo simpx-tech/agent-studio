@@ -20,6 +20,7 @@ export const appCommands: ComposerCommand[] = [
   ['rewind', 'Return to an earlier message'],
   ['undo', 'Undo the latest response’s recorded file edits'],
   ['import', 'Import chats from Claude Code and Codex'],
+  ['screens', 'Open the screens your chats saved'],
   ['connections', 'Manage computers and agent accounts'],
   ['settings', 'Notifications, Claude instructions, workspace administration, and data'],
 ].map(([name, detail]) => ({
