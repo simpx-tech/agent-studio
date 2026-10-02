@@ -649,7 +649,10 @@ test('computers discover existing logins and keep additional accounts in context
     await expect(dialog).toHaveCount(0);
   }
   await expect(claude.locator('.fleet-account')).toHaveCount(3);
-  await expect(ubuntu.locator('.fleet-account')).toHaveCount(2);
+  // Accounts added on Desktop join Ubuntu by themselves, each to sign in there once.
+  await expect(ubuntu.locator('.fleet-account')).toHaveCount(4);
+  await expect(ubuntu).toContainText('Personal 2');
+  await expect(ubuntu).toContainText('Company');
   await primary.getByRole('button', { name: 'Manage account' }).click();
   const management = page.getByRole('dialog', { name: 'Manage account' });
   await expect(primary.locator('input')).toHaveCount(0);
@@ -1007,14 +1010,17 @@ test('Windows discovers WSL automatically and management forms use accessible de
   await page.getByRole('option', { name: 'Codex', exact: true }).click();
   await page.getByRole('textbox', { name: 'Account name', exact: true }).fill('Codex work');
   await page.getByRole('dialog').getByRole('button', { name: 'Add account', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Codex work' })).toBeVisible();
+  const desktop = page.getByRole('article', { name: 'Desktop computer', exact: true });
+  await expect(desktop.getByRole('heading', { name: 'Codex work' })).toBeVisible();
+  // Both distributions have Codex, so the new account joins each of them by itself too.
+  await expect(page.getByRole('heading', { name: 'Codex work' })).toHaveCount(3);
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture-workspace')!));
   const added = saved.fleet.accounts.find((a: any) => a.name === 'Codex work');
   expect(added.provider).toBe('codex');
-  expect(saved.fleet.connections.find((c: any) => c.accountId === added.id).profile).toBe(
-    'isolated',
-  );
-  await page
+  expect(
+    saved.fleet.connections.filter((c: any) => c.accountId === added.id).map((c: any) => c.profile),
+  ).toEqual(['isolated', 'isolated', 'isolated']);
+  await desktop
     .locator('.fleet-account')
     .filter({ hasText: 'Codex work' })
     .getByRole('button', { name: 'Manage account' })

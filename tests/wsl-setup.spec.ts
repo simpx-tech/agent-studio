@@ -13,7 +13,7 @@ async function claudeOnUbuntu(page: Page) {
     .getByRole('article', { name: 'Claude connections' });
 }
 
-test('installs a CLI missing in WSL, then adds the Desktop accounts there to sign in once', async ({
+test('installs a CLI missing in WSL, where the Desktop accounts then join to sign in once', async ({
   page,
 }) => {
   await mockDesktop(page, 'computer-routing');
@@ -37,28 +37,66 @@ test('installs a CLI missing in WSL, then adds the Desktop accounts there to sig
     { provider: 'claude', environmentId: ubuntu },
   ]);
 
-  // The Desktop's Claude login is not in Ubuntu yet: one step adds it under the same name.
-  const add = claude.getByRole('button', { name: /^Add .+ here$/ });
-  await expect(add).toBeVisible();
-  await page.screenshot({ path: 'artifacts/wsl-setup-connections.png', animations: 'disabled' });
-  await add.click();
-  await expect(add).toHaveCount(0);
+  // The Desktop's Claude login joins Ubuntu by itself, under the same name, with no step to add it.
   await expect(claude.getByText('Sign in as me@example.com', { exact: false })).toBeVisible();
+  await expect(claude.getByRole('button', { name: /^Add .+ here$/ })).toHaveCount(0);
+  await page.screenshot({ path: 'artifacts/wsl-setup-connections.png', animations: 'disabled' });
   const workspace = await saved(page);
   const provider = (accountId: string) =>
     workspace.fleet.accounts.find((a: any) => a.id === accountId)?.provider;
   const desktopClaude = workspace.fleet.connections.find(
     (c: any) => c.environmentId === windows && provider(c.accountId) === 'claude',
   );
-  const added = workspace.fleet.connections.find(
-    (c: any) => c.environmentId === ubuntu && c.accountId === desktopClaude.accountId,
+  const added = workspace.fleet.connections.filter(
+    (c: any) => c.environmentId === ubuntu && provider(c.accountId) === 'claude',
   );
-  expect(added).toMatchObject({ profile: 'isolated' });
+  // It is the only Claude account there: Ubuntu's own signed-out login does not join beside it.
+  expect(added).toEqual([expect.objectContaining({ accountId: desktopClaude.accountId })]);
+  expect(added[0]).toMatchObject({ profile: 'isolated' });
   // Sign-in opens for that profile in Ubuntu, never by copying the Desktop's login.
-  const row = claude.locator(`[data-connection="${added.id}"]`);
+  const row = claude.locator(`[data-connection="${added[0].id}"]`);
   await expect(row).toContainText('Sign-in needed');
   await row.getByRole('button', { name: 'Open sign-in' }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).signInCalls)).toEqual([added.id]);
+  await expect.poll(() => page.evaluate(() => (window as any).signInCalls)).toEqual([added[0].id]);
+
+  // Removed there, it stays removed through later refreshes.
+  await claude.getByRole('button', { name: 'Manage account' }).click();
+  const management = page.getByRole('dialog', { name: 'Manage account', exact: true });
+  await management.getByRole('button', { name: 'Disconnect account' }).click();
+  await management.getByRole('button', { name: 'Remove connection' }).click();
+  await expect(management).toHaveCount(0);
+  await expect(claude.locator('.fleet-account')).toHaveCount(0);
+  const refresh = page.getByRole('button', { name: 'Refresh connections', exact: true });
+  await page.evaluate(() => ((window as any).holdCli = ['detect_connection']));
+  await refresh.click();
+  await expect(refresh).toHaveAttribute('aria-busy', 'true');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.holdCli = [];
+    for (const request of (state.pendingCli ?? []).splice(0)) request.resolve();
+  });
+  await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+  await expect(claude.locator('.fleet-account')).toHaveCount(0);
+  await expect(claude).toContainText(
+    'Connect an account using the Linux CLI in this distribution.',
+  );
+
+  // Manage account on Desktop brings it back on request, opening its sign-in there again.
+  await page
+    .getByRole('article', { name: 'Desktop computer' })
+    .getByRole('article', { name: 'Claude connections' })
+    .getByRole('button', { name: 'Manage account' })
+    .click();
+  await management.getByRole('button', { name: 'Connect on WSL · Ubuntu', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const again = (await saved(page)).fleet.connections.find(
+    (c: any) => c.environmentId === ubuntu && c.accountId === desktopClaude.accountId,
+  );
+  expect(again).toMatchObject({ profile: 'isolated' });
+  await expect(claude.locator(`[data-connection="${again.id}"]`)).toContainText('Sign-in needed');
+  expect(await page.evaluate(() => (window as any).signInCalls)).toEqual([added[0].id, again.id]);
 });
 
 test('an installer failure says why and can be tried again', async ({ page }) => {

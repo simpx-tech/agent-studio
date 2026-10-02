@@ -109,6 +109,8 @@ export const environmentOffers = (fleet: Fleet, environmentId: string, provider:
 // account of that agent yet. Once one is connected there (the login itself, a separate profile,
 // or the login turned into one), the login is never added again: removing it keeps it removed,
 // whether the terminal later signs out or into another account, and Add account connects more.
+// A WSL distribution Windows manages takes that computer's accounts instead (`addHostAccounts`),
+// and its own login only while Windows has no account of the agent.
 export function ensureEnvironmentConnections(
   fleet: Fleet,
   environmentId: string,
@@ -121,6 +123,8 @@ export function ensureEnvironmentConnections(
     if (environment.platform === 'wsl' && environment.discoveredOn && provider === 'gemini')
       continue;
     if (environmentOffers(fleet, environment.id, provider)) continue;
+    if (environment.discoveredOn && environmentOffers(fleet, environment.discoveredOn, provider))
+      continue;
     const login = identities?.login(environment.id, provider);
     const match = login
       ? fleet.connections.find(
@@ -150,6 +154,48 @@ export function ensureEnvironmentConnections(
       accountId: account.id,
       profile: 'existing',
     });
+  }
+}
+// Adds the Windows computer's accounts of an agent to a WSL distribution it manages, its
+// separate profiles and its terminal login while signed in, under the same names: each is a
+// separate profile there and signs in once, since a login never moves between computers. While
+// the distribution has no account of the agent, its terminal login joins as the account it
+// reports instead, and an account another connection there already reports is left out. `known`
+// holds every account the distribution has had and gains those connected now, so one removed
+// there is never added again.
+export function addHostAccounts(
+  fleet: Fleet,
+  environmentId: string,
+  provider: ProviderId,
+  known: Set<string>,
+  signedIn: (connectionId: string) => boolean,
+  identities?: LoginIdentities,
+) {
+  const host = fleet.environments.find((e) => e.id === environmentId)?.discoveredOn;
+  if (!host || provider === 'gemini') return;
+  const here = () => fleet.connections.filter((c) => c.environmentId === environmentId);
+  for (const connection of here()) known.add(connection.accountId);
+  const login = environmentOffers(fleet, environmentId, provider)
+    ? undefined
+    : identities?.login(environmentId, provider);
+  const accounts = fleet.connections.filter(
+    (c) =>
+      c.environmentId === host &&
+      providerOf(fleet, c) === provider &&
+      (c.profile === 'isolated' || signedIn(c.id)),
+  );
+  for (const account of accounts) {
+    if (known.has(account.accountId)) continue;
+    const identity = identities?.connection(account.id);
+    if (identity && here().some((c) => identities!.connection(c.id) === identity)) continue;
+    const terminal = !!login && login === identity && !here().some((c) => c.profile === 'existing');
+    fleet.connections.push({
+      id: crypto.randomUUID(),
+      environmentId,
+      accountId: account.accountId,
+      profile: terminal ? 'existing' : 'isolated',
+    });
+    known.add(account.accountId);
   }
 }
 export function locationConnections(fleet: Fleet, location?: ChatLocation, provider?: ProviderId) {

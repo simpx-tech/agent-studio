@@ -129,6 +129,9 @@ export const preferencesSchema = z.object({
   lastProvider: z.enum(providerIds),
   modelByProvider: z.partialRecord(z.enum(providerIds), z.string().max(100)),
   reasoningByProvider: z.partialRecord(z.enum(providerIds), z.record(z.string(), reasoningSchema)),
+  // Every account each WSL distribution this computer manages has had, so adding its accounts
+  // there never brings back one removed there (`addHostAccounts`). Kept on this device only.
+  distributionAccounts: z.record(z.string().uuid(), z.array(z.string().uuid()).max(500)).optional(),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 const blockSchema = z.discriminatedUnion('type', [

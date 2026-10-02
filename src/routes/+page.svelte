@@ -171,6 +171,7 @@
     ensureLocationConnections,
     ensureEnvironmentConnections,
     environmentOffers,
+    addHostAccounts,
     loginIdentity,
     type LoginIdentities,
     locationConnections,
@@ -2185,19 +2186,44 @@
       // account connected elsewhere on this computer joins that account's label, not a new one.
       await refreshConnections();
       const before = workspace.fleet.connections.length;
-      for (const environment of workspace.fleet.environments) {
-        if (executionHost(workspace.fleet, environment.id) !== installation?.id) continue;
-        const inventory = cliInventories[environment.id];
-        if (inventory?.error || !inventory?.entries) continue;
-        const detected = inventory.entries.filter((entry) => entry.path).map((entry) => entry.id);
-        if (environment.id !== installation?.id)
-          await probeEnvironmentLogins(environment.id, detected);
-        ensureEnvironmentConnections(workspace.fleet, environment.id, detected, loginIdentities());
+      const detected = (environmentId: string) => {
+        const inventory = cliInventories[environmentId];
+        return inventory?.error || !inventory?.entries
+          ? undefined
+          : inventory.entries.filter((entry) => entry.path).map((entry) => entry.id);
+      };
+      const own = workspace.fleet.environments.filter(
+        (e) => executionHost(workspace.fleet, e.id) === installation?.id,
+      );
+      // This computer's own logins first, saved and checked (an account's check reads its saved
+      // connection) before its WSL distributions take its accounts.
+      for (const environment of own.filter((e) => !e.discoveredOn)) {
+        const providers = detected(environment.id);
+        if (providers)
+          ensureEnvironmentConnections(
+            workspace.fleet,
+            environment.id,
+            providers,
+            loginIdentities(),
+          );
       }
       if (workspace.fleet.connections.length !== before) {
         await persistSettings();
         await refreshConnections(undefined, true);
       }
+      const added = workspace.fleet.connections.length;
+      let distributions = false;
+      for (const environment of own.filter((e) => e.discoveredOn)) {
+        const providers = detected(environment.id);
+        if (!providers) continue;
+        await probeEnvironmentLogins(environment.id, providers);
+        distributions = addDistributionAccounts(environment.id, providers) || distributions;
+        ensureEnvironmentConnections(workspace.fleet, environment.id, providers, loginIdentities());
+      }
+      if (workspace.fleet.connections.length !== added) {
+        await persistSettings();
+        await refreshConnections(undefined, true);
+      } else if (distributions) await persistLocal();
       if (view === 'connections') void refreshAccountUsage(forceUsage);
       noteSignIn();
     } catch (e) {
@@ -2353,6 +2379,29 @@
         };
       }),
     );
+  }
+  // This computer's accounts join each WSL distribution it manages by themselves, once each, so
+  // one removed there stays removed. Returns whether the accounts it remembers changed.
+  function addDistributionAccounts(environmentId: string, detected: ProviderId[]) {
+    const remembered = workspace.preferences.distributionAccounts?.[environmentId] ?? [];
+    const known = new Set(remembered);
+    for (const provider of detected)
+      addHostAccounts(
+        workspace.fleet,
+        environmentId,
+        provider,
+        known,
+        (id) => connectionStatus(id)?.auth === 'ready',
+        loginIdentities(),
+      );
+    const accounts = [...known].filter((id) => workspace.fleet.accounts.some((a) => a.id === id));
+    if (accounts.length === remembered.length && accounts.every((id, i) => id === remembered[i]))
+      return false;
+    workspace.preferences.distributionAccounts = {
+      ...workspace.preferences.distributionAccounts,
+      [environmentId]: accounts,
+    };
+    return true;
   }
   function loginIdentities(): LoginIdentities {
     return {
@@ -5154,6 +5203,15 @@
                 <Laptop size={15} />{selectedComputer
                   ? 'This computer has no available execution environment.'
                   : 'Choose a computer to select an agent and start chatting.'}
+              </div>
+            {:else if !active && !selectedSettings.connectionId && selectedComputer?.wsl && desktop()}<div
+                class="setup-hint"
+              >
+                <Plug size={15} />{providers[selectedAgent.provider].name} needs to be set up.<button
+                  class="text-button"
+                  onclick={() => openConnections()}
+                  >Open Connections<ArrowRight size={13} /></button
+                >
               </div>
             {:else if !selectedStatus && desktop()}<div class="setup-hint">
                 {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.

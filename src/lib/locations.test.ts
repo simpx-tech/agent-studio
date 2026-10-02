@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { initialWorkspace, restoreWorkspace, settingsFor, type Conversation } from './domain';
-import { registerInstallation, registerWslEnvironments } from './fleet';
+import { registerInstallation, registerWslEnvironments, type Fleet } from './fleet';
 import {
+  addHostAccounts,
   conversationLocation,
   ensureLocationConnections,
   groupConversations,
@@ -40,6 +41,24 @@ function fixture() {
   };
   return { workspace, installation, location };
 }
+// A Claude account connected on Desktop, as a separate profile or its terminal login.
+function desktopClaude(
+  fleet: Fleet,
+  environmentId: string,
+  name: string,
+  profile: 'isolated' | 'existing' = 'isolated',
+) {
+  const account = {
+    id: crypto.randomUUID(),
+    name,
+    provider: 'claude' as const,
+    purpose: 'personal' as const,
+  };
+  const connection = { id: crypto.randomUUID(), environmentId, accountId: account.id, profile };
+  fleet.accounts.push(account);
+  fleet.connections.push(connection);
+  return connection;
+}
 describe('computer and folder chat scope', () => {
   it('runs a WSL folder chosen from the Windows computer inside its distribution', () => {
     const { workspace, installation, location } = fixture();
@@ -59,8 +78,9 @@ describe('computer and folder chat scope', () => {
   it('uses the selected computer for the same WSL folder and preserves both routes across storage and sync', () => {
     const { workspace, installation, location } = fixture();
     const desktopFolder = { ...location, executionEnvironmentId: installation.id };
-    ensureLocationConnections(workspace.fleet, desktopFolder);
+    // Ubuntu's own logins first: once Desktop has accounts, the distribution takes those instead.
     ensureLocationConnections(workspace.fleet, location);
+    ensureLocationConnections(workspace.fleet, desktopFolder);
     const windowsConnections = locationConnections(workspace.fleet, desktopFolder);
     expect(windowsConnections).toHaveLength(3);
     expect(windowsConnections.every((c) => c.environmentId === installation.id)).toBe(true);
@@ -212,36 +232,102 @@ describe('computer and folder chat scope', () => {
     ensureLocationConnections(workspace.fleet, native, identities);
     expect(locationConnections(workspace.fleet, native, 'codex')).toEqual([separated]);
   });
-  it('connects another environment’s terminal login under the account that already reports it', () => {
+  it('adds the Desktop accounts to a WSL distribution once, so one removed there stays removed', () => {
     const { workspace, installation, location } = fixture();
-    const profile = {
-      id: crypto.randomUUID(),
-      name: 'vinporb',
-      provider: 'claude' as const,
-      purpose: 'personal' as const,
+    const fleet = workspace.fleet;
+    const ubuntu = location.environmentId;
+    const desktop = (name: string, profile: 'isolated' | 'existing' = 'isolated') =>
+      desktopClaude(fleet, installation.id, name, profile);
+    desktop('vinporb');
+    const gamer = desktop('gamer');
+    const terminal = desktop('Claude CLI login', 'existing');
+    const known = new Set<string>();
+    let signedIn = (_id: string) => false;
+    const identities = { login: () => null, connection: () => undefined };
+    const refresh = () => {
+      addHostAccounts(fleet, ubuntu, 'claude', known, (id) => signedIn(id), identities);
+      ensureLocationConnections(fleet, location, identities);
     };
-    const isolated = {
-      id: crypto.randomUUID(),
-      environmentId: installation.id,
-      accountId: profile.id,
-      profile: 'isolated' as const,
-    };
-    workspace.fleet.accounts.push(profile);
-    workspace.fleet.connections.push(isolated);
-    ensureLocationConnections(workspace.fleet, location, {
-      login: (environmentId, provider) =>
-        provider === 'claude' && environmentId === location.environmentId
-          ? 'vinporb@example.com'
-          : null,
-      connection: (id) => (id === isolated.id ? 'vinporb@example.com' : null),
-    });
-    const wsl = locationConnections(workspace.fleet, location, 'claude');
-    expect(wsl).toHaveLength(1);
-    expect(wsl[0]).toMatchObject({ accountId: profile.id, profile: 'existing' });
-    expect(workspace.fleet.accounts.filter((a) => a.provider === 'claude')).toHaveLength(1);
-    expect(workspace.fleet.accounts.find((a) => a.provider === 'codex')?.name).toBe(
-      'Codex CLI login',
+    const claude = () =>
+      locationConnections(fleet, location, 'claude').map((c) => [
+        fleet.accounts.find((a) => a.id === c.accountId)?.name,
+        c.profile,
+      ]);
+    refresh();
+    // Each joins as a separate profile that signs in there once. The Desktop login stays out while
+    // signed out, and so does Ubuntu's own login while Desktop has Claude accounts.
+    expect(claude()).toEqual([
+      ['vinporb', 'isolated'],
+      ['gamer', 'isolated'],
+    ]);
+    expect(locationConnections(fleet, location, 'codex')).toHaveLength(1);
+    // One removed there stays removed, while an account added on Desktop later joins too.
+    fleet.connections = fleet.connections.filter(
+      (c) => c.environmentId !== ubuntu || c.accountId !== gamer.accountId,
     );
+    desktop('third');
+    refresh();
+    expect(claude()).toEqual([
+      ['vinporb', 'isolated'],
+      ['third', 'isolated'],
+    ]);
+    // With every Claude account removed there, nothing comes back, not even Ubuntu's own login.
+    const codex = locationConnections(fleet, location, 'codex');
+    fleet.connections = fleet.connections.filter(
+      (c) => c.environmentId !== ubuntu || codex.includes(c),
+    );
+    refresh();
+    expect(claude()).toEqual([]);
+    // The Desktop login joins once it is signed in there.
+    signedIn = (id) => id === terminal.id;
+    refresh();
+    expect(claude()).toEqual([['Claude CLI login', 'isolated']]);
+  });
+  it('lets a WSL login that reports a Desktop account join as that account, never twice', () => {
+    const { workspace, installation, location } = fixture();
+    const fleet = workspace.fleet;
+    const ubuntu = location.environmentId;
+    const vinporb = desktopClaude(fleet, installation.id, 'vinporb');
+    const gamer = desktopClaude(fleet, installation.id, 'gamer');
+    const emails: Record<string, string> = {
+      [vinporb.id]: 'vinporb@example.com',
+      [gamer.id]: 'gamer@example.com',
+    };
+    const identities = {
+      login: (environmentId: string, provider: string) =>
+        provider === 'claude' && environmentId === ubuntu ? 'vinporb@example.com' : null,
+      connection: (id: string) => emails[id],
+    };
+    addHostAccounts(fleet, ubuntu, 'claude', new Set(), () => false, identities);
+    ensureLocationConnections(fleet, location, identities);
+    // Ubuntu's terminal login already is vinporb, so it joins as vinporb without another sign-in.
+    expect(locationConnections(fleet, location, 'claude')).toMatchObject([
+      { accountId: vinporb.accountId, profile: 'existing' },
+      { accountId: gamer.accountId, profile: 'isolated' },
+    ]);
+    expect(fleet.accounts.filter((a) => a.provider === 'claude')).toHaveLength(2);
+    // Desktop has no Codex account, so Ubuntu's own Codex login joins as before.
+    expect(fleet.accounts.find((a) => a.provider === 'codex')?.name).toBe('Codex CLI login');
+    // An account a connection already there reports is left out rather than added twice.
+    const other = fixture();
+    ensureLocationConnections(other.workspace.fleet, other.location);
+    const [own] = locationConnections(other.workspace.fleet, other.location, 'claude');
+    const first = desktopClaude(other.workspace.fleet, other.installation.id, 'vinporb');
+    const second = desktopClaude(other.workspace.fleet, other.installation.id, 'gamer');
+    emails[first.id] = 'vinporb@example.com';
+    emails[second.id] = 'gamer@example.com';
+    emails[own.id] = 'gamer@example.com';
+    addHostAccounts(
+      other.workspace.fleet,
+      other.location.environmentId,
+      'claude',
+      new Set(),
+      () => false,
+      { login: () => undefined, connection: (id) => emails[id] },
+    );
+    expect(
+      locationConnections(other.workspace.fleet, other.location, 'claude').map((c) => c.accountId),
+    ).toEqual([own.accountId, first.accountId]);
     expect(loginIdentity(undefined)).toBeUndefined();
     expect(loginIdentity({ auth: 'unknown', account: 'a@b' })).toBeUndefined();
     expect(loginIdentity({ auth: 'login', account: 'a@b' })).toBeNull();

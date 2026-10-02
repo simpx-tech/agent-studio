@@ -186,12 +186,26 @@
       (c) => c.accountId === managedAccountId && onComputer(c.environmentId, managedComputerId),
     ),
   );
-  const canConnectManagedAccountHere = $derived(
-    !!installation &&
-      !!managedAccount &&
-      !workspace.fleet.connections.some(
-        (c) => c.accountId === managedAccountId && c.environmentId === installation.id,
-      ),
+  // Where the managed account can also connect while it has no connection there: this computer,
+  // and each WSL distribution it manages that has the agent's CLI, where an account removed after
+  // joining by itself is not added again.
+  const connectTargets = $derived(
+    !installation || !managedAccount
+      ? []
+      : computers.filter(
+          (computer) =>
+            (computer.id === ownComputer?.id ||
+              (computer.wsl &&
+                computer.environments.some(
+                  (e) =>
+                    localEnvironment(e.id) &&
+                    managedAccount.provider !== 'gemini' &&
+                    cliInstalled(e.id, managedAccount.provider),
+                ))) &&
+            !workspace.fleet.connections.some(
+              (c) => c.accountId === managedAccountId && onComputer(c.environmentId, computer.id),
+            ),
+        ),
   );
   function cliInstalled(environmentId: string, provider: ProviderId) {
     const inventory = cliInventories[environmentId];
@@ -493,54 +507,6 @@
     } finally {
       delete installing[key];
     }
-  }
-  // This agent's accounts on the Windows computer that manages a distribution, by a separate
-  // profile or a signed-in terminal login, and not yet in that distribution.
-  function accountsToAdd(environment: Environment, provider: ProviderId) {
-    const host = environment.discoveredOn;
-    if (!host || provider === 'gemini') return [];
-    return workspace.fleet.accounts.filter(
-      (account) =>
-        account.provider === provider &&
-        workspace.fleet.connections.some(
-          (c) =>
-            c.accountId === account.id &&
-            c.environmentId === host &&
-            (c.profile === 'isolated' || statuses[c.id]?.auth === 'ready'),
-        ) &&
-        !workspace.fleet.connections.some(
-          (c) => c.accountId === account.id && c.environmentId === environment.id,
-        ),
-    );
-  }
-  // Each account gets a separate profile of its own in the distribution, under the same name, and
-  // signs in there once: a login never moves between computers.
-  async function addAccounts(environment: Environment, provider: ProviderId) {
-    const accounts = accountsToAdd(environment, provider);
-    if (!accounts.length) return;
-    const created = accounts.map((account) => ({
-      id: crypto.randomUUID(),
-      environmentId: environment.id,
-      accountId: account.id,
-      profile: 'isolated' as const,
-    }));
-    workspace.fleet.connections.push(...created);
-    try {
-      await save();
-    } catch (e) {
-      workspace.fleet.connections = workspace.fleet.connections.filter(
-        (c) => !created.some((added) => added.id === c.id),
-      );
-      throw e;
-    }
-    for (const connection of created)
-      statuses[connection.id] = {
-        id: provider,
-        installed: true,
-        auth: 'login',
-        version: null,
-        detail: 'Sign in to use this account here.',
-      };
   }
   // The login an account's connection on the Windows computer reports, to sign the same account
   // in inside one of its distributions.
@@ -877,25 +843,6 @@
                       {:else}<p class="connection-hint remote-empty">
                           No account connected on this computer.
                         </p>{/if}{/each}
-                    {#if local && computer.wsl && cliEnvironment && cliInstalled(cliEnvironment.id, id)}
-                      {@const missing = accountsToAdd(cliEnvironment, id)}
-                      {#if missing.length}<div class="current-login add-accounts">
-                          <p>
-                            {missing.length === 1
-                              ? `${missing[0].name} is connected on ${computer.hostName} but not here yet. Add it to sign in here once.`
-                              : `${missing.length} of your ${providers[id].name} accounts on ${computer.hostName} are not here yet. Add them to sign each in here once.`}
-                            A login never moves between computers.
-                          </p>
-                          <button
-                            class="secondary"
-                            disabled={busy || !desktop()}
-                            onclick={() => action(() => addAccounts(cliEnvironment, id))}
-                            ><Plus size={14} />{missing.length === 1
-                              ? `Add ${missing[0].name} here`
-                              : `Add ${missing.length} accounts here`}</button
-                          >
-                        </div>{/if}
-                    {/if}
                   </article>
                 {/each}
               </div>
@@ -1221,18 +1168,18 @@
           {:else}<p>Manage this connection on its computer.</p>{/if}
         </section>
       {/each}
-      {#if canConnectManagedAccountHere}<div class="managed-connect">
-          <button
-            class="text-button"
-            type="button"
-            disabled={busy ||
-              !installation ||
-              !cliInstalled(installation.id, managedAccount.provider)}
-            onclick={() => {
-              if (managedAccount)
-                openAccount(managedAccount.provider, ownComputer?.id, managedAccount.id);
-            }}>Connect on {ownComputer?.name ?? 'this computer'}</button
-          >
+      {#if connectTargets.length}<div class="managed-connect">
+          {#each connectTargets as computer (computer.id)}<button
+              class="text-button"
+              type="button"
+              disabled={busy ||
+                (computer.id === ownComputer?.id &&
+                  !cliInstalled(installation?.id ?? '', managedAccount.provider))}
+              onclick={() => {
+                if (managedAccount)
+                  openAccount(managedAccount.provider, computer.id, managedAccount.id);
+              }}>Connect on {computer.name}</button
+            >{/each}
         </div>{/if}
       {#if !workspace.fleet.connections.some((c) => c.accountId === managedAccountId)}<button
           class="text-button disconnect-connection"
@@ -1396,10 +1343,6 @@
   .cli-install button {
     flex-shrink: 0;
   }
-  .add-accounts {
-    border-top: 1px solid var(--border);
-    padding-top: 14px;
-  }
   .cli-location .cli-update {
     flex-shrink: 1;
     min-width: 0;
@@ -1458,6 +1401,9 @@
     margin: 0 0 6px;
   }
   .managed-connect {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
     border-top: 1px solid var(--border);
     padding-top: 16px;
   }

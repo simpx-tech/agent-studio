@@ -2236,20 +2236,7 @@ test('a pending environment uses its own model catalog and late checks cannot ch
   await expect(page.getByRole('option', { name: 'gpt-6-astra', exact: true })).toBeVisible();
   await expect(page.getByRole('option', { name: 'GPT-5.6 Sol', exact: true })).toHaveCount(0);
   await picker('Model').press('Escape');
-  await picker('Agent').click();
-  await page.getByRole('option', { name: 'Claude', exact: true }).click();
-  await picker('Model').click();
-  await page.getByRole('option', { name: 'Sonnet', exact: true }).click();
-  // Ubuntu's installed Codex was already detected at startup; Claude is still unchecked.
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        (window as any).pendingCli
-          ?.filter((r: any) => r.command === 'detect_connection')
-          .map((r: any) => r.provider),
-      ),
-    )
-    .toEqual(['claude']);
+  // Ubuntu's Codex is the Desktop account that joined it at startup, and loads its own catalog.
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -2260,22 +2247,15 @@ test('a pending environment uses its own model catalog and late checks cannot ch
       ),
     )
     .toEqual(['codex']);
-  await page.evaluate(() => {
-    const state = window as any;
-    for (const request of state.pendingCli.filter((r: any) => r.command === 'detect_connection'))
-      request.resolve();
-  });
-  await expect(page.locator('.setup-hint')).toContainText('Claude needs to be set up.');
-  await expect(picker('Agent')).toHaveText('Select agent');
+  // Ubuntu has no Claude CLI, so no Claude account is offered there.
   await picker('Agent').click();
   await expect(page.getByRole('option', { name: 'Claude', exact: true })).toHaveCount(0);
   await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveAttribute(
     'aria-selected',
-    'false',
+    'true',
   );
   await picker('Agent').press('Escape');
   await page.getByLabel('Message', { exact: true }).fill('Keep my explicit choice');
-  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await pick(page, 'Computer', 'Desktop');
   await picker('Folder').click();
   await page
