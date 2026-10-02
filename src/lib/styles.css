@@ -1506,6 +1506,110 @@ pre {
   font-size: 12.5px;
   line-height: 1.65;
 }
+/* A fenced block's Copy and Run controls (code-blocks.ts), at its top right corner: quiet until
+   the block is hovered or holds focus, and always shown in a row above the code on touch
+   screens and phones. */
+.code-block {
+  position: relative;
+  margin: 14px 0;
+}
+.prose .code-block pre {
+  margin: 0;
+}
+/* The controls fill the block's corner, so a long first line ends cleanly under them. */
+.code-actions {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: flex;
+  gap: 2px;
+  padding: 6px 6px 6px 4px;
+  border-radius: 0 calc(var(--radius-lg) - 1px) 0 var(--radius-md);
+  background: var(--code-bg);
+  box-shadow: -10px 0 8px -4px var(--code-bg);
+  opacity: 0;
+  transition: opacity var(--duration-fast) ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.code-block:hover .code-actions,
+.code-block:focus-within .code-actions {
+  opacity: 1;
+}
+.code-action {
+  height: 24px;
+  padding: 0 8px;
+  gap: 5px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.code-action:hover {
+  background: var(--hover);
+}
+.code-action::before {
+  content: '';
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  background: currentColor;
+  -webkit-mask: var(--code-icon) center / contain no-repeat;
+  mask: var(--code-icon) center / contain no-repeat;
+}
+.code-copy {
+  --code-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='14' height='14' x='8' y='8' rx='2' ry='2'/%3E%3Cpath d='M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'/%3E%3C/svg%3E");
+}
+/* Run exists where a console can open: the app marks the shells the open chat's computer runs. */
+.code-run {
+  --code-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19h8'/%3E%3Cpath d='m4 17 6-6-6-6'/%3E%3C/svg%3E");
+  display: none;
+}
+[data-console~='posix'] .code-run[data-shell='posix'],
+[data-console~='powershell'] .code-run[data-shell='powershell'],
+[data-console~='cmd'] .code-run[data-shell='cmd'] {
+  display: inline-flex;
+}
+/* What a click led to, shown on the control for a moment: it keeps focus, so it stays in view. */
+.code-actions .code-action[data-state='done'] {
+  --code-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  color: var(--success);
+}
+.code-actions .code-action[data-state='failed'] {
+  color: var(--danger);
+}
+.code-actions .code-action[data-state='busy'] {
+  --code-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 1 1-6.219-8.56'/%3E%3C/svg%3E");
+  color: var(--text);
+  cursor: progress;
+}
+.code-action[data-state='busy']::before {
+  animation: spin 1s linear infinite;
+}
+.code-block .code-note {
+  margin: 6px 2px 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+@media (hover: none), (max-width: 650px) {
+  .code-actions {
+    opacity: 1;
+    padding: 4px;
+    box-shadow: none;
+  }
+  .prose .code-block pre {
+    padding-top: 40px;
+  }
+  .code-action {
+    height: 30px;
+    padding: 0 10px;
+  }
+}
 .hljs .hljs-comment,
 .hljs .hljs-quote {
   color: var(--syntax-comment);

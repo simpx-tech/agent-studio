@@ -109,6 +109,7 @@
     releaseConversation,
     closeConversation,
     signIn,
+    runInConsole,
     openLink,
     getInstallation,
     appSession,
@@ -240,6 +241,7 @@
   import FileViewer from '$lib/components/FileViewer.svelte';
   import { provideFileViewer } from '$lib/file-viewer.svelte';
   import { findSubagent, replyTools } from '$lib/subagents';
+  import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
   import {
@@ -807,6 +809,25 @@
       !!subagentReply &&
       !!findSubagent(replyTools(subagentReply), subagentView.agentId),
   );
+  // The shells a console on this computer runs for the open chat, which is where its code
+  // blocks offer Run in console. A chat another computer runs, and the Viewer, only copy them.
+  const consoles = $derived(
+    desktop() ? consoleShells(workspace.fleet, installation, active).join(' ') : '',
+  );
+  function codeBlockClick(event: MouseEvent) {
+    const action = codeBlockAction(event.target);
+    if (!action) return;
+    // A block's controls never follow a link a reply wrapped around the block.
+    if (action.button.closest('a')) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    const chat = active;
+    void performCodeBlockAction(action, (shell, code) => {
+      if (!chat) throw new Error('Open the chat this code belongs to, then run it again.');
+      return runInConsole(chat.settings, chat.id, chat.location, shell, code);
+    });
+  }
   const selectedSettings = $derived(active?.settings ?? draftSettings);
   const imagesSupported = $derived(supportsImages(selectedSettings.provider));
   const selectedLocation = $derived(
@@ -4574,6 +4595,7 @@
   }}
   ondragend={() => (imageDragDepth = 0)}
   onblur={() => (imageDragDepth = 0)}
+  onclickcapture={codeBlockClick}
 />
 
 {#if !desktop() && !paired}
@@ -4593,6 +4615,7 @@
   class="app-shell"
   class:drawer-dragging={drawerDrag !== undefined}
   class:drawer-settling={drawerSettling}
+  data-console={consoles || undefined}
   style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}
   style:--drawer-progress={drawerDrag}
 >

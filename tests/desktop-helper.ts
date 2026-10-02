@@ -452,6 +452,23 @@ export async function mockDesktop(page: Page, mode = 'success') {
               await new Promise<void>((resolve) => (state.heldSignIns ??= []).push(resolve));
             return;
           }
+          // Run in console: tests read `consoleRuns`, hold the console with `holdConsole` until
+          // `releaseConsole()`, and fail it with `consoleFailure`.
+          if (command === 'run_in_console') {
+            const state = window as any;
+            (state.consoleRuns ??= []).push(args);
+            if (state.holdConsole)
+              await new Promise<void>((resolve) => (state.releaseConsole = resolve));
+            if (state.consoleFailure) throw state.consoleFailure;
+            return {
+              shell:
+                args.shell === 'cmd'
+                  ? 'Command Prompt'
+                  : args.shell === 'posix'
+                    ? 'Git Bash'
+                    : 'PowerShell',
+            };
+          }
           if (command === 'read_native_instructions') {
             const state = window as any;
             (state.nativeInstructionCalls ??= []).push(args);

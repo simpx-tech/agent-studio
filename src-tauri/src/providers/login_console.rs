@@ -1,23 +1,17 @@
+use crate::console::window;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null;
 use windows_sys::Win32::{
     Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
-    System::{
-        SystemInformation::GetSystemDirectoryW,
-        Threading::{
-            CreateEventW, CreateProcessW, GetExitCodeProcess, WaitForMultipleObjects,
-            WaitForSingleObject, CREATE_NEW_CONSOLE, PROCESS_INFORMATION, STARTUPINFOW,
-        },
-    },
+    System::Threading::{CreateEventW, WaitForMultipleObjects},
 };
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-// A GUI process may have redirected or closed standard handles. Let Windows create
-// real console handles for this shell instead of inheriting the GUI's handles.
+// The shell gets a console of its own (`console::window`), and signals once it runs the script.
 pub(super) fn open(script: &str) -> Result<u32, String> {
     let event_name = format!("Local\\AgentStudio.SignIn.{}", uuid::Uuid::new_v4());
     let event_name_wide = wide(&event_name);
@@ -36,61 +30,33 @@ pub(super) fn open(script: &str) -> Result<u32, String> {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    let mut system_dir = vec![0u16; 32768];
-    let length =
-        unsafe { GetSystemDirectoryW(system_dir.as_mut_ptr(), system_dir.len() as u32) } as usize;
-    if length == 0 || length >= system_dir.len() {
-        return Err("Cannot locate Windows PowerShell".into());
-    }
-    let shell = format!(
-        "{}\\WindowsPowerShell\\v1.0\\powershell.exe",
-        String::from_utf16_lossy(&system_dir[..length])
-    );
-    let application = wide(&shell);
-    let mut command = wide(&format!(
-        "\"{shell}\" -NoLogo -NoProfile -NoExit -EncodedCommand {encoded}"
-    ));
-    let startup = STARTUPINFOW {
-        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-        ..Default::default()
-    };
-    let mut process = PROCESS_INFORMATION::default();
-    let started = unsafe {
-        CreateProcessW(
-            application.as_ptr(),
-            command.as_mut_ptr(),
-            null(),
-            null(),
-            0,
-            CREATE_NEW_CONSOLE,
-            null(),
-            null(),
-            &startup,
-            &mut process,
-        )
-    };
-    if started == 0 {
-        return Err(format!(
-            "Could not open the sign-in terminal: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let process_handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
-    let _thread_handle = unsafe { OwnedHandle::from_raw_handle(process.hThread) };
-    let handles = [event.as_raw_handle(), process_handle.as_raw_handle()];
+    let shell = window::system_directory()
+        .ok_or("Cannot locate Windows PowerShell")?
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let console = window::start(window::Start {
+        application: &shell,
+        command_line: &format!(
+            "{} -NoLogo -NoProfile -NoExit -EncodedCommand {encoded}",
+            window::quote(&shell.to_string_lossy())
+        ),
+        directory: None,
+        title: None,
+        environment: None,
+        hidden: false,
+    })
+    .map_err(|error| format!("Could not open the sign-in terminal: {error}"))?;
+    let handles = [event.as_raw_handle(), console.handle()];
+    // SAFETY: both handles are owned here and stay valid during the wait.
     let ready = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 10000) };
-    if ready == WAIT_OBJECT_0
-        && unsafe { WaitForSingleObject(process_handle.as_raw_handle(), 400) } == WAIT_TIMEOUT
-    {
-        return Ok(process.dwProcessId);
+    if ready == WAIT_OBJECT_0 && console.closed_within(400).is_none() {
+        return Ok(console.pid);
     }
     if ready == WAIT_TIMEOUT {
         return Err("The sign-in terminal did not become ready. Check the opened window, then retry sign-in if needed.".into());
     }
-    let mut code = 0;
-    unsafe {
-        GetExitCodeProcess(process_handle.as_raw_handle(), &mut code);
-    }
+    let code = console.closed_within(0).unwrap_or_default();
     Err(format!(
         "The sign-in terminal closed before it was ready (exit {code:#x}). Retry sign-in."
     ))

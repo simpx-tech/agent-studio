@@ -422,6 +422,19 @@ pub(crate) async fn folder(
     location: Option<&ChatLocation>,
     conversation: Option<&str>,
 ) -> Result<String, String> {
+    let distribution = exe.wsl.as_ref().map(|wsl| wsl.distribution.as_str());
+    working_folder(app, provider, distribution, location, conversation).await
+}
+/// The folder a conversation's CLI works in, on this computer or in the WSL distribution it
+/// manages: its project folder, its own Standalone folder, or the shared chat runtime. Needs
+/// only the scoped profile, not the provider's CLI.
+pub(crate) async fn working_folder(
+    app: &tauri::AppHandle,
+    provider: &str,
+    distribution: Option<&str>,
+    location: Option<&ChatLocation>,
+    conversation: Option<&str>,
+) -> Result<String, String> {
     let root = app
         .path()
         .app_local_data_dir()
@@ -440,9 +453,9 @@ pub(crate) async fn folder(
         "chat-runtime".into()
     };
     let profile = crate::profiles::current();
-    let (fallback, bridge) = if let Some(wsl) = &exe.wsl {
+    let (fallback, bridge) = if let Some(distribution) = distribution {
         let (_, _, bridge, fallback) =
-            crate::context::wsl_paths(&wsl.distribution, &profile, provider).await?;
+            crate::context::wsl_paths(distribution, &profile, provider).await?;
         let fallback = Path::new(&fallback)
             .parent()
             .ok_or("Invalid CLI runtime")?
@@ -452,11 +465,12 @@ pub(crate) async fn folder(
         (fallback, bridge)
     } else {
         let runtime = root.join(relative);
-        std::fs::create_dir_all(&runtime).map_err(|_| "Cannot prepare MCP management")?;
+        std::fs::create_dir_all(&runtime)
+            .map_err(|_| "Cannot prepare this chat's working folder")?;
         (runtime.to_string_lossy().into_owned(), None)
     };
     let mut folder = location.map(|l| l.path.clone()).unwrap_or(fallback);
-    if exe.wsl.is_none() {
+    if distribution.is_none() {
         if let Some(distro) = profile
             .folder_distribution
             .as_deref()

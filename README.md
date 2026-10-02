@@ -34,7 +34,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Share one VPS with separate users through private workspace keys. Each workspace has its own chats, computers, environments, and notifications. One designated admin workspace creates and manages access from Settings; administration can be transferred to another workspace. See [private workspace setup](docs/PRIVATE-WORKSPACES.md).
 
 - Codex via your ChatGPT login, Claude via Claude Code, and Gemini via Google login in Antigravity CLI.
-- Rich Markdown messages, selectable code blocks, tables, copy actions, and structured activity.
+- Rich Markdown messages, tables, copy actions, and structured activity. Code blocks copy with one click, and shell blocks run in a console on the chat's computer, in its folder. See [copy and run in console](docs/CAPABILITIES.md#copy-and-run-in-console).
 - Agent/provider, model, and reasoning controls directly in every chat, plus optional chat instructions.
 - Reusable [input templates](docs/CAPABILITIES.md#input-templates) with custom fields, a message preview, and insertion into the composer for review before sending.
 - Last model remembered per provider; last reasoning level remembered independently per provider and model. New chats start with the agent and account you last chose, even after replying in older chats on another account.

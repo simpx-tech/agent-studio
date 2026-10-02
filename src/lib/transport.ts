@@ -67,6 +67,7 @@ import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './backgroun
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
+import type { ConsoleShell } from './code-blocks';
 import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import {
@@ -2902,6 +2903,33 @@ export async function signIn(provider: string, connectionId?: string) {
       'Open sign-in on the computer that owns this connection. Authentication stays on that environment.',
     );
   await invoke('sign_in', { provider, connectionId });
+}
+/**
+ * Opens a console window on this computer, in the chat's folder, and runs one code block of a
+ * reply there (`src-tauri/src/console.rs`). A console opens only where it is seen, so a chat
+ * another computer runs has no Run. Resolves with the name of the shell that opened.
+ */
+export async function runInConsole(
+  settings: Pick<ChatSettings, 'provider' | 'connectionId'>,
+  conversationId: string,
+  location: ChatLocation | undefined,
+  shell: ConsoleShell,
+  code: string,
+): Promise<string> {
+  if (!desktop() || remoteTarget(settings.connectionId))
+    throw new Error(
+      'A console opens on the computer that runs this chat. Open Agent Studio there to run this code.',
+    );
+  const opened = await invoke<{ shell?: unknown } | null>('run_in_console', {
+    provider: settings.provider,
+    connectionId: settings.connectionId ?? null,
+    conversationId,
+    location: location ?? null,
+    shell,
+    code,
+  });
+  const name = opened?.shell;
+  return typeof name === 'string' && name.length <= 80 ? name : 'a console';
 }
 /**
  * The icon a linked site serves for itself, read on this computer for a reply's link marks.

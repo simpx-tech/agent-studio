@@ -3,6 +3,7 @@ import { Marked, type Token, type TokensList } from 'marked';
 import type { Visualization } from './visualizations';
 import { loneImage, type SentFiles } from './sent-files';
 import { siteLink } from './link-marks';
+import { consoleShell, fenceClosed, type ConsoleShell } from './code-blocks';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
 
@@ -48,6 +49,49 @@ const attributeEntities: Record<string, string> = {
 };
 const escapeAttribute = (value: string) =>
   value.replace(/[&<>"]/g, (character) => attributeEntities[character]);
+
+// Fenced code blocks of the render under way. Each goes into the page after sanitization, in
+// place of the mark its fence left there: the sanitizer allows neither <div> nor <button>, so
+// nothing a model writes can produce a block's controls, stand between them and the code they
+// act on, or add text to that code. The mark differs in every window, so a reply cannot name it.
+let fences: string[] = [];
+const nonce = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36));
+const fenceMark = `studio-code-${nonce.join('')}-`;
+const fenceMarks = new RegExp(`${fenceMark}(\\d+);`, 'g');
+function withCodeBlocks(parse: () => string): string {
+  fences = [];
+  const html = sanitizeMarkdown(parse());
+  const blocks = fences;
+  fences = [];
+  return blocks.length ? html.replace(fenceMarks, (_, index) => blocks[Number(index)] ?? '') : html;
+}
+
+const runTitles: Record<ConsoleShell, string> = {
+  posix: 'Run in a console, in this chat’s folder',
+  powershell: 'Run in a PowerShell console, in this chat’s folder',
+  cmd: 'Run in a Command Prompt, in this chat’s folder',
+};
+
+// A block with its Copy and Run controls (code-blocks.ts). Its code is escaped text, or
+// highlight spans that highlightCode already sanitized. A fence still being written has the
+// same place without the controls.
+function codeBlock(text: string, info: string | undefined, raw: string): string {
+  const highlighted = highlightCode(text, info);
+  const label = info?.trim().split(/\s+/, 1)[0].toLowerCase();
+  const language = highlighted?.language ?? (/^[a-z0-9_+#.-]+$/.test(label ?? '') ? label : '');
+  const code = highlighted
+    ? `<code class="hljs language-${language}">${highlighted.html}\n</code>`
+    : `<code${language ? ` class="language-${language}"` : ''}>${escapeAttribute(text.replace(/\n$/, ''))}\n</code>`;
+  const shell = consoleShell(language);
+  const run = shell
+    ? `<button type="button" class="code-action code-run" data-shell="${shell}" title="${runTitles[shell]}">Run</button>`
+    : '';
+  const actions = fenceClosed(raw)
+    ? `<div class="code-actions">${run}<button type="button" class="code-action code-copy" title="Copy this code">Copy</button></div>`
+    : '';
+  return `<div class="code-block">${actions}<pre>${code}</pre></div>\n`;
+}
+
 const markdown = new Marked({
   gfm: true,
   breaks: true,
@@ -60,10 +104,9 @@ const markdown = new Marked({
       const name = title ? ` title="${escapeAttribute(title)}"` : '';
       return `<a href="${escapeAttribute(site.href)}"${name}><span class="link-mark ${site.mark}"></span>${this.parser.parseInline(tokens)}</a>`;
     },
-    code({ text, lang }) {
-      const highlighted = highlightCode(text, lang);
-      if (!highlighted) return false;
-      return `<pre><code class="hljs language-${highlighted.language}">${highlighted.html}\n</code></pre>\n`;
+    code({ text, lang, raw }) {
+      fences.push(codeBlock(text, lang, raw));
+      return `${fenceMark}${fences.length - 1};\n`;
     },
   },
 });
@@ -83,7 +126,7 @@ export function renderMarkdown(text: string): string {
     rendered.set(text, kept);
     return kept;
   }
-  const html = sanitizeMarkdown(markdown.parse(text, { async: false }));
+  const html = withCodeBlocks(() => markdown.parse(text, { async: false }));
   rendered.set(text, html);
   renderedSize += text.length + html.length;
   // Text streamed a delta at a time leaves versions nothing asks for again; they go first.
@@ -116,7 +159,7 @@ export function replyContent(
   function flush() {
     if (!pending.length) return;
     const group = Object.assign(pending, { links: tokens.links }) as TokensList;
-    const html = sanitizeMarkdown(markdown.parser(group));
+    const html = withCodeBlocks(() => markdown.parser(group));
     if (html.trim()) result.push({ key, type: 'text', html });
     pending = [];
   }
@@ -167,7 +210,8 @@ export function replyContent(
 }
 
 function sanitizeMarkdown(html: string): string {
-  // Sanitize after highlighting so source code remains inert in the privileged document.
+  // Everything a model wrote goes through here, so source stays inert in the privileged
+  // document. Fenced blocks are only marks at this point (withCodeBlocks).
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
       'p',

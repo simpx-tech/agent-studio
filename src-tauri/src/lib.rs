@@ -4,6 +4,7 @@ mod badges;
 mod chat_images;
 mod cli_queries;
 mod cli_updates;
+mod console;
 mod context;
 mod drafts;
 mod folder_icons;
@@ -1149,6 +1150,31 @@ async fn sign_in(
         .join("sign-in");
     profiles::scope(profile, providers::sign_in(&provider, &directory)).await
 }
+/// Opens a console window on this computer, in a chat's working folder, and runs the code of
+/// one block of a reply there. The chat's own connection names the computer, as for a reply.
+#[tauri::command]
+async fn run_in_console(
+    app: tauri::AppHandle,
+    provider: String,
+    connection_id: Option<String>,
+    location: Option<folders::ChatLocation>,
+    conversation_id: String,
+    shell: console::Shell,
+    code: String,
+) -> Result<console::Opened, String> {
+    folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
+    let mut profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    profile.folder_distribution = location
+        .as_ref()
+        .map(|l| folders::environment_distribution(&app, &l.environment_id))
+        .transpose()?
+        .flatten();
+    profiles::scope(
+        profile,
+        console::open(app, provider, location, conversation_id, shell, code),
+    )
+    .await
+}
 
 /// Where an export went, and how many of its images neither this computer nor the relay held.
 #[derive(serde::Serialize)]
@@ -1470,6 +1496,7 @@ pub fn run() {
             manage_elicitation,
             steer_run,
             sign_in,
+            run_in_console,
             export_workspace,
             tray::window_behavior,
             tray::set_close_to_tray

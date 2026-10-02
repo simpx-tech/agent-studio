@@ -117,3 +117,8 @@ mark in the script and `BrandMark.svelte` together.
   in `src/lib/disclosures.ts`) and keep them afterwards.
 - **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
   them; avoid nesting more than one card level.
+- **Code blocks:** `--code-bg` with a hairline border. Copy and Run are small text controls with
+  a 13px icon that fill the block's top right corner in the block's own surface, so a long first
+  line ends cleanly under them. They appear on hover or focus and are always shown, in a row above
+  the code, on touch screens and phones. A control reports what its click did in place (Copied in
+  `--success`, Opening… with the spinner, Not copied in `--danger`) and returns to rest.
