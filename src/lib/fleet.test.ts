@@ -162,7 +162,7 @@ describe('shared context choice', () => {
   });
 });
 describe('lent logins', () => {
-  it('names the Windows connection whose Claude login a separate WSL profile borrows', () => {
+  it('names the Windows connection whose login a separate WSL profile borrows', () => {
     const fleet = emptyFleet();
     const windows = crypto.randomUUID();
     const ubuntu = crypto.randomUUID();
@@ -195,15 +195,16 @@ describe('lent logins', () => {
     const desktop = connect(claude, windows, 'existing');
     const borrowing = connect(claude, ubuntu, 'isolated');
     expect(lendingConnection(fleet, borrowing)).toBe(desktop);
-    // Windows itself, Ubuntu's own terminal login, an account Windows lacks and Codex sign in
-    // where they are.
+    // Windows itself, Ubuntu's own terminal login and an account Windows lacks sign in where
+    // they are.
     expect(lendingConnection(fleet, desktop)).toBeUndefined();
     expect(lendingConnection(fleet, connect(claude, ubuntu, 'existing'))).toBeUndefined();
     expect(
       lendingConnection(fleet, connect(account('claude'), ubuntu, 'isolated')),
     ).toBeUndefined();
+    // Codex borrows the same way; Gemini never runs in WSL.
     const codex = account('codex');
-    connect(codex, windows, 'isolated');
-    expect(lendingConnection(fleet, connect(codex, ubuntu, 'isolated'))).toBeUndefined();
+    const codexDesktop = connect(codex, windows, 'isolated');
+    expect(lendingConnection(fleet, connect(codex, ubuntu, 'isolated'))).toBe(codexDesktop);
   });
 });

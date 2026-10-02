@@ -287,11 +287,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
               };
             };
             const status = check(args.connectionId);
-            // A separate Claude profile in WSL borrows its account's Windows login, as the
-            // native host reports it (`lending.rs`).
+            // A separate Claude or Codex profile in WSL borrows its account's Windows login, as
+            // the native host reports it (`lending.rs`).
             const connection = fleet.connections.find((c: any) => c.id === args.connectionId);
             const lender =
-              args.provider === 'claude' &&
+              (args.provider === 'claude' || args.provider === 'codex') &&
               connection?.profile === 'isolated' &&
               connection.environmentId === '33333333-3333-4333-8333-333333333333'
                 ? fleet.connections.find(

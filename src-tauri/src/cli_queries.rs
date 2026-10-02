@@ -35,7 +35,13 @@ async fn codex_operation(
     reset: Option<(&str, bool, &AtomicBool)>,
 ) -> Result<Value, String> {
     let exe = resolve("codex").await?;
-    codex_exchange(exe, method, params, cancel, reset).await
+    // A separate WSL profile signs in with its account's Windows login, read from the Windows
+    // Codex through this same kind of query (boxed for that reason).
+    let login = match crate::lending::codex_lender() {
+        Some(lender) => Some(Box::pin(crate::lending::codex_login(&lender, false)).await?),
+        None => None,
+    };
+    codex_exchange(exe, method, params, cancel, reset, login).await
 }
 async fn codex_exchange(
     exe: crate::providers::Executable,
@@ -43,6 +49,7 @@ async fn codex_exchange(
     params: Value,
     cancel: CancellationToken,
     reset: Option<(&str, bool, &AtomicBool)>,
+    login: Option<Value>,
 ) -> Result<Value, String> {
     let mut child = exe
         .command()
@@ -68,13 +75,25 @@ async fn codex_exchange(
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            let request = json!({"id":2,"method":method,"params":params});
             if v["id"] == 1 {
                 if v["error"].is_object() {
                     return Err("Codex does not support this account query");
                 }
-                let request = json!({"id":2,"method":method,"params":params});
+                let first = match &login {
+                    Some(login) => json!({"id":4,"method":"account/login/start","params":login}),
+                    None => request,
+                };
                 input
-                    .write_all(format!("{{\"method\":\"initialized\"}}\n{request}\n").as_bytes())
+                    .write_all(format!("{{\"method\":\"initialized\"}}\n{first}\n").as_bytes())
+                    .await
+                    .map_err(|_| "CLI input failed")?;
+            } else if v["id"] == 4 {
+                if v["error"].is_object() {
+                    return Err("Codex in WSL did not accept this account's Windows login");
+                }
+                input
+                    .write_all(format!("{request}\n").as_bytes())
                     .await
                     .map_err(|_| "CLI input failed")?;
             } else if v["id"] == 2 {
@@ -298,6 +317,7 @@ rl.on('line',line=>{
                 Value::Null,
                 CancellationToken::new(),
                 Some((&key, retry, &sent)),
+                None,
             )
             .await;
             if expected.is_empty() {

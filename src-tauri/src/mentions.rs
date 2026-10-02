@@ -199,6 +199,11 @@ pub(crate) async fn codex(
     let result = tokio::time::timeout(Duration::from_secs(if kind == "app" { 60 } else { 20 }), async {
         rpc(&mut p, "initialize", json!({"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["app/list/updated"]}})).await?;
         p.stdin.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Could not initialize mention discovery")?;
+        // Apps belong to the account: a separate WSL profile signs in with its Windows login.
+        if let Some(lender) = crate::lending::codex_lender().filter(|_| kind == "app") {
+            let login = crate::lending::codex_login(&lender, false).await?;
+            rpc(&mut p, "account/login/start", login).await?;
+        }
         if kind == "file" {
             let value = rpc(&mut p, "fuzzyFileSearch", json!({"query":query,"roots":[folder],"cancellationToken":null})).await?;
             return files(&value, folder);

@@ -325,6 +325,12 @@ async fn generate_title(
     connection_id: Option<String>,
 ) -> Result<titles::GeneratedTitle, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    // A borrowed login writes titles on Windows, where that login lives: a one-shot `codex
+    // exec` in WSL could not sign in with it.
+    let profile = match profile.lender {
+        Some(lender) => *lender,
+        None => profile,
+    };
     uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
     let cancel = CancellationToken::new();
     {

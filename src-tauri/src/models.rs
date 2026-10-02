@@ -314,6 +314,11 @@ fn codex_contexts() -> BTreeMap<String, u64> {
 }
 async fn codex_models() -> Option<Vec<ModelInfo>> {
     let exe = resolve("codex").await.ok()?;
+    // A separate WSL profile signs in with its account's Windows login before listing models.
+    let login = match crate::lending::codex_lender() {
+        Some(lender) => Some(crate::lending::codex_login(&lender, false).await.ok()?),
+        None => None,
+    };
     let mut child = exe
         .command()
         .args(["app-server", "--stdio"])
@@ -341,12 +346,19 @@ async fn codex_models() -> Option<Vec<ModelInfo>> {
             if value["error"].is_object() {
                 return None;
             }
+            let list =
+                json!({"id":2,"method":"model/list","params":{"limit":100,"includeHidden":false}});
             if value["id"] == 1 {
-                let request = json!({"id":2,"method":"model/list","params":{"limit":100,"includeHidden":false}});
+                let request = match &login {
+                    Some(login) => json!({"id":3,"method":"account/login/start","params":login}),
+                    None => list,
+                };
                 input
                     .write_all(format!("{{\"method\":\"initialized\"}}\n{request}\n").as_bytes())
                     .await
                     .ok()?;
+            } else if value["id"] == 3 {
+                input.write_all(format!("{list}\n").as_bytes()).await.ok()?;
             } else if value["id"] == 2 {
                 data.extend(value["result"]["data"].as_array()?.iter().cloned());
                 if let Some(cursor) = value["result"]["nextCursor"].as_str() {

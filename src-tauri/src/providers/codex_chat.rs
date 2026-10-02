@@ -156,6 +156,8 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Init,
+    /// Signing in with the Windows login a separate WSL profile borrows (`lending`).
+    Login,
     Config,
     Models,
     Thread,
@@ -210,6 +212,46 @@ async fn start_turn(
             Kind::Turn,
             "turn/start",
             turn_params(&effective, thread),
+        )
+        .await
+    }
+}
+
+// After initialization (and signing in with a borrowed login): set this run's skill roots, then
+// read the defaults it lacks or open its thread.
+async fn prepare_thread(
+    process: &mut Process,
+    pending: &mut HashMap<u64, Kind>,
+    request: &RunRequest,
+    resolve_defaults: bool,
+    config_cwd: Option<&str>,
+) -> Result<(), String> {
+    let runtime = crate::plugins::for_run(request);
+    if !runtime.skill_roots.is_empty() {
+        crate::plugins::rpc(
+            process,
+            "skills/extraRoots/set",
+            json!({"extraRoots":runtime.skill_roots}),
+        )
+        .await?;
+    }
+    if resolve_defaults {
+        send(
+            process,
+            pending,
+            Kind::Config,
+            "config/read",
+            json!({"includeLayers":false,"cwd":config_cwd}),
+        )
+        .await
+    } else {
+        let method = thread_method(request);
+        send(
+            process,
+            pending,
+            Kind::Thread,
+            method,
+            start_params(request),
         )
         .await
     }
@@ -353,22 +395,22 @@ pub async fn run(
                             "Codex could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
                         } else if kind == Kind::Turn && request.agent.output_schema.is_some() && !request.compact {
                             "Codex could not start this structured reply. Check the output schema, model access, and CLI version, or disable structured output."
+                        } else if kind == Kind::Login {
+                            "Codex in WSL did not accept this account's Windows login. Check its sign-in on Windows and the Codex version in WSL."
                         } else { "Codex could not start this reply. Check its login, model access, and CLI version." }.into());
                     }
                     match kind {
                         Kind::Init => {
                             process.stdin.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Codex initialization failed")?;
-                            let runtime = crate::plugins::for_run(request);
-                            if !runtime.skill_roots.is_empty() {
-                                crate::plugins::rpc(process, "skills/extraRoots/set", json!({"extraRoots":runtime.skill_roots})).await?;
-                            }
-                            if resolve_defaults {
-                                send(process, &mut pending, Kind::Config, "config/read", json!({"includeLayers":false,"cwd":config_cwd})).await?;
+                            // A separate WSL profile signs in with its account's Windows login first.
+                            if let Some(lender) = crate::lending::codex_lender() {
+                                let login = crate::lending::codex_login(&lender, false).await.inspect_err(|_| process.healthy = false)?;
+                                send(process, &mut pending, Kind::Login, "account/login/start", login).await?;
                             } else {
-                                let method = thread_method(request);
-                                send(process, &mut pending, Kind::Thread, method, start_params(request)).await?;
+                                prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd).await?;
                             }
                         }
+                        Kind::Login => prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd).await?,
                         Kind::Config => {
                             super::defaults::codex_config(request, &value["result"]["config"]);
                             if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
@@ -434,6 +476,15 @@ pub async fn run(
                     if let Some((response, events)) = plan_response(&value, &thread, &mut decoder) {
                         for event in events { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                         process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex plan")?;
+                        continue;
+                    }
+                    // A borrowed login's token was refused: the Windows Codex renews it.
+                    if value["method"] == "account/chatgptAuthTokens/refresh" {
+                        let response = match crate::lending::codex_lender() {
+                            Some(lender) => crate::lending::codex_refresh(&lender, &value).await,
+                            None => json!({"id":value["id"],"error":{"code":-32601,"message":"Agent Studio does not manage this Codex login."}}),
+                        };
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not renew the Codex login")?;
                         continue;
                     }
                     // Full-access runs do not need approvals. Unsupported interactions

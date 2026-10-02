@@ -203,9 +203,10 @@ fn resolve_in(
         lender,
     })
 }
-// A separate Claude profile in a distribution this computer manages borrows the login of the
-// same account's connection on this computer, as the Claude app lends its own login to the CLI
-// it runs in WSL. The distribution's terminal login and accounts Windows lacks sign in there.
+// A separate Claude or Codex profile in a distribution this computer manages borrows the login
+// of the same account's connection on this computer, as the Claude app lends its own login to
+// the CLI it runs in WSL. The distribution's terminal login and accounts Windows lacks sign in
+// there.
 fn lender_id(
     fleet: &Value,
     local: &Installation,
@@ -213,7 +214,7 @@ fn lender_id(
     wsl: bool,
     provider: &str,
 ) -> Option<String> {
-    if !wsl || provider != "claude" || connection["profile"] != "isolated" {
+    if !wsl || !matches!(provider, "claude" | "codex") || connection["profile"] != "isolated" {
         return None;
     }
     fleet["connections"]
@@ -454,7 +455,7 @@ mod tests {
         assert!(!data.path().join("profiles").join("escape").exists());
     }
     #[test]
-    fn separate_wsl_claude_profiles_borrow_the_windows_login_of_their_account() {
+    fn separate_wsl_profiles_borrow_the_windows_login_of_their_account() {
         let local = Installation {
             id: "desktop".into(),
             computer_id: "host".into(),
@@ -473,6 +474,14 @@ mod tests {
         assert_eq!(
             lender_id(&fleet, &local, connection(1), true, "claude"),
             Some(windows.clone())
+        );
+        assert_eq!(
+            lender_id(&fleet, &local, connection(1), true, "codex"),
+            Some(windows.clone())
+        );
+        assert_eq!(
+            lender_id(&fleet, &local, connection(1), true, "gemini"),
+            None
         );
         // An account Windows lacks, the distribution's terminal login and Windows itself keep
         // their own logins.
