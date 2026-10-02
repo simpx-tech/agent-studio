@@ -639,7 +639,8 @@ export function createRelay({
             value.conversationId,
             sessionIdentity,
           );
-          send(200, { ok: true });
+          // A browser's alerts for chats read since they arrived, for its page to close.
+          send(200, { ok: true, close: sessionIdentity ? push.stale(sessionIdentity) : [] });
           return;
         }
         if (url.pathname === '/v1/push' || url.pathname === '/v1/push/test') {

@@ -372,3 +372,195 @@ test('mobile opts in, receives a real worker push without an app page, opens its
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('a phone takes back alerts of chats read elsewhere with its next alert and when the Viewer opens', async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(60_000);
+  const directory = mkdtempSync(join(tmpdir(), 'studio-stale-alerts-'));
+  const token = 'synthetic-stale-alert-pairing-key';
+  const deliveries: { close?: unknown }[] = [];
+  let time = Date.now();
+  const server = createRelay({
+    directory,
+    token,
+    webDirectory: resolve('build'),
+    now: () => time,
+    pushSender: async (_subscription, payload) => {
+      deliveries.push(JSON.parse(payload));
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const key = createECDH('prime256v1');
+  key.generateKeys();
+  const subscription = {
+    endpoint: 'https://fcm.googleapis.com/fcm/send/stale-alerts-fixture',
+    keys: {
+      p256dh: key.getPublicKey().toString('base64url'),
+      auth: randomBytes(16).toString('base64url'),
+    },
+  };
+  const computer = { authorization: `Bearer ${token}`, 'x-environment-id': crypto.randomUUID() };
+  const update = async (mutate: (value: ReturnType<typeof emptyShared>) => void) => {
+    const state = await (await fetch(url + '/v1/state', { headers: computer })).json();
+    mutate(state.workspace);
+    const result = await fetch(url + '/v1/state', {
+      method: 'PUT',
+      headers: computer,
+      body: JSON.stringify({ revision: state.revision, workspace: state.workspace }),
+    });
+    expect(result.status).toBe(200);
+  };
+  const titles = ['Read on the computer', 'Opened on the phone', 'Read before the phone opens'];
+  const ids = titles.map(() => crypto.randomUUID());
+  try {
+    await context.grantPermissions(['notifications'], { origin: url });
+    // Push-service enrollment is controlled for repeatability. The compiled
+    // service worker, Push event, Notification API and relay remain real.
+    await page.addInitScript((value) => {
+      if (!['http:', 'https:'].includes(location.protocol)) return;
+      let subscribed = localStorage.getItem('qa-push-subscribed') === 'yes';
+      const make = () => ({
+        endpoint: value.endpoint,
+        options: {},
+        toJSON: () => value,
+        unsubscribe: async () => {
+          subscribed = false;
+          localStorage.removeItem('qa-push-subscribed');
+          return true;
+        },
+      });
+      PushManager.prototype.getSubscription = async () =>
+        subscribed ? (make() as unknown as PushSubscription) : null;
+      PushManager.prototype.subscribe = async () => {
+        subscribed = true;
+        localStorage.setItem('qa-push-subscribed', 'yes');
+        return make() as unknown as PushSubscription;
+      };
+    }, subscription);
+    const cdp = await context.newCDPSession(page);
+    let registrationId = '';
+    cdp.on('ServiceWorker.workerRegistrationUpdated', ({ registrations }) => {
+      registrationId =
+        registrations.find((r) => r.scopeURL === url + '/' && !r.isDeleted)?.registrationId ??
+        registrationId;
+    });
+    await cdp.send('ServiceWorker.enable');
+    await update((value) => {
+      value.conversations = titles.map((title, index) => ({
+        id: ids[index],
+        title,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        settings: { provider: 'claude', model: 'test', reasoning: '', instructions: '' },
+        messages: [
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            runId: crypto.randomUUID(),
+            status: 'running',
+            createdAt: new Date().toISOString(),
+            blocks: [{ type: 'markdown', text: 'The work is done.' }],
+          },
+        ],
+      }));
+    });
+    await page.goto(url);
+    await signInPwa(page, token);
+    await page.getByRole('button', { name: 'Open conversations' }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect.poll(() => registrationId).not.toBe('');
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+    await page.getByRole('button', { name: 'Enable notifications', exact: true }).click();
+    await expect(page.getByText('Enabled on this device', { exact: true })).toBeVisible();
+    // The phone is put away while its chats finish.
+    await page.goto('about:blank');
+    // The titles of the alerts the phone shows, in no particular order.
+    const shown = async () => {
+      try {
+        const worker = context.serviceWorkers().find((w) => w.url() === url + '/service-worker.js');
+        const alerts = await worker?.evaluate(async () =>
+          (await (self as unknown as ServiceWorkerGlobalScope).registration.getNotifications()).map(
+            (n) => n.title,
+          ),
+        );
+        return alerts?.sort();
+      } catch {
+        return undefined;
+      }
+    };
+    // A chat finishes, its hold passes with no computer opening it, and the push service
+    // hands the relay's alert to the phone's worker.
+    const finish = async (index: number) => {
+      const count = deliveries.length;
+      await update((value) => {
+        value.conversations[index].messages[0].status = 'complete';
+      });
+      time += 20_001;
+      await update(() => {});
+      await expect.poll(() => deliveries.length).toBe(count + 1);
+      await cdp.send('ServiceWorker.deliverPushMessage', {
+        origin: url,
+        registrationId,
+        data: JSON.stringify(deliveries[count]),
+      });
+    };
+    let revision = 0;
+    const viewId = crypto.randomUUID();
+    const view = (conversationId: string | null) =>
+      fetch(url + '/v1/notification-view', {
+        method: 'POST',
+        headers: computer,
+        body: JSON.stringify({ viewId, revision: ++revision, conversationId }),
+      });
+    // A computer opens the chat after its alert reached the phone.
+    const readOn = async (index: number) => {
+      time += 1_000;
+      expect((await view(ids[index])).status).toBe(200);
+      expect((await view(null)).status).toBe(200);
+      return time;
+    };
+    await finish(0);
+    await expect.poll(shown).toEqual([titles[0]]);
+    const readAt = await readOn(0);
+    // The phone's next alert takes the stale one back as it arrives.
+    await finish(1);
+    expect(deliveries[1].close).toEqual([[ids[0], readAt]]);
+    await expect.poll(shown).toEqual([titles[1]]);
+    await finish(2);
+    await expect.poll(shown).toEqual([titles[1], titles[2]]);
+    await readOn(2);
+    // Opening the Viewer takes back the alert of the chat read on the computer, and opening
+    // a chat there takes back that chat's own.
+    await page.goto(url);
+    await page.bringToFront();
+    await expect.poll(shown).toEqual([titles[1]]);
+    // The page closes the alerts of a chat it opens itself, including one the relay has no
+    // record of, such as an alert an older relay sent.
+    await cdp.send('ServiceWorker.deliverPushMessage', {
+      origin: url,
+      registrationId,
+      data: JSON.stringify({ kind: 'complete', conversationId: ids[0], tag: 'qa-unrecorded' }),
+    });
+    await expect.poll(shown).toEqual([titles[1], 'Reply ready']);
+    // Rows read as new replies, since they finished while this phone was elsewhere.
+    const open = async (index: number) => {
+      await page.getByRole('button', { name: 'Open conversations' }).click();
+      await page.getByRole('button', { name: new RegExp(`^${titles[index]}`) }).click();
+      await expect(page.getByRole('main').getByText(titles[index], { exact: true })).toBeVisible();
+    };
+    await open(0);
+    await expect.poll(shown).toEqual([titles[1]]);
+    await open(1);
+    await expect.poll(shown).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

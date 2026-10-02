@@ -22,6 +22,7 @@ import {
   noticeTitleLimit,
   requestsAttention,
   type PushNotice,
+  type StaleAlert,
 } from '../src/lib/notifications.ts';
 import { questionRequestSchema, type QuestionRequest } from '../src/lib/questions.ts';
 import { elicitationReceiptSchema, type ElicitationReceipt } from '../src/lib/elicitations.ts';
@@ -49,6 +50,11 @@ export function jobAwaitsAnswer(job: RelayJob): boolean {
 }
 
 const day = 24 * 60 * 60 * 1000;
+// How long a device's alerts are remembered so reading their chat can take them back.
+const week = 7 * day;
+// Chats a device was alerted about, and the stale alerts its next alert takes back.
+const alertsPerDevice = 64;
+const staleAlertsPerPush = 20;
 // A phone alert waits this long for the chat to be opened on a computer instead. A reply
 // often ends while its reader is at their desk with the app behind another window, where
 // only its own notification shows it; the phone should ring for what they leave unread.
@@ -121,6 +127,16 @@ const subscriberSchema = z.object({
   lastSent: z.number().optional(),
   testAt: z.number().default(0),
 });
+// A chat a device was alerted about. Reading it on any device makes those alerts stale, and
+// the device takes them back the next time it runs: with its next alert, or in its page.
+const shownSchema = z.object({
+  subscriber: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  // When the device was last sent an alert for the chat.
+  sent: z.number().optional(),
+  // When the chat was read after an alert: alerts sent up to then are stale.
+  read: z.number().optional(),
+});
 const diskSchema = z.object({
   version: z.literal(1),
   keyId: z.string(),
@@ -138,8 +154,20 @@ const diskSchema = z.object({
         return parsed.success ? [parsed.data] : [];
       }),
     ),
+  // Absent from files written before alerts could be taken back.
+  shown: z
+    .array(z.unknown())
+    .max(4000)
+    .optional()
+    .transform((items = []) =>
+      items.flatMap((item) => {
+        const parsed = shownSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
 });
 type State = z.infer<typeof diskSchema>;
+type Shown = State['shown'][number];
 type Reply = Parameters<typeof chatNotification>[2];
 
 // A job can end before the execution host's final checkpoint reaches the relay. Its retained
@@ -264,7 +292,8 @@ export function pushService({
     if (statSync(file).size > 10_000_000) throw new Error();
     state = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
     saved = JSON.stringify(state);
-    if (state.keyId !== keyId) save({ ...state, keyId, subscribers: [], pending: [], seen: [] });
+    if (state.keyId !== keyId)
+      save({ ...state, keyId, subscribers: [], pending: [], seen: [], shown: [] });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
       throw new Error('Push notification data is unreadable; preserved without overwriting.');
@@ -275,6 +304,7 @@ export function pushService({
       subscribers: [],
       pending: [],
       seen: [],
+      shown: [],
     };
     save(state);
   }
@@ -284,6 +314,7 @@ export function pushService({
         sessionActive(s.session) &&
         (s.subscription.expirationTime == null || s.subscription.expirationTime > now()),
     );
+    const devices = new Set(subscribers.map((s) => s.id));
     return {
       ...state,
       subscribers,
@@ -291,7 +322,38 @@ export function pushService({
       pending: state.pending.filter(
         (p) => p.expires > now() && subscribers.some((s) => s.id === p.subscriber),
       ),
+      shown: state.shown.filter(
+        (s) => devices.has(s.subscriber) && Math.max(s.sent ?? 0, s.read ?? 0) > now() - week,
+      ),
     };
+  }
+  /** Records that `subscriber` was sent an alert for the chat at `at`. */
+  function alerted(next: State, subscriber: string, conversationId: string, at: number) {
+    const entry = next.shown.find(
+      (s) => s.subscriber === subscriber && s.conversationId === conversationId,
+    );
+    const others = next.shown.filter((s) => s !== entry);
+    const own = others.filter((s) => s.subscriber === subscriber);
+    // Newest last, so the bounds drop the chats a device was alerted about longest ago.
+    const dropped = new Set(own.slice(0, Math.max(0, own.length - (alertsPerDevice - 1))));
+    next.shown = [
+      ...others.filter((s) => !dropped.has(s)),
+      { ...entry, subscriber, conversationId, sent: at },
+    ].slice(-4000);
+  }
+  // Alerts sent for the chat that no reading has covered yet.
+  const unread = (s: Shown, conversationId: string) =>
+    s.conversationId === conversationId && s.sent !== undefined && (s.read ?? -1) < s.sent;
+  /** The chat was read, or deleted: every device's alerts for it so far are stale. */
+  function readAlerts(next: State, conversationId: string) {
+    next.shown = next.shown.map((s) => (unread(s, conversationId) ? { ...s, read: now() } : s));
+  }
+  /** The stale alerts a device still shows, newest reading first. */
+  function staleFor(next: State, subscriber: string): StaleAlert[] {
+    return next.shown
+      .filter((s) => s.subscriber === subscriber && s.read !== undefined)
+      .sort((a, b) => b.read! - a.read!)
+      .map((s) => [s.conversationId, s.read!]);
   }
   /**
    * Queues the alert `receipt` names once, building its text only when it goes out. An alert
@@ -370,6 +432,15 @@ export function pushService({
           save({ ...state, pending: state.pending.filter((p) => p.id !== item.id) });
           continue;
         }
+        // In the clock readings use, and recorded before the alert goes out so reading its
+        // chat while it is in flight still takes it back.
+        const sentAt = now();
+        const stale = staleFor(state, subscriber.id).slice(0, staleAlertsPerPush);
+        if (item.notice.conversationId) {
+          const next = pruned();
+          alerted(next, subscriber.id, item.notice.conversationId, sentAt);
+          save(next);
+        }
         let failed = false,
           gone = false;
         try {
@@ -378,6 +449,10 @@ export function pushService({
           const notice = {
             ...item.notice,
             ...(pendingCount ? { pendingCount: pendingCount() } : {}),
+            sentAt,
+            // Every alert repeats them until the device's page takes them, because a push
+            // service replaces an alert it still holds with a later one of the same topic.
+            ...(stale.length ? { close: stale } : {}),
           };
           await send(subscriber.subscription, JSON.stringify(notice), {
             TTL: Math.max(0, Math.floor((item.expires - now()) / 1000)),
@@ -411,6 +486,7 @@ export function pushService({
         if (gone) {
           next.subscribers = next.subscribers.filter((s) => s.id !== subscriber.id);
           next.pending = next.pending.filter((p) => p.subscriber !== subscriber.id);
+          next.shown = next.shown.filter((s) => s.subscriber !== subscriber.id);
         } else {
           next.subscribers = next.subscribers.map((s) =>
             s.id === subscriber.id
@@ -474,6 +550,9 @@ export function pushService({
               ...chatNotification('attention', conversation, message, key),
             }));
       }
+      // A deleted chat's alerts lead nowhere.
+      const kept = new Set(after.conversations.map((c) => c.id));
+      for (const { id } of before.conversations) if (!kept.has(id)) readAlerts(next, id);
       save(next);
       void drain();
     } catch {
@@ -500,6 +579,35 @@ export function pushService({
         if (read.size <= 1000 && now() - (last.at(-1)?.at ?? 0) < day) break;
         read.delete(id);
       }
+      // Its alerts so far are stale wherever they show. Most readings find none left.
+      if (state.shown.some((s) => unread(s, conversationId)))
+        try {
+          const next = pruned();
+          readAlerts(next, conversationId);
+          save(next);
+        } catch {
+          unavailable = true;
+        }
+    },
+    /** Hands a device's page its alerts for chats read since they arrived, to close them. */
+    stale(session: string): StaleAlert[] {
+      const subscriber = state.subscribers.find((s) => s.session === session);
+      if (!subscriber || !sessionActive(session)) return [];
+      const alerts = staleFor(state, subscriber.id);
+      if (alerts.length)
+        try {
+          const next = pruned();
+          next.shown = next.shown.flatMap((s) => {
+            if (s.subscriber !== subscriber.id || s.read === undefined) return [s];
+            // An alert sent after the reading stays until its chat is read again.
+            const { read, ...rest } = s;
+            return rest.sent !== undefined && rest.sent > read ? [rest] : [];
+          });
+          save(next);
+        } catch {
+          unavailable = true;
+        }
+      return alerts;
     },
     jobUpdated(job: RelayJob) {
       if (job.method !== 'run') return;
@@ -588,6 +696,7 @@ export function pushService({
       const ids = new Set(next.subscribers.filter((s) => s.session === session).map((s) => s.id));
       next.subscribers = next.subscribers.filter((s) => s.session !== session);
       next.pending = next.pending.filter((p) => !ids.has(p.subscriber));
+      next.shown = next.shown.filter((s) => !ids.has(s.subscriber));
       save(next);
     },
     test(session: string) {

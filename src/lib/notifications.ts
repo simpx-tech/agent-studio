@@ -53,6 +53,42 @@ export async function applyAppBadge(
   else await target.setAppBadge?.(count);
 }
 
+/**
+ * A chat read after it alerted a device, and when, in relay time: that device's alerts for it
+ * sent up to then are stale. The relay hands them to the device's next alert and to its page,
+ * because a phone cannot be woken only to remove one: iOS revokes a subscription after three
+ * pushes that show nothing.
+ */
+export type StaleAlert = [conversationId: string, readAt: number];
+export function staleAlerts(value: unknown): StaleAlert[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 64)
+    .flatMap((entry) =>
+      Array.isArray(entry) &&
+      typeof entry[0] === 'string' &&
+      /^[a-f0-9-]{36}$/i.test(entry[0]) &&
+      Number.isSafeInteger(entry[1])
+        ? [[entry[0], entry[1]] as StaleAlert]
+        : [],
+    );
+}
+type ShownAlert = { tag?: string; data?: unknown; close(): void };
+/** Whether the chat this alert announces was read after the relay sent it. */
+export function readSince(alert: ShownAlert, stale: readonly StaleAlert[]): boolean {
+  const data = alert.data as { conversationId?: unknown; sentAt?: unknown } | null | undefined;
+  // The relay stamps every alert it sends; one without a stamp predates any reading it reports.
+  const sentAt = typeof data?.sentAt === 'number' ? data.sentAt : 0;
+  return stale.some(([id, readAt]) => data?.conversationId === id && sentAt <= readAt);
+}
+/** Closes the alerts this device shows that `stale` picks. */
+export async function closeNotifications(
+  registration: { getNotifications(): Promise<readonly ShownAlert[]> },
+  stale: (alert: ShownAlert) => boolean,
+): Promise<void> {
+  for (const alert of await registration.getNotifications()) if (stale(alert)) alert.close();
+}
+
 // Only explicit parent tool identities indicate an in-progress question. Prose
 // questions are covered by the finished-reply notification, in every language.
 export function requestsAttention(

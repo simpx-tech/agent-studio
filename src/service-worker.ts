@@ -1,6 +1,14 @@
 /// <reference lib="webworker" />
 import { build, files, version } from '$service-worker';
-import { applyAppBadge, notificationContent, type PushNotice } from './lib/notifications';
+import {
+  applyAppBadge,
+  closeNotifications,
+  notificationContent,
+  readSince,
+  staleAlerts,
+  type PushNotice,
+  type StaleAlert,
+} from './lib/notifications';
 
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const name = `agent-studio-shell-${version}`;
@@ -10,6 +18,9 @@ worker.addEventListener('push', (event) => {
   // (required by Safari's userVisibleOnly contract). It shows the chat's title and a
   // line about its reply as plain text, or generic text when the relay sent none.
   let notice: PushNotice = { kind: 'complete', tag: 'studio-reply' };
+  // When the relay sent it, and its alerts for chats read since they arrived.
+  let sentAt: number | undefined;
+  let stale: StaleAlert[] = [];
   try {
     const value = event.data?.json();
     if (value && ['complete', 'attention', 'error', 'cancelled', 'test'].includes(value.kind)) {
@@ -20,22 +31,38 @@ worker.addEventListener('push', (event) => {
         notice.pendingCount = value.pendingCount;
       if (typeof value.title === 'string') notice.title = value.title;
       if (typeof value.body === 'string') notice.body = value.body;
+      if (Number.isSafeInteger(value.sentAt) && value.sentAt > 0) sentAt = value.sentAt;
+      stale = staleAlerts(value.close);
     }
   } catch {
     /* A payload-less push still needs a visible notification. */
   }
   const { title, body } = notificationContent(notice);
+  // Tells this alert apart from the older ones it replaces or takes back. Nothing before
+  // waitUntil may throw: a push that shows nothing counts against the subscription.
+  const id = `${Date.now()}:${Math.random()}`;
   event.waitUntil(
     Promise.all([
-      worker.registration.showNotification(title, {
-        body,
-        tag: notice.tag,
-        // Alerts of one reply share its tag, so the end replaces an unread question; it
-        // still rings rather than changing the old alert silently.
-        renotify: true,
-        icon: '/icons/icon-192.png',
-        data: { conversationId: notice.conversationId },
-      } as NotificationOptions),
+      worker.registration
+        .showNotification(title, {
+          body,
+          tag: notice.tag,
+          // Alerts of one reply share its tag, so the end replaces an unread question; it
+          // still rings rather than changing the old alert silently.
+          renotify: true,
+          icon: '/icons/icon-192.png',
+          data: { conversationId: notice.conversationId, sentAt, id },
+        } as NotificationOptions)
+        // Shown first, since a push must show an alert. iOS keeps the older alert of a tag
+        // beside the new one, and alerts of chats read on another device are stale.
+        .then(() =>
+          closeNotifications(
+            worker.registration,
+            (alert) =>
+              (alert.data as { id?: unknown } | null)?.id !== id &&
+              (alert.tag === notice.tag || readSince(alert, stale)),
+          ).catch(() => {}),
+        ),
       notice.pendingCount === undefined
         ? Promise.resolve()
         : applyAppBadge(worker.navigator, notice.pendingCount).catch(() => {}),

@@ -10,7 +10,14 @@ import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
 import { cliUpdatesSchema, type CliUpdates, type UpdatedCli } from './cli-updates';
 import { windowBehaviorSchema, type WindowBehavior } from './window-behavior';
 import { createDesktopNotificationTracker } from './desktop-notifications';
-import { applyAppBadge, asksTheUser, pendingChatCount } from './notifications';
+import {
+  applyAppBadge,
+  asksTheUser,
+  closeNotifications,
+  pendingChatCount,
+  readSince,
+  staleAlerts,
+} from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { FolderEntry, FolderPlace } from './folders';
 import { folderIconContext } from './folder-icons';
@@ -311,18 +318,41 @@ function foregroundConversation(): string | undefined {
     ? notificationConversationId()
     : undefined;
 }
+let shownConversation: string | null = null;
+// Closes this browser's phone alerts that `stale` picks. Desktop alerts are native.
+async function closeAlerts(stale: Parameters<typeof closeNotifications>[1]) {
+  if (desktop() || !('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration('/');
+    if (registration) await closeNotifications(registration, stale);
+  } catch {
+    // An alert left showing is harmless; reading the chat goes on.
+  }
+}
 // A short, transient lease lets the relay suppress a push before it reaches a
 // userVisibleOnly service worker. Each tab has its own revisioned identity.
 export async function publishNotificationView(hidden = false): Promise<void> {
-  if (!relayConnected) return;
   const conversationId = hidden ? null : (foregroundConversation() ?? null);
+  // The chat on screen is read here, so its alerts on this device are stale.
+  if (conversationId !== shownConversation) {
+    shownConversation = conversationId;
+    if (conversationId)
+      void closeAlerts(
+        (alert) =>
+          (alert.data as { conversationId?: unknown } | null)?.conversationId === conversationId,
+      );
+  }
+  if (!relayConnected) return;
   notificationViewId ||= crypto.randomUUID();
   try {
-    await relayApi('POST', 'v1/notification-view', {
+    const result = await relayApi<{ close?: unknown } | undefined>('POST', 'v1/notification-view', {
       viewId: notificationViewId,
       revision: ++notificationViewRevision,
       conversationId,
     });
+    // This device's alerts for chats read on another device since they arrived.
+    const stale = staleAlerts(result?.close);
+    if (stale.length) void closeAlerts((alert) => readSince(alert, stale));
   } catch {
     // Older/offline relays keep delivering normally; never block chat or saving.
   }

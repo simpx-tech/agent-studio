@@ -482,6 +482,123 @@ it('keeps a reading by an active session when a later reader of the chat is revo
   await f.settle();
   expect(f.send).not.toHaveBeenCalled();
 });
+it('takes an alert back on its device once its chat is read, with its next alert or in its page', async () => {
+  const f = fixture();
+  const first = workspace('complete');
+  const id = first.conversations[0].id;
+  f.service.changed(emptyShared(), first);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  const sent = JSON.parse(f.send.mock.calls[0][1]);
+  expect(sent).toMatchObject({ conversationId: id, sentAt: f.advance(0) });
+  expect(sent.close).toBeUndefined();
+  // Nothing is stale until the chat is read.
+  expect(f.service.stale('session')).toEqual([]);
+  // The chat is read on a computer after its alert reached the phone.
+  const readAt = f.advance(60_000);
+  f.service.view('desktop', 1, id);
+  f.service.view('desktop', 2, null);
+  // A push that showed nothing would count against the phone's subscription, so the stale
+  // alert goes with the phone's next alert, which closes it.
+  f.service.changed(emptyShared(), workspace('complete'));
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(f.send.mock.calls[1][1]).close).toEqual([[id, readAt]]);
+  // Every alert repeats it, since a push service replaces an alert of a topic it still holds.
+  f.service.test('session');
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+  expect(JSON.parse(f.send.mock.calls[2][1]).close).toEqual([[id, readAt]]);
+  // It survives a restart until the phone's page takes it.
+  f.restart();
+  expect(f.service.stale('session')).toEqual([[id, readAt]]);
+  expect(f.service.stale('session')).toEqual([]);
+  f.advance(30_001);
+  f.service.test('session');
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(4));
+  expect(JSON.parse(f.send.mock.calls[3][1]).close).toBeUndefined();
+  // Signed-out browsers and computers have no alerts to take.
+  expect(f.service.stale('another')).toEqual([]);
+});
+it('keeps an alert newer than the reading of its chat, and stales the alerts of a deleted chat', async () => {
+  const f = fixture();
+  const chat = workspace('complete');
+  const id = chat.conversations[0].id;
+  f.service.changed(emptyShared(), chat);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  const readAt = f.advance(1_000);
+  f.service.view('tab', 1, id, 'session');
+  f.service.view('tab', 2, null, 'session');
+  // The chat replies again after it was read; that alert is not stale.
+  const reply = structuredClone(chat);
+  Object.assign(reply.conversations[0].messages[0], {
+    id: crypto.randomUUID(),
+    runId: crypto.randomUUID(),
+    createdAt: new Date(f.advance(60_000)).toISOString(),
+  });
+  f.service.changed(chat, reply);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+  const second = JSON.parse(f.send.mock.calls[1][1]);
+  expect(second.close).toEqual([[id, readAt]]);
+  expect(second.sentAt).toBeGreaterThan(readAt);
+  expect(f.service.stale('session')).toEqual([[id, readAt]]);
+  // Reading it once more covers the newer alert; reading again with nothing new adds nothing.
+  const again = f.advance(1_000);
+  f.service.view('tab', 3, id, 'session');
+  f.advance(1_000);
+  f.service.view('tab', 4, id, 'session');
+  expect(f.service.stale('session')).toEqual([[id, again]]);
+  // A deleted chat's alert leads nowhere.
+  const other = workspace('complete');
+  f.service.changed(emptyShared(), other);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+  const deletedAt = f.advance(1_000);
+  f.service.changed(other, emptyShared());
+  expect(f.service.stale('session')).toEqual([[other.conversations[0].id, deletedAt]]);
+});
+it('forgets alerts after a week, past 64 chats a device, and with a rotated key', async () => {
+  const f = fixture();
+  const chats = Array.from({ length: 65 }, () => workspace('complete'));
+  for (const chat of chats) f.service.changed(emptyShared(), chat);
+  await f.settle();
+  // Each pass sends at most 20.
+  await vi.waitFor(async () => {
+    await f.service.drain();
+    expect(f.send).toHaveBeenCalledTimes(65);
+  });
+  const readAt = f.advance(1_000);
+  for (const [index, chat] of chats.entries())
+    f.service.view('desktop', index + 1, chat.conversations[0].id);
+  // The chat alerted longest ago gave its place to the newest.
+  const stale = f.service.stale('session');
+  expect(stale).toHaveLength(64);
+  expect(stale.map(([id]) => id)).not.toContain(chats[0].conversations[0].id);
+  expect(stale.every(([, at]) => at === readAt)).toBe(true);
+  // A reply the relay sees as it ends, rather than history it receives.
+  const fresh = () => {
+    const chat = workspace('complete');
+    chat.conversations[0].messages[0].createdAt = new Date(f.advance(0)).toISOString();
+    return chat;
+  };
+  const old = fresh();
+  f.service.changed(emptyShared(), old);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(66));
+  f.advance(7 * 24 * 60 * 60 * 1000);
+  f.service.view('desktop', 100, old.conversations[0].id);
+  expect(f.service.stale('session')).toEqual([]);
+  const kept = fresh();
+  f.service.changed(emptyShared(), kept);
+  await f.settle();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(67));
+  f.service.view('desktop', 101, kept.conversations[0].id);
+  f.restart('another-notification-pairing-key');
+  expect(readFileSync(join(f.directory, 'web-push.json'), 'utf8')).not.toContain(
+    kept.conversations[0].id,
+  );
+});
 it('drops a saved alert it cannot read instead of refusing the whole file', async () => {
   const f = fixture();
   f.service.changed(emptyShared(), workspace('complete'));
@@ -634,4 +751,69 @@ it('authenticates real HTTP subscription management per browser session and disc
   });
   expect(result.status).toBe(200);
   expect(send).toHaveBeenCalledTimes(1);
+});
+it('hands a paired browser its alerts for chats read since with its notification view, once', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'studio-push-stale-'));
+  const token = 'synthetic-notification-pairing-key';
+  const send = vi.fn(async () => {});
+  let time = Date.now();
+  const server = createRelay({ directory, token, pushSender: send, now: () => time });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  cleanup.push(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const actor = crypto.randomUUID();
+  const pair = await fetch(url + '/v1/browser-session', {
+    method: 'POST',
+    headers: { origin: url },
+    body: JSON.stringify({ token, environmentId: actor }),
+  });
+  const phone = {
+    cookie: pair.headers.get('set-cookie')!.split(';')[0],
+    origin: url,
+    'x-environment-id': actor,
+  };
+  const computer = { authorization: `Bearer ${token}`, 'x-environment-id': crypto.randomUUID() };
+  expect(
+    (
+      await fetch(url + '/v1/push', {
+        method: 'PUT',
+        headers: phone,
+        body: JSON.stringify(subscription()),
+      })
+    ).status,
+  ).toBe(200);
+  const write = async (change: (value: ReturnType<typeof workspace>) => void) => {
+    const state = await (await fetch(url + '/v1/state', { headers: computer })).json();
+    change(state.workspace);
+    const body = JSON.stringify({ revision: state.revision, workspace: state.workspace });
+    expect(
+      (await fetch(url + '/v1/state', { method: 'PUT', headers: computer, body })).status,
+    ).toBe(200);
+  };
+  const chat = workspace('complete');
+  const id = chat.conversations[0].id;
+  await write((value) => (value.conversations = chat.conversations));
+  time += 20_001;
+  await write(() => {});
+  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  let revision = 0;
+  const viewId = crypto.randomUUID();
+  const view = async (headers: Record<string, string>, conversationId: string | null) =>
+    (
+      await fetch(url + '/v1/notification-view', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ viewId, revision: ++revision, conversationId }),
+      })
+    ).json();
+  // The computer opens the chat after the phone was alerted; computers have no alerts to take.
+  time += 1_000;
+  expect(await view(computer, id)).toEqual({ ok: true, close: [] });
+  expect(await view(computer, null)).toEqual({ ok: true, close: [] });
+  expect((await view(phone, null)).close).toEqual([[id, time]]);
+  expect((await view(phone, null)).close).toEqual([]);
 });
