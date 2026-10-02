@@ -139,6 +139,15 @@ pub async fn resolve(
             } else {
                 "existing"
             };
+            // Boxed: renewing a lent login resolves the Windows CLI, which comes back here.
+            if provider == "claude" && login != "existing" {
+                Box::pin(crate::lending::sync(
+                    &profile,
+                    &launch.distribution,
+                    &launch.namespace,
+                ))
+                .await;
+            }
             return Ok(crate::providers::Executable {
                 provider: provider.into(),
                 program: "wsl.exe".into(),
@@ -361,6 +370,7 @@ mod tests {
             "wsl-inventory.sh",
             "wsl-launch.sh",
             "wsl-cancel.sh",
+            "wsl-lend.sh",
             "folders-wsl.sh",
             "folders-windows-path.sh",
         ];
@@ -369,6 +379,7 @@ mod tests {
             include_str!("wsl-inventory.sh"),
             include_str!("wsl-launch.sh"),
             include_str!("wsl-cancel.sh"),
+            include_str!("wsl-lend.sh"),
             include_str!("folders-wsl.sh"),
             include_str!("folders-windows-path.sh"),
         ]) {

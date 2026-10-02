@@ -250,39 +250,66 @@ export async function mockDesktop(page: Page, mode = 'success') {
             // One account's check can fail outright, as a native error, or find no CLI.
             const failure = localStorage.getItem(`test-check-error-${args.connectionId}`);
             if (failure) throw failure;
-            const missing = !!localStorage.getItem(`test-cli-missing-${args.connectionId}`);
             const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
+            const check = (connectionId: string) => {
+              const missing = !!localStorage.getItem(`test-cli-missing-${connectionId}`);
+              const connection = fleet.connections.find((c: any) => c.id === connectionId);
+              const wsl = connection?.environmentId === '33333333-3333-4333-8333-333333333333';
+              const account =
+                connection?.profile === 'isolated'
+                  ? localStorage.getItem(`test-account-isolated-${args.provider}`)
+                  : localStorage.getItem(`test-account-${wsl ? 'wsl-' : ''}${args.provider}`);
+              return {
+                account: account ?? undefined,
+                id: args.provider,
+                installed:
+                  !missing &&
+                  (!wsl ||
+                    !!localStorage.getItem('test-wsl-installed-' + args.provider) ||
+                    (args.provider === 'codex' &&
+                      mode !== 'wsl-empty' &&
+                      !localStorage.getItem('test-wsl-missing'))),
+                location: wsl ? 'WSL · Ubuntu' : 'Windows',
+                auth: missing
+                  ? 'unknown'
+                  : (localStorage.getItem(`test-auth-connection-${connectionId}`) ??
+                    (wsl ? localStorage.getItem(`test-auth-wsl-${args.provider}`) : null) ??
+                    localStorage.getItem(`test-auth-${args.provider}`) ??
+                    (mode === 'login-flow' &&
+                    args.provider === 'gemini' &&
+                    localStorage.getItem('test-google-login') !== 'ready'
+                      ? 'login'
+                      : 'ready')),
+                version: missing ? null : 'Test fixture',
+                detail: missing
+                  ? `${args.provider} CLI was not found. Install it, then refresh Connections.`
+                  : 'Fixture connection',
+              };
+            };
+            const status = check(args.connectionId);
+            // A separate Claude profile in WSL borrows its account's Windows login, as the
+            // native host reports it (`lending.rs`).
             const connection = fleet.connections.find((c: any) => c.id === args.connectionId);
-            const wsl = connection?.environmentId === '33333333-3333-4333-8333-333333333333';
-            const account =
-              connection?.profile === 'isolated'
-                ? localStorage.getItem(`test-account-isolated-${args.provider}`)
-                : localStorage.getItem(`test-account-${wsl ? 'wsl-' : ''}${args.provider}`);
+            const lender =
+              args.provider === 'claude' &&
+              connection?.profile === 'isolated' &&
+              connection.environmentId === '33333333-3333-4333-8333-333333333333'
+                ? fleet.connections.find(
+                    (c: any) =>
+                      c.accountId === connection.accountId &&
+                      c.environmentId === '11111111-1111-4111-8111-111111111111',
+                  )
+                : undefined;
+            if (!lender || !status.installed) return status;
+            const source = check(lender.id);
             return {
-              account: account ?? undefined,
-              id: args.provider,
-              installed:
-                !missing &&
-                (!wsl ||
-                  !!localStorage.getItem('test-wsl-installed-' + args.provider) ||
-                  (args.provider === 'codex' &&
-                    mode !== 'wsl-empty' &&
-                    !localStorage.getItem('test-wsl-missing'))),
-              location: wsl ? 'WSL · Ubuntu' : 'Windows',
-              auth: missing
-                ? 'unknown'
-                : (localStorage.getItem(`test-auth-connection-${args.connectionId}`) ??
-                  (wsl ? localStorage.getItem(`test-auth-wsl-${args.provider}`) : null) ??
-                  localStorage.getItem(`test-auth-${args.provider}`) ??
-                  (mode === 'login-flow' &&
-                  args.provider === 'gemini' &&
-                  localStorage.getItem('test-google-login') !== 'ready'
-                    ? 'login'
-                    : 'ready')),
-              version: missing ? null : 'Test fixture',
-              detail: missing
-                ? `${args.provider} CLI was not found. Install it, then refresh Connections.`
-                : 'Fixture connection',
+              ...status,
+              auth: source.auth,
+              account: source.account,
+              detail:
+                source.auth === 'ready'
+                  ? "Uses this account's Windows login."
+                  : "Uses this account's Windows login, which needs signing in. Open sign-in signs in on Windows.",
             };
           }
           if (command === 'store_chat_image') {

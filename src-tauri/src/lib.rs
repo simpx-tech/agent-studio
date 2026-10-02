@@ -8,6 +8,7 @@ mod context;
 mod drafts;
 mod folders;
 mod imports;
+mod lending;
 mod live_usage;
 mod mcp;
 mod mentions;
@@ -432,7 +433,21 @@ async fn detect_connection(
     connection_id: String,
 ) -> Result<providers::ProviderStatus, String> {
     let profile = profiles::resolve(&app, &provider, Some(&connection_id))?;
-    Ok(profiles::scope(profile, providers::detect_one(&provider)).await)
+    let lender = profile.lender.clone();
+    let mut status = profiles::scope(profile, providers::detect_one(&provider)).await;
+    // A borrowed login is the Windows login: its state and identity are that login's, while
+    // the installation stays this distribution's own.
+    if let Some(lender) = lender.filter(|_| status.installed) {
+        let source = profiles::scope(*lender, providers::detect_one(&provider)).await;
+        status.account = source.account;
+        status.detail = if source.auth == "ready" {
+            "Uses this account's Windows login.".into()
+        } else {
+            "Uses this account's Windows login, which needs signing in. Open sign-in signs in on Windows.".into()
+        };
+        status.auth = source.auth;
+    }
+    Ok(status)
 }
 // Read-only check of one environment's existing CLI login, used before a connection exists so
 // the app can tell whether that login is already connected through another profile.
@@ -1077,6 +1092,11 @@ async fn sign_in(
     connection_id: Option<String>,
 ) -> Result<(), String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    // A WSL profile that borrows a Windows login signs in on Windows, where the login lives.
+    let profile = match profile.lender {
+        Some(lender) => *lender,
+        None => profile,
+    };
     let directory = app
         .path()
         .app_local_data_dir()
@@ -1244,6 +1264,7 @@ pub fn run() {
         .manage(imports::Catalog::default())
         .setup(|app| {
             tray::setup(app.handle());
+            lending::init(app.handle());
             // Remove kept tool results of deleted chats and old runs once startup settles.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

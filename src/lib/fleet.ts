@@ -166,6 +166,18 @@ export function registerWslEnvironments(
   }
   reconcileDiscoveredWsl(fleet);
 }
+// The connection on its Windows computer whose login a separate profile in a WSL distribution
+// borrows instead of signing in there, as the Claude app lends its login to the CLI it runs in
+// WSL (`lending.rs`). Its status and sign-in are that login's.
+export function lendingConnection(fleet: Fleet, connection: Connection): Connection | undefined {
+  const environment = fleet.environments.find((e) => e.id === connection.environmentId);
+  const provider = fleet.accounts.find((a) => a.id === connection.accountId)?.provider;
+  if (!environment?.discoveredOn || connection.profile !== 'isolated' || provider !== 'claude')
+    return undefined;
+  return fleet.connections.find(
+    (c) => c.accountId === connection.accountId && c.environmentId === environment.discoveredOn,
+  );
+}
 // Effective shared-context choice: an account connection id, 'computer', or '' for none.
 // A terminal login is this computer's context by itself, so it reads as 'computer'.
 export function sharedContextChoice(connection: Connection): string {

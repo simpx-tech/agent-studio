@@ -1,4 +1,5 @@
-//! Local installation identity and per-connection CLI configuration. Never read credentials.
+//! Local installation identity and per-connection CLI configuration. Credentials are read only
+//! to lend a Windows login to the same account's profiles in its WSL distributions (`lending`).
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -88,6 +89,9 @@ pub struct Profile {
     pub isolated: bool,
     pub shared_source: Option<Box<Profile>>,
     pub shared_error: Option<String>,
+    /// The same account's connection on the Windows computer that manages this separate
+    /// profile's WSL distribution, whose login the profile borrows instead of signing in itself.
+    pub lender: Option<Box<Profile>>,
 }
 tokio::task_local! { static CURRENT: Profile; }
 pub fn current() -> Profile {
@@ -182,6 +186,10 @@ fn resolve_in(
         Ok(source) => (source, None),
         Err(error) => (None, Some(error)),
     };
+    // A lender that no longer resolves leaves the profile to its own login, as before.
+    let lender = lender_id(fleet, local, connection, distribution.is_some(), provider)
+        .and_then(|lender| resolve_in(namespace, local, data, fleet, provider, &lender).ok())
+        .map(Box::new);
     Ok(Profile {
         id: id.into(),
         provider: provider.into(),
@@ -192,7 +200,29 @@ fn resolve_in(
         isolated: connection["profile"] == "isolated",
         shared_source,
         shared_error,
+        lender,
     })
+}
+// A separate Claude profile in a distribution this computer manages borrows the login of the
+// same account's connection on this computer, as the Claude app lends its own login to the CLI
+// it runs in WSL. The distribution's terminal login and accounts Windows lacks sign in there.
+fn lender_id(
+    fleet: &Value,
+    local: &Installation,
+    connection: &Value,
+    wsl: bool,
+    provider: &str,
+) -> Option<String> {
+    if !wsl || provider != "claude" || connection["profile"] != "isolated" {
+        return None;
+    }
+    fleet["connections"]
+        .as_array()?
+        .iter()
+        .find(|c| c["accountId"] == connection["accountId"] && c["environmentId"] == local.id)
+        .and_then(|c| c["id"].as_str())
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(String::from)
 }
 // The existing CLI login of one locally managed environment, before any connection is saved
 // for it. Used to recognise a terminal login that is already connected through another profile.
@@ -422,6 +452,49 @@ mod tests {
             Some("Invalid connection id")
         );
         assert!(!data.path().join("profiles").join("escape").exists());
+    }
+    #[test]
+    fn separate_wsl_claude_profiles_borrow_the_windows_login_of_their_account() {
+        let local = Installation {
+            id: "desktop".into(),
+            computer_id: "host".into(),
+            name: "Host".into(),
+            platform: "windows".into(),
+            distribution: None,
+        };
+        let windows = uuid::Uuid::new_v4().to_string();
+        let fleet = serde_json::json!({"connections": [
+            {"id": windows, "accountId": "a", "environmentId": "desktop", "profile": "isolated"},
+            {"id": "w1", "accountId": "a", "environmentId": "ubuntu", "profile": "isolated"},
+            {"id": "w2", "accountId": "b", "environmentId": "ubuntu", "profile": "isolated"},
+            {"id": "w3", "accountId": "a", "environmentId": "ubuntu", "profile": "existing"}
+        ]});
+        let connection = |i: usize| &fleet["connections"][i];
+        assert_eq!(
+            lender_id(&fleet, &local, connection(1), true, "claude"),
+            Some(windows.clone())
+        );
+        // An account Windows lacks, the distribution's terminal login and Windows itself keep
+        // their own logins.
+        assert_eq!(
+            lender_id(&fleet, &local, connection(2), true, "claude"),
+            None
+        );
+        assert_eq!(
+            lender_id(&fleet, &local, connection(3), true, "claude"),
+            None
+        );
+        assert_eq!(
+            lender_id(&fleet, &local, connection(0), false, "claude"),
+            None
+        );
+        // A lender is named by a connection id only, never by a path.
+        let mut fleet = fleet.clone();
+        fleet["connections"][0]["id"] = "../escape".into();
+        assert_eq!(
+            lender_id(&fleet, &local, connection(1), true, "claude"),
+            None
+        );
     }
     #[tokio::test]
     async fn concurrent_profile_scopes_do_not_cross_accounts_or_providers() {

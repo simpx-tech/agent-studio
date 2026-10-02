@@ -10,6 +10,7 @@ import {
   executionHost,
   sharedContextChoice,
   applySharedContextChoice,
+  lendingConnection,
   type Installation,
 } from './fleet';
 const windows = (): Installation => ({
@@ -158,5 +159,51 @@ describe('shared context choice', () => {
     });
     expect(parsed.connections[0].sharedContext).toBe('none');
     expect(parsed.connections[1].fromTerminalLogin).toBe(true);
+  });
+});
+describe('lent logins', () => {
+  it('names the Windows connection whose Claude login a separate WSL profile borrows', () => {
+    const fleet = emptyFleet();
+    const windows = crypto.randomUUID();
+    const ubuntu = crypto.randomUUID();
+    const computerId = crypto.randomUUID();
+    fleet.computers.push({ id: computerId, name: 'Desktop' });
+    fleet.environments.push(
+      { id: windows, computerId, name: 'Windows', platform: 'windows' },
+      { id: ubuntu, computerId, name: 'WSL · Ubuntu', platform: 'wsl', discoveredOn: windows },
+    );
+    const account = (provider: 'claude' | 'codex') => {
+      const value = {
+        id: crypto.randomUUID(),
+        name: provider,
+        provider,
+        purpose: 'personal' as const,
+      };
+      fleet.accounts.push(value);
+      return value.id;
+    };
+    const connect = (
+      accountId: string,
+      environmentId: string,
+      profile: 'isolated' | 'existing',
+    ) => {
+      const value = { id: crypto.randomUUID(), accountId, environmentId, profile };
+      fleet.connections.push(value);
+      return value;
+    };
+    const claude = account('claude');
+    const desktop = connect(claude, windows, 'existing');
+    const borrowing = connect(claude, ubuntu, 'isolated');
+    expect(lendingConnection(fleet, borrowing)).toBe(desktop);
+    // Windows itself, Ubuntu's own terminal login, an account Windows lacks and Codex sign in
+    // where they are.
+    expect(lendingConnection(fleet, desktop)).toBeUndefined();
+    expect(lendingConnection(fleet, connect(claude, ubuntu, 'existing'))).toBeUndefined();
+    expect(
+      lendingConnection(fleet, connect(account('claude'), ubuntu, 'isolated')),
+    ).toBeUndefined();
+    const codex = account('codex');
+    connect(codex, windows, 'isolated');
+    expect(lendingConnection(fleet, connect(codex, ubuntu, 'isolated'))).toBeUndefined();
   });
 });

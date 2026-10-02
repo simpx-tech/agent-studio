@@ -32,6 +32,7 @@
     type Connection,
     sharedContextChoice,
     applySharedContextChoice,
+    lendingConnection,
   } from '$lib/fleet';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
@@ -322,6 +323,12 @@
       throw e;
     }
     createdConnectionId = connection.id;
+    // A separate WSL profile that borrows its account's Windows login has nothing to sign in to.
+    if (lendingConnection(workspace.fleet, connection)) {
+      closeDialog();
+      void refresh();
+      return;
+    }
     statuses[connection.id] = {
       id: account.provider,
       installed: true,
@@ -509,10 +516,11 @@
     }
   }
   // The login an account's connection on the Windows computer reports, to sign the same account
-  // in inside one of its distributions.
+  // in inside one of its distributions. A borrowed login signs in on Windows instead.
   function hostIdentity(connection: Connection) {
     const environment = workspace.fleet.environments.find((e) => e.id === connection.environmentId);
-    if (!environment?.discoveredOn) return undefined;
+    if (!environment?.discoveredOn || lendingConnection(workspace.fleet, connection))
+      return undefined;
     const host = workspace.fleet.connections.find(
       (c) => c.accountId === connection.accountId && c.environmentId === environment.discoveredOn,
     );

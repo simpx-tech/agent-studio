@@ -13,7 +13,7 @@ async function claudeOnUbuntu(page: Page) {
     .getByRole('article', { name: 'Claude connections' });
 }
 
-test('installs a CLI missing in WSL, where the Desktop accounts then join to sign in once', async ({
+test('installs a CLI missing in WSL, where the Desktop accounts join on their Windows logins', async ({
   page,
 }) => {
   await mockDesktop(page, 'computer-routing');
@@ -37,10 +37,8 @@ test('installs a CLI missing in WSL, where the Desktop accounts then join to sig
     { provider: 'claude', environmentId: ubuntu },
   ]);
 
-  // The Desktop's Claude login joins Ubuntu by itself, under the same name, with no step to add it.
-  await expect(claude.getByText('Sign in as me@example.com', { exact: false })).toBeVisible();
-  await expect(claude.getByRole('button', { name: /^Add .+ here$/ })).toHaveCount(0);
-  await page.screenshot({ path: 'artifacts/wsl-setup-connections.png', animations: 'disabled' });
+  // The Desktop's Claude login joins Ubuntu by itself, under the same name, and Ubuntu borrows
+  // that login: although Ubuntu's own login is signed out, nothing asks to sign in there.
   const workspace = await saved(page);
   const provider = (accountId: string) =>
     workspace.fleet.accounts.find((a: any) => a.id === accountId)?.provider;
@@ -53,11 +51,12 @@ test('installs a CLI missing in WSL, where the Desktop accounts then join to sig
   // It is the only Claude account there: Ubuntu's own signed-out login does not join beside it.
   expect(added).toEqual([expect.objectContaining({ accountId: desktopClaude.accountId })]);
   expect(added[0]).toMatchObject({ profile: 'isolated' });
-  // Sign-in opens for that profile in Ubuntu, never by copying the Desktop's login.
   const row = claude.locator(`[data-connection="${added[0].id}"]`);
-  await expect(row).toContainText('Sign-in needed');
-  await row.getByRole('button', { name: 'Open sign-in' }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).signInCalls)).toEqual([added[0].id]);
+  // Connected: no status or sign-in line under the account.
+  await expect(row.locator('.connection-hint')).toHaveCount(0);
+  await expect(claude.getByText('Sign in as', { exact: false })).toHaveCount(0);
+  await expect(claude.getByRole('button', { name: /^Add .+ here$/ })).toHaveCount(0);
+  await page.screenshot({ path: 'artifacts/wsl-setup-connections.png', animations: 'disabled' });
 
   // Removed there, it stays removed through later refreshes.
   await claude.getByRole('button', { name: 'Manage account' }).click();
@@ -67,21 +66,24 @@ test('installs a CLI missing in WSL, where the Desktop accounts then join to sig
   await expect(management).toHaveCount(0);
   await expect(claude.locator('.fleet-account')).toHaveCount(0);
   const refresh = page.getByRole('button', { name: 'Refresh connections', exact: true });
-  await page.evaluate(() => ((window as any).holdCli = ['detect_connection']));
-  await refresh.click();
-  await expect(refresh).toHaveAttribute('aria-busy', 'true');
-  await page.evaluate(() => {
-    const state = window as any;
-    state.holdCli = [];
-    for (const request of (state.pendingCli ?? []).splice(0)) request.resolve();
-  });
-  await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+  const refreshed = async () => {
+    await page.evaluate(() => ((window as any).holdCli = ['detect_connection']));
+    await refresh.click();
+    await expect(refresh).toHaveAttribute('aria-busy', 'true');
+    await page.evaluate(() => {
+      const state = window as any;
+      state.holdCli = [];
+      for (const request of (state.pendingCli ?? []).splice(0)) request.resolve();
+    });
+    await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+  };
+  await refreshed();
   await expect(claude.locator('.fleet-account')).toHaveCount(0);
   await expect(claude).toContainText(
     'Connect an account using the Linux CLI in this distribution.',
   );
 
-  // Manage account on Desktop brings it back on request, opening its sign-in there again.
+  // Manage account on Desktop brings it back on request, again with nothing to sign in to.
   await page
     .getByRole('article', { name: 'Desktop computer' })
     .getByRole('article', { name: 'Claude connections' })
@@ -95,8 +97,20 @@ test('installs a CLI missing in WSL, where the Desktop accounts then join to sig
     (c: any) => c.environmentId === ubuntu && c.accountId === desktopClaude.accountId,
   );
   expect(again).toMatchObject({ profile: 'isolated' });
-  await expect(claude.locator(`[data-connection="${again.id}"]`)).toContainText('Sign-in needed');
-  expect(await page.evaluate(() => (window as any).signInCalls)).toEqual([added[0].id, again.id]);
+  const back = claude.locator(`[data-connection="${again.id}"]`);
+  await expect(back.locator('.connection-hint')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).signInCalls ?? [])).toEqual([]);
+
+  // When the Windows login signs out, Ubuntu says so, and its sign-in is the Windows one.
+  await page.evaluate(
+    (id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'),
+    desktopClaude.id,
+  );
+  await refreshed();
+  await expect(back).toContainText('Sign-in needed');
+  await expect(back).toContainText('Open sign-in signs in on Windows');
+  await back.getByRole('button', { name: 'Open sign-in' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).signInCalls)).toEqual([again.id]);
 });
 
 test('an installer failure says why and can be tried again', async ({ page }) => {
