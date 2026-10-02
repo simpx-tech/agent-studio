@@ -137,6 +137,9 @@ pub struct Decoder {
     pub completed: bool,
     items: Vec<(String, String)>,
     context_input: Option<u64>,
+    /// The Claude usage this reply last reported. A result sets every count; each request in
+    /// between changes only its context and model.
+    reading: Option<TokenUsage>,
     /// Claude input, output, cached input and reasoning summed over this reply's results.
     turn_usage: [Option<u64>; 4],
     /// Claude's running cost total in this process before the reply; the reply pays the change.
@@ -208,6 +211,33 @@ impl Decoder {
     }
     pub fn reported_model(&mut self, model: Option<&str>) {
         self.model = model.map(|value| value.chars().take(200).collect());
+    }
+    /// The reply's usage with the context of its latest Claude request, as soon as that request
+    /// reports it. A turn reports its result only when it ends, which can be hundreds of calls
+    /// later, and a reply stopped or cut off before then keeps this reading.
+    fn context_reading(&mut self) -> Option<RunEvent> {
+        let unchanged = match &self.reading {
+            Some(reading) => {
+                reading.context_input == self.context_input && reading.model == self.model
+            }
+            None => self.context_input.is_none(),
+        };
+        if unchanged {
+            return None;
+        }
+        let reading = self.reading.get_or_insert_with(|| TokenUsage {
+            scope: Some("reply".into()),
+            ..Default::default()
+        });
+        if reading.model != self.model {
+            // A window reported for another model does not measure this one.
+            reading.context_window = None;
+        }
+        reading.context_input = self.context_input;
+        reading.model.clone_from(&self.model);
+        Some(RunEvent::Usage {
+            usage: reading.clone(),
+        })
     }
     pub fn decode_codex_server(&mut self, value: &Value, root: &str) -> Vec<RunEvent> {
         let mut events: Vec<_> = self
@@ -377,6 +407,10 @@ impl Decoder {
             if let Some(compaction) = self.compactions.claude(v) {
                 if compaction.status == "complete" {
                     self.context_input = None;
+                    // The page drops the reading it had, so the next request reports its own.
+                    if let Some(reading) = &mut self.reading {
+                        reading.context_input = None;
+                    }
                 }
                 events.push(RunEvent::Compaction { compaction });
             }
@@ -396,6 +430,24 @@ impl Decoder {
         {
             self.context_input = input_with_cache(&v["message"]["usage"]);
             self.model = v["message"]["model"].as_str().map(String::from);
+            events.extend(self.context_reading());
+        }
+        // A request's response starts with its input, before its first block, which a long
+        // thinking block can hold back for minutes. One that reports none waits for its blocks.
+        if provider == "claude"
+            && kind == "stream_event"
+            && string(v, "/event/type") == "message_start"
+        {
+            let message = &v["event"]["message"];
+            if let Some(context) = input_with_cache(&message["usage"])
+                .filter(|_| message["model"] != usage_limit::SYNTHETIC_MODEL)
+            {
+                self.context_input = Some(context);
+                if let Some(model) = message["model"].as_str() {
+                    self.model = Some(model.into());
+                }
+                events.extend(self.context_reading());
+            }
         }
         if provider == "claude" && string(v, "/event/content_block/type") == "tool_use" {
             let name: String = string(v, "/event/content_block/name")
@@ -574,23 +626,24 @@ impl Decoder {
                     let total = v["total_cost_usd"]
                         .as_f64()
                         .filter(|cost| cost.is_finite() && *cost >= 0.0);
-                    events.push(RunEvent::Usage {
-                        usage: TokenUsage {
-                            input,
-                            output,
-                            cached_input,
-                            reasoning_output,
-                            context_input: self.context_input,
-                            context_window: model_usage.and_then(|m| m["contextWindow"].as_u64()),
-                            // A lower total (a zeroed failure or a reset) leaves the cost unknown.
-                            cost_usd: total
-                                .filter(|total| *total >= self.cost_baseline)
-                                .map(|total| total - self.cost_baseline),
-                            model: self.model.clone(),
-                            scope: Some("reply".into()),
-                            ..Default::default()
-                        },
-                    });
+                    let usage = TokenUsage {
+                        input,
+                        output,
+                        cached_input,
+                        reasoning_output,
+                        context_input: self.context_input,
+                        context_window: model_usage.and_then(|m| m["contextWindow"].as_u64()),
+                        // A lower total (a zeroed failure or a reset) leaves the cost unknown.
+                        cost_usd: total
+                            .filter(|total| *total >= self.cost_baseline)
+                            .map(|total| total - self.cost_baseline),
+                        model: self.model.clone(),
+                        scope: Some("reply".into()),
+                        ..Default::default()
+                    };
+                    // A later turn's requests, after background work reports, keep these counts.
+                    self.reading = Some(usage.clone());
+                    events.push(RunEvent::Usage { usage });
                 }
                 "system" if string(v, "/subtype") == "init" => events.push(RunEvent::Activity {
                     text: "Connected to Claude".into(),
@@ -891,6 +944,112 @@ mod tests {
         };
         assert_eq!(usage.input, Some(5000));
         assert_eq!(usage.context_input, None);
+    }
+    #[test]
+    fn claude_reports_each_requests_context_while_its_turn_runs() {
+        let readings = |events: Vec<RunEvent>| -> Vec<TokenUsage> {
+            events
+                .into_iter()
+                .filter_map(|e| match e {
+                    RunEvent::Usage { usage } => Some(usage),
+                    _ => None,
+                })
+                .collect()
+        };
+        let start = |id: &str, usage: Value| {
+            serde_json::json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":id,"model":"claude-opus-5-5","usage":usage}}}).to_string()
+        };
+        let mut d = Decoder::default();
+        // The first request's input is known as its response starts, long before the result.
+        let first = readings(d.decode("claude", &start("m1", serde_json::json!({"input_tokens":10,"cache_creation_input_tokens":5260,"cache_read_input_tokens":4286,"output_tokens":3}))));
+        let [reading] = first.as_slice() else {
+            panic!("Expected one reading: {first:?}")
+        };
+        assert_eq!(reading.context_input, Some(9556));
+        assert_eq!(reading.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(reading.scope.as_deref(), Some("reply"));
+        // Counts, cost and window come only with a result.
+        assert_eq!(
+            (
+                reading.input,
+                reading.output,
+                reading.cost_usd,
+                reading.context_window
+            ),
+            (None, None, None, None)
+        );
+        // Its blocks repeat the same input, and a sub-agent's requests are its own.
+        let block = r#"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"cache_creation_input_tokens":5260,"cache_read_input_tokens":4286},"content":[{"type":"thinking","thinking":""}]}}"#;
+        assert!(readings(d.decode("claude", block)).is_empty());
+        let mut child: Value =
+            serde_json::from_str(&start("c1", serde_json::json!({"input_tokens":90000}))).unwrap();
+        child["parent_tool_use_id"] = serde_json::json!("call");
+        assert!(readings(d.decode("claude", &child.to_string())).is_empty());
+        // A start without usage leaves the reading to its blocks.
+        assert!(readings(d.decode("claude", &start("m2", Value::Null))).is_empty());
+        let next = readings(d.decode("claude", r#"{"type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","usage":{"input_tokens":20,"cache_read_input_tokens":9600},"content":[]}}"#));
+        assert_eq!(
+            next.iter().map(|u| u.context_input).collect::<Vec<_>>(),
+            [Some(9620)]
+        );
+        // A turn after the result, once background work reports, keeps the reply's counts.
+        d.decode("claude", r#"{"type":"result","usage":{"input_tokens":30,"cache_read_input_tokens":13886,"cache_creation_input_tokens":5260,"output_tokens":40},"total_cost_usd":0.02,"modelUsage":{"claude-opus-5-5":{"contextWindow":1000000}}}"#);
+        let later = readings(d.decode(
+            "claude",
+            &start(
+                "m3",
+                serde_json::json!({"input_tokens":5,"cache_read_input_tokens":9700}),
+            ),
+        ));
+        let [reading] = later.as_slice() else {
+            panic!("Expected one reading: {later:?}")
+        };
+        assert_eq!(reading.context_input, Some(9705));
+        assert_eq!(
+            (
+                reading.input,
+                reading.output,
+                reading.cost_usd,
+                reading.context_window
+            ),
+            (Some(19176), Some(40), Some(0.02), Some(1000000))
+        );
+        // Claude Code's own messages ran no request.
+        let own = r#"{"type":"assistant","message":{"id":"s","model":"<synthetic>","usage":{"input_tokens":0},"content":[{"type":"text","text":"No response requested."}]}}"#;
+        assert!(readings(d.decode("claude", own)).is_empty());
+        // A compaction drops the page's reading, so the next request reports one, however
+        // close to the last it reads.
+        d.decode(
+            "claude",
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"b","compact_metadata":{"trigger":"auto"}}"#,
+        );
+        let again = readings(d.decode(
+            "claude",
+            &start(
+                "m4",
+                serde_json::json!({"input_tokens":5,"cache_read_input_tokens":9700}),
+            ),
+        ));
+        assert_eq!(
+            again.iter().map(|u| u.context_input).collect::<Vec<_>>(),
+            [Some(9705)]
+        );
+        // A request another model answers, such as a fallback, is not measured by the first
+        // model's window.
+        let fallback = start(
+            "m5",
+            serde_json::json!({"input_tokens":5,"cache_read_input_tokens":9800}),
+        )
+        .replace("claude-opus-5-5", "claude-sonnet-5-5");
+        let fallback = readings(d.decode("claude", &fallback));
+        let [reading] = fallback.as_slice() else {
+            panic!("Expected one reading: {fallback:?}")
+        };
+        assert_eq!(reading.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(
+            (reading.context_input, reading.context_window),
+            (Some(9805), None)
+        );
     }
     #[test]
     fn missing_usage_is_unknown_and_cached_tokens_are_a_subset() {

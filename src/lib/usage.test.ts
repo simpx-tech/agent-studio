@@ -368,6 +368,35 @@ describe('usage and context semantics', () => {
     chat.messages.at(-1)!.usage = { input: 20000 };
     expect(contextFor(chat, settings, '', automaticModel).reported).toBeNull();
   });
+  it('measures a first reply while it runs and keeps the reading when it is cut off', () => {
+    const chat = measuredChat();
+    chat.messages[0] = { ...chat.messages[0], status: 'running', usage: undefined };
+    const window = { ...snapshot, context: { model: 'opus', tokens: 1e6, source: 'Fixture' } };
+    expect(contextFor(chat, settings, '', automaticModel, window)).toMatchObject({
+      reported: null,
+      streaming: true,
+    });
+    // A Claude request reports its input as its response starts; counts and window come with
+    // the turn's result.
+    chat.messages[0].usage = {
+      input: null,
+      output: null,
+      contextInput: 35200,
+      contextWindow: null,
+      scope: 'reply',
+      revision: 1,
+    };
+    expect(contextFor(chat, settings, '', automaticModel, window)).toMatchObject({
+      reported: 35200,
+      capacity: 1e6,
+      streaming: true,
+    });
+    chat.messages[0].status = 'cancelled';
+    expect(contextFor(chat, settings, '', automaticModel, window)).toMatchObject({
+      reported: 35200,
+      streaming: false,
+    });
+  });
 });
 
 function measuredChat(): Conversation {

@@ -128,6 +128,44 @@ async fn installed_claude_stop_ends_a_waiting_reply_and_keeps_the_process() {
 
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_reports_its_context_before_the_turn_ends() {
+    let (result, events, _) = run("This is an Agent Studio integration test in a disposable folder. Run the command echo CONTEXT_CHECK , then reply with its output.", false).await;
+    let (status, text) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    assert!(text.contains("CONTEXT_CHECK"), "{text}");
+    let readings: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            RunEvent::Usage { usage } => Some((i, usage)),
+            _ => None,
+        })
+        .collect();
+    let first_call = events
+        .iter()
+        .position(|e| matches!(e, RunEvent::Tool { .. }))
+        .expect("The model ran no command");
+    // The request that runs the command reports its context as its response starts, before
+    // the call, the command's result and the turn's own result.
+    let (at, first) = readings.first().expect("No usage reported");
+    assert!(*at < first_call, "{readings:?}");
+    assert!(first.context_input.is_some_and(|n| n > 0), "{first:?}");
+    assert_eq!((first.input, first.output), (None, None));
+    // The request that answers after the command reads the larger context.
+    let (_, last) = readings.last().unwrap();
+    assert!(last.input.is_some() && last.output.is_some(), "{last:?}");
+    assert!(last.context_input > first.context_input, "{readings:?}");
+    eprintln!(
+        "Context readings: {:?}",
+        readings
+            .iter()
+            .map(|(_, u)| (u.context_input, u.input))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
 async fn installed_claude_background_work_outlives_its_reply() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
