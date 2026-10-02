@@ -7,7 +7,7 @@ import {
 } from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
 import { applyRunEvent, retainRunEvent } from './activity';
-import { planProgress, planStepLabel } from './plans';
+import { planProgress, planStepLabel, runningPlanProgress } from './plans';
 import { nativeWorkflowStatus, workflowSchema } from './workflows';
 import { mergeShared, sharedWorkspace } from './sync';
 import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
@@ -126,6 +126,29 @@ describe('artifacts and portable progress', () => {
     expect(nativeWorkflowStatus('paused', 'complete')).toBe('Unconfirmed');
     expect(nativeWorkflowStatus('error', 'complete')).toBe('Failed');
     expect(nativeWorkflowStatus('arbitrary', 'running')).toBe('Unknown');
+  });
+  it('counts the plan of a running reply for its sidebar row, and none once replies end', () => {
+    const steps = [
+      { id: 'a', title: 'Inspect', status: 'complete' as const },
+      { id: 'b', title: 'Change', status: 'running' as const },
+      { id: 'c', title: 'Verify', status: 'pending' as const },
+    ];
+    const reply = (status: Message['status'], plan?: Message['plan']) =>
+      ({ role: 'assistant', status, plan }) as Message;
+    const ended = reply('complete', { revision: 1, steps });
+    expect(runningPlanProgress([ended])).toBeUndefined();
+    expect(runningPlanProgress([ended, reply('running')])).toBeUndefined();
+    expect(runningPlanProgress([reply('running', { revision: 1, steps: [] })])).toBeUndefined();
+    expect(runningPlanProgress([ended, reply('running', { revision: 1, steps })])).toMatchObject({
+      complete: 1,
+      total: 3,
+    });
+    // A reply taking over another runs beside it: the newest plan reported counts.
+    const earlier = reply('running', { revision: 2, steps: steps.slice(0, 2) });
+    expect(runningPlanProgress([earlier, reply('running')])).toMatchObject({ total: 2 });
+    expect(runningPlanProgress([earlier, reply('running', { revision: 1, steps })])).toMatchObject({
+      total: 3,
+    });
   });
   it('retains legacy definitions for export without converting them to native scripts', () => {
     const workflow = {

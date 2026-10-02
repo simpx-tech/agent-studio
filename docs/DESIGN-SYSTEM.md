@@ -99,13 +99,15 @@ mark in the script and `BrandMark.svelte` together.
   plan steps, beside Responding or Compacting context in its heading. Its sidebar row ends with
   its elapsed time instead, in `--accent-text` and the compact form running calls use (12s,
   1m 12s, 1h 7m), counted from the shared clock in `src/lib/clock.ts` that the reply footer's
-  elapsed time also reads; a reply whose start cannot be read keeps the spinner there. After the
-  reply ends, a chat whose Monitor watches still run ends its row with the accent `Activity`
-  pulse that Work history gives Monitor calls, beside any unread dot, until they report their
-  outcome. While a reply waits for your answer to a question or form, it asks for attention in
-  orange (`--warning`): its row and heading show `MessageCircleQuestionMark` instead, the heading
-  reads Waiting for you, and the waiting question, plan approval or MCP form card has an orange
-  border. Choices inside the card and its primary action keep the accent.
+  elapsed time also reads; a reply whose start cannot be read keeps the spinner there. A reply
+  working through a plan counts its completed steps just before that time (1/3) in `--text-muted`,
+  as the footer's Plan toggle counts them. After the reply ends, a chat whose Monitor watches
+  still run ends its row with the accent `Activity` pulse that Work history gives Monitor calls,
+  beside any unread dot, until they report their outcome. While a reply waits for your answer to a
+  question or form, it asks for attention in orange (`--warning`): its row and heading show
+  `MessageCircleQuestionMark` instead, the heading reads Waiting for you, and the waiting
+  question, plan approval or MCP form card has an orange border. Choices inside the card and its
+  primary action keep the accent.
 - **Overlays:** `.modal` and `ConnectionDialog` for dialogs, `--surface-overlay` with
   `--shadow-lg`/`--shadow-xl` for popovers and menus.
 - **Disclosures:** quiet rows with a leading icon, a rotating chevron and a hover layer; expanded

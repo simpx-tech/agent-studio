@@ -38,3 +38,13 @@ export function planProgress(message: Message) {
     current: step && (typeof active === 'string' && active ? active : step.title),
   };
 }
+
+/** The plan a chat's running reply works through, as its sidebar row counts it (1/3): the newest
+ * running reply that reports steps, since a reply taking over another runs beside it. */
+export function runningPlanProgress(messages: Message[]) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].status !== 'running') continue;
+    const progress = planProgress(messages[i]);
+    if (progress?.total) return progress;
+  }
+}

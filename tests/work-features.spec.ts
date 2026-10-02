@@ -356,10 +356,36 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
   const summary = page.locator('.reply-footer .progress-toggle', { hasText: /^\s*Plan/ });
   await expect(summary).toContainText('1/2');
   await expect(summary).toContainText('Run checks');
+  // The chat's sidebar row counts the plan before the reply's elapsed time, as it changes.
+  const row = page.locator('.conversation-item').first();
+  const count = row.locator('.conversation-plan');
+  await expect(count).toHaveText('1/2');
+  await expect(row.locator('.conversation-plan + .conversation-running')).toBeVisible();
+  await expect(row).toHaveAttribute('title', / · 1 of 2 plan steps complete$/);
+  await expect(row).toHaveAccessibleName(/, 1 of 2 plan steps complete$/);
+  await page.evaluate(() => {
+    (window as any).emitCapability({
+      kind: 'plan',
+      plan: {
+        revision: 3,
+        steps: [
+          { id: 'a', title: 'Inspect files', status: 'complete' },
+          { id: 'b', title: 'Run checks', status: 'running' },
+          { id: 'c', title: 'Summarize', status: 'pending' },
+        ],
+      },
+    });
+  });
+  await expect(count).toHaveText('1/3');
+  await expect(row).toHaveAccessibleName(/, 1 of 3 plan steps complete$/);
+  await page.locator('.sidebar').screenshot({ path: 'artifacts/sidebar-plan-count.png' });
   await page.evaluate(() => {
     (window as any).emitCapability({ kind: 'text', text: 'I could not run the checks.' });
     (window as any).finishCapabilities('complete');
   });
+  // Once the reply ends, its plan is no longer in progress.
+  await expect(count).toHaveCount(0);
+  await expect(row).not.toHaveAttribute('title', /plan steps/);
   const panel = page.locator('.plan-panel');
   // A finished reply no longer names a step in progress.
   await expect(summary).not.toContainText('Run checks');

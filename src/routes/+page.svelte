@@ -146,6 +146,7 @@
   import ModelContext from '$lib/components/ModelContext.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
   import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
+  import { runningPlanProgress } from '$lib/plans';
   import { clock } from '$lib/clock';
   import { awaitingAnswer } from '$lib/questions';
   import { applyQuestionDraft, type QuestionDraft } from '$lib/question-drafts';
@@ -1178,8 +1179,13 @@
   const runningMonitors = (conversationId: string) =>
     hostBackground[conversationId]?.runs.filter((run) => run.kind === 'monitor').length ?? 0;
   // What a sidebar row adds to its chat's title, on hover and for assistive technology.
-  function rowNotes(finished: boolean, monitors: number): string[] {
+  function rowNotes(
+    finished: boolean,
+    monitors: number,
+    plan?: { complete: number; total: number },
+  ): string[] {
     return [
+      ...(plan ? [`${plan.complete} of ${plan.total} plan steps complete`] : []),
       ...(finished ? ['New reply'] : []),
       ...(monitors === 1 ? ['Monitor still running'] : []),
       ...(monitors > 1 ? [`${monitors} monitors still running`] : []),
@@ -4798,9 +4804,11 @@
                         {#each folder.conversations as c}{@const runningReply = c.messages.find(
                             (m) => m.status === 'running',
                           )}{@const finished = !runningReply && !!finishedChats[c.id]}{@const monitors =
-                            runningReply ? 0 : runningMonitors(c.id)}{@const notes = rowNotes(
+                            runningReply ? 0 : runningMonitors(c.id)}{@const plan =
+                            runningReply && runningPlanProgress(c.messages)}{@const notes = rowNotes(
                             finished,
                             monitors,
+                            plan,
                           )}
                           <div class="conversation-row">
                             <button
@@ -4834,7 +4842,9 @@
                                 : undefined}
                               >{#if finished}<i class="conversation-finished" aria-hidden="true"
                                 ></i>{/if}<span>{c.title}</span
-                              >{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
+                              >{#if plan}<small class="conversation-plan" aria-hidden="true"
+                                  >{plan.complete}/{plan.total}</small
+                                >{/if}{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
                                   size={14}
                                   class="conversation-waiting"
                                   aria-hidden="true"
