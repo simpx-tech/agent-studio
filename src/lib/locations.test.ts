@@ -136,13 +136,24 @@ describe('computer and folder chat scope', () => {
       }),
     ).toThrow();
   });
-  it('keeps a terminal login out while another profile of the same account is connected there', () => {
+  it('keeps a removed terminal login out while another account of its agent is connected there', () => {
     const { workspace, installation } = fixture();
     const native = {
       computerId: installation.computerId,
       environmentId: installation.id,
       path: '',
     };
+    const identities = (login: LoginIdentity) => ({
+      login: (_environmentId: string, provider: string) => (provider === 'claude' ? login : null),
+      connection: (): LoginIdentity => 'vinporb@example.com',
+    });
+    const claude = () => locationConnections(workspace.fleet, native, 'claude');
+    const labels = () =>
+      workspace.fleet.accounts.filter((a) => a.provider === 'claude').map((a) => a.name);
+    // A computer's first account of an agent is its terminal login.
+    ensureLocationConnections(workspace.fleet, native, identities(undefined));
+    const [login] = claude();
+    expect(login).toMatchObject({ profile: 'existing' });
     const profile = {
       id: crypto.randomUUID(),
       name: 'vinporb',
@@ -157,54 +168,21 @@ describe('computer and folder chat scope', () => {
     };
     workspace.fleet.accounts.push(profile);
     workspace.fleet.connections.push(isolated);
-    const identities = (login: LoginIdentity, connections: Record<string, LoginIdentity>) => ({
-      login: (_environmentId: string, provider: string) => (provider === 'claude' ? login : null),
-      connection: (id: string) => connections[id],
-    });
-    const claude = () => locationConnections(workspace.fleet, native, 'claude');
-    const labels = () =>
-      workspace.fleet.accounts.filter((a) => a.provider === 'claude').map((a) => a.name);
-    // An unchecked login waits for the CLI's report while the agent is already offered here.
-    ensureLocationConnections(workspace.fleet, native, identities(undefined, {}));
-    expect(claude()).toEqual([isolated]);
+    workspace.fleet.connections = workspace.fleet.connections.filter((c) => c.id !== login.id);
+    // Whatever the terminal reports later, unchecked, the same account, signed out as an expired
+    // login is, or another account, its removed connection stays removed.
+    for (const reported of [undefined, 'vinporb@example.com', null, 'other@example.com']) {
+      ensureLocationConnections(workspace.fleet, native, identities(reported));
+      expect(claude()).toEqual([isolated]);
+    }
+    expect(labels()).toEqual(['Claude CLI login', 'vinporb']);
     expect(locationConnections(workspace.fleet, native, 'codex')).toHaveLength(1);
-    // The terminal login is the connected profile's own account: nothing to add.
-    ensureLocationConnections(
-      workspace.fleet,
-      native,
-      identities('vinporb@example.com', { [isolated.id]: 'vinporb@example.com' }),
-    );
-    expect(claude()).toEqual([isolated]);
-    // A sibling whose identity is still unresolved also defers the decision.
-    ensureLocationConnections(workspace.fleet, native, identities('other@example.com', {}));
-    expect(claude()).toEqual([isolated]);
-    expect(labels()).toEqual(['vinporb']);
-    // A different signed-in account becomes the CLI login connection.
-    ensureLocationConnections(
-      workspace.fleet,
-      native,
-      identities('other@example.com', { [isolated.id]: 'vinporb@example.com' }),
-    );
-    const login = claude().find((c) => c.profile === 'existing');
-    expect(login).toBeDefined();
-    expect(labels()).toEqual(['vinporb', 'Claude CLI login']);
-    // Removing that connection leaves its label; a signed-out terminal login reuses the label
-    // instead of creating another one.
-    workspace.fleet.connections = workspace.fleet.connections.filter((c) => c.id !== login!.id);
-    ensureLocationConnections(
-      workspace.fleet,
-      native,
-      identities(null, { [isolated.id]: 'vinporb@example.com' }),
-    );
-    expect(
-      claude()
-        .map((c) => c.profile)
-        .sort(),
-    ).toEqual(['existing', 'isolated']);
-    expect(labels()).toEqual(['vinporb', 'Claude CLI login']);
-    expect(claude().find((c) => c.profile === 'existing')?.accountId).toBe(
-      workspace.fleet.accounts.find((a) => a.name === 'Claude CLI login')?.id,
-    );
+    // With no account of the agent left there, the terminal login is the first one again, under
+    // the label its removed connection left behind rather than another one.
+    workspace.fleet.connections = workspace.fleet.connections.filter((c) => c.id !== isolated.id);
+    ensureLocationConnections(workspace.fleet, native, identities('other@example.com'));
+    expect(claude()).toMatchObject([{ accountId: login.accountId, profile: 'existing' }]);
+    expect(labels()).toEqual(['Claude CLI login', 'vinporb']);
   });
   it('does not register a terminal login again after it became a separate profile without an identity', () => {
     const { workspace, installation } = fixture();
@@ -225,13 +203,14 @@ describe('computer and folder chat scope', () => {
     };
     workspace.fleet.accounts.push(account);
     workspace.fleet.connections.push(separated);
-    // Codex reports no login identity: the marker stands in for the matching identity.
+    // Codex reports no login identity; the converted profile is an account of the agent there,
+    // which keeps the terminal login out like any other.
     const identities = { login: () => null, connection: () => null };
     ensureLocationConnections(workspace.fleet, native, identities);
     expect(locationConnections(workspace.fleet, native, 'codex')).toEqual([separated]);
     delete (separated as { fromTerminalLogin?: boolean }).fromTerminalLogin;
     ensureLocationConnections(workspace.fleet, native, identities);
-    expect(locationConnections(workspace.fleet, native, 'codex')).toHaveLength(2);
+    expect(locationConnections(workspace.fleet, native, 'codex')).toEqual([separated]);
   });
   it('connects another environment’s terminal login under the account that already reports it', () => {
     const { workspace, installation, location } = fixture();

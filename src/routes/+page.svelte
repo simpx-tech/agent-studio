@@ -170,6 +170,7 @@
     folderName,
     ensureLocationConnections,
     ensureEnvironmentConnections,
+    environmentOffers,
     loginIdentity,
     type LoginIdentities,
     locationConnections,
@@ -2180,8 +2181,8 @@
       statuses = await detectProviders();
       if (installation)
         environmentLogins[installation.id] = Object.fromEntries(statuses.map((s) => [s.id, s]));
-      // Connected accounts report their own login identities first, so a terminal login that
-      // is already connected through another profile is recognised instead of duplicated.
+      // Connected accounts report their own login identities first, so a terminal login of an
+      // account connected elsewhere on this computer joins that account's label, not a new one.
       await refreshConnections();
       const before = workspace.fleet.connections.length;
       for (const environment of workspace.fleet.environments) {
@@ -2327,16 +2328,10 @@
     );
   }
   // Managed WSL distributions have no provider-level status; check their existing logins only
-  // while no connection registers them yet.
+  // while no account of that agent is connected there, the only time detection adds one.
   async function probeEnvironmentLogins(environmentId: string, detected: ProviderId[]) {
     const missing = detected.filter(
-      (provider) =>
-        !workspace.fleet.connections.some(
-          (c) =>
-            c.environmentId === environmentId &&
-            c.profile === 'existing' &&
-            workspace.fleet.accounts.some((a) => a.id === c.accountId && a.provider === provider),
-        ),
+      (provider) => !environmentOffers(workspace.fleet, environmentId, provider),
     );
     await Promise.all(
       missing.map(async (provider) => {

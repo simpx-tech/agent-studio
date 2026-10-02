@@ -3294,7 +3294,7 @@ test('an existing chat can switch to another account of the same agent between r
   expect(saved.settings.connectionId).toBe(first.agent.connectionId);
 });
 
-test('a removed terminal login is not added again while its account stays connected through another profile', async ({
+test('a removed terminal login is not added again while another account of its agent stays connected', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -3349,18 +3349,34 @@ test('a removed terminal login is not added again while its account stays connec
         .map((a: any) => a.name),
     );
   expect(await claudeLabels()).toEqual(['Claude CLI login', 'vinporb']);
-  // Signing the terminal into a different account restores its own connection, reusing the
-  // label left behind instead of adding another one.
-  await page.evaluate(() => {
-    localStorage.setItem('test-account-claude', 'other@example.com');
-    window.dispatchEvent(new Event('focus'));
-  });
-  await agent.click();
-  await expect(page.getByRole('option', { name: /Claude · / })).toHaveText([
-    /Claude · vinporb/,
-    /Claude · Claude CLI login/,
-  ]);
-  await page.keyboard.press('Escape');
+  // Nor whatever the terminal reports later: signed out, as an expired login is, while vinporb
+  // stays signed in, or signed into another account.
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const refresh = page.getByRole('button', { name: 'Refresh connections', exact: true });
+  for (const terminal of [{ auth: 'login' }, { account: 'other@example.com' }]) {
+    await page.evaluate((terminal) => {
+      const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
+      const vinporb = fleet.accounts.find((a: any) => a.name === 'vinporb');
+      const profile = fleet.connections.find((c: any) => c.accountId === vinporb.id);
+      localStorage.setItem(`test-auth-connection-${profile.id}`, 'ready');
+      if (terminal.auth) localStorage.setItem('test-auth-claude', terminal.auth);
+      else localStorage.removeItem('test-auth-claude');
+      if (terminal.account) localStorage.setItem('test-account-claude', terminal.account);
+      else localStorage.removeItem('test-account-claude');
+      // Held account checks keep the refresh below running until it is seen.
+      (window as any).holdCli = ['detect_connection'];
+    }, terminal);
+    await refresh.click();
+    await expect(refresh).toHaveAttribute('aria-busy', 'true');
+    await page.evaluate(() => {
+      const state = window as any;
+      state.holdCli = [];
+      for (const request of (state.pendingCli ?? []).splice(0)) request.resolve();
+    });
+    await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+    await expect(card).toContainText('vinporb');
+    await expect(card).not.toContainText('Claude CLI login');
+  }
   expect(await claudeLabels()).toEqual(['Claude CLI login', 'vinporb']);
 });
 

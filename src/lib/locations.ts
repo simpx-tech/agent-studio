@@ -98,10 +98,17 @@ export function ensureLocationConnections(
   if (!environment) throw new Error('This folder or execution computer is no longer available.');
   ensureEnvironmentConnections(fleet, environment.id, providerIds, identities);
 }
-// Registers each detected CLI's existing login as a connection, unless that login is already
-// connected on the environment through another profile of the same account. While the login
-// or a sibling connection is still unchecked, an environment that already offers the agent
-// waits for the CLI's own report instead of adding a duplicate label.
+const providerOf = (fleet: Fleet, connection: Connection) =>
+  fleet.accounts.find((a) => a.id === connection.accountId)?.provider;
+// Whether an account of this agent is connected on the environment, in any profile.
+export const environmentOffers = (fleet: Fleet, environmentId: string, provider: ProviderId) =>
+  fleet.connections.some(
+    (c) => c.environmentId === environmentId && providerOf(fleet, c) === provider,
+  );
+// Registers each detected CLI's existing login as a connection while the environment has no
+// account of that agent yet. Once one is connected there (the login itself, a separate profile,
+// or the login turned into one), the login is never added again: removing it keeps it removed,
+// whether the terminal later signs out or into another account, and Add account connects more.
 export function ensureEnvironmentConnections(
   fleet: Fleet,
   environmentId: string,
@@ -110,32 +117,16 @@ export function ensureEnvironmentConnections(
 ) {
   const environment = fleet.environments.find((e) => e.id === environmentId);
   if (!environment) return;
-  const providerOf = (connection: Connection) =>
-    fleet.accounts.find((a) => a.id === connection.accountId)?.provider;
   for (const provider of detectedProviders) {
     if (environment.platform === 'wsl' && environment.discoveredOn && provider === 'gemini')
       continue;
-    const siblings = fleet.connections.filter(
-      (c) => c.environmentId === environment.id && providerOf(c) === provider,
-    );
-    if (siblings.some((c) => c.profile === 'existing')) continue;
+    if (environmentOffers(fleet, environment.id, provider)) continue;
     const login = identities?.login(environment.id, provider);
-    if (siblings.length) {
-      if (login === undefined) continue;
-      if (login !== null) {
-        const known = siblings.map((c) => identities!.connection(c.id));
-        if (known.includes(login) || known.includes(undefined)) continue;
-      } else if (siblings.some((c) => c.fromTerminalLogin)) {
-        // The CLI reports no identity, but this login was turned into a separate profile
-        // for the same account; registering it again would recreate the duplicate.
-        continue;
-      }
-    }
     const match = login
       ? fleet.connections.find(
           (c) =>
             c.environmentId !== environment.id &&
-            providerOf(c) === provider &&
+            providerOf(fleet, c) === provider &&
             identities!.connection(c.id) === login,
         )
       : undefined;

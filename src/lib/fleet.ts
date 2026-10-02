@@ -25,8 +25,7 @@ export const connectionSchema = z.object({
   sharedContextConnectionId: id.optional(),
   // Separate profiles share this computer's CLI context unless set to 'none' or to an account.
   sharedContext: z.enum(['computer', 'none']).optional(),
-  // A separate profile made from this computer's terminal login: the same account is signed in
-  // there, so detection must not register that login again as another label.
+  // A separate profile made from this computer's terminal login, for the account signed in there.
   fromTerminalLogin: z.boolean().optional(),
 });
 export const fleetSchema = z.object({
