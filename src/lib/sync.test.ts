@@ -15,6 +15,7 @@ import {
   sharedWorkspace,
 } from './sync';
 import { registerInstallation } from './fleet';
+import { sameFolderIcons } from './folder-icons';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
 const chat = (): Conversation => ({
@@ -61,6 +62,39 @@ describe('workspace replication', () => {
     expect(sameShared(local, { ...local, appSessions: [ours, kept] })).toBe(true);
     // No list stays absent, as older relays store it.
     expect('appSessions' in mergeShared(emptyShared(), emptyShared(), older)).toBe(false);
+  });
+  it('syncs folder icons and keeps them when the relay predates them', () => {
+    const icon = (path: string, name: string) => ({
+      environmentId: crypto.randomUUID(),
+      path,
+      icon: name,
+      chosenAt: new Date(2026, 9, 2).toISOString(),
+    });
+    const [kept, ours, theirs] = [
+      icon('/kept', 'code'),
+      icon('/ours', 'bot'),
+      icon('/theirs', 'map'),
+    ];
+    const base = { ...emptyShared(), folderIcons: [kept] };
+    const local = { ...base, folderIcons: [kept, ours] };
+    const remote = { ...base, folderIcons: [kept, theirs] };
+    expect(
+      sameFolderIcons(mergeShared(base, local, remote).folderIcons, [kept, ours, theirs]),
+    ).toBe(true);
+    // An older relay drops the list; this device keeps its own and sees no difference.
+    const older = emptyShared();
+    expect(sharedSchema.parse(local).folderIcons).toEqual(local.folderIcons);
+    expect(mergeShared(base, local, older).folderIcons).toEqual(local.folderIcons);
+    expect(sameShared(older, local)).toBe(true);
+    // A relay that holds icons this device lacks, or other ones, differs.
+    expect(sameShared(remote, emptyShared())).toBe(false);
+    expect(sameShared(remote, local)).toBe(false);
+    expect(sameShared(local, { ...local, folderIcons: [ours, kept] })).toBe(true);
+    // No list stays absent, as older relays store it, and a saved workspace keeps its icons.
+    expect('folderIcons' in mergeShared(emptyShared(), emptyShared(), older)).toBe(false);
+    const saved = restoreWorkspace({ ...initialWorkspace(), folderIcons: local.folderIcons });
+    expect(saved.folderIcons).toEqual(local.folderIcons);
+    expect(sharedWorkspace(saved).folderIcons).toEqual(local.folderIcons);
   });
   it('migrates v2 and registers only this installation without inventing remote machines or accounts', () => {
     const old = {

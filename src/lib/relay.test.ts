@@ -519,6 +519,41 @@ describe('real HTTP relay', () => {
       args: job.args,
     });
   });
+  it('routes folder icon choices to the host with only a bounded folder name and message', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const job = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'folderIcon',
+      args: {
+        conversationId: crypto.randomUUID(),
+        provider: 'claude',
+        folder: 'Unreal Projects/Bluevox',
+        firstMessage: 'Fix the voxel shader',
+        connectionId: crypto.randomUUID(),
+      },
+    };
+    for (const args of [
+      { ...job.args, path: '/outside/process' },
+      { ...job.args, provider: 'shell' },
+      { ...job.args, folder: '' },
+      { ...job.args, firstMessage: 'x'.repeat(4001) },
+      { ...job.args, connectionId: undefined },
+    ])
+      expect((await f.call('POST', 'jobs', { ...job, args })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    expect((await f.call('GET', 'jobs', undefined, f.target)).body[0]).toMatchObject({
+      method: 'folderIcon',
+      args: job.args,
+    });
+  });
   it('routes explicit plan decisions to the owning host and retains proposed plans in checkpoints', async () => {
     const f = await fixture(),
       id = crypto.randomUUID(),

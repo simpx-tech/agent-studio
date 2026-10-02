@@ -6,6 +6,7 @@ mod cli_queries;
 mod cli_updates;
 mod context;
 mod drafts;
+mod folder_icons;
 mod folders;
 mod imports;
 mod lending;
@@ -346,6 +347,44 @@ async fn generate_title(
     )
     .await;
     if let Ok(mut active) = titles.0.lock() {
+        active.remove(&conversation_id);
+    }
+    result
+}
+#[tauri::command]
+async fn generate_folder_icon(
+    app: tauri::AppHandle,
+    icons: State<'_, folder_icons::FolderIcons>,
+    conversation_id: String,
+    provider: String,
+    folder: String,
+    first_message: String,
+    connection_id: Option<String>,
+) -> Result<folder_icons::ChosenIcon, String> {
+    let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+    // A borrowed login chooses icons on Windows, where that login lives, as it writes titles.
+    let profile = match profile.lender {
+        Some(lender) => *lender,
+        None => profile,
+    };
+    uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
+    let cancel = CancellationToken::new();
+    {
+        let mut active = icons
+            .0
+            .lock()
+            .map_err(|_| "Folder icon registry lock failed")?;
+        if active.contains_key(&conversation_id) || active.len() >= 2 {
+            return Err("Folder icon choice is already busy".into());
+        }
+        active.insert(conversation_id.clone(), cancel.clone());
+    }
+    let result = profiles::scope(
+        profile,
+        folder_icons::choose(app, &provider, &folder, &first_message, cancel),
+    )
+    .await;
+    if let Ok(mut active) = icons.0.lock() {
         active.remove(&conversation_id);
     }
     result
@@ -1160,7 +1199,8 @@ fn write_export(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Cancellation tokens of work this app owns: replies, titles, usage reads, and plugin evaluations.
+/// Cancellation tokens of work this app owns: replies, titles, folder icons, usage reads, and
+/// plugin evaluations.
 fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
     let mut tokens = app
         .state::<runner::Runs>()
@@ -1175,6 +1215,13 @@ fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
         .unwrap_or_default();
     tokens.extend(
         app.state::<titles::Titles>()
+            .0
+            .lock()
+            .map(|active| active.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    tokens.extend(
+        app.state::<folder_icons::FolderIcons>()
             .0
             .lock()
             .map(|active| active.values().cloned().collect::<Vec<_>>())
@@ -1258,6 +1305,7 @@ pub fn run() {
         .manage(mcp::Management::default())
         .manage(providers::questions::Questions::default())
         .manage(titles::Titles::default())
+        .manage(folder_icons::FolderIcons::default())
         .manage(Storage::default())
         .manage(drafts::DraftStorage::default())
         .manage(notifications::Notifications::default())
@@ -1414,6 +1462,7 @@ pub fn run() {
             run_agent,
             generate_title,
             cancel_title,
+            generate_folder_icon,
             cancel_run,
             release_conversation,
             undo_files,

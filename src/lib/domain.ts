@@ -21,6 +21,7 @@ import { usageLimitSchema, type UsageLimit } from './usage-limits.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
+import { folderIconsSchema } from './folder-icons.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -294,6 +295,8 @@ export const workspaceSchema = z.object({
   claudeInstructions: claudeInstructionsSchema.optional(),
   // Starts of the desktop app, which History groups chats by.
   appSessions: appSessionsSchema.optional(),
+  // The icon a model chose for each project folder.
+  folderIcons: folderIconsSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

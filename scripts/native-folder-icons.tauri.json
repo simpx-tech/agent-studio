@@ -1,0 +1,16 @@
+{
+  "identifier": "com.vinicius.agentstudio.folder-icons-qa",
+  "productName": "Agent Studio Folder Icons QA",
+  "build": { "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Folder Icons QA",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640
+      }
+    ]
+  }
+}

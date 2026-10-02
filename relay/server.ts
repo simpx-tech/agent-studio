@@ -53,6 +53,7 @@ const jobInput = z
       'account',
       'models',
       'title',
+      'folderIcon',
       'folders',
       'context',
       'mentions',
@@ -79,6 +80,20 @@ const jobInput = z
       ctx.addIssue({ code: 'custom', message: 'Invalid release request' });
     if (job.method === 'mentions' && !mentionRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid mention search' });
+    if (
+      job.method === 'folderIcon' &&
+      !z
+        .object({
+          conversationId: uuid,
+          provider: z.enum(['claude', 'codex', 'gemini']),
+          folder: z.string().min(1).max(4096),
+          firstMessage: z.string().max(4000),
+          connectionId: uuid,
+        })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid folder icon request' });
     if (
       job.method === 'account' &&
       !z.object({ connectionId: uuid, input: accountActionSchema }).strict().safeParse(job.args)

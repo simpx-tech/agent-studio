@@ -10,6 +10,12 @@ Existing chats retain their previous shared runtime to preserve file references 
 
 The saved conversation retains its computer and environment even though no project path is sent to the provider. Desktop, managed WSL, and paired Viewer use the same selection and routing rules; unavailable or signed-out connections still cannot send, and another computer is never used as a fallback. Working-folder contents and bindings stay on the execution host, outside workspace exports and relay sync. Background title generation continues to use its separate restricted runtime.
 
+## Folder icons
+
+Each project folder gets an icon of its own in the sidebar's Active and History folder groups and on the toolbar's Folder control. The first conversation started in a folder without one, once its title request finishes, asks the same small model that names chats (**Claude Haiku**, **GPT-5.6 Luna / Low** or **Gemini 3.8 Flash / Low**, on the conversation's account) to choose from a catalog of 338 [Lucide](https://lucide.dev) icons in ten categories: software and tools, AI and data, web and security, devices, games, creative work, learning and health, business, home and travel, and nature. The model sees the folder's name after up to two of its parent folders (`Unreal Projects/Bluevox`) and up to 1,000 characters of the first message, never the folder's contents, and runs restricted in the title runtime like a title. Only a name from the catalog is kept.
+
+The choice is saved with the workspace (`folderIcons`), so every computer and the Viewer show it, and later chats in the folder never ask again. If the choice fails, the folder keeps the plain folder mark and the next chat there after a reload tries again. Standalone chats keep their chat-bubble mark. A device on an older release keeps the icons it holds while syncing with an older relay that drops them, and shows the folder mark for icon names its catalog does not have yet.
+
 ## File and app mentions
 
 Type `@` anywhere at a word boundary in a Claude or Codex draft to search files in the selected working folder. Type `$` in Codex to choose an accessible, enabled app. Arrow keys navigate; Enter, Tab or touch inserts the choice into the draft, and Escape dismisses. Selection never sends a message. Paths with spaces are quoted, and surrounding draft text is preserved. A new Standalone chat needs its first message to create its working folder before file search is available.

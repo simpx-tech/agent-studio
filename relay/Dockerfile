@@ -25,6 +25,7 @@ COPY src/lib/structured-output.ts ./src/lib/
 COPY src/lib/claude-options.ts ./src/lib/
 COPY src/lib/claude-instructions.ts ./src/lib/
 COPY src/lib/app-sessions.ts ./src/lib/
+COPY src/lib/folder-icons.ts ./src/lib/
 COPY src/lib/sent-files.ts ./src/lib/
 COPY src/lib/tool-output.ts ./src/lib/
 COPY src/lib/usage-limits.ts ./src/lib/

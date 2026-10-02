@@ -21,10 +21,17 @@ import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 import { latestUsageLimit } from './usage-limits.ts';
 import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
+import { mergeFolderIcons, sameFolderIcons } from './folder-icons.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
-  'fleet' | 'conversations' | 'workflows' | 'inputTemplates' | 'claudeInstructions' | 'appSessions'
+  | 'fleet'
+  | 'conversations'
+  | 'workflows'
+  | 'inputTemplates'
+  | 'claudeInstructions'
+  | 'appSessions'
+  | 'folderIcons'
 >;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
@@ -33,6 +40,7 @@ export const sharedSchema = workspaceSchema.pick({
   inputTemplates: true,
   claudeInstructions: true,
   appSessions: true,
+  folderIcons: true,
 });
 /** One conversation as replicated, so a sync can validate and compare it by itself. */
 export const sharedChatSchema = sharedSchema.shape.conversations.element;
@@ -68,8 +76,8 @@ const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b
 /**
  * Whether two shared workspaces hold the same data. Lists compare by item id: this device
  * adds new chats at the front, while a merge keeps its base order and appends them. App sessions
- * compare only when `a`, the relay's copy, holds them: an older relay drops them, and this
- * device keeps its own.
+ * and folder icons compare only when `a`, the relay's copy, holds them: an older relay drops
+ * them, and this device keeps its own.
  */
 export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
   const byId = <T extends { id: string }>(items: T[] = []) =>
@@ -84,7 +92,8 @@ export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
     same(a.workflows, b.workflows) &&
     same(a.inputTemplates, b.inputTemplates) &&
     a.claudeInstructions === b.claudeInstructions &&
-    (!a.appSessions || same(a.appSessions, b.appSessions))
+    (!a.appSessions || same(a.appSessions, b.appSessions)) &&
+    (!a.folderIcons || sameFolderIcons(a.folderIcons, b.folderIcons))
   );
 }
 
@@ -469,6 +478,7 @@ export function mergeShared(
       ),
     ),
     ...appSessionsField(mergeAppSessions(base.appSessions, local.appSessions, remote.appSessions)),
+    ...folderIconsField(mergeFolderIcons(base.folderIcons, local.folderIcons, remote.folderIcons)),
   };
 }
 // An absent value follows the default text, so it stays absent rather than undefined.
@@ -476,6 +486,8 @@ const claudeInstructionsField = (value: string | undefined) =>
   value === undefined ? {} : { claudeInstructions: value };
 const appSessionsField = (value: SharedWorkspace['appSessions']) =>
   value === undefined ? {} : { appSessions: value };
+const folderIconsField = (value: SharedWorkspace['folderIcons']) =>
+  value === undefined ? {} : { folderIcons: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
   environmentId: string;
@@ -500,6 +512,7 @@ export type RelayJob = {
     | 'account'
     | 'models'
     | 'title'
+    | 'folderIcon'
     | 'folders'
     | 'context'
     | 'mentions'

@@ -267,7 +267,9 @@ pub async fn run(
     }
     result
 }
-pub async fn title_text(
+/// The answer to a restricted background request, such as a title or a folder icon, run in the
+/// isolated title runtime with a 30-second limit.
+pub async fn background_text(
     app: tauri::AppHandle,
     request: RunRequest,
     cancel: CancellationToken,
@@ -285,7 +287,7 @@ pub async fn title_text(
     if status == "complete" {
         Ok(text)
     } else {
-        Err("Title generation cancelled".into())
+        Err("Background request cancelled".into())
     }
 }
 pub(crate) async fn execute(

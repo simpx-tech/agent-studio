@@ -56,7 +56,6 @@
     Check,
     Laptop,
     CircleAlert,
-    Folder,
     MessageCircle,
     Archive,
     BookOpen,
@@ -101,6 +100,7 @@
     accountUsageRevision,
     generateTitle,
     cancelTitle,
+    generateFolderIcon,
     steerRun,
     saveWorkspace,
     detectProviders,
@@ -189,6 +189,14 @@
     sessionTimeline,
     startOfDay,
   } from '$lib/app-sessions';
+  import {
+    folderIconIndex,
+    folderIconKey,
+    folderIconOf,
+    folderIconSchema,
+    withFolderIcon,
+  } from '$lib/folder-icons';
+  import FolderIcon from '$lib/components/FolderIcon.svelte';
   import {
     registerInstallation,
     registerWslEnvironments,
@@ -1100,6 +1108,7 @@
       today,
     ),
   );
+  const iconsByFolder = $derived(folderIconIndex(workspace.folderIcons));
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
   // Chats whose reply finished while the reader was elsewhere keep a dot in the sidebar until
   // they are opened. Reading state belongs to this window: never saved, exported or synced.
@@ -1604,6 +1613,7 @@
               workspace.inputTemplates = value.inputTemplates;
               workspace.claudeInstructions = value.claudeInstructions;
               workspace.appSessions = value.appSessions;
+              workspace.folderIcons = value.folderIcons;
               const kept = new Set(value.conversations.map((c) => c.id));
               const deleted = workspace.conversations.filter((c) => !kept.has(c.id));
               // Preserve active object identities while network responses arrive.
@@ -1640,6 +1650,7 @@
                 workspace.inputTemplates = meta.inputTemplates;
                 workspace.claudeInstructions = meta.claudeInstructions;
                 workspace.appSessions = meta.appSessions;
+                workspace.folderIcons = meta.folderIcons;
               }
               const gone = new Set(remove);
               if (gone.size)
@@ -4150,6 +4161,8 @@
     try {
       if (joined) await persistChat(conversation.id);
       if (session !== workspaceSession) return;
+      // The folder's icon is chosen after the title, so a new chat starts one background
+      // request at a time beside its reply.
       if (options.created)
         void nameConversation(
           conversation.id,
@@ -4157,6 +4170,14 @@
           history[0].text || 'A conversation about attached images',
           conversation.title,
           responseSettings.connectionId,
+        ).then(() =>
+          chooseFolderIcon(
+            session,
+            conversation.id,
+            conversation.location,
+            responseSettings,
+            history[0].text,
+          ),
         );
       const instructions =
         responseSettings.provider === 'claude' ? claudeInstructions(workspace) : '';
@@ -4342,6 +4363,58 @@
         conversation.titleStatus = 'fallback';
         saveSoon(conversation.id);
       }
+    }
+  }
+  // Folders this window asked a model to choose an icon for, so a failed choice is tried again
+  // only after the window reloads.
+  const folderIconRequests = new Set<string>();
+  // The first conversation in a folder without an icon has a small model of its agent choose
+  // one from the catalog, as it names the conversation; every device then shows it. `session` is
+  // the workspace the conversation started in, which the choice never outlives.
+  async function chooseFolderIcon(
+    session: number,
+    id: string,
+    location: ChatLocation | undefined,
+    settings: ChatSettings,
+    firstMessage: string,
+  ) {
+    if (session !== workspaceSession || !location?.path) return;
+    const key = folderIconKey(location);
+    if (folderIconRequests.has(key) || iconsByFolder.has(key)) return;
+    folderIconRequests.add(key);
+    try {
+      let result: Awaited<ReturnType<typeof generateFolderIcon>> | undefined;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          result = await generateFolderIcon(
+            id,
+            settings.provider,
+            location.path,
+            firstMessage,
+            settings.connectionId,
+          );
+          break;
+        } catch (error) {
+          // A computer chooses two icons at a time; folders started together wait their turn.
+          if (attempt >= 40 || !String(error).includes('Folder icon choice is already busy'))
+            throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (session !== workspaceSession) return;
+      }
+      // Another device may have chosen one meanwhile.
+      if (session !== workspaceSession || folderIconOf(iconsByFolder, location)) return;
+      const icon = folderIconSchema.parse({
+        environmentId: location.environmentId,
+        path: location.path,
+        icon: result.icon,
+        source: { provider: result.provider, model: result.model },
+        chosenAt: new Date().toISOString(),
+      });
+      workspace.folderIcons = withFolderIcon($state.snapshot(workspace.folderIcons), icon);
+      await persistSettings();
+    } catch {
+      // The folder keeps the folder mark until a chat there after a reload tries again.
     }
   }
   async function stop() {
@@ -4667,7 +4740,10 @@
                         title={folder.detail}
                         aria-expanded={!collapsedGroups[folderKey]}
                         onclick={() => (collapsedGroups[folderKey] = !collapsedGroups[folderKey])}
-                        >{#if folder.location?.path}<Folder size={14} />{:else}<MessageCircle
+                        >{#if folder.location?.path}<FolderIcon
+                            icon={folderIconOf(iconsByFolder, folder.location)?.icon}
+                            size={14}
+                          />{:else}<MessageCircle
                             size={14}
                           />{/if}<span>{folder.name}</span
                         >{#if section.kind !== 'computer' && section.computers > 1}<small
@@ -4993,7 +5069,10 @@
                   {#snippet icon()}
                     {#if selectedLocation && !selectedLocation.path}<MessageCircle
                         size={16}
-                      />{:else}<Folder size={16} />{/if}
+                      />{:else}<FolderIcon
+                        icon={folderIconOf(iconsByFolder, selectedLocation)?.icon}
+                        size={16}
+                      />{/if}
                   {/snippet}
                 </ChoicePicker>
               </div>

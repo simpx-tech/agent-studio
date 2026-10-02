@@ -13,6 +13,7 @@ import { createDesktopNotificationTracker } from './desktop-notifications';
 import { applyAppBadge, asksTheUser, pendingChatCount } from './notifications';
 import { fallbackModels, type ModelCatalog } from './models';
 import type { FolderEntry, FolderPlace } from './folders';
+import { folderIconContext } from './folder-icons';
 import type { SavedDrafts } from './drafts';
 import type { UsageSnapshot } from './usage';
 import {
@@ -1630,12 +1631,18 @@ export async function pollRelay(): Promise<Presence[] | null> {
         for (let attempt = 0; attempt < 4; attempt++) {
           remoteShared ??= sharedSchema.parse(remote.workspace);
           const merged = mergeShared(baseline, start, remoteShared, options);
-          // An older relay or app drops app sessions. This device keeps its own and sends them
-          // with its next other change, instead of writing them back after every write there.
-          const unsent =
-            !remote.workspace.appSessions && merged.appSessions
-              ? { ...merged, appSessions: undefined }
-              : merged;
+          // An older relay or app drops app sessions and folder icons. This device keeps its own
+          // and sends them with its next other change, instead of writing them back after every
+          // write there.
+          const unsent = {
+            ...merged,
+            ...(!remote.workspace.appSessions && merged.appSessions
+              ? { appSessions: undefined }
+              : {}),
+            ...(!remote.workspace.folderIcons && merged.folderIcons
+              ? { folderIcons: undefined }
+              : {}),
+          };
           const mergedJson = JSON.stringify(unsent);
           if (mergedJson === JSON.stringify(remote.workspace)) {
             accepted = unsent;
@@ -1827,6 +1834,7 @@ async function localCall(
     usage: 'read_usage',
     account: 'manage_account',
     title: 'generate_title',
+    folderIcon: 'generate_folder_icon',
     folders: 'list_folders',
     context: 'read_context',
     mentions: 'search_mentions',
@@ -2621,6 +2629,26 @@ export async function generateTitle(
 }
 export async function cancelTitle(conversationId: string) {
   if (desktop()) await invoke('cancel_title', { conversationId });
+}
+/** Has a small model choose the icon of the folder a new conversation started in. */
+export async function generateFolderIcon(
+  conversationId: string,
+  provider: ProviderId,
+  path: string,
+  firstMessage: string,
+  connectionId?: string,
+): Promise<{ icon: string; provider: ProviderId; model: string }> {
+  return routed(
+    'folderIcon',
+    {
+      conversationId,
+      provider,
+      folder: folderIconContext(path),
+      firstMessage: Array.from(firstMessage).slice(0, 1000).join(''),
+      connectionId,
+    },
+    connectionId,
+  );
 }
 export async function loadModels(
   settings?: Pick<ChatSettings, 'provider' | 'connectionId'>,

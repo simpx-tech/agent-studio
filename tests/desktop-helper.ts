@@ -709,6 +709,13 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-cancelled-title', args.conversationId);
             return;
           }
+          if (command === 'generate_folder_icon') {
+            const requests = JSON.parse(localStorage.getItem('test-folder-icon-requests') ?? '[]');
+            requests.push(args);
+            localStorage.setItem('test-folder-icon-requests', JSON.stringify(requests));
+            if (mode !== 'folder-icons') throw new Error('Folder icon unavailable');
+            return { icon: 'gamepad-2', provider: args.provider, model: 'haiku' };
+          }
           if (command === 'cancel_run') {
             const state = window as any;
             (state.cancelCalls ??= []).push(args);

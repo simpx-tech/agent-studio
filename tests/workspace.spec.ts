@@ -1508,6 +1508,57 @@ test('title failure keeps the first-message title without affecting replies or r
   ).toHaveLength(1);
 });
 
+test('the first chat in a folder has a model choose its icon, which every chat there keeps', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'folder-icons');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  await page.getByLabel('Message', { exact: true }).fill('Fix the voxel shader in my game');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
+  const folder = page.locator('.folder-group-toggle', { hasText: 'studio' });
+  await expect(folder.locator('svg.lucide-gamepad-2')).toBeVisible();
+  await expect(
+    page.getByRole('combobox', { name: 'Folder', exact: true }).locator('svg.lucide-gamepad-2'),
+  ).toBeVisible();
+  const requests = () =>
+    page.evaluate(() => JSON.parse(localStorage.getItem('test-folder-icon-requests') ?? '[]'));
+  // The model reads the folder by its name and a parent, and the first message.
+  expect(await requests()).toEqual([
+    expect.objectContaining({
+      provider: 'claude',
+      folder: 'Projects/studio',
+      firstMessage: 'Fix the voxel shader in my game',
+    }),
+  ]);
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
+  expect(saved.folderIcons).toEqual([
+    {
+      environmentId: saved.conversations[0].location.environmentId,
+      path: 'C:\\Projects\\studio',
+      icon: 'gamepad-2',
+      source: { provider: 'claude', model: 'haiku' },
+      chosenAt: expect.any(String),
+    },
+  ]);
+  // Later chats in the folder keep its icon without asking again, after a restart too.
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await page.getByLabel('Message', { exact: true }).fill('Now tune the lighting');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
+  await page.reload();
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await expect(
+    page
+      .locator('#conversation-panel-history .folder-group-toggle', { hasText: 'studio' })
+      .locator('svg.lucide-gamepad-2'),
+  ).toBeVisible();
+  expect(await requests()).toHaveLength(1);
+  await page.screenshot({ path: 'artifacts/folder-icons-browser.png' });
+});
+
 test('a late title follows its original chat and cannot restore a deleted conversation', async ({
   page,
 }) => {

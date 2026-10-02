@@ -40,6 +40,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Last model remembered per provider; last reasoning level remembered independently per provider and model. New chats start with the agent and account you last chose, even after replying in older chats on another account.
 - Saved conversations with search, multi-turn context, retry, stop, and deletion.
 - Automatic conversation titles from the first message, generated once in the background with a small model.
+- An icon for each project folder in the sidebar, chosen once by the same small model from a catalog of 338 icons when the folder's first conversation starts. See [folder icons](docs/CAPABILITIES.md#folder-icons).
 - Provider-reported chat context where available (currently Claude), saved reply token counts, live 5-hour/weekly subscription meters, and a Fable-specific meter when Fable is selected. Compact colored arrows show pace, with full meanings on hover. See [usage details and data sources](docs/USAGE.md).
 - Colored arrows show quota pace and remaining allowance. Context guidance highlights limited room and rapid growth using measured readings; hover an arrow for its full meaning.
 - Provider installation/login status and workspace export to JSON in Downloads.
@@ -102,6 +103,7 @@ message content blocks ← normalized events ← JSONL decoder
 - `src-tauri/src/protocol.rs`: provider JSONL to normalized text/activity/usage events.
 - `src-tauri/src/runner.rs`: streaming, deadlines, cancellation, and process cleanup.
 - `src-tauri/src/titles.rs`: bounded first-message title generation and the small-model policy.
+- `src-tauri/src/folder_icons.rs` and `src/lib/folder-icons.json`: folder icon choice from the shared icon catalog.
 
 There is no terminal emulator. Raw CLI events and ANSI output are not the interface. Scripts, remote images, embeds, and unsafe links are stripped from model output; the desktop CSP limits renderer access. Fonts and icons are bundled locally.
 
