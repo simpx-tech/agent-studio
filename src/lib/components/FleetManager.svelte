@@ -39,8 +39,9 @@
   import AccountUsage from './AccountUsage.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop, contextCache, installCli, type CliUpdates } from '$lib/transport';
+  import { desktop, contextCache, installCli, openLink, type CliUpdates } from '$lib/transport';
   import { cliUpdateSummary } from '$lib/cli-updates';
+  import type { SignInView } from '$lib/sign-in';
   let {
     workspace = $bindable(),
     installation,
@@ -65,6 +66,9 @@
     chat,
     providerStatuses,
     login,
+    signIns,
+    cancelSignIn,
+    sendSignInCode,
     running,
     highlight = '',
   }: {
@@ -91,6 +95,10 @@
     chat: (provider: ProviderId, connectionId?: string, computerId?: string) => void;
     providerStatuses: ProviderStatus[];
     login: (provider: ProviderId, connectionId?: string) => Promise<void>;
+    /** Sign-ins running without a terminal, by connection or by provider for its own login. */
+    signIns: Record<string, SignInView>;
+    cancelSignIn: (view: SignInView) => Promise<void>;
+    sendSignInCode: (view: SignInView, code: string) => Promise<void>;
     running: boolean;
     /** The connection this visit was opened for, shown and marked until it is connected. */
     highlight?: string;
@@ -100,9 +108,15 @@
   let linkedAccountId = $state('');
   let createdConnectionId = $state('');
   let creationStage = $state('');
-  // The connections, and providers' own logins, whose sign-in is opening. Each opens a console
-  // of its own, so one opening never holds back another.
+  // The connections, and providers' own logins, whose sign-in is opening. Each signs in on its
+  // own, so one opening never holds back another.
   let signingIn = $state<Record<string, boolean>>({});
+  // Codes pasted from Claude's sign-in page, by sign-in, while they are typed and sent. The
+  // field shows once a page that ends with a code opened, or on request.
+  let codes = $state<Record<string, string>>({});
+  let codeShown = $state<Record<string, boolean>>({});
+  let sendingCode = $state<Record<string, boolean>>({});
+  let codeErrors = $state<Record<string, string>>({});
   let refreshingConnections = $state(false);
   let error = $state('');
   let busy = $state(false);
@@ -256,8 +270,8 @@
       creationStage = '';
     }
   }
-  // Sign-in opens a console of its own, so neither other actions here, other sign-ins nor
-  // replies running in any chat hold it back.
+  // Sign-in runs on its own, so neither other actions here, other sign-ins nor replies running
+  // in any chat hold it back.
   async function openSignIn(id: ProviderId, connectionId?: string) {
     const key = connectionId ?? id;
     if (signingIn[key]) return;
@@ -269,6 +283,34 @@
       error = String(e);
     } finally {
       delete signingIn[key];
+    }
+  }
+  // Shows the field for a code Claude's page showed, ready to paste into.
+  async function showCode(view: SignInView) {
+    codeShown[view.id] = true;
+    await tick();
+    page?.querySelector<HTMLInputElement>(`[data-sign-in-code="${CSS.escape(view.id)}"]`)?.focus();
+  }
+  // A code Claude's sign-in page showed, sent to the CLI that waits for it.
+  async function submitCode(view: SignInView) {
+    const code = codes[view.id]?.trim();
+    if (!code || sendingCode[view.id]) return;
+    sendingCode[view.id] = true;
+    delete codeErrors[view.id];
+    try {
+      await sendSignInCode(view, code);
+      delete codes[view.id];
+    } catch (e) {
+      codeErrors[view.id] = String(e);
+    } finally {
+      delete sendingCode[view.id];
+    }
+  }
+  async function stopSignIn(view: SignInView) {
+    try {
+      await cancelSignIn(view);
+    } catch (e) {
+      error = String(e);
     }
   }
   // Why sign-in cannot open, shown on its button. Only a check that found no CLI stops it:
@@ -535,6 +577,63 @@
   }
 </script>
 
+<!-- A sign-in waiting for the browser, with its page to open again, Claude's code field and
+  Cancel, or why it ended while its account is still not connected. -->
+{#snippet signInProgress(view: SignInView | undefined, provider: ProviderId, connected: boolean)}
+  {#if view?.phase === 'waiting'}
+    {@const pasting = view.code && (view.codeExpected || codeShown[view.id])}
+    <div class="sign-in-progress" role="group" aria-label={providers[provider].name + ' sign-in'}>
+      <p class="connection-hint" role="status">
+        <LoaderCircle size={13} class="spinning" aria-hidden="true" />{view.message ||
+          `Finish signing in to ${providers[provider].name} in your browser.`}
+      </p>
+      <div class="fleet-actions">
+        {#if view.url}<button
+            class="text-button"
+            onclick={() => {
+              // Claude's page opened from here ends with a code to paste.
+              if (view.code) codeShown[view.id] = true;
+              void openLink(view.url ?? '');
+            }}>Open sign-in page<ArrowUpRight size={13} /></button
+          >{/if}
+        <button class="text-button" onclick={() => stopSignIn(view)}>Cancel</button>
+        {#if view.code && !pasting}<button class="text-button" onclick={() => showCode(view)}
+            >Page shows a code?</button
+          >{/if}
+      </div>
+      {#if pasting}
+        <form
+          class="sign-in-code"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void submitCode(view);
+          }}
+        >
+          <label
+            >Code from the sign-in page<input
+              bind:value={codes[view.id]}
+              data-sign-in-code={view.id}
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste the code"
+            /></label
+          >
+          <button
+            class="secondary"
+            type="submit"
+            disabled={!codes[view.id]?.trim() || !!sendingCode[view.id]}>Submit code</button
+          >
+        </form>
+        {#if codeErrors[view.id]}<p class="sync-error" role="alert">{codeErrors[view.id]}</p>{/if}
+      {/if}
+    </div>
+  {:else if view && !connected}
+    <p class="connection-hint attention sign-in-ended" role="alert">
+      <CircleAlert size={14} aria-hidden="true" />{view.message}
+    </p>
+  {/if}
+{/snippet}
+
 {#snippet accountCard(account: Account, computerId: string | null)}
   {@const connections = workspace.fleet.connections.filter(
     (c) => c.accountId === account.id && onComputer(c.environmentId, computerId),
@@ -581,7 +680,7 @@
             <button class="secondary" onclick={() => chat(account.provider, connection.id)}
               >Chat<ArrowUpRight size={13} /></button
             >
-            {#if localEnvironment(connection.environmentId)}
+            {#if localEnvironment(connection.environmentId) && signIns[connection.id]?.phase !== 'waiting'}
               {@const blocked = signInUnavailable(statuses[connection.id], account.provider)}
               <button
                 class={['sign-in', attention ? 'secondary' : 'text-button']}
@@ -592,7 +691,12 @@
                   sign-in…{:else}Open sign-in{/if}</button
               >{/if}
           </div>
-          {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.detail && statuses[connection.id]?.auth !== 'ready'}<p
+          {#if localEnvironment(connection.environmentId)}{@render signInProgress(
+              signIns[connection.id],
+              account.provider,
+              status === 'Connected',
+            )}{/if}
+          {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.detail && statuses[connection.id]?.auth !== 'ready' && signIns[connection.id]?.phase !== 'waiting'}<p
               class="connection-hint"
             >
               {statuses[connection.id].detail}
@@ -833,15 +937,22 @@
                           {:else if providerStatus(id)?.auth !== 'ready'}<p>
                               {providerStatus(id)?.detail ?? 'Sign in to connect your account.'}
                             </p>{/if}
+                          {@render signInProgress(
+                            signIns[id],
+                            id,
+                            providerStatus(id)?.auth === 'ready',
+                          )}
                           <div class="fleet-actions">
-                            <button
-                              class="text-button"
-                              disabled={!!signingIn[id] || !!blocked}
-                              title={blocked || undefined}
-                              onclick={() => openSignIn(id)}
-                              >{#if signingIn[id]}<LoaderCircle size={13} class="spinning" />Opening
-                                sign-in…{:else}Open sign-in{/if}</button
-                            >{#if providerStatus(id)?.auth === 'ready'}<button
+                            {#if signIns[id]?.phase !== 'waiting'}<button
+                                class="text-button"
+                                disabled={!!signingIn[id] || !!blocked}
+                                title={blocked || undefined}
+                                onclick={() => openSignIn(id)}
+                                >{#if signingIn[id]}<LoaderCircle
+                                    size={13}
+                                    class="spinning"
+                                  />Opening sign-in…{:else}Open sign-in{/if}</button
+                              >{/if}{#if providerStatus(id)?.auth === 'ready'}<button
                                 class="secondary"
                                 onclick={() => chat(id, undefined, computer.id)}
                                 >Start chat<ArrowUpRight size={13} /></button
@@ -973,7 +1084,7 @@
           /></label
         >
       </div>
-      <p>Sign in with your additional account in the terminal that opens.</p>
+      <p>Sign in with your additional account on the page that opens in your browser.</p>
       {#if creationStage}<p class="account-progress" role="status">
           <LoaderCircle size={15} class="spinning" />{creationStage}
         </p>{/if}
@@ -1645,6 +1756,41 @@
   }
   .connection-hint.attention > :global(svg) {
     flex-shrink: 0;
+  }
+  /* A sign-in waiting for the browser. */
+  .sign-in-progress {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .sign-in-progress > .connection-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0;
+  }
+  /* Icons keep to the first line of a hint that wraps. */
+  .sign-in-progress > .connection-hint > :global(svg),
+  .sign-in-ended > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 0.2lh;
+  }
+  .sign-in-code {
+    display: grid;
+    gap: 8px;
+    justify-items: start;
+  }
+  .sign-in-code label {
+    width: 100%;
+  }
+  .sign-in-code .secondary {
+    font-size: var(--text-sm);
+    min-height: 30px;
+    padding: 4px 11px;
+  }
+  .connection-hint.attention.sign-in-ended {
+    align-items: flex-start;
+    margin: 10px 0 0;
   }
   .remote-empty {
     padding: 0 16px 12px;

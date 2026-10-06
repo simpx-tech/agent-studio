@@ -3,7 +3,8 @@ import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
 // Adds a separate Claude profile in Connections, stays there, and returns its connection id.
-async function addAccount(page: Page, name: string) {
+// Adding opens its sign-in, which finishes unless `signedIn` is false.
+async function addAccount(page: Page, name: string, signedIn = true) {
   // The Connections button leaves Connections when it is already open.
   if (!(await page.getByRole('heading', { name: 'Connections', exact: true }).isVisible()))
     await page.getByRole('button', { name: 'Connections', exact: true }).click();
@@ -14,12 +15,14 @@ async function addAccount(page: Page, name: string) {
   await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill(name);
   await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  return page.evaluate((name) => {
+  const id = await page.evaluate((name) => {
     const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
     const account = fleet.accounts.find((a: { name: string }) => a.name === name);
     return fleet.connections.find((c: { accountId: string }) => c.accountId === account.id)
       .id as string;
   }, name);
+  if (signedIn) await page.evaluate((id) => (window as any).finishSignIn(id, 'connected'), id);
+  return id;
 }
 
 async function pick(page: Page, label: string, name: string) {
@@ -31,10 +34,14 @@ async function pick(page: Page, label: string, name: string) {
 // without limits and reports the account signed out from then on, as Claude Code does.
 const expire = (page: Page, id: string) =>
   page.evaluate((id) => localStorage.setItem(`test-usage-expired-${id}`, 'yes'), id);
+// The account signs in: its login works again, and the CLI reports that its sign-in finished.
 const signIn = (page: Page, id: string) =>
   page.evaluate((id) => {
     localStorage.removeItem(`test-usage-expired-${id}`);
     localStorage.removeItem(`test-auth-connection-${id}`);
+    const waiting = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]');
+    if (waiting.some((view: { connectionId?: string }) => view.connectionId === id))
+      (window as any).finishSignIn(id, 'connected');
   }, id);
 
 test('the Agent picker shows an account whose login lapsed, and choosing it opens Connections at it', async ({
@@ -158,7 +165,7 @@ test('accounts can be signed in to while replies run in other chats', async ({ p
   await card.getByRole('button', { name: 'Open sign-in', exact: true }).click();
   expect(await page.evaluate(() => localStorage.getItem('test-sign-in-connection'))).toBe(second);
 
-  // The console finishes while the reply runs, and the account is followed until it is ready.
+  // The sign-in finishes while the reply runs, and the account is checked until it is ready.
   await signIn(page, second);
   await expect(page.locator('.notice[role="status"]')).toContainText('Claude is connected', {
     timeout: 8000,
@@ -192,6 +199,7 @@ test('Open sign-in waits for no account check, and says why when it cannot open'
     state.holdCli = [];
     for (const request of state.pendingCli.splice(0)) request.resolve();
   });
+  await signIn(page, second);
   await expect(page.locator('.notice[role="status"]')).toContainText(
     "Claude · Second Claude is connected. You're ready to chat.",
   );
@@ -213,6 +221,10 @@ test('Open sign-in waits for no account check, and says why when it cannot open'
   await expect
     .poll(() => page.evaluate(() => (window as any).signInCalls))
     .toEqual([second, second]);
+  // While it waits for the browser, the sign-in offers Cancel in place of Open sign-in.
+  await expect(button).toHaveCount(0);
+  await card.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(button).toBeEnabled();
 
   // Only a check that finds no CLI keeps sign-in closed, and the button says why.
   await page.evaluate((id) => {
@@ -285,7 +297,7 @@ test('sign-ins open side by side, and each is followed until its account connect
   const rows = [second, third].map((id) => page.locator(`[data-connection="${id}"]`));
   for (const row of rows) await expect(row).toContainText('Sign-in needed');
 
-  // A console still opening holds back no other account's sign-in.
+  // A sign-in still opening holds back no other account's sign-in.
   await page.evaluate(() => ((window as any).holdSignIn = true));
   const buttons = rows.map((row) => row.locator('.sign-in'));
   await buttons[0].click();
@@ -300,14 +312,122 @@ test('sign-ins open side by side, and each is followed until its account connect
     state.holdSignIn = false;
     for (const release of state.heldSignIns.splice(0)) release();
   });
-  for (const button of buttons) await expect(button).toHaveText('Open sign-in');
+  // Each waits for its own page in the browser.
+  for (const row of rows) {
+    await expect(row.locator('.sign-in-progress').getByRole('status')).toHaveText(
+      'Finish signing in to Claude in your browser.',
+    );
+    await expect(row.locator('.sign-in')).toHaveCount(0);
+  }
   expect((await page.evaluate(() => (window as any).signInCalls)).slice(-2)).toEqual([
     second,
     third,
   ]);
 
-  // Both consoles finish, and each account is followed until it reports ready.
+  // Both finish, and each account is checked until it reports ready.
   await signIn(page, second);
   await signIn(page, third);
   for (const row of rows) await expect(row).not.toContainText('Sign-in needed', { timeout: 8000 });
+});
+
+test('Claude signs in through its page alone, takes the code the page shows, and says how it ended', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.addInitScript(() => {
+    const w = window as any,
+      original = w.__TAURI_INTERNALS__.invoke;
+    w.openedPages = [];
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:opener|open_url') {
+        w.openedPages.push(args.url);
+        return;
+      }
+      return original(command, args);
+    };
+  });
+  await page.goto('/');
+  // Adding the account opened its sign-in: no terminal, only its page in the browser.
+  const second = await addAccount(page, 'Second Claude', false);
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    "Finish signing in to Claude in your browser. The account connects as soon as you're done.",
+  );
+  await page.evaluate((id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'), second);
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  const row = page.locator(`[data-connection="${second}"]`);
+  await expect(row).toContainText('Sign-in needed');
+  const card = page.locator('.fleet-account').filter({ has: row });
+  const progress = row.locator('.sign-in-progress');
+  const open = row.getByRole('button', { name: 'Open sign-in', exact: true });
+  await expect(progress.getByRole('status')).toHaveText(
+    'Finish signing in to Claude in your browser.',
+  );
+  await expect(open).toHaveCount(0);
+  // The page normally comes back by itself, so the code field waits until a page shows one.
+  const code = progress.getByRole('textbox', { name: 'Code from the sign-in page' });
+  await expect(code).toHaveCount(0);
+  await expect(progress.getByRole('button', { name: 'Page shows a code?' })).toBeVisible();
+  await card.screenshot({ path: 'artifacts/sign-in-waiting.png' });
+
+  // Its page opens again from here, ending with a code that goes to this sign-in only.
+  await progress.getByRole('button', { name: 'Open sign-in page', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).openedPages))
+    .toEqual(['https://claude.com/cai/oauth/authorize?code=true&state=test-state']);
+  await expect(progress.getByRole('button', { name: 'Page shows a code?' })).toHaveCount(0);
+  await card.screenshot({ path: 'artifacts/sign-in-code.png' });
+  const submit = progress.getByRole('button', { name: 'Submit code', exact: true });
+  await expect(submit).toBeDisabled();
+  await code.fill('abc#another-state');
+  await submit.click();
+  await expect(progress.getByRole('alert')).toHaveText(
+    'This code is from another sign-in. Open the sign-in page again and paste the code it shows.',
+  );
+  await code.fill(' abc#test-state ');
+  await submit.click();
+  await expect(progress.getByRole('status')).toHaveText('Checking the code…');
+  await expect(code).toHaveValue('');
+  await expect(progress.getByRole('alert')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).signInCodes)).toEqual(['abc#test-state']);
+
+  // The CLI refuses the code: the account says why and can sign in again.
+  const refused =
+    'Claude did not accept the code (Request failed with status code 400). Open sign-in to try again.';
+  await page.evaluate(({ id, refused }) => (window as any).finishSignIn(id, 'failed', refused), {
+    id: second,
+    refused,
+  });
+  await expect(row.locator('.sign-in-ended')).toHaveText(refused);
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    `Claude · Second Claude: ${refused}`,
+  );
+  await expect(progress).toHaveCount(0);
+  await card.screenshot({ path: 'artifacts/sign-in-failed.png' });
+  await open.click();
+  await expect(row.locator('.sign-in-ended')).toHaveCount(0);
+  await expect(progress.getByRole('status')).toBeVisible();
+
+  // The host keeps waiting through a reload, and Cancel ends the sign-in.
+  await page.reload();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(progress.getByRole('status')).toHaveText(
+    'Finish signing in to Claude in your browser.',
+  );
+  await progress.getByRole('button', { name: 'Page shows a code?' }).click();
+  await expect(code).toBeFocused();
+  await progress.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(progress).toHaveCount(0);
+  await expect(row.locator('.sign-in-ended')).toHaveCount(0);
+  await expect(open).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).cancelledSignIns)).toHaveLength(1);
+
+  // A sign-in the CLI finishes connects the account at once.
+  await open.click();
+  await expect(progress.getByRole('status')).toBeVisible();
+  await signIn(page, second);
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    "Claude · Second Claude is connected. You're ready to chat.",
+  );
+  await expect(progress).toHaveCount(0);
+  await expect(row).not.toContainText('Sign-in needed');
 });

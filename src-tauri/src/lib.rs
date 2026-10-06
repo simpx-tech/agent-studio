@@ -27,6 +27,7 @@ mod runner;
 mod saved;
 mod screens;
 mod shared_context;
+mod sign_in;
 mod site_icons;
 mod spend;
 mod standalone;
@@ -1132,12 +1133,17 @@ async fn steer_run(
         .send(&run_id, connection_id.as_deref(), input)
         .await
 }
+/// Signs in to the selected profile's CLI. Claude Code and Codex sign in without a terminal:
+/// their sign-in page opens in the browser, and windows follow the sign-in through
+/// `sign_in::EVENT` until the CLI reports its end. Antigravity keeps its terminal and returns
+/// no sign-in to follow.
 #[tauri::command]
 async fn sign_in(
     app: tauri::AppHandle,
+    sign_ins: State<'_, sign_in::SignIns>,
     provider: String,
     connection_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<Option<sign_in::View>, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
     // A WSL profile that borrows a Windows login signs in on Windows, where the login lives.
     let profile = match profile.lender {
@@ -1149,7 +1155,54 @@ async fn sign_in(
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?
         .join("sign-in");
-    profiles::scope(profile, providers::sign_in(&provider, &directory)).await
+    if provider == "gemini" {
+        return profiles::scope(profile, providers::terminal_sign_in(&directory))
+            .await
+            .map(|()| None);
+    }
+    if !matches!(provider.as_str(), "claude" | "codex") {
+        return Err("Unknown provider".into());
+    }
+    let account = if profile.id.is_empty() {
+        provider.clone()
+    } else {
+        profile.id.clone()
+    };
+    let sign_ins = sign_ins.inner().clone();
+    let (notify, open) = (sign_in::notifier(&app), sign_in::browser(&app));
+    profiles::scope(profile, async move {
+        std::fs::create_dir_all(&directory).map_err(|_| "Cannot prepare the sign-in directory")?;
+        let exe = providers::resolve(&provider).await?;
+        let start = sign_in::Start {
+            exe,
+            provider,
+            connection_id,
+            account,
+            directory,
+        };
+        sign_ins.start(start, notify, open).await.map(Some)
+    })
+    .await
+}
+/// The sign-ins waiting for the browser, for a window that opens or reloads.
+#[tauri::command]
+async fn sign_ins(sign_ins: State<'_, sign_in::SignIns>) -> Result<Vec<sign_in::View>, String> {
+    Ok(sign_ins.list())
+}
+/// Sends the code a Claude sign-in page showed to the CLI waiting for it.
+#[tauri::command]
+async fn sign_in_code(
+    app: tauri::AppHandle,
+    sign_ins: State<'_, sign_in::SignIns>,
+    id: String,
+    code: String,
+) -> Result<sign_in::View, String> {
+    sign_ins.code(&id, &code, &sign_in::notifier(&app)).await
+}
+#[tauri::command]
+async fn cancel_sign_in(sign_ins: State<'_, sign_in::SignIns>, id: String) -> Result<(), String> {
+    sign_ins.cancel(&id);
+    Ok(())
 }
 /// Opens a console window on this computer, in a chat's working folder, and runs the code of
 /// one block of a reply there. The chat's own connection names the computer, as for a reply.
@@ -1226,8 +1279,8 @@ fn write_export(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Cancellation tokens of work this app owns: replies, titles, folder icons, usage reads, and
-/// plugin evaluations.
+/// Cancellation tokens of work this app owns: replies, titles, folder icons, usage reads,
+/// sign-ins and plugin evaluations.
 fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
     let mut tokens = app
         .state::<runner::Runs>()
@@ -1261,6 +1314,7 @@ fn owned_tokens(app: &tauri::AppHandle) -> Vec<CancellationToken> {
             .map(|a| a.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default(),
     );
+    tokens.extend(app.state::<sign_in::SignIns>().tokens());
     tokens.extend(plugins::active_tokens());
     tokens
 }
@@ -1344,6 +1398,7 @@ pub fn run() {
         .manage(tray::Tray::default())
         .manage(imports::Catalog::default())
         .manage(std::sync::Arc::new(screens::Screens::default()))
+        .manage(sign_in::SignIns::default())
         .setup(|app| {
             tray::setup(app.handle());
             lending::init(app.handle());
@@ -1498,6 +1553,9 @@ pub fn run() {
             manage_elicitation,
             steer_run,
             sign_in,
+            sign_ins,
+            sign_in_code,
+            cancel_sign_in,
             run_in_console,
             screens::manage_screen,
             export_workspace,

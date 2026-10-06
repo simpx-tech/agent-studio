@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { version as packageVersion } from '../../package.json';
 
 import { appUpdateStatusSchema, type AppUpdateStatus } from './app-updates';
+import { signInViewSchema, type SignInView } from './sign-in';
 import { cliUpdatesSchema, type CliUpdates, type UpdatedCli } from './cli-updates';
 import { windowBehaviorSchema, type WindowBehavior } from './window-behavior';
 import { createDesktopNotificationTracker } from './desktop-notifications';
@@ -2910,12 +2911,38 @@ export async function steerRun(runId: string, input: SteeringInput, connectionId
     connectionId,
   );
 }
-export async function signIn(provider: string, connectionId?: string) {
+/**
+ * Signs in to a connection's CLI on this computer. Claude Code and Codex sign in without a
+ * terminal: their page opens in the browser, and the returned sign-in is followed through
+ * `watchSignIns`. Antigravity opens its own terminal and returns null.
+ */
+export async function signIn(provider: string, connectionId?: string): Promise<SignInView | null> {
   if (remoteTarget(connectionId))
     throw new Error(
       'Open sign-in on the computer that owns this connection. Authentication stays on that environment.',
     );
-  await invoke('sign_in', { provider, connectionId });
+  const view = await invoke<unknown>('sign_in', { provider, connectionId });
+  return view == null ? null : signInViewSchema.parse(view);
+}
+/** The sign-ins this computer waits on, for a window that opens or reloads. */
+export async function listSignIns(): Promise<SignInView[]> {
+  if (!desktop()) return [];
+  return z
+    .array(signInViewSchema)
+    .max(64)
+    .parse(await invoke('sign_ins'));
+}
+/** Sends the code a Claude sign-in page showed to the CLI waiting for it. */
+export async function submitSignInCode(id: string, code: string): Promise<SignInView> {
+  return signInViewSchema.parse(await invoke('sign_in_code', { id, code }));
+}
+export const cancelSignIn = (id: string): Promise<void> => invoke('cancel_sign_in', { id });
+export async function watchSignIns(update: (view: SignInView) => void): Promise<() => void> {
+  if (!desktop()) return () => {};
+  return listen<unknown>('studio-sign-in', ({ payload }) => {
+    const view = signInViewSchema.safeParse(payload);
+    if (view.success) update(view.data);
+  });
 }
 /**
  * Opens a console window on this computer, in the chat's folder, and runs one code block of a

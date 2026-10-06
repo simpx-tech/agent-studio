@@ -27,9 +27,14 @@
     watchAppUpdates,
     installAppUpdate,
     watchCliUpdates,
+    watchSignIns,
+    listSignIns,
+    submitSignInCode,
+    cancelSignIn,
     type AppUpdateStatus,
     type CliUpdates,
   } from '$lib/transport';
+  import { signInKey, signInUpdate, type SignInView } from '$lib/sign-in';
   import { restartBlocked } from '$lib/app-updates';
   import { newlyUpdated } from '$lib/cli-updates';
   import { modelMark } from '$lib/model-marks';
@@ -350,12 +355,16 @@
   let restartingForUpdate = $state(false);
   let statuses = $state<ProviderStatus[]>([]);
   let refreshing = $state(false);
-  // Sign-ins opened here, by connection or by provider for its own login. Several may be open at
-  // once, and each is followed until its account reports ready or ten minutes pass.
+  // Accounts followed until they report ready, by connection or by provider for its own login:
+  // for ten minutes after Antigravity's terminal opens, and for a minute after a CLI reports
+  // that its sign-in finished. Several may be followed at once.
   const pendingSignIns = new Map<
     string,
     { provider: ProviderId; connectionId?: string; until: number }
   >();
+  // Sign-ins this computer runs without a terminal, by the connection (or provider login) they
+  // sign in to: waiting for the browser, or ended with a reason to show.
+  let signIns = $state<Record<string, SignInView>>({});
   let activeId = $state<string | null>(null);
   let historyAction = $state<{
     kind: 'rewind' | 'files';
@@ -1560,6 +1569,15 @@
       if (disposed) stop();
       else stopCliUpdates = stop;
     });
+    // Sign-ins outlive a reload: the host still waits on them and reports how they end.
+    let stopSignIns = () => {};
+    void watchSignIns(applySignIn).then((stop) => {
+      if (disposed) stop();
+      else stopSignIns = stop;
+    });
+    void listSignIns()
+      .then((views) => views.forEach(applySignIn))
+      .catch(() => {});
     const notificationHash = () => {
       notificationTarget = notificationConversation(window.location.hash);
       followNotification();
@@ -1883,6 +1901,7 @@
       stopNotifications();
       stopAppUpdates();
       stopCliUpdates();
+      stopSignIns();
       stopBrowserSession();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
@@ -2430,9 +2449,9 @@
       refreshing = false;
     }
   }
-  // Sign-in finishes in its own console, whatever replies run meanwhile, so each account signed
-  // in to here is followed by checking that account alone until it reports ready. A provider's
-  // own login is followed by refreshing everything.
+  // Sign-in finishes in the browser or a terminal, whatever replies run meanwhile, so each
+  // account signed in to here is followed by checking that account alone until it reports
+  // ready. A provider's own login is followed by refreshing everything.
   async function checkSignIn() {
     const now = Date.now();
     const accounts: Connection[] = [];
@@ -4628,7 +4647,13 @@
   }
   async function login(id: ProviderId, connectionId?: string) {
     try {
-      await signIn(id, connectionId);
+      const view = await signIn(id, connectionId);
+      if (view) {
+        applySignIn(view);
+        notice = `Finish signing in to ${providers[id].name} in your browser. The account connects as soon as you're done.`;
+        return;
+      }
+      // Antigravity signs in in a terminal of its own, so its account is followed instead.
       pendingSignIns.set(connectionId ?? id, {
         provider: id,
         connectionId,
@@ -4640,6 +4665,35 @@
       notice = String(e);
       throw e;
     }
+  }
+  // The CLI reports how its sign-in ended. Once it saved a login, the account is checked at
+  // once and reads connected; a sign-in that failed or expired says why on its account.
+  function applySignIn(view: SignInView) {
+    const key = signInKey(view);
+    const update = signInUpdate(signIns[key], view);
+    if (update === 'ignore') return;
+    if (update === 'show' || update === 'ended') signIns[key] = view;
+    else delete signIns[key];
+    if (update === 'connected') {
+      pendingSignIns.set(key, {
+        provider: view.provider,
+        connectionId: view.connectionId,
+        until: Date.now() + 60_000,
+      });
+      void checkSignIn();
+    } else if (update === 'ended') {
+      const connection = workspace.fleet.connections.find((c) => c.id === view.connectionId);
+      const account = workspace.fleet.accounts.find((a) => a.id === connection?.accountId);
+      notice = `${providers[view.provider].name}${account ? ` · ${account.name}` : ''}: ${view.message}`;
+    }
+  }
+  async function stopSignIn(view: SignInView) {
+    const key = signInKey(view);
+    if (signIns[key]?.id === view.id) delete signIns[key];
+    await cancelSignIn(view.id);
+  }
+  async function sendSignInCode(view: SignInView, code: string) {
+    applySignIn(await submitSignInCode(view.id, code));
   }
   // An export stands on its own: its images carry their bytes, which the desktop reads from its
   // image store and a browser from the relay's. Images neither holds keep their references.
@@ -5857,6 +5911,9 @@
             newChat(provider, connectionId, undefined, computerId)}
           providerStatuses={statuses}
           {login}
+          {signIns}
+          cancelSignIn={stopSignIn}
+          {sendSignInCode}
           running={localRunning}
           highlight={connectionsHighlight}
         />

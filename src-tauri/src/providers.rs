@@ -1325,51 +1325,23 @@ fn selection_args(agent: &Agent) -> Vec<String> {
 fn ps_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
-fn login_script(exe: &Executable, provider: &str, directory: &Path) -> String {
-    let mut args = exe.prefix.clone();
-    let profile = crate::profiles::current();
-    let mut environment = String::new();
-    if let Some(root) = profile.root.filter(|_| exe.wsl.is_none()) {
-        let name = if provider == "codex" {
-            "CODEX_HOME"
-        } else {
-            "CLAUDE_CONFIG_DIR"
-        };
-        environment = format!("$env:{name} = {}\n", ps_literal(&root.to_string_lossy()));
-        for name in [
-            "OPENAI_API_KEY",
-            "CODEX_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY",
-            "CLAUDE_CODE_USE_MANTLE",
-        ] {
-            environment.push_str(&format!("$env:{name} = $null\n"));
-        }
-        if provider == "codex" {
-            args.extend(["-c".into(), "cli_auth_credentials_store=\"file\"".into()]);
-        }
-    }
-    match provider {
-        "codex" => args.push("login".into()),
-        "claude" => args.extend(["auth".into(), "login".into()]),
-        _ => {}
-    }
+// Antigravity signs in inside its own interactive screen, which needs a terminal. Claude Code and
+// Codex sign in without one (`sign_in`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn login_script(exe: &Executable, directory: &Path) -> String {
     format!(
-        "$Host.UI.RawUI.WindowTitle = 'Agent Studio - {provider} sign-in'\n{environment}$env:CLAUDECODE = $null\ntry {{\nSet-Location -LiteralPath {} -ErrorAction Stop\nWrite-Host 'Complete sign-in here, then return to Agent Studio.'\n& {} {}\n}} catch {{ Write-Host $_.Exception.Message -ForegroundColor Red }}\nWrite-Host 'Return to Agent Studio. Your account will update automatically. This window can now be closed.'\n",
+        "$Host.UI.RawUI.WindowTitle = 'Agent Studio - Antigravity sign-in'\n$env:CLAUDECODE = $null\ntry {{\nSet-Location -LiteralPath {} -ErrorAction Stop\nWrite-Host 'Complete sign-in here, then return to Agent Studio.'\n& {} {}\n}} catch {{ Write-Host $_.Exception.Message -ForegroundColor Red }}\nWrite-Host 'Return to Agent Studio. Your account will update automatically. This window can now be closed.'\n",
         ps_literal(&directory.to_string_lossy()), ps_literal(&exe.program.to_string_lossy()),
-        args.iter().map(|a| ps_literal(a)).collect::<Vec<_>>().join(" ")
+        exe.prefix.iter().map(|a| ps_literal(a)).collect::<Vec<_>>().join(" ")
     )
 }
-pub async fn sign_in(provider: &str, directory: &Path) -> Result<(), String> {
-    let exe = resolve(provider).await?;
+/// Opens a terminal where Antigravity signs in.
+pub async fn terminal_sign_in(directory: &Path) -> Result<(), String> {
+    let exe = resolve("gemini").await?;
     #[cfg(windows)]
     {
         std::fs::create_dir_all(directory).map_err(|_| "Cannot prepare the sign-in directory")?;
-        let script = login_script(&exe, provider, directory);
+        let script = login_script(&exe, directory);
         tokio::task::spawn_blocking(move || login_console::open(&script).map(|_| ()))
             .await
             .map_err(|_| "Could not start the sign-in launcher".to_string())?
@@ -1378,34 +1350,13 @@ pub async fn sign_in(provider: &str, directory: &Path) -> Result<(), String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let profile = crate::profiles::current();
         std::fs::create_dir_all(directory).map_err(|_| "Cannot prepare sign-in directory")?;
-        let mut script = format!(
-            "#!/bin/sh\ncd {} || exit 1\nunset CLAUDECODE\n",
-            quote(&directory.to_string_lossy())
-        );
-        let mut args = exe.prefix.clone();
-        if let Some(root) = profile.root {
-            let name = if provider == "codex" {
-                "CODEX_HOME"
-            } else {
-                "CLAUDE_CONFIG_DIR"
-            };
-            script.push_str(&format!("export {name}={}\nunset OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_MANTLE\n", quote(&root.to_string_lossy())));
-            if provider == "codex" {
-                args.extend(["-c".into(), "cli_auth_credentials_store=\"file\"".into()]);
-            }
-        }
-        match provider {
-            "codex" => args.push("login".into()),
-            "claude" => args.extend(["auth".into(), "login".into()]),
-            _ => {}
-        }
-        script.push_str(&format!(
-            "{} {}\nprintf '\\nReturn to Agent Studio. Press Enter to close.\\n'\nread answer\n",
+        let script = format!(
+            "#!/bin/sh\ncd {} || exit 1\nunset CLAUDECODE\n{} {}\nprintf '\\nReturn to Agent Studio. Press Enter to close.\\n'\nread answer\n",
+            quote(&directory.to_string_lossy()),
             quote(&exe.program.to_string_lossy()),
-            args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
-        ));
+            exe.prefix.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+        );
         let path = directory.join(format!("login-{}.command", uuid::Uuid::new_v4()));
         std::fs::write(&path, script).map_err(|_| "Cannot write sign-in launcher")?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
@@ -1419,7 +1370,12 @@ pub async fn sign_in(provider: &str, directory: &Path) -> Result<(), String> {
             c.arg("-e");
             c
         };
-        command.arg(&path).spawn().map(|_| ()).map_err(|_| format!("Could not open a terminal. Run this local launcher to sign in to the selected profile: {}", path.display()))
+        command.arg(&path).spawn().map(|_| ()).map_err(|_| {
+            format!(
+                "Could not open a terminal. Run this local launcher to sign in: {}",
+                path.display()
+            )
+        })
     }
 }
 #[cfg(test)]
@@ -2424,7 +2380,7 @@ mod tests {
             prefix: vec!["C:/O'Brien/$data/cli.js".into()],
             wsl: None,
         };
-        let script = login_script(&exe, "gemini", Path::new("C:/App Data/login"));
+        let script = login_script(&exe, Path::new("C:/App Data/login"));
         assert!(script.contains("& 'C:/Program Files/Node/node.exe' 'C:/O''Brien/$data/cli.js'"));
         assert!(script.contains("Set-Location -LiteralPath 'C:/App Data/login'"));
     }

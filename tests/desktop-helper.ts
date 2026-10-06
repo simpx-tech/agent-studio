@@ -13,6 +13,25 @@ export async function mockDesktop(page: Page, mode = 'success') {
       // workspace (tests keep them small), read back through the studio-image protocol.
       const storedImages = (): Record<string, { mediaType: string; data: string }> =>
         JSON.parse(localStorage.getItem('test-images') ?? '{}');
+      (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+      (window as any).emitTauriEvent = (event: string, payload: unknown) => {
+        for (const handler of (window as any).tauriListeners?.[event] ?? [])
+          callbacks.get(handler)?.({ event, id: handler, payload });
+      };
+      // Ends the sign-in waiting for a connection (or a provider's own login) as its CLI would.
+      (window as any).finishSignIn = (key: string, phase: string, message = '') => {
+        const views = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]');
+        const view = views.find((v: any) => (v.connectionId ?? v.provider) === key);
+        if (!view) throw new Error(`No sign-in waits for ${key}`);
+        localStorage.setItem('test-sign-ins', JSON.stringify(views.filter((v: any) => v !== view)));
+        (window as any).emitTauriEvent('studio-sign-in', {
+          ...view,
+          phase,
+          message,
+          url: undefined,
+          code: false,
+        });
+      };
       (window as any).__TAURI_INTERNALS__ = {
         convertFileSrc: (path: string, protocol?: string) => {
           if (protocol !== 'studio-image') return '/artifact-preview';
@@ -102,8 +121,17 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (command === 'relay_resume') return null;
           if (command === 'plugin:window|is_maximized') return false;
-          if (command === 'plugin:event|listen') return 0;
-          if (command === 'plugin:event|unlisten') return;
+          // Native events reach the page's listeners through `emitTauriEvent(event, payload)`.
+          if (command === 'plugin:event|listen') {
+            const listeners = ((window as any).tauriListeners ??= {});
+            (listeners[args.event] ??= []).push(args.handler);
+            return args.handler;
+          }
+          if (command === 'plugin:event|unlisten') {
+            const listeners = (window as any).tauriListeners?.[args.event];
+            if (listeners) listeners.splice(listeners.indexOf(args.eventId), 1);
+            return;
+          }
           if (['detect_connection', 'list_models', 'list_folders'].includes(command)) {
             const state = window as any;
             (state.cliCalls ??= []).push({ command, ...args });
@@ -442,14 +470,59 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   : 'ready'),
               detail: 'Fixture connection',
             }));
+          // Sign-in without a terminal: the host keeps each waiting sign-in (`test-sign-ins`,
+          // across reloads) until a test ends it with `finishSignIn(key, phase, message)`.
           if (command === 'sign_in') {
             const state = window as any;
-            (state.signInCalls ??= []).push(args.connectionId ?? args.provider);
+            const key = args.connectionId ?? args.provider;
+            (state.signInCalls ??= []).push(key);
             localStorage.setItem('test-sign-in-provider', args.provider);
             localStorage.setItem('test-sign-in-connection', args.connectionId ?? '');
-            // Its console takes a moment to open, which a test can hold until it releases it.
+            // Its page takes a moment to open, which a test can hold until it releases it.
             if (state.holdSignIn)
               await new Promise<void>((resolve) => (state.heldSignIns ??= []).push(resolve));
+            const failure = localStorage.getItem('test-sign-in-error');
+            if (failure) throw failure;
+            // Antigravity signs in in a terminal of its own.
+            if (args.provider === 'gemini') return null;
+            const view = {
+              id: crypto.randomUUID(),
+              provider: args.provider,
+              connectionId: args.connectionId ?? undefined,
+              phase: 'waiting',
+              url:
+                args.provider === 'claude'
+                  ? 'https://claude.com/cai/oauth/authorize?code=true&state=test-state'
+                  : 'https://auth.openai.com/oauth/authorize?state=test',
+              code: args.provider === 'claude',
+              codeExpected: false,
+              message: '',
+            };
+            const views = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]').filter(
+              (v: any) => (v.connectionId ?? v.provider) !== key,
+            );
+            localStorage.setItem('test-sign-ins', JSON.stringify([...views, view]));
+            return view;
+          }
+          if (command === 'sign_ins')
+            return JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]');
+          if (command === 'sign_in_code') {
+            const views = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]');
+            const view = views.find((v: any) => v.id === args.id);
+            if (!view) throw 'This sign-in has ended. Open sign-in to start again.';
+            if (!/^[\w.~+/=-]+#test-state$/.test(args.code.trim()))
+              throw 'This code is from another sign-in. Open the sign-in page again and paste the code it shows.';
+            ((window as any).signInCodes ??= []).push(args.code.trim());
+            view.message = 'Checking the code…';
+            localStorage.setItem('test-sign-ins', JSON.stringify(views));
+            return view;
+          }
+          if (command === 'cancel_sign_in') {
+            ((window as any).cancelledSignIns ??= []).push(args.id);
+            const view = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]').find(
+              (v: any) => v.id === args.id,
+            );
+            if (view) (window as any).finishSignIn(view.connectionId ?? view.provider, 'cancelled');
             return;
           }
           // Run in console: tests read `consoleRuns`, hold the console with `holdConsole` until
