@@ -457,9 +457,9 @@ fn default_exists(provider: &str, distribution: Option<&str>) -> bool {
     })
 }
 
-/// Whether a Claude connection's profile is linked to its environment's own Claude directory
-/// (`linking`): a profile in a managed WSL distribution is linked by its launch, and one on this
-/// computer once Windows allowed the links.
+/// Whether a Claude connection's profile keeps its chats in its environment's own Claude
+/// directory (`linking`): a profile in a managed WSL distribution is linked by its launch, and one
+/// on this computer once its folders are.
 fn linked_profile(fleet: &Value, connection: &Value, local: &str, data: &Path) -> bool {
     if connection_provider(fleet, connection) != Some("claude")
         || connection["profile"] != "isolated"
@@ -479,7 +479,7 @@ fn linked_profile(fleet: &Value, connection: &Value, local: &str, data: &Path) -
     ) else {
         return false;
     };
-    crate::linking::linked(&data.join("profiles").join("claude").join(id), &source)
+    crate::linking::folders_linked(&data.join("profiles").join("claude").join(id), &source)
 }
 
 /// The sources of this computer and its WSL distributions, read off the async runtime.

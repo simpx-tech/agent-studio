@@ -820,11 +820,11 @@ async fn perform(
         return Ok(());
     }
     if matches!(action, Action::Add { .. } | Action::Logout { .. }) {
-        // A linked Claude profile shares MCP server definitions with this computer's Claude
-        // directory (`linking`): a server added here is saved there, where the Claude app and
-        // the terminal read it too. Sign-ins stay with each account, so signing out stays here.
+        // A Claude profile sharing this computer's Claude directory (`linking`) takes its MCP
+        // server definitions from there: a server added here is saved there, where the Claude app
+        // and the terminal read it too. Sign-ins stay with each account, so signing out stays here.
         let profile = crate::profiles::current();
-        let shared = match (action, profile.linked(), profile.shared_source) {
+        let shared = match (action, profile.shares_directory(), profile.shared_source) {
             (Action::Add { .. }, true, Some(source)) => Some(*source),
             _ => None,
         };

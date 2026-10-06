@@ -110,9 +110,16 @@ impl Profile {
                 .as_ref()
                 .is_some_and(|source| source.id == COMPUTER_SOURCE)
     }
-    /// Whether the shared items are links now: inside a WSL distribution its launch links them,
-    /// and on this computer `linking::ensure` does once Windows allows links.
+    /// Whether every shared item is a link now: inside a WSL distribution its launch links them,
+    /// and on this computer `linking::ensure` does, the two files once Windows allows them.
     pub fn linked(&self) -> bool {
+        self.links(crate::linking::linked)
+    }
+    /// Whether the shared folders are links now, transcripts and memories among them.
+    pub fn folders_linked(&self) -> bool {
+        self.links(crate::linking::folders_linked)
+    }
+    fn links(&self, check: fn(&Path, &Path) -> bool) -> bool {
         if !self.shares_directory() {
             return false;
         }
@@ -120,10 +127,31 @@ impl Profile {
             return true;
         }
         match (&self.root, crate::context::native_default_root("claude")) {
-            (Some(root), Some(source)) => crate::linking::linked(root, &source),
+            (Some(root), Some(source)) => check(root, &source),
             _ => false,
         }
     }
+}
+/// The separate Claude profiles on this computer that share its Claude directory (`linking`),
+/// by connection id, with their folders.
+pub fn directory_sharing(app: &tauri::AppHandle) -> Result<Vec<(String, PathBuf)>, String> {
+    let local = installation(app)?;
+    let (data, fleet) = read_fleet(app)?;
+    let namespace = &app.config().identifier;
+    Ok(fleet["connections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|connection| {
+            let id = connection["id"]
+                .as_str()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())?;
+            let profile = resolve_in(namespace, &local, &data, &fleet, "claude", id).ok()?;
+            let root = profile.root.clone()?;
+            (profile.shares_directory() && profile.distribution.is_none())
+                .then(|| (id.to_string(), root))
+        })
+        .collect())
 }
 tokio::task_local! { static CURRENT: Profile; }
 pub fn current() -> Profile {

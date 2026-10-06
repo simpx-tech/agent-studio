@@ -1186,10 +1186,12 @@ pub async fn read(
     }
     let selected = crate::profiles::current();
     if !shared.native && selected.shares_directory() {
-        if let Some(crate::linking::State::Unlinked(reason)) =
-            selected.root.as_deref().and_then(crate::linking::last)
-        {
-            scan.note(&reason);
+        match selected.root.as_deref().and_then(crate::linking::last) {
+            Some(crate::linking::State::Unlinked(reason)) => scan.note(&reason),
+            Some(crate::linking::State::NeedsPermission) => {
+                scan.note(crate::linking::NEEDS_PERMISSION)
+            }
+            _ => {}
         }
     }
     if shared.native {
@@ -1252,7 +1254,7 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
             .ok_or("The selected WSL profile is unavailable")?
             .join(config.to_string_lossy().trim_start_matches('/')));
     }
-    if profile.linked() {
+    if profile.folders_linked() {
         return native_default_root(provider)
             .ok_or("Cannot locate the selected CLI profile".into());
     }

@@ -79,6 +79,7 @@ pub async fn load(provider: &str, folder: &str) -> Result<SharedContext, String>
         return Err(error);
     }
     let linked = selected.linked();
+    let folders_linked = selected.folders_linked();
     let Some(source) = selected.shared_source else {
         return Ok(SharedContext::default());
     };
@@ -97,13 +98,22 @@ pub async fn load(provider: &str, folder: &str) -> Result<SharedContext, String>
         if !config.is_dir() {
             return Err("The shared account context directory is unavailable".into());
         }
-        collect(
+        let mut result = collect(
             provider,
             folder,
             &config,
             distribution.as_deref(),
             &source.id,
-        )?
+        )?;
+        // Linked folders load rules, skills, commands and memories natively; only CLAUDE.md
+        // still waits for its own link.
+        if folders_linked {
+            let instructions = native_path(&config.join("CLAUDE.md"), distribution.as_deref())?;
+            result.files.retain(|file| file.path == instructions);
+            result.plugin_dir = None;
+            result.memory_dir = None;
+        }
+        result
     };
     let global = crate::profiles::scope(*source.clone(), async {
         crate::context::native_global_config(provider).await

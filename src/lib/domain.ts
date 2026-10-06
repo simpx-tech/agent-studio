@@ -315,6 +315,8 @@ export type ProviderStatus = {
   checkFailed?: boolean;
   // Why a separate Claude profile is not sharing this computer's Claude directory yet.
   sharing?: string | null;
+  // Windows' one-time permission would let it share settings.json and CLAUDE.md too.
+  sharingPermission?: boolean;
 };
 export type RunEvent = TokenUsage & {
   kind:

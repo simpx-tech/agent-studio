@@ -484,13 +484,18 @@ async fn detect_connection(
 ) -> Result<providers::ProviderStatus, String> {
     let profile = profiles::resolve(&app, &provider, Some(&connection_id))?;
     let lender = profile.lender.clone();
-    let unlinked = profile.shares_directory() && profile.distribution.is_none();
+    let shares = profile.shares_directory() && profile.distribution.is_none();
     let root = profile.root.clone();
     let mut status = profiles::scope(profile, providers::detect_one(&provider)).await;
-    // The check linked the profile to this computer's Claude directory when Windows allowed it.
-    if unlinked {
-        if let Some(linking::State::Unlinked(reason)) = root.as_deref().and_then(linking::last) {
-            status.sharing = Some(reason);
+    // The check linked the profile to this computer's Claude directory, as far as Windows let it.
+    if shares {
+        match root.as_deref().and_then(linking::last) {
+            Some(linking::State::NeedsPermission) => {
+                status.sharing = Some(linking::NEEDS_PERMISSION.into());
+                status.sharing_permission = cfg!(windows);
+            }
+            Some(linking::State::Unlinked(reason)) => status.sharing = Some(reason),
+            _ => {}
         }
     }
     // A borrowed Codex login is the Windows login: its state and identity are that login's,
@@ -506,6 +511,60 @@ async fn detect_connection(
         status.auth = source.auth;
     }
     Ok(status)
+}
+/// Asks Windows once to link settings.json and CLAUDE.md of every separate Claude profile on this
+/// computer that shares its Claude directory and still lacks them (`linking`). An automatic
+/// request asks at most once per profile in a run of the app; Allow in Connections asks again.
+async fn share_files(app: &tauri::AppHandle, explicit: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        static ASKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        static ASKED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+        let _one = ASKING.lock().await;
+        let source = context::native_default_root("claude")
+            .ok_or("Cannot locate this computer's Claude directory")?;
+        let mut pending = vec![];
+        for (id, root) in profiles::directory_sharing(app)? {
+            if linking::ensure(root.clone(), source.clone()).await
+                != linking::State::NeedsPermission
+            {
+                continue;
+            }
+            let mut asked = ASKED.lock().unwrap_or_else(|p| p.into_inner());
+            if explicit || !asked.contains(&root) {
+                asked.push(root);
+                pending.push(id);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let owner = app
+            .get_webview_window("main")
+            .and_then(|window| window.hwnd().ok())
+            .map(|hwnd| hwnd.0 as isize)
+            .unwrap_or(0);
+        let shared = source.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            linking::request_permission(&shared, &pending, owner)
+        })
+        .await
+        .map_err(|_| "Could not ask Windows for permission")?;
+        // Whatever Windows allowed is each profile's state for this run from now on.
+        for (_, root) in profiles::directory_sharing(app)? {
+            linking::ensure(root, source.clone()).await;
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, explicit);
+        Ok(())
+    }
+}
+#[tauri::command]
+async fn share_claude_files(app: tauri::AppHandle) -> Result<(), String> {
+    share_files(&app, true).await
 }
 // Read-only check of one environment's existing CLI login, used before a connection exists so
 // the app can tell whether that login is already connected through another profile.
@@ -1355,6 +1414,24 @@ async fn release_owned_work(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
+    // The elevated helper Windows starts, with the user's permission, to link two shared Claude
+    // files (`linking`): it does only that and exits, before anything else of the app starts.
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        if args.first().is_some_and(|arg| arg == linking::ELEVATED) {
+            let identifier = &context.config().identifier;
+            let code =
+                match startup::verify(identifier).and_then(|()| startup::data_root(identifier)) {
+                    Ok(data) => linking::elevated_main(&data, &args[1..]),
+                    Err(_) => 2,
+                };
+            std::process::exit(code);
+        }
+    }
     let version = context.package_info().version.to_string();
     let check_only = std::env::args_os()
         .skip(1)
@@ -1412,6 +1489,17 @@ pub fn run() {
         .manage(sign_in::SignIns::default())
         .setup(|app| {
             tray::setup(app.handle());
+            // When a Claude profile's two shared files need Windows' permission, ask once for
+            // every account that needs it.
+            {
+                let handle = app.handle().clone();
+                linking::on_permission_needed(Box::new(move || {
+                    let handle = handle.clone();
+                    Box::pin(async move {
+                        let _ = share_files(&handle, false).await;
+                    })
+                }));
+            }
             // Remove kept tool results of deleted chats and old runs once startup settles.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1517,6 +1605,7 @@ pub fn run() {
             inspect_environment_clis,
             list_folders,
             detect_connection,
+            share_claude_files,
             detect_environment_login,
             relay_connect,
             relay_resume,

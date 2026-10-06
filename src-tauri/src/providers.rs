@@ -244,6 +244,12 @@ pub struct ProviderStatus {
     /// to it yet (`linking`), such as Windows needing Developer Mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sharing: Option<String>,
+    /// Windows' permission would let it share the rest: Connections offers Allow.
+    #[serde(
+        rename = "sharingPermission",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub sharing_permission: bool,
 }
 async fn output(exe: &Executable, args: &[&str]) -> Result<std::process::Output, String> {
     let result = tokio::time::timeout(
@@ -361,6 +367,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         location: None,
         account: None,
         sharing: None,
+        sharing_permission: false,
     };
     let exe = match resolve(id).await {
         Ok(exe) => exe,

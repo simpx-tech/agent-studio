@@ -255,6 +255,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
             localStorage.setItem('test-wsl-installed-' + args.provider, '1');
             return '2.1.286';
           }
+          // Windows' one-time permission for the two shared Claude files: tests read
+          // `shareCalls`, and `test-share-declined` declines it.
+          if (command === 'share_claude_files') {
+            const w = window as any;
+            w.shareCalls = (w.shareCalls ?? 0) + 1;
+            if (localStorage.getItem('test-share-declined'))
+              throw "Windows' permission was declined, so settings.json and CLAUDE.md stay this account's own. Choose Allow to ask again.";
+            localStorage.setItem('test-shared-files', '1');
+            return null;
+          }
           if (command === 'detect_environment_login') {
             const wsl = args.environmentId === '33333333-3333-4333-8333-333333333333';
             return {
@@ -318,6 +328,21 @@ export async function mockDesktop(page: Page, mode = 'success') {
             // A separate Codex profile in WSL borrows its account's Windows login, as the native
             // host reports it (`lending.rs`). Claude profiles there sign in themselves.
             const connection = fleet.connections.find((c: any) => c.id === args.connectionId);
+            // A separate Windows Claude profile whose two shared files wait for Windows'
+            // permission (`linking.rs`) until `share_claude_files` is allowed.
+            if (
+              localStorage.getItem('test-share-pending') &&
+              !localStorage.getItem('test-shared-files') &&
+              args.provider === 'claude' &&
+              connection?.profile === 'isolated' &&
+              connection.environmentId === '11111111-1111-4111-8111-111111111111'
+            ) {
+              Object.assign(status, {
+                sharing:
+                  'Windows asks once before this account shares settings.json and CLAUDE.md with the Claude app; until then those two stay its own. Its chats, memories, plugins, skills and other folders are shared already.',
+                sharingPermission: true,
+              });
+            }
             const lender =
               args.provider === 'codex' &&
               connection?.profile === 'isolated' &&

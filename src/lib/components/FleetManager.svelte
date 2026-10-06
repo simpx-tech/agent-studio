@@ -39,7 +39,14 @@
   import AccountUsage from './AccountUsage.svelte';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
-  import { desktop, contextCache, installCli, openLink, type CliUpdates } from '$lib/transport';
+  import {
+    desktop,
+    contextCache,
+    installCli,
+    openLink,
+    shareClaudeFiles,
+    type CliUpdates,
+  } from '$lib/transport';
   import { cliUpdateSummary } from '$lib/cli-updates';
   import type { SignInView } from '$lib/sign-in';
   let {
@@ -543,6 +550,23 @@
       !!inventory?.entries?.some((entry) => entry.id === provider && !entry.path)
     );
   }
+  // One Windows permission prompt links settings.json and CLAUDE.md for every Claude account that
+  // shares this computer's Claude directory (`linking.rs`).
+  let allowing = $state(false);
+  let allowError = $state('');
+  async function allowSharing() {
+    if (allowing) return;
+    allowing = true;
+    allowError = '';
+    try {
+      await shareClaudeFiles();
+      await refresh();
+    } catch (e) {
+      allowError = String(e).replace(/^Error: /, '');
+    } finally {
+      allowing = false;
+    }
+  }
   async function install(environmentId: string, provider: ProviderId) {
     const key = installKey(environmentId, provider);
     if (installing[key] || provider === 'gemini') return;
@@ -711,7 +735,16 @@
               class="connection-hint"
             >
               {statuses[connection.id]?.sharing}
-            </p>{/if}
+            </p>
+            {#if statuses[connection.id]?.sharingPermission}<div class="fleet-actions">
+                <button class="text-button" disabled={allowing} onclick={allowSharing}
+                  >{#if allowing}<LoaderCircle size={13} class="spinning" />Waiting for
+                    Windows…{:else}Allow{/if}</button
+                >
+              </div>
+              {#if allowError}<p class="connection-hint attention" role="alert">
+                  {allowError}
+                </p>{/if}{/if}{/if}
         </div>
         <AccountUsage
           connectionId={connection.id}

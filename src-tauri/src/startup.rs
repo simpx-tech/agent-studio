@@ -10,7 +10,7 @@ pub fn verify(_identifier: &str) -> Result<(), &'static str> {
 pub fn show_error(_message: &str) {}
 
 #[cfg(windows)]
-pub use windows::{show_error, verify};
+pub use windows::{data_root, show_error, verify};
 
 #[cfg(windows)]
 mod windows {
@@ -37,6 +37,11 @@ mod windows {
     pub fn verify(identifier: &str) -> Result<(), &'static str> {
         let root = local_data()?.join(identifier);
         verify_root(&root)
+    }
+
+    /// This app's data folder, as Windows locates it without package redirection.
+    pub fn data_root(identifier: &str) -> Result<PathBuf, &'static str> {
+        Ok(local_data()?.join(identifier))
     }
 
     fn local_data() -> Result<PathBuf, &'static str> {

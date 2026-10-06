@@ -269,6 +269,14 @@ export async function installCli(provider: UpdatedCli, environmentId: string): P
     .max(40)
     .parse(await invoke('install_cli', { provider, environmentId }));
 }
+/**
+ * Asks Windows once to let this computer's separate Claude accounts share settings.json and
+ * CLAUDE.md with the Claude app (`linking.rs`). Agent Studio itself keeps running as the user.
+ */
+export async function shareClaudeFiles(): Promise<void> {
+  if (!desktop()) throw new Error('Allow this from Agent Studio on the computer of these accounts.');
+  await invoke('share_claude_files');
+}
 export async function watchCliUpdates(
   onChange: (updates: CliUpdates) => void,
 ): Promise<() => void> {
