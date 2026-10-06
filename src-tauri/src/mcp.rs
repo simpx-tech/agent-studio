@@ -820,48 +820,34 @@ async fn perform(
         return Ok(());
     }
     if matches!(action, Action::Add { .. } | Action::Logout { .. }) {
-        if let Action::Add { name, .. } = action {
-            // CLI add may overwrite an existing definition. Check effective config first.
-            let report = if provider == "codex" {
-                crate::context::codex_report(&exe, &folder).await?
-            } else {
-                crate::context::claude_report(&exe, &folder, "").await?
-            };
-            if report["incomplete"] == true
-                || (provider == "codex" && !report["mcpConfig"].is_object())
-                || (provider == "claude" && !report["mcps"].is_array())
-            {
-                return Err(
-                    "Could not check existing MCP servers. Refresh before adding one.".into(),
-                );
+        // A linked Claude profile shares MCP server definitions with this computer's Claude
+        // directory (`linking`): a server added here is saved there, where the Claude app and
+        // the terminal read it too. Sign-ins stay with each account, so signing out stays here.
+        let profile = crate::profiles::current();
+        let shared = match (action, profile.linked(), profile.shared_source) {
+            (Action::Add { .. }, true, Some(source)) => Some(*source),
+            _ => None,
+        };
+        let outcome = match &shared {
+            Some(source) => {
+                crate::profiles::scope(source.clone(), async {
+                    let exe = crate::providers::resolve(provider).await?;
+                    save_change(&exe, &folder, provider, action).await
+                })
+                .await?
             }
-            if report["mcpConfig"].get(name).is_some()
-                || report["mcps"]
-                    .as_array()
-                    .is_some_and(|list| list.iter().any(|s| s["name"] == *name))
-            {
-                return Err(
-                    "A server with this name already exists. Choose a different name.".into(),
-                );
-            }
-        }
-        let args = cli_args(provider, action)?;
-        let mut child = command(&exe, &folder)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "Could not start the MCP command")?;
-        let result = tokio::time::timeout(Duration::from_secs(25), child.wait()).await;
-        exe.kill(&mut child).await;
+            None => save_change(&exe, &folder, provider, action).await?,
+        };
         // Saved configuration/auth changes take effect on the next native resume.
         pending.pooled = false;
-        if !matches!(result, Ok(Ok(status)) if status.success()) {
-            return Err("The CLI did not confirm the saved MCP change. Check its version and server configuration.".into());
-        }
+        outcome?;
         pending.view.status = "complete".into();
-        pending.view.message =
-            "Saved by the selected CLI. Changes apply when this chat next resumes.".into();
+        pending.view.message = if shared.is_some() {
+            "Saved in this computer's Claude settings, which the Claude app shares. Changes apply when this chat next resumes."
+        } else {
+            "Saved by the selected CLI. Changes apply when this chat next resumes."
+        }
+        .into();
         return Ok(());
     }
     if pending.process.is_none() {
@@ -1007,6 +993,50 @@ async fn perform(
         }
     }
     Ok(())
+}
+/// Saves an MCP change with the CLI of `exe`. The outer error refuses the change before anything
+/// ran; the inner one is a change the CLI did not confirm.
+async fn save_change(
+    exe: &Executable,
+    folder: &str,
+    provider: &str,
+    action: &Action,
+) -> Result<Result<(), String>, String> {
+    if let Action::Add { name, .. } = action {
+        // CLI add may overwrite an existing definition. Check effective config first.
+        let report = if provider == "codex" {
+            crate::context::codex_report(exe, folder).await?
+        } else {
+            crate::context::claude_report(exe, folder, "").await?
+        };
+        if report["incomplete"] == true
+            || (provider == "codex" && !report["mcpConfig"].is_object())
+            || (provider == "claude" && !report["mcps"].is_array())
+        {
+            return Err("Could not check existing MCP servers. Refresh before adding one.".into());
+        }
+        if report["mcpConfig"].get(name).is_some()
+            || report["mcps"]
+                .as_array()
+                .is_some_and(|list| list.iter().any(|s| s["name"] == *name))
+        {
+            return Err("A server with this name already exists. Choose a different name.".into());
+        }
+    }
+    let args = cli_args(provider, action)?;
+    let mut child = command(exe, folder)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "Could not start the MCP command")?;
+    let result = tokio::time::timeout(Duration::from_secs(25), child.wait()).await;
+    exe.kill(&mut child).await;
+    Ok(if matches!(result, Ok(Ok(status)) if status.success()) {
+        Ok(())
+    } else {
+        Err("The CLI did not confirm the saved MCP change. Check its version and server configuration.".into())
+    })
 }
 fn cli_args(provider: &str, action: &Action) -> Result<Vec<String>, String> {
     let mut args = vec!["mcp".into()];

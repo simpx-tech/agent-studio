@@ -5,6 +5,11 @@ job=$3
 provider=$4
 binary=$5
 shift 5
+shared=''
+if [ "${1-}" = --agent-studio-shared ]; then
+  shared=1
+  shift
+fi
 working_directory=''
 standalone=''
 if [ "${1-}" = --agent-studio-cwd ]; then
@@ -19,6 +24,9 @@ elif [ "${1-}" = --agent-studio-standalone ]; then
     fi
     shift 2
 fi
+# The app's own folders and markers are private; the CLI, the commands it runs and the shared
+# Claude directory keep the user's own file modes.
+user_umask=$(umask)
 umask 077
 root="$HOME/.local/share/$namespace"
 mkdir -p "$root/runtime" "$root/runs"
@@ -36,6 +44,18 @@ if [ -f "$marker.cancel" ]; then rm -f -- "$marker.cancel"; exit 130; fi
 if [ "$profile" != existing ]; then
   config="$root/profiles/$provider/$profile"
   mkdir -p "$config"
+  if [ -n "$shared" ] && [ "$provider" = claude ]; then
+    shared_directory=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    umask "$user_umask"
+    exec 9>"$config/.agent-studio-share.lock"
+    if command -v flock >/dev/null 2>&1; then flock -w 60 9 || true; fi
+    if ! share_link "$config" "$shared_directory"; then
+      printf '%s\n' "Could not share $shared_directory with this account; its files were left in place." >&2
+      exit 1
+    fi
+    exec 9>&-
+    umask 077
+  fi
   unset OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
   unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_MANTLE
   if [ "$provider" = codex ]; then
@@ -45,6 +65,7 @@ if [ "$profile" != existing ]; then
     export CLAUDE_CONFIG_DIR="$config"
   fi
 fi
+umask "$user_umask"
 # A distinct Linux process group allows Stop to terminate CLI descendants as well.
 setsid "$binary" "$@" <&0 &
 child=$!

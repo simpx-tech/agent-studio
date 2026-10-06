@@ -164,6 +164,20 @@ fn valid(record: &Record) -> bool {
 /// A version 2 binding for the same computer and folder under another account.
 // A terminal login turned into a separate profile keeps its connection id while its earlier
 // native history stays in the terminal directory, so that directory is also a transfer source.
+/// Whether two profile roots are the same directory, as two accounts linked to this computer's
+/// Claude directory report it.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    let normal = |p: &Path| {
+        let text = p.to_string_lossy().replace('/', "\\");
+        let text = text.trim_end_matches('\\').to_string();
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    normal(a) == normal(b)
+}
 fn source_variants(profile: crate::profiles::Profile) -> Vec<crate::profiles::Profile> {
     let mut variants = vec![profile.clone()];
     if profile.isolated {
@@ -489,6 +503,15 @@ impl Session {
         }
         let source = source.ok_or("The previous account profile is unavailable. Reconnect it before transferring this chat; its saved history was preserved.")?;
         let target = crate::context::native_profile_root(provider).await?;
+        // Accounts linked to the same Claude directory (`linking`) read the same transcripts: the
+        // chosen account continues the session where it is, and nothing is copied.
+        if provider == "claude" && same_directory(&source, &target) {
+            self.record.id = previous.id.clone();
+            self.resumed = true;
+            self.instructions_changed = true;
+            self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
+            return Ok(());
+        }
         let snapshot =
             snapshot_off_thread(source, target, provider, &previous.id, None, TRANSFER_LIMIT)
                 .await?;
@@ -617,8 +640,8 @@ struct Transcript {
     base: Option<(String, u64)>,
     prefix: bool,
 }
-/// The most an account switch carries.
-const TRANSFER_LIMIT: u64 = 64 * 1024 * 1024;
+/// The most an account switch carries: the copy streams, so a long chat moves whole.
+const TRANSFER_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 /// An imported chat carries its session whole, however long it ran in its own app.
 const IMPORT_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 

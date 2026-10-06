@@ -386,6 +386,7 @@ fn sources_in(
     fleet: &Value,
     local: &str,
     default_exists: &dyn Fn(&str, Option<&str>) -> bool,
+    linked: &dyn Fn(&Value) -> bool,
 ) -> Vec<Source> {
     let mut sources = vec![];
     for provider in ["claude", "codex"] {
@@ -410,7 +411,9 @@ fn sources_in(
                 });
             }
             for connection in connections {
-                if connection["profile"] == "isolated" {
+                // A profile linked to the environment's own Claude directory keeps its chats
+                // there, which the environment's own source lists.
+                if connection["profile"] == "isolated" && !linked(connection) {
                     if let Some(id) = connection["id"].as_str() {
                         sources.push(Source {
                             provider: provider.into(),
@@ -454,19 +457,48 @@ fn default_exists(provider: &str, distribution: Option<&str>) -> bool {
     })
 }
 
+/// Whether a Claude connection's profile is linked to its environment's own Claude directory
+/// (`linking`): a profile in a managed WSL distribution is linked by its launch, and one on this
+/// computer once Windows allowed the links.
+fn linked_profile(fleet: &Value, connection: &Value, local: &str, data: &Path) -> bool {
+    if connection_provider(fleet, connection) != Some("claude")
+        || connection["profile"] != "isolated"
+        || connection.get("sharedContextConnectionId").is_some()
+        || connection["sharedContext"] == "none"
+    {
+        return false;
+    }
+    if connection["environmentId"] != local {
+        return true;
+    }
+    let (Some(id), Some(source)) = (
+        connection["id"]
+            .as_str()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+        crate::context::native_default_root("claude"),
+    ) else {
+        return false;
+    };
+    crate::linking::linked(&data.join("profiles").join("claude").join(id), &source)
+}
+
 /// The sources of this computer and its WSL distributions, read off the async runtime.
-async fn current_sources(fleet: &Value, local: &str) -> Result<Vec<Source>, String> {
-    let (fleet, local) = (fleet.clone(), local.to_string());
-    tauri::async_runtime::spawn_blocking(move || sources_in(&fleet, &local, &default_exists))
-        .await
-        .map_err(|_| "Cannot find this computer's chats".into())
+async fn current_sources(fleet: &Value, local: &str, data: &Path) -> Result<Vec<Source>, String> {
+    let (fleet, local, data) = (fleet.clone(), local.to_string(), data.to_path_buf());
+    tauri::async_runtime::spawn_blocking(move || {
+        sources_in(&fleet, &local, &default_exists, &|connection| {
+            linked_profile(&fleet, connection, &local, &data)
+        })
+    })
+    .await
+    .map_err(|_| "Cannot find this computer's chats".into())
 }
 
 /// The sources of this computer and its WSL distributions.
 pub async fn sources(app: &tauri::AppHandle) -> Result<Vec<SourceView>, String> {
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    Ok(current_sources(&fleet, &local.id)
+    Ok(current_sources(&fleet, &local.id, &app_root(app)?)
         .await?
         .into_iter()
         .map(|source| SourceView {
@@ -887,7 +919,10 @@ pub async fn chats(
     let source = Source::parse(source_id).ok_or("Unknown chat source")?;
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    if !current_sources(&fleet, &local.id).await?.contains(&source) {
+    if !current_sources(&fleet, &local.id, &app_root(app)?)
+        .await?
+        .contains(&source)
+    {
         return Err("This chat source is no longer on this computer".into());
     }
     let root = source_root(app, &source).await?;
@@ -1288,7 +1323,10 @@ pub async fn import(
     };
     let local = crate::profiles::installation(app)?;
     let fleet = fleet(app)?;
-    if !current_sources(&fleet, &local.id).await?.contains(&source) {
+    if !current_sources(&fleet, &local.id, &app_root(app)?)
+        .await?
+        .contains(&source)
+    {
         return Err("This chat source is no longer on this computer".into());
     }
     let profile = source_profile(app, &source)?;
@@ -1558,14 +1596,30 @@ mod tests {
 
     #[test]
     fn every_account_profile_and_default_directory_on_this_computer_is_a_source() {
-        let sources = sources_in(&fleet(), LOCAL, &|provider, distribution| {
+        let exists = |provider: &str, distribution: Option<&str>| {
             match distribution {
                 None => provider == "codex",
                 // The Claude desktop app ran chats in Debian, where no account is connected.
                 Some(distribution) => provider == "claude" && distribution == "Debian",
             }
-        });
+        };
+        let sources = sources_in(&fleet(), LOCAL, &exists, &|_| false);
         let ids: Vec<String> = sources.iter().map(Source::id).collect();
+        // A profile linked to this computer's Claude directory keeps its chats in the
+        // computer's own source, which lists them once.
+        let linked: Vec<String> = sources_in(&fleet(), LOCAL, &exists, &|connection| {
+            connection["id"] == "10000000-0000-4000-8000-000000000002"
+        })
+        .iter()
+        .map(Source::id)
+        .collect();
+        assert_eq!(
+            linked,
+            ids.iter()
+                .filter(|id| !id.ends_with("10000000-0000-4000-8000-000000000002"))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             ids,
             [

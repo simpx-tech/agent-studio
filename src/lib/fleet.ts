@@ -166,18 +166,14 @@ export function registerWslEnvironments(
   }
   reconcileDiscoveredWsl(fleet);
 }
-// The connection on its Windows computer whose login a separate profile in a WSL distribution
-// borrows instead of signing in there, as the Claude app lends its login to the CLI it runs in
-// WSL (`lending.rs`; Codex signs in with it through its host-managed ChatGPT login). Its status
-// and sign-in are that login's.
+// The connection on its Windows computer whose login a separate Codex profile in a WSL
+// distribution borrows instead of signing in there, through Codex's host-managed ChatGPT login
+// (`lending.rs`). Its status and sign-in are that login's. Claude profiles in WSL sign in through
+// Claude Code's own login.
 export function lendingConnection(fleet: Fleet, connection: Connection): Connection | undefined {
   const environment = fleet.environments.find((e) => e.id === connection.environmentId);
   const provider = fleet.accounts.find((a) => a.id === connection.accountId)?.provider;
-  if (
-    !environment?.discoveredOn ||
-    connection.profile !== 'isolated' ||
-    (provider !== 'claude' && provider !== 'codex')
-  )
+  if (!environment?.discoveredOn || connection.profile !== 'isolated' || provider !== 'codex')
     return undefined;
   return fleet.connections.find(
     (c) => c.accountId === connection.accountId && c.environmentId === environment.discoveredOn,

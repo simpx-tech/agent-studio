@@ -665,6 +665,21 @@ pub async fn manage(
         .map(|l| crate::folders::environment_distribution(&app, &l.environment_id))
         .transpose()?
         .flatten();
+    // A linked Claude profile shares installed plugins with this computer's Claude directory
+    // (`linking`): that directory's own CLI installs, enables or removes one, so the paths it
+    // records are the directory's, where the Claude app and the terminal read them too.
+    if matches!(
+        action,
+        Action::Install { .. } | Action::Toggle { .. } | Action::Uninstall { .. }
+    ) && profile.linked()
+    {
+        if let Some(source) = profile.shared_source.clone() {
+            profile = crate::profiles::Profile {
+                folder_distribution: profile.folder_distribution.clone(),
+                ..*source
+            };
+        }
+    }
     crate::profiles::scope(
         profile,
         manage_scoped(app, provider, conversation_id, location, action),

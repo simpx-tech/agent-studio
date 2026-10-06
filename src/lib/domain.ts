@@ -313,6 +313,8 @@ export type ProviderStatus = {
   account?: string | null;
   // The check itself failed, as its detail says, so installation and sign-in are unknown.
   checkFailed?: boolean;
+  // Why a separate Claude profile is not sharing this computer's Claude directory yet.
+  sharing?: string | null;
 };
 export type RunEvent = TokenUsage & {
   kind:

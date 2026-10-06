@@ -96,7 +96,8 @@ pub struct Start {
     pub provider: String,
     pub connection_id: Option<String>,
     /// The login that signs in: its connection, or the provider for a CLI's own login. A WSL
-    /// profile that borrows a Windows login names the Windows connection, where it signs in.
+    /// Codex profile that borrows a Windows login names the Windows connection, where it signs
+    /// in.
     pub account: String,
     /// Where a native CLI runs while it signs in.
     pub directory: PathBuf,
@@ -1093,6 +1094,7 @@ mod tests {
             distribution: distro.clone(),
             namespace: namespace.clone(),
             job: uuid::Uuid::new_v4().to_string(),
+            shared: false,
         };
         let shell = Executable {
             provider: "claude".into(),

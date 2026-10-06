@@ -707,6 +707,11 @@
               Sign in as {hostIdentity(connection)}, the login this account uses on its Windows
               computer.
             </p>{/if}
+          {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.sharing}<p
+              class="connection-hint"
+            >
+              {statuses[connection.id]?.sharing}
+            </p>{/if}
         </div>
         <AccountUsage
           connectionId={connection.id}

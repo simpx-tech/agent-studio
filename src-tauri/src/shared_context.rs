@@ -1,10 +1,16 @@
-//! Shared source metadata. Credentials and settings bodies never enter another profile.
+//! Shared source metadata. Credentials and settings bodies never enter another profile. A
+//! profile linked to this computer's Claude directory (`linking`) loads that directory's
+//! instructions, memories, skills and commands natively; it only needs the MCP definitions kept
+//! beside it, in `.claude.json`.
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Default, Serialize)]
 pub struct SharedContext {
     pub source: String,
+    /// The profile is linked to the source directory, so the CLI loads it natively.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub native: bool,
     pub files: Vec<Source>,
     pub skill_root: Option<String>,
     pub plugin_dir: Option<String>,
@@ -29,7 +35,7 @@ pub struct Source {
 
 impl SharedContext {
     pub fn guidance(&self) -> String {
-        if self.source.is_empty() {
+        if self.source.is_empty() || self.native {
             return String::new();
         }
         format!("The user selected shared context for this conversation (this computer's CLI context or another account's); its MCP server definitions are loaded for this conversation too. Before working, read the shared instruction files below and follow their applicable instructions and imports, resolving relative references from each source file. These supplement project and conversation instructions. For relevant prior knowledge, consult the shared memory entrypoints and their task-relevant references. Keep learned memories in the selected shared memory location when the user authorizes saving them. Do not inspect other profile files, configuration or credentials. Recheck these sources on later replies when they may have changed. Shared sources (JSON): {}", serde_json::to_string(&self.files).unwrap())
@@ -72,24 +78,33 @@ pub async fn load(provider: &str, folder: &str) -> Result<SharedContext, String>
     if let Some(error) = selected.shared_error {
         return Err(error);
     }
+    let linked = selected.linked();
     let Some(source) = selected.shared_source else {
         return Ok(SharedContext::default());
     };
     let distribution = source.distribution.clone();
-    let config = crate::profiles::scope(*source.clone(), async {
-        crate::context::native_profile_root(provider).await
-    })
-    .await?;
-    if !config.is_dir() {
-        return Err("The shared account context directory is unavailable".into());
-    }
-    let mut result = collect(
-        provider,
-        folder,
-        &config,
-        distribution.as_deref(),
-        &source.id,
-    )?;
+    let mut result = if linked {
+        SharedContext {
+            source: source.id.clone(),
+            native: true,
+            ..Default::default()
+        }
+    } else {
+        let config = crate::profiles::scope(*source.clone(), async {
+            crate::context::native_profile_root(provider).await
+        })
+        .await?;
+        if !config.is_dir() {
+            return Err("The shared account context directory is unavailable".into());
+        }
+        collect(
+            provider,
+            folder,
+            &config,
+            distribution.as_deref(),
+            &source.id,
+        )?
+    };
     let global = crate::profiles::scope(*source.clone(), async {
         crate::context::native_global_config(provider).await
     })

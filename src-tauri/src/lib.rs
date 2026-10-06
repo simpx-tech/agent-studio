@@ -11,6 +11,7 @@ mod folder_icons;
 mod folders;
 mod imports;
 mod lending;
+mod linking;
 mod live_usage;
 mod mcp;
 mod mentions;
@@ -329,8 +330,8 @@ async fn generate_title(
     connection_id: Option<String>,
 ) -> Result<titles::GeneratedTitle, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
-    // A borrowed login writes titles on Windows, where that login lives: a one-shot `codex
-    // exec` in WSL could not sign in with it.
+    // A borrowed Codex login writes titles on Windows, where that login lives: a one-shot
+    // `codex exec` in WSL could not sign in with it.
     let profile = match profile.lender {
         Some(lender) => *lender,
         None => profile,
@@ -365,7 +366,8 @@ async fn generate_folder_icon(
     connection_id: Option<String>,
 ) -> Result<folder_icons::ChosenIcon, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
-    // A borrowed login chooses icons on Windows, where that login lives, as it writes titles.
+    // A borrowed Codex login chooses icons on Windows, where that login lives, as it writes
+    // titles.
     let profile = match profile.lender {
         Some(lender) => *lender,
         None => profile,
@@ -482,9 +484,17 @@ async fn detect_connection(
 ) -> Result<providers::ProviderStatus, String> {
     let profile = profiles::resolve(&app, &provider, Some(&connection_id))?;
     let lender = profile.lender.clone();
+    let unlinked = profile.shares_directory() && profile.distribution.is_none();
+    let root = profile.root.clone();
     let mut status = profiles::scope(profile, providers::detect_one(&provider)).await;
-    // A borrowed login is the Windows login: its state and identity are that login's, while
-    // the installation stays this distribution's own.
+    // The check linked the profile to this computer's Claude directory when Windows allowed it.
+    if unlinked {
+        if let Some(linking::State::Unlinked(reason)) = root.as_deref().and_then(linking::last) {
+            status.sharing = Some(reason);
+        }
+    }
+    // A borrowed Codex login is the Windows login: its state and identity are that login's,
+    // while the installation stays this distribution's own.
     if let Some(lender) = lender.filter(|_| status.installed) {
         let source = profiles::scope(*lender, providers::detect_one(&provider)).await;
         status.account = source.account;
@@ -1145,7 +1155,8 @@ async fn sign_in(
     connection_id: Option<String>,
 ) -> Result<Option<sign_in::View>, String> {
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
-    // A WSL profile that borrows a Windows login signs in on Windows, where the login lives.
+    // A WSL Codex profile that borrows a Windows login signs in on Windows, where the login
+    // lives. Claude profiles sign in inside their own distribution.
     let profile = match profile.lender {
         Some(lender) => *lender,
         None => profile,
@@ -1401,7 +1412,6 @@ pub fn run() {
         .manage(sign_in::SignIns::default())
         .setup(|app| {
             tray::setup(app.handle());
-            lending::init(app.handle());
             // Remove kept tool results of deleted chats and old runs once startup settles.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

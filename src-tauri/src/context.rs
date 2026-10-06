@@ -1071,6 +1071,8 @@ pub async fn read(
         );
         let config = if provider == "gemini" {
             home.join(".gemini/antigravity-cli")
+        } else if profile.linked() {
+            native_default_root(&provider).ok_or("Cannot locate the selected CLI profile")?
         } else {
             profile
                 .root
@@ -1182,7 +1184,17 @@ pub async fn read(
     if let Some(report) = report {
         match report { Ok(report) => { scan = tokio::task::spawn_blocking(move || { merge_report(&mut scan, &report); scan }).await.map_err(|_| "Context report processing failed")?; }, Err(_) => scan.note("The CLI context query failed. Showing discovered files; actual loading and enabled state are unconfirmed. Refresh to retry.") }
     }
-    if !shared.source.is_empty() {
+    let selected = crate::profiles::current();
+    if !shared.native && selected.shares_directory() {
+        if let Some(crate::linking::State::Unlinked(reason)) =
+            selected.root.as_deref().and_then(crate::linking::last)
+        {
+            scan.note(&reason);
+        }
+    }
+    if shared.native {
+        scan.note("This account shares this computer's Claude directory with the Claude app and the terminal: settings, instructions, memories, chats, checkpoints, plugins, skills, agents, commands and MCP server definitions. Its login, account state and MCP sign-ins remain its own.");
+    } else if !shared.source.is_empty() {
         let computer = shared.source == crate::profiles::COMPUTER_SOURCE;
         let scope = if computer {
             "Computer context"
@@ -1224,6 +1236,9 @@ pub async fn profile_store(provider: &str) -> Result<PathBuf, String> {
 }
 
 /// Resolve the selected profile's storage without starting a model or querying its tools.
+/// Where the selected profile keeps its native files. A separate Claude profile linked to this
+/// computer's CLI context (`linking`) reads them from that shared directory, where its links
+/// lead: Windows cannot follow a link inside a WSL distribution through `\\wsl.localhost`.
 pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
     let profile = crate::profiles::current();
     if profile.distribution.is_some() {
@@ -1237,19 +1252,27 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
             .ok_or("The selected WSL profile is unavailable")?
             .join(config.to_string_lossy().trim_start_matches('/')));
     }
+    if profile.linked() {
+        return native_default_root(provider)
+            .ok_or("Cannot locate the selected CLI profile".into());
+    }
     if let Some(root) = profile.root {
         return Ok(root);
     }
+    native_default_root(provider).ok_or("Cannot locate the selected CLI profile".into())
+}
+
+/// This computer's own CLI directory for a provider: the one the terminal uses.
+pub fn native_default_root(provider: &str) -> Option<PathBuf> {
     if let Some(root) = std::env::var_os(if provider == "codex" {
         "CODEX_HOME"
     } else {
         "CLAUDE_CONFIG_DIR"
     }) {
-        return Ok(PathBuf::from(root));
+        return Some(PathBuf::from(root));
     }
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .ok_or("Cannot locate the selected CLI profile")?;
-    Ok(PathBuf::from(home).join(if provider == "codex" {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    Some(PathBuf::from(home).join(if provider == "codex" {
         ".codex"
     } else {
         ".claude"
@@ -1333,7 +1356,8 @@ pub(crate) async fn wsl_paths(
         }
         let home = PathBuf::from(paths[0]);
         let root = home.join(".local/share").join(&profile.namespace);
-        let config = if profile.isolated {
+        // A linked profile's files are the distribution's own Claude directory's.
+        let config = if profile.isolated && !profile.linked() {
             root.join("profiles").join(provider).join(&profile.id)
         } else {
             PathBuf::from(paths[if provider == "codex" { 1 } else { 2 }])

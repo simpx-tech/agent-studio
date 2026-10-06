@@ -114,6 +114,9 @@ fn search_dirs() -> Vec<PathBuf> {
     paths
 }
 pub async fn resolve(provider: &str) -> Result<Executable, String> {
+    if provider == "claude" {
+        crate::linking::prepare().await;
+    }
     resolve_using(provider, &search_dirs(), |distribution| async move {
         crate::wsl::resolve(provider, &distribution).await
     })
@@ -237,6 +240,10 @@ pub struct ProviderStatus {
     // bounded session metadata for recognising an already connected login, never a credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Why a separate Claude profile that shares this computer's Claude directory is not linked
+    /// to it yet (`linking`), such as Windows needing Developer Mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<String>,
 }
 async fn output(exe: &Executable, args: &[&str]) -> Result<std::process::Output, String> {
     let result = tokio::time::timeout(
@@ -353,6 +360,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         detail: "CLI not found. Install it to get started.".into(),
         location: None,
         account: None,
+        sharing: None,
     };
     let exe = match resolve(id).await {
         Ok(exe) => exe,
@@ -1460,6 +1468,7 @@ mod tests {
                                         distribution,
                                         namespace: "test".into(),
                                         job: uuid::Uuid::new_v4().to_string(),
+                                        shared: false,
                                     }),
                                 })
                             },
@@ -1988,6 +1997,7 @@ mod tests {
             distribution: "Ubuntu".into(),
             namespace: "agent-studio-test".into(),
             job: uuid::Uuid::new_v4().to_string(),
+            shared: false,
         };
         let prefix = launch.prefix("claude", "/bin/claude", "existing");
         let prefix_len = prefix.len();

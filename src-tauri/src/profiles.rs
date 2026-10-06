@@ -1,5 +1,6 @@
-//! Local installation identity and per-connection CLI configuration. Credentials are read only
-//! to lend a Windows login to the same account's profiles in its WSL distributions (`lending`).
+//! Local installation identity and per-connection CLI configuration. No credential file is read:
+//! a WSL Codex profile borrows its account's Windows login through the Windows Codex itself
+//! (`lending`), and every Claude profile signs in through Claude Code's own login.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -93,9 +94,36 @@ pub struct Profile {
     pub isolated: bool,
     pub shared_source: Option<Box<Profile>>,
     pub shared_error: Option<String>,
-    /// The same account's connection on the Windows computer that manages this separate
+    /// The same account's connection on the Windows computer that manages this separate Codex
     /// profile's WSL distribution, whose login the profile borrows instead of signing in itself.
     pub lender: Option<Box<Profile>>,
+}
+impl Profile {
+    /// A separate Claude profile that shares this computer's CLI context links everything but its
+    /// account to that context's directory (`linking`).
+    pub fn shares_directory(&self) -> bool {
+        self.provider == "claude"
+            && self.isolated
+            && self.shared_error.is_none()
+            && self
+                .shared_source
+                .as_ref()
+                .is_some_and(|source| source.id == COMPUTER_SOURCE)
+    }
+    /// Whether the shared items are links now: inside a WSL distribution its launch links them,
+    /// and on this computer `linking::ensure` does once Windows allows links.
+    pub fn linked(&self) -> bool {
+        if !self.shares_directory() {
+            return false;
+        }
+        if self.distribution.is_some() {
+            return true;
+        }
+        match (&self.root, crate::context::native_default_root("claude")) {
+            (Some(root), Some(source)) => crate::linking::linked(root, &source),
+            _ => false,
+        }
+    }
 }
 tokio::task_local! { static CURRENT: Profile; }
 pub fn current() -> Profile {
@@ -207,10 +235,9 @@ fn resolve_in(
         lender,
     })
 }
-// A separate Claude or Codex profile in a distribution this computer manages borrows the login
-// of the same account's connection on this computer, as the Claude app lends its own login to
-// the CLI it runs in WSL. The distribution's terminal login and accounts Windows lacks sign in
-// there.
+// A separate Codex profile in a distribution this computer manages borrows the login of the same
+// account's connection on this computer through Codex's host-managed login. Claude profiles, the
+// distribution's terminal login and accounts Windows lacks sign in there themselves.
 fn lender_id(
     fleet: &Value,
     local: &Installation,
@@ -218,7 +245,7 @@ fn lender_id(
     wsl: bool,
     provider: &str,
 ) -> Option<String> {
-    if !wsl || !matches!(provider, "claude" | "codex") || connection["profile"] != "isolated" {
+    if !wsl || provider != "codex" || connection["profile"] != "isolated" {
         return None;
     }
     fleet["connections"]
@@ -459,7 +486,7 @@ mod tests {
         assert!(!data.path().join("profiles").join("escape").exists());
     }
     #[test]
-    fn separate_wsl_profiles_borrow_the_windows_login_of_their_account() {
+    fn separate_wsl_codex_profiles_borrow_the_windows_login_and_claude_ones_sign_in() {
         let local = Installation {
             id: "desktop".into(),
             computer_id: "host".into(),
@@ -475,9 +502,10 @@ mod tests {
             {"id": "w3", "accountId": "a", "environmentId": "ubuntu", "profile": "existing"}
         ]});
         let connection = |i: usize| &fleet["connections"][i];
+        // Claude Code signs in through its own login inside the distribution.
         assert_eq!(
             lender_id(&fleet, &local, connection(1), true, "claude"),
-            Some(windows.clone())
+            None
         );
         assert_eq!(
             lender_id(&fleet, &local, connection(1), true, "codex"),
@@ -490,22 +518,22 @@ mod tests {
         // An account Windows lacks, the distribution's terminal login and Windows itself keep
         // their own logins.
         assert_eq!(
-            lender_id(&fleet, &local, connection(2), true, "claude"),
+            lender_id(&fleet, &local, connection(2), true, "codex"),
             None
         );
         assert_eq!(
-            lender_id(&fleet, &local, connection(3), true, "claude"),
+            lender_id(&fleet, &local, connection(3), true, "codex"),
             None
         );
         assert_eq!(
-            lender_id(&fleet, &local, connection(0), false, "claude"),
+            lender_id(&fleet, &local, connection(0), false, "codex"),
             None
         );
         // A lender is named by a connection id only, never by a path.
         let mut fleet = fleet.clone();
         fleet["connections"][0]["id"] = "../escape".into();
         assert_eq!(
-            lender_id(&fleet, &local, connection(1), true, "claude"),
+            lender_id(&fleet, &local, connection(1), true, "codex"),
             None
         );
     }

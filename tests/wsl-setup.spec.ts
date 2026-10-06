@@ -13,7 +13,7 @@ async function claudeOnUbuntu(page: Page) {
     .getByRole('article', { name: 'Claude connections' });
 }
 
-test('installs a CLI missing in WSL, where the Desktop accounts join on their Windows logins', async ({
+test('installs a CLI missing in WSL, where the Desktop accounts join and sign in once', async ({
   page,
 }) => {
   await mockDesktop(page, 'computer-routing');
@@ -37,8 +37,9 @@ test('installs a CLI missing in WSL, where the Desktop accounts join on their Wi
     { provider: 'claude', environmentId: ubuntu },
   ]);
 
-  // The Desktop's Claude login joins Ubuntu by itself, under the same name, and Ubuntu borrows
-  // that login: although Ubuntu's own login is signed out, nothing asks to sign in there.
+  // The Desktop's Claude account joins Ubuntu by itself, under the same name, as a separate
+  // profile that signs in once there through Claude Code's own login: the Windows login is never
+  // lent to it.
   const workspace = await saved(page);
   const provider = (accountId: string) =>
     workspace.fleet.accounts.find((a: any) => a.id === accountId)?.provider;
@@ -52,10 +53,20 @@ test('installs a CLI missing in WSL, where the Desktop accounts join on their Wi
   expect(added).toEqual([expect.objectContaining({ accountId: desktopClaude.accountId })]);
   expect(added[0]).toMatchObject({ profile: 'isolated' });
   const row = claude.locator(`[data-connection="${added[0].id}"]`);
+  await expect(row).toContainText('Sign-in needed');
+  await expect(claude.getByRole('button', { name: /^Add .+ here$/ })).toHaveCount(0);
+  await row.getByRole('button', { name: 'Open sign-in' }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).signInCalls))
+    .toEqual([added[0].id]);
+  const connected = (id: string) =>
+    page.evaluate((id) => {
+      localStorage.setItem(`test-auth-connection-${id}`, 'ready');
+      (window as any).finishSignIn(id, 'connected');
+    }, id);
+  await connected(added[0].id);
   // Connected: no status or sign-in line under the account.
   await expect(row.locator('.connection-hint')).toHaveCount(0);
-  await expect(claude.getByText('Sign in as', { exact: false })).toHaveCount(0);
-  await expect(claude.getByRole('button', { name: /^Add .+ here$/ })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/wsl-setup-connections.png', animations: 'disabled' });
 
   // Removed there, it stays removed through later refreshes.
@@ -83,7 +94,7 @@ test('installs a CLI missing in WSL, where the Desktop accounts join on their Wi
     'Connect an account using the Linux CLI in this distribution.',
   );
 
-  // Manage account on Desktop brings it back on request, again with nothing to sign in to.
+  // Manage account on Desktop brings it back on request, and it signs in there again.
   await page
     .getByRole('article', { name: 'Desktop computer' })
     .getByRole('article', { name: 'Claude connections' })
@@ -97,20 +108,21 @@ test('installs a CLI missing in WSL, where the Desktop accounts join on their Wi
     (c: any) => c.environmentId === ubuntu && c.accountId === desktopClaude.accountId,
   );
   expect(again).toMatchObject({ profile: 'isolated' });
+  await expect
+    .poll(() => page.evaluate(() => (window as any).signInCalls))
+    .toEqual([added[0].id, again.id]);
+  await connected(again.id);
   const back = claude.locator(`[data-connection="${again.id}"]`);
   await expect(back.locator('.connection-hint')).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).signInCalls ?? [])).toEqual([]);
 
-  // When the Windows login signs out, Ubuntu says so, and its sign-in is the Windows one.
+  // Its login is its own: the Windows login signing out leaves Ubuntu's alone.
   await page.evaluate(
     (id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'),
     desktopClaude.id,
   );
   await refreshed();
-  await expect(back).toContainText('Sign-in needed');
-  await expect(back).toContainText('Open sign-in signs in on Windows');
-  await back.getByRole('button', { name: 'Open sign-in' }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).signInCalls)).toEqual([again.id]);
+  await expect(back.locator('.connection-hint')).toHaveCount(0);
+  await expect(back).not.toContainText('Sign-in needed');
 });
 
 test('an installer failure says why and can be tried again', async ({ page }) => {

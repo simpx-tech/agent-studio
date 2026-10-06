@@ -165,6 +165,7 @@ mod tests {
                 distribution: "Ubuntu".into(),
                 namespace: "test".into(),
                 job: uuid::Uuid::new_v4().to_string(),
+                shared: false,
             }),
         };
         // Missing bindings must fail instead of inspecting the shared folder.

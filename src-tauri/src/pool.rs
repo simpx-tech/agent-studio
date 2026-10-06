@@ -225,7 +225,7 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "plugins": crate::plugins::for_run(request),
         "sharedContext": request.shared_context,
         "program": exe.program,
-        "prefix": exe.prefix,
+        "prefix": crate::wsl::reusable_prefix(exe),
         "installed": installed(exe),
     })
     .to_string())

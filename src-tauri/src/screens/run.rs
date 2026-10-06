@@ -486,6 +486,7 @@ mod distribution {
                 distribution: distribution.into(),
                 namespace: namespace.into(),
                 job,
+                shared: false,
             }
             .cancel()
             .await;

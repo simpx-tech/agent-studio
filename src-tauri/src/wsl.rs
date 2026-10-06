@@ -21,11 +21,27 @@ pub struct Launch {
     pub distribution: String,
     pub namespace: String,
     pub job: String,
+    /// A separate Claude profile that shares the distribution's own Claude directory: the
+    /// launch links it there first (`wsl-share.sh`).
+    pub shared: bool,
+}
+/// The launch prefix without its per-launch job id, which only names that launch's cancel
+/// marker: a parked WSL process serves a later reply whose prefix otherwise matches.
+pub fn reusable_prefix(exe: &crate::providers::Executable) -> Vec<String> {
+    match &exe.wsl {
+        Some(launch) => exe
+            .prefix
+            .iter()
+            .filter(|arg| **arg != launch.job)
+            .cloned()
+            .collect(),
+        None => exe.prefix.clone(),
+    }
 }
 impl Launch {
     #[cfg(any(windows, test))]
     pub fn prefix(&self, provider: &str, binary: &str, profile: &str) -> Vec<String> {
-        vec![
+        let mut prefix = vec![
             "--distribution".into(),
             self.distribution.clone(),
             "--cd".into(),
@@ -34,8 +50,9 @@ impl Launch {
             "bash".into(),
             "-lc".into(),
             embedded_script(&format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
                 include_str!("wsl-env.sh"),
+                include_str!("wsl-share.sh"),
                 include_str!("wsl-launch.sh")
             )),
             "agent-studio".into(),
@@ -44,7 +61,11 @@ impl Launch {
             self.job.clone(),
             provider.into(),
             binary.into(),
-        ]
+        ];
+        if self.shared {
+            prefix.push("--agent-studio-shared".into());
+        }
+        prefix
     }
     pub async fn cancel(&self) {
         #[cfg(windows)]
@@ -125,6 +146,11 @@ pub async fn resolve(
             if !valid_linux_binary(&path) {
                 continue;
             }
+            let login = if profile.provider == provider && profile.isolated {
+                profile.id.as_str()
+            } else {
+                "existing"
+            };
             let launch = Launch {
                 distribution: distro,
                 namespace: if profile.namespace.is_empty() {
@@ -133,21 +159,8 @@ pub async fn resolve(
                     profile.namespace.clone()
                 },
                 job: uuid::Uuid::new_v4().to_string(),
+                shared: login != "existing" && profile.shares_directory(),
             };
-            let login = if profile.provider == provider && profile.isolated {
-                profile.id.as_str()
-            } else {
-                "existing"
-            };
-            // Boxed: renewing a lent login resolves the Windows CLI, which comes back here.
-            if provider == "claude" && login != "existing" {
-                Box::pin(crate::lending::sync(
-                    &profile,
-                    &launch.distribution,
-                    &launch.namespace,
-                ))
-                .await;
-            }
             return Ok(crate::providers::Executable {
                 provider: provider.into(),
                 program: "wsl.exe".into(),
@@ -370,7 +383,7 @@ mod tests {
             "wsl-inventory.sh",
             "wsl-launch.sh",
             "wsl-cancel.sh",
-            "wsl-lend.sh",
+            "wsl-share.sh",
             "folders-wsl.sh",
             "folders-windows-path.sh",
             "console-launch.sh",
@@ -381,7 +394,7 @@ mod tests {
             include_str!("wsl-inventory.sh"),
             include_str!("wsl-launch.sh"),
             include_str!("wsl-cancel.sh"),
-            include_str!("wsl-lend.sh"),
+            include_str!("wsl-share.sh"),
             include_str!("folders-wsl.sh"),
             include_str!("folders-windows-path.sh"),
             include_str!("console-launch.sh"),
@@ -421,13 +434,112 @@ mod tests {
             distribution: "Ubuntu ' $(literal)".into(),
             namespace: "agent-studio-test".into(),
             job: uuid::Uuid::new_v4().to_string(),
+            shared: false,
         };
         let prefix = launch.prefix("claude", "/home/test/CLI with spaces/claude", "existing");
         assert_eq!(prefix[1], "Ubuntu ' $(literal)");
         assert!(!prefix[7].contains("Ubuntu ' $(literal)"));
         assert_eq!(prefix.last().unwrap(), "/home/test/CLI with spaces/claude");
     }
+    #[test]
+    fn a_wsl_launch_keeps_one_reusable_identity_and_flags_shared_profiles() {
+        let launch = |job: String, shared| Launch {
+            distribution: "Ubuntu".into(),
+            namespace: "agent-studio".into(),
+            job,
+            shared,
+        };
+        let exe = |launch: Launch, profile: &str| crate::providers::Executable {
+            provider: "claude".into(),
+            program: "wsl.exe".into(),
+            prefix: launch.prefix("claude", "/home/u/.local/bin/claude", profile),
+            wsl: Some(launch),
+        };
+        let profile = "11111111-1111-4111-8111-111111111111";
+        let first = exe(launch(uuid::Uuid::new_v4().to_string(), true), profile);
+        let second = exe(launch(uuid::Uuid::new_v4().to_string(), true), profile);
+        // Each launch names its own cancel marker, yet a parked process serves the next reply.
+        assert_ne!(first.prefix, second.prefix);
+        assert_eq!(reusable_prefix(&first), reusable_prefix(&second));
+        assert_eq!(first.prefix.last().unwrap(), "--agent-studio-shared");
+        let own = exe(launch("job".into(), false), "existing");
+        assert!(!own.prefix.iter().any(|arg| arg == "--agent-studio-shared"));
+        assert_ne!(reusable_prefix(&first), reusable_prefix(&own));
+    }
     #[cfg(windows)]
+    /// Launches a profile that shares a throwaway Claude directory, passed as CLAUDE_CONFIG_DIR
+    /// through WSLENV so the distribution's real ~/.claude is never touched.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "Opt-in integration test against an installed WSL distribution; no provider prompts"]
+    async fn a_real_wsl_profile_links_the_shared_claude_directory_before_its_cli_starts() {
+        let distro = list(&["--list", "--quiet"])
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("Install a WSL distribution first");
+        let run = |script: String| {
+            let output = std::process::Command::new("wsl.exe")
+                .args(["-d", &distro, "--exec", "bash", "-lc", &script])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let namespace = format!("agent-studio-share-test-{}", uuid::Uuid::new_v4());
+        let profile = uuid::Uuid::new_v4().to_string();
+        let home = run("printf %s \"$HOME\"".into());
+        let source = format!("{home}/.cache/{namespace}-claude");
+        let config = format!("{home}/.local/share/{namespace}/profiles/claude/{profile}");
+        run(format!(
+            "mkdir -p '{config}/projects/k' '{source}' && printf transcript > '{config}/projects/k/s.jsonl'"
+        ));
+        let launch = Launch {
+            distribution: distro.clone(),
+            namespace: namespace.clone(),
+            job: uuid::Uuid::new_v4().to_string(),
+            shared: true,
+        };
+        let exe = crate::providers::Executable {
+            provider: "claude".into(),
+            program: "wsl.exe".into(),
+            prefix: launch.prefix("claude", "/bin/bash", &profile),
+            wsl: Some(launch),
+        };
+        let output = exe
+            .command()
+            .env("CLAUDE_CONFIG_DIR", &source)
+            .env("WSLENV", "CLAUDE_CONFIG_DIR/u")
+            .args([
+                "-c",
+                r#"readlink "$CLAUDE_CONFIG_DIR/projects"; cat "$CLAUDE_CONFIG_DIR/projects/k/s.jsonl"; echo; umask"#,
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        run(format!(
+            "rm -rf -- '{home}/.local/share/{namespace}' '{source}'"
+        ));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // The CLI reads its transcripts through the link, from the shared directory they moved to.
+        assert_eq!(lines[0], format!("{source}/projects"));
+        assert_eq!(lines[1], "transcript");
+        // The CLI creates files with the user's own permissions, not the launcher's private ones.
+        assert_ne!(lines[2], "0077");
+    }
     #[tokio::test]
     #[ignore = "Opt-in integration test against an installed WSL distribution; no provider prompts"]
     async fn real_wsl_bridge_preserves_stdin_isolates_profiles_and_kills_descendants() {
@@ -447,6 +559,7 @@ mod tests {
                 distribution: distro.clone(),
                 namespace: namespace.clone(),
                 job: uuid::Uuid::new_v4().to_string(),
+                shared: false,
             };
             Executable {
                 provider: "claude".into(),
