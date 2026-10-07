@@ -166,6 +166,8 @@ pub async fn claude_usage(
             "--permission-mode",
             "dontAsk",
             "--no-session-persistence",
+            "--settings",
+            &crate::retention::settings(),
         ])
         .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())

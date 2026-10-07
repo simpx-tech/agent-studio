@@ -473,6 +473,31 @@ pub(crate) async fn execute(
                 command = chat_command(&request, &root, &exe) => command?,
                 _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
             };
+            // A fresh Claude process resumes its session from the transcript, which Claude Code's
+            // cleanup may have deleted: then the reply starts a new session instead.
+            if let Some(session) = request.native_session.as_mut() {
+                let launch = command.as_std();
+                let cwd = if exe.wsl.is_some() {
+                    let args: Vec<_> = launch.get_args().collect();
+                    args.windows(2)
+                        .find(|a| a[0] == "--agent-studio-cwd")
+                        .map(|a| a[1].to_string_lossy().into_owned())
+                } else {
+                    launch
+                        .get_current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                };
+                let missing = tokio::select! {
+                    missing = session.verify_transcript(&exe, cwd) => missing,
+                    _ = cancel.cancelled() => return Ok(("cancelled".into(), String::new())),
+                };
+                if missing {
+                    if request.compact {
+                        return Err("Claude Code no longer has this chat's earlier session on this computer, so there is nothing to compact. Send a message to start a new session from the saved messages.".into());
+                    }
+                    command = chat_command(&request, &root, &exe).await?;
+                }
+            }
             if request.agent.provider == "claude"
                 && request.agent.model.is_empty()
                 && request.native_session.as_ref().is_some_and(|s| s.resumed)
@@ -511,6 +536,8 @@ pub(crate) async fn execute(
                             revision: 1,
                             text,
                         });
+                    } else if session.transcript_missing {
+                        let _ = channel.send(RunEvent::Progress { id: "studio-session-missing".into(), revision: 1, text: "Claude Code no longer has this chat's earlier session on this computer (it removes sessions unused for a while), so this reply continues from the saved messages. Earlier tool details and compacted context are not carried over.".into() });
                     } else if session.history_rewritten {
                         if request.messages.len() > 1 {
                             let _ = channel.send(RunEvent::Progress { id: "studio-session-rewound".into(), revision: 1, text: "Starting a new native session from the retained messages after a rewind or file Undo. Earlier tool details and compacted context are not carried over.".into() });

@@ -43,7 +43,7 @@ fn claude_command(
             "--permission-mode",
             "dontAsk",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            &serde_json::json!({"cleanupPeriodDays": crate::retention::DAYS, "disableAllHooks": true}).to_string(),
         ])
         .env_remove("CLAUDECODE")
         .env_remove("CODEX_THREAD_ID")

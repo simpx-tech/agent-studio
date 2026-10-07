@@ -1074,3 +1074,122 @@ async fn installed_claude_continues_a_wsl_chat_with_this_computers_cli() {
         Some(format!("\\\\wsl.localhost\\{distribution}\\tmp\\{scratch}\\work").as_str())
     );
 }
+
+/// A chat whose transcript Claude Code's cleanup deleted continues as a new session from its
+/// saved messages instead of failing to resume, and the new session is the one it keeps.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity."]
+async fn installed_claude_continues_a_chat_whose_transcript_was_cleaned_up() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let profile = crate::context::native_profile_root("claude").await.unwrap();
+    let cwd = folder.path().to_string_lossy().into_owned();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let (computer, environment) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let request = |messages: &serde_json::Value| -> RunRequest {
+        serde_json::from_value(
+            json!({"runId":uuid::Uuid::new_v4(),"conversationId":conversation,
+            "location":{"computerId":computer,"environmentId":environment,"path":cwd},
+            "agent":{"provider":"claude","model":"haiku","instructions":""},"messages":messages}),
+        )
+        .unwrap()
+    };
+    let reply = |request: RunRequest| {
+        let (exe, runtime) = (exe.clone(), runtime.clone());
+        async move {
+            let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+                .await
+                .unwrap();
+            let id = request.native_session.as_ref().unwrap().id().to_string();
+            let mut process =
+                crate::pool::Process::new(exe, command.spawn().unwrap(), "cleanup".into(), id)
+                    .unwrap();
+            let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let channel = EventSink::new(move |event| {
+                let _ = tx.send(event);
+                Ok(())
+            });
+            let mut questions = Questions::default()
+                .open(&request.run_id, None, channel.clone())
+                .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(300),
+                stream_turn(
+                    &mut process,
+                    &request,
+                    Some(&channel),
+                    CancellationToken::new(),
+                    None,
+                    Some(&mut questions),
+                    false,
+                ),
+            )
+            .await
+            .expect("Installed CLI test timed out");
+            process.kill().await;
+            drop(channel);
+            while received.try_recv().is_ok() {}
+            result.expect("Installed CLI failed")
+        }
+    };
+    let mut messages = json!([{"role":"user","text":"Remember the codeword KESTREL-2093 for later. Reply only OK."}]);
+    let mut first = request(&messages);
+    first.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &first).unwrap();
+    let original = first.native_session.as_ref().unwrap().id().to_string();
+    let (status, text) = reply(first).await;
+    assert_eq!(status, "complete");
+    let transcript = crate::native_instructions::find_record(&profile, "claude", &original)
+        .unwrap()
+        .expect("The first reply saved its transcript");
+    messages.as_array_mut().unwrap().extend([
+        json!({"role":"assistant","text":text}),
+        json!({"role":"user","text":"What was the codeword? Reply with the codeword only."}),
+    ]);
+    // While the transcript is there, the next reply resumes it.
+    let mut kept = crate::providers::sessions::Session::prepare(root.path(), &request(&messages))
+        .unwrap()
+        .unwrap();
+    assert!(kept.resumed);
+    assert!(!kept.verify_transcript(&exe, Some(cwd.clone())).await);
+    assert_eq!(kept.id(), original);
+    drop(kept);
+    // Claude Code's cleanup removes it, with the folder of files it kept beside it.
+    std::fs::remove_file(&transcript).unwrap();
+    let _ = std::fs::remove_dir_all(transcript.with_extension(""));
+    let mut second = request(&messages);
+    let mut session = crate::providers::sessions::Session::prepare(root.path(), &second)
+        .unwrap()
+        .unwrap();
+    assert!(session.verify_transcript(&exe, Some(cwd.clone())).await);
+    assert!(session.transcript_missing && !session.resumed);
+    let fresh = session.id().to_string();
+    assert_ne!(fresh, original);
+    second.native_session = Some(session);
+    let (status, text) = reply(second).await;
+    assert_eq!(status, "complete");
+    assert!(text.contains("KESTREL-2093"), "{text}");
+    let bound: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join("native-sessions")
+                .join(format!("{conversation}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bound["id"],
+        fresh.as_str(),
+        "The chat keeps its new session"
+    );
+    let continued = crate::native_instructions::find_record(&profile, "claude", &fresh)
+        .unwrap()
+        .expect("The new session was saved");
+    eprintln!("Continued {original} as {fresh}: {text}");
+    // The project folder named after the throwaway folder holds only this test's files.
+    std::fs::remove_dir_all(continued.parent().unwrap()).unwrap();
+}

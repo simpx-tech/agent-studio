@@ -3035,13 +3035,16 @@
     conversationScope = 'active';
     locationPending = false;
     draftSettings = settingsFor(workspace.preferences, provider);
+    // A new chat on a WSL folder runs inside its distribution, whichever folder or recent
+    // location it starts from.
+    const recent = (workspace.preferences.recentLocations ?? []).map((l) =>
+      insideDistribution(workspace.fleet, l),
+    );
     draftLocation = location
-      ? { ...location }
+      ? insideDistribution(workspace.fleet, { ...location })
       : computerId
         ? undefined
-        : workspace.preferences.recentLocations?.find(
-            (l) => locationConnections(workspace.fleet, l).length,
-          );
+        : recent.find((l) => locationConnections(workspace.fleet, l).length);
     if (computerId) draftComputerId = computerId;
     const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
     if (connection) {
@@ -3050,9 +3053,7 @@
       );
       draftComputerId = environment ? computerViewId(environment) : '';
       draftLocation =
-        workspace.preferences.recentLocations?.find(
-          (l) => locationExecutionId(l) === connection.environmentId,
-        ) ??
+        recent.find((l) => locationExecutionId(l) === connection.environmentId) ??
         (environment
           ? { computerId: environment.computerId, environmentId: environment.id, path: '' }
           : undefined);

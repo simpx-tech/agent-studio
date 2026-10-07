@@ -770,7 +770,8 @@ async fn claude_report_sources(
 ) -> Result<Value, String> {
     use std::process::Stdio;
     let mut command = exe.command();
-    let mut settings = json!({"disableAllHooks":true});
+    let mut settings =
+        json!({"cleanupPeriodDays": crate::retention::DAYS, "disableAllHooks": true});
     if let Some(directory) = memory_dir {
         settings["autoMemoryDirectory"] = json!(directory);
     }
@@ -1262,6 +1263,23 @@ pub async fn native_profile_root(provider: &str) -> Result<PathBuf, String> {
         return Ok(root);
     }
     native_default_root(provider).ok_or("Cannot locate the selected CLI profile".into())
+}
+
+/// The directory a CLI already resolved for the selected profile uses, as this computer reads it:
+/// inside a WSL distribution through its `\\wsl.localhost` share, with the paths the
+/// distribution's login shell reports, as its launch uses them.
+pub async fn resolved_profile_root(exe: &crate::providers::Executable) -> Result<PathBuf, String> {
+    match &exe.wsl {
+        Some(wsl) => {
+            let profile = crate::profiles::current();
+            let (_, config, bridge, _) =
+                wsl_paths(&wsl.distribution, &profile, &exe.provider).await?;
+            Ok(bridge
+                .ok_or("The selected WSL profile is unavailable")?
+                .join(config.to_string_lossy().trim_start_matches('/')))
+        }
+        None => native_profile_root(&exe.provider).await,
+    }
 }
 
 /// This computer's own CLI directory for a provider: the one the terminal uses.

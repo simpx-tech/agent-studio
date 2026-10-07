@@ -143,6 +143,8 @@ async fn claude_aliases(directory: &Path) -> Option<BTreeMap<String, String>> {
             "--permission-mode",
             "dontAsk",
             "--no-session-persistence",
+            "--settings",
+            &crate::retention::settings(),
         ])
         .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())

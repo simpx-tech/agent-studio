@@ -59,6 +59,9 @@ pub struct Session {
     /// The imported session is no longer on this computer, so the reply starts a new session
     /// from the imported messages.
     pub import_missing: bool,
+    /// The bound Claude transcript is gone, deleted by Claude Code's cleanup or by hand, so the
+    /// reply starts a new session from the saved messages (`verify_transcript`).
+    pub transcript_missing: bool,
 }
 
 struct Identity {
@@ -412,6 +415,7 @@ impl Session {
             transfer_path: None,
             import,
             import_missing: false,
+            transcript_missing: false,
             instructions_changed: previous
                 .as_ref()
                 .is_some_and(|p| !p.received || p.instructions != instructions),
@@ -512,6 +516,20 @@ impl Session {
             self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
             return Ok(());
         }
+        if provider == "claude" {
+            // A transcript Claude Code's cleanup deleted leaves the saved messages to continue.
+            let (config, id) = (source.clone(), previous.id.clone());
+            let present =
+                tokio::task::spawn_blocking(move || claude_transcript(&config, &id, None))
+                    .await
+                    .ok()
+                    .flatten();
+            if present == Some(false) {
+                self.transfer_from = None;
+                self.start_over();
+                return Ok(());
+            }
+        }
         let snapshot =
             snapshot_off_thread(source, target, provider, &previous.id, None, TRANSFER_LIMIT)
                 .await?;
@@ -600,6 +618,46 @@ impl Session {
         self.transfer_from = None;
         self.import_missing = true;
         Ok(())
+    }
+
+    /// Claude Code deletes a transcript some time after its last write (`retention`), and the
+    /// Claude app, the terminal or the user may as well. A reply that would resume a Claude session
+    /// whose transcript is gone starts a new session from the saved messages instead, as after a
+    /// rewind, and reports whether it did. Only a transcript known to be missing counts: when the
+    /// profile's transcripts cannot be read, the CLI resumes as before. `cwd` is the folder the
+    /// CLI runs in, which names the transcript's folder.
+    pub async fn verify_transcript(
+        &mut self,
+        exe: &crate::providers::Executable,
+        cwd: Option<String>,
+    ) -> bool {
+        if exe.provider != "claude" || !self.resumed || self.transfer_path.is_some() {
+            return false;
+        }
+        let Ok(config) = crate::context::resolved_profile_root(exe).await else {
+            return false;
+        };
+        let id = self.id().to_string();
+        let present =
+            tokio::task::spawn_blocking(move || claude_transcript(&config, &id, cwd.as_deref()))
+                .await
+                .ok()
+                .flatten();
+        if present != Some(false) {
+            return false;
+        }
+        self.start_over();
+        true
+    }
+
+    /// A new native session, bootstrapped from the saved messages, replaces the bound one.
+    fn start_over(&mut self) {
+        self.resumed = false;
+        self.transcript_missing = true;
+        self.instructions_changed = false;
+        self.shared_context_changed = false;
+        self.unconfirmed_message = None;
+        self.record.id = uuid::Uuid::new_v4().to_string();
     }
 
     // Persist immediately when the provider confirms its parent identity, before
@@ -889,6 +947,32 @@ async fn snapshot_off_thread(
     })
     .await
     .map_err(|_| "Cannot copy the native transcript".to_string())?
+}
+
+/// Whether the Claude profile at `config` holds the transcript of session `id`, kept as
+/// `projects/<folder>/<id>.jsonl` where the folder is named after the one the CLI ran in, every
+/// character but ASCII letters and digits turned into `-`. That name is tried first, then every
+/// project folder, since a folder can be moved or named differently. `None` when the projects
+/// folder cannot be read.
+fn claude_transcript(config: &Path, id: &str, cwd: Option<&str>) -> Option<bool> {
+    let projects = config.join("projects");
+    let name = format!("{id}.jsonl");
+    if let Some(cwd) = cwd {
+        let folder: String = cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        // Claude Code shortens longer names with a hash this does not compute.
+        if folder.len() <= 200 && projects.join(folder).join(&name).is_file() {
+            return Some(true);
+        }
+    }
+    for entry in std::fs::read_dir(&projects).ok()? {
+        if entry.ok()?.path().join(&name).is_file() {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 #[cfg(test)]
@@ -1424,6 +1508,108 @@ mod tests {
     }
     fn saved(session: &Session) -> Record {
         serde_json::from_slice(&std::fs::read(&session.path).unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn a_claude_session_whose_transcript_was_cleaned_up_starts_over_from_the_saved_messages()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let account = crate::profiles::Profile {
+            root: Some(config.path().to_path_buf()),
+            isolated: true,
+            ..profile("claude")
+        };
+        let exe = crate::providers::Executable {
+            provider: "claude".into(),
+            program: "claude".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        crate::profiles::scope(account, async {
+            let mut r = request();
+            let first = Session::prepare(root.path(), &r).unwrap().unwrap();
+            first.bind(first.id(), true).unwrap();
+            let id = first.id().to_string();
+            drop(first);
+            r.messages.push(message("assistant", "Earlier answer"));
+            r.messages.push(message("user", "Next"));
+            // Without a projects folder nothing proves the transcript gone: the CLI resumes.
+            let mut session = Session::prepare(root.path(), &r).unwrap().unwrap();
+            assert!(!session.verify_transcript(&exe, None).await);
+            assert!(session.resumed && session.id() == id);
+            drop(session);
+            // Where the CLI keeps it, under the folder it ran in or any other.
+            let folder = config.path().join("projects").join("C--work-my-app");
+            std::fs::create_dir_all(&folder).unwrap();
+            let transcript = folder.join(format!("{id}.jsonl"));
+            std::fs::write(&transcript, "{}\n").unwrap();
+            let mut session = Session::prepare(root.path(), &r).unwrap().unwrap();
+            for cwd in [Some("C:\\work\\my app"), Some("D:\\moved"), None] {
+                assert!(!session.verify_transcript(&exe, cwd.map(Into::into)).await);
+            }
+            assert!(session.resumed && !session.transcript_missing && session.id() == id);
+            // A Codex session or an account switch's copy is never checked this way.
+            let codex = crate::providers::Executable {
+                provider: "codex".into(),
+                ..exe.clone()
+            };
+            std::fs::remove_file(&transcript).unwrap();
+            assert!(!session.verify_transcript(&codex, None).await);
+            session.transfer_path = Some("host-owned-snapshot.jsonl".into());
+            assert!(!session.verify_transcript(&exe, None).await);
+            drop(session);
+            // Once Claude Code's cleanup deleted it, the reply starts a new session from the
+            // saved messages, as after a rewind.
+            let mut session = Session::prepare(root.path(), &r).unwrap().unwrap();
+            assert!(
+                session
+                    .verify_transcript(&exe, Some("C:\\work\\my app".into()))
+                    .await
+            );
+            assert!(session.transcript_missing && !session.resumed && !session.history_rewritten);
+            assert_ne!(session.id(), id);
+            assert!(session.unconfirmed_message.is_none() && !session.instructions_changed);
+            let fresh = session.id().to_string();
+            session.bind(&fresh, true).unwrap();
+            assert_eq!(saved(&session).id, fresh);
+            r.native_session = Some(session);
+            assert!(r.native_context().unwrap().contains("Earlier answer"));
+        })
+        .await;
+    }
+    #[test]
+    fn a_claude_transcript_is_found_by_its_folder_name_or_by_looking_through_every_folder() {
+        let config = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(claude_transcript(config.path(), &id, None), None);
+        let long = format!("/home/me/{}", "deep/".repeat(60));
+        let named: String = long
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        // Claude Code shortens names past 200 characters with a hash.
+        let folder = config
+            .path()
+            .join("projects")
+            .join(format!("{}-1x2y3z", &named[..200]));
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(
+            claude_transcript(config.path(), &id, Some(&long)),
+            Some(false)
+        );
+        std::fs::write(folder.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        assert_eq!(
+            claude_transcript(config.path(), &id, Some(&long)),
+            Some(true)
+        );
+        assert_eq!(
+            claude_transcript(
+                config.path(),
+                &uuid::Uuid::new_v4().to_string(),
+                Some(&long)
+            ),
+            Some(false)
+        );
     }
     #[test]
     fn manual_compaction_requires_an_existing_binding_and_cannot_switch_accounts() {

@@ -74,6 +74,32 @@ describe('computer and folder chat scope', () => {
     // Another computer's folder, or one of an environment no longer known, stays as it was chosen.
     const unknown = { ...fromDesktop, environmentId: crypto.randomUUID() };
     expect(insideDistribution(workspace.fleet, unknown)).toBe(unknown);
+    // A path into the distribution chosen as a Windows folder runs inside it too.
+    for (const path of [
+      '\\\\wsl.localhost\\Ubuntu\\home\\test\\project',
+      '\\\\wsl$\\ubuntu\\home\\test\\project\\',
+      '//wsl.localhost/Ubuntu/home//test/project',
+      '\\\\WSL.LOCALHOST\\UBUNTU\\home\\test\\project',
+    ])
+      expect(insideDistribution(workspace.fleet, { ...windows, path })).toEqual(location);
+    expect(
+      insideDistribution(workspace.fleet, { ...windows, path: '\\\\wsl.localhost\\Ubuntu' }),
+    ).toEqual({ ...location, path: '/' });
+    for (const path of [
+      '\\\\wsl.localhost\\Debian\\home\\test',
+      '\\\\server\\share\\project',
+      'C:\\wsl.localhost\\Ubuntu',
+    ]) {
+      const other = { ...windows, path };
+      expect(insideDistribution(workspace.fleet, other)).toBe(other);
+    }
+    // A scratch chat saved with Desktop running the folder is a new chat: it runs inside too.
+    expect(
+      scratchLocation(workspace.fleet, {
+        computerId: installation.computerId,
+        location: fromDesktop,
+      }),
+    ).toEqual(location);
   });
   it('uses the selected computer for the same WSL folder and preserves both routes across storage and sync', () => {
     const { workspace, installation, location } = fixture();

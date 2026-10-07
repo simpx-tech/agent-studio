@@ -48,15 +48,36 @@ export function locationExecutionEnvironment(fleet: Fleet, location: ChatLocatio
 /**
  * Where a new chat in this folder runs: a folder inside a WSL distribution runs inside it, with
  * that distribution's own CLI, as the Claude app runs one, so choosing it from the Windows
- * computer moves the chat there. Other folders run where they were chosen.
+ * computer moves the chat there, and so does a `\\wsl.localhost\<distribution>\…` path chosen
+ * there. Other folders run where they were chosen. Every new chat takes its folder through this;
+ * chats saved with Desktop running a WSL folder keep doing so.
  */
 export function insideDistribution(fleet: Fleet, location: ChatLocation): ChatLocation {
-  if (locationExecutionId(location) === location.environmentId) return location;
   const folder = fleet.environments.find((e) => e.id === location.environmentId);
+  const share = folder?.platform === 'windows' ? wslShare(location.path) : undefined;
+  if (share) {
+    const inside = fleet.environments.find(
+      (e) =>
+        e.platform === 'wsl' &&
+        e.discoveredOn === folder?.id &&
+        e.distribution?.toLowerCase() === share.distribution.toLowerCase(),
+    );
+    return inside
+      ? { computerId: inside.computerId, environmentId: inside.id, path: share.path }
+      : location;
+  }
+  if (locationExecutionId(location) === location.environmentId) return location;
   if (folder?.platform !== 'wsl') return location;
   const inside = { ...location };
   delete inside.executionEnvironmentId;
   return inside;
+}
+/** The distribution and Linux path that a Windows path into a WSL distribution names. */
+export function wslShare(path: string): { distribution: string; path: string } | undefined {
+  const match = /^(?:\\\\|\/\/)(?:wsl\.localhost|wsl\$)[\\/]+([^\\/]+)(?:[\\/]+(.*))?$/i.exec(path);
+  if (!match) return;
+  const rest = (match[2] ?? '').split(/[\\/]+/).filter(Boolean);
+  return { distribution: match[1], path: `/${rest.join('/')}` };
 }
 export function computerFolderEnvironments(fleet: Fleet, computerId: string) {
   const computer = computerViews(fleet).find((c) => c.id === computerId);
@@ -257,7 +278,8 @@ export function scratchLocation(
   fleet: Fleet,
   scratch: { computerId: string; location?: ChatLocation },
 ): ChatLocation | undefined {
-  if (scratch.location) return scratch.location;
+  // A scratch chat is a new chat: one saved on Desktop with a WSL folder runs inside it.
+  if (scratch.location) return insideDistribution(fleet, scratch.location);
   const environment = computerViews(fleet).find((c) => c.id === scratch.computerId)
     ?.environments[0];
   return environment

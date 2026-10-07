@@ -50,9 +50,10 @@ impl Launch {
             "bash".into(),
             "-lc".into(),
             embedded_script(&format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("wsl-env.sh"),
                 include_str!("wsl-share.sh"),
+                include_str!("wsl-kill.sh"),
                 include_str!("wsl-launch.sh")
             )),
             "agent-studio".into(),
@@ -70,8 +71,13 @@ impl Launch {
     pub async fn cancel(&self) {
         #[cfg(windows)]
         {
-            // Only our generated job marker is read. Never stop an entire WSL distribution.
-            let script = embedded_script(include_str!("wsl-cancel.sh"));
+            // Only our generated job marker and job are read. Never stop an entire WSL
+            // distribution.
+            let script = embedded_script(&format!(
+                "{}\n{}",
+                include_str!("wsl-kill.sh"),
+                include_str!("wsl-cancel.sh")
+            ));
             let mut command = tokio::process::Command::new("wsl.exe");
             command
                 .args([
@@ -87,7 +93,9 @@ impl Launch {
                 ])
                 .creation_flags(0x08000000)
                 .kill_on_drop(true);
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await;
+            // TERM, up to three seconds' grace, then KILL.
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(15), command.output()).await;
         }
     }
 }
@@ -506,6 +514,7 @@ mod tests {
             job: uuid::Uuid::new_v4().to_string(),
             shared: true,
         };
+        let job = launch.job.clone();
         let exe = crate::providers::Executable {
             provider: "claude".into(),
             program: "wsl.exe".into(),
@@ -518,7 +527,7 @@ mod tests {
             .env("WSLENV", "CLAUDE_CONFIG_DIR/u")
             .args([
                 "-c",
-                r#"readlink "$CLAUDE_CONFIG_DIR/projects"; cat "$CLAUDE_CONFIG_DIR/projects/k/s.jsonl"; echo; umask"#,
+                r#"readlink "$CLAUDE_CONFIG_DIR/projects"; cat "$CLAUDE_CONFIG_DIR/projects/k/s.jsonl"; echo; umask; echo "$AGENT_STUDIO_JOB"; tr -d ' \n' < "$CLAUDE_CONFIG_DIR/settings.json"; echo"#,
             ])
             .stdin(std::process::Stdio::null())
             .output()
@@ -539,6 +548,11 @@ mod tests {
         assert_eq!(lines[1], "transcript");
         // The CLI creates files with the user's own permissions, not the launcher's private ones.
         assert_ne!(lines[2], "0077");
+        // Its commands inherit the job a stop finds them by.
+        assert_eq!(lines[3], job);
+        // The shared directory keeps transcripts that the Claude app and the terminal would
+        // otherwise delete after 30 days.
+        assert_eq!(lines[4], r#"{"cleanupPeriodDays":3650}"#);
     }
     #[tokio::test]
     #[ignore = "Opt-in integration test against an installed WSL distribution; no provider prompts"]
@@ -678,12 +692,30 @@ mod tests {
             .await
             .unwrap();
         assert!(output.status.success());
+        // A process of the same user that the launch did not start, which a stop leaves alone.
+        let unrelated = tokio::process::Command::new("wsl.exe")
+            .args([
+                "-d",
+                &distro,
+                "--exec",
+                "bash",
+                "-c",
+                "setsid sleep 123 >/dev/null 2>&1 </dev/null & sleep 1; printf '%s' \"$!\"",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .await
+            .unwrap();
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        assert!(!unrelated.is_empty() && unrelated.chars().all(|c| c.is_ascii_digit()));
         let exe = make("existing");
+        // The CLI, a command of its process group, one in a session of its own (as Claude Code runs
+        // each shell command), and one left running by a parent that already ended.
         let mut child = exe
             .command()
             .args([
                 "-c",
-                "sleep 120 & descendant=$!; printf '%s %s\\n' \"$BASHPID\" \"$descendant\"; wait",
+                "sleep 120 & descendant=$!; setsid sleep 121 & detached=$!; orphan=$(setsid sh -c 'sleep 122 >/dev/null 2>&1 & echo $!'); printf '%s %s %s %s\\n' \"$BASHPID\" \"$descendant\" \"$detached\" \"$orphan\"; wait",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -696,30 +728,51 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        exe.kill(&mut child).await;
+        assert_eq!(pids.split_whitespace().count(), 4, "{pids}");
+        let running = |pid: String| {
+            let distro = distro.clone();
+            async move {
+                assert!(pid.chars().all(|c| c.is_ascii_digit()));
+                let output = tokio::process::Command::new("wsl.exe")
+                    .args([
+                        "-d",
+                        &distro,
+                        "--exec",
+                        "bash",
+                        "-c",
+                        "kill -0 -- \"$1\" 2>/dev/null && ! grep -q '^State:.*Z' \"/proc/$1/status\"",
+                        "check",
+                        &pid,
+                    ])
+                    .creation_flags(0x08000000)
+                    .output()
+                    .await
+                    .unwrap();
+                output.status.success()
+            }
+        };
         for pid in pids.split_whitespace() {
-            assert!(pid.chars().all(|c| c.is_ascii_digit()));
-            let mut verify = tokio::process::Command::new("wsl.exe");
-            let output = verify
-                .args([
-                    "-d",
-                    &distro,
-                    "--exec",
-                    "bash",
-                    "-c",
-                    "! kill -0 -- \"$1\" 2>/dev/null || grep -q '^State:.*Z' \"/proc/$1/status\"",
-                    "check",
-                    pid,
-                ])
-                .creation_flags(0x08000000)
-                .output()
-                .await
-                .unwrap();
             assert!(
-                output.status.success(),
-                "WSL descendant survived cancellation"
+                running(pid.into()).await,
+                "WSL process {pid} of {pids} did not start"
             );
         }
+        exe.kill(&mut child).await;
+        for pid in pids.split_whitespace() {
+            assert!(
+                !running(pid.into()).await,
+                "WSL process {pid} of {pids} survived cancellation"
+            );
+        }
+        assert!(
+            running(unrelated.clone()).await,
+            "A stop ended another process"
+        );
+        let _ = tokio::process::Command::new("wsl.exe")
+            .args(["-d", &distro, "--exec", "kill", &unrelated])
+            .creation_flags(0x08000000)
+            .output()
+            .await;
         // Early Stop must be respected even before the Linux wrapper creates its PID marker.
         let exe = make("existing");
         exe.wsl.as_ref().unwrap().cancel().await;

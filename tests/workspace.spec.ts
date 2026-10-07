@@ -2408,6 +2408,27 @@ test('a WSL folder chosen on Desktop runs inside its distribution, and older Des
   });
   saved = await page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
   expect(saved.conversations[0].settings.connectionId).toBe(windowsCodex.id);
+  // A new chat started from that older chat's folder runs inside the distribution.
+  await page
+    .getByRole('button', { name: 'New conversation in studio on Desktop', exact: true })
+    .click();
+  await expect(page.getByRole('combobox', { name: 'Computer', exact: true })).toHaveText(
+    'WSL · Ubuntu',
+  );
+  await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
+    'title',
+    '/home/test/studio',
+  );
+  await page.getByLabel('Message', { exact: true }).fill('A new chat in the same folder');
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+  const fresh = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(fresh.location).toMatchObject({
+    environmentId: '33333333-3333-4333-8333-333333333333',
+    path: '/home/test/studio',
+  });
+  expect(fresh.location.executionEnvironmentId).toBeUndefined();
 });
 
 test('a WSL computer without installed CLIs has an empty Agent dropdown', async ({ page }) => {

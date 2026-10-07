@@ -147,7 +147,8 @@ test('a sent 3D model opens in a viewer with its animation, and expands to full 
     inline,
   );
   await page.getByRole('button', { name: 'Close model preview' }).click();
-  await expect(page.getByLabel('Model preview')).toBeHidden();
+  // Exact: while the dialog closes, its Close model preview button matches the label too.
+  await expect(page.getByLabel('Model preview', { exact: true })).toBeHidden();
   await expect(reply.getByLabel('3D model figure.glb')).toBeVisible();
 
   // The model's bytes stay on the computer that ran the reply.

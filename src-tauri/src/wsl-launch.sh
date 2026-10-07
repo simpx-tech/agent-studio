@@ -53,6 +53,7 @@ if [ "$profile" != existing ]; then
       printf '%s\n' "Could not share $shared_directory with this account; its files were left in place." >&2
       exit 1
     fi
+    share_retain "$shared_directory" || true
     exec 9>&-
     umask 077
   fi
@@ -66,12 +67,16 @@ if [ "$profile" != existing ]; then
   fi
 fi
 umask "$user_umask"
-# A distinct Linux process group allows Stop to terminate CLI descendants as well.
-setsid "$binary" "$@" <&0 &
+# The CLI login keeps its transcripts in the directory the Claude app and the terminal use.
+if [ "$profile" = existing ] && [ "$provider" = claude ]; then
+  share_retain "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" || true
+fi
+# Its own process group and the job in its environment, which its commands inherit, let a stop
+# end everything the CLI started (`studio_kill`).
+AGENT_STUDIO_JOB=$job setsid "$binary" "$@" <&0 &
 child=$!
 cleanup() {
-  kill -TERM -- "-$child" 2>/dev/null || true
-  kill -KILL -- "-$child" 2>/dev/null || true
+  studio_kill "$job" "$child" || true
   rm -f -- "$marker" "$marker.cancel"
 }
 trap cleanup EXIT

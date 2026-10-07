@@ -67,3 +67,37 @@ share_link() {
     ln -s -- "$target" "$entry" || return 1
   done
 }
+# Keeps the transcripts of a Claude directory this distribution's Claude app and terminal share
+# with Agent Studio, as retention.rs does on Windows: a settings.json that sets no
+# cleanupPeriodDays gets it right after its opening brace, the rest of the file as it was, and a
+# directory without one gets one. A file that is a link, read-only, names the key anywhere or does
+# not start with an object is left alone.
+share_retain() {
+  local directory=$1 file text rest after separator tmp
+  file=$directory/settings.json
+  [ -d "$directory" ] || return 0
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    # noclobber creates the file only if nothing else did meanwhile.
+    (set -C; printf '{\n  "cleanupPeriodDays": 3650\n}\n' > "$file") 2>/dev/null || true
+    return 0
+  fi
+  if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -w "$file" ]; then return 0; fi
+  text=$(cat -- "$file" && printf x) || return 0
+  text=${text%x}
+  case $text in *'"cleanupPeriodDays"'*) return 0 ;; esac
+  rest=${text#"${text%%[![:space:]]*}"}
+  case $rest in '{'*) ;; *) return 0 ;; esac
+  after=${rest#'{'}
+  after=${after#"${after%%[![:space:]]*}"}
+  case $after in
+    '"'*) separator=',' ;;
+    '}'*) separator='' ;;
+    *) return 0 ;;
+  esac
+  tmp=$(mktemp "$directory/.settings.json.XXXXXX") || return 0
+  if printf '%s{\n  "cleanupPeriodDays": 3650%s%s' "${text%%'{'*}" "$separator" "${text#*'{'}" > "$tmp" \
+    && chmod --reference="$file" -- "$tmp" && mv -f -- "$tmp" "$file"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+}

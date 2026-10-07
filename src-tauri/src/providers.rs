@@ -116,6 +116,7 @@ fn search_dirs() -> Vec<PathBuf> {
 pub async fn resolve(provider: &str) -> Result<Executable, String> {
     if provider == "claude" {
         crate::linking::prepare().await;
+        crate::retention::prepare().await;
     }
     resolve_using(provider, &search_dirs(), |distribution| async move {
         crate::wsl::resolve(provider, &distribution).await
@@ -1206,6 +1207,7 @@ pub async fn chat_command(
                     c.arg("--dangerously-skip-permissions");
                 }
                 let mut settings = serde_json::json!({
+                    "cleanupPeriodDays": crate::retention::DAYS,
                     "env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"},
                     "permissions": {"ask": ["EnterPlanMode", "ExitPlanMode"]}
                 });
@@ -1251,6 +1253,8 @@ pub async fn chat_command(
                     "--permission-mode",
                     "dontAsk",
                     "--disable-slash-commands",
+                    "--settings",
+                    &crate::retention::settings(),
                 ]);
             }
         }
@@ -1593,10 +1597,13 @@ mod tests {
         r.conversation_only = true;
         assert!(r.validate().is_err());
         let c = chat_command(&r, root.path(), &exe).await.unwrap();
-        assert!(!c
-            .as_std()
-            .get_args()
-            .any(|a| a == "--fallback-model" || a == "--settings"));
+        let args: Vec<_> = c.as_std().get_args().map(|a| a.to_string_lossy()).collect();
+        assert!(!args.iter().any(|a| a == "--fallback-model"));
+        // Restricted work gets only the transcript retention period, never Fast mode.
+        assert_eq!(
+            args.windows(2).find(|a| a[0] == "--settings").unwrap()[1],
+            crate::retention::settings()
+        );
         r.conversation_only = false;
         r.agent.provider = "codex".into();
         assert!(r.validate().is_err());
@@ -1924,7 +1931,7 @@ mod tests {
                     assert!(args_contain("--tools", "default"));
                     assert!(args_contain(
                         "--settings",
-                        r#"{"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#
+                        r#"{"cleanupPeriodDays":3650,"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#
                     ));
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| matches!(
