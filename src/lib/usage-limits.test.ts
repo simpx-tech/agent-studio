@@ -16,7 +16,6 @@ import { contextFor } from './usage';
 import {
   claudeLimitLine,
   latestUsageLimit,
-  limitResets,
   replyUsageLimit,
   savedLimitComment,
   usageLimitSchema,
@@ -71,18 +70,6 @@ describe('usage limits', () => {
       'The generator now hits your limits.',
     ])
       expect(claudeLimitLine(text), text).toBe(false);
-  });
-
-  it('knows which limits name a time they reset', () => {
-    const limit = (text: string) => ({ revision: 1, text });
-    expect(limitResets(limit(line))).toBe(true);
-    expect(
-      limitResets(limit('You’ve hit your usage limit. Upgrade to Pro, or try again at 3:05 PM.')),
-    ).toBe(true);
-    expect(
-      limitResets(limit("You've reached your Fable limit. Switch to another model to continue.")),
-    ).toBe(false);
-    expect(limitResets(limit("You're out of usage credits. Run /usage-credits."))).toBe(false);
   });
 
   it('keeps the latest bounded record and saves it at once, apart from other replies', () => {

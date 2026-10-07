@@ -79,27 +79,23 @@ pub async fn read(
         let guidance_request: crate::providers::RunRequest = serde_json::from_value(serde_json::json!({"runId":uuid::Uuid::nil(),"agent":{"provider":provider,"model":"","instructions":""},"messages":[]})).map_err(|_| "Cannot inspect Agent Studio guidance")?;
         let mut result = NativeInstructions { provider: provider.clone(), checked_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64, blocks: vec![], notice: String::new(), studio_guidance: guidance_request.guidance() };
         if !matches!(provider.as_str(), "claude" | "codex") {
-            result.notice = "This provider does not expose a supported native prompt record.".into();
+            result.notice = "Not available for this provider.".into();
             return Ok(result);
         }
         let Some(id) = crate::providers::sessions::bound_id(&root, &conversation_id, &provider, location.as_ref())? else {
-            result.notice = "No native session has been recorded for this conversation. Send a message to create one; older imported chats may have no native record on this computer.".into();
+            result.notice = "No native session yet. Send a message first.".into();
             return Ok(result);
         };
         let config = crate::context::native_profile_root(&provider).await?;
         tokio::task::spawn_blocking(move || {
             let Some(path) = find_record(&config, &provider, &id)? else {
-                result.notice = "The bound native session record is unavailable in the selected CLI profile. It may have been moved or deleted.".into();
+                result.notice = "The native session record is unavailable.".into();
                 return Ok(result);
             };
             result.blocks = parse_file(&path, &provider, &id)?;
-            result.notice = if result.blocks.is_empty() {
-                "This native session has no supported instruction snapshot yet. Refresh after its first request, or check whether this CLI version records prompts."
-            } else if provider == "codex" {
-                "Base instructions, when available, describe the session start. Developer messages are unique recorded messages in chronological order and may belong to earlier turns. Model changes and compaction can change later input. Tool definitions, project files, and conversation history are separate."
-            } else {
-                "Latest system-prompt snapshot recorded by this Claude Code session. Compaction can replace it. Tool definitions, project files, and conversation history are separate."
-            }.into();
+            if result.blocks.is_empty() {
+                result.notice = "No instruction snapshot recorded yet.".into();
+            }
             Ok(result)
         }).await.map_err(|_| "Native instruction inspection failed")?
     }).await

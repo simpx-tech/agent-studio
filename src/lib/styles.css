@@ -1095,10 +1095,6 @@ pre {
   font-size: var(--text-lg);
   font-weight: 600;
 }
-.image-drop-overlay span {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
 .chat-toolbar {
   display: flex;
   justify-content: space-between;
@@ -1264,11 +1260,6 @@ pre {
 }
 .chat-empty h1 {
   font-size: var(--text-3xl);
-  margin-top: 8px;
-}
-.chat-empty > p {
-  font-size: var(--text-md);
-  color: var(--text-muted);
   margin-top: 8px;
 }
 
@@ -1446,9 +1437,6 @@ pre {
 }
 .reply-waiting > span:nth-child(3) {
   animation-delay: 0.3s;
-}
-.reply-waiting small {
-  margin-left: 8px;
 }
 
 /* ── Prose ────────────────────────────────────────────────────────────── */
@@ -2707,9 +2695,6 @@ pre {
   }
   .chat-empty h1 {
     font-size: var(--text-2xl);
-  }
-  .chat-empty > p {
-    font-size: var(--text-base);
   }
   .modal {
     padding: 20px;

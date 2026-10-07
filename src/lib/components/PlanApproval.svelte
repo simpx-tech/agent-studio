@@ -45,11 +45,6 @@
         ? 'Claude wants to enter plan mode.'
         : 'Approve this plan and let Claude implement it?'}
     </p>
-    <p class="muted small">
-      {approval.action === 'enter'
-        ? 'Claude can explore and prepare a plan. Implementation requires your approval.'
-        : 'Approval resumes full tool access for this reply. Your mode choice still applies to the next message.'}
-    </p>
     <div class="actions">
       <button type="button" class="primary" disabled={busy} onclick={() => submit('Approve')}
         >{approval.action === 'enter' ? 'Enter plan mode' : 'Approve and implement'}</button

@@ -303,29 +303,14 @@
             <dd>{money(usage.sessionCostUsd)}</dd>
           </div>{/if}
       </dl>
-      {#if timeTotal}<p>
-          Total AI time sums this and earlier saved AI replies in this conversation, including
-          stopped and failed replies.
-          {#if timeTotal.missing}
-            Timing is missing for {timeTotal.missing}
-            {timeTotal.missing === 1 ? 'reply' : 'replies'}; the total includes recorded time only.
-          {/if}
+      {#if timeTotal?.missing}<p>
+          Timing is missing for {timeTotal.missing}
+          {timeTotal.missing === 1 ? 'reply' : 'replies'}.
         </p>{/if}
-      {#if usage?.cachedInput != null}<p>Cached tokens are already included in input.</p>{/if}
-      <p>
-        {usage?.scope === 'session'
-          ? 'Cumulative native chat reading through this reply, not an additional per-reply charge. Estimates may differ from billing.'
-          : runningTotal
-            ? 'Saved before Agent Studio recorded per-reply Claude costs: the conversation’s running estimate through this reply, not an additional charge.'
-            : cost == null
-              ? 'No cost was reported for this reply. Older replies may not have a saved cost.'
-              : 'Estimate reported by the provider for this reply. Your plan determines actual billing.'}
-      </p>
+      {#if usage?.scope === 'session' || runningTotal}<p>
+          Chat total so far, not an additional charge.
+        </p>{/if}
       <AccountChanges {message} />
-      {#if message.settings?.provider === 'codex'}<p>
-          Native chat estimates cover the session through this reply. They are not additional
-          per-reply charges.
-        </p>{/if}
     </div>
   </div>
   <div

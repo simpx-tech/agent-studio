@@ -19,14 +19,3 @@ export const trayPlace = (behavior: WindowBehavior) =>
 /** Whether closing the window keeps the app running now. */
 export const keepsRunning = (behavior: WindowBehavior) =>
   behavior.closeToTray && !behavior.unavailable;
-
-/** What closing the window does now, and how to come back or quit. */
-export function closeSummary(behavior: WindowBehavior): string {
-  if (behavior.unavailable) return behavior.unavailable;
-  if (!behavior.closeToTray) return 'Closing the window quits Agent Studio and stops its replies.';
-  if (behavior.area === 'menuBar')
-    return 'Closing the window keeps Agent Studio in the menu bar. Open the window from the Dock or the menu bar icon, and quit from that icon.';
-  return behavior.clickOpens
-    ? 'Closing the window keeps Agent Studio in the system tray. Click its icon to open the window again, or right-click it and choose Quit Agent Studio.'
-    : 'Closing the window keeps Agent Studio in the system tray. Open the window again or quit from its icon’s menu.';
-}

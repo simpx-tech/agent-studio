@@ -135,13 +135,12 @@
     {:else if request}
       <p class="request-message">{request.message}</p>
       {#if request.mode === 'url' && request.url}
-        <p>Open this page to continue. The server verifies when the action is complete.</p>
+        <p>Open this page to continue.</p>
         <p class="destination" title={request.url}>{request.url}</p>
         <button class="secondary" onclick={open} disabled={busy}>Open page</button>
       {:else}
         <p class="hint">
-          Your answers will be sent to {receipt.serverName}. Do not enter passwords or other
-          secrets.
+          Sent to {receipt.serverName}. Don’t enter passwords or other secrets.
         </p>
         <form
           onsubmit={(e) => {

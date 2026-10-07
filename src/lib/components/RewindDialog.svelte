@@ -52,10 +52,6 @@
       void confirm();
     }}
   >
-    <p>
-      Return to before this message and put it back in the message box. A draft there stays after
-      it.
-    </p>
     <ChoicePicker
       field
       label="Rewind to message"
@@ -66,12 +62,7 @@
     />
     <p>
       {count}
-      {count === 1 ? 'message' : 'messages'} will be set aside. You can undo this rewind until you send
-      another message. Files stay as they are.
-    </p>
-    <p>
-      The next reply starts a new agent session from the retained messages. Earlier tool details are
-      not carried over.
+      {count === 1 ? 'message' : 'messages'} will be set aside; files unchanged.
     </p>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
     <div class="dialog-actions">

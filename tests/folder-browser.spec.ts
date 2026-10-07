@@ -23,7 +23,7 @@ test('folder browser offers breadcrumbs, places, filtering, hidden folders, and 
   await page.goto('/');
   const { dialog, crumbs, list, places } = await openBrowser(page);
   await expect(crumbs).toContainText('studio');
-  await expect(dialog.getByText('No subfolders. You can use this folder.')).toBeVisible();
+  await expect(dialog.getByText('No subfolders.')).toBeVisible();
   await expect(dialog.getByLabel('Filter folders', { exact: true })).toBeFocused();
 
   // Breadcrumb ancestors open directly; hidden folders stay out of the way by default.

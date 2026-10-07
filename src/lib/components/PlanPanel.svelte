@@ -9,9 +9,7 @@
 </script>
 
 <div class="plan-panel">
-  {#if message.workflow}<p class="plan-note">
-      Legacy prompt sequence. This is saved history from the removed custom sequencer.
-    </p>{/if}
+  {#if message.workflow}<p class="plan-note">Legacy prompt sequence (saved history).</p>{/if}
   {#if !steps.length}<p class="plan-note">The agent cleared its plan.</p>{/if}
   {#if message.plan?.explanation && !message.workflow}<p class="plan-note">
       {message.plan.explanation}
@@ -74,7 +72,7 @@
         ? message.workflow
           ? 'Stopped. Remaining steps were not run.'
           : 'Stopped. Unfinished steps remain unconfirmed.'
-        : 'Unfinished steps remain as reported; completion of the reply does not mark them done.'}
+        : 'Unfinished steps remain as reported.'}
     </p>{/if}
 </div>
 

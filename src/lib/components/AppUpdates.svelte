@@ -34,10 +34,6 @@
 
 <section aria-labelledby="updates-heading">
   <h2 id="updates-heading"><RefreshCw size={18} />App updates</h2>
-  <p>
-    Agent Studio downloads signed updates from GitHub Releases in the background. Restarting
-    installs them; it waits for replies running on this computer to finish.
-  </p>
   {#if status}
     <p class="state">Current version {status.currentVersion}</p>
     <p role="status" title={checked?.toLocaleString()}>

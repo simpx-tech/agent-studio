@@ -61,11 +61,6 @@
 
 <section aria-labelledby="claude-instructions-heading">
   <h2 id="claude-instructions-heading"><ScrollText size={18} />Claude chat instructions</h2>
-  <p>
-    Added to the system prompt of every Claude chat that Agent Studio runs, in any folder. They sync
-    with this workspace and apply from each chat's next reply. The Claude desktop app and terminal
-    do not use them.
-  </p>
   <textarea
     aria-label="Claude chat instructions"
     aria-describedby="claude-instructions-state"

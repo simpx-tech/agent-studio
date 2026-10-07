@@ -35,23 +35,23 @@ export function updateSummary(status: AppUpdateStatus): string {
   const version = status.version ? `version ${status.version}` : 'the update';
   switch (status.phase) {
     case 'unavailable':
-      return status.message ?? 'Automatic updates are unavailable for this copy.';
+      return status.message ?? 'Updates unavailable.';
     case 'idle':
-      return 'Agent Studio checks for updates shortly after it starts.';
+      return 'Not checked yet.';
     case 'checking':
       return 'Checking for updates…';
     case 'current':
-      return 'Agent Studio is up to date.';
+      return 'Up to date.';
     case 'downloading': {
       const progress = updateProgress(status);
       return `Downloading ${version}${progress === undefined ? '…' : ` (${progress}%)`}`;
     }
     case 'ready':
-      return `${status.version ? `Version ${status.version}` : 'An update'} is ready. Restart Agent Studio to finish updating.`;
+      return `${status.version ? `Version ${status.version}` : 'An update'} is ready.`;
     case 'installing':
-      return `Installing ${version}. Agent Studio will restart.`;
+      return `Installing ${version}…`;
     case 'failed':
-      return 'The last update attempt did not finish.';
+      return 'Update failed.';
   }
 }
 

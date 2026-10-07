@@ -186,10 +186,9 @@ test('a narrow Agent picker puts each account’s bars below its name', async ({
   const claude = page.getByRole('option', { name: 'Claude', exact: true });
   await expect(claude.locator('.quota-bar')).toHaveText(['5-hour70% used', 'Weekly25% used']);
   const name = (await claude.locator('.option-name').boundingBox())!;
-  const detail = (await claude.locator('.option-detail').boundingBox())!;
   const bars = (await claude.locator('.quota-bars').boundingBox())!;
   const list = (await page.getByRole('listbox').boundingBox())!;
-  expect(bars.y).toBeGreaterThanOrEqual(detail.y + detail.height);
+  expect(bars.y).toBeGreaterThanOrEqual(name.y + name.height);
   expect(Math.round(bars.x)).toBe(Math.round(name.x));
   expect(bars.x + bars.width).toBeLessThanOrEqual(list.x + list.width);
   await page.screenshot({ path: 'artifacts/agent-usage-picker-narrow.png' });

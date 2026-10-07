@@ -27,7 +27,6 @@
 
 <section aria-labelledby="appearance-heading">
   <h2 id="appearance-heading"><Palette size={18} />Appearance</h2>
-  <p>Choose how Agent Studio looks on this device. System follows your operating system setting.</p>
   <div class="theme-options" role="radiogroup" aria-label="Theme" bind:this={group}>
     {#each options as option (option.id)}
       <button

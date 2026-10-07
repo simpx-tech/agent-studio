@@ -103,17 +103,13 @@
 </script>
 
 {#if !supported}
-  <p>Plugin management is unavailable for this agent.</p>
+  <p>Unavailable for this agent.</p>
 {:else}
   <div class="plugin-management">
-    <p class="help">
-      Manage plugins in this account’s CLI profile on the selected computer. Changes apply to the
-      next reply.
-    </p>
     <button class="text-button" disabled={busy} onclick={() => run({ kind: 'list' })}
       >Refresh plugins</button
     >
-    {#if running}<p class="help">Wait for the reply to finish before changing plugins.</p>{/if}
+    {#if running}<p class="help">Wait for the reply to finish.</p>{/if}
     {#if error}<p role="alert" class="error-banner">{error}</p>{/if}
     {#if notice}<p role="status">{notice}</p>{/if}
     {#if busy}<p role="status">
@@ -121,7 +117,7 @@
       </p>{/if}
     {#if evaluation}<button class="secondary" onclick={() => cancel()}>Cancel evaluation</button
       >{/if}
-    {#if result && !result.plugins.length}<p>No installed plugins were reported.</p>{/if}
+    {#if result && !result.plugins.length}<p>No plugins installed.</p>{/if}
     {#each (result?.plugins ?? []).filter((p) => `${p.name} ${p.id} ${p.scope}`
         .toLowerCase()
         .includes(search.toLowerCase())) as plugin (plugin.id + plugin.scope)}
@@ -175,11 +171,7 @@
           </div>{/if}
         {#if evalId === plugin.id}
           <div class="form">
-            <p>
-              Evaluation runs this plugin’s test prompts using the selected account. It can consume
-              paid usage and saves a local report on the selected computer. Reports are not
-              published.
-            </p>
+            <p>Can use this account’s paid usage.</p>
             <label
               >Evaluation budget (USD)<input
                 type="number"
@@ -232,21 +224,13 @@
           maxlength="200"
         /></label
       >
-      <p class="help">
-        Install a known plugin from a source already configured in this CLI. Claude installs into
-        the selected user profile.
-      </p>
       <button class="secondary" disabled={busy || running || !installId.trim()}
         >Install plugin</button
       >
     </form>
     <details class="form">
       <summary>Temporary sources for this conversation</summary>
-      <p class="help">
-        Use absolute paths on the selected computer, one per line. These sources apply to the next
-        reply and last until the execution host restarts.
-      </p>
-      {#if !conversationId}<p>Send a message first to bind these sources to a conversation.</p>{/if}
+      {#if !conversationId}<p>Send a message first.</p>{/if}
       {#if settings.provider === 'claude'}
         <label
           >Plugin directories or zip files<textarea

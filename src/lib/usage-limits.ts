@@ -18,12 +18,6 @@ export function latestUsageLimit(left?: UsageLimit, right?: UsageLimit): UsageLi
   return right.revision > left.revision ? right : left;
 }
 
-/**
- * Whether the limit's line names a time it resets ("resets 1:50pm", "try again at 3:05 PM"),
- * rather than credits to buy or another model to choose, which the line itself explains.
- */
-export const limitResets = (limit: UsageLimit) => /\bresets?\b|\btry again\b/i.test(limit.text);
-
 /** Claude Code's model name for the messages it writes itself: they ran no request. */
 export const syntheticModel = '<synthetic>';
 

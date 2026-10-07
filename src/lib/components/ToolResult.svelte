@@ -260,9 +260,7 @@
             {/if}
           </div>
           {#if !runId && !empty}
-            <p class="result-note">
-              This reply has no run identity, so its output cannot be found.
-            </p>
+            <p class="result-note">Output unavailable for this reply.</p>
           {:else if loading && !output}
             <p class="result-note" role="status">
               <LoaderCircle size={13} class="spinning" aria-hidden="true" />Loading output…
@@ -307,9 +305,7 @@
               </div>
             {/if}
             {#if partial}<p class="result-note">
-                {#if full}Showing the first and last 8 MB of each stream; the complete {formatBytes(
-                    kept,
-                  )} are kept on the computer that ran it.
+                {#if full}Showing the first and last 8 MB of each stream.
                 {:else}Showing the first and last part of {formatBytes(kept)}.
                   <button
                     type="button"

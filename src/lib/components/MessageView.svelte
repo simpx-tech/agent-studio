@@ -19,7 +19,7 @@
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
   import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
-  import { limitResets, replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
+  import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
   import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
@@ -172,9 +172,7 @@
           class="live-label"
           class:waiting
           class:idle={!waiting && idle}
-          title={!waiting && idle
-            ? 'Claude’s turn ended and it waits for background work to report. A message you send now goes at once.'
-            : undefined}
+          title={!waiting && idle ? 'A message sent now goes at once.' : undefined}
           >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if idle}<Hourglass
               size={13}
               aria-hidden="true"
@@ -187,10 +185,7 @@
               : 'Responding'}{/if}</span
         >{/if}
     </div>
-    {#if mismatch}<p
-        class="model-mismatch"
-        title={`The Model picker showed ${mismatch.picked} when this reply was sent, but Claude Code reported ${mismatch.ran}. An older Claude Code maps Opus, Sonnet, Fable and Haiku to older models, and a fallback model answers when the chosen one is unavailable.`}
-      >
+    {#if mismatch}<p class="model-mismatch">
         <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
       </p>{/if}
     {#if message.role === 'user'}
@@ -290,21 +285,14 @@
       {#if !content.length && !(structured && text) && message.status === 'running' && !message.blocks.length && !drafts.length}<div
           class="reply-waiting"
         >
-          <span></span><span></span><span></span><small>Making room for a good answer…</small>
+          <span></span><span></span><span></span>
         </div>{/if}
       {#if limit}<div class="usage-limit" role="status">
           <Hourglass size={15} aria-hidden="true" />
           <div class="usage-limit-text">
             <p>{limit.text}</p>
-            {#if message.status !== 'running' && limitResets(limit)}<p class="usage-limit-hint">
-                Send a message once the limit resets to continue.
-              </p>{/if}
           </div>
-          {#if switchAccount}<button
-              type="button"
-              class="secondary"
-              title="Choose another account of this agent for the next message"
-              onclick={switchAccount}
+          {#if switchAccount}<button type="button" class="secondary" onclick={switchAccount}
               ><ArrowRightLeft size={14} aria-hidden="true" />Switch account</button
             >{/if}
         </div>
@@ -312,7 +300,7 @@
           <CircleAlert size={15} />{message.error}
         </div>{/if}
       {#if message.status === 'cancelled' && !message.error}<p class="muted small">
-          Response stopped. Partial text has been kept.
+          Response stopped.
         </p>{/if}
       {#if artifacts.length || message.screens?.length}<div class="response-extras">
           {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
@@ -465,12 +453,6 @@
     margin: 0;
     color: var(--text);
     font-weight: 500;
-  }
-  .usage-limit-text .usage-limit-hint {
-    margin-top: 2px;
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-    font-weight: 400;
   }
   .usage-limit button {
     margin-left: auto;

@@ -378,11 +378,7 @@
         <Maximize2 size={13} aria-hidden="true" />
       </button>
     {/if}
-    <span
-      class="model-size"
-      title="Too large to load on this device, so the computer that ran the reply sent eight views of it. Open the reply there to turn the model freely."
-      >{label} · {modelViewCount} views</span
-    >
+    <span class="model-size" title="Too large to load here">{label} · {modelViewCount} views</span>
   </div>
 {/snippet}
 

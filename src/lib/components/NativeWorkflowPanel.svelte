@@ -40,7 +40,7 @@
               {#if agent.durationMs !== null}<span>{formatReplyTime(agent.durationMs)}</span>{/if}
             </div>
             {#if agent.result}<p class="agent-result">{agent.result}</p>{:else}<p class="muted">
-                Claude has not reported a result preview for this agent.
+                No result preview.
               </p>{/if}
           </div>
         </details>
@@ -49,18 +49,13 @@
   {/each}
   {#if !run.phases.length && !run.agents.length}<p class="muted">
       {message.status === 'running' && ['pending', 'running'].includes(run.status)
-        ? 'Waiting for Claude’s phase and agent updates.'
-        : 'Claude did not report phase or agent details.'}
+        ? 'Waiting for phases and agents…'
+        : 'No phase or agent details reported.'}
     </p>{/if}
   {#if run.error}<p role="alert">{run.error}</p>{/if}
-  {#if run.limited}<p class="muted">
-      The display limit was reached. Claude may have additional phases or agents.
-    </p>{/if}
+  {#if run.limited}<p class="muted">Display limit reached; more may exist.</p>{/if}
   {#if run.scriptPath}<details class="script-location">
       <summary>Workflow script</summary><code>{run.scriptPath}</code>
-      <p class="muted">
-        Ask Claude to save this script as a project or personal workflow to run it again by name.
-      </p>
     </details>{/if}
   {#if message.nativeWorkflows?.limited}<p class="muted">
       Only the first 16 native workflow runs are shown.

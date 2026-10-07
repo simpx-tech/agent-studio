@@ -61,18 +61,12 @@ impl Scan {
                     }
                     let event = event_name(&json!(event));
                     let kind = handler_type(&handler["type"]);
-                    let mut detail = format!(
-                        "{kind} hook discovered in configuration; execution is unconfirmed."
+                    let detail = facts(
+                        None,
+                        identifier(&group["matcher"], 200),
+                        handler["async"] == true,
+                        handler["timeout"].as_u64(),
                     );
-                    if let Some(matcher) = identifier(&group["matcher"], 200) {
-                        detail.push_str(&format!(" Matcher: {matcher}."));
-                    }
-                    if handler["async"] == true {
-                        detail.push_str(" Runs asynchronously.");
-                    }
-                    if let Some(timeout) = handler["timeout"].as_u64() {
-                        detail.push_str(&format!(" Timeout: {timeout}s."));
-                    }
                     self.hook(
                         &self.display(path),
                         format!("{event} · {kind} {count}"),
@@ -132,6 +126,29 @@ impl Scan {
     }
 }
 
+/// What a hook's entry shows beyond its event and handler: its trust, matcher and timing.
+fn facts(
+    trust: Option<&str>,
+    matcher: Option<&str>,
+    run_async: bool,
+    timeout: Option<u64>,
+) -> String {
+    let mut facts = vec![];
+    if let Some(trust) = trust {
+        facts.push(format!("Trust: {trust}"));
+    }
+    if let Some(matcher) = matcher {
+        facts.push(format!("Matcher: {matcher}"));
+    }
+    if run_async {
+        facts.push("Async".into());
+    }
+    if let Some(timeout) = timeout {
+        facts.push(format!("Timeout: {timeout}s"));
+    }
+    facts.join(" · ")
+}
+
 // Discard commands, prompts, MCP targets, hashes, raw diagnostics and other config at the IPC boundary.
 pub(super) fn codex_report(report: &mut Value, result: &Value, folder: &str) {
     let Some(groups) = result["data"].as_array() else {
@@ -184,13 +201,11 @@ pub(super) fn codex_report(report: &mut Value, result: &Value, folder: &str) {
 
 pub(super) fn merge_codex(scan: &mut Scan, report: &Value) {
     let Some(hooks) = report["hooks"].as_array() else {
-        scan.note("Codex did not return a hook catalog. Hook availability is unknown; this CLI may not support hooks/list.");
+        scan.note("Codex returned no hook catalog; hook availability is unknown.");
         return;
     };
     if report["hookIncomplete"] == true {
-        scan.note(
-            "Codex reported hook discovery warnings or errors. The hook catalog may be incomplete.",
-        );
+        scan.note("The Codex hook catalog may be incomplete.");
     }
     if report["hookTruncated"] == true {
         scan.snapshot.truncated = true;
@@ -208,18 +223,12 @@ pub(super) fn merge_codex(scan: &mut Scan, report: &Value) {
         } else {
             "unknown"
         };
-        let mut detail = format!(
-            "{kind} hook reported by the selected CLI. Trust: {trust}. Execution is unconfirmed."
+        let detail = facts(
+            Some(trust),
+            hook["matcher"].as_str(),
+            hook["async"] == true,
+            hook["timeout"].as_u64(),
         );
-        if let Some(matcher) = hook["matcher"].as_str() {
-            detail.push_str(&format!(" Matcher: {matcher}."));
-        }
-        if hook["async"] == true {
-            detail.push_str(" Runs asynchronously.");
-        }
-        if let Some(timeout) = hook["timeout"].as_u64() {
-            detail.push_str(&format!(" Timeout: {timeout}s."));
-        }
         scan.hook(
             hook["path"].as_str().unwrap_or_default(),
             format!("{event} · {kind} {}", index + 1),
@@ -228,7 +237,6 @@ pub(super) fn merge_codex(scan: &mut Scan, report: &Value) {
             detail,
         );
     }
-    scan.note("Hook configuration and trust are reported by Codex. Inspection does not execute hooks. Work history records only lifecycle events actually reported by the CLI; asynchronous hooks may not emit them.");
 }
 
 #[cfg(test)]

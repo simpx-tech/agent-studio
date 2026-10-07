@@ -61,7 +61,7 @@ describe('usage and context semantics', () => {
     };
     expect(creditReading('codex', codex)?.value).toBe('0.00 credits');
     expect(creditReading('codex', codex)?.rows).toEqual([
-      { label: 'Estimated value (USD)', value: '$0.00' },
+      { label: 'Estimated value (US$0.04 per credit)', value: '$0.00' },
       { label: 'Usage resets available', value: '2' },
     ]);
     expect(creditReading('claude', codex)?.value).toBe('Not reported');
@@ -110,7 +110,6 @@ describe('usage and context semantics', () => {
     expect(reading.rows.find((r) => r.label === 'Remaining under cap')?.value).toMatch(
       /USD\s87.50/,
     );
-    expect(reading.detail).toContain('not a credit balance');
     if (claude.credits?.kind === 'claude') {
       claude.credits.enabled = false;
       claude.credits.limit = null;
@@ -135,15 +134,13 @@ describe('usage and context semantics', () => {
       [0.01, '<$0.01'],
     ] as const) {
       expect(valueFor(balance)?.rows).toContainEqual({
-        label: 'Estimated value (USD)',
+        label: 'Estimated value (US$0.04 per credit)',
         value: dollars,
       });
     }
-    expect(valueFor(4322.4487)?.detail).toContain('US$0.04 per credit');
-    expect(valueFor(4322.4487)?.detail).toContain('checkout discounts and taxes');
     for (const balance of [null, -1, NaN, Infinity]) {
       expect(valueFor(balance)?.rows).not.toContainEqual(
-        expect.objectContaining({ label: 'Estimated value (USD)' }),
+        expect.objectContaining({ label: 'Estimated value (US$0.04 per credit)' }),
       );
     }
     expect(valueFor(5000, true)?.rows).not.toContainEqual(

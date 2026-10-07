@@ -76,20 +76,14 @@
       onclick={() => refresh++}><RefreshCw size={15} class={loading ? 'spinning' : ''} /></button
     >
   </div>
-  <p>
-    Recorded by the CLI used for this conversation. Provider desktop apps can add further
-    instructions.
-  </p>
   {#if !conversationId}
-    <p class="native-empty">
-      Send the first message in this conversation to create a native session record.
-    </p>
+    <p class="native-empty">Send a message first.</p>
   {:else if error}<p class="error-banner" role="alert">{error}</p>{/if}
   {#if loading}<p role="status">
       {snapshot ? 'Updating recorded instructions…' : 'Reading the conversation’s native record…'}
     </p>{/if}
   {#if snapshot}
-    <p class="native-notice">{snapshot.notice}</p>
+    {#if snapshot.notice}<p class="native-notice">{snapshot.notice}</p>{/if}
     <p class="native-meta">
       Checked {timestamp(snapshot.checkedAt)} · {snapshot.blocks.length
         ? 'Recorded text'
@@ -118,15 +112,6 @@
     {#if snapshot.studioGuidance}
       <details class="native-block studio-guidance">
         <summary>Agent Studio additions · current app version</summary>
-        <p>
-          App guidance supplied as user context when a native conversation starts. This is the
-          current app’s text; an older conversation may have started with different wording. Your
-          conversation instructions appear separately above.
-        </p>
-        {#if settings.provider === 'claude'}<p>
-            Claude chat instructions from Settings are appended to the system prompt, so the
-            recorded snapshot above includes the text in use when it was captured.
-          </p>{/if}
         <pre aria-label="Current Agent Studio guidance">{snapshot.studioGuidance}</pre>
       </details>
     {/if}

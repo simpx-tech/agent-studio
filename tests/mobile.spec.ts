@@ -422,9 +422,7 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
       'Offline · On Desktop QA',
     );
     await page.getByRole('option', { name: 'WSL · Ubuntu QA', exact: true }).click();
-    await expect(page.locator('.setup-hint')).toContainText(
-      'WSL · Ubuntu QA is offline. Open Agent Studio on Desktop QA',
-    );
+    await expect(page.locator('.setup-hint')).toContainText('WSL · Ubuntu QA is offline.');
     await expectSynced(page);
     await expect(page.getByText(/Could not refresh models/)).toHaveCount(0);
     expect(jobRequests).toBe(offlineJobRequests);

@@ -52,12 +52,10 @@ describe('app updates', () => {
 
   it('summarizes every phase without inventing versions', () => {
     expect(updateSummary(status({ phase: 'ready', version: '0.3.0' }))).toBe(
-      'Version 0.3.0 is ready. Restart Agent Studio to finish updating.',
+      'Version 0.3.0 is ready.',
     );
-    expect(updateSummary(status({ phase: 'ready' }))).toBe(
-      'An update is ready. Restart Agent Studio to finish updating.',
-    );
-    expect(updateSummary(status({ phase: 'current' }))).toBe('Agent Studio is up to date.');
+    expect(updateSummary(status({ phase: 'ready' }))).toBe('An update is ready.');
+    expect(updateSummary(status({ phase: 'current' }))).toBe('Up to date.');
     expect(updateSummary(status({ phase: 'unavailable', message: 'Development build.' }))).toBe(
       'Development build.',
     );

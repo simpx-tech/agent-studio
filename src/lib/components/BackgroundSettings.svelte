@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { AppWindow } from '@lucide/svelte';
   import { setCloseToTray, windowBehavior, type WindowBehavior } from '$lib/transport';
-  import { closeSummary, keepsRunning, trayPlace } from '$lib/window-behavior';
+  import { keepsRunning, trayPlace } from '$lib/window-behavior';
   let behavior = $state<WindowBehavior>();
   let busy = $state(false);
   let error = $state('');
@@ -38,10 +38,6 @@
 
 <section aria-labelledby="background-heading">
   <h2 id="background-heading"><AppWindow size={18} />Background</h2>
-  <p>
-    Agent Studio can keep running after you close its window: replies keep going, notifications
-    still arrive, and your other devices can still run chats on this computer.
-  </p>
   {#if behavior}
     <label class="checkbox"
       ><input
@@ -51,7 +47,7 @@
         onchange={(event) => change(event.currentTarget)}
       /><span>Keep running in the {trayPlace(behavior)} when the window closes</span></label
     >
-    <p role="status">{closeSummary(behavior)}</p>
+    {#if behavior.unavailable}<p role="status">{behavior.unavailable}</p>{/if}
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
 </section>

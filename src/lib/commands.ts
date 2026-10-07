@@ -9,24 +9,25 @@ export type ComposerCommand = {
   kind: 'app' | 'native' | 'skill' | 'compact';
   skill?: SkillReference;
 };
+// Only commands whose name alone could mislead say more.
 export const appCommands: ComposerCommand[] = [
-  ['help', 'Show commands and skills'],
-  ['new', 'Start a new conversation'],
-  ['model', 'Choose the model for your next message'],
-  ['reasoning', 'Choose reasoning for your next message'],
-  ['instructions', 'Edit conversation instructions'],
-  ['context', 'Inspect model context and available skills'],
-  ['usage', 'Show usage and context limits'],
-  ['rewind', 'Return to an earlier message'],
-  ['undo', 'Undo the latest response’s recorded file edits'],
-  ['import', 'Import chats from Claude Code and Codex'],
-  ['screens', 'Open the screens your chats saved'],
-  ['connections', 'Manage computers and agent accounts'],
-  ['settings', 'Notifications, Claude instructions, workspace administration, and data'],
+  ['help', ''],
+  ['new', ''],
+  ['model', ''],
+  ['reasoning', ''],
+  ['instructions', ''],
+  ['context', 'Model context'],
+  ['usage', ''],
+  ['rewind', ''],
+  ['undo', 'Undo file edits'],
+  ['import', 'Import chats'],
+  ['screens', ''],
+  ['connections', ''],
+  ['settings', ''],
 ].map(([name, detail]) => ({
   id: `app:${name}`,
   name: `/${name}`,
-  detail: `App · ${detail}`,
+  detail,
   kind: 'app',
 }));
 
@@ -71,14 +72,14 @@ export function commandChoices(
       id: 'app:fast',
       name: '/fast',
       kind: 'app',
-      detail: 'App · Configure Fast mode for the next reply · /fast on, off, or default',
+      detail: 'Fast mode · on, off or default',
     });
   if (provider === 'claude' || provider === 'codex')
     choices.push({
       id: 'compact',
       name: '/compact',
       kind: 'compact',
-      detail: 'Compact the current native conversation context',
+      detail: 'Compact context',
     });
   // The command catalog was introduced with native skill-input support. Older
   // hosts omit it and must not silently accept then discard a skill reference.
@@ -103,7 +104,7 @@ export function commandChoices(
         id: `skill:${entry.path}`,
         name: `/${entry.name}`,
         kind: 'skill',
-        detail: `Skill · ${entry.scope} · ${entry.path}`,
+        detail: `Skill · ${entry.scope}`,
         title: entry.path,
         skill: { name: entry.name, path: entry.path },
       });

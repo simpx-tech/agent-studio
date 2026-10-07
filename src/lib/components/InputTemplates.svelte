@@ -207,7 +207,6 @@
 
   {#if mode === 'library'}
     <div class="template-body">
-      <p class="intro">Reusable prompts with inputs you fill in each time.</p>
       {#if templates.length}
         <label
           >Find a template<input
@@ -258,7 +257,6 @@
         <div class="template-empty">
           <FileText size={28} />
           <p>No templates yet</p>
-          <span>Create a prompt and add named inputs wherever you need them.</span>
         </div>
       {/if}
       {#if deleting}
@@ -322,10 +320,6 @@
             onclick={addField}><Plus size={14} />Add input field</button
           >
         </div>
-        <p class="intro">
-          Use {'{{field name}}'} for each custom input. Repeating a name uses the same value. Up to 20
-          inputs; plain prompts work too.
-        </p>
         {#if fieldInfo.error}<p class="template-error" role="alert">{fieldInfo.error}</p>
         {:else if fieldInfo.names.length}<div class="template-fields" aria-label="Template inputs">
             {#each fieldInfo.names as field}<span>{field}</span>{/each}
@@ -347,9 +341,6 @@
       }}
     >
       <div class="template-body">
-        <p class="intro">
-          Fill in the inputs, then review your message. You can edit it again before sending.
-        </p>
         {#each fieldInfo.names as field}
           <label
             >{field}<textarea
@@ -447,8 +438,7 @@
     padding-top: 16px;
     flex-wrap: wrap;
   }
-  .intro,
-  .template-empty span {
+  .intro {
     color: var(--text-muted);
     font-size: var(--text-base);
     line-height: var(--leading-normal);

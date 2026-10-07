@@ -281,20 +281,13 @@
     </div>
   </header>
   {#if !online}<div class="setup-hint neutral" role="status">
-      <CircleAlert size={15} aria-hidden="true" /><span
-        >{computerName} is offline. A screen opens on the computer that runs its actions; open it again
-        once {computerName} is connected.</span
-      >
+      <CircleAlert size={15} aria-hidden="true" /><span>{computerName} is offline.</span>
     </div>
   {:else if pending && detail}<div class="setup-hint" role="status">
       <ShieldAlert size={15} aria-hidden="true" /><span
         >This screen runs {detail.actions.length === 1
           ? 'an action'
-          : `${detail.actions.length} actions`} on {computerName}. Review {detail.actions.length ===
-        1
-          ? 'it'
-          : 'them'} and allow {detail.actions.length === 1 ? 'it' : 'them'} before the screen can use
-        {detail.actions.length === 1 ? 'it' : 'them'}.</span
+          : `${detail.actions.length} actions`} on {computerName}. Review before allowing.</span
       ><button
         class="text-button"
         onclick={() => {
@@ -344,8 +337,7 @@
       }}
     >
       <p>
-        Delete <strong>{detail.title}</strong> from {computerName}? Its page, its actions and the
-        values it saved go with it. Chats keep their messages.
+        Delete <strong>{detail.title}</strong> from {computerName}?
       </p>
       {#if deleteError}<div class="error-banner" role="alert">{deleteError}</div>{/if}
       <div class="dialog-actions">

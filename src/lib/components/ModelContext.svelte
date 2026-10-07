@@ -159,13 +159,6 @@
       >
     </header>
     <div class="context-body">
-      <p class="context-intro">
-        {#if category === 'native'}
-          Recorded CLI instructions for this conversation’s selected account and computer.
-        {:else}
-          Instructions and resources for this model’s selected account, folder, and conversation.
-        {/if}
-      </p>
       <div class="context-location">
         <strong>{computerName} · {accountName}</strong>
         <span>{snapshot?.execution ?? providers[settings.provider].name}</span>
@@ -175,7 +168,7 @@
       </div>
       {#if settings.instructions.trim()}
         <details class="context-custom">
-          <summary>Conversation instructions <span>Included with the next message</span></summary>
+          <summary>Conversation instructions</summary>
           <pre>{settings.instructions}</pre>
         </details>
       {/if}
@@ -234,23 +227,15 @@
             changed={() => refresh++}
           />
         {:else}
-          {#if category === 'memories'}
-            <p class="context-category-help">
-              Global memory entrypoints and sources for this project or folder. Topic files are read
-              when relevant to the task.
-            </p>
-          {/if}
           {#if loading && !snapshot}<p class="context-empty" role="status">
               Inspecting the selected CLI profile…
             </p>
           {:else if snapshot && !filtered.length}<p class="context-empty">
               {search
                 ? 'No sources match this filter.'
-                : category === 'hooks'
-                  ? settings.provider === 'gemini'
-                    ? 'Hook discovery is unavailable for this agent.'
-                    : 'No hooks were reported or discovered. Check the inspection notes for availability.'
-                  : `No ${category} were reported or found in the inspected locations.`}
+                : category === 'hooks' && settings.provider === 'gemini'
+                  ? 'Unavailable for this agent.'
+                  : `No ${category} found.`}
             </p>
           {:else}
             {#each filtered as entry (entry.kind + entry.path + entry.name)}
@@ -273,7 +258,7 @@
                         />{/if}</button
                     >
                   </div>{/if}
-                <p>{entry.detail}</p>
+                {#if entry.detail}<p>{entry.detail}</p>{/if}
                 {#if entry.kind === 'skills' && settings.provider !== 'gemini'}
                   {#if settings.provider === 'codex' && ['reported', 'disabled'].includes(entry.status)}
                     <button
@@ -307,21 +292,19 @@
       </div>
       {#if snapshot && category !== 'native'}
         <div class="context-notes">
-          {#if snapshot.truncated}<p role="status">
-              The inventory reached its size limit. Additional sources may exist.
-            </p>{/if}
+          {#if snapshot.truncated}<p role="status">List truncated; more sources may exist.</p>{/if}
           {#each snapshot.notes as note}<p>{note}</p>{/each}
         </div>
       {/if}
     </div>
     {#if snapshot || category === 'native'}
       <footer>
-        {#if category === 'native'}<span>Native session inspection</span>{:else if snapshot}
+        {#if category !== 'native' && snapshot}
           <span
             >Checked {new Date(snapshot.checkedAt).toLocaleTimeString([], {
               hour: '2-digit',
               minute: '2-digit',
-            })} · Context inventory
+            })}
             <span role="status"
               >{loading ? '· Updating…' : error ? '· Showing last saved result' : ''}</span
             ></span
@@ -358,12 +341,6 @@
   .context-modal header {
     margin-bottom: 12px;
   }
-  .context-intro {
-    font-size: var(--text-base);
-    line-height: var(--leading-normal);
-    color: var(--text-secondary);
-    margin: 0 0 14px;
-  }
   .context-location {
     display: flex;
     flex-wrap: wrap;
@@ -399,11 +376,6 @@
     cursor: pointer;
     color: var(--text-secondary);
     font-weight: 500;
-  }
-  summary span {
-    color: var(--text-muted);
-    font-weight: 400;
-    margin-left: 10px;
   }
   pre {
     white-space: pre-wrap;
@@ -530,12 +502,6 @@
     color: var(--text-muted);
     font-size: var(--text-base);
     line-height: var(--leading-normal);
-  }
-  .context-category-help {
-    color: var(--text-muted);
-    font-size: var(--text-sm);
-    line-height: var(--leading-normal);
-    margin: 10px 0;
   }
   .context-notes {
     margin-top: 12px;

@@ -72,14 +72,7 @@
       void confirm();
     }}
   >
-    <p>
-      Restore the files this response changed. Files it created are removed. The conversation stays
-      as it is.
-    </p>
-    <p>
-      Only recorded file edits are included; shell commands and external actions are not undone. A
-      file changed since this response blocks Undo.
-    </p>
+    <p>Created files are removed. Shell commands and external actions are not undone.</p>
     {#if checking}<p role="status">Checking files on the execution computer…</p>{/if}
     {#if files.length}<ul class="undo-files" aria-label="Files to restore">
         {#each files as file (file)}<li>{file}</li>{/each}

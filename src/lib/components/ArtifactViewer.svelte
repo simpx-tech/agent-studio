@@ -195,8 +195,7 @@
         ></pre>{/if}
   </div>
   <footer>
-    <span role="status">{downloadStatus}</span>Self-contained HTML and SVG · External resources are
-    blocked in preview.
+    <span role="status">{downloadStatus}</span>
   </footer>
 </dialog>
 
@@ -338,13 +337,13 @@
     color: var(--code-text);
   }
   footer {
-    padding: 9px 16px;
+    padding: 0 16px;
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
   footer > span:not(:empty) {
     display: block;
-    margin-bottom: 5px;
+    padding: 9px 0;
   }
   @media (max-width: 600px) {
     dialog {

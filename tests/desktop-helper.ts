@@ -652,8 +652,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
               provider: args.provider,
               checkedAt: Date.now(),
               notice: state.noNativeInstructions
-                ? 'No native session has been recorded for this conversation.'
-                : 'Latest recorded instructions. Tool definitions and conversation history are separate.',
+                ? 'No native session yet. Send a message first.'
+                : '',
               studioGuidance: 'Current Agent Studio guidance supplied as user context.',
               blocks: state.noNativeInstructions
                 ? []

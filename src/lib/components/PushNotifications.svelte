@@ -193,15 +193,8 @@
 
 <section aria-labelledby="notifications-heading" class="push-settings">
   <h2 id="notifications-heading"><Bell size={18} />Notifications</h2>
-  <p>
-    Get notified on this device when a reply finishes, stops, or needs your attention. Tap an alert
-    to open its chat.
-  </p>
-  {#if !paired}<p>Connect to workspace sync to enable notifications.</p>
-  {:else if !supported}<p>
-      On iPhone or iPad, add Agent Studio to your Home Screen and open it there. Notifications
-      require a supported browser and HTTPS.
-    </p>
+  {#if !paired}<p>Connect to workspace sync first.</p>
+  {:else if !supported}<p>Not supported here. On iPhone or iPad, open it from the Home Screen.</p>
   {:else}
     <p class="notification-state">
       {enabled
@@ -222,16 +215,11 @@
         >{/if}
     </div>
     {#if status?.unavailable || status?.deliveryFailed}<p role="status">
-        Notification delivery is temporarily unavailable. The server will retry queued alerts.
+        Delivery temporarily unavailable; alerts will be retried.
       </p>{/if}
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if feedback}<p role="status">{feedback}</p>{/if}
-  <p class="notification-privacy">
-    Alerts show the chat’s title and the start of its reply; your phone’s notification preview
-    settings decide whether that text shows on the lock screen. Keep Agent Studio open on the
-    computer running your agents.
-  </p>
 </section>
 
 <style>
@@ -250,10 +238,5 @@
   .notification-state {
     color: var(--text);
     font-weight: 500;
-  }
-  .notification-privacy {
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    font-size: var(--text-sm);
   }
 </style>

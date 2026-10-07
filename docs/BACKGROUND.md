@@ -76,10 +76,11 @@ tray icon first. Native QA identifiers such as `com.vinicius.agentstudio.tray-qa
 - `src-tauri/src/tray.rs` tests: the setting defaults on and keeps a saved choice, closing hides
   only while the icon can bring the window back and never after Quit, and the reported status
   serializes without an empty reason.
-- `src/lib/window-behavior.test.ts`: the Settings wording for Windows, Linux, macOS, a computer
-  without a tray and the switch turned off, and the reported shape.
+- `src/lib/window-behavior.test.ts`: where the icon lives on each platform, whether closing keeps
+  the app running (turned off, or no tray), and the reported shape.
 - `tests/background.spec.ts`: the Settings switch saves, survives a reload and restores itself
-  when saving fails; an unavailable tray disables it with the reason; macOS wording.
+  when saving fails; an unavailable tray disables it with the reason, the only line Settings adds
+  to it; macOS names the menu bar.
   `tests/app-updates.spec.ts` checks that the Viewer has no Background section.
 - `scripts/tray-native-smoke.mjs` drives an isolated build of
   `scripts/native-tray.tauri.json` (CDP 19751). `scripts/tray-native-helper.ps1` sends the tray

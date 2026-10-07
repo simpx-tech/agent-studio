@@ -68,7 +68,6 @@
 
 <section aria-labelledby="notifications-heading">
   <h2 id="notifications-heading"><Bell size={18} />Notifications</h2>
-  <p>Get notified on this computer when a reply finishes, stops, or needs your attention.</p>
   {#if settings}
     <p class="state">{settings.enabled ? 'Enabled on this computer' : 'Off on this computer'}</p>
     <label class="checkbox"
@@ -79,7 +78,6 @@
         onchange={(event) => update(settings!.enabled, event.currentTarget.checked)}
       /><span>Play the Agent Studio chime</span></label
     >
-    <p>A short, distinctive chime replaces the system notification sound.</p>
     <div class="actions">
       {#if settings.enabled}
         <button class="secondary" disabled={busy} onclick={test}>Send test notification</button>
@@ -95,11 +93,6 @@
   {/if}
   {#if error || settings?.lastError}<p role="alert">{error || settings?.lastError}</p>{/if}
   {#if feedback}<p role="status">{feedback}</p>{/if}
-  <p class="privacy">
-    Alerts show the chat’s title and the start of its reply, and arrive while Agent Studio runs:
-    open, minimized, or in the background after its window closes. Your computer’s notification
-    settings control banners; mute the chime here when you need quiet.
-  </p>
 </section>
 
 <style>
@@ -120,11 +113,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin: 14px 0 12px;
-  }
-  .privacy {
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    font-size: var(--text-sm);
+    margin: 14px 0 0;
   }
 </style>

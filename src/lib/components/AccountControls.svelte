@@ -25,7 +25,6 @@
     disabled?: boolean;
   } = $props();
   let messages = $state<WorkspaceMessages>();
-  let messageError = $state('');
   let result = $state('');
   let confirmation = $state(false);
   let busy = $state(false);
@@ -51,7 +50,6 @@
     void changed;
     const current = ++generation;
     messages = undefined;
-    messageError = '';
     confirmation = false;
     result = '';
     busy = false;
@@ -64,10 +62,8 @@
           if (current === generation && scope === workspaceStorageScope())
             messages = workspaceMessagesSchema.parse(value);
         })
-        .catch(() => {
-          if (current === generation && scope === workspaceStorageScope())
-            messageError = 'Workspace notices are unavailable for this CLI or account.';
-        });
+        // Notices are optional; an account without them shows none.
+        .catch(() => {});
     });
     return () => {
       generation++;
@@ -133,7 +129,6 @@
         <strong>Workspace notice</strong><span>{message.messageBody}</span>
       </p>
     {/each}
-    {#if messageError}<p class="account-note">{messageError}</p>{/if}
   </section>
 {/if}
 {#if confirmation && connectionId}
@@ -144,13 +139,8 @@
       confirmation = false;
     }}
   >
-    <p>
-      Use one earned reset credit for <strong>{name}</strong>? Eligible limits are reset across this
-      account, including other chats.
-    </p>
-    {#if retry}<p>
-        This retries the same redemption attempt. It will not request a second credit.
-      </p>{/if}
+    <p>Use one reset credit for <strong>{name}</strong>?</p>
+    {#if retry}<p>Retries the same request; no second credit is used.</p>{/if}
     <div class="actions">
       <button
         class="secondary"

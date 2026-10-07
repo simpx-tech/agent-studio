@@ -85,7 +85,7 @@
       .map((m) => ({
         id: m.path,
         name: m.kind === 'file' ? m.name : m.token,
-        detail: m.kind === 'app' ? m.name : 'File',
+        detail: m.kind === 'app' ? m.name : '',
         title: m.path,
       })),
   );
@@ -450,10 +450,10 @@
     value=""
     label={mentionMode ? (mention?.kind === 'app' ? 'Apps' : 'Files') : 'Commands and skills'}
     heading={mentionMode
-      ? `${mention?.kind === 'app' ? 'Apps' : 'Files'} · ${mentionLoading ? 'Loading…' : '↑ ↓ · Enter or Tab'}`
+      ? `${mention?.kind === 'app' ? 'Apps' : 'Files'}${mentionLoading ? ' · Loading…' : ''}`
       : loading
         ? 'Commands and skills · Loading…'
-        : 'Commands and skills · ↑ ↓ · Enter or Tab'}
+        : 'Commands and skills'}
     emptyMessage={mentionMode
       ? !available
         ? 'Connect the selected agent to search mentions.'

@@ -110,7 +110,7 @@ impl Scan {
             self.snapshot.notes.push(value.into());
         }
     }
-    fn add(&mut self, path: &Path, kind: &str, scope: &str, status: &str, detail: &str) {
+    fn add(&mut self, path: &Path, kind: &str, scope: &str, status: &str) {
         let path = self.display(path);
         if let Some(entry) = self
             .snapshot
@@ -120,7 +120,6 @@ impl Scan {
         {
             if status == "reported" || status == "disabled" {
                 entry.status = status.into();
-                entry.detail = detail.into();
             }
             return;
         }
@@ -151,19 +150,17 @@ impl Scan {
             kind: kind.into(),
             scope: scope.into(),
             status: status.into(),
-            detail: detail.into(),
+            detail: String::new(),
         });
     }
-    fn file(&mut self, path: &Path, kind: &str, scope: &str, detail: &str) -> bool {
+    fn file(&mut self, path: &Path, kind: &str, scope: &str) -> bool {
         match std::fs::metadata(self.physical(path)) {
             Ok(m) if m.is_file() && m.len() > 0 => {
-                self.add(path, kind, scope, "discovered", detail);
+                self.add(path, kind, scope, "discovered");
                 true
             }
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                self.note(
-                    "Some source locations could not be inspected. Their availability is unknown.",
-                );
+                self.note("Some locations could not be inspected.");
                 false
             }
             _ => false,
@@ -183,9 +180,7 @@ impl Scan {
             return;
         }
         let Ok(files) = std::fs::read_dir(physical) else {
-            self.note(
-                "Some source locations could not be inspected. Their availability is unknown.",
-            );
+            self.note("Some locations could not be inspected.");
             return;
         };
         let mut files: Vec<_> = files.take(MAX_VISITS + 1).filter_map(Result::ok).collect();
@@ -202,16 +197,7 @@ impl Scan {
             } else if (skills && item.file_name() == "SKILL.md")
                 || (!skills && logical.extension().is_some_and(|e| e == "md"))
             {
-                self.file(
-                    &logical,
-                    kind,
-                    scope,
-                    if skills {
-                        "Available file; loaded when a relevant skill is used."
-                    } else {
-                        "Available file; use depends on the CLI and task."
-                    },
-                );
+                self.file(&logical, kind, scope);
                 if skills {
                     let display = self.display(&logical);
                     if let Some(entry) =
@@ -232,7 +218,7 @@ impl Scan {
     }
     fn memory_index(&mut self, directory: &Path, folder: &Path) {
         for name in ["memory_summary.md", "MEMORY.md"] {
-            self.file(&directory.join(name), "memories", "Global", "Global memory entrypoint for the selected profile; topic lookup depends on the task.");
+            self.file(&directory.join(name), "memories", "Global");
         }
         // The Codex memory registry labels source references with their workspace cwd.
         // Inspect only those labels and paths, never return memory text or crawl archives.
@@ -275,16 +261,11 @@ impl Scan {
                 .zip(std::fs::canonicalize(self.physical(directory)).ok())
                 .is_some_and(|(p, root)| p.starts_with(root));
             if contained {
-                self.file(
-                    &path,
-                    "memories",
-                    "Project memory",
-                    "Indexed for this project. Read on demand when the task calls for this memory.",
-                );
+                self.file(&path, "memories", "Project memory");
             }
         }
     }
-    fn mcp(&mut self, name: &str, scope: &str, status: &str, detail: &str) {
+    fn mcp(&mut self, name: &str, scope: &str, status: &str) {
         if name.is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
             return;
         }
@@ -296,7 +277,6 @@ impl Scan {
         {
             entry.scope = scope.into();
             entry.status = status.into();
-            entry.detail = detail.into();
             return;
         }
         if self.snapshot.entries.len() >= MAX_ENTRIES {
@@ -309,7 +289,7 @@ impl Scan {
             kind: "mcps".into(),
             scope: scope.into(),
             status: status.into(),
-            detail: detail.into(),
+            detail: String::new(),
         });
     }
     fn codex_guidance(&mut self, dir: &Path, scope: &str, fallbacks: &[String]) {
@@ -323,7 +303,7 @@ impl Scan {
         let mut chosen = false;
         for name in &names {
             let path = dir.join(name);
-            let found = self.file(&path, "instructions", scope, if chosen { "A higher-priority instruction file exists in this directory." } else { "Discovered in the Codex instruction chain; loading also depends on configuration and trust." });
+            let found = self.file(&path, "instructions", scope);
             if found && chosen {
                 let display = self.display(&path);
                 if let Some(entry) = self.snapshot.entries.iter_mut().find(|e| e.path == display) {
@@ -333,9 +313,12 @@ impl Scan {
             chosen |= found;
         }
         for name in ["CLAUDE.md", "CLAUDE.local.md"] {
-            if !names.iter().any(|n| n == name) && self.file(&dir.join(name), "instructions", scope, "Companion guidance. Codex reads it only if other instructions request it or it is configured as a fallback.") {
+            if !names.iter().any(|n| n == name) && self.file(&dir.join(name), "instructions", scope)
+            {
                 let display = self.display(&dir.join(name));
-                if let Some(entry) = self.snapshot.entries.iter_mut().find(|e| e.path == display) { entry.status = "reference".into(); }
+                if let Some(entry) = self.snapshot.entries.iter_mut().find(|e| e.path == display) {
+                    entry.status = "reference".into();
+                }
             }
         }
     }
@@ -410,14 +393,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         scan.walk(&home.join(".agents/skills"), "skills", "User", true, 0);
         scan.walk(&config.join("skills"), "skills", "Profile", true, 0);
         scan.memory_index(&config.join("memories"), &folder);
-        scan.note("Instruction files are discovered from disk; configuration and trust can change loading. Memories include global entrypoints and indexed sources for this project, not other projects or unscoped archives. Topic use depends on the task. This is a startup inventory, not a previous reply's read history.");
     } else if provider == "claude" {
-        scan.file(
-            &config.join("CLAUDE.md"),
-            "instructions",
-            "User",
-            "User guidance for the selected CLI profile.",
-        );
+        scan.file(&config.join("CLAUDE.md"), "instructions", "User");
         scan.walk(&config.join("rules"), "instructions", "User", false, 0);
         scan.walk(&config.join("skills"), "skills", "User", true, 0);
         scan.walk(
@@ -438,12 +415,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         let mut hooks_disabled = user_settings["disableAllHooks"].as_bool();
         for dir in &dirs {
             for name in ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"] {
-                scan.file(
-                    &dir.join(name),
-                    "instructions",
-                    "Project",
-                    "Project guidance; path-scoped instructions can load later.",
-                );
+                scan.file(&dir.join(name), "instructions", "Project");
             }
             scan.walk(
                 &dir.join(".claude/rules"),
@@ -505,12 +477,13 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 .filter(|e| e.kind == "hooks")
             {
                 entry.status = "disabled".into();
-                entry
-                    .detail
-                    .push_str(" Disabled by the discovered disableAllHooks setting.");
+                entry.detail = if entry.detail.is_empty() {
+                    "disableAllHooks".into()
+                } else {
+                    format!("{} · disableAllHooks", entry.detail)
+                };
             }
         }
-        scan.note("Claude hooks are discovered from selected-profile and project settings and enabled installed plugins. Managed policy, runtime hooks and trust can change availability. Inspection does not execute hooks; Work history records only lifecycle events actually reported by the CLI.");
         let memory_enabled = user_settings["autoMemoryEnabled"] != false
             && (scan.bridge.is_some()
                 || std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
@@ -556,22 +529,11 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         } else {
             PathBuf::from("/Library/Application Support/ClaudeCode/CLAUDE.md")
         };
-        scan.file(
-            &managed,
-            "instructions",
-            "Managed",
-            "Organization guidance.",
-        );
-        scan.note("Reported files come from a fresh Claude context query for this folder and model. Discovered files may be conditional or disabled. This is a startup inspection, not a read history of an earlier reply.");
+        scan.file(&managed, "instructions", "Managed");
     } else {
         for dir in &dirs {
             for name in ["AGENTS.md", "GEMINI.md", ".agents/AGENTS.md"] {
-                scan.file(
-                    &dir.join(name),
-                    "instructions",
-                    "Project",
-                    "Available guidance; loading is not reported by this CLI.",
-                );
+                scan.file(&dir.join(name), "instructions", "Project");
             }
             scan.walk(
                 &dir.join(".agents/rules"),
@@ -582,12 +544,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             );
             scan.walk(&dir.join(".agents/skills"), "skills", "Project", false, 0);
         }
-        scan.file(
-            &home.join(".gemini/GEMINI.md"),
-            "instructions",
-            "User",
-            "Global Antigravity guidance; loading is unconfirmed.",
-        );
+        scan.file(&home.join(".gemini/GEMINI.md"), "instructions", "User");
         scan.walk(
             &home.join(".gemini/antigravity-cli/skills"),
             "skills",
@@ -595,8 +552,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             false,
             0,
         );
-        scan.note("Antigravity does not expose a verified context inventory here. Listed files are candidates only; memory availability and actual skill loading are unknown. Gemini chats use the CLI's configured tools with full access and no approval prompts.");
-        scan.note("Antigravity MCP status is not inspected here. Configured servers may be available to the chat; their connection state is unknown.");
+        scan.note("Antigravity reports no context inventory; listed files are candidates.");
+        scan.note("Antigravity MCP status is not inspected.");
     }
     scan
 }
@@ -878,7 +835,15 @@ fn merge_mcps(scan: &mut Scan, report: &Value) {
     }
     if let Some(servers) = report["mcpConfig"].as_object() {
         for (name, config) in servers.iter().take(200) {
-            scan.mcp(name, "CLI", if config["enabled"] == false { "disabled" } else { "configured" }, "Reported by the selected CLI's effective configuration. Connection status is unconfirmed.");
+            scan.mcp(
+                name,
+                "CLI",
+                if config["enabled"] == false {
+                    "disabled"
+                } else {
+                    "configured"
+                },
+            );
         }
     }
     if let Some(servers) = report["mcps"].as_array() {
@@ -914,18 +879,13 @@ fn merge_mcps(scan: &mut Scan, report: &Value) {
                 _ if server["plugin"] == true => "Plugin",
                 _ => "CLI",
             };
-            scan.mcp(
-                name,
-                scope,
-                status,
-                "Reported by a fresh MCP inspection for the selected CLI profile and folder.",
-            );
+            scan.mcp(name, scope, status);
         }
     } else {
-        scan.note("MCP status could not be reported by this CLI. Configured entries, if present, have unconfirmed connection status.");
+        scan.note("MCP status could not be reported by this CLI.");
     }
     if report["incomplete"] == true {
-        scan.note("The CLI inspection did not finish. Some source or MCP metadata is unavailable; refresh to retry.");
+        scan.note("The CLI inspection did not finish; refresh to retry.");
     }
 }
 
@@ -936,7 +896,7 @@ fn merge_report(scan: &mut Scan, report: &Value) {
     }
     if scan.snapshot.provider == "codex" {
         if !report["data"].is_array() {
-            scan.note("Codex did not return a skill catalog. Skill availability is unconfirmed.");
+            scan.note("Codex returned no skill catalog; skills are unconfirmed.");
             return;
         }
         // Replace skill candidates with the provider's enabled/disabled catalog, retaining other categories.
@@ -959,7 +919,6 @@ fn merge_report(scan: &mut Scan, report: &Value) {
                     } else {
                         "reported"
                     },
-                    "Reported by the selected CLI profile. Skill contents load when used.",
                 );
                 if let Some(entry) = scan
                     .snapshot
@@ -974,7 +933,7 @@ fn merge_report(scan: &mut Scan, report: &Value) {
     } else {
         scan.snapshot.commands = command_catalog(&report["commands"]);
         if !report["memoryFiles"].is_array() {
-            scan.note("Claude did not return instruction-file metadata. Loading is unconfirmed.");
+            scan.note("Claude returned no instruction-file metadata; loading is unconfirmed.");
             return;
         }
         // The CLI resolves custom memory directories, worktrees, disabled memory and imports.
@@ -1003,7 +962,6 @@ fn merge_report(scan: &mut Scan, report: &Value) {
                     "CLI"
                 },
                 "reported",
-                "Loaded in a fresh CLI context query for the selected folder and model.",
             );
             if kind == "memories" {
                 if let Some(parent) = Path::new(path).parent() {
@@ -1161,9 +1119,6 @@ pub async fn read(
                 );
             }
         }
-        if !sources.plugin_dirs.is_empty() || !sources.plugin_urls.is_empty() {
-            scan.note("Temporary Claude plugins are included in this conversation's CLI initialization. Zip and URL component paths are CLI-owned; their commands may be available even when no local skill path was reported.");
-        }
     }
     let report = match provider.as_str() {
         "codex" => {
@@ -1183,7 +1138,18 @@ pub async fn read(
         _ => None,
     };
     if let Some(report) = report {
-        match report { Ok(report) => { scan = tokio::task::spawn_blocking(move || { merge_report(&mut scan, &report); scan }).await.map_err(|_| "Context report processing failed")?; }, Err(_) => scan.note("The CLI context query failed. Showing discovered files; actual loading and enabled state are unconfirmed. Refresh to retry.") }
+        match report {
+            Ok(report) => {
+                scan = tokio::task::spawn_blocking(move || {
+                    merge_report(&mut scan, &report);
+                    scan
+                })
+                .await
+                .map_err(|_| "Context report processing failed")?;
+            }
+            Err(_) => scan
+                .note("The CLI context query failed; showing discovered files. Refresh to retry."),
+        }
     }
     let selected = crate::profiles::current();
     if !shared.native && selected.shares_directory() {
@@ -1196,7 +1162,7 @@ pub async fn read(
         }
     }
     if shared.native {
-        scan.note("This account shares this computer's Claude directory with the Claude app and the terminal: settings, instructions, memories, chats, checkpoints, plugins, skills, agents, commands and MCP server definitions. Its login, account state and MCP sign-ins remain its own.");
+        scan.note("Linked to this computer's Claude directory.");
     } else if !shared.source.is_empty() {
         let computer = shared.source == crate::profiles::COMPUTER_SOURCE;
         let scope = if computer {
@@ -1206,17 +1172,10 @@ pub async fn read(
         };
         let empty = shared.files.is_empty();
         for source in shared.files {
-            scan.add(Path::new(&source.path), &source.kind, scope, "reference", "Shared source requested by this account. Chat guidance directs the agent to read applicable instructions and consult task-relevant memories; this inventory does not claim a previous read.");
+            scan.add(Path::new(&source.path), &source.kind, scope, "reference");
         }
-        scan.note(if computer {
-            "This separate profile uses this computer's CLI context: the terminal's instructions, rules, skills, project memories and MCP server definitions. Credentials, model settings, installed-plugin configuration and MCP sign-ins remain with the selected account."
-        } else {
-            "Shared account sources supplement this profile, including its MCP server definitions. Credentials, model settings, installed-plugin configuration and MCP sign-ins remain with the selected account."
-        });
         if empty {
-            scan.note(
-                "The selected shared source has no instructions or memories for this folder yet.",
-            );
+            scan.note("The shared source has no instructions or memories for this folder.");
         }
     }
     Ok(scan.snapshot)
@@ -1647,7 +1606,6 @@ mod tests {
             "skills",
             "User",
             "discovered",
-            "Candidate",
         );
         merge_report(
             &mut scan,
@@ -1665,7 +1623,6 @@ mod tests {
             "skills",
             "User",
             "discovered",
-            "Candidate",
         );
         merge_report(&mut scan, &Value::Null);
         assert_eq!(scan.snapshot.entries.len(), 1);
@@ -1733,7 +1690,7 @@ mod tests {
         let mut scan = scanner("codex", Path::new("/home/test/project"));
         scan.bridge = Some(PathBuf::from("bridge"));
         let logical = Path::new("/home/test").join(".codex/AGENTS.md");
-        scan.add(&logical, "instructions", "User", "discovered", "Fixture");
+        scan.add(&logical, "instructions", "User", "discovered");
         assert_eq!(scan.snapshot.entries[0].path, "/home/test/.codex/AGENTS.md");
         assert_eq!(
             scan.physical(&logical),

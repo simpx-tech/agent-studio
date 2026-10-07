@@ -49,11 +49,10 @@
     </div>
     <div class="login-heading">
       <h1 id="workspace-login-title">Sign in to your workspace</h1>
-      <p>View your chats and manage agents running on your connected computers.</p>
     </div>
     {#if !online}
       <p class="login-status" role="status">
-        <WifiOff size={17} />You’re offline. Connect to the internet to sign in.
+        <WifiOff size={17} />You’re offline.
       </p>
     {:else if checking}
       <p class="login-status" role="status">
@@ -86,7 +85,6 @@
           minlength="32"
           required
           disabled={busy || checking || !ready}
-          aria-describedby="workspace-key-help"
         />
         <button
           class="key-visibility"
@@ -103,17 +101,12 @@
             />{/if}
         </button>
       </div>
-      <p id="workspace-key-help">Use the key provided by your workspace administrator.</p>
       <button class="primary" disabled={busy || checking || !ready || !online || !key.trim()}>
         {#if busy}<LoaderCircle size={17} class="spinning" />Signing in…{:else}Sign in<ArrowRight
             size={17}
           />{/if}
       </button>
     </form>
-    <p class="login-note">
-      Your session stays signed in on this browser. Agents run on your computers, so keep Agent
-      Studio open there.
-    </p>
     <BrowserStatus showConnection={false} />
   </div>
 </main>
@@ -144,11 +137,6 @@
   .login-heading h1 {
     font-size: 26px;
     line-height: 1.2;
-    margin-bottom: 8px;
-  }
-  .login-heading p {
-    color: var(--text-muted);
-    font-size: var(--text-md);
   }
   .login-heading {
     margin-bottom: 24px;
@@ -202,18 +190,9 @@
     background: var(--hover);
     color: var(--text);
   }
-  #workspace-key-help,
-  .login-note {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
   .primary {
     min-height: 42px;
     margin-top: 8px;
-  }
-  .login-note {
-    margin-top: 20px;
-    text-align: center;
   }
   .login-status {
     display: flex;

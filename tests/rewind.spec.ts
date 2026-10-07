@@ -47,7 +47,7 @@ test('Rewind here returns its message to the composer at once, and Undo rewind t
   await expect(input).toHaveValue('Second prompt\n\nKeep my draft');
   await expect(input).toBeFocused();
   await expect(page.getByRole('status').filter({ hasText: 'Conversation rewound' })).toContainText(
-    'new agent session without earlier tool details',
+    'files unchanged',
   );
   await page.screenshot({ path: 'artifacts/rewind/rewound-desktop.png' });
   expect(await page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
@@ -120,7 +120,7 @@ test('rewind handles the first message, storage failure, slash commands, and pho
   await input.fill('/rewind');
   await input.press('Enter');
   await expect(page.getByRole('dialog')).toBeVisible();
-  await expect(page.getByRole('dialog')).toContainText('put it back in the message box');
+  await expect(page.getByRole('dialog')).toContainText('will be set aside; files unchanged');
   await page.getByRole('combobox', { name: 'Rewind to message' }).click();
   await page.getByRole('option', { name: /1. First prompt/ }).click();
   await expect(page.getByRole('button', { name: 'Rewind', exact: true })).toBeInViewport();

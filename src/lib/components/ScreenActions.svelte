@@ -53,10 +53,7 @@
       <strong>{screen.title}</strong> runs {screen.actions.length === 1
         ? 'this command'
         : `these ${screen.actions.length} commands`} on <strong>{computerName}</strong> in
-      <code>{screen.folder}</code> whenever its page asks, with values it chooses within the limits
-      shown. {screen.allowed
-        ? 'You allowed them. Revoke to stop them until you allow them again.'
-        : 'Read each one before allowing them; a chat that changes them asks you again.'}
+      <code>{screen.folder}</code> when its page asks.
     </p>
     {#each screen.actions as action (action.name)}
       {@const highlighted = highlightCode(action.script, action.shell)}

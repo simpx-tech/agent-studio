@@ -66,7 +66,6 @@
   >
     <header>
       <div>
-        <span class="eyebrow">Just for this conversation</span>
         <h2 id="instructions-title">Chat instructions</h2>
       </div>
       <button class="icon-button" onclick={close} aria-label="Close chat instructions"
@@ -92,12 +91,8 @@
           bind:value={draft}
           rows="8"
           maxlength="16000"
-          placeholder="Optional guidance on tone, role, or how to approach this conversation."
-        ></textarea></label
+          placeholder="Optional"></textarea></label
       >
-      <p class="field-hint">
-        Applies to the next reply in this chat. New conversations start with no custom instructions.
-      </p>
       {#if provider === 'claude' || provider === 'codex'}
         <label
           >Structured output · JSON Schema<textarea
@@ -106,13 +101,8 @@
             spellcheck="false"
             maxlength="16000"
             placeholder={'{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'}
-            aria-describedby="output-schema-hint"
             aria-invalid={!!schemaError}></textarea></label
         >
-        <p id="output-schema-hint" class="field-hint">
-          Optional. Constrains replies to a JSON object. Leave empty for normal replies. The
-          provider checks supported schema rules. Context compaction is unaffected.
-        </p>
         {#if schemaError}<p role="alert">{schemaError}</p>{/if}
       {/if}
       {#if provider === 'claude'}
@@ -130,11 +120,7 @@
             onchange={(value) => (fast = value)}
           />
         </div>
-        <p class="field-hint">
-          Requests faster Opus responses at higher per-token pricing, using usage credits on
-          subscription plans. Requires a supported model and account access. Claude may use standard
-          speed when unavailable. Applies to the next reply in this chat.
-        </p>
+        <p class="field-hint">Faster Opus replies at a higher usage cost.</p>
         <label
           >Fallback models<input
             bind:value={fallback}
@@ -146,9 +132,7 @@
           /></label
         >
         <p id="fallback-model-hint" class="field-hint">
-          Optional backup models when the primary model is overloaded or unavailable, in order (for
-          example, sonnet,haiku). Up to three aliases or IDs. Leave empty for the selected CLI
-          profile's default. Model availability and pricing may differ.
+          Up to three, comma-separated: sonnet,haiku
         </p>
         {#if fallbackError}<p role="alert">
             Enter up to three distinct model aliases or IDs, separated by commas.
@@ -165,11 +149,7 @@
             aria-invalid={!!tokensError}
           /></label
         >
-        <p id="thinking-budget-hint" class="field-hint">
-          Leave empty for Claude's default, use 0 to turn thinking off, or enter 1,024–128,000
-          tokens. Applies to the next reply. This is separate from Reasoning effort; model support
-          varies.
-        </p>
+        <p id="thinking-budget-hint" class="field-hint">0 turns thinking off; or 1,024–128,000.</p>
         {#if tokensError}<p role="alert">Use 0 or a whole number from 1,024 to 128,000.</p>{/if}
       {/if}
       <footer>

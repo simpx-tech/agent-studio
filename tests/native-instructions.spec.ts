@@ -23,7 +23,7 @@ test('native instructions are loaded on demand, remain exact inert text, and nev
   await chooseTestFolder(page);
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   let dialog = await open(page);
-  await expect(dialog).toContainText('Send the first message');
+  await expect(dialog).toContainText('Send a message first');
   expect(await page.evaluate(() => (window as any).nativeInstructionCalls ?? [])).toEqual([]);
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
@@ -103,7 +103,7 @@ test('closing a pending native inspection discards its result and an unavailable
     (window as any).noNativeInstructions = true;
   });
   dialog = await open(page);
-  await expect(dialog).toContainText('No native session has been recorded');
+  await expect(dialog).toContainText('No native session yet');
   await page.evaluate(() => (window as any).releaseNativeInstructions());
   await expect(dialog).not.toContainText('Old session prompt');
   await expect(dialog.locator('pre:visible')).toHaveCount(0);

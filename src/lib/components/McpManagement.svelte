@@ -51,7 +51,7 @@
           kind: 'mcps',
           scope: 'Live session',
           status: s.status as ContextEntry['status'],
-          detail: 'Reported by the selected CLI process.',
+          detail: '',
         })),
     ].filter((e) =>
       `${e.name} ${e.scope} ${e.status}`.toLowerCase().includes(search.toLowerCase()),
@@ -160,15 +160,9 @@
 
 <section class="mcp-management" aria-label="MCP management">
   {#if settings.provider === 'gemini'}
-    <p>MCP management is unavailable for this agent.</p>
+    <p>Unavailable for this agent.</p>
   {:else}
-    <p>
-      Manage servers for the selected account and folder. The CLI stores sign-in credentials on the
-      selected computer.
-    </p>
-    {#if running}<p role="status">
-        Wait for this reply to finish before changing MCP servers.
-      </p>{/if}
+    {#if running}<p role="status">Wait for the reply to finish.</p>{/if}
     <div class="actions">
       <button class="secondary" {disabled} onclick={() => (adding = !adding)}>Add server</button>
       <button class="secondary" {disabled} onclick={() => act({ kind: 'status' })}
@@ -189,10 +183,7 @@
         }}
       >
         <strong>Add to this CLI profile</strong>
-        <p>
-          Saved for future chats. Only add servers you trust; stdio commands run on the selected
-          computer.
-        </p>
+        <p>Only add servers you trust.</p>
         <label>Server name<input bind:value={name} maxlength="200" required /></label>
         <ChoicePicker
           field
@@ -233,10 +224,7 @@
       <div class="operation" role="status">
         <p>{result.message}</p>
         {#if pending}
-          {#if settings.provider === 'codex'}<p>
-              For a remote computer, open the sign-in link in a browser on that computer so the
-              callback can reach the CLI.
-            </p>{/if}
+          {#if settings.provider === 'codex'}<p>On a remote computer, open the link there.</p>{/if}
           <div class="actions">
             {#if result.authorizationUrl}<button
                 class="primary"
@@ -292,7 +280,7 @@
         <div class="heading">
           <strong>{entry.name}</strong><span>{entry.scope}</span><span>{stateLabel(entry)}</span>
         </div>
-        <p>{entry.detail}</p>
+        {#if entry.detail}<p>{entry.detail}</p>{/if}
         {#if entry.name !== 'agent_studio'}
           <div class="actions">
             <button
@@ -328,10 +316,7 @@
             >
           </div>
           {#if logout === entry.name}<div class="editor">
-              <p>
-                Clear this server’s saved sign-in for this CLI profile? Other chats using the same
-                profile may need to sign in again.
-              </p>
+              <p>Clear this server’s saved sign-in for this profile?</p>
               <div class="actions">
                 <button
                   class="secondary"
@@ -344,18 +329,11 @@
       </article>
     {/each}
     {#if !rows.length}<p>
-        {search
-          ? 'No sources match this filter.'
-          : 'No MCP servers were reported. Check the inspection notes for availability.'}
+        {search ? 'No sources match this filter.' : 'No MCP servers found.'}
       </p>{/if}
     {#if settings.provider === 'claude'}
       <details class="editor">
         <summary>Live session servers</summary>
-        <p>
-          Replace the additional servers supplied to this idle chat session. Saved profile and
-          project servers remain managed by Claude. These additions last until its process restarts.
-          Agent Studio’s tools are retained.
-        </p>
         <label
           >Server definitions (JSON)<textarea
             bind:value={sessionJson}
@@ -367,9 +345,7 @@
           >Apply session servers</button
         >
       </details>
-      <p class="hint">
-        Reconnect, enable/disable, and session servers require an idle live chat process.
-      </p>
+      <p class="hint">Reconnect, Enable/Disable and session servers need an idle chat.</p>
     {/if}
   {/if}
 </section>

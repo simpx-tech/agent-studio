@@ -152,7 +152,7 @@ test('a chat saves a screen that runs only allowed actions, keeps values and sta
     { op: 'run', id: screenId, action: 'list_prs', params: { since: '2026-09-28' } },
   ]);
   await expect(page.getByRole('button', { name: 'Review this screen’s actions' })).toBeVisible();
-  await expect(page.getByText('Review them and allow')).toBeHidden();
+  await expect(page.getByText('Review before allowing')).toBeHidden();
   // Values the page saves stay with the screen on its computer.
   await frame.getByRole('button', { name: 'Save filter' }).click();
   await expect(frame.locator('#saved')).toHaveText('Saved open');

@@ -45,12 +45,8 @@
     selectedId === 'owner' || selectedId === administration?.workspaceId,
   );
   const roleOptions = [
-    { id: 'member', name: 'Member', detail: 'Uses this workspace’s chats and computers.' },
-    {
-      id: 'admin',
-      name: 'Administrator',
-      detail: 'Transfers the only administrator role to this workspace.',
-    },
+    { id: 'member', name: 'Member' },
+    { id: 'admin', name: 'Administrator' },
   ];
 
   function guard() {
@@ -242,11 +238,6 @@
         onclick={refresh}><RefreshCw size={16} /></button
       >
     </div>
-    <p>
-      Only one workspace can be the administrator. It manages workspace access and issues keys.
-      Transferring administration makes this workspace a member. Chats and computer setups stay
-      separate.
-    </p>
     <ul class="workspace-admin-list">
       {#each workspaces as workspace (workspace.id)}
         <li class="workspace-admin-row" data-workspace-id={workspace.id}>
@@ -310,19 +301,15 @@
               onchange={(value) => (role = value as WorkspaceRole)}
             />
           </div>{/if}
-        <p>
-          {dialog === 'create'
-            ? 'New workspaces start as members. Save the new key before transferring administration from Manage.'
-            : selectedId === administration?.workspaceId
-              ? 'This is the only administrator workspace. To transfer administration, manage another enabled workspace and choose Administrator.'
-              : 'Choosing Administrator transfers the only admin role here. Your current workspace becomes a member.'}
-        </p>
+        {#if dialog === 'manage' && selectedId === administration?.workspaceId}<p>
+            To transfer administration, manage another workspace.
+          </p>{/if}
         {#if dialog === 'manage' && selected}
           <div class="workspace-key-actions">
             {#if protectedKey}<p>
                 {selectedId === 'owner'
-                  ? 'The owner workspace key is managed in the server configuration.'
-                  : 'Transfer administration before rotating or disabling this workspace. The server CLI can rotate its key.'}
+                  ? 'Its key is managed in the server configuration.'
+                  : 'Transfer administration first.'}
               </p>{/if}
             <button
               class="secondary"
@@ -342,10 +329,7 @@
                 dialog = 'disable';
               }}>Disable workspace</button
             >
-            {#if !selected.enabled}<p>
-                Rotating the key enables this workspace again. Its saved chats and settings are
-                retained.
-              </p>{/if}
+            {#if !selected.enabled}<p>Rotate its key to enable it again.</p>{/if}
           </div>
         {/if}
         <div class="dialog-actions">
@@ -361,10 +345,7 @@
     <ConnectionDialog title="Workspace key" close={clearDialog}>
       <div class="key-disclosure">
         {@render accessWarning()}
-        <p>
-          <strong>{issuedName}</strong> is ready. Copy this key now and give it only to people who should
-          access this workspace. It will not be shown again after you close this dialog.
-        </p>
+        <p><strong>{issuedName}</strong> is ready. Copy its key now; it won’t be shown again.</p>
         <label
           >New workspace key<textarea
             aria-label="New workspace key"
@@ -402,25 +383,15 @@
         {@render accessWarning()}
         {#if dialog === 'role'}
           <p>
-            Transfer administration to <strong>{name}</strong>? It will become the only
-            administrator workspace and can manage other workspaces and issue keys that grant access
-            to them.
-          </p>
-          <p>
-            Make sure you can open that workspace using its key. Your current workspace will become
-            a member and these administration controls will close immediately.
+            Transfer administration to <strong>{name}</strong>? Your current workspace will become a
+            member.
           </p>
         {:else if dialog === 'rotate'}
-          <p>
-            Replace the key for <strong>{selected?.name}</strong>? Its current key and browser
-            sessions will stop working. Devices must pair again with the new key. Saved chats and
-            settings are kept.
-          </p>
+          <p>Replace the key for <strong>{selected?.name}</strong>? Its devices must pair again.</p>
         {:else}
           <p>
-            Disable access to <strong>{selected?.name}</strong>? Its computers and browsers will
-            disconnect. Saved chats and settings are kept; rotating its key will enable access
-            again.
+            Disable access to <strong>{selected?.name}</strong>? Its devices disconnect; saved chats
+            and settings are kept.
           </p>
         {/if}
         <div class="dialog-actions">

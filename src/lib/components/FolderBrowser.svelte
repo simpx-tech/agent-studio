@@ -258,11 +258,7 @@
 <ConnectionDialog title="Choose a folder" busy={saving} wide {close}>
   <div class="folder-browser" bind:this={root}>
     <div class="browser-scope">
-      <span
-        class="browser-computer"
-        title={`Uses the CLI and account on ${computerName}. Choosing a folder does not change the computer that runs the agent.`}
-        >{computerName}</span
-      >
+      <span class="browser-computer">{computerName}</span>
       <ChoicePicker
         label="Folder environment"
         value={environmentId}
@@ -403,7 +399,7 @@
             <Search size={14} aria-hidden="true" />
             <input
               aria-label="Filter folders"
-              placeholder="Filter folders, or paste a path and press Enter"
+              placeholder="Filter or paste a path"
               bind:value={query}
               bind:this={filterInput}
               autocomplete="off"
@@ -476,19 +472,17 @@
             {:else if query && !jumpTarget}
               <p class="folder-state">No folders match “{query.trim()}”.</p>
             {:else if !listing.entries.length}
-              <p class="folder-state">No subfolders. You can use this folder.</p>
+              <p class="folder-state">No subfolders.</p>
             {:else if !jumpTarget}
-              <p class="folder-state">
-                All {listing.entries.length} subfolders are hidden. Turn on Show hidden to see them.
-              </p>
+              <p class="folder-state">All {listing.entries.length} subfolders are hidden.</p>
             {/if}
           {:else if !error}
-            <p class="folder-state muted">Choose a place or enter a path to browse.</p>
+            <p class="folder-state muted">Choose a place or enter a path.</p>
           {/if}
         </div>
         <p class="folder-status">
           {#if listing}{describeFolders(listing.entries)}{#if listing.truncated}
-              · Showing the first 1,000 folders; enter a path to open another folder.{/if}{/if}
+              · first 1,000 shown{/if}{/if}
         </p>
       </section>
     </div>

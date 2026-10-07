@@ -38,7 +38,6 @@
     <button type="button" class="button secondary small" disabled={!canCompact} onclick={compact}
       >Compact context</button
     >
-    <p>Summarize older native context while keeping this chat history.</p>
     {#if settings.provider === 'claude'}
       <ChoicePicker
         label="Claude auto-compaction window"
@@ -52,6 +51,7 @@
         }}
       />
       {#if custom}
+        <p>100,000–1,000,000 tokens.</p>
         <div class="custom-size">
           <input
             aria-label="Auto-compaction tokens"
@@ -77,7 +77,6 @@
           >
         </div>
       {/if}
-      <p>Claude window: 100,000–1,000,000 tokens. Changes apply on the next operation.</p>
     {/if}
   </div>
 {/if}

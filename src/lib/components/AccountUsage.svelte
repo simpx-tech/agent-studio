@@ -140,12 +140,12 @@
   {/if}
   <AccountControls {provider} {connectionId} {name} {snapshot} disabled={!!unavailable} />
   {#if unavailable || error}<p class="usage-note" role="status">
-      {unavailable || error}{snapshot ? ' Keeping the last reported values.' : ''}
+      {unavailable || error}
     </p>
   {:else if !loading && snapshot && limits.every((window) => window.usedPercent == null)}<p
       class="usage-note"
     >
-      This CLI did not report account limits.
+      No limits reported.
     </p>{/if}
 </section>
 

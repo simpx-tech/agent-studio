@@ -242,7 +242,7 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
   await expect(page.getByRole('button', { name: 'Attach images' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Attach images' })).toHaveAttribute(
     'title',
-    /Codex and Claude/,
+    'Images need Codex or Claude',
   );
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
 });
@@ -293,12 +293,12 @@ test('the whole chat accepts file drops with a hint and ignores drops outside ch
     .click();
   await welcome.dispatchEvent('dragenter', { dataTransfer: transfer });
   await expect(
-    page.getByRole('status').filter({ hasText: 'Images are available in Codex and Claude chats' }),
+    page.getByRole('status').filter({ hasText: 'Images need Codex or Claude' }),
   ).toBeVisible();
   await welcome.dispatchEvent('drop', { dataTransfer: transfer });
   await expect(page.locator('.image-drop-overlay')).toHaveCount(0);
   await expect(
-    page.getByRole('alert').filter({ hasText: 'Image attachments are available' }),
+    page.getByRole('alert').filter({ hasText: 'Images need Codex or Claude' }),
   ).toBeVisible();
   await expect(page.locator('.composer .image-thumbnail')).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
@@ -398,7 +398,7 @@ test('signed-out Gemini warns before submission and preserves the draft through 
   await expect(page.locator('.fleet-account.highlighted')).toContainText('Gemini CLI login');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const message = page.getByLabel('Message', { exact: true });
-  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini.');
   await message.fill('Keep this Gemini draft until connected');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await message.press('Enter');
@@ -447,7 +447,7 @@ test('signed-out Gemini warns before submission and preserves the draft through 
     localStorage.removeItem('test-google-login');
     window.dispatchEvent(new Event('focus'));
   });
-  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini.');
   await message.fill('Do not restore while signed out');
   await message.press('Enter');
   await expect(page.getByRole('tab', { name: /^History/ })).toHaveAttribute(
@@ -590,7 +590,7 @@ test('login errors never masquerade as a completed answer', async ({ page }) => 
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-status="error"]')).toContainText('login needs attention');
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled();
-  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini before sending');
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Gemini.');
   await expect(page.locator('[data-testid="message"]')).toHaveCount(2);
 });
 
@@ -1136,7 +1136,7 @@ test('missing and failed quota readings never show fabricated zero usage', async
   await expect(page.getByTestId('limit-weekly')).toContainText('26%');
   await page.evaluate(() => localStorage.setItem('test-usage-error', '1'));
   await returnAfterUsageCacheExpires(page);
-  await expect(page.locator('.usage-error')).toContainText('Keeping the last reported values');
+  await expect(page.locator('.usage-error')).toContainText('Usage refresh failed');
   await expect(page.getByTestId('limit-weekly')).toContainText('26%');
   await expect(page.getByTestId('limit-weekly')).toContainText('Last reported');
   await expect(page.getByRole('progressbar', { name: 'Weekly limit used' })).toHaveAttribute(
@@ -1703,7 +1703,7 @@ test('sidebar deletion stops a running Active chat and ignores late events', asy
   await page.locator('.conversation-item[aria-current="page"]').click({ button: 'right' });
   const item = page.getByRole('menuitem', { name: 'Delete conversation', exact: true });
   await item.click();
-  await expect(page.getByRole('alertdialog')).toContainText('The running response will be stopped');
+  await expect(page.getByRole('alertdialog')).toContainText('Its running reply will be stopped');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(await page.evaluate(() => (window as any).cancelCalls ?? [])).toEqual([]);
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
@@ -2916,9 +2916,7 @@ test('tool targets stream inline and finish as expandable work history below the
     .filter({ hasText: 'Legacy tool' })
     .locator(':scope > summary')
     .click();
-  await expect(
-    page.getByText('No details were recorded for this tool call.', { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText('No details recorded.', { exact: true })).toBeVisible();
   await page
     .locator('.tool-card')
     .filter({ hasText: 'select:WebSearch' })
@@ -3094,8 +3092,6 @@ test('reply cost distinguishes unreported, zero, and tiny values', async ({ page
         .filter({ hasText: 'Estimated cost (USD)' })
         .locator('dd'),
     ).toHaveText(expected);
-    if (costUsd == null)
-      await expect(reply.locator('.usage-breakdown')).toContainText('No cost was reported');
   }
 });
 
@@ -3175,7 +3171,6 @@ test('model context shows scoped sources, filters, refresh failures, and preserv
   await expect(dialog).toContainText('No sources match this filter.');
   await dialog.getByRole('button', { name: /^Memories/ }).click();
   await expect(dialog.getByText('MEMORY.md', { exact: true })).toBeVisible();
-  await expect(dialog).toContainText('Global memory entrypoints');
   await dialog.getByRole('button', { name: /^MCPs/ }).click();
   await expect(dialog.getByText('docs-mcp', { exact: true })).toBeVisible();
   await expect(dialog.getByText('Connected', { exact: true })).toBeVisible();
@@ -3307,7 +3302,7 @@ test('an existing chat can switch to another account of the same agent between r
     await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
   const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
   await expect(agent).toBeEnabled();
-  await expect(agent).toHaveAttribute('title', /Choosing another account.*Full access/);
+  await expect(agent).toHaveAttribute('title', /Another account applies.*Full access/);
   await page.getByLabel('Message', { exact: true }).fill('Draft kept across the switch');
   await agent.click();
   await expect(page.getByRole('option')).toHaveText([
@@ -3317,7 +3312,7 @@ test('an existing chat can switch to another account of the same agent between r
   await page.getByRole('option', { name: 'Claude · Second Claude', exact: true }).click();
   await expect(agent).toContainText('Second Claude');
   await expect(page.locator('.next-reply-settings')).toHaveText(
-    /Next message: Second Claude account · starts a new native session/,
+    /Next message: Second Claude account/,
   );
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
     'Draft kept across the switch',
@@ -3461,7 +3456,7 @@ test('a terminal login can become a separate profile for the same account withou
   await expect(source).toHaveText('This computer’s CLI context');
   await source.click();
   await page.getByRole('option', { name: 'This account only', exact: true }).click();
-  await expect(dialog).toContainText('creates a separate profile for this account');
+  await expect(dialog).toContainText('creates a separate profile');
   await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('test-sign-in-provider'))).toBe('codex');

@@ -14,11 +14,10 @@
   <div class="mode-picker">
     <ChoicePicker
       label="Mode"
-      title="Mode for the next message"
       value={settings.planMode ? 'plan' : 'build'}
       options={[
-        { id: 'build', name: 'Build', detail: 'Work with full tool access.' },
-        { id: 'plan', name: 'Plan', detail: 'Explore and propose changes before implementation.' },
+        { id: 'build', name: 'Build' },
+        { id: 'plan', name: 'Plan' },
       ]}
       {disabled}
       onchange={(value) => change({ ...settings, planMode: value === 'plan' })}

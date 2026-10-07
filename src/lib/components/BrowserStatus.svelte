@@ -84,8 +84,8 @@
   >
     <div class="browser-status-row">
       {#if showConnection && (offline || error || !paired)}<span role="status"
-          >{#if offline}<WifiOff size={15} />Offline · Reconnect to control agents.
-          {:else if error}<WifiOff size={15} />Server unavailable · Reconnect to control agents.
+          >{#if offline}<WifiOff size={15} />Offline
+          {:else if error}<WifiOff size={15} />Server unavailable
           {:else}<Link size={15} />Connect your computers{/if}</span
         >{/if}
       {#if showConnection && (!paired || error)}<button class="text-button" onclick={connect}

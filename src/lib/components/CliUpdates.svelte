@@ -30,13 +30,6 @@
 
 <section aria-labelledby="cli-updates-heading">
   <h2 id="cli-updates-heading"><SquareTerminal size={18} />CLI updates</h2>
-  <p>
-    Claude Code and Codex update themselves only in their terminals, and Agent Studio runs them
-    without one. So Agent Studio runs <code>claude update</code> and <code>codex update</code> a minute
-    after it starts and every six hours, on this computer and in WSL distributions that are running. Codex
-    updates only when a newer version is out, and a Codex installed with npm or another package manager
-    on Windows waits until no Codex chat here is using it. Newer CLIs can bring newer models.
-  </p>
   {#if updates}
     <div class="switches">
       {#each updatedClis as cli (cli.provider)}
@@ -64,7 +57,7 @@
         {/each}
       </ul>
     {:else}
-      <p class="summary">Not checked since Agent Studio started.</p>
+      <p class="summary">Not checked yet.</p>
     {/if}
     <div class="actions">
       <button class="secondary" disabled={busy || checking} onclick={() => act(checkCliUpdates)}
@@ -80,10 +73,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  code {
-    font-family: var(--font-mono);
-    font-size: 0.92em;
   }
   .switches {
     display: grid;

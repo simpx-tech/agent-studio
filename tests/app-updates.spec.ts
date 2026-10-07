@@ -62,10 +62,7 @@ test('a downloaded update waits for local replies, then saves before restarting 
   // Status refreshes while an update waits, without a native event.
   await setUpdate(page, ready);
   await expect(restart).toBeEnabled({ timeout: 10000 });
-  await expect(restart).toHaveAttribute(
-    'title',
-    'Version 0.3.0 is ready. Restart Agent Studio to finish updating.',
-  );
+  await expect(restart).toHaveAttribute('title', 'Version 0.3.0 is ready.');
   const commands = await recordCommands(page);
   await restart.click();
   await expect
@@ -103,7 +100,7 @@ test('Settings shows the version, checks on request, and explains update states'
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const section = page.getByRole('region', { name: 'App updates', exact: true });
   await expect(section.getByText('Current version 0.2.0', { exact: true })).toBeVisible();
-  await expect(section.getByRole('status')).toContainText('Agent Studio is up to date.');
+  await expect(section.getByRole('status')).toContainText('Up to date.');
   const commands = await recordCommands(page);
   await section.getByRole('button', { name: 'Check for updates', exact: true }).click();
   await expect.poll(commands).toContain('check_app_update');
@@ -135,9 +132,7 @@ test('Settings shows the version, checks on request, and explains update states'
   await setUpdate(page, ready);
   await page.reload();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(section.getByRole('status')).toHaveText(
-    'Version 0.3.0 is ready. Restart Agent Studio to finish updating.',
-  );
+  await expect(section.getByRole('status')).toHaveText('Version 0.3.0 is ready.');
   await section.getByText('What’s new in 0.3.0', { exact: true }).click();
   await expect(section.getByText('- Faster sync')).toBeVisible();
   await page.evaluate(() =>

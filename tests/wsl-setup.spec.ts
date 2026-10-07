@@ -26,7 +26,6 @@ test('installs a CLI missing in WSL, where the Desktop accounts join and sign in
   await page.goto('/');
   const claude = await claudeOnUbuntu(page);
   await expect(claude.locator('.installation-status')).toHaveText('Not installed');
-  await expect(claude).toContainText('Install Claude in WSL · Ubuntu to run chats in its folders');
   await page.evaluate(() => ((window as any).holdInstall = true));
   await claude.getByRole('button', { name: 'Install Claude', exact: true }).click();
   await expect(claude.getByRole('button', { name: 'Installing…' })).toBeDisabled();
@@ -90,9 +89,7 @@ test('installs a CLI missing in WSL, where the Desktop accounts join and sign in
   };
   await refreshed();
   await expect(claude.locator('.fleet-account')).toHaveCount(0);
-  await expect(claude).toContainText(
-    'Connect an account using the Linux CLI in this distribution.',
-  );
+  await expect(claude.getByRole('button', { name: 'Add account', exact: true })).toBeVisible();
 
   // Manage account on Desktop brings it back on request, and it signs in there again.
   await page

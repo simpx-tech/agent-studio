@@ -144,7 +144,7 @@ for (const mobile of [false, true])
     await expect(buildCard.locator('summary')).not.toContainText('13m');
     await expect(buildCard.locator('.query-preview')).toHaveText('docker build -t studio .');
     await buildCard.locator('summary').click();
-    await expect(buildCard).toContainText('Background work below this reply tracks it.');
+    await expect(buildCard).toContainText('Running in the background.');
     // A launch that moved to the background has no output to wait for.
     await expect(buildCard).not.toContainText('The output appears when the command finishes.');
     await expect(group.locator('.subagent-row', { hasText: 'Review the Dockerfile' })).toContainText(
@@ -193,9 +193,7 @@ for (const mobile of [false, true])
     await expect(server.locator('summary')).toContainText('Left running');
     await expect(server.locator('summary')).not.toContainText('5s');
     await server.locator('summary').click();
-    await expect(server).toContainText(
-      'Still running in the background when this reply ended. Its later outcome was not recorded.',
-    );
+    await expect(server).toContainText('Left running; its outcome was not recorded.');
     await page.screenshot({
       path: `artifacts/background-work/history-${mobile ? 'mobile' : 'desktop'}.png`,
     });

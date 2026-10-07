@@ -211,8 +211,8 @@
   function backgroundNote(tool: ToolActivity) {
     if (tool.status !== 'running') return 'Ran in the background.';
     return replyStatus === 'running'
-      ? 'Running in the background while the reply continues. Background work below this reply tracks it.'
-      : 'Still running in the background when this reply ended. Its later outcome was not recorded.';
+      ? 'Running in the background.'
+      : 'Left running; its outcome was not recorded.';
   }
   const editOf = (tool: ToolActivity) => fileChanges?.edits.find((edit) => edit.id === tool.id);
   // The command's exit code now travels with its output; older calls kept it as a fact.
@@ -294,10 +294,7 @@
   {@const showDetail =
     !!tool.detail && visual.title !== tool.detail && visual.detail !== tool.detail}
   {#if disclosures.has(`tool:${tool.id}`)}<div class="tool-body">
-      {#if tool.progress}<p
-          class="tool-progress"
-          title="Progress signals carry no output; the result is shown when the call finishes."
-        >
+      {#if tool.progress}<p class="tool-progress">
           {toolProgressLabel(tool)} at {toolElapsed(tool.progress.atElapsedMs)}
         </p>{/if}
       {#if tool.parentId && tool.parentId !== owner}<p class="tool-note">
@@ -337,7 +334,7 @@
                   ? 'File renamed without recorded text changes.'
                   : file.kind === 'deleted'
                     ? 'File deleted.'
-                    : 'No text diff was recorded for this file.'}
+                    : 'No text diff recorded.'}
               </p>{/if}
           </section>
         {/each}
@@ -353,12 +350,12 @@
           {tool.status === 'running' && replyStatus === 'running'
             ? 'Waiting for tool details…'
             : tool.commandRun || tool.operation === 'command'
-              ? 'The command and its output were not recorded for this call.'
-              : 'No details were recorded for this tool call.'}
+              ? 'Command not recorded.'
+              : 'No details recorded.'}
         </p>
       {/if}
       {#if tool.category === 'search' && !tool.sources.length && tool.status === 'complete'}
-        <p class="tool-note">The provider did not include source links in this activity.</p>
+        <p class="tool-note">No source links.</p>
       {/if}
       {#if tool.sources.length}<ul class="tool-sources">
           {#each tool.sources.filter((s) => safeSourceUrl(s.url)) as source}

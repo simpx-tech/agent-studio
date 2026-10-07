@@ -42,7 +42,6 @@ export const providers = {
     color: '#b9ddcc',
     install: 'npm install -g @openai/codex',
     login: 'codex login',
-    description: 'A thoughtful partner for ideas, code, and problem solving.',
   },
   claude: {
     name: 'Claude',
@@ -52,7 +51,6 @@ export const providers = {
     color: '#dda987',
     install: 'irm https://claude.ai/install.ps1 | iex',
     login: 'claude auth login',
-    description: 'Go from a rough thought to something carefully considered.',
   },
   gemini: {
     name: 'Gemini',
@@ -62,7 +60,6 @@ export const providers = {
     color: '#a9bff0',
     install: 'irm https://antigravity.google/cli/install.ps1 | iex',
     login: 'agy',
-    description: 'Explore possibilities and bring a fresh perspective.',
   },
 } satisfies Record<
   ProviderId,
@@ -74,7 +71,6 @@ export const providers = {
     color: string;
     install: string;
     login: string;
-    description: string;
   }
 >;
 

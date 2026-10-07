@@ -31,11 +31,6 @@
         </dd>
       </div>{/if}
   </dl>
-  <p>{spend.detail}</p>
-  <p>
-    Provider estimates are not billed charges. Subscription limits cannot be converted into exact
-    per-chat costs.
-  </p>
   <AccountChanges message={latest} />
 </section>
 
@@ -61,7 +56,6 @@
     color: var(--warning);
     font-size: var(--text-xs);
   }
-  p,
   dt {
     color: var(--text-muted);
   }
@@ -79,10 +73,5 @@
     font-weight: 500;
     overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
-  }
-  p {
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
-    margin: 6px 0;
   }
 </style>

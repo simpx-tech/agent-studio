@@ -71,8 +71,10 @@ test('the Agent picker shows an account whose login lapsed, and choosing it open
     'Choosing this account opens Connections to sign in to it',
   );
   await expect(
-    page.getByRole('option', { name: 'Claude · Claude CLI login', exact: true }),
-  ).toContainText('Anthropic');
+    page
+      .getByRole('option', { name: 'Claude · Claude CLI login', exact: true })
+      .locator('.option-detail'),
+  ).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/account-sign-in-picker.png' });
   await lapsed.click();
 
@@ -91,9 +93,7 @@ test('the Agent picker shows an account whose login lapsed, and choosing it open
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(message).toHaveValue('Keep this draft');
   await expect(agent).toHaveText(/Claude · Second Claude/);
-  await expect(page.locator('.setup-hint')).toContainText(
-    'Sign in to Claude · Second Claude before sending a message.',
-  );
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Claude · Second Claude.');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   await page.getByRole('button', { name: 'Open Connections', exact: true }).click();
   await expect(card).toHaveClass(/highlighted/);
@@ -132,9 +132,7 @@ test('the composer names the selected account whose login lapsed and opens Conne
   // Its next usage reading, on returning to the window, finds the login expired.
   await expire(page, second);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await expect(page.locator('.setup-hint')).toContainText(
-    'Sign in to Claude · Second Claude before sending a message.',
-  );
+  await expect(page.locator('.setup-hint')).toContainText('Sign in to Claude · Second Claude.');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
   await page.getByRole('button', { name: 'Open Connections', exact: true }).click();
@@ -213,9 +211,7 @@ test('Open sign-in waits for no account check, and says why when it cannot open'
   await expect(card).toContainText('Could not check this account');
   await expect(card).toContainText('Cannot read connection registry');
   await expect(card).not.toContainText('Install the CLI');
-  await expect(card.locator('.usage-note')).toContainText(
-    'Refresh Connections to check this account and read its usage.',
-  );
+  await expect(card.locator('.usage-note')).toContainText('Refresh to read usage.');
   await expect(button).toBeEnabled();
   await button.click();
   await expect
@@ -274,9 +270,7 @@ test('the composer reads an account whose check failed as unverified, not as mis
   );
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const hint = page.locator('.setup-hint');
-  await expect(hint).toContainText(
-    "We couldn't verify your Claude connection. Open Connections to check it before sending.",
-  );
+  await expect(hint).toContainText("We couldn't verify your Claude connection.");
   await expect(hint).not.toContainText('needs to be set up');
 });
 
@@ -350,7 +344,7 @@ test('Claude signs in through its page alone, takes the code the page shows, and
   // Adding the account opened its sign-in: no terminal, only its page in the browser.
   const second = await addAccount(page, 'Second Claude', false);
   await expect(page.locator('.notice[role="status"]')).toContainText(
-    "Finish signing in to Claude in your browser. The account connects as soon as you're done.",
+    'Finish signing in to Claude in your browser.',
   );
   await page.evaluate((id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'), second);
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();

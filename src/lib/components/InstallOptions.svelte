@@ -49,25 +49,18 @@
   <div class="install-options">
     <section aria-labelledby="install-viewer-title">
       <h3 id="install-viewer-title"><Smartphone size={20} />Viewer <span>PWA</span></h3>
-      <p>View chats and manage agents running on your connected computers.</p>
       <button class="primary" type="button" onclick={install} disabled={prompting}>
         <Download size={16} />{prompting ? 'Opening installation…' : 'Install Viewer'}
       </button>
       {#if help}<p class="install-help" role="status">
-          {#if device === 'mobile'}On iPhone, open this page in Safari, tap Share, then Add to Home
-            Screen. On Android, choose Install app or Add to Home screen in your browser menu.
-          {:else}Use your browser’s install option, if available. You can also keep using Viewer in
-            this tab.{/if}
+          {#if device === 'mobile'}iPhone: Share → Add to Home Screen. Android: browser menu →
+            Install app.
+          {:else}Use your browser’s install option.{/if}
         </p>{/if}
       {#if installError}<p role="alert">{installError}</p>{/if}
     </section>
     {#if device !== 'mobile'}<section aria-labelledby="install-desktop-title">
         <h3 id="install-desktop-title"><Monitor size={20} />Desktop app</h3>
-        <p>
-          {device === 'windows'
-            ? 'Run agents on this computer and connect it to your workspace.'
-            : 'Run agents on a Windows computer and connect it to your workspace.'}
-        </p>
         {#if checking}<p role="status">Checking installer availability…</p>
         {:else if downloadError}<p role="alert">Could not check desktop downloads.</p>
           <button class="text-button" type="button" onclick={checkDownload}>Try again</button>
@@ -75,7 +68,7 @@
             <Download size={16} />Download for Windows
           </a>
           <p class="download-detail">Windows · 64-bit installer</p>
-        {:else}<p role="status">The desktop installer is not available on this server yet.</p>{/if}
+        {:else}<p role="status">Installer not available on this server.</p>{/if}
       </section>{/if}
   </div>
 </ConnectionDialog>

@@ -64,7 +64,6 @@ async function createForm(page: Page, name: string) {
   const form = page.getByRole('dialog', { name: 'Create workspace', exact: true });
   await form.getByLabel('Workspace name', { exact: true }).fill(name);
   await expect(form.getByRole('combobox', { name: 'Workspace role' })).toHaveCount(0);
-  await expect(form).toContainText('New workspaces start as members');
   return form;
 }
 
@@ -131,7 +130,6 @@ test('the sole administrator creates members and transfers administration atomic
     await owner.getByRole('option', { name: /^Administrator/ }).click();
     await owner.getByRole('button', { name: 'Save changes', exact: true }).click();
     const confirm = owner.getByRole('dialog', { name: 'Transfer administration', exact: true });
-    await expect(confirm).toContainText('manage other workspaces and issue keys');
     await expect(confirm).toContainText('Your current workspace will become a member');
     await confirm.getByRole('button', { name: 'Transfer administration', exact: true }).click();
     await expect(owner.getByRole('dialog')).toHaveCount(0);
@@ -226,7 +224,7 @@ test('phone administrators create members, rotate keys, and disable a workspace'
     await page.getByRole('button', { name: 'Manage workspace Phone member', exact: true }).click();
     await page.getByRole('button', { name: 'Rotate key', exact: true }).click();
     const rotation = page.getByRole('dialog', { name: 'Rotate workspace key', exact: true });
-    await expect(rotation).toContainText('browser sessions will stop working');
+    await expect(rotation).toContainText('Its devices must pair again');
     await rotation.getByRole('button', { name: 'Rotate key', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Workspace key', exact: true })).toBeVisible();
     const nextKey = await page.getByLabel('New workspace key', { exact: true }).inputValue();
@@ -239,7 +237,7 @@ test('phone administrators create members, rotate keys, and disable a workspace'
     await page.getByRole('button', { name: 'Manage workspace Phone member', exact: true }).click();
     await page.getByRole('button', { name: 'Disable workspace', exact: true }).click();
     const disabling = page.getByRole('dialog', { name: 'Disable workspace', exact: true });
-    await expect(disabling).toContainText('Saved chats and settings are kept');
+    await expect(disabling).toContainText('saved chats and settings are kept');
     await disabling.getByRole('button', { name: 'Disable workspace', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(

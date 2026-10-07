@@ -146,7 +146,7 @@ test('older Claude replies label saved running cost totals and leave them out of
   const card = page.getByRole('region', { name: 'Chat usage and spend' });
   await expect(card).toContainText('$0.05');
   await expect(card).not.toContainText('$0.45');
-  await expect(card).toContainText('that reading is excluded');
+  await expect(card).toContainText('Incomplete readings');
   await page.keyboard.press('Escape');
   const toggles = page.getByRole('button', { name: 'Reply usage and cost', exact: true });
   await toggles.first().click();

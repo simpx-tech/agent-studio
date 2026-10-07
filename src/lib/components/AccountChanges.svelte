@@ -22,12 +22,8 @@
           <dd>{row.value}</dd>
         </div>{/each}
     </dl>
-  {:else}<p>No comparable before-and-after readings were recorded.</p>{/if}
-  <p>
-    Shared account observations. Other chats, devices, delayed reporting, resets and credit
-    purchases may contribute. These changes are not this chat’s billed spend or exact share of its
-    limits.
-  </p>
+  {:else}<p>No comparable readings.</p>{/if}
+  <p>Shared account observations; other chats may contribute.</p>
 </details>
 
 <style>

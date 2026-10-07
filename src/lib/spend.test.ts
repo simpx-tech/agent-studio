@@ -56,7 +56,6 @@ describe('chat spend tracking', () => {
       { ...reply(), status: 'cancelled' },
     ]);
     expect(chatSpend(c)).toMatchObject({ input: 30, output: 6, cost: 0.5, partial: true });
-    expect(chatSpend(c).detail).not.toContain('running cost total');
     expect(chatSpend(chat('claude', [reply()]))).toMatchObject({ input: null, cost: null });
     // Older replies saved the session's running total: their tokens count, not their cost.
     const older = chatSpend(
@@ -67,7 +66,6 @@ describe('chat spend tracking', () => {
       ]),
     );
     expect(older).toMatchObject({ input: 35, output: 7, cost: 0.1, partial: true });
-    expect(older.detail).toContain('those readings are excluded');
     expect(money(0)).toBe('$0.00');
     expect(money(0.0000001)).toBe('<$0.000001');
     expect(money(null)).toBe('Not reported');

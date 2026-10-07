@@ -214,13 +214,8 @@
           onclick={() => (expanded = false)}><X size={14} /></button
         >
       </div>
-      {#if error}<p class="usage-error" role="status">
-          {error}
-          {snapshot ? 'Keeping the last reported values.' : ''}
-        </p>{/if}
-      {#if preview}<p class="usage-note">
-          Open the desktop app to read live subscription limits.
-        </p>{/if}
+      {#if error}<p class="usage-error" role="status">{error}</p>{/if}
+      {#if preview}<p class="usage-note">Live limits need the desktop app.</p>{/if}
       <div class="usage-cards">
         <div class="usage-card context-card" data-testid="reported-context">
           <div class="usage-card-heading">

@@ -72,7 +72,6 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
     typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const rows: { label: string; value: string }[] = [];
   let value = 'Not reported';
-  let conversionDetail = '';
   if (credits?.kind === 'codex') {
     value =
       credits.unlimited === true
@@ -91,7 +90,7 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
     if (credits.unlimited !== true && numeric(credits.balance)) {
       const usd = credits.balance * CODEX_CREDIT_USD_RATE;
       rows.push({
-        label: 'Estimated value (USD)',
+        label: `Estimated value (US$${CODEX_CREDIT_USD_RATE.toFixed(2)} per credit)`,
         value:
           credits.balance > 0 && usd < 0.01
             ? '<$0.01'
@@ -102,7 +101,6 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
                 maximumFractionDigits: 2,
               }).format(usd),
       });
-      conversionDetail = ` Estimated at US$${CODEX_CREDIT_USD_RATE.toFixed(2)} per credit from displayed pack prices; checkout discounts and taxes may change the actual cost.`;
     }
     if (numeric(credits.resetCredits))
       rows.push({ label: 'Usage resets available', value: String(credits.resetCredits) });
@@ -145,14 +143,7 @@ export function creditReading(provider: ProviderId, snapshot?: UsageSnapshot) {
     if (numeric(credits.usedPercent))
       rows.push({ label: 'Spending cap used', value: percentage(credits.usedPercent) });
   }
-  return {
-    value,
-    rows,
-    detail:
-      provider === 'claude'
-        ? 'Prepaid balance is not reported by this CLI. Remaining under cap is spending room, not a credit balance.'
-        : `Account credits are separate from subscription limits. Usage resets are separate from the credit balance.${conversionDetail}`,
-  };
+  return { value, rows };
 }
 export const usageKey = (settings: Pick<ChatSettings, 'provider' | 'model' | 'connectionId'>) =>
   `${settings.provider}:${settings.model}${settings.connectionId ? `:${settings.connectionId}` : ''}`;

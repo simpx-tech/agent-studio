@@ -237,7 +237,7 @@ test('scratch chats can be discarded, and earlier folder drafts become scratch c
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('alertdialog');
   await expect(dialog).toContainText('Discard draft?');
-  await expect(dialog).toContainText('“Saved before scratch chats” was never sent.');
+  await expect(dialog).toContainText('“Saved before scratch chats” will be discarded.');
   await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(earlier).toBeFocused();

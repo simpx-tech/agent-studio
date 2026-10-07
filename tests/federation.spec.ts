@@ -943,7 +943,6 @@ test('missing WSL CLIs require installation before connecting accounts', async (
   await expect(
     ubuntu.locator('.provider-group').getByRole('button', { name: 'Add account', exact: true }),
   ).toHaveCount(0);
-  await expect(ubuntu).toContainText('Install this CLI in WSL · Ubuntu, then refresh Connections.');
   const desktop = page.getByRole('article', { name: 'Desktop computer', exact: true });
   await expect(desktop.getByRole('button', { name: 'Add account', exact: true })).toBeEnabled();
 });
@@ -1062,9 +1061,7 @@ test('Windows discovers WSL automatically and management forms use accessible de
   );
   await page.evaluate(() => localStorage.setItem('fixture-inventory-error', 'yes'));
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
-  await expect(ubuntuCard.getByRole('alert')).toContainText(
-    'Showing the last successful installation check',
-  );
+  await expect(ubuntuCard.getByRole('alert')).toContainText('Synthetic installation check failure');
   await expect(ubuntuCard.getByLabel('Codex installation in WSL · Ubuntu')).toContainText(
     'Last check',
   );

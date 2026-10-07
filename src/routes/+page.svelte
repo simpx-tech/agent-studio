@@ -258,7 +258,6 @@
     imageTypes,
     supportsImages,
     maxImagesPerMessage,
-    maxImageLabel,
     storedImage,
     type DraftImage,
     type StoredImage,
@@ -322,9 +321,7 @@
   let presence = $state<Presence[]>([]);
   let paired = $state(false);
   let workspaceSession = $state(0);
-  let syncStatus = $state(
-    'Saved on this environment. Pair a relay to bring your workspace together.',
-  );
+  let syncStatus = $state('');
   let syncError = $state('');
   let view = $state<View>('chat');
   // The account Connections was opened for, shown there with its sign-in on that visit.
@@ -929,7 +926,7 @@
             detail: attention
               ? 'Sign-in needed'
               : connectionStatus(c.id)?.installed
-                ? providers[provider].company
+                ? undefined
                 : canChooseConnection(c.id)
                   ? 'Checking availability…'
                   : 'Unavailable connection',
@@ -951,7 +948,7 @@
                 ? 'Checking availability…'
                 : attention
                   ? 'Sign-in needed'
-                  : providers[provider].company,
+                  : undefined,
           ...signIn(attention),
         },
       ];
@@ -1767,7 +1764,7 @@
                 paired = false;
                 relayRestorePending = false;
                 syncError = reason;
-                syncStatus = 'Pair with your private workspace to see its chats and computers.';
+                syncStatus = '';
               }
               await loadSavedDrafts();
               await persist();
@@ -1934,7 +1931,7 @@
         presence = peers;
         // A conversation too large to send is named here while every other one syncs.
         syncError = relaySyncNotice();
-        syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · Environments report every few seconds`;
+        syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       }
     } catch (e) {
       if (version !== relaySelectionVersion) return;
@@ -1974,9 +1971,7 @@
     relayRestorePending = false;
     presence = [];
     syncError = '';
-    syncStatus = desktop()
-      ? 'Disconnected. Changes continue to save on this environment.'
-      : 'Disconnected. Pair with your private workspace to see its chats and computers.';
+    syncStatus = '';
   }
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
   // changed. Streamed reply events count too, because they update messages before a save.
@@ -2704,7 +2699,7 @@
     const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
     return JSON.stringify([settings.provider, connection ?? settings.connectionId ?? null]);
   }
-  const modelRefreshWarning = 'Could not refresh models. Your saved choices are still available.';
+  const modelRefreshWarning = 'Could not refresh models.';
   function applyCliUpdates(next: CliUpdates) {
     const updated = newlyUpdated(cliUpdates, next);
     cliUpdates = next;
@@ -3397,7 +3392,7 @@
         activeId !== selected || view !== selectedView || imagesLoading ||
         (!activeId && (prompt || attachedImages.length))
       ) {
-        notice = `“${fork.title}” was created in Active. Your current draft is unchanged.`;
+        notice = `“${fork.title}” created in Active.`;
         return;
       }
       // The source chat keeps its draft for when it is reopened.
@@ -3838,12 +3833,11 @@
     if (!files.length || imagesLoading) return;
     attachmentError = '';
     if (!imagesSupported) {
-      attachmentError =
-        'Image attachments are available with Codex and Claude. Choose one in Agent to attach images.';
+      attachmentError = 'Images need Codex or Claude.';
       return;
     }
     if (attachedImages.length + files.length > maxImagesPerMessage) {
-      attachmentError = `Attach up to ${maxImagesPerMessage} images per message. Remove an image before adding more.`;
+      attachmentError = `Up to ${maxImagesPerMessage} images per message.`;
       return;
     }
     const generation = attachmentGeneration;
@@ -4123,7 +4117,7 @@
     }
     const compact = !!compactRequest || !!command?.compact || (retry && !!active?.messages.at(-1)?.compact);
     if (compact && (!canCompact || (!compactRequest && attachedImages.length))) {
-      notice = 'Compact an idle conversation with its current account and no attachments. Send a message first after switching accounts or rewinding.';
+      notice = 'Compaction needs an idle chat without attachments, and a reply since any account switch or rewind.';
       return;
     }
     const text = compactRequest ?? (queuedMessage ? queuedMessage.text : prompt.trim());
@@ -4651,7 +4645,7 @@
       const view = await signIn(id, connectionId);
       if (view) {
         applySignIn(view);
-        notice = `Finish signing in to ${providers[id].name} in your browser. The account connects as soon as you're done.`;
+        notice = `Finish signing in to ${providers[id].name} in your browser.`;
         return;
       }
       // Antigravity signs in in a terminal of its own, so its account is followed instead.
@@ -4660,7 +4654,7 @@
         connectionId,
         until: Date.now() + 10 * 60_000,
       });
-      notice = `Finish signing in through ${providers[id].name}. We'll update the connection automatically; you can leave the sign-in window open.`;
+      notice = `Finish signing in through ${providers[id].name}.`;
       void refresh();
     } catch (e) {
       notice = String(e);
@@ -4878,7 +4872,7 @@
         <span role="status" aria-live="polite" aria-label={`${pendingChats} pending chats`}>
           {#if pendingChats > 0}<span
               class="pending-chat-count"
-              title="Pending chats: active conversations that are not working, or wait for your answer"
+              title="Pending chats"
               >{pendingChats}</span
             >{/if}
         </span>
@@ -5193,7 +5187,7 @@
               ? 'Reading screens…'
               : query
                 ? 'No matching screens.'
-                : 'No screens yet. Ask a chat to build one, such as a page of the pull requests you opened this week.'}
+                : 'No screens yet.'}
           </p>{/each}
         {#each screenProblems as problem (problem.host)}<p class="sidebar-empty screen-problem">
             Could not read the screens of {problem.name}: {problem.error}
@@ -5204,8 +5198,7 @@
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
           class="update-button"
           disabled={restartingForUpdate || !!restartBlocked(appUpdate)}
-          title={restartBlocked(appUpdate) ??
-            `Version ${appUpdate.version} is ready. Restart Agent Studio to finish updating.`}
+          title={restartBlocked(appUpdate) ?? `Version ${appUpdate.version} is ready.`}
           onclick={restartFromSidebar}
           ><RefreshCw size={14} aria-hidden="true" /><span
             >{restartingForUpdate || appUpdate.phase === 'installing'
@@ -5288,16 +5281,13 @@
                 <Paperclip size={28} aria-hidden="true" />
                 <strong
                   >{!imagesSupported
-                    ? 'Images are available in Codex and Claude chats'
+                    ? 'Images need Codex or Claude'
                     : imagesLoading
                       ? 'Reading images…'
                       : attachedImages.length >= maxImagesPerMessage
                         ? 'Remove an attachment to add more images'
                         : 'Drop images to attach'}</strong
                 >
-                {#if imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage}<span
-                    >PNG, JPEG or WebP · Up to {maxImagesPerMessage} images · {maxImageLabel} each</span
-                  >{/if}
               </div>
             </div>
           {/if}
@@ -5306,9 +5296,7 @@
               <div class="chat-setting computer-setting">
                 <ChoicePicker
                   label="Computer"
-                  title={active
-                    ? 'Fixed for this conversation. Start a new conversation to change it.'
-                    : undefined}
+                  title={active ? 'Fixed for this conversation' : undefined}
                   value={selectedComputerId}
                   options={[
                     ...computers.map((c) => ({
@@ -5408,10 +5396,10 @@
                   title={`${
                     active
                       ? switchableConnections.length
-                        ? 'The agent, computer, and folder are fixed for this conversation. Choosing another account applies to the next message and starts a new native session for it from the saved messages. '
-                        : 'Fixed for this conversation. Start a new conversation to change it, or connect another account of this agent to switch accounts between replies. '
+                        ? 'Another account applies to the next message. '
+                        : 'Fixed for this conversation. '
                       : ''
-                  }${selectedSettings.planMode ? 'Plan mode: explore and propose changes before implementation. Claude asks for plan-mode approval; Codex returns a proposed plan.' : 'Full access: file access, editing, commands, and configured CLI tools are enabled. Tool calls run without approval prompts, except explicit plan-mode decisions.'}`}
+                  }${selectedSettings.planMode ? 'Plan mode: proposes changes before making them.' : 'Full access: tools run without approval prompts.'}`}
                   bind:open={agentPickerOpen}
                   value={selectedAgentOption}
                   options={agentOptions}
@@ -5512,7 +5500,7 @@
           {:else if accountSwitchPending}
             <p class="next-reply-settings" role="status">
               Next message: {accountName(workspace.fleet, selectedSettings.connectionId) ??
-                'Another'} account · starts a new native session from this chat's saved messages
+                'Another'} account
             </p>
           {/if}
           <div
@@ -5581,7 +5569,6 @@
                     >A conversation with {selectedAgent.name}</span
                   >
                   <h1>What’s on your mind?</h1>
-                  <p>Bring a question, an idea, or the thing you can’t quite untangle.</p>
                 </div>{/if}
             </div>
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
@@ -5589,8 +5576,7 @@
           <div class="composer-area" bind:this={composerArea}>
             {#if active?.rewind}<div class="setup-hint neutral" role="status">
                 <Rewind size={15} aria-hidden="true" /><span
-                  >Conversation rewound. Files stay as they are, and the next reply starts a new
-                  agent session without earlier tool details.</span
+                  >Conversation rewound; files unchanged.</span
                 ><button
                   class="text-button"
                   disabled={historyBusy || activeRunning}
@@ -5600,14 +5586,12 @@
               </div>{/if}
             {#if historyError}<p class="attachment-notice" role="alert">{historyError}</p>{/if}
             {#if selectedComputerOffline}<div class="setup-hint">
-                <Laptop size={15} />{selectedComputer?.name} is offline. Open Agent Studio on {selectedComputer?.wsl
-                  ? selectedComputer.hostName
-                  : selectedComputer?.name} and connect it to sync.
+                <Laptop size={15} />{selectedComputer?.name} is offline.
               </div>
             {:else if locationPending || (!selectedLocation && !active)}<div class="setup-hint">
                 <Laptop size={15} />{selectedComputer
                   ? 'This computer has no available execution environment.'
-                  : 'Choose a computer to select an agent and start chatting.'}
+                  : 'Choose a computer.'}
               </div>
             {:else if !active && !selectedSettings.connectionId && selectedComputer?.wsl && desktop()}<div
                 class="setup-hint"
@@ -5622,7 +5606,7 @@
                 {#if selectedRemote}<Laptop size={15} />Computer offline or relay disconnected.
                 {:else if selectedSettings.connectionId && !selectedConnection}<Plug
                     size={15}
-                  />This CLI connection is no longer available. Choose another connection.
+                  />This connection is no longer available.
                 {:else}<RefreshCw size={15} class="spinning" />Checking this computer’s CLIs…{/if}
               </div>
             {:else if !selectedStatus?.installed && !selectedCheckFailed && desktop()}<div
@@ -5641,9 +5625,8 @@
                 <Plug size={15} />
                 {#if selectedStatus.auth === 'login'}Sign in to {agentOptions.find(
                     (option) => option.id === selectedAgentOption,
-                  )?.name ?? providers[selectedAgent.provider].name} before sending a message.
-                {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection. Open
-                  Connections to check it before sending.{/if}
+                  )?.name ?? providers[selectedAgent.provider].name}.
+                {:else}We couldn't verify your {providers[selectedAgent.provider].name} connection.{/if}
                 <button
                   class="text-button"
                   onclick={() => openConnections(selectedSettings.connectionId)}
@@ -5706,10 +5689,9 @@
               <textarea
                 bind:this={composerInput}
                 aria-label="Message"
-                title="Enter to send · Shift + Enter for a new line · / commands · @ files · $ apps in Codex"
                 placeholder={activeRunning && !waitingReply
-                  ? `Message ${selectedAgent.name} after this reply… Type / for commands`
-                  : `Message ${selectedAgent.name}… Type / for commands`}
+                  ? `Message ${selectedAgent.name} after this reply…`
+                  : `Message ${selectedAgent.name}…`}
                 bind:value={prompt}
                 rows="3"
                 maxlength="30000"
@@ -5756,10 +5738,10 @@
                       fastMode: name === 'fast:default' ? undefined : name === 'fast:on',
                     });
                     notice = name === 'fast:on'
-                      ? 'Fast mode requested for the next reply. Supported Opus models use higher per-token pricing and usage credits on subscription plans; account availability applies.'
+                      ? 'Fast mode on for the next reply; it costs more usage.'
                       : name === 'fast:off'
-                        ? 'Fast mode is off for the next reply.'
-                        : 'The next reply will use the Claude CLI profile’s Fast mode default.';
+                        ? 'Fast mode off for the next reply.'
+                        : 'Fast mode follows the CLI default.';
                   } else if (name === 'context') contextOpen = true;
                   else if (name === 'usage') usageExpanded = true;
                   else if (name === 'rewind') openRewind();
@@ -5791,7 +5773,7 @@
                   class="attachment-notice"
                   role="alert"
                 >
-                  Choose Codex or Claude to send these images, or remove them to use Gemini.
+                  Images need Codex or Claude.
                 </p>{/if}
               <div class="composer-bottom">
                 <div class="composer-tools">
@@ -5800,9 +5782,7 @@
                     type="button"
                     class="attach-button"
                     aria-label="Attach images"
-                    title={imagesSupported
-                      ? `Attach images · PNG, JPEG, WebP · ${maxImageLabel} each · up to ${maxImagesPerMessage}`
-                      : 'Image attachments are available with Codex and Claude'}
+                    title={imagesSupported ? 'Attach images' : 'Images need Codex or Claude'}
                     disabled={!imagesSupported ||
                       imagesLoading ||
                       attachedImages.length >= maxImagesPerMessage}
@@ -5812,13 +5792,12 @@
                     type="button"
                     class="template-button"
                     disabled={!loaded}
-                    title="Create and fill reusable input templates"
                     onclick={() => (templatesOpen = true)}><FileText size={16} />Templates</button
                   >
                 </div>
                 {#if activeRunning}
                   {#if steeringSupported}<button type="button" class="steer-button" disabled={!canSteer} onclick={steer}
-                    title={attachedImages.length || hasComposerMentions || prompt.trimStart().startsWith('/') ? 'Queue images, mentions, commands, and skills for the next reply' : 'Send text to the active reply'}
+                    title={attachedImages.length || hasComposerMentions || prompt.trimStart().startsWith('/') ? 'Images, mentions and commands wait for the next reply' : 'Send to the running reply'}
                     >{activeSteering ? 'Sending…' : 'Steer now'}</button>{/if}
                   <button
                     class="stop-button"
@@ -5833,9 +5812,7 @@
                     type="submit"
                     disabled={!canQueue || (!prompt.trim() && !attachedImages.length)}
                     aria-label={waitingReply ? 'Send message' : 'Queue message'}
-                    title={waitingReply
-                      ? 'Send now: Claude only waits for background work, which the new reply keeps waiting for'
-                      : 'Send after the current reply'}><ArrowUp size={19} /></button
+                    title={waitingReply ? 'Send now' : 'Send after this reply'}><ArrowUp size={19} /></button
                   >{:else}<button
                     class="send-button"
                     type="submit"
@@ -6101,16 +6078,13 @@
       use:focusDeletionDialog
     >
       {#if deletion.type === 'draft'}<h2 id="delete-title">Discard draft?</h2>
-        <p>
-          “{deletion.name}” was never sent. Its text will be removed from this device. This cannot
-          be undone.
-        </p>
+        <p>“{deletion.name}” will be discarded. This cannot be undone.</p>
       {:else}<h2 id="delete-title">Delete {deletion.type}?</h2>
         <p>
           “{deletion.name}” will be removed from this workspace. This cannot be undone.
         </p>{/if}
       {#if deletingConversation && conversationRunning(deletingConversation)}<p>
-          The running response will be stopped before this conversation is deleted.
+          Its running reply will be stopped first.
         </p>{/if}
       {#if deletionError}<p role="alert">{deletionError}</p>{/if}
       <footer>

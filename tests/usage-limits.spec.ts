@@ -58,7 +58,6 @@ async function expectStoppedAtLimit(reply: ReturnType<Page['locator']>) {
   const card = reply.locator('.usage-limit');
   await expect(card).toHaveAttribute('role', 'status');
   await expect(card).toContainText(line);
-  await expect(card).toContainText('Send a message once the limit resets to continue.');
   await expect(reply.getByText(line, { exact: true })).toHaveCount(1);
   await expect(reply.locator('.message-error')).toHaveCount(0);
   await expect(reply.locator('.message-heading strong')).not.toContainText('synthetic');
@@ -100,7 +99,7 @@ test('a reply stopped at a usage limit keeps its history open and shows the limi
   ]);
   await page.getByRole('option', { name: 'Claude · Second Claude', exact: true }).click();
   await expect(page.locator('.next-reply-settings')).toHaveText(
-    /Next message: Second Claude account · starts a new native session/,
+    /Next message: Second Claude account/,
   );
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Continue with the map');
 

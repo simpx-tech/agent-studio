@@ -71,8 +71,9 @@ export function chatSpend(conversation: Conversation) {
         ? (latest?.sessionCostUsd ?? null)
         : sum('costUsd', provider === 'claude' ? priced : measured),
     credits: provider === 'codex' ? (latest?.sessionCredits ?? null) : null,
-    detail: `Sums saved per-reply token readings, including stopped and failed replies.${missing ? ` ${missing} ${missing === 1 ? 'reply has' : 'replies have'} incomplete readings; totals include reported values only.` : ''}${provider === 'codex' ? ' Older unscoped token readings are excluded. Credit and cost estimates cover the native session through the latest reply when reported.' : ''}${runningTotals ? ` Older Claude replies saved the conversation's running cost total instead of their own cost; ${runningTotals === 1 ? 'that reading is' : 'those readings are'} excluded.` : ''}`,
-    partial: missing > 0,
+    // Older Claude replies saved the conversation's running cost total; leaving it out makes the
+    // total incomplete too.
+    partial: missing > 0 || runningTotals > 0,
   };
 }
 function resetMs(value: string | number | null) {

@@ -232,12 +232,6 @@
 
 <ConnectionDialog title="Import chats" wide {busy} {close}>
   <div class="import-chats" aria-busy={busy || loading}>
-    <p>
-      Chats that Claude Code and Codex saved on this computer: from the terminal, the desktop apps
-      and each account's own profile. Imported chats open in History. Continuing one picks up its
-      saved session with its context and tool results, as a copy, so the original stays as it was in
-      its app.
-    </p>
     <div class="import-toolbar">
       <label class="import-search">
         <Search size={15} aria-hidden="true" />
@@ -341,15 +335,13 @@
       {:else}
         {#if !loading}
           <li class="import-empty">
-            {chats.length
-              ? 'No chats match.'
-              : 'No Claude Code or Codex chats were found on this computer.'}
+            {chats.length ? 'No chats match.' : 'No chats found on this computer.'}
           </li>
         {/if}
       {/each}
     </ul>
     {#if truncated}<p class="import-note">
-        Only the 5,000 most recent chats of each place are listed.
+        Showing the 5,000 most recent chats of each place.
       </p>{/if}
     {#if failures.length}
       <div class="error-banner" role="alert">

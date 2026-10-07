@@ -728,8 +728,7 @@
           {#if statuses[connection.id]?.auth === 'login' && hostIdentity(connection)}<p
               class="connection-hint"
             >
-              Sign in as {hostIdentity(connection)}, the login this account uses on its Windows
-              computer.
+              Sign in as {hostIdentity(connection)}.
             </p>{/if}
           {#if localEnvironment(connection.environmentId) && statuses[connection.id]?.sharing}<p
               class="connection-hint"
@@ -756,15 +755,15 @@
           unavailable={status === 'Connected'
             ? ''
             : status === 'Offline'
-              ? 'Computer offline. Usage is unavailable.'
+              ? 'Computer offline.'
               : status === 'Sign-in needed' || status === 'Sign in or refresh'
                 ? 'Sign in to read usage.'
                 : status === 'Checking…'
-                  ? 'Checking account availability…'
+                  ? 'Checking…'
                   : status === 'Install the CLI'
                     ? 'Install the CLI to read usage.'
                     : status === 'Could not check this account'
-                      ? 'Refresh Connections to check this account and read its usage.'
+                      ? 'Refresh to read usage.'
                       : 'Connect the account on its computer to read usage.'}
         />
       </div>
@@ -777,7 +776,6 @@
     <section class="page-heading">
       <div>
         <h1>Connections</h1>
-        <p>Choose a computer to manage its accounts and CLIs.</p>
       </div>
       <button
         class="secondary refresh-connections"
@@ -801,7 +799,6 @@
       <div class="section-heading">
         <div>
           <h2 id="computers-heading">Your computers</h2>
-          <span>Accounts and CLIs live with the computer that runs them.</span>
         </div>
         <span class="computer-count"
           >{computers.length} {computers.length === 1 ? 'computer' : 'computers'}</span
@@ -837,14 +834,6 @@
                     >{/if}
                 </div>{/if}
             </header>
-            {#if computer.wsl}<p class="computer-hint">
-                Linux CLI installations in this distribution are shown below. Managed through {computer.hostName}.
-                Chats in its folders run here, with only its Linux CLI and login. Checking
-                installations can start WSL.
-              </p>{:else if local && installation?.platform === 'windows'}<p class="computer-hint">
-                Selecting this computer uses its Windows CLIs. Choosing a folder inside a WSL
-                distribution moves the chat to that distribution, which runs it with its own CLI.
-              </p>{/if}
             {#if computer.id === ownComputer?.id && wslError}<p class="sync-error" role="alert">
                 {wslError}
               </p>{/if}
@@ -852,9 +841,7 @@
                 class="sync-error"
                 role="alert"
               >
-                {environment.name}: {cliInventories[environment.id]
-                  .error}{#if cliInventories[environment.id].entries}
-                  Showing the last successful installation check.{/if}
+                {environment.name}: {cliInventories[environment.id].error}
               </p>{/each}
             {#if environments.length}
               <div class="computer-providers" aria-label={'Accounts and CLIs on ' + computer.name}>
@@ -927,10 +914,9 @@
                         {#if cliMissing(cliEnvironment.id, id) || installing[key] || installErrors[key]}<div
                             class="cli-install"
                           >
-                            <p class:sync-error={!!installErrors[key]}>
-                              {installErrors[key] ||
-                                `Install ${providers[id].name} in ${computer.name} to run chats in its folders with its own Linux CLI. Its official installer downloads it.`}
-                            </p>
+                            {#if installErrors[key]}<p class="sync-error">
+                                {installErrors[key]}
+                              </p>{/if}
                             <button
                               class="secondary"
                               disabled={!!installing[key] || !desktop()}
@@ -946,33 +932,22 @@
                     {#each accounts as account (account.id)}
                       {@render accountCard(account, computer.id)}
                     {:else}{#if local && computer.wsl}
-                        <div class="current-login">
-                          <p>
-                            {id === 'gemini'
-                              ? 'Antigravity chat connections are not supported through WSL.'
-                              : cliInstalled(environments[0].id, id)
-                                ? 'Connect an account using the Linux CLI in this distribution.'
-                                : cliInventories[environments[0].id]?.error ||
-                                    !cliInventories[environments[0].id]?.entries
-                                  ? 'Refresh Connections to check whether this CLI is installed.'
-                                  : 'Install this CLI in ' +
-                                    computer.name +
-                                    ', then refresh Connections.'}
+                        {#if id === 'gemini'}<p class="connection-hint remote-empty">
+                            Not supported in WSL.
                           </p>
-                          {#if id !== 'gemini' && cliInstalled(environments[0].id, id)}<button
+                        {:else if cliInstalled(environments[0].id, id)}<div class="current-login">
+                            <button
                               class="secondary"
                               disabled={busy || !desktop()}
                               onclick={() => openAccount(id, computer.id)}>Add account</button
-                            >{/if}
-                        </div>
+                            >
+                          </div>{/if}
                       {:else if local}
                         {@const blocked = signInUnavailable(providerStatus(id), id)}
                         <div class="current-login">
                           {#if !providerStatus(id)}<p>Checking login…</p>
-                          {:else if !providerStatus(id)?.installed}<p>
-                              Install {providers[id].name} to connect an account.
-                            </p>
-                          {:else if providerStatus(id)?.auth !== 'ready'}<p>
+                          {:else if providerStatus(id)?.auth !== 'ready' && providerStatus(id)?.installed}<p
+                            >
                               {providerStatus(id)?.detail ?? 'Sign in to connect your account.'}
                             </p>{/if}
                           {@render signInProgress(
@@ -1003,10 +978,6 @@
                   </article>
                 {/each}
               </div>
-              {#if !local}<p class="computer-hint remote-hint">
-                  Use connected accounts here when {computer.name} is online. Add CLI profiles and complete
-                  sign-in in Agent Studio on {computer.name}.
-                </p>{/if}
             {:else}<p class="connection-hint">No environments connected to this computer.</p>
               <button
                 class="text-button"
@@ -1025,9 +996,6 @@
     </section>
     {#if unassignedAccounts.length}<details class="unassigned-accounts">
         <summary>Accounts without a computer <span>{unassignedAccounts.length}</span></summary>
-        <p class="connection-hint">
-          These saved account labels are available when you add an account to a computer.
-        </p>
         {#each unassignedAccounts as account (account.id)}{@render accountCard(
             account,
             null,
@@ -1047,11 +1015,7 @@
             : 'Local only'}</span
         >
       </div>
-      <p>
-        {paired
-          ? syncStatus
-          : 'Connect your computers and phone to your private workspace. Each person uses their own workspace key.'}
-      </p>
+      <p>{paired ? syncStatus : ''}</p>
       {#if syncError}<p class="sync-error" role="alert">{syncError}</p>{/if}
       {#if syncError.includes('changed on both devices')}<button
           class="secondary"
@@ -1060,7 +1024,6 @@
         >{/if}
       {#if paired && !syncError}<details class="sync-settings">
           <summary>Sync settings</summary>
-          <p>Keep Agent Studio open on each computer you want to use. WSL uses its Windows host.</p>
           <button class="text-button" disabled={busy} onclick={() => action(disconnect)}
             >{desktop() ? 'Disconnect relay' : 'Sign out'}</button
           >
@@ -1122,7 +1085,6 @@
           /></label
         >
       </div>
-      <p>Sign in with your additional account on the page that opens in your browser.</p>
       {#if creationStage}<p class="account-progress" role="status">
           <LoaderCircle size={15} class="spinning" />{creationStage}
         </p>{/if}
@@ -1250,11 +1212,6 @@
             <h3>
               {connection.profile === 'isolated' ? 'Separate CLI profile' : 'Existing CLI login'}
             </h3>
-            <p>
-              {connection.profile === 'isolated'
-                ? 'This account has its own login and settings. By default it uses this computer’s CLI context.'
-                : 'Shares the login and settings you use in your terminal.'}
-            </p>
           </div>
           {#if managedAccount.provider !== 'gemini'}
             <div class="shared-context-control">
@@ -1269,18 +1226,10 @@
                 disabled={busy || running}
                 onchange={(value) => (sharedSources[connection.id] = value)}
               />
-              <p>
-                {#if connection.profile === 'existing' && (sharedSources[connection.id] ?? '') === ''}
-                  Saving creates a separate profile for this account on this computer and opens its
-                  sign-in. Existing chats continue from the terminal’s history, and the terminal
-                  keeps its own login and files.
-                {:else}
-                  This computer’s CLI context is the terminal’s instructions, rules, skills, project
-                  memories, and MCP server definitions. Choose another account to use its context
-                  instead, or This account only to keep this profile separate. Logins and MCP
-                  sign-ins always stay with the account. Applies to the next reply.
-                {/if}
-              </p>
+              {#if connection.profile === 'existing' && (sharedSources[connection.id] ?? '') === ''}<p
+                >
+                  Saving creates a separate profile and opens its sign-in.
+                </p>{/if}
             </div>
           {/if}
           {#if localEnvironment(connection.environmentId)}
@@ -1289,7 +1238,7 @@
                 role="group"
                 aria-label="Confirm disconnection"
               >
-                <p>Remove this connection? Saved chats and the CLI’s login files are kept.</p>
+                <p>Remove this connection? Chats and login files are kept.</p>
                 <div class="fleet-actions">
                   <button
                     class="secondary"
@@ -1386,10 +1335,6 @@
         });
       }}
     >
-      <p>
-        Settings for {ownComputer.name}. Its WSL distributions appear as separate computers and
-        remain managed by this Windows app.
-      </p>
       <label
         >Computer name<input
           aria-label="Computer name"
@@ -1400,7 +1345,6 @@
       >
       <details>
         <summary>Advanced: group environments</summary>
-        <p>Use this when separate app installations belong to the same physical computer.</p>
         <div class="fleet-field">
           <span>Group this environment under</span><ChoicePicker
             field
@@ -1434,11 +1378,6 @@
         });
       }}
     >
-      <p>
-        {desktop()
-          ? 'Enter your relay address and private workspace key. Use the same key only on your own computers and phone. Each person sharing the VPS needs a separate workspace key.'
-          : 'Enter your private workspace key from the server owner. Each person has separate chats, computers, and agent connections. Keep Agent Studio open on your connected computers.'}
-      </p>
       <label
         >Relay URL<input
           aria-label="Relay URL"
@@ -1457,14 +1396,6 @@
           required
         /></label
       >
-      <p>
-        Pairing shares chat content and account labels with devices in this private workspace.
-        Provider credentials stay on each host. {desktop()
-          ? installation?.platform === 'windows'
-            ? 'Windows protects the saved pairing and reconnects when you open the app. Disconnect relay removes it from this computer.'
-            : 'The pairing key stays in memory until the app closes.'
-          : 'This device stays paired across app updates and server restarts. Pairing renews while you use it and expires after seven days without renewal, or when you disconnect or change the workspace key. The key is not saved in your browser. Disconnecting clears chats from the screen; another workspace starts with its own data.'}
-      </p>
       <div class="dialog-actions">
         <button class="secondary" type="button" disabled={busy} onclick={closeDialog}>Cancel</button
         ><button class="primary" disabled={busy}>Pair & sync<Link size={15} /></button>
@@ -1583,14 +1514,8 @@
     display: block;
   }
   .section-heading h2 {
-    margin: 0 0 4px;
+    margin: 0;
     font-size: var(--text-md);
-  }
-  .section-heading > div > span {
-    display: block;
-    color: var(--text-muted);
-    font-size: var(--text-sm);
-    line-height: var(--leading-normal);
   }
   .computer-count {
     padding: 1px 9px;
@@ -1659,12 +1584,6 @@
   .computer-state.ready::before {
     background: var(--success);
     box-shadow: 0 0 0 3px var(--success-soft);
-  }
-  .computer-hint {
-    font-size: var(--text-sm);
-    line-height: var(--leading-normal);
-    color: var(--text-muted);
-    margin: 10px 0 0;
   }
   .computer-providers {
     display: grid;
@@ -1930,8 +1849,9 @@
   .sync-settings[open] {
     grid-column: 1 / -1;
   }
-  .sync-settings p {
-    margin: 12px 0;
+  .sync-settings button {
+    display: block;
+    margin-top: 12px;
   }
   .sync-error {
     color: var(--warning) !important;

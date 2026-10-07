@@ -29,7 +29,6 @@
         </div>
       {/each}
     </dl>
-    <p>{reading.detail}</p>
   </section>
 {/if}
 
@@ -64,8 +63,7 @@
     gap: 6px 28px;
     margin: 10px 0 0;
   }
-  dt,
-  p {
+  dt {
     color: var(--text-muted);
   }
   small {
@@ -76,10 +74,5 @@
     color: var(--text-secondary);
     overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
-  }
-  p {
-    margin: 10px 0 0;
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
   }
 </style>

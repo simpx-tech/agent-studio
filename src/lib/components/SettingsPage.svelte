@@ -60,11 +60,6 @@
     <section class="page-heading">
       <div>
         <h1>Settings</h1>
-        <p>
-          {desktop()
-            ? 'Appearance, notifications, running in the background, app and CLI updates, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'
-            : 'Appearance, notifications, Claude chat instructions, workspace administration, the data kept for this workspace, and the version with its changelog.'}
-        </p>
       </div>
     </section>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
@@ -84,20 +79,6 @@
       <WorkspaceAdministration {paired} {workspaceSession} />
       <section class="workspace-data" aria-labelledby="workspace-data-heading">
         <h2 id="workspace-data-heading"><ShieldCheck size={18} />Workspace data</h2>
-        <p>
-          Provider sign-ins stay on each computer. Passwords and provider tokens stay with their
-          CLIs; Agent Studio never reads or copies them.
-        </p>
-        <p>
-          Pairing sync shares chat content, computer setups, and account labels only within your
-          private workspace. Other workspace keys on the same server cannot access them. Anyone with
-          your workspace key can join it; the server administrator controls its storage.
-          Conversation files and exports are plain text.
-        </p>
-        {#if importChats}<p>
-            Import chats that Claude Code and Codex saved on this computer, from the terminal, the
-            desktop apps and each account's own profile.
-          </p>{/if}
         <div class="actions">
           <button class="secondary" disabled={busy} onclick={exportNow}
             ><Download size={14} />{busy ? 'Exporting…' : 'Export workspace'}</button
@@ -149,9 +130,6 @@
   }
   :global(.settings-sections > section :where([role='alert'])) {
     color: var(--danger);
-  }
-  .workspace-data p {
-    color: var(--text-muted);
   }
   .actions {
     display: flex;
