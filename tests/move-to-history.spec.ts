@@ -4,6 +4,7 @@ import { chooseTestFolder } from './folder-helper';
 
 const input = (page: Page) => page.getByLabel('Message', { exact: true });
 const title = (page: Page) => page.locator('.page-title');
+const folder = (page: Page) => page.getByRole('combobox', { name: 'Folder', exact: true });
 const activeTab = (page: Page) => page.getByRole('tab', { name: /^Active/ });
 // Row titles, without the elapsed time a running reply shows beside its title.
 const titles = (page: Page, panel: string) =>
@@ -24,15 +25,48 @@ async function start(page: Page, mode = 'success') {
   await page.goto('/');
   await chooseTestFolder(page);
 }
+async function send(page: Page, text: string) {
+  await input(page).fill(text);
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+}
 // Sends each chat from a new conversation. The sidebar lists the newest first.
 async function chats(page: Page, ...names: string[]) {
   for (const name of names) {
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-    await input(page).fill(name);
-    await page.getByRole('button', { name: 'Send message', exact: true }).click();
-    await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'complete');
+    await send(page, name);
   }
 }
+// Chooses C:\Projects\<name> as the new chat's folder.
+async function chooseProject(page: Page, name: string) {
+  await folder(page).click();
+  await page.getByRole('option', { name: 'Browse folders…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Choose a folder' });
+  await dialog
+    .getByRole('navigation', { name: 'Current folder' })
+    .getByRole('button', { name: 'Projects', exact: true })
+    .click();
+  await dialog
+    .getByRole('list', { name: 'Folders' })
+    .getByRole('button', { name, exact: true })
+    .click();
+  await dialog.getByRole('button', { name: 'Use this folder', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+// Two chats in studio, newer first, then one in tools, listed in that order.
+async function projects(page: Page, studio: [string, string], tools: string) {
+  await chats(page, studio[1]);
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await chooseProject(page, 'tools');
+  await send(page, tools);
+  await page
+    .getByRole('button', { name: 'New conversation in studio on Desktop', exact: true })
+    .click();
+  await send(page, studio[0]);
+  expect(await activeRows(page)).toEqual([...studio, tools]);
+}
+const lastRequest = (page: Page) =>
+  page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
 
 test('the toolbar moves the open chat to history first and opens the next Active chat', async ({
   page,
@@ -88,6 +122,51 @@ test('while searching, the next matching chat opens first', async ({ page }) => 
   // The only match left falls back to the next chat outside the search.
   await page.getByRole('button', { name: 'Move to history', exact: true }).click();
   await expect(title(page)).toHaveText('Unrelated chat');
+});
+
+test('a project keeps its place: its next chat, or a new chat in it after its last', async ({
+  page,
+}) => {
+  await start(page);
+  await projects(page, ['Studio newer', 'Studio older'], 'Tools chat');
+  // The bottom chat of a project gives way to the one above it, not to the next project's chat.
+  await page.getByRole('button', { name: 'Studio older', exact: true }).click();
+  await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  await expect(title(page)).toHaveText('Studio newer');
+  // Its last chat, here from its row, leaves a new chat with the project selected.
+  await row(page, 'Studio newer').hover();
+  await archive(page, 'Studio newer').click();
+  await expect(title(page)).toHaveText('New conversation');
+  await expect(folder(page)).toHaveAttribute('title', 'C:\\Projects\\studio');
+  await expect(page.getByRole('button', { name: 'Tools chat', exact: true })).toBeFocused();
+  await expect(activeTab(page)).toHaveAttribute('aria-selected', 'true');
+  expect(await activeRows(page)).toEqual(['Tools chat']);
+  await send(page, 'Studio again');
+  expect((await lastRequest(page)).location.path).toBe('C:\\Projects\\studio');
+  // The same from the toolbar, which moves focus to the new chat's composer.
+  await page.getByRole('button', { name: 'Tools chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  await expect(title(page)).toHaveText('New conversation');
+  await expect(folder(page)).toHaveAttribute('title', 'C:\\Projects\\tools');
+  await expect(input(page)).toBeFocused();
+  expect(await activeRows(page)).toEqual(['Studio again']);
+});
+
+test('while searching, the project keeps its place before matches in other projects', async ({
+  page,
+}) => {
+  await start(page);
+  await projects(page, ['Deploy studio', 'Studio notes'], 'Deploy tools');
+  await page.getByLabel('Search conversations').fill('deploy');
+  expect(await activeRows(page)).toEqual(['Deploy studio', 'Deploy tools']);
+  await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  await expect(title(page)).toHaveText('Studio notes');
+  // A new chat in the project keeps the search.
+  await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+  await expect(title(page)).toHaveText('New conversation');
+  await expect(folder(page)).toHaveAttribute('title', 'C:\\Projects\\studio');
+  await expect(page.getByLabel('Search conversations')).toHaveValue('deploy');
+  expect(await activeRows(page)).toEqual(['Deploy tools']);
 });
 
 test('sidebar rows move to history on hover without leaving the open chat or its draft', async ({

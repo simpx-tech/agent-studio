@@ -573,7 +573,7 @@ describe('computer and folder chat scope', () => {
       `Yesterday, ${clock(morning.startedAt)}`,
     ]);
   });
-  it('moves on to the Active conversation listed below a chat leaving Active, else the one above', () => {
+  it('moves on to the Active conversation listed below a chat leaving Active in its folder, else the one above', () => {
     const { workspace, installation, location } = fixture();
     ensureLocationConnections(workspace.fleet, location);
     const chat = (title: string, place = location, archived = false): Conversation => ({
@@ -595,16 +595,20 @@ describe('computer and folder chat scope', () => {
       chat('first'),
       chat('archived', location, true),
       chat('second'),
+      chat('other project', { ...location, path: '/home/test/other' }),
       chat('standalone', standalone),
     ];
     const groups = groupConversations(conversations, workspace.fleet, installation, [
       { id: 'scratch', computerId: installation.computerId, location: standalone },
     ]);
     const next = (id: string) => nextActiveConversation(groups, id)?.id;
-    // The listed order crosses folders and computers; History and scratch chats are skipped.
+    // The next chat stays in the folder, never the folder or computer listed after it; History
+    // and scratch chats are skipped.
     expect(next('first')).toBe('second');
-    expect(next('second')).toBe('standalone');
-    expect(next('standalone')).toBe('second');
+    expect(next('second')).toBe('first');
+    // A folder's last chat has none, so the page opens a new chat in that folder.
+    expect(next('other project')).toBeUndefined();
+    expect(next('standalone')).toBeUndefined();
     expect(next('archived')).toBeUndefined();
     expect(next('unknown')).toBeUndefined();
     const alone = groupConversations([chat('only')], workspace.fleet, installation);

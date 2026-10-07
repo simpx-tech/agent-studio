@@ -456,15 +456,16 @@ export function groupConversations<S extends { computerId: string; location?: Ch
     },
   ];
 }
-// The Active conversation listed below `id`, else the one above it, to open when `id` leaves
-// Active. Scratch chats are unsent drafts, not conversations, and are skipped.
+// The Active conversation listed below `id` in its folder, else the one above it there, to open
+// when `id` leaves Active. Without one, its folder gets a new chat rather than another folder's
+// chat. Scratch chats are unsent drafts, not conversations, and are skipped.
 export function nextActiveConversation(
   groups: ReturnType<typeof groupConversations>,
   id: string,
 ): Conversation | undefined {
-  const listed = groups
-    .filter((group) => group.id === 'active')
-    .flatMap((group) => group.sections.flatMap((s) => s.folders.flatMap((f) => f.conversations)));
-  const index = listed.findIndex((c) => c.id === id);
-  return index < 0 ? undefined : (listed[index + 1] ?? listed[index - 1]);
+  for (const section of groups.find((group) => group.id === 'active')?.sections ?? [])
+    for (const { conversations } of section.folders) {
+      const index = conversations.findIndex((c) => c.id === id);
+      if (index >= 0) return conversations[index + 1] ?? conversations[index - 1];
+    }
 }

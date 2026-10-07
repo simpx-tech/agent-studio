@@ -3014,11 +3014,14 @@
       '';
     changeSettings({ ...selectedSettings, model, reasoning });
   }
+  // A chat started on a computer or in a folder is revealed in the sidebar and focused, unless
+  // `reveal` is false, as when Move to history continues in the folder it left.
   function newChat(
     provider?: ProviderId,
     connectionId?: string,
     location?: ChatLocation,
     computerId?: string,
+    reveal = true,
   ) {
     if (!loaded || selectingLocation) return;
     // Opening a chat on a computer can register its CLI logins as connections.
@@ -3087,7 +3090,7 @@
     editorOpen = false;
     contextOpen = false;
     view = 'chat';
-    if (location || computerId) {
+    if (reveal && (location || computerId)) {
       query = '';
       const computerKey = `active/${location ? locationComputerId(location) : computerId}`;
       collapsedGroups[computerKey] = false;
@@ -3218,8 +3221,9 @@
     for (const id of ids) void releaseConversation(id).catch(() => {});
   }
   // Moves a conversation to History. The open chat gives way to the Active conversation listed
-  // below it, else above it (a search match first), or to a new chat when none is left. From the
-  // sidebar, the view and the phone drawer stay as they are.
+  // below it in its folder, else above it there (a search match first), or to a new chat in that
+  // folder when none is left, never to another folder's chat. From the sidebar, the view and the
+  // phone drawer stay as they are.
   function archiveConversation(c: Conversation, fromSidebar = false) {
     if (!loaded || c.archived || conversationRunning(c)) return;
     const open = c.id === activeId;
@@ -3244,7 +3248,14 @@
     const shown = view,
       drawer = sidebarOpen;
     if (next) openConversation(next);
-    else newChat();
+    else
+      newChat(
+        undefined,
+        undefined,
+        conversationLocation(c, workspace.fleet, installation),
+        undefined,
+        false,
+      );
     if (fromSidebar) {
       view = shown;
       sidebarOpen = drawer;

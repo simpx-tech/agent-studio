@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Move to history stays in the chat's project — 2026-10-07
+
+Requested 2026-10-07: closing the last chat of a project should show an empty chat with that project selected instead of opening another project's chat.
+
+- `nextActiveConversation` in `src/lib/locations.ts` now looks only in the closed chat's folder: the chat listed below it there, else the one above. Without one, `archiveConversation` in `+page.svelte` opens a new chat in that folder through `newChat` with `reveal` off, so the sidebar keeps its search and the toolbar and row actions still place focus themselves (the composer, the actions menu on phones, or the row now in its place). Standalone is a folder like the others, and a WSL folder that Desktop ran opens inside its distribution, as the folder's New conversation does. Deleting the open chat is unchanged: it opens a new chat in the folder chosen last.
+- Unit: `locations.test.ts` checks that the next chat stays in its folder, never the folder or computer listed after it, and that a folder's last chat has none.
+- Browser: `tests/move-to-history.spec.ts` adds two projects in the mock's `C:\Projects`. A project's bottom chat gives way to the one above it rather than to the next project's chat. Its last chat, from its row and from the toolbar, leaves a new chat with the project selected, focus on the next row or in the composer, and a message sent there runs in that folder. While searching, the project's chat outside the search comes before another project's match, and the new chat keeps the search. Both scenarios failed on the previous code, which opened the other project's chat.
+- Pipeline: `npm run check` (0 errors), 611 Vitest tests, the build and `cargo fmt --check` passed. The first browser run passed 335 of 337: two local budgets in `performance.spec.ts` were missed under full-suite load (28.8 ms against 25 ms per update of an open sub-agent conversation, and a 184 ms task against 150 ms with 3,000 calls). That spec then passed alone (9 of 9), and the full rerun passed all 337. Clippy and the Rust tests were not rerun because no Rust file changed. Logs: `artifacts/move-to-history-project/`.
+- Not exercised: the native app. The change is frontend-only, and the scenarios ran in Edge, the engine of WebView2.
+
 ## WSL stops, WSL routing and transcript cleanup — 2026-10-07
 
 Requested 2026-10-07 after the review comparing Agent Studio with the Claude app: a stop in WSL should end what the chat started, every new chat on a WSL folder should run inside the distribution, and Claude Code's 30-day cleanup should not break chats.
