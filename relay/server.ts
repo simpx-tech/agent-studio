@@ -1149,5 +1149,11 @@ export function createRelay({
     clearInterval(pushTimer);
     for (const current of contexts.values()) current.retire();
   });
+  // Caddy keeps idle connections to the relay for two minutes, and Node closed its side of one
+  // after five seconds by default, so a request sent on a connection the relay was closing failed
+  // with a reset (a 502): about one in ten of the five-second notification heartbeats. Idle
+  // connections now outlive the proxy's.
+  server.keepAliveTimeout = 125_000;
+  server.headersTimeout = 126_000;
   return server;
 }

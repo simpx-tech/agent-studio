@@ -417,6 +417,13 @@ describe('image store', () => {
 });
 
 describe('real HTTP relay', () => {
+  it('keeps idle connections longer than the proxy in front of it keeps them', async () => {
+    const f = await fixture();
+    // Caddy reuses an idle connection for two minutes; one the relay closed sooner was reset.
+    expect(f.server.keepAliveTimeout).toBeGreaterThan(120_000);
+    expect(f.server.headersTimeout).toBeGreaterThan(f.server.keepAliveTimeout);
+  });
+
   it('names its workspace in the revision answer, so a computer pairs without the whole state', async () => {
     const f = await fixture();
     expect(await f.call('GET', 'state/revision')).toEqual({
