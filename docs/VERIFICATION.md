@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Work history collapses from its end — 2026-10-08
+
+Requested 2026-10-08: a long Work history should close from its end, without scrolling back to its start.
+
+- Expanded Work history now ends with a divider that starts with **Collapse** (`.history-end` in `ToolActivity.svelte`), drawn like the summary; it replaces the disclosure's bottom border. It closes the disclosure, and focus it had moves to the summary without scrolling.
+- `virtual-space.ts` holds a `data-collapse` control like any disclosure control. When the collapse removes both the content at the top of the view and the control, the disclosure's summary goes where the control was, so the Work history row ends up under the pointer. A history whose start was still in view keeps it there, as its summary does.
+- Browser: `chat-virtual-space.spec.ts` adds a desktop and a phone scenario. A 40-step history read to the end of the conversation, and one in the middle of it with its control 300px down, both leave their summary within a pixel of the control's place, the second without held space; a short history whose summary was 150px down keeps it there. With the hand-off removed, the summary landed 1,419px away and the view showed only blank held space. `work-history.spec.ts` checks the divider and its control instead of the border, and that Enter on Collapse closes the history and focuses its summary.
+- Pipeline: `npm run check` (0 errors), 611 Vitest tests, the build, 339 browser tests (two shards of 170 and 169) and `cargo fmt --check` passed. Clippy and the Rust tests were not rerun because no Rust file changed. Logs: `artifacts/work-history-collapse-end/`.
+- Not exercised: the native app. The change is frontend-only, and the scenarios ran in Edge, the engine of WebView2.
+
 ## Move to history stays in the chat's project — 2026-10-07
 
 Requested 2026-10-07: closing the last chat of a project should show an empty chat with that project selected instead of opening another project's chat.

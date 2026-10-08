@@ -6,6 +6,7 @@
     Check,
     CircleAlert,
     ChevronDown,
+    ChevronUp,
     CornerDownRight,
     ExternalLink,
     Layers,
@@ -231,6 +232,16 @@
       } catch {
         linkError = 'Could not open this source.';
       }
+  }
+  // Expanded history also closes from its end. Its summary takes the focus the control had,
+  // and its place unless the start of the history was in view (virtual-space.ts).
+  function collapseHistory(event: MouseEvent) {
+    const control = event.currentTarget as HTMLButtonElement;
+    const history = control.closest('details')!;
+    const focused = document.activeElement === control;
+    history.open = false;
+    if (focused)
+      history.querySelector<HTMLElement>(':scope > summary')?.focus({ preventScroll: true });
   }
 </script>
 
@@ -586,7 +597,16 @@
             >{:else if limited}<span class="tool-status limited">Limit reached</span
             >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
         </summary>
-        {#if limited || disclosures.has('history')}{@render timeline()}{/if}
+        {#if limited || disclosures.has('history')}{@render timeline()}
+          <div class="history-end">
+            <button
+              type="button"
+              class="collapse-history"
+              data-collapse
+              aria-label="Collapse Work history"
+              onclick={collapseHistory}><ChevronUp size={14} aria-hidden="true" />Collapse</button
+            >
+          </div>{/if}
       </details>
     {/if}
     {#if linkError}<p role="alert">{linkError}</p>{/if}
@@ -864,11 +884,10 @@
     }
   }
   .activity-summary[open] {
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 14px;
     margin-bottom: 4px;
   }
-  .activity-summary > summary {
+  .activity-summary > summary,
+  .collapse-history {
     display: flex;
     gap: 7px;
     align-items: center;
@@ -885,9 +904,25 @@
       background-color var(--duration-fast) ease,
       color var(--duration-fast) ease;
   }
-  .activity-summary > summary:hover {
+  .activity-summary > summary:hover,
+  .collapse-history:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  /* Expanded history ends with a divider, which starts with the control that closes it. */
+  .history-end {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .history-end::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
+  .collapse-history {
+    flex: none;
   }
   .activity-summary[open] > summary {
     margin-bottom: 8px;
@@ -988,7 +1023,8 @@
   summary::-webkit-details-marker {
     display: none;
   }
-  summary:focus-visible {
+  summary:focus-visible,
+  .collapse-history:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 0;
   }

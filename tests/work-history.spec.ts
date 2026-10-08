@@ -201,11 +201,14 @@ for (const mobile of [false, true])
     const reply = page.locator('.message[data-status="complete"]').last();
     const history = reply.locator('.activity-summary');
     const toggle = reply.getByLabel('Work history', { exact: true });
+    // Expanded history ends with a divider, which starts with a control that closes it.
+    const divider = history.locator('.history-end');
+    const collapse = divider.getByRole('button', { name: 'Collapse Work history', exact: true });
     const draft = page.getByLabel('Message', { exact: true });
     await draft.fill('Keep this next message');
     await expect(toggle).toHaveText('Work history');
     await expect(history).not.toHaveAttribute('open', '');
-    await expect(history).toHaveCSS('border-bottom-width', '0px');
+    await expect(divider).toBeHidden();
     await expect(reply.locator('.message-heading + .tool-activity + .prose')).toHaveText(
       'Choose the second option.',
     );
@@ -220,8 +223,10 @@ for (const mobile of [false, true])
       'The second option fits your requirements.',
     ]);
     await expect(history.locator('.activity-filters')).toHaveCount(0);
-    await expect(history).toHaveCSS('border-bottom-width', '1px');
-    await expect(history).toHaveCSS('border-bottom-style', 'solid');
+    await expect(collapse).toHaveText('Collapse');
+    expect(await divider.evaluate((el) => getComputedStyle(el, '::after').borderTopStyle)).toBe(
+      'solid',
+    );
     await expect(history.getByText('Starting the provider CLI', { exact: true })).toHaveCount(0);
     await expect(history.getByText('Connected to Claude', { exact: true })).toHaveCount(0);
     await expect(draft).toHaveValue('Keep this next message');
@@ -232,7 +237,7 @@ for (const mobile of [false, true])
     await toggle.focus();
     await page.keyboard.press('Space');
     await expect(history).not.toHaveAttribute('open', '');
-    await expect(history).toHaveCSS('border-bottom-width', '0px');
+    await expect(divider).toBeHidden();
     await expect(draft).toHaveValue('Keep this next message');
     await expect
       .poll(() =>
@@ -251,7 +256,12 @@ for (const mobile of [false, true])
     await expect(history.getByText('Starting the provider CLI', { exact: true })).toHaveCount(0);
     await expect(history.getByText('Connected to Claude', { exact: true })).toHaveCount(0);
     await expect(history.locator('.progress-message')).toHaveCount(2);
-    await expect(history).toHaveCSS('border-bottom-width', '1px');
+    // Closing from the end hands the control's focus to the summary.
+    await collapse.focus();
+    await page.keyboard.press('Enter');
+    await expect(history).not.toHaveAttribute('open', '');
+    await expect(divider).toBeHidden();
+    await expect(toggle).toBeFocused();
   });
 
 test('collapsed disclosures render on first expansion and keep nested expansion', async ({

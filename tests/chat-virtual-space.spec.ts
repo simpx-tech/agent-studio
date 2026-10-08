@@ -23,30 +23,33 @@ const frames = (page: Page) =>
   page.evaluate(
     () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
   );
-function measure(page: Page, selector: string) {
-  return page.evaluate((selector) => {
-    const scroll = document.querySelector<HTMLElement>('.chat-scroll')!;
-    const view = scroll.getBoundingClientRect();
-    const bottom = view.top + scroll.clientTop + scroll.clientHeight;
-    return {
-      top: scroll.scrollTop,
-      max: scroll.scrollHeight - scroll.clientHeight,
-      space: document.querySelector<HTMLElement>('.chat-virtual-space')?.offsetHeight ?? 0,
-      // Blank viewport below the conversation's real end.
-      gap: bottom - document.querySelector('.message-column')!.getBoundingClientRect().bottom,
-      target: document.querySelector(selector)!.getBoundingClientRect().top - view.top,
-    };
-  }, selector);
+function measure(page: Page, selector: string, index = 0) {
+  return page.evaluate(
+    ({ selector, index }) => {
+      const scroll = document.querySelector<HTMLElement>('.chat-scroll')!;
+      const view = scroll.getBoundingClientRect();
+      const bottom = view.top + scroll.clientTop + scroll.clientHeight;
+      return {
+        top: scroll.scrollTop,
+        max: scroll.scrollHeight - scroll.clientHeight,
+        space: document.querySelector<HTMLElement>('.chat-virtual-space')?.offsetHeight ?? 0,
+        // Blank viewport below the conversation's real end.
+        gap: bottom - document.querySelector('.message-column')!.getBoundingClientRect().bottom,
+        target: document.querySelectorAll(selector)[index].getBoundingClientRect().top - view.top,
+      };
+    },
+    { selector, index },
+  );
 }
 // Place a control a fixed distance below the top of the conversation viewport.
-const place = (page: Page, selector: string, offset: number) =>
+const place = (page: Page, selector: string, offset: number, index = 0) =>
   page.locator('.chat-scroll').evaluate(
-    (scroll, { selector, offset }) => {
-      const target = scroll.querySelector(selector)!;
+    (scroll, { selector, offset, index }) => {
+      const target = scroll.querySelectorAll(selector)[index];
       scroll.scrollTop +=
         target.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
     },
-    { selector, offset },
+    { selector, offset, index },
   );
 
 for (const mobile of [false, true])
@@ -131,6 +134,86 @@ for (const mobile of [false, true])
     await page.keyboard.press('Control+n');
     await expect(page.locator('.message-column.empty')).toBeVisible();
     await expect(page.locator('.chat-virtual-space')).toHaveJSProperty('offsetHeight', 0);
+  });
+
+for (const mobile of [false, true])
+  test(`collapsing Work history from its end leaves its summary there ${mobile ? 'mobile' : 'desktop'}`, async ({
+    page,
+  }) => {
+    await start(page, mobile);
+    const summary = '.activity-summary > summary';
+    const end = '.collapse-history';
+    const reply = page.locator('[data-testid="message"]').last();
+    const finish = async () => {
+      await page.evaluate(() => (window as any).finishCapabilities('complete'));
+      await expect(reply).toHaveAttribute('data-status', 'complete');
+    };
+    await emit(page, {
+      kind: 'reasoning',
+      id: 'r1',
+      revision: 1,
+      text: reasoning(40),
+      truncated: false,
+    });
+    await emit(page, { kind: 'text', text: 'Final answer paragraph.\n\n'.repeat(2) });
+    await finish();
+    await page.locator(summary).click();
+    await expect(page.locator(end)).toBeVisible();
+
+    // At the end of the conversation, the summary comes down to where the control was.
+    await page
+      .locator('.chat-scroll')
+      .evaluate((scroll) => (scroll.scrollTop = scroll.scrollHeight));
+    await frames(page);
+    const last = await measure(page, end);
+    expect(last.max - last.top).toBeLessThan(1);
+    expect((await measure(page, summary)).target).toBeLessThan(0);
+    await page.locator(end).click();
+    await expect(page.locator('.activity-summary')).not.toHaveAttribute('open', '');
+    await frames(page);
+    await page.locator('.chat-scroll').screenshot({
+      path: `artifacts/work-history-collapsed-from-end-${mobile ? 'mobile' : 'desktop'}.png`,
+    });
+    const settled = await measure(page, summary);
+    expect(Math.abs(settled.target - last.target)).toBeLessThan(1);
+    await expect(page.locator(summary)).toBeInViewport();
+
+    // A later reply with a short history and a long answer.
+    await page.getByLabel('Message', { exact: true }).fill('Continue');
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await expect(page.locator('[data-testid="message"]')).toHaveCount(4);
+    await emit(page, {
+      kind: 'reasoning',
+      id: 'r2',
+      revision: 1,
+      text: reasoning(2),
+      truncated: false,
+    });
+    await emit(page, { kind: 'text', text: 'Later answer paragraph.\n\n'.repeat(40) });
+    await finish();
+
+    // Above other content the summary takes the control's place without any space.
+    await page.locator(summary).first().click();
+    await expect(page.locator(end)).toBeVisible();
+    await place(page, end, 300);
+    const middle = await measure(page, end);
+    expect(Math.abs(middle.target - 300)).toBeLessThan(1);
+    expect((await measure(page, summary)).target).toBeLessThan(0);
+    await page.locator(end).click();
+    await frames(page);
+    const replaced = await measure(page, summary);
+    expect(Math.abs(replaced.target - 300)).toBeLessThan(1);
+    expect(replaced.space).toBe(0);
+
+    // A short history whose start is in view keeps it there, as its summary does.
+    await page.locator(summary).nth(1).click();
+    await expect(page.locator(end).nth(1)).toBeVisible();
+    await place(page, summary, 150, 1);
+    await expect(page.locator(end).nth(1)).toBeInViewport();
+    await page.locator(end).nth(1).click();
+    await expect(page.locator('.activity-summary').nth(1)).not.toHaveAttribute('open', '');
+    await frames(page);
+    expect(Math.abs((await measure(page, summary, 1)).target - 150)).toBeLessThan(1);
   });
 
 test('expanding at the end of a running reply stops following it', async ({ page }) => {

@@ -7,8 +7,9 @@
 // lets the reader scroll further down than the held position.
 
 // Controls whose activation changes the height of the content they disclose. Popup
-// triggers such as dropdowns are excluded because they do not change the layout.
-const disclosures = 'summary, [aria-expanded]:not([aria-haspopup]), [role="tab"]';
+// triggers such as dropdowns are excluded because they do not change the layout. A
+// `data-collapse` control ends the content of a `<details>` and closes it.
+const disclosures = 'summary, [aria-expanded]:not([aria-haspopup]), [role="tab"], [data-collapse]';
 const tabKeys = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End']);
 
 type Anchor = { element: Element; offset: number };
@@ -84,14 +85,20 @@ export function createVirtualSpace(
   }
   function hold(control: Element) {
     // Several activations within one frame are measured against the original layout.
-    pending ??= {
-      // Visible content stays put. When a collapse removes it, the control stays instead.
-      anchors: [topAnchor(), control].flatMap((element) =>
-        element ? [{ element, offset: offset(element) }] : [],
-      ),
-      top: scroller.scrollTop,
-    };
+    pending ??= { anchors: anchors(control), top: scroller.scrollTop };
     if (!frame) frame = requestAnimationFrame(settle);
+  }
+  // Visible content stays put. When a collapse removes it, the control stays instead, and a
+  // control that went with the content it closed leaves the summary in its place.
+  function anchors(control: Element): Anchor[] {
+    const held = [topAnchor(), control].flatMap((element) =>
+      element ? [{ element, offset: offset(element) }] : [],
+    );
+    const summary = control.matches('[data-collapse]')
+      ? control.closest('details')?.querySelector(':scope > summary')
+      : undefined;
+    if (summary) held.push({ element: summary, offset: offset(control) });
+    return held;
   }
   // Runs before the next paint, once the activation has changed the layout. The browser may
   // already have clamped the scroll position to the shorter conversation.
