@@ -5,6 +5,58 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.8.0 - 2026-10-08
+
+Agent Studio now imports the chats Claude Code and Codex saved on this computer, signs in without a
+terminal, shares settings, memories and chats with the Claude app, and runs chats on WSL folders
+inside their distribution. Chats can also build lasting screens, and code blocks gain Copy and Run.
+
+### Added
+
+- Import the chats Claude Code and Codex saved on this computer and its WSL distributions, with
+  their tool calls, files edited and images, from Settings → Workspace data → Import chats or
+  /import. The first reply continues with the account that made the chat and leaves the original
+  as it was
+- Sign in to Claude Code and Codex from Connections with only the sign-in page in your browser,
+  without a terminal
+- Share settings, CLAUDE.md, memories, chats, plugins and skills with the Claude app and the
+  terminal: a Claude account that uses this computer's context now works from the same files and
+  keeps only its own login. On Windows, Agent Studio asks Windows once for permission to link two
+  of those files
+- Run chats on WSL folders inside their distribution, as the Claude app does, with its own CLIs and
+  tools. Connections installs Claude Code or Codex in a distribution on request and adds this
+  computer's accounts there by themselves: Codex accounts use their Windows login, and each Claude
+  account signs in once inside the distribution
+- Let chats build screens: lasting pages with their own interface and commands, listed in the
+  sidebar's Screens tab and /screens, whose commands run only after you allow them
+- Copy any code block in a reply, and run shell blocks in a console in the chat's folder
+- Show a Claude question while it is being written
+- Count a running chat's completed plan steps in its sidebar row
+- Close a chat's phone alerts once you read it on another device
+- Give each project folder its own icon, chosen once by a small model from the folder's name and
+  the chat's first message
+- Close an expanded Work history from its end with Collapse
+
+### Changed
+
+- Cut descriptions and explanatory text across the app down to labels, values, errors and warnings
+- Moving a chat to History opens the next chat of the same project, or a new chat there after its
+  last one
+
+### Fixed
+
+- Keep Claude chats past Claude Code's 30-day cleanup of old transcripts, and continue a chat whose
+  transcript is gone from its saved messages instead of failing
+- Stop everything a WSL chat started when you stop it, including commands and servers running on
+  their own
+- Say when Agent Studio stops answering its window, with Reload window, keep replies and Close from
+  waiting on it, and record such freezes on this computer for diagnosis
+- Stop relay connections from failing about one heartbeat in ten
+- Show a running Claude reply's context from its first request, and keep it when the reply is
+  stopped
+- Keep a removed terminal login removed while the agent has other accounts
+- Count chats waiting for your answer in the pending badge
+
 ## 0.7.0 - 2026-09-30
 
 Sub-agents now open in a panel beside the chat, a chat's images and 3D models share one viewer, and
