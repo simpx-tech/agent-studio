@@ -370,7 +370,7 @@ pub fn install_on_close(app: &AppHandle, package: Box<Package>) -> bool {
 }
 
 #[tauri::command]
-pub fn app_update_status(app: AppHandle) -> Status {
+pub async fn app_update_status(app: AppHandle) -> Status {
     snapshot(&app)
 }
 

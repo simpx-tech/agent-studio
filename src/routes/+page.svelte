@@ -31,9 +31,18 @@
     listSignIns,
     submitSignInCode,
     cancelSignIn,
+    windowHeartbeat,
+    recordWindowStall,
     type AppUpdateStatus,
     type CliUpdates,
   } from '$lib/transport';
+  import {
+    rememberStall,
+    takeRememberedStall,
+    waitingCalls,
+    watchAnswers,
+    type WindowStall,
+  } from '$lib/window-answers';
   import { signInKey, signInUpdate, type SignInView } from '$lib/sign-in';
   import { restartBlocked } from '$lib/app-updates';
   import { newlyUpdated } from '$lib/cli-updates';
@@ -346,6 +355,8 @@
   let workspace = $state<Workspace>(initialWorkspace());
   let loaded = $state(false);
   let storageError = $state('');
+  // The desktop app stopped answering this window's calls (src/lib/window-answers.ts).
+  let appNotAnswering = $state(false);
   let notice = $state('');
   let appUpdate = $state<AppUpdateStatus>();
   let cliUpdates = $state<CliUpdates>();
@@ -1548,6 +1559,7 @@
       () => (loaded && view === 'chat' ? activeId || undefined : undefined),
     );
     const stopBrowserSession = watchBrowserSession();
+    const stopAnswers = watchAppAnswers();
     let stopNotifications = () => {};
     void watchDesktopNotifications((id) => {
       notificationTarget = notificationConversation(`#conversation=${id}`);
@@ -1900,6 +1912,7 @@
       stopCliUpdates();
       stopSignIns();
       stopBrowserSession();
+      stopAnswers();
       window.removeEventListener('hashchange', notificationHash);
       navigator.serviceWorker?.removeEventListener('message', notificationMessage);
       cancelTouchMenu();
@@ -1921,6 +1934,39 @@
       document.removeEventListener('visibilitychange', saveDraftsWhenHidden);
     };
   });
+  // Whether the desktop app still answers this window: a banner while it does not, and a record
+  // of the calls left waiting for its diagnostics (docs/DIAGNOSTICS.md).
+  function watchAppAnswers() {
+    if (!desktop()) return () => {};
+    const earlier = takeRememberedStall();
+    if (earlier) void recordWindowStall(earlier).catch(() => rememberStall(earlier));
+    let stall: WindowStall | undefined;
+    const answers = watchAnswers({
+      check: (shown) => windowHeartbeat(shown),
+      stalled: (started, waitedMs) => {
+        appNotAnswering = !!started;
+        if (started) {
+          stall = {
+            noticedAt: Date.now(),
+            unansweredMs: waitedMs,
+            answeredAfterMs: null,
+            calls: waitingCalls(),
+          };
+          rememberStall(stall);
+        } else if (stall) {
+          const answered = { ...stall, answeredAfterMs: waitedMs };
+          stall = undefined;
+          takeRememberedStall();
+          void recordWindowStall(answered).catch(() => rememberStall(answered));
+        }
+      },
+    });
+    document.addEventListener('visibilitychange', answers.check);
+    return () => {
+      answers.stop();
+      document.removeEventListener('visibilitychange', answers.check);
+    };
+  }
   /** Polls the relay. `now` publishes a change at once, after any poll already under way. */
   async function syncNow(now = false) {
     const version = relaySelectionVersion;
@@ -2021,6 +2067,10 @@
       }
     });
     saveQueue = next;
+    // A save the app leaves unanswered says so, while replies and the page carry on.
+    const unanswered = setTimeout(() => {
+      if (!storageError) storageError = 'Changes are not being saved.';
+    }, saveWarning);
     try {
       await next;
       storageError = '';
@@ -2029,7 +2079,16 @@
       marks.failedSave();
       storageError = `Changes could not be saved: ${String(e)}`;
       throw e;
+    } finally {
+      clearTimeout(unanswered);
     }
+  }
+  const saveWarning = 30_000;
+  // A reply waits this long for its message to be saved, then starts anyway: a save the app never
+  // answers held every new reply at Responding for an hour on 2026-10-08.
+  const replySaveWait = 10_000;
+  function within<T>(work: Promise<T>, ms: number): Promise<T | void> {
+    return Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, ms))]);
   }
   /**
    * Saves and publishes every conversation and setting: for changes nobody named. `local = false`
@@ -4371,7 +4430,7 @@
     // Events of a take-over wait for the host to confirm it.
     const early: RunEvent[] = [];
     try {
-      if (joined) await persistChat(conversation.id);
+      if (joined) await within(persistChat(conversation.id), replySaveWait);
       if (session !== workspaceSession) return;
       // The folder's icon is chosen after the title, so a new chat starts one background
       // request at a time beside its reply.
@@ -5253,6 +5312,12 @@
     />
     {#if storageError}<div class="error-banner" role="alert">
         <CircleAlert size={17} />{storageError}
+      </div>{/if}
+    {#if appNotAnswering}<div class="error-banner" role="alert">
+        <CircleAlert size={17} />Agent Studio stopped answering this window.<button
+          class="text-button"
+          onclick={() => window.location.reload()}>Reload window</button
+        >
       </div>{/if}
     {#if notice}<div class="notice" role="status">
         <span>{notice}</span><button

@@ -41,6 +41,7 @@ mod tray;
 mod undo;
 mod updates;
 mod usage;
+mod watchdog;
 mod wsl;
 use std::io::Write;
 use std::sync::Mutex;
@@ -302,13 +303,17 @@ async fn read_usage(
 }
 
 #[tauri::command]
-fn live_account_updates(state: State<'_, live_usage::LiveUsage>) -> Vec<live_usage::Update> {
-    state.snapshots()
+async fn live_account_updates(
+    state: State<'_, live_usage::LiveUsage>,
+) -> Result<Vec<live_usage::Update>, String> {
+    Ok(state.snapshots())
 }
 
 #[tauri::command]
-fn background_work(state: State<'_, background_work::Registry>) -> Vec<background_work::Snapshot> {
-    state.snapshots()
+async fn background_work(
+    state: State<'_, background_work::Registry>,
+) -> Result<Vec<background_work::Snapshot>, String> {
+    Ok(state.snapshots())
 }
 
 #[tauri::command]
@@ -396,12 +401,16 @@ async fn generate_folder_icon(
     result
 }
 #[tauri::command]
-fn cancel_title(titles: State<titles::Titles>, conversation_id: String) {
+async fn cancel_title(
+    titles: State<'_, titles::Titles>,
+    conversation_id: String,
+) -> Result<(), String> {
     if let Ok(active) = titles.0.lock() {
         if let Some(cancel) = active.get(&conversation_id) {
             cancel.cancel();
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1423,6 +1432,16 @@ pub fn run() {
             .skip(1)
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        // The helper the watchdog starts to save a minidump of a frozen app, which a process
+        // cannot safely do for itself.
+        if args.first().is_some_and(|arg| arg == watchdog::DUMP) {
+            let identifier = &context.config().identifier;
+            let code = match startup::data_root(identifier) {
+                Ok(data) => watchdog::dump_main(&data, &args[1..]),
+                Err(_) => 2,
+            };
+            std::process::exit(code);
+        }
         if args.first().is_some_and(|arg| arg == linking::ELEVATED) {
             let identifier = &context.config().identifier;
             let code =
@@ -1488,8 +1507,21 @@ pub fn run() {
         .manage(imports::Catalog::default())
         .manage(std::sync::Arc::new(screens::Screens::default()))
         .manage(sign_in::SignIns::default())
+        .manage(watchdog::Watchdog::default())
         .setup(|app| {
             tray::setup(app.handle());
+            // The taskbar overlay is set off the window thread, on the window's own handle.
+            #[cfg(windows)]
+            {
+                let overlay = badges::Overlay::new();
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = window.hwnd() {
+                        overlay.attach(hwnd.0 as isize);
+                    }
+                }
+                app.manage(overlay);
+            }
+            watchdog::start(app.handle());
             // When a Claude profile's two shared files need Windows' permission, ask once for
             // every account that needs it.
             {
@@ -1660,11 +1692,17 @@ pub fn run() {
             screens::manage_screen,
             export_workspace,
             tray::window_behavior,
-            tray::set_close_to_tray
+            tray::set_close_to_tray,
+            watchdog::window_heartbeat,
+            watchdog::record_window_stall
         ])
         .build(context)
         .expect("error while building tauri application");
     app.run(|handle, event| {
+        // The window thread stops taking tasks on purpose now; that is no freeze.
+        if let tauri::RunEvent::Exit = event {
+            watchdog::stop(handle);
+        }
         // The Dock icon brings back a window kept running in the menu bar.
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen {
@@ -1675,7 +1713,7 @@ pub fn run() {
             tray::show_window(handle);
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = (handle, event);
+        let _ = event;
     });
 }
 

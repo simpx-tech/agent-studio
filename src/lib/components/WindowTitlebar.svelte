@@ -19,8 +19,10 @@
 
   async function act(action: WindowAction) {
     try {
-      // Unsaved work, such as a draft typed a moment ago, is saved before the window closes.
-      if (action === 'close') await beforeclose?.();
+      // Unsaved work, such as a draft typed a moment ago, is saved before the window closes,
+      // unless the app takes too long to answer, which must not keep the window open.
+      if (action === 'close')
+        await Promise.race([beforeclose?.(), new Promise((resolve) => setTimeout(resolve, 2000))]);
       await controlWindow(action);
     } catch (error) {
       onerror(`Could not change the window: ${String(error)}`);

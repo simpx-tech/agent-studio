@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+import { Channel, convertFileSrc, isTauri } from '@tauri-apps/api/core';
+// Tauri's invoke, remembering the calls the app has not answered yet.
+import { invoke, type WindowStall } from './window-answers';
 import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -403,6 +405,14 @@ export function watchNotificationView(current: () => string | undefined): () => 
     window.removeEventListener('pagehide', hide);
     document.removeEventListener('visibilitychange', refresh);
   };
+}
+/** Tells the desktop app this window still calls it, and whether it is shown (watchdog.rs). */
+export async function windowHeartbeat(shown: boolean): Promise<void> {
+  if (desktop()) await invoke('window_heartbeat', { visible: shown });
+}
+/** Keeps this window's record of a time the app did not answer it with the app's diagnostics. */
+export async function recordWindowStall(stall: WindowStall): Promise<void> {
+  if (desktop()) await invoke('record_window_stall', { stall });
 }
 let badgeQueue = Promise.resolve();
 let lastBadgeCount: number | undefined;

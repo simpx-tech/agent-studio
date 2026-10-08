@@ -14,6 +14,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
       const storedImages = (): Record<string, { mediaType: string; data: string }> =>
         JSON.parse(localStorage.getItem('test-images') ?? '{}');
       (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+      (window as any).releaseCommands = () => {
+        const releases = (window as any).releases ?? [];
+        (window as any).heldCommands = [];
+        (window as any).releases = [];
+        for (const release of releases) release();
+      };
       (window as any).emitTauriEvent = (event: string, payload: unknown) => {
         for (const handler of (window as any).tauriListeners?.[event] ?? [])
           callbacks.get(handler)?.({ event, id: handler, payload });
@@ -48,6 +54,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          // Commands a test leaves unanswered, as an app that stopped answering the window
+          // would, until it calls `releaseCommands()`.
+          const held = window as any;
+          if (held.heldCommands?.includes(command))
+            await new Promise<void>((resolve) => (held.releases ??= []).push(resolve));
+          if (command === 'window_heartbeat') return;
+          if (command === 'record_window_stall') {
+            (held.windowStalls ??= []).push(args.stall);
+            return;
+          }
           if (command === 'set_pending_chat_badge') {
             localStorage.setItem('test-badge-count', String(args.count));
             return;

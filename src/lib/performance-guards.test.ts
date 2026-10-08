@@ -17,15 +17,6 @@ const allowedWorkspaceCopies: [site: string, reason: string][] = [
   ['src/routes/+page.svelte › exportWorkspace', 'Viewer export'],
 ];
 
-// Synchronous commands and why each returns without waiting on files, processes or the network.
-const synchronousCommands: Record<string, string> = {
-  set_pending_chat_badge: 'sets the taskbar overlay, which belongs to the window thread',
-  live_account_updates: 'copies bounded readings from memory',
-  background_work: 'copies bounded snapshots from memory',
-  cancel_title: 'cancels a token',
-  app_update_status: 'copies the update status from memory',
-};
-
 function sources(root: string, extensions: string[]) {
   return readdirSync(root, { recursive: true, encoding: 'utf8' })
     .filter((file) => extensions.some((extension) => file.endsWith(extension)))
@@ -167,7 +158,7 @@ describe('performance guards', () => {
     ).toEqual(allowedWorkspaceCopies.map(([site]) => site).sort());
   });
 
-  it('runs native commands off the UI thread', () => {
+  it('runs no native command on the UI thread', () => {
     const commands = tauriCommands();
     const registered = registeredCommands();
     expect(registered.length).toBeGreaterThan(40);
@@ -177,10 +168,12 @@ describe('performance guards', () => {
         .filter(([, asynchronous]) => !asynchronous)
         .map(([name]) => name)
         .sort(),
-      'Synchronous Tauri commands run on the UI thread, which also handles window input. ' +
-        'Declare new commands async and move file, process and network work into ' +
-        'tauri::async_runtime::spawn_blocking. See docs/PERFORMANCE.md.',
-    ).toEqual(Object.keys(synchronousCommands).sort());
+      'Synchronous Tauri commands run on the UI thread, inside the request handler of WebView2: ' +
+        'while one waits, on a lock, a file or another program such as Explorer, the buttons ' +
+        'of the window and every call from the page wait too. Declare commands async and move file, ' +
+        'process and network work into tauri::async_runtime::spawn_blocking. See ' +
+        'docs/PERFORMANCE.md and docs/DIAGNOSTICS.md.',
+    ).toEqual([]);
   });
 
   it('keeps closed disclosure contents out of style and layout', () => {

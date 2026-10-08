@@ -412,6 +412,13 @@ pre {
   color: var(--danger);
   border-bottom: 1px solid var(--danger-border);
 }
+.error-banner .text-button,
+.error-banner .text-button:not(:disabled):hover {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: inherit;
+  text-decoration: underline;
+}
 
 /* ── App shell ────────────────────────────────────────────────────────── */
 
