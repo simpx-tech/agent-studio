@@ -212,7 +212,7 @@ test('workspace login gates startup, authentication, restoration, and expired se
   const handleRequest = f.server.listeners('request')[0];
   f.server.removeAllListeners('request');
   f.server.on('request', (request, response) => {
-    if (request.url === blockedPath && request.method === 'GET') {
+    if (request.url?.split('?')[0] === blockedPath && request.method === 'GET') {
       reached();
       void hold.then(() => handleRequest.call(f.server, request, response));
     } else handleRequest.call(f.server, request, response);

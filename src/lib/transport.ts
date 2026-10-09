@@ -140,6 +140,14 @@ import {
 } from './incremental-sync';
 import type { ChangeSet } from './change-marks';
 import {
+  holdsWork,
+  lightChat,
+  messageIds,
+  messagesById,
+  restoreChat,
+  workIds,
+} from './light-chats';
+import {
   initialWorkspace,
   providerIds,
   restoreWorkspace,
@@ -509,8 +517,18 @@ type RuntimeContext = {
    * the saved workspace lacks: after a crash, the older saved copy would win the next merge.
    */
   flush?: () => Promise<void>;
-  /** Applies conversations and replicated settings that arrived for part of the workspace. */
-  applyChats: (upsert: Conversation[], remove: string[], meta?: SharedMeta) => Promise<void>;
+  /**
+   * Applies conversations and replicated settings that arrived for part of the workspace. A light
+   * connection also hands over the whole copies it read, such as the open chat's, to show.
+   */
+  applyChats: (
+    upsert: Conversation[],
+    remove: string[],
+    meta?: SharedMeta,
+    wholes?: Map<string, Conversation>,
+  ) => Promise<void>;
+  /** The conversation shown, which a light connection reads whole. */
+  openChat?: () => string | undefined;
   /** A copy of the computer and account registry alone, for routing and ownership checks. */
   fleet: () => Fleet;
   /**
@@ -551,6 +569,28 @@ let baselineMetaRevision = 0;
 // relay still there knows its manifest without asking for it.
 let baselineManifest = false;
 let manifestEndpoint = true;
+// Whether the relay reads and keeps chats light (src/lib/light-chats.ts), as its revision answer
+// says, and whether this connection holds them so: the Viewer does from its first read on, since
+// a phone cannot hold every reply's recorded work. A light connection never syncs with a relay
+// that stops keeping that work, which would store its light chats as they are.
+let relayLight = false;
+let lightSession = false;
+const lightRelayGone = 'The relay no longer keeps chats light. Reload this page to continue.';
+// The messages the relay holds, those of the baseline. A light connection leaves their recorded
+// work out of what it syncs and stores, as the relay keeps it; a message only this device holds,
+// such as a new fork's, goes out whole.
+let relayHeld = new Set<string>();
+const noteBaseline = () => {
+  relayHeld = lightSession ? messageIds(baseline.conversations) : new Set();
+};
+/** A conversation as this device syncs and stores it. */
+function syncedChat(conversation: Conversation): Conversation {
+  return lightSession ? lightChat(conversation, (m) => !relayHeld.has(m.id)) : conversation;
+}
+/** Whether this Viewer holds chats light, and reads a chat whole to show it. */
+export const holdsLightChats = () => lightSession;
+/** Whether the relay holds this message, so this device may leave its recorded work out. */
+export const relayHolds = (messageId: string) => relayHeld.has(messageId);
 const checkpointRevisionsSchema = z.object({
   revision: z.number().int().nonnegative(),
   chats: z.record(z.string(), z.number().int().nonnegative()),
@@ -619,6 +659,7 @@ export function configureRuntime(context: RuntimeContext) {
  */
 function resetBaseline(next: SharedWorkspace, revisions?: CheckpointRevisions) {
   baseline = next;
+  noteBaseline();
   baselineRevision = revisions?.revision;
   settledRevision = undefined;
   checkpointRevision = revisions?.revision;
@@ -626,6 +667,12 @@ function resetBaseline(next: SharedWorkspace, revisions?: CheckpointRevisions) {
   revisionEndpoint = true;
   baselineChats = revisions?.chats ?? {};
   baselineMetaRevision = revisions?.metaRevision ?? 0;
+  // A light connection never syncs the whole state, which would compare its light chats with
+  // whole ones. Without the revisions, it asks for the manifest and reads every conversation once.
+  if (lightSession && !revisions) {
+    baselineRevision = -1;
+    baselineChats = Object.fromEntries(next.conversations.map((c) => [c.id, -1]));
+  }
   // Revisions that do not name exactly the baseline's conversations came from a checkpoint
   // written without the relay's own; the first poll then asks for the manifest.
   const named = Object.keys(baselineChats);
@@ -809,6 +856,7 @@ async function endBrowserSession(reason: string) {
   const previousScope = browserScope;
   browserScope = undefined;
   notifyRelayConnection(false);
+  lightSession = false;
   resetBaseline(emptyShared());
   contextCache = makeContextCache();
   updatePendingBadge(0);
@@ -1144,7 +1192,10 @@ type WholeState = {
 let relayStoresImages = false;
 const oldRelayImages = 'Update the relay to sync conversations with images.';
 function noteImageStore(probe: { status: number; body: any }) {
-  if (probe.status === 200) relayStoresImages = probe.body?.images === 1;
+  if (probe.status !== 200) return;
+  relayStoresImages = probe.body?.images === 1;
+  relayLight = probe.body?.light === 1;
+  if (lightSession && !relayLight) throw new Error(lightRelayGone);
 }
 async function relayIdentity(): Promise<{ instanceId: string; state?: WholeState }> {
   const probe = await relayRaw('GET', 'v1/state/revision');
@@ -1175,17 +1226,24 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     const preserveInitialNotification = restoring && !browserScope;
     const scope = { url, workspaceId: browserWorkspaceId, instanceId };
     const current = () => generation === relayGeneration;
+    // Decided once per connection: the chats this device holds stay light or whole until the next.
+    const light = relayLight;
     const store = await workspaceStore();
     if (!current()) return false;
-    const saved = await readBrowserWorkspace(store, scope);
+    const saved = await readBrowserWorkspace(store, scope, light);
     if (!current()) return false;
     await discardOtherBrowserWorkspaces(store, localStorage, scope);
     // A copy saved before the image store holds its images inline. Once the relay holds their
     // bytes they become the references the relay keeps, in this copy and in the checkpoint it
-    // merges against, so neither is sent or kept inline again.
-    if (saved && relayStoresImages) {
+    // merges against, so neither is sent or kept inline again. A checkpoint an earlier release
+    // saved whole is written back light at once, so no later start reads it whole again; the
+    // conversations follow with the first save.
+    if (saved && (relayStoresImages || saved.lightened)) {
       try {
-        if (await referenceLegacyImages([saved.base, saved.workspace], current))
+        const images =
+          relayStoresImages &&
+          (await referenceLegacyImages([saved.base, saved.workspace], current));
+        if (images || saved.lightened)
           await store.put(
             [
               [
@@ -1210,7 +1268,9 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     if (!saved) {
       // A browser without a copy of this workspace downloads it once, with the revisions it
       // came with, so the first poll is already incremental instead of downloading it again.
-      const state = identity.state ?? (await relayApi<WholeState>('GET', 'v1/state'));
+      const state =
+        identity.state ??
+        (await relayApi<WholeState>('GET', light ? 'v1/state?light=1' : 'v1/state'));
       if (!current()) return false;
       if (state.instanceId !== instanceId) throw new Error(relayReplaced);
       if (state.workspaceId !== browserWorkspaceId)
@@ -1235,6 +1295,7 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     }
     if (!current()) return false;
     browserScope = scope;
+    lightSession = light;
     if (saved) resetBaseline(saved.base, checkpointRevisions(saved.revisions));
     else resetBaseline(remote!, revisions);
     relayInstance = instanceId;
@@ -1397,6 +1458,29 @@ async function syncIncremental(
       if (answer.instanceId !== relayInstance) throw new Error(relayReplaced);
       remoteMeta = answer.meta;
     }
+    // Each conversation here is read once per poll: validating it detaches it at a cost that
+    // grows with its size, and the merge and the plan compare the same copy. A light connection
+    // reads it as it syncs it, without the work the relay holds.
+    const read = new Map<string, Conversation | undefined>();
+    const localChat = (id: string) => {
+      if (!read.has(id)) {
+        const conversation = runtime!.chat(id);
+        read.set(id, conversation && syncedChat(conversation));
+      }
+      return read.get(id);
+    };
+    // A light connection reads light chats, but whole the open one, to show, and any holding work
+    // only this device recorded, whose copies on the relay then merge whole with it.
+    const open = lightSession ? runtime.openChat?.() : undefined;
+    const whole = new Set(
+      lightSession
+        ? fetch.filter((id) => {
+            const own = localChat(id);
+            return id === open || (!!own && holdsWork(own));
+          })
+        : [],
+    );
+    const wholes = new Map<string, Conversation>();
     const fetched = new Map<string, Conversation>();
     // The relay answers up to a thousand conversations per request, within a size budget, and
     // names those it left for another request.
@@ -1404,10 +1488,27 @@ async function syncIncremental(
     while (wanted.length) {
       const ids = wanted.splice(0, 1000);
       const answer = chatsAnswerSchema.parse(
-        await relayApi<unknown>('POST', 'v1/state/chats', { ids }),
+        await relayApi<unknown>(
+          'POST',
+          'v1/state/chats',
+          lightSession ? { ids, light: true, full: ids.filter((id) => whole.has(id)) } : { ids },
+        ),
       );
       if (answer.instanceId !== relayInstance) throw new Error(relayReplaced);
-      for (const conversation of answer.chats) fetched.set(conversation.id, conversation);
+      for (const conversation of answer.chats) {
+        if (!lightSession) {
+          fetched.set(conversation.id, conversation);
+          continue;
+        }
+        if (whole.has(conversation.id)) wholes.set(conversation.id, conversation);
+        // The merge reads the relay's copy light, but whole where this device recorded work.
+        const own = localChat(conversation.id);
+        const recorded = own ? workIds(own) : new Set<string>();
+        fetched.set(
+          conversation.id,
+          lightChat(conversation, (m) => recorded.has(m.id)),
+        );
+      }
       const asked = new Set(ids);
       const rest = (answer.rest ?? []).filter((id) => asked.has(id) && !fetched.has(id));
       if (rest.length && !answer.chats.length)
@@ -1419,13 +1520,6 @@ async function syncIncremental(
     // A conversation the relay still holds at the baseline revision is the baseline's own copy.
     const remoteChat = (id: string) =>
       fetched.get(id) ?? (id in relayed.chats ? baseChats.get(id) : undefined);
-    // Each conversation here is read once per poll: validating it detaches it at a cost that
-    // grows with its size, and the merge and the plan compare the same copy.
-    const read = new Map<string, Conversation | undefined>();
-    const localChat = (id: string) => {
-      if (!read.has(id)) read.set(id, runtime!.chat(id));
-      return read.get(id);
-    };
     const localMeta = runtime.meta();
     const merged = mergeInvolved({
       involved,
@@ -1492,13 +1586,21 @@ async function syncIncremental(
     if (held.length)
       runtime.restoreUnsynced({ chats: new Set(held.map((c) => c.id)), meta: false });
     if (generation !== relayGeneration) return null;
+    // The relay now holds every message of what it took, so saves from here on, such as the one
+    // applying this sync, leave that work out.
+    if (lightSession) {
+      const kept = new Set([...oversized, ...held].map((c) => c.id));
+      for (const [id, conversation] of plan.result)
+        if (!kept.has(id)) for (const message of messageIds([conversation])) relayHeld.add(message);
+    }
     // The merge read this device before the patch went out. A conversation edited here since,
     // such as a reply that finished meanwhile, merges again over that edit, with the copy the
     // merge read as its base, instead of being replaced by the older merge; the result goes out
     // with the next poll.
     const since = new Set<string>();
     const changedSince = (id: string) => {
-      const now = runtime!.chat(id);
+      const live = runtime!.chat(id);
+      const now = live && syncedChat(live);
       return now && JSON.stringify(read.get(id)) !== JSON.stringify(now) ? now : undefined;
     };
     const again = (id: string, now: Conversation, remote: Conversation | undefined) => {
@@ -1536,8 +1638,8 @@ async function syncIncremental(
           since.add(result.id);
         }
     }
-    if (apply.length || plan.forget.length || plan.applyMeta) {
-      await runtime.applyChats(apply, plan.forget, plan.applyMeta);
+    if (apply.length || plan.forget.length || plan.applyMeta || wholes.size) {
+      await runtime.applyChats(apply, plan.forget, plan.applyMeta, wholes);
       if (generation !== relayGeneration) return null;
     }
     if (since.size) runtime.restoreUnsynced({ chats: since, meta: false });
@@ -1548,6 +1650,9 @@ async function syncIncremental(
       if (remote) result.set(id, remote);
       else result.delete(id);
     }
+    // The relay now holds the work of every message here, so a light baseline leaves it out.
+    if (lightSession)
+      for (const [id, conversation] of result) result.set(id, lightChat(conversation));
     const next: SharedWorkspace = {
       ...plan.mergedMeta,
       conversations: nextBaselineChats(baseline.conversations, involved, result),
@@ -1558,6 +1663,7 @@ async function syncIncremental(
     });
     if (generation !== relayGeneration) return null;
     baseline = next;
+    noteBaseline();
     baselineRevision = current.revision;
     baselineChats = current.chats;
     baselineMetaRevision = current.metaRevision;
@@ -1567,6 +1673,81 @@ async function syncIncremental(
   } finally {
     if (!published) runtime.restoreUnsynced(changes);
   }
+}
+/**
+ * The relay's whole copies of these conversations, for a light connection to show, fork or export
+ * one: all of them, or each answer handed to `each` in turn, so an export never holds every chat
+ * whole at once. A conversation the relay lacks is left out.
+ */
+export async function readWholeChats(
+  ids: string[],
+  each?: (chats: Conversation[]) => void | Promise<void>,
+): Promise<Conversation[]> {
+  if (!relayConnected) throw new Error('Connect to your workspace to read this chat.');
+  const generation = relayGeneration;
+  const found: Conversation[] = [];
+  const wanted = [...ids];
+  while (wanted.length) {
+    const batch = wanted.splice(0, 1000);
+    const answer = chatsAnswerSchema.parse(
+      await relayApi<unknown>('POST', 'v1/state/chats', { ids: batch }),
+    );
+    if (generation !== relayGeneration)
+      throw new Error('The private workspace connection changed. Try again after pairing.');
+    if (answer.instanceId !== relayInstance) throw new Error(relayReplaced);
+    if (each) await each(answer.chats);
+    else found.push(...answer.chats);
+    const asked = new Set(batch);
+    const sent = new Set(answer.chats.map((c) => c.id));
+    const rest = (answer.rest ?? []).filter((id) => asked.has(id) && !sent.has(id));
+    if (rest.length && !answer.chats.length)
+      throw new Error('The relay sent none of the conversations it was asked for.');
+    wanted.unshift(...rest);
+  }
+  return found;
+}
+/**
+ * A browser's workspace export, as indented JSON with its images' bytes inline. A light connection
+ * puts each conversation's work back from the relay's whole copy, an answer at a time; one the
+ * relay lacks, such as a new one not synced yet, is exported as this device holds it.
+ */
+export async function browserExport(copy: Workspace): Promise<{ blob: Blob; missing: number }> {
+  const { conversations, ...rest } = copy;
+  let missing = 0;
+  const chunks: Blob[] = [];
+  const done = new Set<string>();
+  const write = async (list: Conversation[]) => {
+    if (!list.length) return;
+    missing += await portableWorkspace({ conversations: list });
+    const parts: string[] = [];
+    for (const conversation of list) {
+      parts.push(
+        `${done.size ? ',\n' : ''}    ${JSON.stringify(conversation, null, 2).replaceAll('\n', '\n    ')}`,
+      );
+      done.add(conversation.id);
+    }
+    chunks.push(new Blob(parts));
+  };
+  if (lightSession) {
+    const local = new Map(conversations.map((c) => [c.id, c]));
+    await readWholeChats([...local.keys()], async (wholes) => {
+      const found = messagesById(wholes);
+      await write(
+        wholes.flatMap((whole) => {
+          const own = local.get(whole.id);
+          return own ? [restoreChat(own, (id) => found.get(id))] : [];
+        }),
+      );
+    });
+    await write(conversations.filter((c) => !done.has(c.id)));
+  } else await write(conversations);
+  const head = JSON.stringify({ ...rest, conversations: [] }, null, 2).replace(/\[\]\n}$/, '[\n');
+  return {
+    blob: new Blob([head, ...chunks, done.size ? '\n  ]\n}' : ']\n}'], {
+      type: 'application/json',
+    }),
+    missing,
+  };
 }
 /**
  * Writes the merge baseline and the revisions it came from for the next start of the app, at
@@ -1629,6 +1810,8 @@ export async function pollRelay(): Promise<Presence[] | null> {
     const incremental = await syncIncremental(generation, options);
     if (incremental === null) return null;
     if (incremental) return await relayTail(generation);
+    // The whole-state path compares whole chats, which a light connection does not hold.
+    if (lightSession) throw new Error(lightRelayGone);
     // Syncing copies, compares and saves the whole workspace, which stalls the page, so once a
     // poll leaves both sides equal, later ones only ask whether the relay moved. A reply running
     // here counts each of its events as a change, so its progress still goes out every poll,
@@ -1765,6 +1948,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
         );
         if (generation !== relayGeneration) return null;
         baseline = accepted;
+        noteBaseline();
         baselineRevision = acceptedRevision;
         if (reported.success) {
           baselineChats = reported.data.chatRevisions;
@@ -1842,7 +2026,10 @@ export async function resolveRelaySettings(): Promise<string> {
       backup = 'this browser’s local backup';
     }
     currentSession();
-    const remote = await relayApi<{ workspace: SharedWorkspace }>('GET', 'v1/state');
+    const remote = await relayApi<{ workspace: SharedWorkspace }>(
+      'GET',
+      lightSession ? 'v1/state?light=1' : 'v1/state',
+    );
     currentSession();
     await runtime.apply({
       ...sharedWorkspace(runtime.workspace()),
@@ -2767,6 +2954,7 @@ export async function saveWorkspace(
       workspace,
       changed,
       () => scope === workspaceStorageScope(),
+      syncedChat,
     );
   }
   updatePendingBadge(pendingChatCount(workspace.conversations));

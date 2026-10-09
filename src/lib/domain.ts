@@ -440,7 +440,12 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
 }
 // Loading a saved workspace cannot regain a run that was live when the app stopped.
 export const interruptedReplyError = 'This response was interrupted when the app closed.';
-export function restoreWorkspace(value: unknown): Workspace {
+/**
+ * A saved workspace, migrated and validated. Replies saved as running were interrupted with the
+ * app, unless `followsRuns`: the Viewer runs none, so its reload stops nothing, and it keeps
+ * following each one as its computer reports it.
+ */
+export function restoreWorkspace(value: unknown, { followsRuns = false } = {}): Workspace {
   const oldSchema = z.object({
     version: z.literal(1),
     agents: z.array(agentSchema).min(1),
@@ -484,12 +489,13 @@ export function restoreWorkspace(value: unknown): Workspace {
   } else data = workspaceSchema.parse(value);
   for (const c of data.conversations) {
     if (c.titleStatus === 'pending') c.titleStatus = 'fallback';
-    for (const m of c.messages)
-      if (m.status === 'running') {
-        m.status = 'cancelled';
-        m.error = interruptedReplyError;
-        delete m.backgroundWait;
-      }
+    if (!followsRuns)
+      for (const m of c.messages)
+        if (m.status === 'running') {
+          m.status = 'cancelled';
+          m.error = interruptedReplyError;
+          delete m.backgroundWait;
+        }
   }
   return data;
 }

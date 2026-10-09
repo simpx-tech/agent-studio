@@ -353,6 +353,15 @@ test('phone pairs to the hosted PWA, controls a remote host, resumes and stays s
     await expect(page.getByText('Working from your phone…', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Stop response' }).click();
     await expect.poll(() => running.size).toBe(0);
+    // The stopped reply reaches the relay before the reload: a reload of the phone stops
+    // nothing, so a reply still saved as running keeps running here until its computer ends it.
+    await expect
+      .poll(async () =>
+        (await call('GET', 'state')).workspace.conversations.some(
+          (c: { messages: { status: string }[] }) => c.messages.some((m) => m.status === 'running'),
+        ),
+      )
+      .toBe(false);
 
     // A real provider error is actionable, but a host going offline is normal state.
     const savedModel = await page.getByRole('combobox', { name: 'Model', exact: true }).innerText();

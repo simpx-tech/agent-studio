@@ -145,11 +145,21 @@
     workspaceStorageScope,
     BrowserWorkspaceStorageError,
     OfflineHostError,
-    portableWorkspace,
+    browserExport,
+    holdsLightChats,
+    readWholeChats,
+    relayHolds,
     readChatImage,
     storeChatImages,
     listScreens,
   } from '$lib/transport';
+  import {
+    isLightMessage,
+    messagesById,
+    restoreChat,
+    sameMarkdown,
+    workSignature,
+  } from '$lib/light-chats';
   import ScreenView from '$lib/components/ScreenView.svelte';
   import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
@@ -459,6 +469,12 @@
       keepDraft(content);
     });
   });
+  // A light Viewer shows the open chat's recorded work, read whole from the relay, whenever another
+  // chat opens, and lets the one left go back to light.
+  $effect(() => {
+    void activeId;
+    if (loaded) untrack(() => void showWork());
+  });
   // The open scratch chat keeps the computer, folder and settings chosen for it.
   $effect(() => {
     const id = scratchId,
@@ -481,6 +497,86 @@
   let attachmentGeneration = 0;
   let imageInput = $state<HTMLInputElement>();
   let query = $state('');
+  // A light Viewer holds every chat without the work its replies recorded (src/lib/light-chats.ts),
+  // which the relay keeps, and shows the open chat's from the relay's whole copy. The chats that
+  // may hold work here, those showing the relay's, and the work each message shows, so an
+  // unchanged copy is not shown again.
+  const chatsWithWork = new Set<string>();
+  const workShown = new Set<string>();
+  const shownWork = new Map<string, string>();
+  let workReading = 0;
+  /** Gives the open chat the work its replies recorded, and lets the others go back to light. */
+  async function showWork() {
+    if (!holdsLightChats()) return;
+    const id = activeId;
+    for (const other of [...chatsWithWork]) if (other !== id) lightenChat(other);
+    if (!id || workShown.has(id)) return;
+    const reading = ++workReading;
+    try {
+      const [whole] = await readWholeChats([id]);
+      if (reading !== workReading || activeId !== id) return;
+      // One the relay lacks yet holds everything here; its work arrives once it moves there.
+      if (whole) attachWork(whole);
+      else workShown.add(id);
+    } catch {
+      // Tried again after the next sync.
+    }
+  }
+  /** Shows the relay's whole copy of the open chat. */
+  function attachWork(whole: Conversation) {
+    if (whole.id !== activeId) return;
+    const conversation = workspace.conversations.find((c) => c.id === whole.id);
+    if (!conversation) return;
+    const found = messagesById([whole]);
+    const live = runs[conversation.id];
+    for (const message of [...conversation.messages, ...(conversation.rewind?.removed ?? [])]) {
+      const source = found.get(message.id);
+      // A message the relay lacks, such as a new fork's, and a reply this window follows as it
+      // runs keep their own work; one whose text moved on shows its work after the sync that
+      // brings that text.
+      if (!source || (live && message.runId === live)) continue;
+      if (!sameMarkdown(message, source)) continue;
+      const signature = workSignature(source);
+      if (shownWork.get(message.id) === signature && !isLightMessage(message)) continue;
+      message.blocks = source.blocks;
+      if (source.fileChanges) message.fileChanges = source.fileChanges;
+      else delete message.fileChanges;
+      shownWork.set(message.id, signature);
+    }
+    chatsWithWork.add(conversation.id);
+    workShown.add(conversation.id);
+  }
+  /** A chat no longer shown lets go of the work the relay keeps for it. */
+  function lightenChat(id: string) {
+    const conversation = workspace.conversations.find((c) => c.id === id);
+    let kept = false;
+    for (const message of [
+      ...(conversation?.messages ?? []),
+      ...(conversation?.rewind?.removed ?? []),
+    ]) {
+      if (isLightMessage(message)) continue;
+      // Work only this device holds goes out first, and a reply still running keeps its own.
+      if (!relayHolds(message.id) || message.status === 'running') {
+        kept = true;
+        continue;
+      }
+      message.blocks = message.blocks.filter((block) => block.type === 'markdown');
+      delete message.fileChanges;
+      shownWork.delete(message.id);
+    }
+    workShown.delete(id);
+    if (!kept) chatsWithWork.delete(id);
+  }
+  /** A chat whose own recorded work arrives here, as a reply this window follows does. */
+  const holdWork = (id: string) => {
+    if (holdsLightChats()) chatsWithWork.add(id);
+  };
+  /** A light copy of a chat that arrived, with the work the chat shows here, which a sync keeps. */
+  function keepWork(incoming: Conversation, existing: Conversation): Conversation {
+    if (!holdsLightChats() || !chatsWithWork.has(existing.id)) return incoming;
+    const found = messagesById([existing]);
+    return restoreChat(incoming, (id) => found.get(id));
+  }
   // Replies this window started, by conversation. Each conversation runs one reply at a time;
   // different conversations run side by side.
   let runs = $state<Record<string, string>>({});
@@ -1733,6 +1829,10 @@
               forking = false;
               const previousView = view;
               workspace = value;
+              chatsWithWork.clear();
+              workShown.clear();
+              shownWork.clear();
+              workReading++;
               // Another workspace's replies are history here, not news.
               finishedChats = {};
               observeFinishedChats = createFinishedChatTracker();
@@ -1833,7 +1933,7 @@
               // Preserve active object identities while network responses arrive.
               workspace.conversations = value.conversations.map((incoming) => {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
-                return existing ? replaceFields(existing, incoming) : incoming;
+                return existing ? replaceFields(existing, keepWork(incoming, existing)) : incoming;
               });
               if (activeId && kept.has(activeId)) followReceived();
               releaseDeleted(deleted.map((c) => c.id));
@@ -1857,7 +1957,8 @@
             restoreUnsynced: (changes) => marks.restoreUnsynced(changes),
             flush: flushPending,
             // Only the conversations a sync merged, so an unrelated chat is never rewritten.
-            applyChats: async (upsert, remove, meta) => {
+            openChat: () => activeId ?? undefined,
+            applyChats: async (upsert, remove, meta, wholes) => {
               if (meta) {
                 workspace.fleet = meta.fleet;
                 workspace.workflows = meta.workflows;
@@ -1873,10 +1974,13 @@
               for (const incoming of upsert) {
                 const existing = workspace.conversations.find((c) => c.id === incoming.id);
                 // Preserve active object identities while network responses arrive.
-                if (existing) replaceFields(existing, incoming);
+                if (existing) replaceFields(existing, keepWork(incoming, existing));
                 else workspace.conversations.push(incoming);
               }
-              if (upsert.some((c) => c.id === activeId)) followReceived();
+              // The open chat's work as the relay recorded it, read with this sync.
+              const whole = activeId ? wholes?.get(activeId) : undefined;
+              if (whole) attachWork(whole);
+              if (whole || upsert.some((c) => c.id === activeId)) followReceived();
               // A conversation deleted on another device takes its unsent draft along.
               const chats = new Set(workspace.conversations.map((c) => draftKey.chat(c.id)));
               for (const key of [...drafts.keys()])
@@ -1885,7 +1989,7 @@
               // Received from the relay: only these conversations need saving here, and nothing
               // needs publishing back. Settings and the order travel with the index.
               noteFinishedChats();
-              if (!loaded) return;
+              if (!loaded || (!upsert.length && !gone.size && !meta)) return;
               for (const conversation of upsert) marks.received(conversation.id);
               if (gone.size || meta) marks.local();
               await flushWorkspace();
@@ -1974,6 +2078,8 @@
       const peers = await (now ? pollRelayNow() : pollRelay());
       if (peers) {
         followNotification();
+        // The open chat's work, when reading it failed before.
+        void showWork();
         presence = peers;
         // A conversation too large to send is named here while every other one syncs.
         syncError = relaySyncNotice();
@@ -3450,8 +3556,20 @@
     closeConversationMenu();
     try {
       notice = '';
-      fork = forkConversation($state.snapshot(source), messageId);
+      let copy: Conversation = $state.snapshot(source);
+      // A light Viewer holds the source without its recorded work, which the fork copies.
+      if (holdsLightChats()) {
+        const [whole] = await readWholeChats([id]);
+        if (session !== workspaceSession) return;
+        if (whole) {
+          const found = messagesById([whole]);
+          copy = restoreChat(copy, (m) => found.get(m));
+        }
+      }
+      fork = forkConversation(copy, messageId);
       workspace.conversations.unshift(fork);
+      // Its work goes out whole once, then it lets that work go like any other chat.
+      holdWork(fork.id);
       await persistChat(fork.id);
       if (session !== workspaceSession) return;
       query = '';
@@ -4419,6 +4537,7 @@
       conversation.messages.push(placeholder);
       conversation.updatedAt = now;
       runs[conversation.id] = runId;
+      holdWork(conversation.id);
     };
     if (joined) join();
     const message = () => conversation.messages.find((m) => m.id === assistantId)!;
@@ -4775,13 +4894,9 @@
         });
         notice = `Workspace exported to ${exported.path}.${unexported(exported.missingImages)}`;
       } else {
-        const copy = $state.snapshot(workspace);
-        const missing = await portableWorkspace(copy);
-        const url = URL.createObjectURL(
-          new Blob([JSON.stringify(copy, null, 2)], {
-            type: 'application/json',
-          }),
-        );
+        // A light Viewer puts back each chat's work from the relay as it writes the file.
+        const { blob, missing } = await browserExport($state.snapshot(workspace));
+        const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         a.download = 'agent-studio-workspace.json';

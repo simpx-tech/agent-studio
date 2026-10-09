@@ -18,6 +18,7 @@ import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { serveDownloads } from './downloads.ts';
 import { siteIcons, siteOrigin, type SiteIcons } from './icons.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
+import { lightChat, messagesById, restoreChat } from '../src/lib/light-chats.ts';
 import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { jobAwaitsAnswer, pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
@@ -393,6 +394,25 @@ export function createRelay({
       return true;
     };
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    /**
+     * Conversations as a device sent them, with the recorded work of each message that left it out
+     * (tool calls, reasoning and file diffs) put back from this relay's copy of that message, its
+     * own conversation's first: the Viewer uploads light chats (src/lib/light-chats.ts), and no
+     * app's upload ever erases the work a reply recorded.
+     */
+    const restored = (conversations: z.infer<typeof chatSchema>[]) => {
+      const held = new Map(state.workspace.conversations.map((c) => [c.id, c]));
+      let everywhere: ReturnType<typeof messagesById> | undefined;
+      return conversations.map((conversation) => {
+        const own = held.get(conversation.id);
+        const mine = own ? messagesById([own]) : undefined;
+        return restoreChat(
+          conversation,
+          (id) =>
+            mine?.get(id) ?? (everywhere ??= messagesById(state.workspace.conversations)).get(id),
+        );
+      });
+    };
     /** A whole workspace from an app without the incremental routes, marking what moved. */
     const replaced = (workspace: z.infer<typeof sharedSchema>): RelayState => {
       const revision = state.revision + 1;
@@ -695,7 +715,18 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/state' && req.method === 'GET') {
-          send(200, { ...forApp(state), workspaceId: workspace.id });
+          const value = forApp(state);
+          // The Viewer starts from light chats and reads a chat whole when it shows it.
+          const light =
+            url.searchParams.get('light') === '1'
+              ? {
+                  workspace: {
+                    ...value.workspace,
+                    conversations: value.workspace.conversations.map((c) => lightChat(c)),
+                  },
+                }
+              : {};
+          send(200, { ...value, ...light, workspaceId: workspace.id });
           return;
         }
         // Pollers holding the current revision skip downloading the whole workspace.
@@ -706,6 +737,8 @@ export function createRelay({
             revision: state.revision,
             // Messages here keep references to images this relay stores.
             images: 1,
+            // Chats can be read light, and uploads keep the recorded work they leave out.
+            light: 1,
           });
           return;
         }
@@ -721,10 +754,16 @@ export function createRelay({
         }
         if (url.pathname === '/v1/state/chats' && req.method === 'POST') {
           const value = z
-            .object({ ids: z.array(uuid).max(1000) })
+            .object({
+              ids: z.array(uuid).max(1000),
+              // Light chats, except those named in `full`, such as the one the Viewer shows.
+              light: z.boolean().optional(),
+              full: z.array(uuid).max(1000).optional(),
+            })
             .strict()
-            .parse(await body(req, authorized, 64_000));
+            .parse(await body(req, authorized, 128_000));
           const wanted = new Set(value.ids);
+          const whole = new Set(value.full ?? []);
           // One answer carries conversations up to a budget, always at least one, and names
           // the rest, so a device asking for many large ones reads them in turns.
           const chats: typeof state.workspace.conversations = [];
@@ -732,10 +771,12 @@ export function createRelay({
           let size = 0;
           for (const conversation of state.workspace.conversations) {
             if (!wanted.has(conversation.id)) continue;
-            const bytes = JSON.stringify(conversation).length;
+            const copy =
+              value.light && !whole.has(conversation.id) ? lightChat(conversation) : conversation;
+            const bytes = JSON.stringify(copy).length;
             if (chats.length && size + bytes > answer) rest.push(conversation.id);
             else {
-              chats.push(conversation);
+              chats.push(copy);
               size += bytes;
             }
           }
@@ -756,7 +797,7 @@ export function createRelay({
             return;
           }
           const previous = state.workspace;
-          save(patched(value));
+          save(patched({ ...value, ...(value.upsert ? { upsert: restored(value.upsert) } : {}) }));
           push.changed(previous, state.workspace);
           send(200, manifest());
           return;
@@ -773,7 +814,12 @@ export function createRelay({
           const previous = state.workspace;
           // Record what actually moved, so a device on the incremental routes still sees
           // exactly the conversations this whole upload changed.
-          save(replaced(value.workspace));
+          save(
+            replaced({
+              ...value.workspace,
+              conversations: restored(value.workspace.conversations),
+            }),
+          );
           push.changed(previous, state.workspace);
           send(200, { ...forApp(state), workspaceId: workspace.id });
           return;

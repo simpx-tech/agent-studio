@@ -2,9 +2,11 @@ import {
   initialWorkspace,
   restoreWorkspace,
   type Conversation,
+  type Message,
   type Workspace,
 } from './domain';
 import { sharedSchema, type SharedWorkspace } from './sync';
+import { lightChat, messageIds } from './light-chats';
 
 export type BrowserWorkspaceScope = {
   url: string;
@@ -145,6 +147,8 @@ export async function discardOtherBrowserWorkspaces(
  * streamed reply's checkpoint writes that conversation alone. Releases before this kept the whole
  * workspace under the scope key itself; it is read once more and replaced on the next save.
  */
+// A browser runs no replies: one saved as running still runs on its computer.
+const viewer = { followsRuns: true };
 const indexKey = (key: string) => `${key}:index`;
 const chatKey = (key: string, id: string) => `${key}:chat:${id}`;
 export const browserChatOrder = (index: unknown): string[] => {
@@ -154,13 +158,17 @@ export const browserChatOrder = (index: unknown): string[] => {
   return chats as string[];
 };
 
-/** Writes the index and the conversations given, or all of them when none are named. */
+/**
+ * Writes the index and the conversations given, or all of them when none are named, each as
+ * `stored` gives it: a light connection leaves out the work the relay keeps.
+ */
 export async function saveBrowserWorkspace(
   store: BrowserWorkspaceStore,
   key: string,
   workspace: Workspace,
   changed: Conversation[] | undefined,
   current: () => boolean,
+  stored: (conversation: Conversation) => Conversation = (conversation) => conversation,
 ) {
   const { conversations, ...rest } = workspace;
   const order = conversations.map((c) => c.id);
@@ -168,7 +176,7 @@ export async function saveBrowserWorkspace(
     [indexKey(key), JSON.stringify({ ...rest, chats: order })],
   ];
   for (const conversation of changed ?? conversations)
-    entries.push([chatKey(key, conversation.id), JSON.stringify(conversation)]);
+    entries.push([chatKey(key, conversation.id), JSON.stringify(stored(conversation))]);
   const kept = new Set(order.map((id) => chatKey(key, id)));
   await store.update(
     (keys) => ({
@@ -188,34 +196,70 @@ export async function saveBrowserWorkspace(
 export async function readBrowserWorkspace(
   store: BrowserWorkspaceStore,
   scope: BrowserWorkspaceScope,
+  // Whether this connection holds chats light (src/lib/light-chats.ts). A copy an earlier release
+  // saved whole is read light, one conversation at a time.
+  light = false,
 ) {
   const key = browserScopeKey(scope);
   // The index and its conversations are read together: another tab writing between two reads
   // could remove an entry the first read listed.
-  const {
-    values: [whole, index, checkpoint],
-    entries,
-  } = await store.snapshot([key, indexKey(key), `${key}:sync`], chatKey(key, ''));
+  const { values, entries } = await store.snapshot(
+    [key, indexKey(key), `${key}:sync`],
+    chatKey(key, ''),
+  );
+  // Each saved string is let go once it is read: a copy saved whole holds tens of megabytes.
+  const take = (at: number) => {
+    const value = values[at];
+    values[at] = undefined;
+    return value;
+  };
+  const whole = take(0);
+  const index = take(1);
+  let checkpoint = take(2);
   const saved = index === undefined ? whole : index;
   if (saved === undefined && checkpoint === undefined) return undefined;
   try {
     if (typeof checkpoint !== 'string') throw new BrowserWorkspaceStorageError();
     const previous = JSON.parse(checkpoint);
+    checkpoint = undefined;
     if (previous.url !== scope.url || previous.instanceId !== scope.instanceId)
       throw new BrowserWorkspaceStorageError();
+    // Whether this read found whole what a light connection holds light, which an earlier release
+    // saved, so the caller writes the checkpoint back light instead of reading it whole again.
+    let lightened = false;
+    const lighter = (conversation: Conversation, keep?: (message: Message) => boolean) => {
+      const light = lightChat(conversation, keep);
+      if (light !== conversation) lightened = true;
+      return light;
+    };
+    // The baseline is the relay's own data, whose work the relay keeps.
+    if (light && Array.isArray(previous.base?.conversations))
+      previous.base.conversations = previous.base.conversations.map((c: Conversation) =>
+        lighter(c),
+      );
     const base = sharedSchema.parse(previous.base);
+    // A message the baseline lacks is one only this device holds, which stays whole.
+    const held = light ? messageIds(base.conversations) : undefined;
+    const kept = (conversation: Conversation) =>
+      held ? lighter(conversation, (message) => !held.has(message.id)) : conversation;
     // The revisions this baseline came from, when the checkpoint was written with them.
     const revisions: unknown = previous.revisions;
     if (saved === undefined) return undefined;
     if (typeof saved !== 'string') throw new BrowserWorkspaceStorageError();
     const parsed = JSON.parse(saved);
-    if (index === undefined) return { workspace: restoreWorkspace(parsed), base, revisions };
+    if (index === undefined) {
+      if (held && Array.isArray(parsed.conversations))
+        parsed.conversations = parsed.conversations.map(kept);
+      return { workspace: restoreWorkspace(parsed, viewer), base, revisions, lightened };
+    }
     const order = browserChatOrder(parsed);
     const stored = new Map(entries.map(([entry, value]) => [entry, value]));
+    entries.length = 0;
     const checkpointed = new Map(base.conversations.map((c) => [c.id, c]));
     const conversations = order.flatMap((id) => {
       const value = stored.get(chatKey(key, id));
-      if (typeof value === 'string') return [JSON.parse(value)];
+      stored.delete(chatKey(key, id));
+      if (typeof value === 'string') return [kept(JSON.parse(value))];
       // Another tab of this workspace removes the entry of a conversation it never received,
       // after this index listed it. The conversation opens as the checkpoint holds it, and the
       // relay's copy merges over it, rather than locking this browser out of its workspace. One
@@ -224,9 +268,10 @@ export async function readBrowserWorkspace(
       return synced ? [synced] : [];
     });
     return {
-      workspace: restoreWorkspace({ ...parsed, chats: undefined, conversations }),
+      workspace: restoreWorkspace({ ...parsed, chats: undefined, conversations }, viewer),
       base,
       revisions,
+      lightened,
     };
   } catch {
     throw new BrowserWorkspaceStorageError();

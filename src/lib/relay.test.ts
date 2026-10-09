@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../../relay/server.ts';
 import { emptyShared } from './sync';
+import { lightChat } from './light-chats';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
@@ -84,6 +85,52 @@ const conversation = (text: string) => ({
     },
   ],
 });
+// A conversation whose reply recorded its work: reasoning, a tool call and a file diff.
+const recordedChat = (title: string) => {
+  const chat = conversation(title);
+  return {
+    ...chat,
+    messages: [
+      ...chat.messages,
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant' as const,
+        status: 'complete' as const,
+        createdAt: '2026-09-27',
+        blocks: [
+          {
+            type: 'reasoning' as const,
+            id: 'r1',
+            revision: 1,
+            text: 'Checking the build.',
+            truncated: false,
+          },
+          {
+            type: 'activity' as const,
+            text: 'Ran npm run build',
+            tool: {
+              id: 'call-1',
+              revision: 2,
+              category: 'tool' as const,
+              name: 'Bash',
+              status: 'complete' as const,
+              command: 'npm run build',
+              facts: [],
+              sources: [],
+              agents: [],
+            },
+          },
+          { type: 'markdown' as const, text: 'Fixed it.' },
+        ],
+        fileChanges: {
+          revision: 1,
+          limited: false,
+          edits: [{ id: 'edit-1', files: [{ path: 'src/app.ts', kind: 'modified' as const }] }],
+        },
+      },
+    ],
+  };
+};
 /** A 1×1 PNG, and the same with one more byte, so two images differ. */
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
@@ -428,7 +475,13 @@ describe('real HTTP relay', () => {
     const f = await fixture();
     expect(await f.call('GET', 'state/revision')).toEqual({
       status: 200,
-      body: { instanceId: expect.any(String), workspaceId: 'owner', revision: 0, images: 1 },
+      body: {
+        instanceId: expect.any(String),
+        workspaceId: 'owner',
+        revision: 0,
+        images: 1,
+        light: 1,
+      },
     });
   });
 
@@ -465,6 +518,60 @@ describe('real HTTP relay', () => {
     const second = await f.call('POST', 'state/chats', { ids: first.body.rest });
     expect(second.body.chats.map((c: { id: string }) => c.id)).toEqual([ids[1]]);
     expect(second.body.rest).toEqual([ids[2]]);
+  });
+
+  it('answers light chats on request, whole those it is asked for, and the whole state light', async () => {
+    const f = await fixture();
+    const [first, second] = [recordedChat('One'), recordedChat('Two')];
+    expect(
+      (await f.call('POST', 'state/patch', { revision: 0, upsert: [first, second] })).status,
+    ).toBe(200);
+    const ids = [first.id, second.id];
+    const light = await f.call('POST', 'state/chats', { ids, light: true, full: [second.id] });
+    expect(light.body.chats).toEqual([lightChat(first), second]);
+    expect((await f.call('POST', 'state/chats', { ids })).body.chats).toEqual([first, second]);
+    expect((await f.call('GET', 'state?light=1')).body.workspace.conversations).toEqual([
+      lightChat(first),
+      lightChat(second),
+    ]);
+    expect((await f.call('GET', 'state')).body.workspace.conversations).toEqual([first, second]);
+  });
+
+  it('keeps the recorded work an upload leaves out, whole or patched, and in copies', async () => {
+    const f = await fixture();
+    const chat = recordedChat('Fix the build');
+    await f.call('POST', 'state/patch', { revision: 0, upsert: [chat] });
+    const stored = async () =>
+      (await f.call('POST', 'state/chats', { ids: [chat.id] })).body.chats[0];
+    // An unchanged light upload is the stored chat: nothing moves.
+    const same = await f.call('POST', 'state/patch', { revision: 1, upsert: [lightChat(chat)] });
+    expect(same.body).toMatchObject({ revision: 2, chats: { [chat.id]: 1 } });
+    expect(await stored()).toEqual(chat);
+    // A light upload's own edits are kept with the work it left out.
+    const renamed = { ...lightChat(chat), title: 'Renamed' };
+    await f.call('POST', 'state/patch', { revision: 2, upsert: [renamed] });
+    expect(await stored()).toEqual({ ...chat, title: 'Renamed' });
+    // A conflict copy keeps the work of the messages it copied, and a whole upload as well.
+    const copy = { ...lightChat(chat), id: crypto.randomUUID(), title: 'Copy' };
+    const put = await f.call('PUT', 'state', {
+      revision: 3,
+      workspace: { ...emptyShared(), conversations: [renamed, copy] },
+    });
+    expect(put.status).toBe(200);
+    expect((await f.call('GET', 'state')).body.workspace.conversations).toEqual([
+      { ...chat, title: 'Renamed' },
+      { ...chat, id: copy.id, title: 'Copy' },
+    ]);
+    // Text that moved on keeps its own words and gains the recorded calls.
+    const longer = lightChat(chat);
+    longer.messages[1].blocks = [{ type: 'markdown', text: 'Fixed it, and the tests pass.' }];
+    await f.call('POST', 'state/patch', { revision: 4, upsert: [longer] });
+    const merged = (await stored()).messages[1];
+    expect(merged.blocks.filter((b: { type: string }) => b.type === 'markdown')).toEqual([
+      { type: 'markdown', text: 'Fixed it, and the tests pass.' },
+    ]);
+    expect(merged.blocks.filter((b: { type: string }) => b.type !== 'markdown')).toHaveLength(2);
+    expect(merged.fileChanges).toEqual((chat.messages[1] as { fileChanges?: unknown }).fileChanges);
   });
 
   it('routes Undo identities without accepting caller-supplied file content or paths', async () => {
@@ -1142,6 +1249,7 @@ describe('real HTTP relay', () => {
       workspaceId: 'owner',
       revision: 0,
       images: 1,
+      light: 1,
     });
     const workspace = emptyShared();
     workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Desktop' });
@@ -1151,6 +1259,7 @@ describe('real HTTP relay', () => {
       workspaceId: 'owner',
       revision: 1,
       images: 1,
+      light: 1,
     });
   });
   it('routes work to the exact environment, claims once, streams progress, cancels and deduplicates submissions', async () => {

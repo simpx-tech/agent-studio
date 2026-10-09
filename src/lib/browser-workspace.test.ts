@@ -239,3 +239,58 @@ it('opens a conversation whose entry another tab removed as the checkpoint holds
     'Synced before, as the relay had it',
   ]);
 });
+
+const recorded = (title: string, status: 'complete' | 'running' = 'complete') => ({
+  ...chat(title),
+  messages: [
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant' as const,
+      status,
+      createdAt: '2026-09-26',
+      blocks: [
+        { type: 'activity' as const, text: 'Ran the tests' },
+        { type: 'markdown' as const, text: `${title} done.` },
+      ],
+      fileChanges: { revision: 1, edits: [], limited: false },
+    },
+  ],
+});
+
+it('keeps a reply saved as running, which a browser never runs, running', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(recorded('Running elsewhere', 'running'));
+  data.set(`${key}:sync`, checkpoint(workspace));
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  const [message] = (await readBrowserWorkspace(store, scope))!.workspace.conversations[0].messages;
+  expect(message.status).toBe('running');
+  expect(message.error).toBeUndefined();
+});
+
+it('reads a copy saved whole light, keeping whole only the work the relay lacks', async () => {
+  const { store, data } = memoryStore();
+  const synced = recorded('Synced');
+  const fork = recorded('Forked here');
+  const base = initialWorkspace();
+  base.conversations.push(synced);
+  data.set(`${key}:sync`, checkpoint(base));
+  const workspace = initialWorkspace();
+  workspace.conversations.push(synced, fork);
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  const read = (await readBrowserWorkspace(store, scope, true))!;
+  expect(read.lightened).toBe(true);
+  // The baseline and what the relay holds lose their recorded work, kept by the relay.
+  expect(read.base.conversations[0].messages[0].blocks).toEqual([
+    { type: 'markdown', text: 'Synced done.' },
+  ]);
+  const [light, whole] = read.workspace.conversations;
+  expect(light.messages[0]).not.toHaveProperty('fileChanges');
+  expect(light.messages[0].blocks).toHaveLength(1);
+  // A message only this device holds stays whole until it reaches the relay.
+  expect(whole.messages[0]).toEqual(fork.messages[0]);
+  // A copy already light reads back unchanged.
+  await saveBrowserWorkspace(store, key, read.workspace, undefined, () => true);
+  data.set(`${key}:sync`, JSON.stringify({ ...scope, base: read.base }));
+  expect((await readBrowserWorkspace(store, scope, true))!.lightened).toBe(false);
+});
