@@ -5,6 +5,16 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.8.1 - 2026-10-09
+
+### Fixed
+
+- Stop the Viewer on a phone from closing itself while it loads a large workspace: it now keeps
+  chats without the work their replies recorded, and reads a chat whole when you open it
+- Stop a reload of the Viewer from marking replies still running on a computer as interrupted
+- Stop chats from gaining "(conflict copy)" twins when a phone and a computer held a reply at
+  different steps, or when a chat switched accounts on one of them
+
 ## 0.8.0 - 2026-10-08
 
 Agent Studio now imports the chats Claude Code and Codex saved on this computer, signs in without a
