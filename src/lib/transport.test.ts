@@ -1592,6 +1592,70 @@ it('publishes only the conversation that changed, and takes in only what moved',
   await transport.disconnectRelay();
 });
 
+it('writes the checkpoint at once for a change it takes in other than a reply moving on', async () => {
+  // A copy saved after its checkpoint looks edited here after a restart, and merged with a rewind
+  // or retry made elsewhere meanwhile it left a conflict copy of the chat. Only a reply's progress
+  // waits for the interval.
+  const { transport, workspace, relay, local, polls, marks, checkpoint } = await incrementalRelay();
+  const id = workspace.conversations[0].id;
+  const here = () => workspace.conversations.find((c) => c.id === id)!;
+  const elsewhere = (change: (conversation: Conversation) => void) => {
+    relay.revision++;
+    relay.workspace = {
+      ...relay.workspace,
+      conversations: relay.workspace.conversations.map((c) => {
+        if (c.id !== id) return c;
+        const changed = structuredClone(c);
+        change(changed);
+        return changed;
+      }),
+    };
+    relay.chats[id] = relay.revision;
+  };
+  // Another device sends a message, and its reply starts.
+  elsewhere((c) =>
+    c.messages.push(
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        createdAt: '2026-10-09',
+        status: 'complete',
+        blocks: [{ type: 'markdown', text: 'Continue' }],
+      },
+      {
+        id: crypto.randomUUID(),
+        runId: crypto.randomUUID(),
+        role: 'assistant',
+        createdAt: '2026-10-09',
+        status: 'running',
+        blocks: [{ type: 'markdown', text: 'Work' }],
+      },
+    ),
+  );
+  expect((await polls(1)).state).toContain('save_sync_state');
+  const saved = () =>
+    (checkpoint() as { base: SharedWorkspace }).base.conversations.find((c) => c.id === id)!;
+  expect(saved().messages).toHaveLength(2);
+  // The reply's progress is saved here, and its checkpoint waits.
+  elsewhere((c) => (c.messages[1].blocks = [{ type: 'markdown', text: 'Working' }]));
+  expect((await polls(1)).state).not.toContain('save_sync_state');
+  expect(here().messages[1].blocks).toEqual([{ type: 'markdown', text: 'Working' }]);
+  expect(saved().messages[1].blocks).toEqual([{ type: 'markdown', text: 'Work' }]);
+  // The chat moved to History there goes in at once.
+  elsewhere((c) => (c.archived = true));
+  expect((await polls(1)).state).toContain('save_sync_state');
+  expect(saved().archived).toBe(true);
+  // A change this computer makes and publishes still writes the checkpoint at intervals. The
+  // page edits its own copy of a chat it received, never the baseline’s.
+  workspace.conversations = workspace.conversations.map((c) =>
+    c.id === id ? { ...structuredClone(c), title: 'Renamed here' } : c,
+  );
+  local.changes++;
+  marks.mark(id);
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision', 'POST v1/state/patch']);
+  await transport.disconnectRelay();
+});
+
 it('sends replicated settings only when they move, and deletes on both sides', async () => {
   const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
   // A computer added here belongs to the settings the relay keeps beside its conversations.

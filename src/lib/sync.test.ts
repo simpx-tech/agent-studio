@@ -5,10 +5,12 @@ import {
   restoreWorkspace,
   settingsFor,
   type Conversation,
+  type Message,
 } from './domain';
 import {
   emptyShared,
   mergeShared,
+  onlyRepliesMoved,
   replaceFields,
   sameShared,
   sharedSchema,
@@ -226,6 +228,172 @@ describe('workspace replication', () => {
     expect(continued.conversations).toHaveLength(1);
     expect(continued.conversations[0].messages).toHaveLength(2);
     expect(continued.conversations[0].messages[0].durationMs).toBe(1200);
+  });
+  it('keeps the later copy of a reply whose answer started over, instead of copying the chat', () => {
+    // A long reply writes its earlier text down as a progress comment when it calls a tool, and
+    // its answer starts again, so a copy from an earlier step holds text the later one no longer
+    // extends. A phone that saw that step merged it with the finished reply as a conflict copy.
+    const runId = crypto.randomUUID();
+    const replyId = crypto.randomUUID();
+    const step = (steps: number, text: string) => ({
+      id: replyId,
+      runId,
+      role: 'assistant' as const,
+      createdAt: '',
+      status: 'running' as const,
+      blocks: [
+        { type: 'markdown' as const, text },
+        ...Array.from({ length: steps }, (_, i) => ({
+          type: 'activity' as const,
+          text: `Progress ${i}`,
+          order: i + 1,
+          progress: { id: `progress-${i}`, revision: 0 },
+        })),
+      ],
+    });
+    const at = (message: Message) => {
+      const shared = emptyShared();
+      shared.conversations.push({ ...chat(), id: 'chat', messages: [message] });
+      return shared;
+    };
+    const base = at(step(1, 'The fourth round'));
+    const earlier = at(step(2, 'The fourth round is running. Before starting it, I reorganised'));
+    const later = at({ ...step(4, 'Round 4 is still running.'), status: 'complete' as const });
+    const running = at(step(4, 'Round 4 is still running.'));
+    for (const [local, remote] of [
+      [earlier, later],
+      [later, earlier],
+      [earlier, running],
+      [running, earlier],
+    ]) {
+      const merged = mergeShared(base, local, remote);
+      const newer = local === earlier ? remote : local;
+      expect(merged.conversations).toHaveLength(1);
+      expect(merged.conversations[0].messages[0].status).toBe(
+        newer.conversations[0].messages[0].status,
+      );
+      expect(merged.conversations[0].messages[0].blocks).toEqual(
+        newer.conversations[0].messages[0].blocks,
+      );
+    }
+    // A copy an older Viewer restored as interrupted yields to the finished one the same way.
+    const stopped = at({
+      ...step(2, 'The fourth round is running.'),
+      status: 'cancelled' as const,
+      error: interruptedReplyError,
+    });
+    const finished = mergeShared(base, stopped, later).conversations;
+    expect(finished).toHaveLength(1);
+    expect(finished[0].messages[0]).toMatchObject({ status: 'complete' });
+    expect(finished[0].messages[0].error).toBeUndefined();
+    // Copies at the same step whose answers differ take the relay's, which its computer published.
+    const theirs = at(step(2, 'Round 4 is running.'));
+    expect(mergeShared(base, earlier, theirs).conversations).toEqual(theirs.conversations);
+  });
+  it('keeps an account switched on one device with the reply another device saw end', () => {
+    // A reply hit a usage limit; the desktop switched the chat to another account and went on,
+    // while a phone still held the first account and the reply as it was before.
+    const first = crypto.randomUUID(),
+      second = crypto.randomUUID();
+    const conversation = chat();
+    conversation.settings.connectionId = first;
+    const reply = {
+      id: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+      role: 'assistant' as const,
+      createdAt: '',
+      status: 'running' as const,
+      settings: { ...conversation.settings },
+      blocks: [{ type: 'markdown' as const, text: 'Working' }],
+    };
+    conversation.messages.push(reply);
+    const base = { ...emptyShared(), conversations: [conversation] };
+    const phone = structuredClone(base);
+    phone.conversations[0].messages[0] = {
+      ...reply,
+      status: 'cancelled',
+      error: interruptedReplyError,
+    };
+    const desktop = structuredClone(base);
+    const switched = desktop.conversations[0];
+    switched.settings.connectionId = second;
+    switched.messages[0] = { ...reply, status: 'error', error: 'You hit your session limit.' };
+    switched.messages.push(
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        createdAt: '',
+        status: 'complete',
+        blocks: [{ type: 'markdown', text: 'Continue from where you stopped' }],
+      },
+      {
+        ...reply,
+        id: crypto.randomUUID(),
+        runId: crypto.randomUUID(),
+        status: 'complete',
+        settings: { ...switched.settings },
+        blocks: [{ type: 'markdown', text: 'Continued.' }],
+      },
+    );
+    for (const [local, remote] of [
+      [phone, desktop],
+      [desktop, phone],
+    ]) {
+      const merged = mergeShared(base, local, remote);
+      expect(merged.conversations).toHaveLength(1);
+      expect(merged.conversations[0].settings.connectionId).toBe(second);
+      expect(merged.conversations[0].messages).toEqual(switched.messages);
+    }
+    // Switching to two different accounts is still a conflict, never a silent choice.
+    const elsewhere = structuredClone(phone);
+    elsewhere.conversations[0].settings.connectionId = crypto.randomUUID();
+    expect(mergeShared(base, elsewhere, desktop).conversations).toHaveLength(2);
+  });
+  it('tells a reply moving on from any other change, which the checkpoint must hold at once', () => {
+    const conversation = chat();
+    conversation.messages.push(
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        createdAt: '',
+        status: 'complete',
+        blocks: [{ type: 'markdown', text: 'Go' }],
+      },
+      {
+        id: crypto.randomUUID(),
+        runId: crypto.randomUUID(),
+        role: 'assistant',
+        createdAt: '',
+        status: 'running',
+        blocks: [{ type: 'markdown', text: 'Wor' }],
+      },
+    );
+    const moved = structuredClone(conversation);
+    moved.messages[1] = {
+      ...moved.messages[1],
+      status: 'complete',
+      blocks: [{ type: 'markdown', text: 'Worked' }],
+    };
+    moved.updatedAt = '2026-10-09';
+    expect(onlyRepliesMoved(conversation, moved)).toBe(true);
+    expect(onlyRepliesMoved(conversation, structuredClone(conversation))).toBe(true);
+    const changes: ((c: Conversation) => void)[] = [
+      (c) => c.messages.push({ ...c.messages[0], id: crypto.randomUUID() }),
+      (c) => c.messages.pop(),
+      (c) => (c.messages[1] = { ...c.messages[1], id: crypto.randomUUID() }),
+      (c) => (c.messages[0] = { ...c.messages[0], blocks: [{ type: 'markdown', text: 'Stop' }] }),
+      (c) => (c.historyRevision = 1),
+      (c) => (c.archived = true),
+      (c) => (c.title = 'Renamed'),
+      (c) => (c.settings = { ...c.settings, model: 'another' }),
+    ];
+    for (const change of changes) {
+      const changed = structuredClone(conversation);
+      change(changed);
+      expect(onlyRepliesMoved(conversation, changed)).toBe(false);
+    }
+    // A conversation new to this device is a change of its own.
+    expect(onlyRepliesMoved(undefined, conversation)).toBe(false);
   });
   it('lets only the restarted execution host interrupt its dead run over a newer checkpoint', () => {
     const base = emptyShared();

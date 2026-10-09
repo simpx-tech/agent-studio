@@ -170,6 +170,29 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
   };
 }
 
+const rank = { running: 0, cancelled: 1, error: 2, complete: 3 };
+// A restarted device only saw its own copy stop; any other copy of the run knows better.
+const interrupted = (message: Message) => message.error === interruptedReplyError;
+const score = (message: Message) => (interrupted(message) ? -1 : rank[message.status]);
+/**
+ * The later of two copies of one reply, `left` this device's and `right` the relay's. Only the
+ * computer running a reply writes it, so its copies differ in time, never in content. Its answer
+ * is not one growing text: the text written before a call becomes a progress comment and the
+ * answer starts again. So the status decides first, then the blocks and the usage revision the
+ * reply recorded, then an answer extending the other; otherwise the relay's copy, which the
+ * running computer publishes, is the later one. Requiring one answer to extend the other made a
+ * conflict copy of a chat whenever a phone held its reply from an earlier step.
+ */
+function laterReply(left: Message, right: Message): Message {
+  for (const difference of [
+    score(left) - score(right),
+    left.blocks.length - right.blocks.length,
+    (left.usage?.revision ?? -1) - (right.usage?.revision ?? -1),
+  ])
+    if (difference) return difference > 0 ? left : right;
+  return messageText(left).startsWith(messageText(right)) ? left : right;
+}
+
 function sameRun(
   left: Conversation,
   right: Conversation,
@@ -182,7 +205,6 @@ function sameRun(
     (left.historyRevision ?? 0) !== (right.historyRevision ?? 0) ||
     !equal(left.rewind, right.rewind) ||
     left.settings.provider !== right.settings.provider ||
-    left.settings.connectionId !== right.settings.connectionId ||
     !equal(left.location, right.location)
   )
     return;
@@ -193,8 +215,9 @@ function sameRun(
     else if (!base || !!right.archived !== !!base.archived) return;
   }
   if (!equal(left.settings, right.settings)) {
-    // A response checkpoint and a one-sided edit for the next request are independent.
-    // Conflicting settings edits still produce the existing conflict copy.
+    // A response checkpoint and a one-sided edit for the next request, such as the account
+    // switched to after a usage limit, are independent. Conflicting settings edits still
+    // produce the existing conflict copy.
     if (base && equal(left.settings, base.settings)) settings = right.settings;
     else if (!base || !equal(right.settings, base.settings)) return;
   }
@@ -215,15 +238,7 @@ function sameRun(
     }
     if (!a.runId || a.runId !== b.runId) return;
     if (!equal(a.settings, b.settings)) return;
-    const at = messageText(a),
-      bt = messageText(b);
-    if (!at.startsWith(bt) && !bt.startsWith(at)) return;
-    const rank = { running: 0, cancelled: 1, error: 2, complete: 3 };
-    // A restarted device only saw its own copy stop; any other copy of the run knows better.
-    const interrupted = (message: typeof a) => message.error === interruptedReplyError;
-    const score = (message: typeof a) => (interrupted(message) ? -1 : rank[message.status]);
-    const chosen =
-      score(a) > score(b) ? a : score(b) > score(a) ? b : at.length >= bt.length ? a : b;
+    const chosen = laterReply(a, b);
     const other = chosen === a ? b : a;
     // Unless the execution host itself restarted without this run: keep the newest checkpoint
     // content, but nothing will finish it, so its interruption outranks the stale running copy.
@@ -293,6 +308,27 @@ function sameRun(
 }
 export function sharedWorkspace(workspace: Workspace): SharedWorkspace {
   return sharedSchema.parse(workspace);
+}
+
+/**
+ * Whether `after` is `before` with only its replies further along: the same messages in the same
+ * order, the user's unchanged, and the chat itself the same apart from when it was updated. A
+ * merge reconciles such copies by itself. Any other change (a message added or removed, a rewind,
+ * an archive, settings, a title, a new chat) has to reach the sync checkpoint at once, because
+ * after a reload a saved copy the checkpoint lags behind looks edited on that device.
+ */
+export function onlyRepliesMoved(before: Conversation | undefined, after: Conversation): boolean {
+  if (!before || before.messages.length !== after.messages.length) return false;
+  for (let i = 0; i < before.messages.length; i++) {
+    const a = before.messages[i],
+      b = after.messages[i];
+    if (a.id !== b.id || a.role !== b.role || (a.role !== 'assistant' && !equal(a, b)))
+      return false;
+  }
+  return equal(
+    { ...after, updatedAt: before.updatedAt, messages: [] },
+    { ...before, messages: [] },
+  );
 }
 
 // A stopped host can publish its last checkpoint after another device deletes

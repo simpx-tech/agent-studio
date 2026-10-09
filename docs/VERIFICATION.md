@@ -1,5 +1,17 @@
 # Verification — 2026-09-08
 
+## Copies of one reply no longer split a chat into conflict copies — 2026-10-09
+
+Requested 2026-10-09: chats kept gaining "(conflict copy)" versions, which should not happen.
+
+- Cause, from the user's workspace: six copies since 2026-09-25, five in History and the sixth the chat still in use. Replaying `sameRun`'s checks on each copy and its original named what refused them. In five, one side holds a reply at an earlier step saved as "This response was interrupted when the app closed.", the mark a restart puts on a reply still running there, and before 9aab67c (on `development`, not yet released) every Viewer reload too, while the other side holds it finished. Two of those failed because `sameRun` reconciled copies of one reply only when one answer extended the other, and a reply's answer starts again after each call, its earlier text kept as a progress comment. One met an account the desktop switched to after a usage limit, which `sameRun` refused outright, and two no longer show what refused them. The sixth, this morning, came from a Viewer reopened with a checkpoint older than its saved copy: a turn it had taken in after the checkpoint counted as its own edit, and the desktop had rewound and resent that turn meanwhile.
+- `laterReply` in `src/lib/sync.ts` keeps the later copy of a reply: its status first, then the blocks and usage revision it recorded, then an answer extending the other, otherwise the relay's. An account switch merges like any one-sided next-reply setting; two different switches still conflict.
+- `onlyRepliesMoved` tells replies moving on from any other change. The incremental and whole-state polls write the checkpoint at once after taking in any other change, and a Viewer also after publishing one of its own; replies' progress keeps the one-minute interval.
+- Unit: `sync.test.ts` adds the answer that started over (four orders of an earlier, a later and a running copy, an interrupted one, and two copies at the same step), the account switch beside a reply another device saw end, and the classification. On the previous `sync.ts` the first two made two conversations each. `transport.test.ts` checks that a message and an archive taken in write the checkpoint at once, while a reply's progress and this computer's own change wait.
+- Browser: `tests/viewer-sync-conflicts.spec.ts` signs a Viewer in to a real relay and lets it take in a turn, its failure and another reply's progress. With the Viewer closed, the computer rewinds and resends the turn and the other reply answers anew. Reopened on the previous build, the Viewer left "Rewound on the computer (conflict copy)" and "Answer started over (conflict copy)" on the relay; now it leaves neither.
+- Pipeline: `npm run check` (0 errors), 631 Vitest tests, the build, 344 browser tests in three shards and `cargo fmt --check` passed. Clippy and the Rust tests were not rerun because no Rust file changed. Logs: `artifacts/conflict-copies-fix/`.
+- Not exercised: the installed app and the phone, which run the published release until the next one. Copies made before stay until deleted.
+
 ## Work history collapses from its end — 2026-10-08
 
 Requested 2026-10-08: a long Work history should close from its end, without scrolling back to its start.

@@ -117,6 +117,7 @@ import {
   emptyShared,
   mergeShared,
   metaOf,
+  onlyRepliesMoved,
   sameShared,
   sharedChatSchema,
   sharedSchema,
@@ -1642,6 +1643,14 @@ async function syncIncremental(
       await runtime.applyChats(apply, plan.forget, plan.applyMeta, wholes);
       if (generation !== relayGeneration) return null;
     }
+    // A change other than replies moving on goes into the checkpoint now: after a reload, what
+    // this device saved since its checkpoint looks edited here, and merging that with a rewind,
+    // retry or archive made elsewhere left a conflict copy of the chat. A Viewer, which a phone
+    // may close at any moment, does the same for such a change of its own.
+    const structural =
+      !!plan.applyMeta ||
+      apply.some((c) => !onlyRepliesMoved(read.get(c.id), c)) ||
+      (!desktop() && (!!plan.sendMeta || send.some((c) => !onlyRepliesMoved(remoteChat(c.id), c))));
     if (since.size) runtime.restoreUnsynced({ chats: since, meta: false });
     // The relay still holds its own copy of a conversation this poll could not send.
     const result = new Map(plan.result);
@@ -1657,10 +1666,13 @@ async function syncIncremental(
       ...plan.mergedMeta,
       conversations: nextBaselineChats(baseline.conversations, involved, result),
     };
-    await saveCheckpoint(generation, next, current.revision, {
-      chats: current.chats,
-      metaRevision: current.metaRevision,
-    });
+    await saveCheckpoint(
+      generation,
+      next,
+      current.revision,
+      { chats: current.chats, metaRevision: current.metaRevision },
+      structural,
+    );
     if (generation !== relayGeneration) return null;
     baseline = next;
     noteBaseline();
@@ -1751,18 +1763,20 @@ export async function browserExport(copy: Workspace): Promise<{ blob: Blob; miss
 }
 /**
  * Writes the merge baseline and the revisions it came from for the next start of the app, at
- * most once per interval. Call before advancing the baseline in memory, so a failed write leaves
- * the next poll to try again. `manifest` is left out when the relay reported no per-conversation
- * revisions, so the next start asks for them instead of trusting an empty list.
+ * most once per interval unless `now`, for a change other than replies moving on. Call before
+ * advancing the baseline in memory, so a failed write leaves the next poll to try again.
+ * `manifest` is left out when the relay reported no per-conversation revisions, so the next start
+ * asks for them instead of trusting an empty list.
  */
 async function saveCheckpoint(
   generation: number,
   base: SharedWorkspace,
   revision: number,
   manifest?: { chats: Record<string, number>; metaRevision: number },
+  now = false,
 ): Promise<void> {
   if (!runtime || revision === checkpointRevision) return;
-  if (checkpointSavedAt && Date.now() - checkpointSavedAt < CHECKPOINT_INTERVAL) return;
+  if (!now && checkpointSavedAt && Date.now() - checkpointSavedAt < CHECKPOINT_INTERVAL) return;
   // Everything the checkpoint holds must already be in the saved workspace: after a crash, an
   // older saved copy would otherwise win the next merge against the relay's newer one.
   await runtime.flush?.();
@@ -1928,6 +1942,13 @@ export async function pollRelay(): Promise<Presence[] | null> {
           await runtime.apply(mergeShared(start, current, accepted, options));
           if (generation !== relayGeneration) return null;
         }
+        // As on the incremental path, a change that arrived other than replies moving on goes
+        // into the checkpoint now.
+        const sentChats = new Map(start.conversations.map((c) => [c.id, c]));
+        const structural =
+          !sent &&
+          (!sameShared({ ...accepted, conversations: [] }, { ...start, conversations: [] }) ||
+            accepted.conversations.some((c) => !onlyRepliesMoved(sentChats.get(c.id), c)));
         // A relay with per-conversation revisions reports them here too, so the next poll can
         // publish and take in only what moved. An older one reports none and keeps this path.
         const reported = z
@@ -1945,6 +1966,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
           reported.success
             ? { chats: reported.data.chatRevisions, metaRevision: reported.data.metaRevision }
             : undefined,
+          structural,
         );
         if (generation !== relayGeneration) return null;
         baseline = accepted;
