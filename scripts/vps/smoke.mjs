@@ -256,7 +256,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${qa.data}
-MemoryMax=512M
+MemoryMax=2G
 CPUQuota=100%
 `,
       { mode: 0o600 },

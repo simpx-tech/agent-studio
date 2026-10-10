@@ -260,7 +260,7 @@ const runMessages = (job: { method: string; args: Record<string, unknown> }) => 
 /**
  * The largest workspace upload, whole or patched. A body is held about four times over while it
  * is read and parsed, beside every workspace this relay keeps in memory, and the service runs
- * within 512 MiB (docs/DEPLOYMENT.md), so an upload past this is refused before it is read.
+ * within 2 GiB (docs/DEPLOYMENT.md), so an upload past this is refused before it is read.
  */
 export const stateUploadLimit = 64_000_000;
 /** How much conversation data one answer to `v1/state/chats` carries; the rest is named. */
