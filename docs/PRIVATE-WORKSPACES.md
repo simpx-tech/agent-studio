@@ -18,7 +18,7 @@ All devices paired with an admin workspace share its authority. Only grant this 
 
 Choose **Create workspace** and enter a name. The new workspace starts empty as a member. Copy the displayed private key and save it in your password manager before closing the dialog; it is shown only once and cannot be recovered from the list. Send it privately to its intended user with the server's HTTPS address.
 
-The recipient installs Agent Studio on their computer, signs in to their own provider CLIs in **Connections**, and uses **Set up sync** with the shared server address and their private workspace key. They can pair phones and additional computers with the same key. The VPS serves the PWA and relay; agents continue to execute on that person's paired computers. This does not provision Linux users, hosted agent processes, or provider subscriptions on the VPS.
+The recipient installs Agent Studio on their computer, signs in to their own provider CLIs in **Connections**, and uses **Set up sync** with the shared server address and their private workspace key. They can pair phones and additional computers with the same key. The VPS serves the PWA and relay; agents continue to execute on that person's paired computers. The VPS's own [server host](DEPLOYMENT.md#server-host) belongs to the owner workspace alone, since it pairs with the relay's own key; nothing provisions Linux users, hosted agent processes, or provider subscriptions on the VPS for other workspaces.
 
 ## Manage access
 

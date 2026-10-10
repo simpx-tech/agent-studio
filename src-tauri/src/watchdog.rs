@@ -23,6 +23,12 @@ use tauri::{AppHandle, Manager, State};
 const STALL: Duration = Duration::from_secs(10);
 /// How long a shown page may go without calling.
 const SILENCE: Duration = Duration::from_secs(60);
+/// How long a server's page may go without calling, or its window thread without answering,
+/// before the server ends so its service starts it again: no one is at its window, and the work
+/// it runs for other devices stops with its page (`server`).
+const SERVER_SILENCE: Duration = Duration::from_secs(300);
+/// The exit code of a server that ended for that.
+const SERVER_RESTART: i32 = 75;
 /// One wait of the watch. One that took far longer means the computer slept, which counts for
 /// nothing.
 const SLICE: Duration = Duration::from_secs(1);
@@ -127,6 +133,7 @@ fn watch(app: &AppHandle) {
     let mut last_step = Instant::now();
     let mut failed_posts = 0;
     let mut queue_report = false;
+    let mut unanswered = Unanswered::default();
     loop {
         if watchdog.ending.load(Ordering::SeqCst) {
             return;
@@ -164,6 +171,12 @@ fn watch(app: &AppHandle) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             waited += awake(slice.elapsed());
+            if crate::server::active()
+                && waited >= SERVER_SILENCE
+                && !watchdog.ending.load(Ordering::SeqCst)
+            {
+                std::process::exit(SERVER_RESTART);
+            }
             if stalled.is_none() && waited >= STALL && !watchdog.ending.load(Ordering::SeqCst) {
                 let started = Instant::now();
                 let visible = watchdog.visible.load(Ordering::SeqCst);
@@ -181,6 +194,12 @@ fn watch(app: &AppHandle) {
             let beats = watchdog.beats.load(Ordering::SeqCst);
             let visible = watchdog.visible.load(Ordering::SeqCst);
             let took = std::mem::replace(&mut last_step, Instant::now()).elapsed();
+            if crate::server::active()
+                && unanswered.step(beats, awake(took)) >= SERVER_SILENCE
+                && !watchdog.ending.load(Ordering::SeqCst)
+            {
+                std::process::exit(SERVER_RESTART);
+            }
             match silence.step(beats, visible, awake(took)) {
                 Step::Quiet => {}
                 Step::Silent(after) => silence.report = freeze(app, "windowSilent", after, true),
@@ -201,6 +220,26 @@ fn awake(took: Duration) -> Duration {
         Duration::ZERO
     } else {
         took
+    }
+}
+
+/// How long a server's page has gone without calling, from the start on: a page that never
+/// loads owes its calls as much as one that stopped.
+#[derive(Default)]
+struct Unanswered {
+    beats: u64,
+    quiet: Duration,
+}
+
+impl Unanswered {
+    fn step(&mut self, beats: u64, awake: Duration) -> Duration {
+        if beats != self.beats {
+            self.beats = beats;
+            self.quiet = Duration::ZERO;
+        } else {
+            self.quiet += awake;
+        }
+        self.quiet
     }
 }
 
@@ -535,6 +574,19 @@ mod tests {
             Step::Heard(SILENCE + 2 * SECOND)
         );
         assert_eq!(silence.step(2, true, SECOND), Step::Quiet);
+    }
+
+    #[test]
+    fn a_server_page_owes_calls_from_the_start_and_each_call_resets_the_count() {
+        let mut unanswered = Unanswered::default();
+        assert_eq!(unanswered.step(0, SECOND), SECOND);
+        assert_eq!(unanswered.step(0, SECOND), 2 * SECOND);
+        assert_eq!(unanswered.step(1, SECOND), Duration::ZERO);
+        for _ in 0..299 {
+            unanswered.step(1, SECOND);
+        }
+        assert_eq!(unanswered.step(1, SECOND), SERVER_SILENCE);
+        assert_eq!(unanswered.step(2, SECOND), Duration::ZERO);
     }
 
     #[test]

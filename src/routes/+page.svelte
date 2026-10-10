@@ -1770,15 +1770,22 @@
       if (loaded && view === 'connections' && document.visibilityState !== 'hidden')
         void refreshWsl();
     }, 15_000);
+    // No one opens a server's window, so it checks its CLIs and accounts on its own, for the
+    // devices that run chats on it.
+    const serverPoll = setInterval(() => {
+      if (loaded && installation?.server && !localRunning) void refresh();
+    }, 5 * 60_000);
     void (async () => {
       try {
-        workspace = await loadWorkspace();
-        installation = await getInstallation();
+        const local = await getInstallation();
+        workspace = await loadWorkspace(local);
+        installation = local;
         if (installation && desktop()) registerInstallation(workspace.fleet, installation);
         // Legacy chats retain a stable owning computer when the workspace is synchronized.
         for (const conversation of workspace.conversations) {
-          // Start each app session with a clean Active list without changing chat recency.
-          if (desktop()) conversation.archived = true;
+          // Start each app session with a clean Active list without changing chat recency. A
+          // server starts with no one at its window and leaves everyone's chats where they are.
+          if (desktop() && !installation?.server) conversation.archived = true;
           if (!conversation.location)
             conversation.location = conversationLocation(
               conversation,
@@ -1787,7 +1794,11 @@
             );
         }
         // History lists the chats used from this start of the app until the next one under it.
-        const started = desktop() ? await appSession().catch(() => undefined) : undefined;
+        // A server's starts are no one's sessions.
+        const started =
+          desktop() && !installation?.server
+            ? await appSession().catch(() => undefined)
+            : undefined;
         const session = started && installation && { ...started, environmentId: installation.id };
         if (session && appSessionSchema.safeParse(session).success)
           workspace.appSessions = recordAppSession(
@@ -2027,6 +2038,7 @@
       clearInterval(usagePoll);
       clearInterval(relayPoll);
       clearInterval(wslPoll);
+      clearInterval(serverPoll);
       window.removeEventListener('focus', onReturn);
       window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
@@ -2078,6 +2090,8 @@
         // The open chat's work, when reading it failed before.
         void showWork();
         presence = peers;
+        // An account signed in on another computer reads connected once that computer says so.
+        if (pendingSignIns.size) noteSignIn();
         // A conversation too large to send is named here while every other one syncs.
         syncError = relaySyncNotice();
         syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
@@ -2614,7 +2628,8 @@
         executionHost(workspace.fleet, connection.environmentId) === installation?.id
       )
         accounts.push(connection);
-      else everything = true;
+      // Another computer checks its own accounts and reports them with its heartbeat.
+      else if (!connection) everything = true;
     }
     if (everything) await refresh();
     await Promise.all(
@@ -2625,10 +2640,19 @@
     );
     noteSignIn();
   }
+  // An account's status as this computer checked it, or as its own computer reports it.
+  function reportedStatus(connectionId: string) {
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    const host = connection && executionHost(workspace.fleet, connection.environmentId);
+    if (!connection || host === installation?.id) return connectionStatuses[connectionId];
+    return presence
+      .find((p) => p.environmentId === host && p.online)
+      ?.connections.find((c) => c.connectionId === connectionId);
+  }
   function noteSignIn() {
     for (const [key, pending] of pendingSignIns) {
       const status = pending.connectionId
-        ? connectionStatuses[pending.connectionId]
+        ? reportedStatus(pending.connectionId)
         : statuses.find((s) => s.id === pending.provider);
       if (status?.auth !== 'ready') continue;
       pendingSignIns.delete(key);
@@ -4815,10 +4839,13 @@
   }
   async function login(id: ProviderId, connectionId?: string) {
     try {
-      const view = await signIn(id, connectionId);
+      // One opened on another computer goes on reporting to this window until it ends.
+      const view = await signIn(id, connectionId, applySignIn);
       if (view) {
         applySignIn(view);
-        notice = `Finish signing in to ${providers[id].name} in your browser.`;
+        notice = view.userCode
+          ? `Open the sign-in page and enter ${view.userCode} to sign in to ${providers[id].name}.`
+          : `Finish signing in to ${providers[id].name} in your browser.`;
         return;
       }
       // Antigravity signs in in a terminal of its own, so its account is followed instead.

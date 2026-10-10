@@ -91,8 +91,21 @@ test('shared account context is explicit, scoped, cancellable and saved across r
   await expect(page.locator('select')).toHaveCount(0);
 });
 
-async function host(page: Page, relay: string, token: string, name: string, platform: string) {
-  const identity = { id: crypto.randomUUID(), computerId: crypto.randomUUID(), name, platform };
+async function host(
+  page: Page,
+  relay: string,
+  token: string,
+  name: string,
+  platform: string,
+  server = false,
+) {
+  const identity = {
+    id: crypto.randomUUID(),
+    computerId: crypto.randomUUID(),
+    name,
+    platform,
+    ...(server ? { server: true } : {}),
+  };
   await page.exposeFunction('relayBridge', async (method: string, path: string, body?: unknown) => {
     const response = await fetch(`${relay}/${path}`, {
       method,
@@ -139,6 +152,11 @@ async function host(page: Page, relay: string, token: string, name: string, plat
       // This computer's image store, by hash.
       const storedImages = (): Record<string, { mediaType: string; data: string }> =>
         JSON.parse(localStorage.getItem('fixture-images') ?? '{}');
+      w.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+      w.emitTauriEvent = (event: string, payload: unknown) => {
+        for (const listener of w.eventListeners ?? [])
+          if (listener.event === event) callbacks.get(listener.handler)?.({ event, id: 0, payload });
+      };
       w.__TAURI_INTERNALS__ = {
         convertFileSrc: (path: string) => {
           const image = storedImages()[path];
@@ -157,7 +175,10 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           if (command === 'desktop_notification_settings') return { enabled: true, sound: true };
           if (command === 'desktop_notification' || command === 'set_pending_chat_badge') return;
           if (command === 'plugin:window|is_maximized') return false;
-          if (command === 'plugin:event|listen') return 0;
+          if (command === 'plugin:event|listen') {
+            (w.eventListeners ??= []).push({ event: args.event, handler: args.handler });
+            return w.eventListeners.length;
+          }
           if (command === 'plugin:event|unlisten') return;
           if (command === 'live_account_updates') return [];
           if (command === 'manage_account') {
@@ -313,6 +334,14 @@ async function host(page: Page, relay: string, token: string, name: string, plat
             const result = status(args.provider);
             if (localStorage.getItem('fixture-pending-auth') === args.connectionId)
               result.auth = 'login';
+            // A new separate profile has no login until it signs in, as its CLI reports.
+            if (w.separateProfilesSignIn && !(w.signedIn ?? []).includes(args.connectionId)) {
+              const saved = JSON.parse(localStorage.getItem('fixture-workspace') ?? '{}');
+              const connection = saved.fleet?.connections?.find(
+                (c: any) => c.id === args.connectionId,
+              );
+              if (connection?.profile === 'isolated') result.auth = 'login';
+            }
             return result;
           }
           if (command === 'list_models')
@@ -392,6 +421,24 @@ async function host(page: Page, relay: string, token: string, name: string, plat
           }
           if (command === 'generate_title') throw new Error('Synthetic title unavailable');
           if (command === 'cancel_title') return;
+          if (command === 'sign_in' && args.remote) {
+            (w.signInCalls ??= []).push(args);
+            localStorage.setItem('fixture-pending-auth', args.connectionId);
+            w.remoteSignIn = {
+              id: crypto.randomUUID(),
+              provider: args.provider,
+              connectionId: args.connectionId,
+              phase: 'waiting',
+              url: 'https://auth.openai.com/codex/device',
+              code: false,
+              codeExpected: false,
+              userCode: 'ABCD-12345',
+              message: 'Open the sign-in page and enter this code.',
+            };
+            w.emitTauriEvent('studio-sign-in', w.remoteSignIn);
+            return w.remoteSignIn;
+          }
+          if (command === 'sign_ins') return w.remoteSignIn ? [w.remoteSignIn] : [];
           if (command === 'sign_in') {
             (w.signInCalls ??= []).push(args);
             if (w.holdSignIn) await new Promise<void>((resolve) => (w.releaseSignIn = resolve));
@@ -1600,6 +1647,81 @@ test('two app environments pair, share accounts, route chats, retain progress an
       )
       .toBe(1);
     expect(await desktop.evaluate(() => JSON.stringify(localStorage))).not.toContain(token);
+  } finally {
+    await a.close();
+    await b.close();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a server’s accounts are added and signed in from another computer through the relay', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
+  const token = 'synthetic-relay-key-for-browser-checks-123456';
+  const relay = createRelay({ token, directory });
+  await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(relay.address() as { port: number }).port}`;
+  const a = await browser.newContext(),
+    b = await browser.newContext();
+  try {
+    const desktop = await a.newPage(),
+      vps = await b.newPage();
+    await host(desktop, url, token, 'Desktop', 'windows');
+    await host(vps, url, token, 'VPS', 'linux', true);
+    for (const page of [vps, desktop]) {
+      await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
+      await page.getByLabel('Relay URL', { exact: true }).fill(url);
+      await page.getByLabel('Relay pairing key', { exact: true }).fill(token);
+      await page.getByRole('button', { name: 'Pair & sync', exact: true }).click();
+      await expect(page.getByText(/^Synced /)).toBeVisible({ timeout: 15_000 });
+    }
+    // A server keeps everyone's chats where they are and records no app session of its own.
+    expect(
+      await vps.evaluate(
+        () => JSON.parse(localStorage.getItem('fixture-workspace')!).appSessions ?? [],
+      ),
+    ).toEqual([]);
+    await vps.evaluate(() => ((window as any).separateProfilesSignIn = true));
+    const server = desktop.getByRole('article', { name: 'VPS computer', exact: true });
+    await expect(server.getByRole('heading', { name: 'Codex CLI login' })).toBeVisible({
+      timeout: 15_000,
+    });
+    await server.getByRole('button', { name: 'Add account', exact: true }).click();
+    const dialog = desktop.getByRole('dialog');
+    await expect(dialog).toContainText('Add an account on VPS.');
+    await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+    await desktop.getByRole('option', { name: 'Codex', exact: true }).click();
+    await dialog.getByLabel('Account name', { exact: true }).fill('Codex on the server');
+    await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+    const account = server.locator('.fleet-account').filter({ hasText: 'Codex on the server' });
+    // The server signs in with a device code, and this computer shows its page and code.
+    await expect(account.locator('.sign-in-user-code')).toContainText('ABCD-12345', {
+      timeout: 15_000,
+    });
+    await expect(account.getByRole('button', { name: 'Open sign-in page' })).toBeVisible();
+    await account.screenshot({ path: 'artifacts/server-account-sign-in-code.png' });
+    const calls = await vps.evaluate(() => (window as any).signInCalls);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ provider: 'codex', remote: true });
+    expect(await desktop.evaluate(() => (window as any).signInCalls ?? [])).toEqual([]);
+    await expect(account).toContainText('Sign-in needed');
+    // The code was entered on that page, and the server's CLI reports success.
+    await vps.evaluate(() => {
+      const w = window as any;
+      localStorage.removeItem('fixture-pending-auth');
+      (w.signedIn ??= []).push(w.remoteSignIn.connectionId);
+      w.remoteSignIn = { ...w.remoteSignIn, phase: 'connected', message: '' };
+      delete w.remoteSignIn.url;
+      delete w.remoteSignIn.userCode;
+      w.emitTauriEvent('studio-sign-in', w.remoteSignIn);
+      w.remoteSignIn = undefined;
+    });
+    await expect(account.locator('.sign-in-user-code')).toHaveCount(0, { timeout: 15_000 });
+    await expect(account).not.toContainText('Sign-in needed', { timeout: 15_000 });
+    await desktop.screenshot({ path: 'artifacts/server-account-signed-in.png', fullPage: true });
   } finally {
     await a.close();
     await b.close();

@@ -580,6 +580,146 @@ it('keeps following a run another computer still executes after this device rest
   expect(reply?.blocks).toEqual([{ type: 'markdown', text: 'Working on it' }]);
 });
 
+// A server and a desktop each with a chat whose reply was running when the server stopped.
+function serverAndDesktop() {
+  const workspace = initialWorkspace();
+  const ids = () => ({
+    environment: crypto.randomUUID(),
+    computer: crypto.randomUUID(),
+    account: crypto.randomUUID(),
+    connection: crypto.randomUUID(),
+  });
+  const server = ids(),
+    desktop = ids();
+  for (const [host, platform] of [
+    [server, 'linux'],
+    [desktop, 'windows'],
+  ] as const) {
+    workspace.fleet.computers.push({ id: host.computer, name: platform });
+    workspace.fleet.environments.push({
+      id: host.environment,
+      computerId: host.computer,
+      name: platform,
+      platform,
+    });
+    workspace.fleet.accounts.push({
+      id: host.account,
+      provider: 'claude',
+      name: platform,
+      purpose: 'personal',
+    });
+    workspace.fleet.connections.push({
+      id: host.connection,
+      accountId: host.account,
+      environmentId: host.environment,
+      profile: 'existing',
+    });
+    const settings = { ...settingsFor(workspace.preferences, 'claude'), connectionId: host.connection };
+    workspace.conversations.push({
+      id: crypto.randomUUID(),
+      settings,
+      title: platform,
+      createdAt: '2026-10-10',
+      updatedAt: '2026-10-10',
+      location: { computerId: host.computer, environmentId: host.environment, path: '' },
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          role: 'user',
+          createdAt: '2026-10-10',
+          status: 'complete',
+          blocks: [{ type: 'markdown', text: 'Build it' }],
+        },
+        {
+          id: crypto.randomUUID(),
+          runId: crypto.randomUUID(),
+          role: 'assistant',
+          createdAt: '2026-10-10',
+          status: 'running',
+          settings,
+          backgroundWait: 1,
+          blocks: [{ type: 'markdown', text: 'Working' }],
+        },
+      ],
+    });
+  }
+  const installation = (isServer: boolean) => ({
+    id: server.environment,
+    computerId: server.computer,
+    name: 'VPS',
+    platform: 'linux' as const,
+    ...(isServer ? { server: true } : {}),
+  });
+  return { workspace, installation };
+}
+
+it('interrupts only the replies a restarted server ran, leaving other computers’ replies running', async () => {
+  const transport = await import('./transport');
+  const { workspace, installation } = serverAndDesktop();
+  native.invoke.mockImplementation(async (command) =>
+    command === 'load_workspace' ? structuredClone(workspace) : null,
+  );
+  const replies = (loaded: Workspace) => loaded.conversations.map((c) => c.messages[1]);
+  const [own, other] = replies(await transport.loadWorkspace(installation(true)));
+  expect(own).toMatchObject({ status: 'cancelled', error: interruptedReplyError });
+  expect(own.backgroundWait).toBeUndefined();
+  expect(other).toMatchObject({ status: 'running', backgroundWait: 1 });
+  expect(other.error).toBeUndefined();
+  // A desktop app that restarts still reads every reply it saved as running as interrupted.
+  expect(replies(await transport.loadWorkspace(installation(false))).map((m) => m.status)).toEqual(
+    ['cancelled', 'cancelled'],
+  );
+});
+
+it('never reports a chat a server shows as read, so phone alerts keep coming', async () => {
+  for (const isServer of [true, false]) {
+    vi.resetModules();
+    const transport = await import('./transport');
+    const { workspace, installation } = serverAndDesktop();
+    transport.configureRuntime({
+      installation: installation(isServer),
+      workspace: () => workspace,
+      shared: () => sharedWorkspace(workspace),
+      ...chatRuntime(() => workspace),
+      fleet: () => workspace.fleet,
+      statuses: () => ({}),
+      localRuns: () => [],
+      apply: async () => {},
+      checkpointRun: async () => {},
+    });
+    const shared = sharedWorkspace(workspace);
+    const views: unknown[] = [];
+    native.invoke.mockImplementation(async (command, args) => {
+      if (command === 'relay_resume') return 'https://relay.example.com/';
+      if (command === 'load_sync_state')
+        return { url: 'https://relay.example.com', instanceId: 'same-relay', base: shared };
+      if (command !== 'relay_request') return null;
+      if (args.path === 'v1/notification-view') views.push(args.body.conversationId);
+      return {
+        status: 200,
+        body:
+          args.path === 'v1/state'
+            ? { instanceId: 'same-relay', workspace: shared, revision: 0 }
+            : [],
+      };
+    });
+    // Its window is shown and has focus, as a window on a virtual display may.
+    vi.stubGlobal('window', new EventTarget());
+    vi.stubGlobal(
+      'document',
+      Object.assign(new EventTarget(), { visibilityState: 'visible', hasFocus: () => true }),
+    );
+    const open = workspace.conversations[0].id;
+    const stop = transport.watchNotificationView(() => open);
+    expect(await transport.resumeRelay()).toBe(true);
+    await transport.publishNotificationView();
+    expect(views.length).toBeGreaterThan(0);
+    expect(new Set(views)).toEqual(new Set([isServer ? null : open]));
+    stop();
+    await transport.disconnectRelay();
+  }
+});
+
 it('saves a host Undo receipt into the live workspace once, including requests from a Viewer', async () => {
   const transport = await import('./transport');
   const workspace = initialWorkspace();

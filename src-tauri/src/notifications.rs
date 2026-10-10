@@ -354,6 +354,10 @@ fn open(app: &tauri::AppHandle, id: Option<&str>) {
 #[tauri::command]
 pub async fn desktop_notification(app: tauri::AppHandle, notice: Notice) -> Result<(), String> {
     notice.validate()?;
+    // No one sits at a server's screen; its replies reach phones through the relay instead.
+    if crate::server::active() {
+        return Ok(());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Notifications>();
         // Serialize delivery/settings changes: disabling wins over queued work.

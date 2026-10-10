@@ -8,9 +8,12 @@ import {
   allowedUrl,
   authenticate,
   check,
+  appImageName,
   emptyState,
+  hostUnit,
   installerName,
   parseRelease,
+  relayKeyIn,
   publicKeyId,
   readConfig,
   retry,
@@ -46,13 +49,18 @@ function signer() {
 
 const trusted = signer();
 const installer = Buffer.from('Agent Studio installer fixture');
+const appImage = Buffer.from('Agent Studio AppImage fixture');
 const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex');
-const config = readConfig({});
+// The relay alone; the server's host has tests of its own below.
+const config = readConfig({ AGENT_STUDIO_UPDATE_HOST: 'off' });
+const host = readConfig({}).host;
 const [A, B, C, D] = ['a', 'b', 'c', 'd'].map((letter) => letter.repeat(40));
 
-function githubRelease(version: string, data = installer) {
+function githubRelease(version: string, data = installer, linux = false) {
   const name = installerName(version);
-  const url = `https://github.com/simpx-tech/agent-studio/releases/download/v${version}/${name}`;
+  const base = `https://github.com/simpx-tech/agent-studio/releases/download/v${version}`;
+  const url = `${base}/${name}`;
+  const image = appImageName(version);
   return {
     tag_name: `v${version}`,
     draft: false,
@@ -61,6 +69,17 @@ function githubRelease(version: string, data = installer) {
       { name, size: data.length, digest: `sha256:${sha(data)}`, browser_download_url: url },
       { name: `${name}.sig`, size: 420, browser_download_url: `${url}.sig` },
       { name: 'latest.json', size: 900, browser_download_url: `${url}.json` },
+      ...(linux
+        ? [
+            {
+              name: image,
+              size: appImage.length,
+              digest: `sha256:${sha(appImage)}`,
+              browser_download_url: `${base}/${image}`,
+            },
+            { name: `${image}.sig`, size: 420, browser_download_url: `${base}/${image}.sig` },
+          ]
+        : []),
     ],
   };
 }
@@ -83,6 +102,15 @@ function fake() {
     buildError: undefined as Error | undefined,
     publishError: undefined as Error | undefined,
     releaseKeys: {} as Record<string, string>,
+    // The server's host.
+    byTag: {} as Record<string, unknown>,
+    hostStaged: new Set<string>(),
+    serverCheck: true,
+    host: undefined as string | undefined,
+    hostUp: (_version?: string) => true,
+    provisionError: undefined as Error | undefined,
+    relayKey: undefined as string | undefined,
+    hostKey: undefined as string | undefined,
   };
   const system: System = {
     now: () => new Date(clock),
@@ -149,21 +177,73 @@ function fake() {
     prune: (commit, backup) => {
       calls.push(`prune ${commit} ${backup ?? ''}`.trim());
     },
+    releaseByTag: async (tag) => {
+      calls.push(`release ${tag}`);
+      return env.byTag[tag];
+    },
+    hostStaged: (version) => env.hostStaged.has(version),
+    extractHost: async (version, data) => {
+      calls.push(`extract host ${version} ${data.length}`);
+      if (!env.serverCheck) return false;
+      env.hostStaged.add(version);
+      return true;
+    },
+    currentHost: () => env.host,
+    provisionHost: async () => {
+      calls.push('provision host');
+      if (env.provisionError) throw env.provisionError;
+    },
+    selectHost: (version) => {
+      calls.push(`select host ${version}`);
+      env.host = version;
+    },
+    hostActive: () => !!env.host && env.hostUp(env.host),
+    restartHost: () => {
+      calls.push('restart host');
+    },
+    stopHost: () => {
+      calls.push('stop host');
+    },
+    pruneHost: (keep) => {
+      calls.push(`prune host ${keep.join(' ')}`);
+    },
+    relayKey: () => env.relayKey,
+    hostKey: () => env.hostKey,
+    writeHostKey: (key) => {
+      calls.push('write host key');
+      env.hostKey = key;
+    },
   };
   const publish = (
     version: string,
     commit: string,
-    options: { key?: ReturnType<typeof signer>; signedVersion?: string } = {},
+    options: {
+      key?: ReturnType<typeof signer>;
+      signedVersion?: string;
+      /** Publishes the Linux AppImage too, signed by `linuxKey` for `linuxVersion`. */
+      linux?: boolean;
+      linuxKey?: ReturnType<typeof signer>;
+      linuxVersion?: string;
+    } = {},
   ) => {
-    const release = githubRelease(version);
+    const release = githubRelease(version, installer, options.linux);
     const signature = (options.key ?? trusted).signData(
       installer,
       options.signedVersion ?? version,
     );
     env.latest = release;
+    env.byTag[release.tag_name] = release;
     env.commits[release.tag_name] = commit;
     env.files[release.assets[0].browser_download_url] = installer;
     env.files[release.assets[1].browser_download_url] = Buffer.from(signature);
+    if (options.linux) {
+      const image = (options.linuxKey ?? trusted).signData(
+        appImage,
+        options.linuxVersion ?? version,
+      );
+      env.files[release.assets[3].browser_download_url] = appImage;
+      env.files[release.assets[4].browser_download_url] = Buffer.from(image);
+    }
   };
   return {
     system,
@@ -492,5 +572,219 @@ describe('automatic updates', () => {
     f.env.publishError = undefined;
     await f.run();
     expect(f.env.state.release).toMatchObject({ download: 'published', downloadAttempts: 2 });
+  });
+});
+
+describe('server host', () => {
+  const relayCalls = (commit: string) => [
+    'download Agent-Studio_0.9.0_x64-setup.exe',
+    'download Agent-Studio_0.9.0_x64-setup.exe.sig',
+    `build ${commit}`,
+    'stop',
+    `backup ${commit}`,
+    `select ${commit}`,
+    'start',
+    `publish ${commit} ${installer.length}`,
+    `discard ${commit}`,
+  ];
+  const key = 'relay-pairing-key-'.repeat(3);
+
+  it('runs the release the relay runs, from its signed AppImage, once set up', async () => {
+    const f = fake();
+    f.env.relayKey = key;
+    f.publish('0.9.0', B, { linux: true });
+    await f.run({ host });
+    expect(f.calls).toEqual([
+      ...relayCalls(B),
+      'write host key',
+      'download Agent-Studio_0.9.0_amd64.AppImage',
+      'download Agent-Studio_0.9.0_amd64.AppImage.sig',
+      `extract host 0.9.0 ${appImage.length}`,
+      'provision host',
+      'select host 0.9.0',
+      'restart host',
+      'prune host 0.9.0',
+    ]);
+    expect(f.env.state.host).toMatchObject({ tag: 'v0.9.0', commit: B, phase: 'active' });
+    expect(f.env.hostKey).toBe(key);
+    expect(f.logs.join('\n')).toMatch(/Staged the v0.9.0 host[\s\S]*The host runs v0.9.0/);
+    f.calls.length = 0;
+    await f.run({ host });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('restarts the host only once no reply runs, or after two hours', async () => {
+    const f = fake();
+    f.publish('0.9.0', B, { linux: true });
+    f.env.current = B;
+    f.env.host = '0.8.9';
+    f.env.running = 1;
+    await f.run({ host });
+    expect(f.calls).toContain(`extract host 0.9.0 ${appImage.length}`);
+    expect(f.calls).not.toContain('restart host');
+    expect(f.env.state.host).toMatchObject({ phase: 'staged', waiting: 'replies' });
+    await f.run({ host });
+    expect(f.logs.filter((line) => line.includes('waits up to two hours'))).toHaveLength(1);
+    f.advance(2 * 60 * 60 * 1000);
+    await f.run({ host });
+    expect(f.calls.slice(-4)).toEqual([
+      'provision host',
+      'select host 0.9.0',
+      'restart host',
+      'prune host 0.9.0 0.8.9',
+    ]);
+    expect(f.env.state.host).toMatchObject({ phase: 'active', previous: '0.8.9' });
+  });
+
+  it('refuses an AppImage from another key or for another version and keeps the host', async () => {
+    for (const options of [{ linuxKey: signer() }, { linuxVersion: '0.8.0' }]) {
+      const f = fake();
+      f.env.host = '0.8.9';
+      f.publish('0.9.0', B, { linux: true, ...options });
+      await expect(f.run({ host })).rejects.toThrow(/Could not stage the v0.9.0 host/);
+      expect(f.env.state.release).toMatchObject({ phase: 'active' });
+      expect(f.env.state.host).toMatchObject({ phase: 'failed' });
+      expect(f.calls.some((call) => call.startsWith('extract host'))).toBe(false);
+      expect(f.env.host).toBe('0.8.9');
+      await f.run({ host });
+    }
+  });
+
+  it('keeps the host on its release when a release cannot run as a server', async () => {
+    const f = fake();
+    f.env.host = '0.8.9';
+    f.env.serverCheck = false;
+    f.publish('0.9.0', B, { linux: true });
+    await f.run({ host });
+    expect(f.env.state.host).toMatchObject({ phase: 'unsupported' });
+    expect(f.calls).not.toContain('provision host');
+    expect(f.calls).not.toContain('restart host');
+    f.calls.length = 0;
+    await f.run({ host });
+    expect(f.calls).toEqual([]);
+    // A release without an AppImage leaves it alone too.
+    const g = fake();
+    g.publish('0.9.0', C);
+    await g.run({ host });
+    expect(g.env.state.host).toMatchObject({ phase: 'unsupported' });
+    expect(g.calls).toContain('release v0.9.0');
+  });
+
+  it('goes back to the host that ran before when a new one does not stay up', async () => {
+    const f = fake();
+    f.env.host = '0.8.9';
+    f.env.hostUp = (version) => version !== '0.9.0';
+    f.publish('0.9.0', B, { linux: true });
+    await expect(f.run({ host })).rejects.toThrow(/did not stay up; it runs 0.8.9 again/);
+    expect(f.calls.slice(-4)).toEqual([
+      'select host 0.9.0',
+      'restart host',
+      'select host 0.8.9',
+      'restart host',
+    ]);
+    expect(f.env.state.host).toMatchObject({ phase: 'failed' });
+    // A first host that does not stay up stops instead of restarting forever.
+    const g = fake();
+    g.env.hostUp = () => false;
+    g.publish('0.9.0', B, { linux: true });
+    await expect(g.run({ host })).rejects.toThrow(/did not stay up and was stopped/);
+    expect(g.calls.at(-1)).toBe('stop host');
+  });
+
+  it('reads the AppImage of a release tracked before the updater knew of it', async () => {
+    const f = fake();
+    f.publish('0.9.0', B, { linux: true });
+    f.env.current = B;
+    f.env.state.release = {
+      tag: 'v0.9.0',
+      version: '0.9.0',
+      commit: B,
+      installer: parseRelease(githubRelease('0.9.0')).installer,
+      signature: parseRelease(githubRelease('0.9.0')).signature,
+      phase: 'active',
+      attempts: 1,
+      seen: '2026-10-10T00:00:00Z',
+      download: 'published',
+    };
+    await f.run({ host });
+    expect(f.calls).toContain('release v0.9.0');
+    expect(f.env.state.host).toMatchObject({ phase: 'active' });
+  });
+
+  it('retries a host whose server could not be prepared', async () => {
+    const f = fake();
+    f.env.provisionError = new Error('apt-get exited with 100.');
+    f.publish('0.9.0', B, { linux: true });
+    await expect(f.run({ host })).rejects.toThrow(/Could not prepare the server/);
+    expect(f.env.state.host).toMatchObject({ phase: 'pending', error: 'apt-get exited with 100.' });
+    delete f.env.provisionError;
+    f.advance(11 * 60 * 1000);
+    await f.run({ host });
+    expect(f.env.state.host).toMatchObject({ phase: 'active' });
+  });
+
+  it('follows the relay key, restarting the host, but keeps a key set by hand', async () => {
+    const f = fake();
+    f.env.relayKey = key;
+    f.publish('0.9.0', B, { linux: true });
+    await f.run({ host });
+    f.calls.length = 0;
+    // The relay's key was rotated.
+    f.env.relayKey = 'rotated-pairing-key-'.repeat(3);
+    await f.run({ host });
+    expect(f.calls).toEqual(['write host key', 'restart host']);
+    expect(f.env.hostKey).toBe(f.env.relayKey);
+    // Someone gave the host another workspace's key.
+    f.env.hostKey = 'member-workspace-key-'.repeat(3);
+    f.env.relayKey = 'rotated-again-key-'.repeat(3);
+    f.calls.length = 0;
+    await f.run({ host });
+    expect(f.calls).toEqual([]);
+    expect(f.env.hostKey).toBe('member-workspace-key-'.repeat(3));
+  });
+
+  it('describes the host service and its settings', () => {
+    expect(host).toMatchObject({
+      user: 'agent-studio-host',
+      sudo: false,
+      name: 'VPS',
+      service: 'agent-studio-host',
+      key: '/etc/agent-studio/host.key',
+    });
+    expect(readConfig({ AGENT_STUDIO_UPDATE_HOST: 'off' }).host).toBe(false);
+    const custom = readConfig({
+      AGENT_STUDIO_UPDATE_HOST_USER: 'claude',
+      AGENT_STUDIO_UPDATE_HOST_SUDO: 'on',
+      AGENT_STUDIO_UPDATE_HOST_NAME: 'Build server',
+    });
+    expect(custom.host).toMatchObject({ user: 'claude', sudo: true, name: 'Build server' });
+    for (const [name, value] of [
+      ['HOST_USER', 'root'],
+      ['HOST_USER', 'claude; reboot'],
+      ['HOST_NAME', 'VPS\nExecStart=/bin/sh'],
+      ['HOST_NAME', 'VPS"'],
+      ['HOST_KEY', 'relative/key'],
+    ])
+      expect(() => readConfig({ [`AGENT_STUDIO_UPDATE_${name}`]: value })).toThrow();
+    const unit = hostUnit({ ...readConfig({}), host: custom.host }, '/home/claude');
+    for (const line of [
+      'User=claude',
+      'Environment=AGENT_STUDIO_SERVER=1',
+      'Environment=AGENT_STUDIO_RELAY_URL=http://127.0.0.1:4317',
+      'Environment="AGENT_STUDIO_COMPUTER_NAME=Build server"',
+      'Environment=PATH=/home/claude/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      'LoadCredential=relay-key:/etc/agent-studio/host.key',
+      'ExecStart=/usr/bin/dbus-run-session -- /usr/bin/xvfb-run --auto-servernum "--server-args=-screen 0 1440x900x24 -nolisten tcp" /opt/agent-studio/host/current/AppRun',
+      'Restart=always',
+    ])
+      expect(unit.split('\n')).toContain(line);
+  });
+
+  it('reads the relay key from its environment file', () => {
+    const value = 'k'.repeat(64);
+    expect(relayKeyIn(`AGENT_STUDIO_RELAY_TOKEN=${value}\n`)).toBe(value);
+    expect(relayKeyIn(`# key\nexport AGENT_STUDIO_RELAY_TOKEN="${value}"\r\n`)).toBe(value);
+    expect(relayKeyIn('AGENT_STUDIO_RELAY_TOKEN=short')).toBeUndefined();
+    expect(relayKeyIn('OTHER=1')).toBeUndefined();
   });
 });

@@ -93,6 +93,8 @@ fn endpoint(value: &str) -> Result<reqwest::Url, String> {
     url.set_path("/");
     Ok(url)
 }
+/// A server pairs from its service's settings alone (`server`), at every start.
+const SERVER_PAIRING: &str = "This server pairs from its service settings.";
 pub async fn connect(
     state: &Relay,
     identifier: &str,
@@ -101,6 +103,9 @@ pub async fn connect(
     environment: String,
     directory: &Path,
 ) -> Result<(), String> {
+    if crate::server::active() {
+        return Err(SERVER_PAIRING.into());
+    }
     let _change = state.change.lock().await;
     let (client, url, remote) = validate(&url, &token, &environment).await?;
     bind_workspace(directory, &url, &remote)?;
@@ -131,8 +136,15 @@ pub async fn resume(
     {
         return Ok(Some(url.to_string()));
     }
-    let Some(pairing) = credentials::load(&credentials::target(identifier, &environment))? else {
-        return Ok(None);
+    let pairing = match crate::server::pairing() {
+        Some(configured) => {
+            let (url, token) = configured?;
+            credentials::Pairing { url, token }
+        }
+        None => match credentials::load(&credentials::target(identifier, &environment))? {
+            Some(pairing) => pairing,
+            None => return Ok(None),
+        },
     };
     let (client, url, remote) = validate(&pairing.url, &pairing.token, &environment).await?;
     bind_workspace(directory, &url, &remote)?;
@@ -143,6 +155,9 @@ pub async fn resume(
 }
 
 pub async fn disconnect(state: &Relay, identifier: &str, environment: &str) -> Result<(), String> {
+    if crate::server::active() {
+        return Err(SERVER_PAIRING.into());
+    }
     // Serialize changes so a pending restoration cannot resurrect an explicit disconnect.
     let _change = state.change.lock().await;
     credentials::remove(&credentials::target(identifier, environment))?;

@@ -33,7 +33,7 @@ For local development, use Node 24+, `npm ci`, `npm run build`, then `npm run re
 
 ## Phone setup
 
-1. Pair each desktop host with the server in **Connections → Set up sync**. Sign in to its provider CLIs there.
+1. Pair each desktop host with the server in **Connections → Set up sync**. Sign in to its provider CLIs there. The VPS's own accounts, and those of computers whose app takes sign-ins from other devices, sign in from the phone's **Connections** too.
 2. Open the server’s HTTPS address on the phone. Enter your workspace key and choose **Sign in**. The browser uses the current server address.
 3. Use the conversation menu, or swipe in from the left border, to start a chat. Choose the execution computer, browse its folders, and select its agent account. Swipe the settings row to reach Model and Reasoning. The ellipsis opens additional conversation actions.
 4. Choose **Install app → Install Viewer**. In Safari on iPhone, use **Share → Add to Home Screen**. Android browsers offer **Install app** or **Add to Home screen**. Enter inserts a newline on phone layouts; tap the send arrow to submit.

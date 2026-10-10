@@ -635,6 +635,61 @@ describe('real HTTP relay', () => {
       args: job.args,
     });
   });
+  it('routes sign-ins opened on another device with only an account and a code, read once', async () => {
+    const f = await fixture();
+    const peers = await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, features: ['signIn', 'server'], connections: [], running: [] },
+      f.target,
+    );
+    expect(
+      peers.body.find((p: { environmentId: string }) => p.environmentId === f.target).features,
+    ).toEqual(['signIn', 'server']);
+    const connectionId = crypto.randomUUID();
+    const signIn = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'signIn',
+      args: { provider: 'codex', connectionId },
+    };
+    for (const args of [
+      { ...signIn.args, provider: 'gemini' },
+      { ...signIn.args, page: 'https://example.com' },
+      { provider: 'codex' },
+    ])
+      expect((await f.call('POST', 'jobs', { ...signIn, args })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', signIn)).status).toBe(200);
+    const code = {
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method: 'signInCode',
+      args: { connectionId, id: crypto.randomUUID(), code: 'good#state' },
+    };
+    for (const args of [
+      { ...code.args, code: '' },
+      { ...code.args, id: 'every-sign-in' },
+      { ...code.args, command: 'claude auth login' },
+    ])
+      expect((await f.call('POST', 'jobs', { ...code, args })).status).toBe(400);
+    expect((await f.call('POST', 'jobs', code)).status).toBe(200);
+    expect(
+      (await f.call('GET', 'jobs', undefined, f.target)).body.map(
+        (job: { method: string }) => job.method,
+      ),
+    ).toEqual(['signIn', 'signInCode']);
+    // A code leaves the relay once the device that sent it has its answer.
+    await f.call(
+      'PUT',
+      `jobs/${code.id}`,
+      { status: 'complete', events: [], result: { phase: 'waiting' } },
+      f.target,
+    );
+    expect((await f.call('GET', `jobs/${code.id}`)).status).toBe(200);
+    expect((await f.call('GET', `jobs/${code.id}`)).status).toBe(404);
+  });
   it('routes folder icon choices to the host with only a folder name and message, of any length', async () => {
     const f = await fixture();
     await f.call(

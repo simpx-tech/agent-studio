@@ -75,10 +75,13 @@ pub struct Updates {
 impl Updates {
     pub fn new(current_version: String) -> Self {
         let bundle = tauri::utils::platform::bundle_type();
-        Self::with(
-            current_version,
-            availability(cfg!(debug_assertions), bundle),
-        )
+        // A server's releases are installed by the service that runs it (docs/DEPLOYMENT.md).
+        let availability = if crate::server::active() {
+            Err("This server's releases are installed by its updater.")
+        } else {
+            availability(cfg!(debug_assertions), bundle)
+        };
+        Self::with(current_version, availability)
     }
     fn with(current_version: String, availability: Result<(), &'static str>) -> Self {
         let (phase, message) = match availability {

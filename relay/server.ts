@@ -71,6 +71,8 @@ const jobInput = z
       'steer',
       'release',
       'screens',
+      'signIn',
+      'signInCode',
     ]),
     args: z.record(z.string(), z.unknown()),
   })
@@ -86,6 +88,23 @@ const jobInput = z
       !z.object({ conversationId: uuid, connectionId: uuid }).strict().safeParse(job.args).success
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid release request' });
+    // A sign-in opened from another device, and the code its page showed there.
+    if (
+      job.method === 'signIn' &&
+      !z
+        .object({ provider: z.enum(['claude', 'codex']), connectionId: uuid })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid sign-in request' });
+    if (
+      job.method === 'signInCode' &&
+      !z
+        .object({ connectionId: uuid, id: uuid, code: z.string().min(1) })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid sign-in code' });
     if (job.method === 'mentions' && !mentionRequestSchema.safeParse(job.args).success)
       ctx.addIssue({ code: 'custom', message: 'Invalid mention search' });
     if (
@@ -199,6 +218,7 @@ const jobInput = z
   });
 const presenceInput = z.object({
   accountUpdates: z.array(accountUpdateSchema).optional(),
+  features: z.array(z.enum(['signIn', 'server'])).optional(),
   environmentId: uuid,
   connections: z.array(
     z.object({
@@ -265,6 +285,9 @@ const chatsAnswerBudget = 32_000_000;
  */
 const resultRead = (method: string) =>
   method === 'screens' ||
+  // A sign-in's page and codes leave the relay once the device that opened it has them.
+  method === 'signIn' ||
+  method === 'signInCode' ||
   method === 'toolOutput' ||
   method === 'toolOutputImage' ||
   method === 'toolOutputModel' ||
@@ -795,7 +818,10 @@ export function createRelay({
           const value = presenceInput.parse(await body(req, authorized));
           if (
             !bearer &&
-            (value.connections.length || value.running.length || value.accountUpdates?.length)
+            (value.connections.length ||
+              value.running.length ||
+              value.accountUpdates?.length ||
+              value.features?.length)
           ) {
             send(403, { error: 'Browser devices cannot execute agent jobs.' });
             return;

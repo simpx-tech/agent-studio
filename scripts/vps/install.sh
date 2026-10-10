@@ -4,8 +4,9 @@
 #
 #   bash install.sh <scripts directory> <tauri.conf.json>
 #
-# The relay service, its data, pairing configuration, releases and downloads stay unchanged.
-# See docs/DEPLOYMENT.md.
+# The relay service, its data, pairing configuration, releases and downloads stay unchanged. The
+# updater sets up the server's host with the next release it activates (AGENT_STUDIO_HOST_*
+# below). See docs/DEPLOYMENT.md.
 set -euo pipefail
 source="$1"
 config="$2"
@@ -33,6 +34,27 @@ for unit in agent-studio-update.service agent-studio-update.timer; do
   tr -d '\r' < "$source/vps/$unit" > "/etc/systemd/system/$unit"
   chmod 0644 "/etc/systemd/system/$unit"
 done
+
+# The server's host (the desktop app in server mode) runs as AGENT_STUDIO_HOST_USER, created when
+# missing, may run anything as root through sudo with AGENT_STUDIO_HOST_SUDO=on, and is named
+# AGENT_STUDIO_HOST_NAME; AGENT_STUDIO_HOST=off runs none. Given settings are kept in a drop-in,
+# which a later install without them leaves as it is.
+settings=()
+for name in HOST HOST_USER HOST_SUDO HOST_NAME; do
+  value="$(printenv "AGENT_STUDIO_$name" || true)"
+  [ -n "$value" ] || continue
+  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]*$ ]]; then
+    echo "AGENT_STUDIO_$name may hold letters, digits, spaces, dots, dashes and underscores." >&2
+    exit 1
+  fi
+  settings+=("Environment=\"AGENT_STUDIO_UPDATE_$name=$value\"")
+done
+if [ "${#settings[@]}" -gt 0 ]; then
+  install -d -m 0755 /etc/systemd/system/agent-studio-update.service.d
+  { printf '[Service]\n'; printf '%s\n' "${settings[@]}"; } \
+    > /etc/systemd/system/agent-studio-update.service.d/host.conf
+  chmod 0644 /etc/systemd/system/agent-studio-update.service.d/host.conf
+fi
 systemd-analyze verify /etc/systemd/system/agent-studio-update.service \
   /etc/systemd/system/agent-studio-update.timer
 

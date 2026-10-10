@@ -4,9 +4,13 @@
 //! cannot come back to this computer. Codex's app-server hands back its page
 //! (`account/login/start`), which this app opens, and reports how the sign-in ended
 //! (`account/login/completed`). Windows follow each sign-in through `studio-sign-in` events until
-//! the CLI reports its end. Sign-in pages and codes stay in this computer's memory: they are never
-//! logged, saved, synced or relayed. Antigravity signs in inside its own interactive screen, so it
-//! keeps a terminal (`providers::terminal_sign_in`).
+//! the CLI reports its end. A sign-in opened from another device (`Start::remote`, requested
+//! 2026-10-10 for a server no one sits at) opens nothing here: Codex signs in with a device code
+//! instead, and that device shows its page and code; Claude Code's page ends with a code to paste
+//! there. The page and codes reach that device through the relay's job for the sign-in, and the
+//! pasted code comes back the same way, in memory only. Sign-in pages and codes are never logged,
+//! saved or synced. Antigravity signs in inside its own interactive screen, so it keeps a terminal
+//! (`providers::terminal_sign_in`).
 use crate::providers::Executable;
 use regex::Regex;
 use serde::Serialize;
@@ -55,9 +59,12 @@ pub struct View {
     pub url: Option<String>,
     /// Whether the page can end with a code to paste here (Claude).
     pub code: bool,
-    /// Whether the page that opened always ends with that code (Claude in WSL), rather than
-    /// returning to the CLI by itself.
+    /// Whether the page that opened always ends with that code (Claude in WSL, or opened from
+    /// another device), rather than returning to the CLI by itself.
     pub code_expected: bool,
+    /// The code to enter on the page, for a device-code sign-in (Codex from another device).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
     /// What to do now, or why the sign-in ended, as plain text.
     pub message: String,
 }
@@ -95,6 +102,8 @@ pub struct Start {
     pub account: String,
     /// Where a native CLI runs while it signs in.
     pub directory: PathBuf,
+    /// Opened from another device, which shows the page: this computer opens nothing.
+    pub remote: bool,
 }
 
 struct Entry {
@@ -158,7 +167,7 @@ impl SignIns {
             "codex" => codex(&start, &cancel).await,
             _ => Err("This agent signs in through its own terminal.".to_string()),
         };
-        let (mut flow, page, input) = match started {
+        let (mut flow, page, input, user_code) = match started {
             Ok(started) => started,
             Err(error) => {
                 self.entries.lock().unwrap().remove(&id);
@@ -175,10 +184,14 @@ impl SignIns {
             return Err(CANCELLED.into());
         }
         // Claude Code opens its own page, except in WSL, where it cannot reach the Windows
-        // browser: there this app opens the page, which ends with a code to paste.
+        // browser: there this app opens the page, which ends with a code to paste. A sign-in
+        // opened from another device opens nothing here: that device opens the page.
         let wsl = start.exe.wsl.is_some();
-        let opened = (start.provider != "claude" || wsl) && open(&page);
-        let message = match (start.provider == "claude", wsl, opened) {
+        let opened = !start.remote && (start.provider != "claude" || wsl) && open(&page);
+        let message = match (start.provider == "claude", wsl || start.remote, opened) {
+            _ if start.remote && start.provider != "claude" => {
+                "Open the sign-in page and enter this code."
+            }
             (true, false, _) => "",
             (true, true, true) => "Sign in on the page that opened, then paste the code it shows.",
             (true, true, false) => "Open the sign-in page, sign in, then paste the code it shows.",
@@ -189,7 +202,8 @@ impl SignIns {
         let view = self.entries.lock().unwrap().get_mut(&id).map(|entry| {
             entry.view.url = Some(page);
             entry.view.code = state.is_some() && input.is_some();
-            entry.view.code_expected = entry.view.code && wsl;
+            entry.view.code_expected = entry.view.code && (wsl || start.remote);
+            entry.view.user_code = user_code;
             entry.view.message = message.into();
             entry.input = input
                 .zip(state)
@@ -287,6 +301,7 @@ impl SignIns {
                     url: None,
                     code: false,
                     code_expected: false,
+                    user_code: None,
                     message: String::new(),
                 },
                 account: start.account.clone(),
@@ -374,6 +389,7 @@ impl SignIns {
             entry.view.url = None;
             entry.view.code = false;
             entry.view.code_expected = false;
+            entry.view.user_code = None;
             entry.view
         });
         if let Some(view) = view {
@@ -382,7 +398,8 @@ impl SignIns {
     }
 }
 
-type Started = (Flow, String, Option<ChildStdin>);
+/// The sign-in under way, its page, Claude's input for a pasted code, and a device code.
+type Started = (Flow, String, Option<ChildStdin>, Option<String>);
 
 async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, String> {
     let mut command = start.exe.command();
@@ -399,6 +416,10 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
             .env("BROWSER", "true")
             .env("WSLENV", wsl_env("BROWSER/u"));
     } else {
+        // The device that opened this sign-in opens its page, not this computer.
+        if start.remote {
+            command.env("BROWSER", "true");
+        }
         command.current_dir(&start.directory);
     }
     let mut child = command
@@ -430,6 +451,7 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
                 },
                 page,
                 input,
+                None,
             ))
         }
         Err(error) => {
@@ -482,10 +504,10 @@ async fn codex(start: &Start, cancel: &CancellationToken) -> Result<Started, Str
     let mut lines = BufReader::new(stdout).lines();
     let found = tokio::select! {
         _ = cancel.cancelled() => Err(CANCELLED.to_string()),
-        found = codex_page(&mut input, &mut lines) => found,
+        found = codex_page(&mut input, &mut lines, start.remote) => found,
     };
     match found {
-        Ok((login, page)) => Ok((
+        Ok((login, page, code)) => Ok((
             Flow::Codex {
                 child,
                 input,
@@ -494,6 +516,7 @@ async fn codex(start: &Start, cancel: &CancellationToken) -> Result<Started, Str
             },
             page,
             None,
+            code,
         )),
         Err(error) => {
             start.exe.kill(&mut child).await;
@@ -502,10 +525,13 @@ async fn codex(start: &Start, cancel: &CancellationToken) -> Result<Started, Str
     }
 }
 
+/// Starts Codex's sign-in: its browser sign-in, or, opened from another device, a device-code
+/// sign-in, whose page and code work from anywhere and return nothing to this computer.
 async fn codex_page(
     input: &mut ChildStdin,
     lines: &mut Lines<BufReader<ChildStdout>>,
-) -> Result<(String, String), String> {
+    remote: bool,
+) -> Result<(String, String, Option<String>), String> {
     const STOPPED: &str = "Codex stopped before it showed its sign-in page.";
     let initialize = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_studio","version":"0.1.0"}}});
     send(input, &initialize).await.map_err(|_| STOPPED)?;
@@ -523,7 +549,12 @@ async fn codex_page(
             send(input, &json!({"method":"initialized"}))
                 .await
                 .map_err(|_| STOPPED)?;
-            let login = json!({"id":2,"method":"account/login/start","params":{"type":"chatgpt"}});
+            let kind = if remote {
+                "chatgptDeviceCode"
+            } else {
+                "chatgpt"
+            };
+            let login = json!({"id":2,"method":"account/login/start","params":{"type":kind}});
             send(input, &login).await.map_err(|_| STOPPED)?;
         } else if response && value["id"] == 2 {
             if let Some(error) = value.get("error") {
@@ -536,8 +567,18 @@ async fn codex_page(
             }
             let result = &value["result"];
             let login = result["loginId"].as_str().filter(|id| !id.is_empty());
+            if remote {
+                let page = result["verificationUrl"].as_str().and_then(sign_in_page);
+                let code = result["userCode"].as_str().filter(|code| device_code(code));
+                return match (login, page, code) {
+                    (Some(login), Some(page), Some(code)) => {
+                        Ok((login.into(), page, Some(code.into())))
+                    }
+                    _ => Err("Codex did not return a sign-in code this app can show.".into()),
+                };
+            }
             return match (login, result["authUrl"].as_str().and_then(sign_in_page)) {
-                (Some(login), Some(page)) => Ok((login.into(), page)),
+                (Some(login), Some(page)) => Ok((login.into(), page, None)),
                 _ => Err("Codex did not return a sign-in page this app can open.".into()),
             };
         } else {
@@ -643,6 +684,11 @@ fn sign_in_page(text: &str) -> Option<String> {
         && url.username().is_empty()
         && url.password().is_none())
     .then(|| text.to_string())
+}
+
+/// A code a device-code sign-in shows: letters, digits and dashes, which windows show as text.
+fn device_code(code: &str) -> bool {
+    !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The state a Claude sign-in page carries, which the code it ends with repeats after `#`.
@@ -752,6 +798,13 @@ mod tests {
             connection_id: Some(account.into()),
             account: account.into(),
             directory: dir.to_owned(),
+            remote: false,
+        }
+    }
+    fn from_elsewhere(exe: Executable, dir: &Path, account: &str) -> Start {
+        Start {
+            remote: true,
+            ..request(exe, dir, account)
         }
     }
     fn recorder() -> (Notify, Arc<Mutex<Vec<View>>>) {
@@ -901,6 +954,10 @@ mod tests {
               // Asks something, which the sign-in refuses before it ends.
               send({ id: 99, method: 'item/tool/requestUserInput', params: {} });
             }
+            if (v.method === 'account/login/start' && v.params.type === 'chatgptDeviceCode') {
+              send({ id: v.id, result: { type: 'chatgptDeviceCode', loginId: 'login-1', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-12345' } });
+              send({ id: 99, method: 'item/tool/requestUserInput', params: {} });
+            }
             if (v.id === 99 && v.error && outcome !== 'never') {
               send({ method: 'account/login/completed', params: { loginId: 'other', success: true, error: null } });
               send({ method: 'account/login/completed', params: outcome === 'fail'
@@ -930,6 +987,65 @@ mod tests {
         let ended = end_of(&views, &view.id).await;
         assert_eq!(ended.phase, Phase::Connected);
         assert!(signs.tokens().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_opened_elsewhere_opens_nothing_here_and_hands_over_page_and_code() {
+        // Codex signs in with a device code, whose page and code work from any device.
+        let (exe, dir) = codex_cli("success");
+        let signs = SignIns::default();
+        let (notify, views) = recorder();
+        let (open, pages) = browser(true);
+        let view = signs
+            .start(from_elsewhere(exe, dir.path(), "server"), notify, open)
+            .await
+            .unwrap();
+        assert!(pages.lock().unwrap().is_empty());
+        assert_eq!(
+            view.url.as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        assert_eq!(view.user_code.as_deref(), Some("ABCD-12345"));
+        assert_eq!(view.message, "Open the sign-in page and enter this code.");
+        assert!(!view.code);
+        let ended = end_of(&views, &view.id).await;
+        assert_eq!((ended.phase, ended.user_code), (Phase::Connected, None));
+
+        // Claude Code opens no browser here, and its page ends with a code to paste there.
+        let (exe, dir) = cli(
+            "claude",
+            &CLAUDE.replace(
+                "if (process.argv",
+                "if (process.env.BROWSER !== 'true') { console.error('A browser would open'); process.exit(3); }\n      if (process.argv",
+            ),
+        );
+        let signs = SignIns::default();
+        let (notify, views) = recorder();
+        let (open, pages) = browser(true);
+        let view = signs
+            .start(
+                from_elsewhere(exe, dir.path(), "server"),
+                notify.clone(),
+                open,
+            )
+            .await
+            .unwrap();
+        assert!(pages.lock().unwrap().is_empty());
+        assert!(view.code && view.code_expected && view.user_code.is_none());
+        assert_eq!(
+            view.message,
+            "Open the sign-in page, sign in, then paste the code it shows."
+        );
+        signs.code(&view.id, "good#st4te", &notify).await.unwrap();
+        assert_eq!(end_of(&views, &view.id).await.phase, Phase::Connected);
+    }
+
+    #[test]
+    fn device_codes_are_plain_letters_digits_and_dashes() {
+        assert!(device_code("ABCD-12345"));
+        for code in ["", "AB CD", "AB<script>", "AB\u{202e}CD"] {
+            assert!(!device_code(code), "{code}");
+        }
     }
 
     #[tokio::test]

@@ -18,6 +18,9 @@ pub struct Installation {
     pub platform: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<String>,
+    /// Whether this app runs as a server (`server`). Reported to the page, never saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server: bool,
 }
 pub fn installation(app: &tauri::AppHandle) -> Result<Installation, String> {
     let root = app
@@ -47,9 +50,10 @@ pub fn installation_in(root: &Path) -> Result<Installation, String> {
             let value = Installation {
                 id: uuid::Uuid::new_v4().to_string(),
                 computer_id: uuid::Uuid::new_v4().to_string(),
-                name: std::env::var("COMPUTERNAME")
-                    .or_else(|_| std::env::var("HOSTNAME"))
-                    .unwrap_or_else(|_| "My computer".into()),
+                name: crate::server::computer_name()
+                    .or_else(|| std::env::var("COMPUTERNAME").ok())
+                    .or_else(|| std::env::var("HOSTNAME").ok())
+                    .unwrap_or_else(|| "My computer".into()),
                 platform: if wsl_distribution().is_some() {
                     "wsl"
                 } else {
@@ -57,6 +61,7 @@ pub fn installation_in(root: &Path) -> Result<Installation, String> {
                 }
                 .into(),
                 distribution: wsl_distribution(),
+                server: false,
             };
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -479,6 +484,7 @@ mod tests {
             name: "Host".into(),
             platform: "windows".into(),
             distribution: None,
+            server: false,
         };
         let target = uuid::Uuid::new_v4().to_string();
         let source = uuid::Uuid::new_v4().to_string();
@@ -521,6 +527,7 @@ mod tests {
             name: "Host".into(),
             platform: "windows".into(),
             distribution: None,
+            server: false,
         };
         let windows = uuid::Uuid::new_v4().to_string();
         let fleet = serde_json::json!({"connections": [

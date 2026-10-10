@@ -4,7 +4,7 @@ import { outputSchemaSetting } from './structured-output.ts';
 import { mentionSchema, type Mention } from './mentions.ts';
 import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
-import { emptyFleet, fleetSchema } from './fleet.ts';
+import { emptyFleet, fleetSchema, type Fleet } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
 import { imageSchema, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
@@ -433,7 +433,22 @@ export const interruptedReplyError = 'This response was interrupted when the app
  * app, unless `followsRuns`: the Viewer runs none, so its reload stops nothing, and it keeps
  * following each one as its computer reports it.
  */
-export function restoreWorkspace(value: unknown, { followsRuns = false } = {}): Workspace {
+/**
+ * A saved workspace, ready to use. Replies saved as running stopped with the app that ran them,
+ * so they read as interrupted, unless this device follows runs other computers report (the
+ * Viewer), or names the replies it ran itself (`runsHere`, a server, whose restart leaves the
+ * replies of other computers running).
+ */
+export function restoreWorkspace(
+  value: unknown,
+  {
+    followsRuns = false,
+    runsHere,
+  }: {
+    followsRuns?: boolean;
+    runsHere?: (conversation: Conversation, message: Message, fleet: Fleet) => boolean;
+  } = {},
+): Workspace {
   const oldSchema = z.object({
     version: z.literal(1),
     agents: z.array(agentSchema).min(1),
@@ -479,7 +494,7 @@ export function restoreWorkspace(value: unknown, { followsRuns = false } = {}): 
     if (c.titleStatus === 'pending') c.titleStatus = 'fallback';
     if (!followsRuns)
       for (const m of c.messages)
-        if (m.status === 'running') {
+        if (m.status === 'running' && (!runsHere || runsHere(c, m, data.fleet))) {
           m.status = 'cancelled';
           m.error = interruptedReplyError;
           delete m.backgroundWait;

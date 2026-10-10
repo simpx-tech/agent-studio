@@ -99,6 +99,21 @@ it('serves only public build files and keeps API authentication and cross-origin
       })
     ).status,
   ).toBe(403);
+  // Nor can it offer to sign in accounts for other devices.
+  expect(
+    (
+      await fetch(f.url + '/v1/heartbeat', {
+        method: 'POST',
+        headers: { ...headers, origin: f.url },
+        body: JSON.stringify({
+          environmentId: f.actor,
+          features: ['signIn'],
+          connections: [],
+          running: [],
+        }),
+      })
+    ).status,
+  ).toBe(403);
   expect(
     (
       await fetch(f.url + '/v1/browser-session', {

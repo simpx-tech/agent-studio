@@ -2,8 +2,10 @@ import { z } from 'zod';
 
 /**
  * A sign-in the desktop host runs without a terminal: the selected profile's CLI waits hidden
- * while its sign-in page is open in the browser (`src-tauri/src/sign_in.rs`). Its page and any
- * pasted code stay on this computer, in memory: never saved, synced or relayed.
+ * while its sign-in page is open in the browser (`src-tauri/src/sign_in.rs`). One opened from
+ * another device, for a computer such as a server no one sits at, travels through the relay's
+ * job for it: the page and code to that device, a pasted code back, in memory only. Pages and
+ * codes are never saved or synced.
  */
 export const signInViewSchema = z.object({
   id: z.string().min(1),
@@ -14,8 +16,10 @@ export const signInViewSchema = z.object({
   url: z.string().max(8192).optional(),
   /** Whether the page can end with a code to paste in the app (Claude). */
   code: z.boolean(),
-  /** Whether the page that opened always ends with that code (Claude in WSL). */
+  /** Whether the page that opened always ends with that code (Claude in WSL or from elsewhere). */
   codeExpected: z.boolean().optional(),
+  /** The code to enter on the page, for a device-code sign-in (Codex from another device). */
+  userCode: z.string().optional(),
   /** What to do now, or why the sign-in ended. */
   message: z.string(),
 });

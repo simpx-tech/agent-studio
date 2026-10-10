@@ -321,6 +321,8 @@ const desktopNotices = createDesktopNotificationTracker(Date.now, (delay) => {
   }, delay);
 });
 function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
+  // No one sits at a server's screen; its replies reach phones through the relay instead.
+  if (serverHost()) return;
   noticeWorkspace = workspace;
   for (const notice of desktopNotices(workspace)) {
     // Consume all lifecycle events, including suppressed ones, so switching
@@ -334,7 +336,11 @@ function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
 let notificationConversationId: () => string | undefined = () => undefined;
 let notificationViewId = '';
 let notificationViewRevision = 0;
+/** This desktop app runs as a server, with no one at its window (`src-tauri/src/server.rs`). */
+const serverHost = () => !!runtime?.installation.server;
 function foregroundConversation(): string | undefined {
+  // A server's window is never read: a chat it shows must not hold back or close phone alerts.
+  if (serverHost()) return undefined;
   return typeof document !== 'undefined' &&
     document.visibilityState === 'visible' &&
     document.hasFocus()
@@ -418,6 +424,7 @@ export async function recordWindowStall(stall: WindowStall): Promise<void> {
 let badgeQueue = Promise.resolve();
 let lastBadgeCount: number | undefined;
 function updatePendingBadge(count: number) {
+  if (serverHost()) return;
   // Serialize writes so an older count cannot land after a newer checkpoint.
   badgeQueue = badgeQueue
     .catch(() => {})
@@ -633,6 +640,9 @@ function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, un
     method === 'toolOutputModelViews' ||
     // A screen's request ends with its page; a disconnect drops its answer.
     method === 'screens' ||
+    // A sign-in waits on its computer until it ends there, however this device leaves it.
+    method === 'signIn' ||
+    method === 'signInCode' ||
     (method === 'account' && (args.input as AccountAction)?.action === 'workspaceMessages')
   );
 }
@@ -931,15 +941,19 @@ function remoteTarget(connectionId?: string, environmentId?: string) {
 }
 // Only the execution host can declare a run dead. After it restarts, an unfinished reply it
 // owns can never finish; a viewer or another computer must keep following the live host.
-function deadRunHere(fleet: Fleet, conversation: Conversation, message: Message): boolean {
-  if (!runtime || !message.runId) return false;
+/** Whether the computer `host` runs this reply, through its account's environment or the chat's. */
+function runsOn(fleet: Fleet, conversation: Conversation, message: Message, host: string) {
   const connection = fleet.connections.find((c) => c.id === message.settings?.connectionId);
   const environmentId =
     connection?.environmentId ??
     conversation.location?.executionEnvironmentId ??
     conversation.location?.environmentId;
   if (!environmentId || !fleet.environments.some((e) => e.id === environmentId)) return false;
-  if (executionHost(fleet, environmentId) !== runtime.installation.id) return false;
+  return executionHost(fleet, environmentId) === host;
+}
+function deadRunHere(fleet: Fleet, conversation: Conversation, message: Message): boolean {
+  if (!runtime || !message.runId) return false;
+  if (!runsOn(fleet, conversation, message, runtime.installation.id)) return false;
   return !runtime.localRuns().includes(message.runId) && !workerRuns.has(message.runId);
 }
 async function relayRaw(
@@ -1983,6 +1997,9 @@ async function relayTail(generation: number): Promise<Presence[] | null> {
     }));
     const presence = await relayApi<Presence[]>('POST', 'v1/heartbeat', {
       environmentId: runtime.installation.id,
+      ...(desktop()
+        ? { features: runtime.installation.server ? ['signIn', 'server'] : ['signIn'] }
+        : {}),
       connections,
       running: desktop() ? [...runtime.localRuns(), ...workerRuns.keys()] : [],
       accountUpdates: accountHeartbeat(),
@@ -2073,6 +2090,14 @@ async function localCall(
   }
   if (method === 'release')
     return invoke('release_conversation', { conversationId: args.conversationId });
+  if (method === 'signIn') return hostSignIn(args, onEvent);
+  if (method === 'signInCode') {
+    // Only a sign-in still waiting here, for the connection the code was sent for.
+    const waiting = z.array(signInViewSchema).parse(await invoke('sign_ins'));
+    if (!waiting.some((view) => view.id === args.id && view.connectionId === args.connectionId))
+      throw new Error('This sign-in has ended. Open sign-in to start again.');
+    return invoke('sign_in_code', { id: args.id, code: args.code });
+  }
   if (method === 'toolOutputModelViews')
     return hostModelViews({
       runId: String(args.runId),
@@ -2133,7 +2158,8 @@ async function routed<T>(
       method === 'mcp' ||
       method === 'plugins' ||
       method === 'undoFiles' ||
-      method === 'nativeInstructions'
+      method === 'nativeInstructions' ||
+      method === 'signIn'
     ) {
       while (relayBusy) await new Promise((resolve) => setTimeout(resolve, 100));
       await pollRelay();
@@ -2185,6 +2211,8 @@ async function executeJob(job: RelayJob) {
   let result: unknown, error: string | undefined;
   const events: RunEvent[] = [];
   const request = job.method === 'run' ? (job.args.request as RunRequest) : undefined;
+  // The sign-in this job follows, which the device that opened it may cancel.
+  let signInId: string | undefined;
   let checkpoint = Promise.resolve();
   const persistEvent = (event?: RunEvent, finalStatus?: 'complete' | 'cancelled' | 'error') => {
     if (event?.kind === 'skillschanged') {
@@ -2216,6 +2244,8 @@ async function executeJob(job: RelayJob) {
             await invoke('cancel_run', { runId: (job.args.request as RunRequest)?.runId });
           if (job.method === 'title')
             await invoke('cancel_title', { conversationId: job.args.conversationId });
+          if (job.method === 'signIn' && signInId)
+            await invoke('cancel_sign_in', { id: signInId });
         }
       });
     return publishing;
@@ -2239,11 +2269,23 @@ async function executeJob(job: RelayJob) {
     const fleet = runtime?.fleet();
     const owned = (environmentId: string) =>
       !!fleet && executionHost(fleet, environmentId) === runtime?.installation.id;
-    const connection = fleet?.connections.find(
+    let connection = fleet?.connections.find(
       (c) => c.id === connectionId && owned(c.environmentId),
     );
     // Folders and screens belong to an environment of this computer rather than an account.
     const byEnvironment = job.method === 'folders' || job.method === 'screens';
+    // An account another device has just added here reaches this computer with a sync that may
+    // come after the request.
+    for (let wait = 0; !byEnvironment && !connection && typeof connectionId === 'string'; wait++) {
+      if (wait === 20 || generation !== relayGeneration) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const current = runtime?.fleet();
+      connection = current?.connections.find(
+        (c) =>
+          c.id === connectionId &&
+          executionHost(current, c.environmentId) === runtime?.installation.id,
+      );
+    }
     const ownedEnvironment =
       byEnvironment &&
       fleet?.environments.find((e) => e.id === job.args.environmentId && owned(e.id));
@@ -2255,6 +2297,15 @@ async function executeJob(job: RelayJob) {
       void publish().catch(() => {});
     }, 700);
     result = await localCall(job.method, job.args, (event) => {
+      if (job.method === 'signIn') {
+        // A sign-in's latest state is all its device needs, and it waits for each at once.
+        const view = signInViewSchema.safeParse(event);
+        if (!view.success) return;
+        signInId ??= view.data.id;
+        events.splice(0, events.length, event);
+        publishSoon(true);
+        return;
+      }
       retainRunEvent(events, event);
       // The execution host retains results even if the initiating computer disconnects.
       persistEvent(event);
@@ -2892,9 +2943,16 @@ export async function loadModels(
       )
     : structuredClone(fallbackModels);
 }
-export async function loadWorkspace(): Promise<Workspace> {
+export async function loadWorkspace(installation?: Installation): Promise<Workspace> {
   const value = desktop() ? await invoke<unknown>('load_workspace') : null;
-  return value ? restoreWorkspace(value) : initialWorkspace();
+  if (!value) return initialWorkspace();
+  // A restarted server interrupts only the replies it ran; other computers' replies run on.
+  return restoreWorkspace(
+    value,
+    installation?.server
+      ? { runsHere: (c, m, fleet) => runsOn(fleet, c, m, installation.id) }
+      : undefined,
+  );
 }
 /** The app session this desktop process opened when it started; page reloads keep it. */
 export async function appSession(): Promise<{ id: string; startedAt: string } | undefined> {
@@ -3102,13 +3160,112 @@ export async function steerRun(runId: string, input: SteeringInput, connectionId
  * terminal: their page opens in the browser, and the returned sign-in is followed through
  * `watchSignIns`. Antigravity opens its own terminal and returns null.
  */
-export async function signIn(provider: string, connectionId?: string): Promise<SignInView | null> {
-  if (remoteTarget(connectionId))
-    throw new Error(
-      'Open sign-in on the computer that owns this connection. Authentication stays on that environment.',
-    );
+export async function signIn(
+  provider: string,
+  connectionId?: string,
+  onView?: (view: SignInView) => void,
+): Promise<SignInView | null> {
+  if (connectionId && remoteTarget(connectionId))
+    return remoteSignIn(provider, connectionId, onView);
   const view = await invoke<unknown>('sign_in', { provider, connectionId });
   return view == null ? null : signInViewSchema.parse(view);
+}
+// Sign-ins this window opened on other computers, by the id their computer gave them: the relay
+// job that follows each, and the connection it signs in.
+const remoteSignIns = new Map<string, { job: string; connectionId: string }>();
+/**
+ * Opens a sign-in on the computer that runs this connection, through the relay: its CLI waits
+ * there, opening nothing, while this window shows the page and the code (Codex's device code, or
+ * the one Claude's page shows, pasted back here). Resolves once the page is known; later changes,
+ * up to the end, go to `onView`.
+ */
+function remoteSignIn(
+  provider: string,
+  connectionId: string,
+  onView?: (view: SignInView) => void,
+): Promise<SignInView> {
+  const job = crypto.randomUUID();
+  return new Promise<SignInView>((resolve, reject) => {
+    let started: SignInView | undefined;
+    const seen = (value: unknown) => {
+      const view = signInViewSchema.safeParse(value);
+      if (!view.success) return;
+      if (started) {
+        onView?.(view.data);
+        return;
+      }
+      started = view.data;
+      remoteSignIns.set(view.data.id, { job, connectionId });
+      resolve(view.data);
+    };
+    // Its end, as its computer reported it, or as the request ended without saying.
+    const ended = (message: string, phase: 'failed' | 'cancelled') => {
+      if (!started) reject(new Error(message || 'Sign-in was cancelled.'));
+      else
+        onView?.({
+          ...started,
+          phase,
+          url: undefined,
+          code: false,
+          codeExpected: false,
+          userCode: undefined,
+          message,
+        });
+    };
+    routed<unknown>('signIn', { provider, connectionId }, connectionId, seen, job)
+      .then((result) => {
+        if (result === 'cancelled') ended('', 'cancelled');
+        else if (!signInViewSchema.safeParse(result).success)
+          ended('The sign-in ended without saying how.', 'failed');
+        else if (!started) reject(new Error('The sign-in ended before it showed its page.'));
+        else seen(result);
+      })
+      .catch((error) => ended(String(error instanceof Error ? error.message : error), 'failed'))
+      .finally(() => {
+        if (started) remoteSignIns.delete(started.id);
+      });
+  });
+}
+/**
+ * A sign-in another device opened on this computer: started without opening a page here, and
+ * followed through this computer's own sign-in events until it ends, each state going to that
+ * device as the job's event.
+ */
+async function hostSignIn(
+  args: Record<string, unknown>,
+  onEvent?: (event: RunEvent) => void,
+): Promise<SignInView> {
+  const send = (view: SignInView) => onEvent?.(view as unknown as RunEvent);
+  let id: string | undefined;
+  const early: SignInView[] = [];
+  let finish!: (view: SignInView) => void;
+  const ended = new Promise<SignInView>((resolve) => (finish = resolve));
+  const take = (view: SignInView) => {
+    if (view.id !== id) return;
+    send(view);
+    if (view.phase !== 'waiting') finish(view);
+  };
+  const stop = await listen<unknown>('studio-sign-in', ({ payload }) => {
+    const view = signInViewSchema.safeParse(payload);
+    if (!view.success) return;
+    if (id) take(view.data);
+    else early.push(view.data);
+  });
+  try {
+    const first = signInViewSchema.parse(
+      await invoke('sign_in', {
+        provider: args.provider,
+        connectionId: args.connectionId,
+        remote: true,
+      }),
+    );
+    id = first.id;
+    send(first);
+    for (const view of early) take(view);
+    return await ended;
+  } finally {
+    stop();
+  }
 }
 /** The sign-ins this computer waits on, for a window that opens or reloads. */
 export async function listSignIns(): Promise<SignInView[]> {
@@ -3117,9 +3274,23 @@ export async function listSignIns(): Promise<SignInView[]> {
 }
 /** Sends the code a Claude sign-in page showed to the CLI waiting for it. */
 export async function submitSignInCode(id: string, code: string): Promise<SignInView> {
+  const remote = remoteSignIns.get(id);
+  if (remote)
+    return signInViewSchema.parse(
+      await routed(
+        'signInCode',
+        { connectionId: remote.connectionId, id, code },
+        remote.connectionId,
+      ),
+    );
   return signInViewSchema.parse(await invoke('sign_in_code', { id, code }));
 }
-export const cancelSignIn = (id: string): Promise<void> => invoke('cancel_sign_in', { id });
+export async function cancelSignIn(id: string): Promise<void> {
+  const remote = remoteSignIns.get(id);
+  // The computer running it stops it once the relay says so.
+  if (remote) await relayApi('POST', `v1/jobs/${remote.job}/cancel`);
+  else await invoke('cancel_sign_in', { id });
+}
 export async function watchSignIns(update: (view: SignInView) => void): Promise<() => void> {
   if (!desktop()) return () => {};
   return listen<unknown>('studio-sign-in', ({ payload }) => {

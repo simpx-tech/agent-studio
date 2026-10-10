@@ -2,12 +2,16 @@
 // server, using an isolated relay instance and a local stand-in for GitHub. Production releases,
 // data, services and downloads are only read. See docs/DEPLOYMENT.md.
 //
-//   node scripts/vps/smoke.mjs [--host agent-studio-vps]
+//   node scripts/vps/smoke.mjs [--host agent-studio-vps] [--appimage <Linux AppImage>]
 //
 // Packages the committed HEAD, uploads it with this script, and runs the scenarios remotely as
 // root: install a signed release, wait for a running reply, roll back a release that fails its
-// health check, refuse an untrusted installer and ignore a downgrade. Everything it creates is
-// removed afterwards, except the updater's build account and npm cache.
+// health check, refuse an untrusted installer and ignore a downgrade. Each release also runs as
+// the server's host (agent-studio-qa-host.service): a stand-in AppImage that only stays up, or,
+// with --appimage, a real build of the app for the first release, which must pair with the QA
+// relay as a server and list a folder for another device. A host that does not stay up goes
+// back to the previous one. Everything it creates is removed afterwards, except the updater's
+// build account and npm cache.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import {
@@ -56,11 +60,16 @@ function local() {
   const upload = '/root/agent-studio-update-qa';
   const ssh = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes'];
   sh('ssh', [...ssh, host, `rm -rf ${upload} && install -d -m 0700 ${upload}`]);
+  const appImage = option('--appimage');
   for (const [file, name] of [
     [archive, 'source.tar.gz'],
     [import.meta.filename, 'smoke.mjs'],
+    ...(appImage ? [[appImage, 'host.AppImage']] : []),
   ])
-    sh('ssh', [...ssh, host, `cat > ${upload}/${name}`], { input: readFileSync(file) });
+    sh('ssh', [...ssh, host, `cat > ${upload}/${name}`], {
+      input: readFileSync(file),
+      maxBuffer: 1024 * 1024 * 1024,
+    });
   rmSync(scratch, { recursive: true, force: true });
   const result = spawnSync(
     'ssh',
@@ -104,6 +113,18 @@ function signer() {
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 
+// A stand-in AppImage: it unpacks an app that answers as a server and then stays up, or exits.
+const fakeAppImage = (stays) =>
+  Buffer.from(`#!/bin/sh
+if [ "$1" = "--appimage-extract" ]; then
+  mkdir -p squashfs-root
+  printf '%s\\n' '#!/bin/sh' 'if [ "$1" = "--server-check" ]; then echo "agent-studio-server 1"; exit 0; fi' '${stays ? 'exec sleep infinity' : 'exit 3'}' > squashfs-root/AppRun
+  chmod 755 squashfs-root/AppRun
+  exit 0
+fi
+exit 1
+`);
+
 async function remote(upload) {
   const qa = {
     root: '/opt/agent-studio-qa',
@@ -114,7 +135,19 @@ async function remote(upload) {
     user: 'agent-studio-qa',
     port: 4399,
     apiPort: 4398,
+    hostService: 'agent-studio-qa-host',
+    hostUser: 'agent-studio-qa-host',
+    hostHome: '/var/lib/agent-studio-qa-host',
+    // Another device of the QA workspace, which asks the host for work.
+    viewer: crypto.randomUUID(),
   };
+  const relayEnv = join(qa.root, 'relay.env');
+  const hostKey = join(qa.state, 'host.key');
+  const hostUnit = `/etc/systemd/system/${qa.hostService}.service`;
+  const token = randomBytes(32).toString('hex');
+  const realHost = existsSync(join(upload, 'host.AppImage'))
+    ? readFileSync(join(upload, 'host.AppImage'))
+    : undefined;
   const unit = `/etc/systemd/system/${qa.service}.service`;
   const work = join(qa.root, 'work');
   const logFile = join(upload, 'updater.log');
@@ -150,13 +183,25 @@ async function remote(upload) {
       '-p',
       'MainPID',
     ]);
-  const productionBefore = { current: realpathSync('/opt/agent-studio/current'), pids: pids() };
+  const productionBefore = {
+    current: realpathSync('/opt/agent-studio/current'),
+    pids: pids(),
+    host: spawnSync('systemctl', ['is-active', '--quiet', 'agent-studio-host']).status === 0,
+  };
   let createdUser = false;
+  let createdHostUser = false;
   let server;
 
   const qaKey = signer();
   const otherKey = signer();
-  const commit = { '9.0.0': 'a0', '9.0.1': 'b1', '9.0.2': 'c2', '9.0.3': 'd3', '8.0.0': 'e4' };
+  const commit = {
+    '9.0.0': 'a0',
+    '9.0.1': 'b1',
+    '9.0.2': 'c2',
+    '9.0.3': 'd3',
+    '9.0.4': 'f5',
+    '8.0.0': 'e4',
+  };
   for (const version of Object.keys(commit)) commit[version] = commit[version].repeat(20);
   const releases = new Map();
   let latest;
@@ -164,7 +209,7 @@ async function remote(upload) {
 
   try {
     // An isolated relay instance that starts from a copy of the production release.
-    for (const path of [qa.root, qa.data, qa.backups, qa.state, unit])
+    for (const path of [qa.root, qa.data, qa.backups, qa.state, unit, hostUnit, qa.hostHome])
       expect(!existsSync(path), `${path} already exists; remove the previous QA run first.`);
     sh('install', [
       '-d',
@@ -218,6 +263,28 @@ async function remote(upload) {
       createdUser = true;
     }
     sh('install', ['-d', '-o', qa.user, '-g', qa.user, '-m', '0700', qa.data]);
+    // The host's account, with stand-ins for the CLIs the updater would otherwise install.
+    if (spawnSync('id', [qa.hostUser]).status !== 0) {
+      sh('useradd', [
+        '--system',
+        '--user-group',
+        '--create-home',
+        '--home-dir',
+        qa.hostHome,
+        '--shell',
+        '/bin/bash',
+        qa.hostUser,
+      ]);
+      createdHostUser = true;
+    }
+    mkdirSync(join(qa.hostHome, '.local', 'bin'), { recursive: true });
+    for (const cli of ['claude', 'codex']) {
+      const stub = join(qa.hostHome, '.local', 'bin', cli);
+      writeFileSync(stub, `#!/bin/sh\necho "0.0.0 (${cli} QA stand-in)"\n`);
+      chmodSync(stub, 0o755);
+    }
+    sh('chown', ['-R', `${qa.hostUser}:${qa.hostUser}`, qa.hostHome]);
+    writeFileSync(relayEnv, `AGENT_STUDIO_RELAY_TOKEN=${token}\n`, { mode: 0o600 });
     writeFileSync(join(qa.data, 'qa-marker.txt'), 'original data');
     mkdirSync(join(qa.data, '.npm'));
     writeFileSync(join(qa.data, '.npm', 'cache.txt'), 'npm cache');
@@ -240,7 +307,7 @@ Type=simple
 User=${qa.user}
 Group=${qa.user}
 WorkingDirectory=${qa.root}/current
-Environment=AGENT_STUDIO_RELAY_TOKEN=${randomBytes(32).toString('hex')}
+EnvironmentFile=${relayEnv}
 Environment=NODE_ENV=production
 Environment=NODE_OPTIONS=--max-old-space-size=32768
 Environment=AGENT_STUDIO_RELAY_HOST=127.0.0.1
@@ -295,21 +362,59 @@ TasksMax=infinity
     );
     const trustFile = join(work, 'trust.json');
     writeFileSync(trustFile, JSON.stringify({ plugins: { updater: { pubkey: qaKey.key } } }));
-    for (const [version, tarball, key] of [
-      ['9.0.0', good, qaKey],
-      ['9.0.1', good, qaKey],
-      ['9.0.2', broken, qaKey],
-      ['9.0.3', good, otherKey],
-      ['8.0.0', good, qaKey],
+    for (const [version, tarball, key, appImage] of [
+      ['9.0.0', good, qaKey, realHost ?? fakeAppImage(true)],
+      ['9.0.1', good, qaKey, fakeAppImage(true)],
+      ['9.0.2', broken, qaKey, fakeAppImage(true)],
+      ['9.0.3', good, otherKey, fakeAppImage(true)],
+      ['9.0.4', good, qaKey, fakeAppImage(false)],
+      ['8.0.0', good, qaKey, fakeAppImage(true)],
     ]) {
       const installer = randomBytes(512 * 1024);
       releases.set(version, {
         tarball,
         installer,
         signature: Buffer.from(key.signData(installer, version)),
+        appImage,
+        appImageSignature: Buffer.from(key.signData(appImage, version)),
       });
     }
     const assetName = (version) => `Agent-Studio_${version}_x64-setup.exe`;
+    const appImageName = (version) => `Agent-Studio_${version}_amd64.AppImage`;
+    const releaseOf = (version) => {
+      const { installer, signature, appImage, appImageSignature } = releases.get(version);
+      const name = assetName(version);
+      const image = appImageName(version);
+      return JSON.stringify({
+        tag_name: `v${version}`,
+        draft: false,
+        prerelease: false,
+        assets: [
+          {
+            name,
+            size: installer.length,
+            digest: `sha256:${sha256(installer)}`,
+            browser_download_url: `${origin}/assets/${name}`,
+          },
+          {
+            name: `${name}.sig`,
+            size: signature.length,
+            browser_download_url: `${origin}/assets/${name}.sig`,
+          },
+          {
+            name: image,
+            size: appImage.length,
+            digest: `sha256:${sha256(appImage)}`,
+            browser_download_url: `${origin}/assets/${image}`,
+          },
+          {
+            name: `${image}.sig`,
+            size: appImageSignature.length,
+            browser_download_url: `${origin}/assets/${image}.sig`,
+          },
+        ],
+      });
+    };
     const origin = `http://127.0.0.1:${qa.apiPort}`;
     server = createServer((req, res) => {
       const path = new URL(req.url ?? '/', origin).pathname;
@@ -319,30 +424,17 @@ TasksMax=infinity
         res.end(body);
       };
       let match;
-      if (path === '/repos/qa/agent-studio/releases/latest') {
-        if (!latest) return send(404, '{"message":"Not Found"}');
-        const { installer, signature } = releases.get(latest);
-        const name = assetName(latest);
+      if (path === '/repos/qa/agent-studio/releases/latest')
+        return latest ? send(200, releaseOf(latest)) : send(404, '{"message":"Not Found"}');
+      if ((match = /^\/repos\/qa\/agent-studio\/releases\/tags\/v([\d.]+)$/.exec(path)))
+        return releases.has(match[1]) ? send(200, releaseOf(match[1])) : send(404, '{}');
+      if ((match = /^\/assets\/Agent-Studio_([\d.]+)_amd64\.AppImage(\.sig)?$/.exec(path))) {
+        const release = releases.get(match[1]);
+        if (!release) return send(404, '{}');
         return send(
           200,
-          JSON.stringify({
-            tag_name: `v${latest}`,
-            draft: false,
-            prerelease: false,
-            assets: [
-              {
-                name,
-                size: installer.length,
-                digest: `sha256:${sha256(installer)}`,
-                browser_download_url: `${origin}/assets/${name}`,
-              },
-              {
-                name: `${name}.sig`,
-                size: signature.length,
-                browser_download_url: `${origin}/assets/${name}.sig`,
-              },
-            ],
-          }),
+          match[2] ? release.appImageSignature : release.appImage,
+          'application/octet-stream',
         );
       }
       if ((match = /^\/repos\/qa\/agent-studio\/commits\/v([\d.]+)$/.exec(path)))
@@ -378,6 +470,11 @@ TasksMax=infinity
         STATE: qa.state,
         SERVICE: qa.service,
         PORT: String(qa.port),
+        HOST_USER: qa.hostUser,
+        HOST_SERVICE: qa.hostService,
+        HOST_NAME: 'QA server',
+        HOST_KEY: hostKey,
+        RELAY_ENV: relayEnv,
       };
       const child = spawn('systemd-run', [
         '--quiet',
@@ -406,7 +503,7 @@ TasksMax=infinity
       const messages = output
         .split('\n')
         .filter((line) =>
-          /^(Found|Building|Staged|Waiting|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|Rollback|No )/.test(
+          /^(Found|Building|Staged|Waiting|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|Rollback|No |The |Extracting|Installing|Created|Starting)/.test(
             line,
           ),
         );
@@ -415,6 +512,27 @@ TasksMax=infinity
     };
     const state = () => JSON.parse(readFileSync(join(qa.state, 'state.json'), 'utf8'));
     const selected = () => basename(realpathSync(join(qa.root, 'current')));
+    const hostVersion = () => {
+      try {
+        return basename(realpathSync(join(qa.root, 'host', 'current')));
+      } catch {
+        return undefined;
+      }
+    };
+    const relay = async (method, path, body, environment = crypto.randomUUID()) => {
+      const response = await fetch(`http://127.0.0.1:${qa.port}/${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-environment-id': environment,
+          'content-type': 'application/json',
+          'x-studio-images': '1',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+      return { status: response.status, body: await response.json() };
+    };
 
     let run = await update('trust', trustFile);
     expect(run.status === 0 && state().trustedKey === qaKey.key, 'trust failed');
@@ -431,6 +549,8 @@ TasksMax=infinity
       'Staged v9.0.0',
       'Activated v9.0.0',
       'Published the v9.0.0 Windows installer',
+      'Staged the v9.0.0 host',
+      'The host runs v9.0.0',
     ])
       expect(run.output.includes(text), `missing "${text}"`);
     const first = join(qa.root, 'releases', commit['9.0.0']);
@@ -502,6 +622,90 @@ TasksMax=infinity
       },
     );
 
+    // The release also runs as the server's host, from its signed AppImage.
+    expect(state().host?.phase === 'active', `host not active: ${JSON.stringify(state().host)}`);
+    expect(hostVersion() === '9.0.0' && active(qa.hostService), 'host does not run v9.0.0');
+    const hostFiles = sh('find', [
+      join(qa.root, 'host', '9.0.0'),
+      '!',
+      '-type',
+      'l',
+      '(',
+      '-perm',
+      '/022',
+      '-o',
+      '!',
+      '-user',
+      'root',
+      ')',
+      '-print',
+      '-quit',
+    ]);
+    expect(hostFiles.trim() === '', `host file writable by others or not root-owned: ${hostFiles}`);
+    const unitText = readFileSync(hostUnit, 'utf8');
+    for (const line of [`User=${qa.hostUser}`, `LoadCredential=relay-key:${hostKey}`])
+      expect(unitText.split('\n').includes(line), `host unit lacks ${line}`);
+    expect(
+      readFileSync(hostKey, 'utf8').trim() === token && (statSync(hostKey).mode & 0o777) === 0o600,
+      'host key is not the relay key, privately',
+    );
+    expect(!existsSync(`/etc/sudoers.d/${qa.hostService}`), 'host got sudo it was not given');
+    if (realHost) {
+      // The app pairs with the relay as a server and answers another device's request.
+      let server;
+      for (let attempt = 0; attempt < 90 && !server; attempt++) {
+        const peers = await relay(
+          'POST',
+          'v1/heartbeat',
+          { environmentId: qa.viewer, connections: [], running: [] },
+          qa.viewer,
+        );
+        server = peers.body.find?.((peer) => peer.online && peer.features?.includes('server'));
+        if (!server) await new Promise((done) => setTimeout(done, 2000));
+      }
+      expect(server, 'the host never paired with the relay as a server');
+      let owned = false;
+      for (let attempt = 0; attempt < 30 && !owned; attempt++) {
+        const shared = await relay('GET', 'v1/state', undefined, qa.viewer);
+        owned = shared.body.workspace?.fleet?.environments?.some(
+          (environment) => environment.id === server.environmentId,
+        );
+        if (!owned) await new Promise((done) => setTimeout(done, 2000));
+      }
+      expect(owned, 'the host never registered its computer');
+      const job = crypto.randomUUID();
+      const posted = await relay(
+        'POST',
+        'v1/jobs',
+        {
+          id: job,
+          source: qa.viewer,
+          target: server.environmentId,
+          method: 'folders',
+          args: { environmentId: server.environmentId, path: '' },
+        },
+        qa.viewer,
+      );
+      expect(posted.status === 200, `folders request refused: ${JSON.stringify(posted.body)}`);
+      let answer;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        answer = (await relay('GET', `v1/jobs/${job}`, undefined, qa.viewer)).body;
+        if (['complete', 'error', 'cancelled'].includes(answer.status)) break;
+        await new Promise((done) => setTimeout(done, 1000));
+      }
+      expect(
+        answer?.status === 'complete' && answer.result?.path === qa.hostHome,
+        `the host did not list its home folder: ${JSON.stringify(answer)}`,
+      );
+      passed('the host pairs with the relay as a server and lists a folder for another device', {
+        environment: server.environmentId,
+        features: server.features,
+      });
+      // The app's own sync must not touch the checkpoints the next scenarios write.
+      sh('systemctl', ['stop', qa.hostService]);
+    }
+    passed('runs the release as the server host from its signed AppImage, with the relay key');
+
     // 2. Activation waits for a running reply.
     latest = '9.0.1';
     const checkpoint = join(qa.data, 'workspace.json');
@@ -529,7 +733,12 @@ TasksMax=infinity
       `activation failed:\n${run.output}`,
     );
     expect(selected() === commit['9.0.1'], 'current does not select v9.0.1');
-    passed('waits for running replies, then activates');
+    expect(
+      run.output.includes('The host runs v9.0.1') && hostVersion() === '9.0.1',
+      `host not updated:\n${run.output}`,
+    );
+    expect(active(qa.hostService), 'host not running v9.0.1');
+    passed('waits for running replies, then activates the relay and the host');
 
     // 3. A release that fails its health check is rolled back with its data.
     latest = '9.0.2';
@@ -589,9 +798,26 @@ TasksMax=infinity
       'superseded failed build was kept',
     );
     expect(selected() === commit['9.0.1'], 'current changed');
+    expect(hostVersion() === '9.0.1' && active(qa.hostService), 'host changed');
     passed('refuses an installer signed by another key without building it');
 
-    // 5. Older releases are never installed.
+    // 5. A host that does not stay up gives way to the one before it.
+    latest = '9.0.4';
+    run = await update('check');
+    expect(
+      run.status === 1 && run.output.includes('Activated v9.0.4'),
+      `relay of v9.0.4 not activated:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      run.output.includes('did not stay up; it runs 9.0.1 again'),
+      `no host rollback:\n${run.output.slice(-4000)}`,
+    );
+    expect(hostVersion() === '9.0.1' && active(qa.hostService), 'previous host not restored');
+    run = await update('check');
+    expect(run.status === 0 && run.output.trim() === '', 'a failed host was retried automatically');
+    passed('a host that does not stay up gives way to the previous one');
+
+    // 6. Older releases are never installed.
     latest = '8.0.0';
     run = await update('check');
     expect(
@@ -606,6 +832,11 @@ TasksMax=infinity
       'production release changed',
     );
     expect(pids() === productionBefore.pids, 'a production service restarted');
+    expect(
+      spawnSync('systemctl', ['is-active', '--quiet', 'agent-studio-host']).status !== 0 ||
+        productionBefore.host,
+      'a production host started',
+    );
     passed('production release and service processes unchanged');
     result.ok = true;
   } catch (error) {
@@ -614,6 +845,9 @@ TasksMax=infinity
     if (existsSync(logFile)) console.log(readFileSync(logFile, 'utf8').slice(-12000));
   } finally {
     server?.close();
+    spawnSync('systemctl', ['disable', '--now', qa.hostService]);
+    rmSync(hostUnit, { force: true });
+    spawnSync('systemctl', ['reset-failed', qa.hostService]);
     spawnSync('systemctl', ['stop', qa.service]);
     rmSync(unit, { force: true });
     spawnSync('systemctl', ['daemon-reload']);
@@ -624,9 +858,11 @@ TasksMax=infinity
       if (name.startsWith('.agent-studio-qa-'))
         rmSync(join('/var/lib', name), { recursive: true, force: true });
     if (createdUser) spawnSync('userdel', [qa.user]);
+    if (createdHostUser) spawnSync('userdel', ['--remove', qa.hostUser]);
+    rmSync(qa.hostHome, { recursive: true, force: true });
     rmSync(upload, { recursive: true, force: true });
     result.finished = new Date().toISOString();
-    result.cleaned = [qa.root, qa.data, qa.backups, qa.state, unit].every(
+    result.cleaned = [qa.root, qa.data, qa.backups, qa.state, unit, hostUnit, qa.hostHome].every(
       (path) => !existsSync(path),
     );
     console.log(`RESULT ${JSON.stringify(result)}`);

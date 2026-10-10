@@ -12,6 +12,14 @@
 // Activation waits for running replies (at most two hours), backs up private data, switches the
 // release and restarts only the relay. A failed health check restores the previous release and
 // data. The installer then replaces the public Windows download, keeping the previous package.
+//
+// The server also runs the desktop app as a host for its workspace (requested 2026-10-10), so
+// the other devices can start chats on it: the release's Linux AppImage, authenticated like the
+// installer and extracted by the build user, runs as agent-studio-host.service in server mode
+// under a virtual display. The updater provisions what it needs once (Xvfb, its user, optional
+// passwordless sudo, Claude Code and Codex, the pairing key, the unit) and switches it to each
+// release the relay runs, after running replies end, going back to the previous one when it
+// does not stay up.
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -51,6 +59,22 @@ export type Config = {
   deferLimit: number;
   /** Releases (and their backups) this updater activated that stay on disk. */
   keep: number;
+  /** The desktop app this server runs for its workspace's devices, or false to run none. */
+  host: Host | false;
+};
+
+export type Host = {
+  /** The Linux user that runs the app and its agents. */
+  user: string;
+  /** Whether that user may run anything as root through sudo without a password. */
+  sudo: boolean;
+  /** The computer's name the first time the app starts. */
+  name: string;
+  service: string;
+  /** The pairing key the service hands the app, kept from the relay's own key. */
+  key: string;
+  /** The relay's environment file, which holds its pairing key. */
+  relayEnv: string;
 };
 
 export function readConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -68,8 +92,28 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     buildHome: value('BUILD_HOME', '/var/cache/agent-studio-build'),
     deferLimit: 2 * 60 * 60 * 1000,
     keep: 5,
+    host:
+      value('HOST', 'on') === 'off'
+        ? false
+        : {
+            user: value('HOST_USER', 'agent-studio-host'),
+            sudo: value('HOST_SUDO', 'off') === 'on',
+            name: value('HOST_NAME', 'VPS'),
+            service: value('HOST_SERVICE', 'agent-studio-host'),
+            key: value('HOST_KEY', '/etc/agent-studio/host.key'),
+            relayEnv: value('RELAY_ENV', '/etc/agent-studio/relay.env'),
+          },
   };
   const paths = [config.root, config.data, config.backups, config.stateDirectory, config.buildHome];
+  if (config.host) paths.push(config.host.key, config.host.relayEnv);
+  if (
+    config.host &&
+    (!/^[a-z_][a-z0-9_-]*$/.test(config.host.user) ||
+      config.host.user === 'root' ||
+      !/^[\w@-]+$/.test(config.host.service) ||
+      !/^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u.test(config.host.name))
+  )
+    throw new Error('Invalid AGENT_STUDIO_UPDATE_HOST_* configuration.');
   if (
     !allowedUrl(config.api) ||
     !/^[\w.-]+\/[\w.-]+$/.test(config.repo) ||
@@ -98,11 +142,20 @@ export function allowedUrl(value: string): boolean {
 }
 
 export type Asset = { name: string; url: string; size: number; sha256?: string };
-export type Release = { tag: string; version: string; installer: Asset; signature: Asset };
+export type Release = {
+  tag: string;
+  version: string;
+  installer: Asset;
+  signature: Asset;
+  /** The Linux AppImage and its signature, which a server runs as its host. */
+  appImage?: Asset;
+  appImageSignature?: Asset;
+};
 
 const assetLimit = 256 * 1024 * 1024;
 const installerFile = 'agent-studio-windows-x64-setup.exe';
 export const installerName = (version: string) => `Agent-Studio_${version}_x64-setup.exe`;
+export const appImageName = (version: string) => `Agent-Studio_${version}_amd64.AppImage`;
 
 /** Reads GitHub's latest-release response, requiring the signed Windows installer. */
 export function parseRelease(value: unknown): Release {
@@ -131,7 +184,12 @@ export function parseRelease(value: unknown): Release {
     return { name, url, size, ...(sha256 ? { sha256 } : {}) };
   };
   const name = installerName(version);
-  return { tag, version, installer: find(name), signature: find(`${name}.sig`) };
+  const linux = appImageName(version);
+  // A release without its AppImage still updates the relay; the host keeps the one it runs.
+  const appImage = assets.some((item) => item?.name === linux)
+    ? { appImage: find(linux), appImageSignature: find(`${linux}.sig`) }
+    : {};
+  return { tag, version, installer: find(name), signature: find(`${name}.sig`), ...appImage };
 }
 
 /** A release that does not come from the signing pipeline; retrying cannot fix it. */
@@ -141,19 +199,31 @@ export const sha256 = (data: Buffer) => createHash('sha256').update(data).digest
 
 /** Confirms the installer was signed by the release pipeline for exactly this version. */
 export function authenticate(installer: Buffer, signature: string, release: Release, key: string) {
-  if (installer.length !== release.installer.size)
-    throw new Error(`The ${release.tag} installer download is incomplete.`);
-  if (release.installer.sha256 && sha256(installer) !== release.installer.sha256)
-    throw new Error(`The ${release.tag} installer does not match its published SHA-256.`);
+  authenticateAsset(installer, signature, release.installer, release, key, 'installer');
+}
+
+/** Confirms a package was signed by the release pipeline for exactly this version. */
+export function authenticateAsset(
+  data: Buffer,
+  signature: string,
+  asset: Asset,
+  release: Pick<Release, 'tag' | 'version'>,
+  key: string,
+  label: string,
+) {
+  if (data.length !== asset.size)
+    throw new Error(`The ${release.tag} ${label} download is incomplete.`);
+  if (asset.sha256 && sha256(data) !== asset.sha256)
+    throw new Error(`The ${release.tag} ${label} does not match its published SHA-256.`);
   let signed: Record<string, string>;
   try {
-    signed = verifySignature(installer, signature, key);
+    signed = verifySignature(data, signature, key);
   } catch (error) {
-    throw new AuthenticityError(`The ${release.tag} installer is not trusted: ${message(error)}`);
+    throw new AuthenticityError(`The ${release.tag} ${label} is not trusted: ${message(error)}`);
   }
   if (signed.version !== release.version)
     throw new AuthenticityError(
-      `The ${release.tag} installer was signed for ${signed.version ?? 'no version'}.`,
+      `The ${release.tag} ${label} was signed for ${signed.version ?? 'no version'}.`,
     );
 }
 
@@ -197,6 +267,8 @@ export type Tracked = {
   commit: string;
   installer: Asset;
   signature: Asset;
+  appImage?: Asset;
+  appImageSignature?: Asset;
   /** The updater key that authenticated the installer. */
   key?: string;
   phase: 'pending' | 'staged' | 'active' | 'failed';
@@ -214,10 +286,30 @@ export type Tracked = {
   error?: string;
 };
 
+/** The release the server's host runs, or is about to. */
+export type HostRelease = {
+  tag: string;
+  version: string;
+  commit: string;
+  phase: 'pending' | 'staged' | 'active' | 'failed' | 'unsupported';
+  attempts: number;
+  retryAt?: string;
+  seen: string;
+  staged?: string;
+  waiting?: 'replies';
+  /** The host version that ran before this one. */
+  previous?: string;
+  activated?: string;
+  error?: string;
+};
+
 export type State = {
   version: 1;
   trustedKey?: string;
   release?: Tracked;
+  host?: HostRelease;
+  /** The SHA-256 of the relay key the host's key file was last given. */
+  hostKey?: string;
   /** A latest release that is not installed: malformed, or older than the tracked one. */
   ignored?: string;
   /** Releases this updater activated, newest first. */
@@ -260,6 +352,30 @@ export type System = {
   probe(): Promise<number | undefined>;
   publishInstaller(commit: string, installer: Buffer): Promise<'published' | 'unavailable'>;
   prune(commit: string, backup?: string): void;
+  /** GitHub's response for the release of a tag. */
+  releaseByTag(tag: string): Promise<unknown>;
+  /** Whether a host version is extracted and ready to run. */
+  hostStaged(version: string): boolean;
+  /**
+   * Extracts an authenticated AppImage as the build user, and asks the app whether it runs as a
+   * server (`--server-check`). False keeps nothing.
+   */
+  extractHost(version: string, appImage: Buffer): Promise<boolean>;
+  /** The host version the host's current link selects. */
+  currentHost(): string | undefined;
+  /** Installs what the host needs: packages, its user, sudo, Claude Code and Codex, its unit. */
+  provisionHost(): Promise<void>;
+  selectHost(version: string): void;
+  hostActive(): boolean;
+  restartHost(): void;
+  stopHost(): void;
+  /** Removes host versions other than these. */
+  pruneHost(keep: string[]): void;
+  /** The relay's own pairing key, from its environment file. */
+  relayKey(): string | undefined;
+  /** The key the host's service hands the app, or undefined when it has none. */
+  hostKey(): string | undefined;
+  writeHostKey(key: string): void;
 };
 
 const maxAttempts = 3;
@@ -287,6 +403,228 @@ export async function check(system: System, config: Config): Promise<void> {
     (release.downloadAttempts ?? 0) < maxAttempts
   )
     await publish(system, state, release, save);
+  if (release.phase === 'active' && config.host) await host(system, config, state, release, save);
+}
+
+/**
+ * Keeps the server's host on the release the relay runs: it stages that release's AppImage,
+ * provisions what the host needs and switches to it once no reply runs, and keeps its pairing
+ * key that of the relay.
+ */
+async function host(
+  system: System,
+  config: Config,
+  state: State,
+  release: Tracked,
+  save: () => void,
+) {
+  if (!state.host || state.host.commit !== release.commit) {
+    state.host = {
+      tag: release.tag,
+      version: release.version,
+      commit: release.commit,
+      phase: 'pending',
+      attempts: 0,
+      seen: system.now().toISOString(),
+    };
+    save();
+  }
+  const tracked = state.host;
+  // A key the relay rotated reaches the host, unless someone gave the host another one.
+  const key = system.relayKey();
+  if (key) {
+    const current = system.hostKey();
+    const digest = sha256(Buffer.from(key));
+    if (current === undefined || (current !== key && sha256(Buffer.from(current)) === state.hostKey)) {
+      system.writeHostKey(key);
+      state.hostKey = digest;
+      save();
+      if (tracked.phase !== 'pending' && tracked.phase !== 'staged' && system.hostActive()) {
+        system.restartHost();
+        system.log('The relay pairing key changed; the host restarted with it.');
+      }
+    } else if (current === key && state.hostKey !== digest) {
+      state.hostKey = digest;
+      save();
+    }
+  }
+  if (tracked.phase === 'pending') {
+    if (tracked.retryAt && system.now() < new Date(tracked.retryAt)) return;
+    await stageHost(system, state, release, tracked, save);
+  }
+  if (tracked.phase === 'staged') await activateHost(system, config, tracked, save);
+}
+
+async function stageHost(
+  system: System,
+  state: State,
+  release: Tracked,
+  tracked: HostRelease,
+  save: () => void,
+) {
+  const key = release.key ?? state.trustedKey;
+  if (!key) return;
+  const unsupported = (reason: string) => {
+    tracked.phase = 'unsupported';
+    tracked.error = reason;
+    save();
+    system.log(`The host keeps its release: ${reason}`);
+  };
+  tracked.attempts++;
+  delete tracked.retryAt;
+  delete tracked.error;
+  save();
+  try {
+    if (!system.hostStaged(release.version)) {
+      // Releases tracked before the updater knew the AppImage carry no record of it.
+      let { appImage, appImageSignature } = release;
+      if (!appImage || !appImageSignature)
+        ({ appImage, appImageSignature } = parseRelease(await system.releaseByTag(release.tag)));
+      if (!appImage || !appImageSignature)
+        return unsupported(`${release.tag} has no Linux AppImage.`);
+      const data = await system.download(appImage);
+      const signature = (await system.download(appImageSignature)).toString('utf8');
+      authenticateAsset(data, signature, appImage, release, key, 'AppImage');
+      system.log(`Extracting the ${release.tag} host.`);
+      if (!(await system.extractHost(release.version, data)))
+        return unsupported(`${release.tag} does not run as a server.`);
+    }
+  } catch (error) {
+    const final = error instanceof AuthenticityError || tracked.attempts >= maxAttempts;
+    tracked.error = message(error);
+    if (final) tracked.phase = 'failed';
+    else
+      tracked.retryAt = new Date(
+        system.now().getTime() + retryDelays[tracked.attempts - 1],
+      ).toISOString();
+    save();
+    throw new Error(
+      `Could not stage the ${release.tag} host${final ? '' : `; retrying after ${tracked.retryAt}`}: ${tracked.error}`,
+    );
+  }
+  tracked.phase = 'staged';
+  tracked.staged = system.now().toISOString();
+  save();
+  system.log(`Staged the ${release.tag} host.`);
+}
+
+/** The host stays up through its start and a while after it. */
+async function hostUp(system: System): Promise<boolean> {
+  await system.sleep(10_000);
+  if (!system.hostActive()) return false;
+  await system.sleep(10_000);
+  return system.hostActive();
+}
+
+async function activateHost(
+  system: System,
+  config: Config,
+  tracked: HostRelease,
+  save: () => void,
+) {
+  const previous = system.currentHost();
+  if (previous === tracked.version && system.hostActive()) {
+    tracked.phase = 'active';
+    tracked.activated = system.now().toISOString();
+    save();
+    return;
+  }
+  // Restarting the host ends the replies it runs.
+  let running: number;
+  try {
+    running = system.runningReplies();
+  } catch {
+    running = 1;
+  }
+  if (running && system.now().getTime() - Date.parse(tracked.staged!) < config.deferLimit) {
+    if (tracked.waiting !== 'replies') {
+      tracked.waiting = 'replies';
+      save();
+      system.log(`The ${tracked.tag} host waits up to two hours for running replies.`);
+    }
+    return;
+  }
+  try {
+    await system.provisionHost();
+  } catch (error) {
+    tracked.phase = 'pending';
+    tracked.error = message(error);
+    tracked.retryAt = new Date(system.now().getTime() + retryDelays[0]).toISOString();
+    save();
+    throw new Error(`Could not prepare the server for its host: ${tracked.error}`);
+  }
+  if (previous !== tracked.version) tracked.previous = previous;
+  delete tracked.waiting;
+  save();
+  let ok = false;
+  try {
+    system.selectHost(tracked.version);
+    system.restartHost();
+    ok = await hostUp(system);
+  } catch (error) {
+    system.log(`Starting the ${tracked.tag} host failed: ${message(error)}`);
+  }
+  if (ok) {
+    tracked.phase = 'active';
+    tracked.activated = system.now().toISOString();
+    delete tracked.error;
+    save();
+    system.pruneHost([tracked.version, ...(tracked.previous ? [tracked.previous] : [])]);
+    system.log(`The host runs ${tracked.tag}.`);
+    return;
+  }
+  tracked.phase = 'failed';
+  if (tracked.previous) {
+    system.selectHost(tracked.previous);
+    system.restartHost();
+    tracked.error = `The ${tracked.tag} host did not stay up; it runs ${tracked.previous} again.`;
+  } else {
+    system.stopHost();
+    tracked.error = `The ${tracked.tag} host did not stay up and was stopped.`;
+  }
+  save();
+  throw new Error(tracked.error);
+}
+
+/** The service that runs the host: the app in server mode under a virtual display. */
+export function hostUnit(config: Config, home: string): string {
+  const host = config.host;
+  if (!host) throw new Error('No host is configured.');
+  return `# Written by the Agent Studio updater (scripts/vps/update.ts); changes are replaced.
+[Unit]
+Description=Agent Studio host: chats run on this server for its workspace
+After=network-online.target ${config.service}.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${host.user}
+WorkingDirectory=~
+Environment=AGENT_STUDIO_SERVER=1
+Environment=AGENT_STUDIO_RELAY_URL=http://127.0.0.1:${config.port}
+Environment="AGENT_STUDIO_COMPUTER_NAME=${host.name}"
+Environment=PATH=${home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WEBKIT_DISABLE_COMPOSITING_MODE=1
+LoadCredential=relay-key:${host.key}
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/xvfb-run --auto-servernum "--server-args=-screen 0 1440x900x24 -nolisten tcp" ${config.root}/host/current/AppRun
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+/** The relay's pairing key from its environment file's AGENT_STUDIO_RELAY_TOKEN line. */
+export function relayKeyIn(environment: string): string | undefined {
+  for (const line of environment.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?AGENT_STUDIO_RELAY_TOKEN\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const value = match[1].trim().replace(/^(["'])(.*)\1$/, '$2');
+    return value.length >= 32 ? value : undefined;
+  }
+  return undefined;
 }
 
 async function track(system: System, state: State, save: () => void) {
@@ -320,6 +658,9 @@ async function track(system: System, state: State, save: () => void) {
     commit,
     installer: latest.installer,
     signature: latest.signature,
+    ...(latest.appImage && latest.appImageSignature
+      ? { appImage: latest.appImage, appImageSignature: latest.appImageSignature }
+      : {}),
     phase: 'pending',
     attempts: 0,
     seen: system.now().toISOString(),
@@ -540,6 +881,12 @@ export function retry(state: State): string {
     release.downloadAttempts = 0;
     return `The ${release.tag} Windows installer will be published again at the next check.`;
   }
+  if (state.host?.phase === 'failed') {
+    state.host.phase = 'pending';
+    state.host.attempts = 0;
+    for (const field of ['retryAt', 'waiting', 'error'] as const) delete state.host[field];
+    return `The ${state.host.tag} host will be tried again at the next check.`;
+  }
   delete state.ignored;
   return 'Nothing failed; the latest release will be checked again.';
 }
@@ -550,6 +897,18 @@ function stamp() {
     .replace(/[-:]/g, '')
     .replace(/\.\d+Z$/, 'Z');
 }
+
+// Installs a provider's CLI for the host's user with the provider's own installer, which verifies
+// what it downloads: positional arguments only, the whole installer before any of it runs.
+const cliInstaller = `set -eu
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT
+curl -fsSL --retry 2 "$1" -o "$installer"
+CODEX_NON_INTERACTIVE=1 "$2" "$installer" </dev/null`;
+const clis = [
+  ['claude', 'https://claude.ai/install.sh', 'bash'],
+  ['codex', 'https://chatgpt.com/codex/install.sh', 'sh'],
+] as const;
 
 function run(command: string, args: string[], options: SpawnSyncOptions = {}) {
   const result = spawnSync(command, args, { stdio: ['ignore', 'inherit', 'inherit'], ...options });
@@ -581,6 +940,7 @@ async function fetchBytes(url: string, limit: number, headers: Record<string, st
 
 export function createSystem(config: Config): System {
   const releases = join(config.root, 'releases');
+  const hosts = join(config.root, 'host');
   const current = join(config.root, 'current');
   const stateFile = join(config.stateDirectory, 'state.json');
   const saved = (commit: string) => join(config.stateDirectory, `${commit}.installer`);
@@ -642,6 +1002,78 @@ export function createSystem(config: Config): System {
       { stdio: [input ?? 'ignore', 'inherit', 'inherit'] },
     );
   };
+  // The same sandbox for a command whose output is the answer, ending it after `seconds`.
+  const sandboxOutput = (directory: string, command: string[], seconds: number) => {
+    const result = spawnSync(
+      'systemd-run',
+      [
+        '--quiet',
+        '--wait',
+        '--pipe',
+        '--collect',
+        '--service-type=exec',
+        `--uid=${config.buildUser}`,
+        `--gid=${config.buildUser}`,
+        `--working-directory=${directory}`,
+        `--setenv=HOME=${config.buildHome}`,
+        '--setenv=PATH=/usr/bin:/bin',
+        ...[
+          'ProtectSystem=strict',
+          `InaccessiblePaths=${[config.data, config.backups, config.stateDirectory, '/etc/agent-studio'].map((path) => `-${path}`).join(' ')}`,
+          'ProtectHome=yes',
+          'PrivateTmp=yes',
+          'PrivateDevices=yes',
+          'PrivateNetwork=yes',
+          'NoNewPrivileges=yes',
+          `RuntimeMaxSec=${seconds}`,
+        ].map((property) => `--property=${property}`),
+        '--',
+        ...command,
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    return result.status === 0 ? result.stdout : '';
+  };
+  // Runs a command outside this updater's own sandbox, where /home is hidden and files are
+  // private: as root to set up the system, or as the host's user for what lives in its home.
+  const transient = (command: string[], user?: string, check = true) => {
+    const result = spawnSync(
+      'systemd-run',
+      [
+        '--quiet',
+        '--wait',
+        '--pipe',
+        '--collect',
+        '--service-type=exec',
+        ...(user ? [`--uid=${user}`, '--property=WorkingDirectory=~'] : []),
+        '--setenv=DEBIAN_FRONTEND=noninteractive',
+        '--property=UMask=0022',
+        '--',
+        ...command,
+      ],
+      { stdio: ['ignore', 'inherit', 'inherit'] },
+    );
+    if (result.error) throw result.error;
+    if (check && result.status !== 0)
+      throw new Error(`${basename(command[0])} exited with ${result.status ?? result.signal}.`);
+    return result.status;
+  };
+  // Replaces a root-owned file only when it changes, never through what its path points to.
+  const place = (path: string, content: string, mode: number) => {
+    if (exists(path) && lstatSync(path).isFile() && readFileSync(path, 'utf8') === content)
+      return false;
+    const staging = join(dirname(path), `.${basename(path)}.new`);
+    rmSync(staging, { force: true });
+    writeFileSync(staging, content, { flag: 'wx', mode });
+    chmodSync(staging, mode);
+    return staging;
+  };
+  // How often the host's service restarted the host on its own, as of the updater's restart.
+  let hostRestarts: string | undefined;
+  const restartsOf = (service: string) =>
+    spawnSync('systemctl', ['show', '--property=NRestarts', '--value', service], {
+      encoding: 'utf8',
+    }).stdout.trim();
   // Creates a public, root-owned file without following anything the build left at its path.
   const create = (path: string, data: Buffer | string = '') => {
     rmSync(path, { recursive: true, force: true });
@@ -844,6 +1276,178 @@ export function createSystem(config: Config): System {
       if (previous) place(previous, 'rollback');
       else rmSync(destination, { force: true });
       throw new Error('The relay did not serve the new installer; the previous one was restored.');
+    },
+    async releaseByTag(tag) {
+      const url = `${config.api}/repos/${config.repo}/releases/tags/${encodeURIComponent(tag)}`;
+      const response = await fetch(url, {
+        headers: { ...api, 'User-Agent': 'agent-studio-updater' },
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok) throw new Error(`GitHub answered HTTP ${response.status} for ${tag}.`);
+      return response.json();
+    },
+    hostStaged: (version) => exists(join(hosts, version, '.deployment-ready')),
+    async extractHost(version, appImage) {
+      if (!validVersion(version)) throw new Error(`${version} is not a release version.`);
+      mkdirSync(hosts, { recursive: true });
+      chmodSync(hosts, 0o755);
+      const extracting = join(hosts, `.extracting-${version}`);
+      rmSync(extracting, { recursive: true, force: true });
+      mkdirSync(extracting);
+      chmodSync(extracting, 0o755);
+      run('chown', [`${config.buildUser}:${config.buildUser}`, extracting]);
+      const image = join(extracting, 'app.AppImage');
+      writeFileSync(image, appImage, { flag: 'wx' });
+      chmodSync(image, 0o755);
+      run('chown', [`${config.buildUser}:${config.buildUser}`, image]);
+      try {
+        // The AppImage's own runtime unpacks it, as the build user and without network.
+        sandbox(extracting, ['/bin/sh', '-c', './app.AppImage --appimage-extract >/dev/null'], false);
+        rmSync(image, { force: true });
+        const app = join(extracting, 'squashfs-root');
+        // The host runs these files, so only root may change them from now on.
+        run('chown', ['-R', '-h', 'root:root', app]);
+        run('chmod', ['-R', 'go-w', app]);
+        // An app from before server mode would try to open its window instead of answering.
+        const answer = sandboxOutput(app, [join(app, 'AppRun'), '--server-check'], 120);
+        if (!answer.split(/\r?\n/).includes('agent-studio-server 1')) return false;
+        create(join(app, '.built-by-updater'));
+        create(join(app, '.deployment-ready'));
+        rmSync(join(hosts, version), { recursive: true, force: true });
+        renameSync(app, join(hosts, version));
+        return true;
+      } finally {
+        rmSync(extracting, { recursive: true, force: true });
+      }
+    },
+    currentHost() {
+      try {
+        const target = realpathSync(join(hosts, 'current'));
+        return dirname(target) === realpathSync(hosts) ? basename(target) : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    async provisionHost() {
+      const host = config.host;
+      if (!host) return;
+      // A virtual display, a session bus of its own, sudo, and curl for the CLIs' installers.
+      const programs = [
+        ['/usr/bin/Xvfb', 'xvfb'],
+        ['/usr/bin/xvfb-run', 'xvfb'],
+        ['/usr/bin/xauth', 'xauth'],
+        ['/usr/bin/dbus-run-session', 'dbus-daemon'],
+        ['/usr/bin/sudo', 'sudo'],
+        ['/usr/bin/curl', 'curl'],
+      ];
+      const missing = [...new Set(programs.filter(([file]) => !exists(file)).map(([, p]) => p))];
+      if (missing.length) {
+        system.log(`Installing ${missing.join(', ')} for the host.`);
+        transient(['/usr/bin/apt-get', 'update', '-q']);
+        transient(['/usr/bin/apt-get', 'install', '-y', '-q', '--no-install-recommends', ...missing]);
+      }
+      if (spawnSync('id', ['-u', host.user], { stdio: 'ignore' }).status !== 0) {
+        transient([
+          '/usr/sbin/useradd',
+          '--create-home',
+          '--shell',
+          '/bin/bash',
+          '--comment',
+          'Agent Studio host',
+          host.user,
+        ]);
+        system.log(`Created the ${host.user} user for the host.`);
+      }
+      const entry = spawnSync('getent', ['passwd', host.user], { encoding: 'utf8' }).stdout;
+      const home = entry.split(':')[5]?.trim() ?? '';
+      if (!isAbsolute(home) || /\s/.test(home))
+        throw new Error(`${host.user} has no usable home folder.`);
+      // Its agents may administer the server when the updater is configured so.
+      const sudoers = join('/etc/sudoers.d', host.service);
+      const mark = '# Written by the Agent Studio updater (scripts/vps/update.ts).';
+      if (host.sudo) {
+        const staging = place(sudoers, `${mark}\n${host.user} ALL=(ALL:ALL) NOPASSWD: ALL\n`, 0o440);
+        if (staging) {
+          run('visudo', ['-c', '-q', '-f', staging]);
+          renameSync(staging, sudoers);
+          system.log(`${host.user} may now run commands as root through sudo.`);
+        }
+      } else if (exists(sudoers) && readFileSync(sudoers, 'utf8').startsWith(mark)) {
+        rmSync(sudoers);
+        system.log(`${host.user} no longer runs commands through sudo.`);
+      }
+      for (const [cli, url, runner] of clis) {
+        const probe = `command -v ${cli} >/dev/null || test -x "$HOME/.local/bin/${cli}"`;
+        if (transient(['/bin/bash', '-lc', probe], host.user, false) === 0) continue;
+        system.log(`Installing ${cli} for ${host.user}.`);
+        transient(['/bin/bash', '-c', cliInstaller, 'install', url, runner], host.user);
+      }
+      const unit = join('/etc/systemd/system', `${host.service}.service`);
+      const staging = place(unit, hostUnit(config, home), 0o644);
+      if (staging) {
+        renameSync(staging, unit);
+        run('systemctl', ['daemon-reload']);
+      }
+      run('systemctl', ['enable', '--quiet', host.service]);
+    },
+    selectHost(version) {
+      if (!validVersion(version) || !lstatSync(join(hosts, version)).isDirectory())
+        throw new Error(`${version} is not a host version.`);
+      const next = join(hosts, `.next-${version}`);
+      rmSync(next, { force: true });
+      symlinkSync(join(hosts, version), next);
+      renameSync(next, join(hosts, 'current'));
+    },
+    // A host that ended and was started again by its service since this updater started it did
+    // not stay up, even when it runs again now.
+    hostActive: () =>
+      !!config.host &&
+      spawnSync('systemctl', ['is-active', '--quiet', config.host.service]).status === 0 &&
+      (hostRestarts === undefined || restartsOf(config.host.service) === hostRestarts),
+    restartHost() {
+      if (!config.host) return;
+      spawnSync('systemctl', ['reset-failed', config.host.service], { stdio: 'ignore' });
+      run('systemctl', ['restart', config.host.service]);
+      hostRestarts = restartsOf(config.host.service);
+    },
+    stopHost() {
+      if (config.host) spawnSync('systemctl', ['stop', config.host.service], { stdio: 'ignore' });
+    },
+    pruneHost(keep) {
+      for (const entry of existsSync(hosts) ? readdirSync(hosts) : [])
+        if (
+          validVersion(entry) &&
+          !keep.includes(entry) &&
+          entry !== system.currentHost() &&
+          exists(join(hosts, entry, '.built-by-updater'))
+        )
+          rmSync(join(hosts, entry), { recursive: true, force: true });
+    },
+    relayKey() {
+      if (!config.host) return undefined;
+      try {
+        return relayKeyIn(readFileSync(config.host.relayEnv, 'utf8'));
+      } catch {
+        return undefined;
+      }
+    },
+    hostKey() {
+      if (!config.host) return undefined;
+      try {
+        return readFileSync(config.host.key, 'utf8').trim() || undefined;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+    },
+    writeHostKey(key) {
+      if (!config.host) return;
+      mkdirSync(dirname(config.host.key), { recursive: true, mode: 0o700 });
+      const staging = `${config.host.key}.new`;
+      rmSync(staging, { force: true });
+      writeFileSync(staging, `${key}\n`, { flag: 'wx', mode: 0o600 });
+      chmodSync(staging, 0o600);
+      renameSync(staging, config.host.key);
     },
     prune(commit, backup) {
       if (system.currentRelease() !== commit)

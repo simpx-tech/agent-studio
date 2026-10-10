@@ -44,6 +44,11 @@ export type Installation = {
   name: string;
   platform: Environment['platform'];
   distribution?: string;
+  /**
+   * This desktop app runs as a server: a service on an always-on computer, such as the VPS that
+   * hosts the relay, with no one at its window (`src-tauri/src/server.rs`).
+   */
+  server?: boolean;
 };
 export type WslDiscovery = {
   distributions: { id: string; name: string; running: boolean | null }[];

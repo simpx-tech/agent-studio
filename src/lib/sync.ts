@@ -528,6 +528,11 @@ const folderIconsField = (value: SharedWorkspace['folderIcons']) =>
   value === undefined ? {} : { folderIcons: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
+  /**
+   * What this computer's app takes from other devices beyond chats: `signIn` (its accounts sign
+   * in from elsewhere) and `server` (a server no one sits at). Older apps and relays report none.
+   */
+  features?: string[];
   environmentId: string;
   seenAt: number;
   online: boolean;
@@ -566,7 +571,9 @@ export type RelayJob = {
     | 'elicitation'
     | 'steer'
     | 'release'
-    | 'screens';
+    | 'screens'
+    | 'signIn'
+    | 'signInCode';
   args: Record<string, unknown>;
   status: 'queued' | 'running' | 'complete' | 'error' | 'cancelled';
   events: unknown[];

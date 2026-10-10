@@ -141,6 +141,10 @@ fn status(app: &AppHandle) -> Status {
 /// Reads this device's choice and adds the icon when closing keeps the app running. Runs
 /// before the window opens, so the first close already knows.
 pub fn setup(app: &AppHandle) {
+    // A server has no one at its window to see an icon (`server`).
+    if crate::server::active() {
+        return;
+    }
     let settings = path(app)
         .ok()
         .and_then(|path| std::fs::read(path).ok())

@@ -28,6 +28,7 @@ mod retention;
 mod runner;
 mod saved;
 mod screens;
+mod server;
 mod shared_context;
 mod sign_in;
 mod site_icons;
@@ -454,9 +455,12 @@ async fn app_session() -> AppSession {
 }
 #[tauri::command]
 async fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, String> {
-    tauri::async_runtime::spawn_blocking(move || profiles::installation(&app))
-        .await
-        .map_err(|_| "Cannot read the installation identity")?
+    let mut installation =
+        tauri::async_runtime::spawn_blocking(move || profiles::installation(&app))
+            .await
+            .map_err(|_| "Cannot read the installation identity")??;
+    installation.server = server::active();
+    Ok(installation)
 }
 #[tauri::command]
 async fn discover_wsl(app: tauri::AppHandle) -> Result<wsl::Discovery, String> {
@@ -1213,7 +1217,10 @@ async fn sign_in(
     sign_ins: State<'_, sign_in::SignIns>,
     provider: String,
     connection_id: Option<String>,
+    remote: Option<bool>,
 ) -> Result<Option<sign_in::View>, String> {
+    // Opened from another device, through the relay, which shows the page itself.
+    let remote = remote.unwrap_or(false);
     let profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
     // A WSL Codex profile that borrows a Windows login signs in on Windows, where the login
     // lives. Claude profiles sign in inside their own distribution.
@@ -1227,6 +1234,9 @@ async fn sign_in(
         .map_err(|_| "Cannot locate app data")?
         .join("sign-in");
     if provider == "gemini" {
+        if remote {
+            return Err("Antigravity signs in through a terminal on its own computer.".into());
+        }
         return profiles::scope(profile, providers::terminal_sign_in(&directory))
             .await
             .map(|()| None);
@@ -1250,6 +1260,7 @@ async fn sign_in(
             connection_id,
             account,
             directory,
+            remote,
         };
         sign_ins.start(start, notify, open).await.map(Some)
     })
@@ -1414,6 +1425,13 @@ async fn release_owned_work(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A server's settings leave the environment before any thread or process starts.
+    server::init();
+    // The VPS updater asks a release whether it runs as a server before deploying it.
+    if std::env::args_os().skip(1).any(|arg| arg == server::CHECK) {
+        println!("{}", server::CHECKED);
+        return;
+    }
     let context = tauri::generate_context!();
     // The elevated helper Windows starts, with the user's permission, to link two shared Claude
     // files (`linking`): it does only that and exits, before anything else of the app starts.

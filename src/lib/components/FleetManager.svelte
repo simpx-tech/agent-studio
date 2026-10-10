@@ -187,6 +187,45 @@
   function localEnvironment(id: string) {
     return executionHost(workspace.fleet, id) === installation?.id;
   }
+  // Another computer whose app takes its accounts' sign-ins and setup from other devices, as a
+  // server no one sits at does: online now, or as last reported.
+  function managedRemotely(id: string, online = true) {
+    const host = presenceFor(id);
+    return (
+      !localEnvironment(id) &&
+      paired &&
+      !!host?.features?.includes('signIn') &&
+      (!online || host.online)
+    );
+  }
+  // What another computer reports about one of its accounts.
+  function reported(connectionId: string, environmentId: string) {
+    const host = presenceFor(environmentId);
+    return host?.online
+      ? host.connections.find((c) => c.connectionId === connectionId)
+      : undefined;
+  }
+  // Whether an environment has this agent's CLI: as this computer found it, or as the computer
+  // that runs it reports for its accounts of that agent.
+  function cliAvailable(environmentId: string, provider: ProviderId) {
+    if (localEnvironment(environmentId)) return cliInstalled(environmentId, provider);
+    return (
+      managedRemotely(environmentId) &&
+      workspace.fleet.connections.some(
+        (c) =>
+          c.environmentId === environmentId &&
+          workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider &&
+          reported(c.id, environmentId)?.installed,
+      )
+    );
+  }
+  // A server no one sits at, as it reports itself.
+  function serverComputer(computerId: string) {
+    return workspace.fleet.environments.some(
+      (e) =>
+        computerViewId(e) === computerId && !!presenceFor(e.id)?.features?.includes('server'),
+    );
+  }
   const ownEnvironment = $derived(
     workspace.fleet.environments.find((e) => e.id === installation?.id),
   );
@@ -223,6 +262,13 @@
                     localEnvironment(e.id) &&
                     managedAccount.provider !== 'gemini' &&
                     cliInstalled(e.id, managedAccount.provider),
+                )) ||
+              (managedAccount.provider !== 'gemini' &&
+                computer.environments.some(
+                  (e) =>
+                    !e.discoveredOn &&
+                    managedRemotely(e.id) &&
+                    cliAvailable(e.id, managedAccount.provider),
                 ))) &&
             !workspace.fleet.connections.some(
               (c) => c.accountId === managedAccountId && onComputer(c.environmentId, computer.id),
@@ -240,7 +286,11 @@
     return providerIds.filter(
       (id) =>
         id !== 'gemini' &&
-        environments.some((e) => localEnvironment(e.id) && cliInstalled(e.id, id)),
+        environments.some(
+          (e) =>
+            (localEnvironment(e.id) && cliInstalled(e.id, id)) ||
+            (!e.discoveredOn && managedRemotely(e.id) && cliAvailable(e.id, id)),
+        ),
     );
   }
   function distroState(environment: Environment) {
@@ -322,17 +372,26 @@
   }
   // Why sign-in cannot open, shown on its button. Only a check that found no CLI stops it:
   // sign-in never waits for a check, and after a failed one the sign-in reports what stops it.
-  function signInUnavailable(status: ProviderStatus | undefined, provider: ProviderId) {
-    if (!desktop()) return 'Sign in on the computer that runs this account.';
+  function signInUnavailable(
+    status: Pick<ProviderStatus, 'installed' | 'checkFailed'> | undefined,
+    provider: ProviderId,
+    remote = false,
+  ) {
+    if (!desktop() && !remote) return 'Sign in on the computer that runs this account.';
+    if (remote)
+      return status && !status.installed
+        ? `Install the ${providers[provider].name} CLI on its computer to sign in.`
+        : '';
     return status && !status.installed && !status.checkFailed
       ? `Install the ${providers[provider].name} CLI on this computer, then refresh Connections to sign in.`
       : '';
   }
   async function add() {
+    const remote = !!targetEnvironment && managedRemotely(targetEnvironment.id);
     if (
       !installation ||
       !targetEnvironment ||
-      !localEnvironment(targetEnvironment.id) ||
+      (!localEnvironment(targetEnvironment.id) && !remote) ||
       computerViewId(targetEnvironment) !== accountComputerId
     )
       throw new Error('Choose an environment on this computer.');
@@ -346,7 +405,7 @@
       ? workspace.fleet.accounts.find((a) => a.id === linkedAccountId)
       : accountSchema.parse({ id: crypto.randomUUID(), name, provider, purpose: 'personal' });
     if (!account) throw new Error('Choose an account.');
-    if (!cliInstalled(targetEnvironment.id, account.provider))
+    if (!cliAvailable(targetEnvironment.id, account.provider))
       throw new Error('Install this CLI on the selected computer, then refresh Connections.');
     if (account.provider === 'gemini')
       throw new Error('Additional accounts are supported for Claude and Codex.');
@@ -378,13 +437,15 @@
       void refresh();
       return;
     }
-    statuses[connection.id] = {
-      id: account.provider,
-      installed: true,
-      auth: 'login',
-      version: null,
-      detail: 'Sign in to connect this account.',
-    };
+    // Another computer checks its new account itself and reports it.
+    if (!remote)
+      statuses[connection.id] = {
+        id: account.provider,
+        installed: true,
+        auth: 'login',
+        version: null,
+        detail: 'Sign in to connect this account.',
+      };
     creationStage = 'Opening sign-in…';
     await login(account.provider, connection.id);
     closeDialog();
@@ -408,10 +469,15 @@
     const host = presenceFor(environmentId);
     if (!paired || !host?.online) return 'Offline';
     const reported = host.connections.find((c) => c.connectionId === id);
+    // An account just added there, before its computer has checked it.
+    const own = !workspace.fleet.environments.find((e) => e.id === environmentId)?.discoveredOn;
+    if (!reported && own && managedRemotely(environmentId)) return 'Checking…';
     return reported?.auth === 'ready'
       ? 'Connected'
       : reported?.installed && reported.auth === 'login'
-        ? 'Sign-in needed on its computer'
+        ? managedRemotely(environmentId)
+          ? 'Sign-in needed'
+          : 'Sign-in needed on its computer'
         : 'Needs attention on host';
   }
   // A status that asks for the user, as an account to sign in to does.
@@ -482,6 +548,12 @@
       workspace.fleet.environments.find(
         (environment) =>
           computerViewId(environment) === computerId && localEnvironment(environment.id),
+      )?.id ??
+      workspace.fleet.environments.find(
+        (environment) =>
+          computerViewId(environment) === computerId &&
+          !environment.discoveredOn &&
+          managedRemotely(environment.id),
       )?.id ??
       '';
     name = workspace.fleet.accounts.find((a) => a.id === accountId)?.name ?? '';
@@ -611,6 +683,12 @@
         <LoaderCircle size={13} class="spinning" aria-hidden="true" />{view.message ||
           `Finish signing in to ${providers[provider].name} in your browser.`}
       </p>
+      {#if view.userCode}<p class="sign-in-user-code">
+          Code <code>{view.userCode}</code><button
+            class="text-button"
+            onclick={() => void navigator.clipboard?.writeText(view.userCode ?? '')}>Copy</button
+          >
+        </p>{/if}
       <div class="fleet-actions">
         {#if view.url}<button
             class="text-button"
@@ -704,8 +782,15 @@
             <button class="secondary" onclick={() => chat(account.provider, connection.id)}
               >Chat<ArrowUpRight size={13} /></button
             >
-            {#if localEnvironment(connection.environmentId) && signIns[connection.id]?.phase !== 'waiting'}
-              {@const blocked = signInUnavailable(statuses[connection.id], account.provider)}
+            {#if (localEnvironment(connection.environmentId) || (managedRemotely(connection.environmentId) && account.provider !== 'gemini')) && signIns[connection.id]?.phase !== 'waiting'}
+              {@const remote = !localEnvironment(connection.environmentId)}
+              {@const blocked = signInUnavailable(
+                remote
+                  ? reported(connection.id, connection.environmentId)
+                  : statuses[connection.id],
+                account.provider,
+                remote,
+              )}
               <button
                 class={['sign-in', attention ? 'secondary' : 'text-button']}
                 disabled={!!signingIn[connection.id] || !!blocked}
@@ -715,7 +800,7 @@
                   sign-in…{:else}Open sign-in{/if}</button
               >{/if}
           </div>
-          {#if localEnvironment(connection.environmentId)}{@render signInProgress(
+          {#if localEnvironment(connection.environmentId) || signIns[connection.id]}{@render signInProgress(
               signIns[connection.id],
               account.provider,
               status === 'Connected',
@@ -811,7 +896,9 @@
           <article class="fleet-computer" aria-label={computer.name + ' computer'}>
             <header class="computer-heading">
               <span class="computer-icon"
-                >{#if computer.wsl}<Server size={21} />{:else}<Monitor size={21} />{/if}</span
+                >{#if computer.wsl || serverComputer(computer.id)}<Server
+                    size={21}
+                  />{:else}<Monitor size={21} />{/if}</span
               >
               <div class="computer-identity">
                 <h3>{computer.name}</h3>
@@ -819,7 +906,9 @@
                   >{computerStatus(computer.id)}</span
                 >
               </div>
-              {#if local}<div class="fleet-actions">
+              {#if local || (!computer.wsl && environments.some((e) => managedRemotely(e.id)))}<div
+                  class="fleet-actions"
+                >
                   <button
                     class="secondary"
                     disabled={busy || !installation || !connectableProviders(computer.id).length}
@@ -1096,7 +1185,7 @@
             !installation ||
             !targetEnvironment ||
             !name.trim() ||
-            !cliInstalled(targetEnvironment.id, selectedProvider)}
+            !cliAvailable(targetEnvironment.id, selectedProvider)}
         >
           {#if busy}<LoaderCircle
               size={15}
@@ -1230,7 +1319,7 @@
                 </p>{/if}
             </div>
           {/if}
-          {#if localEnvironment(connection.environmentId)}
+          {#if localEnvironment(connection.environmentId) || managedRemotely(connection.environmentId, false)}
             {#if removing === connection.id}<div
                 class="remove-connection"
                 role="group"
@@ -1737,6 +1826,19 @@
     font-size: var(--text-sm);
     min-height: 30px;
     padding: 4px 11px;
+  }
+  .sign-in-user-code {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0;
+  }
+  .sign-in-user-code code {
+    font-family: var(--font-mono);
+    font-size: var(--text-md);
+    letter-spacing: 0.06em;
+    user-select: all;
   }
   .connection-hint.attention.sign-in-ended {
     align-items: flex-start;
