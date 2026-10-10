@@ -824,7 +824,7 @@ TasksMax=infinity
       run.status === 0 && run.output.includes('Not installing v8.0.0'),
       'downgrade not ignored',
     );
-    expect(selected() === commit['9.0.1'], 'downgraded');
+    expect(selected() === commit['9.0.4'], 'downgraded');
     passed('never downgrades');
 
     expect(
