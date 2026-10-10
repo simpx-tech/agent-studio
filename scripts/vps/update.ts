@@ -1305,9 +1305,10 @@ export function createSystem(config: Config): System {
         sandbox(extracting, ['/bin/sh', '-c', './app.AppImage --appimage-extract >/dev/null'], false);
         rmSync(image, { force: true });
         const app = join(extracting, 'squashfs-root');
-        // The host runs these files, so only root may change them from now on.
+        // The host runs these files, so only root may change them from now on, while every user
+        // reads them: the AppImage keeps some folders private to whoever unpacked it.
         run('chown', ['-R', '-h', 'root:root', app]);
-        run('chmod', ['-R', 'go-w', app]);
+        run('chmod', ['-R', 'u=rwX,go=rX', app]);
         // An app from before server mode would try to open its window instead of answering.
         const answer = sandboxOutput(app, [join(app, 'AppRun'), '--server-check'], 120);
         if (!answer.split(/\r?\n/).includes('agent-studio-server 1')) return false;
