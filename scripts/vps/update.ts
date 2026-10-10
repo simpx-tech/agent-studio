@@ -597,7 +597,8 @@ export function createSystem(config: Config): System {
     }
   };
   // Runs one build step as the unprivileged build user, confined to the release directory and
-  // its npm cache, without private data and with limits that leave room for other services.
+  // its npm cache, without private data and at low priority beside other services. It has no
+  // memory, task or time limit: a build stops only where the machine itself does.
   const sandbox = (directory: string, command: string[], network: boolean, input?: number) => {
     const hidden = [config.data, config.backups, config.stateDirectory, '/etc/agent-studio'];
     const properties = [
@@ -613,12 +614,10 @@ export function createSystem(config: Config): System {
       'ProtectControlGroups=yes',
       'RestrictSUIDSGID=yes',
       'LockPersonality=yes',
-      'MemoryMax=4G',
       'CPUWeight=20',
       'IOWeight=20',
       'Nice=10',
-      'TasksMax=2048',
-      'RuntimeMaxSec=1800',
+      'TasksMax=infinity',
       ...(network ? [] : ['PrivateNetwork=yes']),
     ];
     run(

@@ -242,6 +242,7 @@ Group=${qa.user}
 WorkingDirectory=${qa.root}/current
 Environment=AGENT_STUDIO_RELAY_TOKEN=${randomBytes(32).toString('hex')}
 Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=32768
 Environment=AGENT_STUDIO_RELAY_HOST=127.0.0.1
 Environment=AGENT_STUDIO_RELAY_PORT=${qa.port}
 Environment=AGENT_STUDIO_RELAY_DATA=${qa.data}
@@ -256,8 +257,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${qa.data}
-MemoryMax=2G
-CPUQuota=100%
+TasksMax=infinity
 `,
       { mode: 0o600 },
     );
