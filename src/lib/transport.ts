@@ -631,6 +631,8 @@ let browserSessionBlocked = false;
 const relayConnectionListeners = new Set<(ready: boolean) => void>();
 const remoteRuns = new Map<string, boolean>();
 const workerRuns = new Map<string, RelayJob>();
+/** Whether this computer is running work another device asked of it. */
+export const workingForOthers = () => workerRuns.size > 0;
 // Optional reads never keep this device from disconnecting; late results are discarded.
 function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, unknown>) {
   return (

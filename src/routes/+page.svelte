@@ -33,6 +33,7 @@
     cancelSignIn,
     windowHeartbeat,
     recordWindowStall,
+    workingForOthers,
     type AppUpdateStatus,
     type CliUpdates,
   } from '$lib/transport';
@@ -1773,7 +1774,7 @@
     // No one opens a server's window, so it checks its CLIs and accounts on its own, for the
     // devices that run chats on it.
     const serverPoll = setInterval(() => {
-      if (loaded && installation?.server && !localRunning) void refresh();
+      if (loaded && installation?.server && !localRunning && !workingForOthers()) void refresh();
     }, 5 * 60_000);
     void (async () => {
       try {
