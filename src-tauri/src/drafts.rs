@@ -4,18 +4,15 @@ use std::{io::Write, path::Path, sync::Mutex};
 use tauri::Manager;
 
 const FILE: &str = "drafts.json";
-/// The renderer keeps drafts within 2 MB; the slack covers encoding differences.
-const MAX_BYTES: usize = 2_500_000;
 
 #[derive(Default)]
 pub struct DraftStorage(Mutex<()>);
 
 fn read(root: &Path) -> Result<Option<serde_json::Value>, String> {
     match std::fs::read(root.join(FILE)) {
-        Ok(bytes) if bytes.len() <= MAX_BYTES => serde_json::from_slice(&bytes)
+        Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|_| "Saved drafts are unreadable.".into()),
-        Ok(_) => Err("Saved drafts exceed their size limit.".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err("Cannot read saved drafts. Check your app data permissions.".into()),
     }
@@ -26,9 +23,6 @@ fn write(root: &Path, drafts: &serde_json::Value) -> Result<(), String> {
         return Err("Invalid drafts".into());
     }
     let bytes = serde_json::to_vec(drafts).map_err(|_| "Cannot encode drafts")?;
-    if bytes.len() > MAX_BYTES {
-        return Err("Drafts exceed their size limit.".into());
-    }
     std::fs::create_dir_all(root).map_err(|_| "Cannot create app data directory")?;
     let mut file = tempfile::NamedTempFile::new_in(root).map_err(|_| "Cannot prepare drafts")?;
     file.write_all(&bytes).map_err(|_| "Cannot write drafts")?;
@@ -86,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_or_oversized_drafts_without_replacing_the_saved_file() {
+    fn rejects_invalid_drafts_without_replacing_the_saved_file() {
         let root = tempfile::tempdir().unwrap();
         let drafts =
             json!({"version": 1, "drafts": [{"key": "chat:a", "text": "Keep", "updatedAt": 1}]});
@@ -95,7 +89,6 @@ mod tests {
             json!({"version": 2, "drafts": []}),
             json!({"version": 1, "drafts": {}}),
             json!({"drafts": []}),
-            json!({"version": 1, "drafts": [{"text": "x".repeat(MAX_BYTES)}]}),
         ] {
             assert!(write(root.path(), &invalid).is_err());
         }
@@ -103,17 +96,16 @@ mod tests {
     }
 
     #[test]
-    fn reports_unreadable_and_oversized_files() {
+    fn keeps_drafts_of_any_size_and_reports_unreadable_files() {
         let root = tempfile::tempdir().unwrap();
+        // Past the 2.5 MB earlier releases kept.
+        let large = json!({"version": 1, "drafts": [{"key": "chat:a", "text": "x".repeat(3_000_000), "updatedAt": 1}]});
+        write(root.path(), &large).unwrap();
+        assert_eq!(read(root.path()).unwrap(), Some(large));
         std::fs::write(root.path().join(FILE), "{damaged").unwrap();
         assert_eq!(
             read(root.path()).unwrap_err(),
             "Saved drafts are unreadable."
-        );
-        std::fs::write(root.path().join(FILE), vec![b' '; MAX_BYTES + 1]).unwrap();
-        assert_eq!(
-            read(root.path()).unwrap_err(),
-            "Saved drafts exceed their size limit."
         );
     }
 }

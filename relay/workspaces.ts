@@ -6,7 +6,6 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,7 +18,6 @@ export const workspaceNameSchema = z
   .string()
   .trim()
   .min(1)
-  .max(80)
   .regex(/^[^\x00-\x1f\x7f]+$/);
 export const workspaceAdminInput = z
   .object({ name: workspaceNameSchema, role: workspaceRoleSchema })
@@ -39,7 +37,7 @@ const legacyRegistrySchema = z
   .object({
     version: z.literal(1),
     owner: ownerSchema.default({ name: 'Owner', role: 'admin' }),
-    workspaces: z.array(entrySchema).max(100),
+    workspaces: z.array(entrySchema),
   })
   .refine(
     (value) => new Set(value.workspaces.map((entry) => entry.id)).size === value.workspaces.length,
@@ -53,7 +51,7 @@ const registrySchema = z
   .object({
     version: z.literal(2),
     owner: ownerSchema,
-    workspaces: z.array(entrySchema.extend({ role: workspaceRoleSchema })).max(100),
+    workspaces: z.array(entrySchema.extend({ role: workspaceRoleSchema })),
   })
   .refine(
     (value) => new Set(value.workspaces.map((entry) => entry.id)).size === value.workspaces.length,
@@ -151,12 +149,6 @@ function createEntry(registry: Registry, name: string, role: WorkspaceRole, now:
       'create_member_first',
       'Create a member workspace and save its key before transferring administration to it.',
     );
-  if (registry.workspaces.length >= 100)
-    throw new WorkspaceAdminError(
-      409,
-      'workspace_limit',
-      'The server supports at most 100 additional workspaces.',
-    );
   const token = randomBytes(32).toString('base64url');
   const entry = entrySchema.parse({
     id: randomUUID(),
@@ -215,7 +207,6 @@ function disableEntry(registry: Registry, id: string) {
 function readRegistry(directory: string): Registry {
   const file = join(directory, 'workspaces.json');
   try {
-    if (statSync(file).size > 128_000) throw new Error();
     const value = JSON.parse(readFileSync(file, 'utf8'));
     if (value.version !== 1) return registrySchema.parse(value);
     const legacy = legacyRegistrySchema.parse(value);

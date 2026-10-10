@@ -6,8 +6,6 @@ use super::*;
 
 /// Claude's question tools, whose input holds the questions.
 const TOOLS: [&str; 2] = ["AskUserQuestion", "mcp__agent_studio__studio_ask_user"];
-/// The input a question call can hold, as `parse` accepts it.
-const INPUT_LIMIT: usize = 32_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +36,6 @@ impl Draft {
 }
 struct Writing {
     json: String,
-    full: bool,
     draft: Draft,
 }
 #[derive(Default)]
@@ -86,8 +83,7 @@ impl Drafts {
                 };
                 if block["type"] != "tool_use"
                     || !TOOLS.contains(&block["name"].as_str().unwrap_or_default())
-                    || !bounded(id, 240)
-                    || self.writing.len() + self.written.len() >= 16
+                    || !filled(id)
                 {
                     return vec![];
                 }
@@ -101,7 +97,6 @@ impl Drafts {
                     index,
                     Writing {
                         json: String::new(),
-                        full: false,
                         draft: draft.clone(),
                     },
                 );
@@ -114,11 +109,6 @@ impl Drafts {
                 ) else {
                     return vec![];
                 };
-                // Longer input is refused when the call arrives; the draft keeps what it showed.
-                if writing.full || writing.json.len() + text.len() > INPUT_LIMIT {
-                    writing.full = true;
-                    return vec![];
-                }
                 writing.json.push_str(text);
                 let Some(input) = partial(&writing.json) else {
                     return vec![];
@@ -150,41 +140,38 @@ impl Drafts {
     }
 }
 
-/// The questions an input holds so far, within the limits of a recorded request.
+/// The questions an input holds so far, each whole.
 fn questions(input: &Value) -> Vec<DraftQuestion> {
     input["questions"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|q| q.is_object())
-        .take(4)
         .map(|q| DraftQuestion {
-            header: text(&q["header"], 100),
-            question: text(&q["question"], 2000),
+            header: text(&q["header"]),
+            question: text(&q["question"]),
             options: q["options"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|o| {
-                    let label = text(&o["label"], 200);
+                    let label = text(&o["label"]);
                     (!label.trim().is_empty()).then(|| OptionItem {
                         label,
-                        description: text(&o["description"], 1000),
+                        description: text(&o["description"]),
                     })
                 })
-                .take(12)
                 .collect(),
             multi_select: q["multiSelect"].as_bool().unwrap_or(false),
         })
         .collect()
 }
-fn text(value: &Value, limit: usize) -> String {
+fn text(value: &Value) -> String {
     value
         .as_str()
         .unwrap_or_default()
         .chars()
         .filter(|c| *c != '\0')
-        .take(limit)
         .collect()
 }
 
@@ -564,13 +551,18 @@ mod tests {
         let closed = drafts.observe(&stream(json!({"type":"message_start","message":{}})));
         assert_eq!(closed.len(), 1);
         assert!(closed[0].closed && closed[0].id == "cut");
-        // Input past the limit stops updating the draft.
+        // Input of any length keeps updating the draft, past the 32,000 bytes earlier releases
+        // followed.
         drafts.observe(&start(0, "long", "AskUserQuestion"));
-        let text = format!(
-            r#"{{"questions":[{{"question":"{}"#,
-            "a".repeat(INPUT_LIMIT)
+        let long = "a".repeat(40_000);
+        let text = format!(r#"{{"questions":[{{"question":"{long}"#);
+        assert_eq!(
+            drafts.observe(&delta(0, &text))[0].questions[0].question,
+            long
         );
-        assert!(drafts.observe(&delta(0, &text)).is_empty());
-        assert!(drafts.observe(&delta(0, "b")).is_empty());
+        assert_eq!(
+            drafts.observe(&delta(0, "b"))[0].questions[0].question,
+            format!("{long}b")
+        );
     }
 }

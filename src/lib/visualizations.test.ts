@@ -68,23 +68,27 @@ it('persists and merges multiple visuals and stale events through a relay checkp
     3, 2,
   ]);
 });
-it('rejects paths, duplicates, oversized UTF-8 sources and user-message events', () => {
-  expect(visualizationSchema.safeParse({ ...visual, source: 'é'.repeat(256_001) }).success).toBe(
-    false,
-  );
+it('rejects paths, duplicates, empty sources and user-message events, never a size or count', () => {
+  for (const source of ['', '   ', 'a\0b'])
+    expect(visualizationSchema.safeParse({ ...visual, source }).success).toBe(false);
   expect(
     visualizationSchema.safeParse({ ...visual, source: undefined, path: '/secret.html' }).success,
   ).toBe(false);
   expect(visualizationsSchema.safeParse([visual, visual]).success).toBe(false);
+  // Sources of any size, and any number of visuals in a reply.
+  expect(visualizationSchema.safeParse({ ...visual, source: 'é'.repeat(256_001) }).success).toBe(
+    true,
+  );
   expect(
     visualizationsSchema.safeParse(
-      Array.from({ length: 5 }, (_, i) => ({
+      Array.from({ length: 13 }, (_, i) => ({
         ...visual,
         id: `v${i}`,
+        title: 't'.repeat(200),
         source: 'x'.repeat(500_000),
       })),
     ).success,
-  ).toBe(false);
+  ).toBe(true);
   const message = reply();
   message.role = 'user';
   applyRunEvent(message, { kind: 'visualization', visualization: visual });

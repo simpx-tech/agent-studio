@@ -3,7 +3,6 @@
   import {
     claudeInstructions,
     defaultClaudeInstructions,
-    maxClaudeInstructions,
     storedClaudeInstructions,
   } from '$lib/claude-instructions';
   let {
@@ -29,7 +28,7 @@
         : draft.trim()
           ? 'Custom instructions'
           : 'Off: Claude chats get no added instructions',
-      `${draft.length.toLocaleString()} / ${maxClaudeInstructions.toLocaleString()} characters`,
+      `${draft.length.toLocaleString()} characters`,
       ...(dirty ? ['Unsaved changes'] : []),
     ].join(' · '),
   );
@@ -65,7 +64,6 @@
     aria-label="Claude chat instructions"
     aria-describedby="claude-instructions-state"
     rows="6"
-    maxlength={maxClaudeInstructions}
     disabled={busy}
     placeholder="No instructions are added to Claude chats."
     bind:value={draft}

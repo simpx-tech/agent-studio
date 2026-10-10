@@ -267,7 +267,6 @@ async fn steering_requires_the_human_echo_and_kills_unconfirmed_input_at_complet
                 &first,
                 Some(&channel),
                 CancellationToken::new(),
-                None,
                 Some(&mut questions),
                 false,
             )
@@ -400,7 +399,6 @@ async fn stop_while_waiting_stops_only_declared_work_and_keeps_the_process() {
             &request,
             Some(&channel),
             cancel,
-            None,
             Some(&mut questions),
             false,
         ),
@@ -454,7 +452,6 @@ async fn a_message_takes_over_a_reply_that_only_waits_for_a_background_agent() {
             &first,
             Some(&channel),
             CancellationToken::new(),
-            None,
             Some(&mut questions),
             false,
         )
@@ -520,7 +517,6 @@ async fn a_message_takes_over_a_reply_that_only_waits_for_a_background_agent() {
             &next,
             Some(&channel),
             CancellationToken::new(),
-            None,
             Some(&mut next_questions),
             true,
         ),
@@ -723,7 +719,7 @@ async fn claude_settings_acknowledged_before_prompt_and_reused_without_restart()
 
 #[tokio::test]
 async fn claude_settings_failure_never_sends_the_prompt_or_reuses_partial_state() {
-    for mode in ["reject", "partial", "exit", "cancel", "timeout"] {
+    for mode in ["reject", "partial", "exit", "cancel", "wait"] {
         let root = tempfile::tempdir().unwrap();
         let conversation = uuid::Uuid::new_v4().to_string();
         let r = request(
@@ -754,7 +750,7 @@ async fn claude_settings_failure_never_sends_the_prompt_or_reuses_partial_state(
         r.agent.max_thinking_tokens = Some(4096);
         std::fs::write(
             root.path().join("settings-mode"),
-            if matches!(mode, "cancel" | "timeout") {
+            if matches!(mode, "cancel" | "wait") {
                 "hang"
             } else {
                 mode
@@ -764,10 +760,10 @@ async fn claude_settings_failure_never_sends_the_prompt_or_reuses_partial_state(
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let task = tokio::spawn(async move {
-            let result = stream_turn(&mut process, &r, None, cancel, None, None, true).await;
+            let result = stream_turn(&mut process, &r, None, cancel, None, true).await;
             (process, result)
         });
-        if matches!(mode, "cancel" | "timeout") {
+        if matches!(mode, "cancel" | "wait") {
             tokio::time::timeout(Duration::from_secs(10), async {
                 while !settings_input(root.path())
                     .iter()
@@ -778,25 +774,23 @@ async fn claude_settings_failure_never_sends_the_prompt_or_reuses_partial_state(
             })
             .await
             .unwrap();
-            if mode == "cancel" {
-                stop.cancel();
-            } else {
+            if mode == "wait" {
+                // No acknowledgement deadline: the reply waits for the CLI however long it
+                // takes, until the user stops it.
                 tokio::time::pause();
-                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::advance(Duration::from_secs(60 * 60)).await;
+                tokio::time::resume();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert!(!task.is_finished(), "settings have no deadline");
             }
+            stop.cancel();
         }
         let (mut process, result) = task.await.unwrap();
-        if mode == "timeout" {
-            tokio::time::resume();
-        }
-        if mode == "cancel" {
+        if matches!(mode, "cancel" | "wait") {
             assert_eq!(result.unwrap().0, "cancelled");
         } else {
             let error = result.unwrap_err();
             assert!(!error.contains("PRIVATE"));
-            if mode == "timeout" {
-                assert!(error.contains("30 seconds"));
-            }
         }
         assert!(!process.healthy);
         assert_eq!(process.claude_settings, before);
@@ -884,7 +878,6 @@ async fn turn(
             request,
             Some(&channel),
             cancel,
-            None,
             Some(&mut questions),
             reused,
         ),
@@ -1013,7 +1006,6 @@ async fn one_shot_runs_end_the_input_so_the_cli_exits_with_its_answer() {
                 &request,
                 None,
                 CancellationToken::new(),
-                Some(Duration::from_secs(20)),
                 None,
                 false,
             ),

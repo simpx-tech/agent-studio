@@ -32,7 +32,7 @@ pub struct UsageLimit {
     pub text: String,
 }
 
-/// The line as a reply shows it: one line of at most 500 characters.
+/// The line as a reply shows it: one line, whole.
 pub fn line(text: &str) -> Option<String> {
     let text: String = text
         .chars()
@@ -40,10 +40,7 @@ pub fn line(text: &str) -> Option<String> {
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(500)
-        .collect();
+        .join(" ");
     (!text.is_empty()).then_some(text)
 }
 
@@ -136,10 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn limit_lines_are_one_bounded_line_and_codex_needs_its_error_kind() {
+    fn limit_lines_are_one_whole_line_and_codex_needs_its_error_kind() {
         let long = format!("You've hit your limit\n\u{7}\t{}", "x".repeat(900));
         let text = claude(&synthetic(&long)).unwrap();
-        assert_eq!(text.chars().count(), 500);
+        assert_eq!(text.chars().count(), 922);
         assert!(text.starts_with("You've hit your limit x"));
         let limit = json!({"message":"You\u{2019}ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:05 PM.","codexErrorInfo":"usageLimitExceeded"});
         assert!(codex(&limit)

@@ -211,13 +211,22 @@ export function browserSessions(
     }
     attempt.count++;
     attempts.set(address, attempt);
+    // Pairing is read before any key is checked, so it keeps its size and idle limits. The idle
+    // limit ends with the read, leaving the connection to the proxy's keep-alive.
+    const idle = () => req.socket.destroy();
+    req.socket.setTimeout(30_000, idle);
     try {
       let bytes = 0;
       const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        bytes += chunk.length;
-        if (bytes > 4096) throw new Error('Invalid pairing request.');
-        chunks.push(chunk);
+      try {
+        for await (const chunk of req) {
+          bytes += chunk.length;
+          if (bytes > 4096) throw new Error('Invalid pairing request.');
+          chunks.push(chunk);
+        }
+      } finally {
+        req.socket.setTimeout(0);
+        req.socket.off('timeout', idle);
       }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const workspace =
@@ -234,10 +243,6 @@ export function browserSessions(
         return;
       }
       const sessions = store(workspace);
-      if (sessions.size() >= 1000) {
-        send(429, { error: 'Too many paired devices in this workspace.' });
-        return;
-      }
       const id =
         (workspace.id === 'owner' ? '' : workspace.id + '.') + randomBytes(32).toString('hex');
       try {

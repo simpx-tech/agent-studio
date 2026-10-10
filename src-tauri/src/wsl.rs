@@ -142,9 +142,7 @@ pub async fn resolve(
                 .creation_flags(0x08000000)
                 .kill_on_drop(true)
                 .stdin(std::process::Stdio::null());
-            let output =
-                tokio::time::timeout(std::time::Duration::from_secs(8), command.output()).await;
-            let Ok(Ok(output)) = output else {
+            let Ok(output) = command.output().await else {
                 continue;
             };
             if !output.status.success() {
@@ -226,7 +224,7 @@ fn names(bytes: &[u8]) -> Result<Vec<String>, String> {
         if name.is_empty() {
             continue;
         }
-        if name.chars().any(char::is_control) || name.chars().count() > 255 {
+        if name.chars().any(char::is_control) {
             return Err("WSL returned an invalid distribution name.".into());
         }
         if !result.iter().any(|n: &String| n.eq_ignore_ascii_case(name)) {
@@ -256,17 +254,14 @@ fn inventory(
 
 #[cfg(windows)]
 async fn list(args: &[&str]) -> Result<Option<Vec<String>>, String> {
-    use std::{process::Stdio, time::Duration};
+    use std::process::Stdio;
     let mut command = tokio::process::Command::new("wsl.exe");
     command
         .args(args)
         .stdin(Stdio::null())
         .creation_flags(0x08000000)
         .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
-        .await
-        .map_err(|_| "WSL discovery timed out. Refresh to retry.")?;
-    let output = match output {
+    let output = match command.output().await {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => {
             return Err("Cannot run WSL discovery. Check your Windows WSL installation.".into())
@@ -343,9 +338,9 @@ pub async fn installations(
             .creation_flags(0x08000000)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null());
-        let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output())
+        let output = command
+            .output()
             .await
-            .map_err(|_| "WSL CLI inspection timed out. Refresh to retry.")?
             .map_err(|_| "Could not inspect CLIs in this WSL distribution.")?;
         if !output.status.success() {
             return Err("WSL CLI inspection failed. Check that the distribution is available, then refresh.".into());

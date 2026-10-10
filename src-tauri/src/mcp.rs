@@ -7,9 +7,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fs::File, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs::File, path::Path, process::Stdio, sync::Arc};
 use tauri::Manager;
-use tokio::{io::AsyncWriteExt, sync::Mutex, time::Instant};
+use tokio::{io::AsyncWriteExt, sync::Mutex};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
@@ -88,22 +89,28 @@ struct Pending {
     provider: String,
     name: String,
     view: ResultView,
-    expires: Instant,
     oauth_completed: Option<bool>,
 }
+/// An operation's state, with what ends a request the CLI has not answered: Cancel and closing
+/// the app do not wait for the CLI.
+#[derive(Clone)]
+struct Operation {
+    scope: String,
+    cancel: CancellationToken,
+    pending: Arc<Mutex<Pending>>,
+}
 #[derive(Default)]
-pub struct Management(Mutex<HashMap<String, Arc<Mutex<Pending>>>>);
+pub struct Management(Mutex<HashMap<String, Operation>>);
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 200
         && name != "agent_studio"
         && !name.starts_with('-')
         && name.trim() == name
         && !name.chars().any(char::is_control)
 }
 fn safe_url(value: &str) -> bool {
-    if value.len() > 8192 || value.chars().any(char::is_control) {
+    if value.chars().any(char::is_control) {
         return false;
     }
     let Ok(url) = tauri::Url::parse(value) else {
@@ -118,10 +125,10 @@ fn safe_url(value: &str) -> bool {
 impl Server {
     fn value(&self) -> Result<Value, String> {
         match self {
-            Self::Http { url } | Self::Sse { url } if safe_url(url) && url.len() <= 4096 && tauri::Url::parse(url).is_ok_and(|u| u.fragment().is_none()) =>
+            Self::Http { url } | Self::Sse { url } if safe_url(url) && tauri::Url::parse(url).is_ok_and(|u| u.fragment().is_none()) =>
                 Ok(json!({"type":if matches!(self, Self::Http { .. }) { "http" } else { "sse" },"url":url})),
-            Self::Stdio { command, args } if args.len() <= 64 &&
-                std::iter::once(command).chain(args).all(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control)) =>
+            Self::Stdio { command, args } if
+                std::iter::once(command).chain(args).all(|s| !s.is_empty() && !s.chars().any(char::is_control)) =>
                 Ok(json!({"type":"stdio","command":command,"args":args})),
             _ => Err("Invalid MCP server. Use HTTPS or local HTTP, or a command with separate arguments.".into()),
         }
@@ -144,15 +151,11 @@ impl Action {
                 return Err("Invalid or reserved MCP server name".into())
             }
             Self::SetServers { servers } => {
-                if servers.len() > 20 || servers.keys().any(|s| !valid_name(s)) {
-                    return Err("Invalid session server names or too many servers".into());
+                if servers.keys().any(|s| !valid_name(s)) {
+                    return Err("Invalid session server names".into());
                 }
-                let mut total = 0;
                 for server in servers.values() {
-                    total += server.value()?.to_string().len();
-                    if total > 64_000 {
-                        return Err("Session server definitions exceed their size limit".into());
-                    }
+                    server.value()?;
                 }
             }
             Self::Add { server, .. } => {
@@ -209,12 +212,10 @@ fn observe(pending: &mut Pending, value: &Value) {
                 status(&params["status"])
             };
             pending.view.servers.retain(|s| s.name != name);
-            if pending.view.servers.len() < 200 {
-                pending.view.servers.push(ServerView {
-                    name: name.into(),
-                    status: status.into(),
-                });
-            }
+            pending.view.servers.push(ServerView {
+                name: name.into(),
+                status: status.into(),
+            });
         }
     }
 }
@@ -255,73 +256,56 @@ async fn request(pending: &mut Pending, method: &str, params: Value) -> Result<V
         json!({"id":id,"method":method,"params":params})
     };
     write(pending, value).await?;
-    let work = async {
-        loop {
-            let line = pending
-                .process
-                .as_mut()
-                .ok_or("MCP process is unavailable")?
-                .lines
-                .recv()
-                .await
-                .ok_or("The CLI exited before confirming the MCP request")?;
-            let Line::Out(line) = line else {
-                continue;
+    loop {
+        let line = pending
+            .process
+            .as_mut()
+            .ok_or("MCP process is unavailable")?
+            .lines
+            .recv()
+            .await
+            .ok_or("The CLI exited before confirming the MCP request")?;
+        let Line::Out(line) = line else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        observe(pending, &value);
+        if claude
+            && value["type"] == "control_response"
+            && value["response"]["request_id"] == request_id
+        {
+            return if value["response"]["subtype"] == "success" {
+                Ok(value["response"]["response"].clone())
+            } else {
+                Err("The CLI rejected this MCP action. Check server availability, policy, and CLI version.".into())
             };
-            if line.len() > 2_000_000 {
-                return Err("MCP response exceeded its limit".into());
-            }
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            observe(pending, &value);
-            if claude
-                && value["type"] == "control_response"
-                && value["response"]["request_id"] == request_id
-            {
-                return if value["response"]["subtype"] == "success" {
-                    Ok(value["response"]["response"].clone())
-                } else {
-                    Err("The CLI rejected this MCP action. Check server availability, policy, and CLI version.".into())
-                };
-            }
-            if !claude && value["id"] == id && value.get("method").is_none() {
-                return if value.get("error").is_some() {
-                    Err("The CLI rejected this MCP action. Check server availability, policy, and CLI version.".into())
-                } else {
-                    Ok(value["result"].clone())
-                };
-            }
-            // Management never approves tool execution or elicitation from a background server.
-            if claude && value["type"] == "control_request" {
-                if value["request"]["subtype"] == "mcp_message"
-                    && value["request"]["server_name"] == "agent_studio"
-                    && matches!(
-                        value["request"]["message"]["method"].as_str(),
-                        Some("initialize" | "notifications/initialized" | "ping" | "tools/list")
-                    )
-                {
-                    let response =
-                        crate::providers::visualize::Visualizer::default().claude_response(&value);
-                    write(pending, response).await?;
-                    continue;
-                }
-                write(pending, json!({"type":"control_response","response":{"subtype":"error","request_id":value["request_id"],"error":"Unavailable during MCP management"}})).await?;
-            } else if !claude && value.get("id").is_some() && value["method"].is_string() {
-                write(pending, json!({"id":value["id"],"error":{"code":-32601,"message":"Unavailable during MCP management"}})).await?;
-            }
         }
-    };
-    match tokio::time::timeout(Duration::from_secs(25), work).await {
-        Ok(result) => result,
-        Err(_) => {
-            if let Some(process) = &mut pending.process {
-                process.healthy = false;
+        if !claude && value["id"] == id && value.get("method").is_none() {
+            return if value.get("error").is_some() {
+                Err("The CLI rejected this MCP action. Check server availability, policy, and CLI version.".into())
+            } else {
+                Ok(value["result"].clone())
+            };
+        }
+        // Management never approves tool execution or elicitation from a background server.
+        if claude && value["type"] == "control_request" {
+            if value["request"]["subtype"] == "mcp_message"
+                && value["request"]["server_name"] == "agent_studio"
+                && matches!(
+                    value["request"]["message"]["method"].as_str(),
+                    Some("initialize" | "notifications/initialized" | "ping" | "tools/list")
+                )
+            {
+                let response =
+                    crate::providers::visualize::Visualizer::default().claude_response(&value);
+                write(pending, response).await?;
+                continue;
             }
-            Err(
-                "MCP request timed out; its outcome is unconfirmed. Refresh before retrying."
-                    .into(),
-            )
+            write(pending, json!({"type":"control_response","response":{"subtype":"error","request_id":value["request_id"],"error":"Unavailable during MCP management"}})).await?;
+        } else if !claude && value.get("id").is_some() && value["method"].is_string() {
+            write(pending, json!({"id":value["id"],"error":{"code":-32601,"message":"Unavailable during MCP management"}})).await?;
         }
     }
 }
@@ -332,7 +316,7 @@ async fn inventory(pending: &mut Pending) -> Result<(), String> {
         let list = result["mcpServers"]
             .as_array()
             .ok_or("MCP status is unavailable in this CLI version")?;
-        for server in list.iter().take(200) {
+        for server in list {
             if let Some(name) = server["name"].as_str().filter(|n| valid_name(n)) {
                 servers.push(ServerView {
                     name: name.into(),
@@ -343,11 +327,7 @@ async fn inventory(pending: &mut Pending) -> Result<(), String> {
     } else {
         let config = request(pending, "config/read", json!({"includeLayers":false})).await?;
         if let Some(configured) = config["config"]["mcp_servers"].as_object() {
-            for (name, settings) in configured
-                .iter()
-                .take(200)
-                .filter(|(name, _)| valid_name(name))
-            {
+            for (name, settings) in configured.iter().filter(|(name, _)| valid_name(name)) {
                 servers.push(ServerView {
                     name: name.clone(),
                     status: if settings["enabled"] == false {
@@ -376,7 +356,7 @@ async fn inventory(pending: &mut Pending) -> Result<(), String> {
             let list = result["data"]
                 .as_array()
                 .ok_or("MCP status is unavailable in this CLI version")?;
-            for server in list.iter().take(200usize.saturating_sub(servers.len())) {
+            for server in list {
                 if let Some(name) = server["name"].as_str().filter(|n| valid_name(n)) {
                     let state = if server["authStatus"] == "notLoggedIn" {
                         "needsAuth"
@@ -397,7 +377,7 @@ async fn inventory(pending: &mut Pending) -> Result<(), String> {
                 }
             }
             cursor = result["nextCursor"].clone();
-            if cursor.is_null() || servers.len() >= 200 || !seen.insert(cursor.to_string()) {
+            if cursor.is_null() || !seen.insert(cursor.to_string()) {
                 break;
             }
         }
@@ -533,24 +513,27 @@ impl Management {
             .map(|entries| !entries.is_empty())
             .unwrap_or(true)
     }
+    /// With `all`, ends every operation, cancelling requests the CLI has not answered;
+    /// otherwise drops the operations that have ended. A sign-in waits as long as it takes.
     pub async fn sweep(&self, app: &tauri::AppHandle, all: bool) {
         let entries: Vec<_> = self
             .0
             .lock()
             .await
             .iter()
-            .map(|(id, p)| (id.clone(), p.clone()))
+            .map(|(id, operation)| (id.clone(), operation.clone()))
             .collect();
-        for (id, entry) in entries {
+        for (id, operation) in entries {
             let mut pending = if all {
-                entry.lock().await
+                operation.cancel.cancel();
+                operation.pending.lock().await
             } else {
-                let Ok(pending) = entry.try_lock() else {
+                let Ok(pending) = operation.pending.try_lock() else {
                     continue;
                 };
                 pending
             };
-            if all || Instant::now() > pending.expires {
+            if all || pending.process.is_none() {
                 // An abandoned OAuth flow must not continue in a parked process.
                 pending.pooled = false;
                 finish(app, &mut pending).await;
@@ -595,21 +578,26 @@ pub async fn manage(
         | Action::Cancel { operation_id }
         | Action::Callback { operation_id, .. } = &action
         {
-            let entry = state
+            let operation = state
                 .0
                 .lock()
                 .await
                 .get(operation_id)
                 .cloned()
-                .ok_or("This MCP sign-in expired. Start again.")?;
-            let mut pending = if matches!(action, Action::Cancel { .. }) {
-                entry.lock().await
-            } else {
-                entry.try_lock().map_err(|_| "This MCP operation is busy")?
-            };
-            if pending.scope != scope {
+                .ok_or("This MCP sign-in ended. Start again.")?;
+            if operation.scope != scope {
                 return Err("MCP operation belongs to another selection".into());
             }
+            let mut pending = if matches!(action, Action::Cancel { .. }) {
+                // A request the CLI has not answered ends now rather than holding the sign-in.
+                operation.cancel.cancel();
+                operation.pending.lock().await
+            } else {
+                operation
+                    .pending
+                    .try_lock()
+                    .map_err(|_| "This MCP operation is busy")?
+            };
             if pending.process.is_none() {
                 return Ok(pending.view.clone());
             }
@@ -620,7 +608,7 @@ pub async fn manage(
                     "Sign-in cancelled. Refresh to check the server's current state.".into();
                 finish(&app, &mut pending).await;
             } else {
-                let result = async {
+                let work = async {
                     if pending.cli_login {
                         let exit = pending
                             .process
@@ -646,8 +634,14 @@ pub async fn manage(
                         request(&mut pending, "mcp_reconnect", json!({"serverName":name})).await?;
                     }
                     inventory(&mut pending).await
-                }
-                .await;
+                };
+                let result = tokio::select! {
+                    result = work => result,
+                    _ = operation.cancel.cancelled() => {
+                        pending.pooled = false;
+                        Err("MCP sign-in cancelled".to_string())
+                    }
+                };
                 let completed = if provider == "codex" || pending.cli_login {
                     pending.oauth_completed
                 } else if pending
@@ -686,13 +680,8 @@ pub async fn manage(
         }
         // Serialize by exact selection, including while an OAuth browser is open.
         let mut registry = state.0.lock().await;
-        if registry.len() >= 32 {
-            return Err("Too many MCP operations. Wait for earlier operations to expire.".into());
-        }
-        let mut active = 0;
-        for entry in registry.values() {
-            if let Ok(p) = entry.try_lock() {
-                active += usize::from(p.process.is_some());
+        for operation in registry.values() {
+            if let Ok(p) = operation.pending.try_lock() {
                 if p.scope == scope && p.process.is_some() {
                     return Err("Finish or cancel this selection's MCP sign-in first".into());
                 }
@@ -700,15 +689,11 @@ pub async fn manage(
                 return Err("Another MCP request is busy. Try again shortly.".into());
             }
         }
-        if active >= 4 {
-            return Err(
-                "Four MCP sign-ins are already waiting. Finish or cancel one first.".into(),
-            );
-        }
         let operation_id = uuid::Uuid::new_v4().to_string();
+        let cancel = CancellationToken::new();
         let entry = Arc::new(Mutex::new(Pending {
             cli_login: false,
-            scope,
+            scope: scope.clone(),
             conversation: conversation_id.clone(),
             process: None,
             _lock: None,
@@ -716,22 +701,34 @@ pub async fn manage(
             provider: provider.clone(),
             name: String::new(),
             view: ResultView::default(),
-            expires: Instant::now() + Duration::from_secs(300),
             oauth_completed: None,
         }));
-        registry.insert(operation_id.clone(), entry.clone());
+        registry.insert(
+            operation_id.clone(),
+            Operation {
+                scope,
+                cancel: cancel.clone(),
+                pending: entry.clone(),
+            },
+        );
         // Lock before releasing the registry so concurrent starts cannot pass the reservation.
         let mut pending = entry.lock().await;
         drop(registry);
-        let result = perform(
-            &app,
-            &mut pending,
-            &provider,
-            conversation_id.as_deref(),
-            location.as_ref(),
-            &action,
-        )
-        .await;
+        let result = tokio::select! {
+            result = perform(
+                &app,
+                &mut pending,
+                &provider,
+                conversation_id.as_deref(),
+                location.as_ref(),
+                &action,
+            ) => result,
+            _ = cancel.cancelled() => {
+                // A request left unanswered leaves the CLI's protocol state unknown.
+                pending.pooled = false;
+                Err("MCP operation cancelled".into())
+            }
+        };
         match result {
             Ok(()) if pending.view.status == "pending" => {
                 pending.view.operation_id = Some(operation_id);
@@ -914,7 +911,7 @@ async fn perform(
                 request(
                     pending,
                     "mcpServer/oauth/login",
-                    json!({"name":name,"threadId":thread,"timeoutSecs":300}),
+                    json!({"name":name,"threadId":thread}),
                 )
                 .await?
             } else {
@@ -1030,9 +1027,9 @@ async fn save_change(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "Could not start the MCP command")?;
-    let result = tokio::time::timeout(Duration::from_secs(25), child.wait()).await;
+    let result = child.wait().await;
     exe.kill(&mut child).await;
-    Ok(if matches!(result, Ok(Ok(status)) if status.success()) {
+    Ok(if matches!(result, Ok(status) if status.success()) {
         Ok(())
     } else {
         Err("The CLI did not confirm the saved MCP change. Check its version and server configuration.".into())
@@ -1113,14 +1110,13 @@ mod tests {
                 provider: provider.into(),
                 name: "docs".into(),
                 view: ResultView::default(),
-                expires: Instant::now() + Duration::from_secs(300),
                 oauth_completed: None,
             },
             dir,
         )
     }
     #[test]
-    fn rejects_unbounded_or_executable_auth_links_and_reserved_servers() {
+    fn rejects_executable_auth_links_and_reserved_servers() {
         for url in [
             "javascript:alert(1)",
             "file:///tmp/test",
@@ -1132,6 +1128,11 @@ mod tests {
         }
         assert!(safe_url("https://example.com/authorize?state=abc"));
         assert!(safe_url("http://localhost:1234/callback?code=abc"));
+        // Any length, past the 8,192 characters earlier releases accepted.
+        assert!(safe_url(&format!(
+            "https://example.com/authorize?state={}",
+            "a".repeat(10_000)
+        )));
         for name in ["agent_studio", "--help", "docs\nserver", ""] {
             assert!(Action::Authenticate { name: name.into() }
                 .validate("claude")
@@ -1151,6 +1152,22 @@ mod tests {
             json!({"type":"http","url":"https://example.com","headers":{"Authorization":"secret"}})
         )
         .is_err());
+        // Any number of session servers, arguments and names of any length, past the 20 servers,
+        // 64,000 bytes, 64 arguments and 200-character names earlier releases accepted.
+        let servers = (0..25)
+            .map(|index| {
+                (
+                    format!("server{index}-{}", "n".repeat(250)),
+                    Server::Stdio {
+                        command: "tool".into(),
+                        args: (0..70)
+                            .map(|arg| format!("{arg}{}", "a".repeat(100)))
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        assert!(Action::SetServers { servers }.validate("claude").is_ok());
     }
     #[test]
     fn saved_commands_keep_arguments_as_data_and_use_selected_profile_user_scope() {

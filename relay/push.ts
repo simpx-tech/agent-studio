@@ -1,13 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
-import {
-  closeSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import webpush from 'web-push';
 import { z } from 'zod';
@@ -84,7 +76,7 @@ const base64 = (length: number) =>
     .regex(/^[a-zA-Z0-9_-]+={0,2}$/)
     .refine((s) => Buffer.from(s, 'base64url').length === length);
 export const subscriptionSchema = z.object({
-  endpoint: z.string().max(4096).refine(validPushEndpoint),
+  endpoint: z.string().refine(validPushEndpoint),
   expirationTime: z.number().nullable().optional(),
   keys: z.object({
     p256dh: base64(65).refine((s) => Buffer.from(s, 'base64url')[0] === 4),
@@ -141,7 +133,7 @@ const diskSchema = z.object({
   version: z.literal(1),
   keyId: z.string(),
   keys: z.object({ publicKey: base64(65), privateKey: base64(32) }),
-  subscribers: z.array(subscriberSchema).max(1000),
+  subscribers: z.array(subscriberSchema),
   seen: z.array(z.tuple([z.string().max(120), z.number()])).max(4000),
   // An alert this version cannot read is dropped rather than making the whole file, and
   // with it the workspace's notifications, unreadable.
@@ -289,7 +281,6 @@ export function pushService({
     unavailable = false;
   }
   try {
-    if (statSync(file).size > 10_000_000) throw new Error();
     state = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
     saved = JSON.stringify(state);
     if (state.keyId !== keyId)
@@ -568,7 +559,6 @@ export function pushService({
           views.delete(id);
       const old = views.get(source);
       if (old && revision <= old.revision) return;
-      if (!old && views.size >= 1000) throw new Error('Notification view limit reached.');
       views.set(source, { revision, conversationId, seenAt: now(), session });
       if (!conversationId || (session && !sessionActive(session))) return;
       // Newest last, so the oldest records are the ones this bounded map drops.
@@ -674,8 +664,6 @@ export function pushService({
       const subscription = subscriptionSchema.parse(value);
       const next = pruned();
       const existing = next.subscribers.find((s) => s.session === session);
-      if (!existing && next.subscribers.length >= 1000)
-        throw new Error('Notification device limit reached.');
       // Re-pairing the same browser replaces ownership without duplicating pushes.
       next.subscribers = next.subscribers.filter(
         (s) => s.session !== session && s.subscription.endpoint !== subscription.endpoint,
@@ -703,8 +691,6 @@ export function pushService({
       const next = pruned();
       const subscriber = next.subscribers.find((s) => s.session === session);
       if (!subscriber) throw new Error('Enable notifications on this device first.');
-      if (subscriber.testAt > now() - 30_000)
-        throw new Error('Wait 30 seconds before sending another test.');
       next.subscribers = next.subscribers.map((s) =>
         s.id === subscriber.id ? { ...s, testAt: now() } : s,
       );

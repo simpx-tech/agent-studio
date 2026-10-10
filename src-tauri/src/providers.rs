@@ -3,7 +3,6 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -77,7 +76,6 @@ pub(crate) fn unexpected_fields(args: &serde_json::Value, accepted: &[&str]) -> 
             object
                 .keys()
                 .filter(|key| !accepted.contains(&key.as_str()))
-                .take(5)
                 .cloned()
                 .collect()
         })
@@ -238,7 +236,7 @@ pub struct ProviderStatus {
     pub detail: String,
     pub location: Option<String>,
     // The signed-in identity the CLI itself reports (Claude's account email). It is
-    // bounded session metadata for recognising an already connected login, never a credential.
+    // session metadata for recognising an already connected login, never a credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// Why a separate Claude profile that shares this computer's Claude directory is not linked
@@ -253,18 +251,12 @@ pub struct ProviderStatus {
     pub sharing_permission: bool,
 }
 async fn output(exe: &Executable, args: &[&str]) -> Result<std::process::Output, String> {
-    let result = tokio::time::timeout(
-        Duration::from_secs(15),
-        exe.command().args(args).stdin(Stdio::null()).output(),
-    )
-    .await
-    .map_err(|_| "CLI check timed out".to_string());
-    if result.is_err() {
-        if let Some(wsl) = &exe.wsl {
-            wsl.cancel().await;
-        }
-    }
-    result?.map_err(|_| "Could not start the CLI".to_string())
+    exe.command()
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|_| "Could not start the CLI".to_string())
 }
 #[derive(Debug, PartialEq)]
 enum LoginCheck {
@@ -312,14 +304,11 @@ async fn check_gemini_login(
     let mut diagnostics = String::new();
     let mut out_done = false;
     let mut err_done = false;
-    let deadline = tokio::time::sleep(Duration::from_secs(20));
-    tokio::pin!(deadline);
     loop {
         tokio::select! {
             _ = cancel.cancelled() => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
-            _ = &mut deadline => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
             line = stdout.next_line(), if !out_done => match line {
-                Ok(Some(line)) if text.len() + line.len() < 512_000 => {
+                Ok(Some(line)) => {
                     if gemini_login_result(false, &line, "") == LoginCheck::Login {
                         exe.kill(&mut child).await;
                         return LoginCheck::Login;
@@ -337,7 +326,7 @@ async fn check_gemini_login(
                         exe.kill(&mut child).await;
                         return LoginCheck::Login;
                     }
-                    if diagnostics.len() < 16_000 { diagnostics.push_str(&line); diagnostics.push('\n'); }
+                    diagnostics.push_str(&line); diagnostics.push('\n');
                 },
                 Ok(None) => err_done = true,
                 Err(_) => { exe.kill(&mut child).await; return LoginCheck::Unknown; }
@@ -383,13 +372,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
         .await
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .chars()
-                .take(100)
-                .collect()
-        });
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     s.detail = "Installed. Send a message to verify your login.".into();
     if id == "gemini" {
         let (auth, detail) = match check_gemini_login(&exe, &tokio_util::sync::CancellationToken::new()).await {
@@ -442,14 +425,14 @@ pub(crate) async fn claude_organization() -> Option<String> {
         .map(String::from)
 }
 // `claude auth status` reports whether the selected configuration directory is signed in and,
-// when it is, the account email. Only that bounded identity is kept; tokens are never read.
+// when it is, the account email. Only that identity is kept; tokens are never read.
 fn claude_login(status: &serde_json::Value) -> (bool, Option<String>) {
     let ready = status["loggedIn"].as_bool().unwrap_or(false);
     let account = status["email"]
         .as_str()
         .map(str::trim)
         .filter(|email| ready && !email.is_empty())
-        .map(|email| email.chars().take(200).collect());
+        .map(String::from);
     (ready, account)
 }
 #[derive(Clone, Deserialize)]
@@ -532,7 +515,6 @@ pub struct ChatMessage {
     pub visualizations: Vec<visualize::Visualization>,
 }
 mod images;
-pub(crate) use images::MAX_IMAGES_PER_MESSAGE;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.agent.fast_mode.is_some() || self.agent.fallback_model.is_some() {
@@ -546,25 +528,18 @@ impl RunRequest {
                 let pattern =
                     regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*(?:\[1m\])?$").unwrap();
                 let unique: std::collections::HashSet<_> = models.iter().collect();
-                if value.len() > 302
-                    || models.len() > 3
-                    || unique.len() != models.len()
-                    || models.iter().any(|m| m.len() > 100 || !pattern.is_match(m))
-                {
-                    return Err("Enter up to three distinct fallback model aliases or IDs, separated by commas.".into());
+                if unique.len() != models.len() || models.iter().any(|m| !pattern.is_match(m)) {
+                    return Err(
+                        "Enter distinct fallback model aliases or IDs, separated by commas.".into(),
+                    );
                 }
             }
         }
-        if let Some(tokens) = self.agent.max_thinking_tokens {
-            if self.conversation_only || self.agent.provider != "claude" {
-                return Err("A thinking-token budget is available only for Claude chats.".into());
-            }
-            if tokens != 0 && !(1024..=128_000).contains(&tokens) {
-                return Err(
-                    "Claude thinking budget must be 0 (off) or between 1,024 and 128,000 tokens."
-                        .into(),
-                );
-            }
+        // Any budget goes to the CLI, which reports the range its model accepts.
+        if self.agent.max_thinking_tokens.is_some()
+            && (self.conversation_only || self.agent.provider != "claude")
+        {
+            return Err("A thinking-token budget is available only for Claude chats.".into());
         }
         if let Some(schema) = &self.agent.output_schema {
             if self.conversation_only || !matches!(self.agent.provider.as_str(), "claude" | "codex")
@@ -581,14 +556,8 @@ impl RunRequest {
         {
             return Err("Plan mode is available only for Claude and Codex chats.".into());
         }
-        if self
-            .agent
-            .auto_compact_tokens
-            .is_some_and(|n| !(100_000..=1_000_000).contains(&n))
-        {
-            return Err(
-                "Claude auto-compaction size must be between 100,000 and 1,000,000 tokens.".into(),
-            );
+        if self.agent.auto_compact_tokens == Some(0) {
+            return Err("Claude auto-compaction size must be a positive number of tokens.".into());
         }
         if self.compact
             && (self.conversation_only
@@ -596,7 +565,6 @@ impl RunRequest {
                 || !matches!(self.agent.provider.as_str(), "claude" | "codex")
                 || !self.messages.last().is_some_and(|m| {
                     m.role == "user"
-                        && m.text.chars().count() <= 30_000
                         && m.images.is_empty()
                         && m.skills.is_empty()
                         && m.mentions.is_empty()
@@ -633,27 +601,16 @@ impl RunRequest {
         if !valid_provider(&self.agent.provider) {
             return Err("Unknown provider".into());
         }
-        if self.messages.is_empty() || self.messages.len() > 200 {
-            return Err(
-                "Conversations support up to 200 messages. Start a new conversation to continue."
-                    .into(),
-            );
-        }
-        if self.agent.model.len() > 100
-            || self.agent.model.starts_with('-')
-            || self.agent.model.chars().any(char::is_control)
-        {
+        if self.agent.model.starts_with('-') || self.agent.model.chars().any(char::is_control) {
             return Err("Invalid model name".into());
-        }
-        if self.agent.instructions.len() > 64000 {
-            return Err("Agent instructions are too long".into());
         }
         if let Some(text) = &self.claude_instructions {
             if self.conversation_only || self.agent.provider != "claude" {
                 return Err("Claude chat instructions apply only to Claude chats.".into());
             }
-            if text.chars().count() > 4000 || text.contains('\0') {
-                return Err("Claude chat instructions must be at most 4,000 characters.".into());
+            // A command-line argument cannot carry a null character.
+            if text.contains('\0') {
+                return Err("Claude chat instructions cannot contain a null character.".into());
             }
         }
         let allowed: &[&str] = match self.agent.provider.as_str() {
@@ -674,24 +631,10 @@ impl RunRequest {
         {
             return Err("Invalid message role".into());
         }
-        if self.messages.iter().map(|m| m.text.len()).sum::<usize>() > 400_000 {
-            return Err("Conversation is too large. Start a new conversation.".into());
-        }
-        if self
-            .messages
-            .iter()
-            .flat_map(|m| &m.visualizations)
-            .map(|v| v.source.len())
-            .sum::<usize>()
-            > 8_000_000
-        {
-            return Err("Visualization history is too large. Start a new conversation.".into());
-        }
         for message in &self.messages {
             if !message.mentions.is_empty()
                 && (!self.uses_codex_server()
                     || message.role != "user"
-                    || message.mentions.len() > 16
                     || message.mentions.iter().any(|m| {
                         !crate::mentions::valid(m)
                             || !crate::mentions::has_token(&message.text, &m.token)
@@ -709,16 +652,13 @@ impl RunRequest {
             if !message.skills.is_empty()
                 && (!self.uses_codex_server()
                     || message.role != "user"
-                    || message.skills.len() > 4
                     || message.skills.iter().any(|skill| {
                         skill.name.is_empty()
-                            || skill.name.len() > 200
                             || !skill
                                 .name
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
                             || skill.path.is_empty()
-                            || skill.path.len() > 4096
                             || skill.path.chars().any(char::is_control)
                     }))
             {
@@ -734,9 +674,6 @@ impl RunRequest {
                 return Err(
                     "Image attachments are available only in Codex and Claude user messages".into(),
                 );
-            }
-            if message.images.len() > images::MAX_IMAGES_PER_MESSAGE {
-                return Err("Attach up to 16 images per message".into());
             }
             for image in &message.images {
                 image.validate()?;
@@ -759,24 +696,6 @@ impl RunRequest {
     }
     pub fn uses_claude_visualizer(&self) -> bool {
         self.agent.provider == "claude" && self.tools_enabled()
-    }
-    pub fn output_line_limit(&self) -> usize {
-        // Providers can echo visual input in user-message lifecycle events.
-        // Retain the text limit plus only already-validated visual payloads.
-        2_000_000
-            + self
-                .messages
-                .iter()
-                .flat_map(|m| &m.images)
-                .map(images::ChatImage::encoded_len)
-                .sum::<usize>()
-            + self
-                .messages
-                .iter()
-                .flat_map(|m| &m.visualizations)
-                .map(|v| serde_json::to_string(v).map_or(0, |s| s.len()))
-                .sum::<usize>()
-                * 2
     }
     pub fn prompt(&self) -> String {
         // Image bytes are separate visual inputs, never text tokens or shell paths.
@@ -1400,6 +1319,7 @@ pub async fn terminal_sign_in(directory: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     #[cfg(windows)]
     #[tokio::test]
     async fn desktop_connections_never_probe_wsl_even_when_the_cli_is_missing() {
@@ -1563,6 +1483,8 @@ mod tests {
             assert!(!args.iter().any(|a| a == "--fallback-model"));
         }
         r.agent.fast_mode = None;
+        // Any number of fallbacks of any length: the CLI reports what it cannot use.
+        let long = "a".repeat(500);
         for fallback in [
             "sonnet",
             "sonnet,haiku",
@@ -1570,6 +1492,8 @@ mod tests {
             "claude-opus-4-8[1m]",
             "us.anthropic.claude-sonnet-4-6-v1:0",
             "claude-sonnet-4-5@20250929",
+            "a,b,c,d,e",
+            &long,
         ] {
             r.agent.fallback_model = Some(fallback.into());
             r.validate().unwrap();
@@ -1582,12 +1506,10 @@ mod tests {
             "",
             "sonnet,",
             "sonnet,sonnet",
-            "a,b,c,d",
             "--flag",
             "$(echo)",
             "sonnet\nhaiku",
             "sonnet, haiku",
-            &"a".repeat(101),
         ] {
             r.agent.fallback_model = Some(fallback.into());
             assert!(r.validate().is_err(), "accepted {fallback}");
@@ -1637,12 +1559,10 @@ mod tests {
             let c = chat_command(&r, root.path(), &exe).await.unwrap();
             assert!(!c.as_std().get_args().any(|a| a == "--append-system-prompt"));
         }
-        r.claude_instructions = Some("é".repeat(4000));
+        r.claude_instructions = Some("é".repeat(100_000));
         r.validate().unwrap();
-        for invalid in ["é".repeat(4001), "null\0".into()] {
-            r.claude_instructions = Some(invalid);
-            assert!(r.validate().is_err());
-        }
+        r.claude_instructions = Some("null\0".into());
+        assert!(r.validate().is_err());
         r.claude_instructions = Some(text.into());
         r.conversation_only = true;
         assert!(r.validate().is_err());
@@ -1764,11 +1684,14 @@ mod tests {
             .as_std()
             .get_args()
             .any(|a| a == "--autocompact"));
-        r.agent.auto_compact_tokens = Some(99_999);
-        assert!(r.validate().is_err());
-        r.agent.auto_compact_tokens = Some(1_000_001);
-        assert!(r.validate().is_err());
         r.conversation_only = false;
+        // Any positive size reaches the CLI, which reports the sizes its model accepts.
+        for tokens in [1, 99_999, 1_000_001, 5_000_000] {
+            r.agent.auto_compact_tokens = Some(tokens);
+            r.validate().unwrap();
+        }
+        r.agent.auto_compact_tokens = Some(0);
+        assert!(r.validate().is_err());
         r.agent.auto_compact_tokens = None;
         r.compact = true;
         assert!(r.validate().is_err());
@@ -2211,7 +2134,7 @@ mod tests {
             (true, None)
         );
         let long = serde_json::json!({"loggedIn": true, "email": "a".repeat(300)});
-        assert_eq!(claude_login(&long).1.map(|s| s.len()), Some(200));
+        assert_eq!(claude_login(&long).1.map(|s| s.len()), Some(300));
     }
     #[test]
     fn gemini_login_requires_a_successful_account_check() {

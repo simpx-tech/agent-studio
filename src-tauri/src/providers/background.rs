@@ -9,15 +9,11 @@ use std::collections::HashMap;
 pub const TOOL: &str = "await_background_tasks";
 const CLAUDE_NAME: &str = "mcp__agent_studio__await_background_tasks";
 pub const DESCRIPTION: &str = "Keep your reply open while you wait for background tasks you started. Agent Studio tells the user that a reply is finished when your turn ends, so call this right before ending a turn in which you wait for finite background work whose results you still need: tests, builds, type checks, installs, migrations or CI polling started with run_in_background or Monitor. Pass their IDs in task_ids, then end your turn: you are re-invoked when each task finishes, and the reply completes after your final turn. Never pass servers, watchers or an app you launched for the user to try; they keep running after the reply ends. Background agents and workflows are awaited automatically.";
-const MAX_IDS: usize = 8;
-const MAX_TASKS: usize = 256;
-const MAX_AWAITED: usize = 32;
-const MAX_REQUESTS: usize = 16;
 
 pub fn tool() -> Value {
     json!({"name":TOOL,"description":DESCRIPTION,"inputSchema":{
-        "type":"object","properties":{"task_ids":{"type":"array","minItems":1,"maxItems":MAX_IDS,
-            "items":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"},
+        "type":"object","properties":{"task_ids":{"type":"array","minItems":1,
+            "items":{"type":"string","minLength":1,"pattern":"^[A-Za-z0-9_-]+$"},
             "description":"IDs of running background tasks from this reply, as reported when each started."}},
         "required":["task_ids"],"additionalProperties":false},
         "annotations":{"readOnlyHint":true},
@@ -54,11 +50,8 @@ impl AwaitedTasks {
             "assistant" if parent => {
                 self.turn_started();
                 for block in blocks {
-                    if block["type"] == "tool_use"
-                        && block["name"] == CLAUDE_NAME
-                        && self.requests.len() < MAX_REQUESTS
-                    {
-                        if let Some(id) = bounded(&block["id"], 240) {
+                    if block["type"] == "tool_use" && block["name"] == CLAUDE_NAME {
+                        if let Some(id) = filled(&block["id"]) {
                             self.requests.insert(id, block["input"].clone());
                         }
                     }
@@ -108,23 +101,16 @@ impl AwaitedTasks {
         }
     }
     fn started(&mut self, value: &Value) {
-        let (Some(id), Some(call)) = (
-            bounded(&value["task_id"], 64),
-            bounded(&value["tool_use_id"], 240),
-        ) else {
+        let (Some(id), Some(call)) = (filled(&value["task_id"]), filled(&value["tool_use_id"]))
+        else {
             return;
         };
-        if self.tasks.len() >= MAX_TASKS {
-            self.tasks.retain(|_, task| task.running);
-        }
-        if self.tasks.len() < MAX_TASKS {
-            let task = Task {
-                call,
-                background: false,
-                running: true,
-            };
-            self.tasks.insert(id, task);
-        }
+        let task = Task {
+            call,
+            background: false,
+            running: true,
+        };
+        self.tasks.insert(id, task);
     }
     fn finished(&mut self, value: &Value, status: Option<&str>) {
         let (Some(id), Some(status)) = (value["task_id"].as_str(), status) else {
@@ -147,7 +133,7 @@ impl AwaitedTasks {
         if !text.trim_start().starts_with("<task-notification>") {
             return;
         }
-        for part in text.split("<task-id>").skip(1).take(16) {
+        for part in text.split("<task-id>").skip(1) {
             if let Some(id) = part.split("</task-id>").next() {
                 self.awaited.remove(id.trim());
             }
@@ -208,17 +194,13 @@ impl AwaitedTasks {
         let Some(ids) = task_ids(arguments) else {
             return (
                 true,
-                "Provide task_ids with one to eight background task IDs.".into(),
+                "Provide task_ids with one or more background task IDs.".into(),
             );
         };
         let (mut waiting, mut finished, mut unknown) = (vec![], vec![], vec![]);
         for id in ids {
             match self.tasks.get(&id) {
-                Some(task)
-                    if task.running
-                        && task.background
-                        && (self.awaited.len() < MAX_AWAITED || self.awaited.contains_key(&id)) =>
-                {
+                Some(task) if task.running && task.background => {
                     self.awaited.insert(id.clone(), false);
                     waiting.push(id);
                 }
@@ -244,7 +226,6 @@ impl AwaitedTasks {
                 .map(|(id, _)| id.as_str())
                 .collect();
             running.sort_unstable();
-            running.truncate(MAX_IDS);
             text.push(format!(
                 "Not a running background task started in this reply: {}. Running background tasks: {}.",
                 unknown.join(", "),
@@ -255,11 +236,8 @@ impl AwaitedTasks {
     }
 }
 
-fn bounded(value: &Value, max: usize) -> Option<String> {
-    value
-        .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= max)
-        .map(String::from)
+fn filled(value: &Value) -> Option<String> {
+    value.as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
 fn task_ids(arguments: &Value) -> Option<Vec<String>> {
@@ -267,12 +245,11 @@ fn task_ids(arguments: &Value) -> Option<Vec<String>> {
     let ids = object
         .get("task_ids")?
         .as_array()
-        .filter(|ids| (1..=MAX_IDS).contains(&ids.len()))?;
+        .filter(|ids| !ids.is_empty())?;
     let mut valid: Vec<String> = vec![];
     for id in ids {
         let id = id.as_str().filter(|id| {
             !id.is_empty()
-                && id.len() <= 64
                 && id
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -410,7 +387,6 @@ mod tests {
             .starts_with("Already finished: tests."));
         for input in [
             json!({"task_ids":[]}),
-            json!({"task_ids":["a","b","c","d","e","f","g","h","i"]}),
             json!({"task_ids":["bad id"]}),
             json!({"task_ids":["tests"],"extra":true}),
             json!({"task_ids":"tests"}),
@@ -429,6 +405,21 @@ mod tests {
         assert_eq!(tool["name"], TOOL);
         assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
-        assert_eq!(tool["inputSchema"]["properties"]["task_ids"]["maxItems"], 8);
+        assert!(tool["inputSchema"]["properties"]["task_ids"]
+            .get("maxItems")
+            .is_none());
+    }
+
+    #[test]
+    fn a_reply_waits_for_any_number_of_declared_tasks() {
+        // Past the 8 IDs a call and 32 tasks a reply earlier releases took.
+        let mut state = AwaitedTasks::default();
+        let ids: Vec<String> = (0..40).map(|i| format!("task_{i}")).collect();
+        for (index, id) in ids.iter().enumerate() {
+            launch(&mut state, id, &format!("call{index}"));
+        }
+        let accepted = declare(&mut state, "await", json!({ "task_ids": ids }));
+        assert_eq!(accepted["isError"], false);
+        assert_eq!(state.running().count(), 40);
     }
 }

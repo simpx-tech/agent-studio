@@ -4,9 +4,8 @@ import { mcpRequestSchema } from './mcp.ts';
 const text = z
   .string()
   .min(1)
-  .max(4096)
   .refine((s) => s.trim() === s && !/[\x00-\x1f\x7f]/.test(s));
-const id = text.refine((s) => s.length <= 200 && !s.startsWith('-'));
+const id = text.refine((s) => !s.startsWith('-'));
 const path = text.refine(
   (s) => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(s),
   'Use an absolute path on the selected computer.',
@@ -25,9 +24,9 @@ export const pluginActionSchema = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('runtime'),
-      pluginDirs: z.array(path).max(8),
-      pluginUrls: z.array(url).max(8),
-      skillRoots: z.array(path).max(8),
+      pluginDirs: z.array(path),
+      pluginUrls: z.array(url),
+      skillRoots: z.array(path),
     })
     .strict(),
   z
@@ -35,7 +34,7 @@ export const pluginActionSchema = z.discriminatedUnion('kind', [
       kind: z.literal('eval'),
       id,
       operationId: z.string().uuid(),
-      maxCostUsd: z.number().finite().min(0.01).max(100),
+      maxCostUsd: z.number().finite().positive(),
       trusted: z.literal(true),
     })
     .strict(),

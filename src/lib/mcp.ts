@@ -3,14 +3,12 @@ import { z } from 'zod';
 const name = z
   .string()
   .min(1)
-  .max(200)
   .refine(
     (s) =>
       s.trim() === s && !s.startsWith('-') && !/[\x00-\x1f\x7f]/.test(s) && s !== 'agent_studio',
   );
 const endpoint = z
   .string()
-  .max(4096)
   .url()
   .refine((value) => {
     const url = new URL(value);
@@ -25,12 +23,11 @@ const endpoint = z
 const text = z
   .string()
   .min(1)
-  .max(4096)
   .refine((s) => !/[\x00-\x1f]/.test(s));
 export const mcpServerSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('http'), url: endpoint }).strict(),
   z.object({ type: z.literal('sse'), url: endpoint }).strict(),
-  z.object({ type: z.literal('stdio'), command: text, args: z.array(text).max(64) }).strict(),
+  z.object({ type: z.literal('stdio'), command: text, args: z.array(text) }).strict(),
 ]);
 export type McpServer = z.infer<typeof mcpServerSchema>;
 export const mcpActionSchema = z.discriminatedUnion('kind', [
@@ -45,14 +42,7 @@ export const mcpActionSchema = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('setServers'),
-      servers: z
-        .record(name, mcpServerSchema)
-        .refine(
-          (s) =>
-            Object.keys(s).length <= 20 &&
-            !('agent_studio' in s) &&
-            JSON.stringify(s).length <= 64_000,
-        ),
+      servers: z.record(name, mcpServerSchema).refine((s) => !('agent_studio' in s)),
     })
     .strict(),
   z.object({ kind: z.literal('poll'), operationId: z.string().uuid() }).strict(),
@@ -61,7 +51,7 @@ export const mcpActionSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('callback'),
       operationId: z.string().uuid(),
-      callbackUrl: z.string().max(8192).url(),
+      callbackUrl: z.string().url(),
     })
     .strict(),
 ]);
@@ -84,7 +74,7 @@ export const mcpRequestSchema = z
         computerId: z.string().uuid(),
         environmentId: z.string().uuid(),
         executionEnvironmentId: z.string().uuid().optional(),
-        path: z.string().max(4096),
+        path: z.string(),
       })
       .strict()
       .nullable()

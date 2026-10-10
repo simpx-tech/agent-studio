@@ -4,16 +4,14 @@ import type { Conversation, Message, TokenUsage } from './domain';
 const amount = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const pointSchema = z.object({
   checkedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  windows: z
-    .array(
-      z.object({
-        id: z.string().max(200),
-        label: z.string().max(200),
-        usedPercent: z.number().min(0).max(100).nullable(),
-        resetsAt: z.union([z.string().max(80), amount]),
-      }),
-    )
-    .max(16),
+  windows: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      usedPercent: z.number().min(0).max(100).nullable(),
+      resetsAt: z.union([z.string(), amount]),
+    }),
+  ),
   balance: amount,
   extraUsed: amount,
   currency: z

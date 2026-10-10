@@ -7,7 +7,6 @@ use serde_json::Value;
 pub struct Snapshot {
     revision: u64,
     runs: Vec<WorkflowRun>,
-    limited: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +23,6 @@ struct WorkflowRun {
     agents: Vec<Agent>,
     tokens: Option<u64>,
     duration_ms: Option<u64>,
-    limited: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct Phase {
@@ -48,13 +46,12 @@ struct Agent {
 pub struct WorkflowDecoder {
     snapshot: Snapshot,
 }
-fn text(value: &Value, key: &str, limit: usize) -> String {
+fn text(value: &Value, key: &str) -> String {
     value[key]
         .as_str()
         .unwrap_or_default()
         .chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .take(limit)
         .collect()
 }
 fn state(value: &str) -> &'static str {
@@ -70,15 +67,11 @@ fn state(value: &str) -> &'static str {
 }
 impl WorkflowDecoder {
     fn ensure(&mut self, id: &str) -> Option<&mut WorkflowRun> {
-        if id.is_empty() || id.len() > 240 {
+        if id.is_empty() {
             return None;
         }
         if let Some(index) = self.snapshot.runs.iter().position(|r| r.id == id) {
             return self.snapshot.runs.get_mut(index);
-        }
-        if self.snapshot.runs.len() >= 16 {
-            self.snapshot.limited = true;
-            return None;
         }
         self.snapshot.runs.push(WorkflowRun {
             id: id.into(),
@@ -93,7 +86,6 @@ impl WorkflowDecoder {
             agents: vec![],
             tokens: None,
             duration_ms: None,
-            limited: false,
         });
         self.snapshot.runs.last_mut()
     }
@@ -108,8 +100,8 @@ impl WorkflowDecoder {
                     if block["type"] != "tool_use" || block["name"] != "Workflow" {
                         continue;
                     }
-                    if let Some(run) = self.ensure(&text(block, "id", 240)) {
-                        let name = text(&block["input"], "name", 200);
+                    if let Some(run) = self.ensure(&text(block, "id")) {
+                        let name = text(&block["input"], "name");
                         if !name.is_empty() {
                             run.name = name;
                         }
@@ -122,7 +114,7 @@ impl WorkflowDecoder {
                     if block["type"] != "tool_result" {
                         continue;
                     }
-                    let id = text(block, "tool_use_id", 240);
+                    let id = text(block, "tool_use_id");
                     let Some(run) = self.snapshot.runs.iter_mut().find(|r| r.id == id) else {
                         continue;
                     };
@@ -136,11 +128,11 @@ impl WorkflowDecoder {
                     }
                     if result["status"] == "async_launched" || result["status"] == "remote_launched"
                     {
-                        run.task_id = text(result, "taskId", 240);
-                        run.run_id = text(result, "runId", 240);
-                        run.name = text(result, "workflowName", 200);
-                        run.description = text(result, "summary", 1000);
-                        run.script_path = text(result, "scriptPath", 4096);
+                        run.task_id = text(result, "taskId");
+                        run.run_id = text(result, "runId");
+                        run.name = text(result, "workflowName");
+                        run.description = text(result, "summary");
+                        run.script_path = text(result, "scriptPath");
                         if matches!(run.status.as_str(), "pending" | "running") {
                             run.status = "running".into();
                         }
@@ -148,13 +140,13 @@ impl WorkflowDecoder {
                 }
             }
             "system" => {
-                let task = text(v, "task_id", 240);
+                let task = text(v, "task_id");
                 if v["subtype"] == "task_started" && v["task_type"] == "local_workflow" {
-                    let id = text(v, "tool_use_id", 240);
+                    let id = text(v, "tool_use_id");
                     if let Some(run) = self.ensure(if id.is_empty() { &task } else { &id }) {
                         run.task_id = task.clone();
-                        run.name = text(v, "workflow_name", 200);
-                        run.description = text(v, "description", 1000);
+                        run.name = text(v, "workflow_name");
+                        run.description = text(v, "description");
                         if run.status == "pending" {
                             run.status = "running".into();
                         }
@@ -183,38 +175,34 @@ impl WorkflowDecoder {
                                 if entry["type"] == "workflow_phase" {
                                     let phase = Phase {
                                         index,
-                                        title: text(entry, "title", 200),
+                                        title: text(entry, "title"),
                                     };
                                     if let Some(old) =
                                         run.phases.iter_mut().find(|p| p.index == index)
                                     {
                                         *old = phase;
-                                    } else if run.phases.len() < 64 {
-                                        run.phases.push(phase);
                                     } else {
-                                        run.limited = true;
+                                        run.phases.push(phase);
                                     }
                                 } else if entry["type"] == "workflow_agent" {
                                     let agent = Agent {
                                         index,
-                                        id: text(entry, "agentId", 240),
-                                        label: text(entry, "label", 200),
+                                        id: text(entry, "agentId"),
+                                        label: text(entry, "label"),
                                         phase_index: entry["phaseIndex"].as_u64(),
-                                        model: text(entry, "model", 200),
+                                        model: text(entry, "model"),
                                         status: state(entry["state"].as_str().unwrap_or_default())
                                             .into(),
                                         tokens: entry["tokens"].as_u64(),
                                         duration_ms: entry["durationMs"].as_u64(),
-                                        result: text(entry, "resultPreview", 2000),
+                                        result: text(entry, "resultPreview"),
                                     };
                                     if let Some(old) =
                                         run.agents.iter_mut().find(|a| a.index == index)
                                     {
                                         *old = agent;
-                                    } else if run.agents.len() < 128 {
-                                        run.agents.push(agent);
                                     } else {
-                                        run.limited = true;
+                                        run.agents.push(agent);
                                     }
                                 }
                             }
@@ -276,7 +264,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn native_launch_progress_and_completion_are_distinct_and_bounded() {
+    fn native_launch_progress_and_completion_are_distinct() {
         let mut d = WorkflowDecoder::default();
         d.decode(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"call","name":"Workflow","input":{"script":"private script"}}]}}));
         d.decode(&json!({"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"call","task_type":"local_workflow","workflow_name":"audit"}));

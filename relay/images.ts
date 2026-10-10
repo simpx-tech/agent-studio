@@ -24,7 +24,6 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
-import { maxImageBytes } from '../src/lib/images.ts';
 
 const hashPattern = /^[0-9a-f]{64}$/;
 export const validImageHash = (hash: unknown): hash is string =>
@@ -74,7 +73,7 @@ export function imageStore(directory: string, now = Date.now) {
   }
   /** Stores the bytes of an image a message carried inline, returning their hash. */
   function keep(bytes: Uint8Array, mediaType: string): string {
-    if (!bytes.length || bytes.length > maxImageBytes || imageType(bytes) !== mediaType)
+    if (!bytes.length || imageType(bytes) !== mediaType)
       throw new ImageUploadError(400, 'An image in this message is not a valid image.');
     const hash = sha256(bytes);
     write(hash, bytes);
@@ -94,8 +93,6 @@ export function imageStore(directory: string, now = Date.now) {
    */
   async function receive(req: IncomingMessage, hash: string, authorized: () => boolean) {
     if (!validImageHash(hash)) throw new ImageUploadError(400, 'Invalid image hash.');
-    if (Number(req.headers['content-length']) > maxImageBytes)
-      throw new ImageUploadError(413, 'Images must be 16 MB or smaller.');
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const temporary = join(root, `${hash}.${randomUUID()}.tmp`);
     const digest = createHash('sha256');
@@ -107,8 +104,6 @@ export function imageStore(directory: string, now = Date.now) {
         for await (const chunk of req as AsyncIterable<Buffer>) {
           if (length < head.length) head.set(chunk.subarray(0, head.length - length), length);
           length += chunk.length;
-          if (length > maxImageBytes)
-            throw new ImageUploadError(413, 'Images must be 16 MB or smaller.');
           digest.update(chunk);
           writeSync(fd, chunk);
         }

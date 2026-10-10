@@ -20,8 +20,8 @@ fn write(
     filename: &str,
     language: &str,
 ) -> Result<String, String> {
-    if source.len() > 512_000 || !matches!(language, "html" | "svg") {
-        return Err("Artifact exceeds the supported size or format".into());
+    if !matches!(language, "html" | "svg") {
+        return Err("Artifacts are saved as HTML or SVG".into());
     }
     let name: String = filename
         .chars()

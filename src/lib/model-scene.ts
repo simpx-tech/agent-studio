@@ -332,9 +332,6 @@ export type ViewOptions = {
   count: number;
   width: number;
   height: number;
-  /** The largest view, and all of them together; past either, they are drawn again smaller. */
-  viewBytes: number;
-  totalBytes: number;
 };
 /**
  * The grey of a model without colours of its own in its views, which other devices show on
@@ -378,26 +375,16 @@ export async function renderModelViews(
   const distance = fitDistance(THREE, camera, radius);
   try {
     renderer.setPixelRatio(1);
-    // A model whose views come out too large, as PNG can, is drawn again smaller.
-    for (const scale of [1, 0.7, 0.5]) {
-      const width = Math.round(options.width * scale);
-      const height = Math.round(options.height * scale);
-      renderer.setSize(width, height, false);
-      const views: ModelViewImage[] = [];
-      let total = 0;
-      for (let view = 0; view < options.count; view++) {
-        const turn = (-view * 2 * Math.PI) / options.count;
-        camera.position.copy(start).applyAxisAngle(up, turn).multiplyScalar(distance);
-        camera.lookAt(0, 0, 0);
-        renderer.render(scene, camera);
-        const image = await encode(canvas, width, height);
-        total += image.bytes;
-        if (image.bytes > options.viewBytes || total > options.totalBytes) break;
-        views.push(image);
-      }
-      if (views.length === options.count) return views;
+    renderer.setSize(options.width, options.height, false);
+    const views: ModelViewImage[] = [];
+    for (let view = 0; view < options.count; view++) {
+      const turn = (-view * 2 * Math.PI) / options.count;
+      camera.position.copy(start).applyAxisAngle(up, turn).multiplyScalar(distance);
+      camera.lookAt(0, 0, 0);
+      renderer.render(scene, camera);
+      views.push(await encode(canvas, options.width, options.height));
     }
-    throw new Error('The views of this model are too large to send to another device.');
+    return views;
   } finally {
     mixer?.stopAllAction();
     mixer?.uncacheRoot(object);
@@ -511,8 +498,8 @@ async function parse(
     if (--pending === 0) settle();
   };
   const object = await load(THREE, manager, bytes, format, blobs);
-  if (pending > 0)
-    await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 5000))]);
+  // However long they take: a texture still arriving is never dropped.
+  if (pending > 0) await settled;
   // The images are decoded by now; three.js keeps them, not their object URLs.
   for (const url of blobs) URL.revokeObjectURL(url);
   dropMissingTextures(object);

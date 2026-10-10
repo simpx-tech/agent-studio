@@ -3,7 +3,6 @@ import {
   claudeInstructions,
   claudeInstructionsSchema,
   defaultClaudeInstructions,
-  maxClaudeInstructions,
   storedClaudeInstructions,
 } from './claude-instructions';
 import { initialWorkspace, restoreWorkspace } from './domain';
@@ -20,12 +19,9 @@ describe('Claude chat instructions', () => {
     expect(storedClaudeInstructions('Custom')).toBe('Custom');
     expect(storedClaudeInstructions('')).toBe('');
   });
-  it('bound stored text and round-trip through storage, exports and relay schemas', () => {
-    expect(claudeInstructionsSchema.safeParse('é'.repeat(maxClaudeInstructions)).success).toBe(
-      true,
-    );
-    for (const invalid of ['x'.repeat(maxClaudeInstructions + 1), 'null\0'])
-      expect(claudeInstructionsSchema.safeParse(invalid).success).toBe(false);
+  it('keep text of any length and round-trip through storage, exports and relay schemas', () => {
+    expect(claudeInstructionsSchema.safeParse('é'.repeat(100_000)).success).toBe(true);
+    expect(claudeInstructionsSchema.safeParse('null\0').success).toBe(false);
     const old = initialWorkspace();
     expect(restoreWorkspace(JSON.parse(JSON.stringify(old))).claudeInstructions).toBeUndefined();
     old.claudeInstructions = 'Line one\nLine "two"';

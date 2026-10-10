@@ -46,7 +46,7 @@
         data.height < 0
       )
         return;
-      height = Math.max(24, Math.min(1600, Math.ceil(data.height)));
+      height = Math.max(24, Math.ceil(data.height));
     }
     window.addEventListener('message', resize);
     return () => window.removeEventListener('message', resize);

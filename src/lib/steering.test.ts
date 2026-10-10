@@ -10,14 +10,23 @@ import {
 import { sharedWorkspace, mergeShared } from './sync';
 import { steeringSchema, steeringInputSchema } from './steering';
 
-it('bounds plain human input, rejecting commands and arbitrary metadata', () => {
+it('accepts plain human input of any length, rejecting commands and arbitrary metadata', () => {
   const input = { id: crypto.randomUUID(), text: 'Focus here' };
   expect(steeringInputSchema.safeParse(input).success).toBe(true);
-  for (const text of ['', ' ', '/skill', 'x'.repeat(30001), 'a\0b'])
+  expect(steeringInputSchema.safeParse({ ...input, text: 'x'.repeat(100_000) }).success).toBe(true);
+  for (const text of ['', ' ', '/skill', 'a\0b'])
     expect(steeringInputSchema.safeParse({ ...input, text }).success).toBe(false);
   expect(steeringInputSchema.safeParse({ ...input, images: [] }).success).toBe(false);
   const receipt = { ...input, runId: crypto.randomUUID(), sequence: 1 };
   expect(steeringSchema.safeParse([receipt, receipt]).success).toBe(false);
+  // However many a reply receives, however long together.
+  const many = Array.from({ length: 12 }, (_, i) => ({
+    ...receipt,
+    id: crypto.randomUUID(),
+    sequence: i + 1,
+    text: 'x'.repeat(10_000),
+  }));
+  expect(steeringSchema.parse(many)).toEqual(many);
 });
 
 it('persists only matching receipts, deduplicates checkpoints, and keeps failed-turn guidance during sync', () => {

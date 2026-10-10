@@ -82,11 +82,7 @@ pub(crate) fn background_request(
 fn clean_title(text: &str) -> Option<String> {
     let text = text.trim().trim_matches(['"', '\'', '`', '“', '”']);
     let text = text.strip_prefix("Title: ").unwrap_or(text).trim();
-    if text.is_empty()
-        || text.contains(['\n', '\r'])
-        || text.chars().any(char::is_control)
-        || text.chars().count() > 80
-    {
+    if text.is_empty() || text.contains(['\n', '\r']) || text.chars().any(char::is_control) {
         return None;
     }
     Some(text.to_string())
@@ -101,7 +97,7 @@ pub async fn generate(
     request.validate()?;
     let model = request.agent.model.clone();
     let output = runner::background_text(app, request, cancel).await?;
-    let title = clean_title(&output).ok_or("The model did not return a short title")?;
+    let title = clean_title(&output).ok_or("The model did not return a single-line title")?;
     Ok(GeneratedTitle {
         title,
         provider: provider.into(),
@@ -131,7 +127,7 @@ mod tests {
         assert!(super::request("claude", "  ").is_err());
     }
     #[test]
-    fn titles_are_short_single_line_text() {
+    fn titles_are_single_line_text() {
         assert_eq!(
             clean_title(" \"Planejando uma horta\"\n"),
             Some("Planejando uma horta".into())
@@ -140,14 +136,10 @@ mod tests {
             clean_title("Title: Planning a garden"),
             Some("Planning a garden".into())
         );
-        for invalid in [
-            "",
-            "  ",
-            "A title\nAnd an explanation",
-            &"x".repeat(81),
-            "bad\u{1b}title",
-        ] {
+        for invalid in ["", "  ", "A title\nAnd an explanation", "bad\u{1b}title"] {
             assert_eq!(clean_title(invalid), None);
         }
+        // Any length, past the 80 characters earlier releases accepted.
+        assert_eq!(clean_title(&"x".repeat(120)), Some("x".repeat(120)));
     }
 }

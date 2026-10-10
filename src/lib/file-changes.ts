@@ -4,16 +4,15 @@ import type { Message } from './domain';
 const pathSchema = z
   .string()
   .min(1)
-  .max(4096)
   .refine((s) => !/[\u0000-\u001f\u007f]/.test(s));
-const lineCount = z.number().int().min(0).max(1_000_000);
+const lineCount = z.number().int().min(0);
 export const diffHunkSchema = z
   .object({
     oldStart: lineCount,
     oldLines: lineCount,
     newStart: lineCount,
     newLines: lineCount,
-    lines: z.array(z.string().max(64_000)).max(10_000),
+    lines: z.array(z.string()),
   })
   .refine((h) => {
     let old = 0,
@@ -35,22 +34,17 @@ export const filePatchSchema = z.object({
   path: pathSchema,
   previousPath: pathSchema.optional(),
   kind: z.enum(['added', 'modified', 'deleted', 'renamed']),
-  hunks: z.array(diffHunkSchema).max(200).optional(),
+  hunks: z.array(diffHunkSchema).optional(),
 });
 export type FilePatch = z.infer<typeof filePatchSchema>;
 export const fileChangesSchema = z
   .object({
     revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    edits: z
-      .array(z.object({ id: z.string().min(1).max(240), files: z.array(filePatchSchema).max(32) }))
-      .max(100),
-    limited: z.boolean(),
+    edits: z.array(z.object({ id: z.string().min(1), files: z.array(filePatchSchema) })),
+    // Replies recorded before 2026-10-10 could reach a recording limit; nothing limits them now.
+    limited: z.boolean().optional(),
   })
-  .refine(
-    (s) =>
-      new Set(s.edits.map((e) => e.id)).size === s.edits.length &&
-      new TextEncoder().encode(JSON.stringify(s)).length <= 1_000_000,
-  );
+  .refine((s) => new Set(s.edits.map((e) => e.id)).size === s.edits.length);
 export type FileChanges = z.infer<typeof fileChangesSchema>;
 export function latestFileChanges(a?: FileChanges, b?: FileChanges) {
   return (a?.revision ?? -1) >= (b?.revision ?? -1) ? a : b;
@@ -102,7 +96,6 @@ export function relativeFilePath(path: string, base?: string): string {
 }
 
 type Token = number | string;
-const maxSpan = 100_000;
 // Matches reported paths across separators, and Windows paths regardless of case.
 export const filePathKey = (path: string) => {
   const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '');
@@ -128,7 +121,7 @@ function encoded(type: string, text: string) {
 
 /** Compose confirmed patches against a sparse original document. Unknown lines are
  * identity tokens, never invented source. A discontinuity fails closed. */
-function combine(patches: FilePatch[], budget: { remaining: number }): FileSummary | undefined {
+function combine(patches: FilePatch[]): FileSummary | undefined {
   const first = patches[0],
     last = patches.at(-1)!;
   let existed = first.kind !== 'added',
@@ -137,10 +130,7 @@ function combine(patches: FilePatch[], budget: { remaining: number }): FileSumma
     originalLength = 0;
   const original = new Map<number, string>();
   const ensure = (length: number) => {
-    if (length > maxSpan || (!existed && length > tokens.length)) throw new Error('span');
-    const growth = Math.max(0, length - tokens.length);
-    if (growth > budget.remaining) throw new Error('span');
-    budget.remaining -= growth;
+    if (!existed && length > tokens.length) throw new Error('span');
     while (tokens.length < length) tokens.push(originalLength++);
   };
   let unavailable = '';
@@ -175,7 +165,6 @@ function combine(patches: FilePatch[], budget: { remaining: number }): FileSumma
         }
         tokens.splice(start, h.oldLines, ...replacement);
         offset += h.newLines - h.oldLines;
-        if (tokens.length > maxSpan) throw new Error('span');
       }
       exists = patch.kind !== 'deleted';
       if (!exists && tokens.length) throw new Error('incomplete deletion');
@@ -299,12 +288,9 @@ export function summarizeFileChanges(
         chains.set(newKey, chain);
       }
   }
-  const budget = { remaining: 1_000_000 };
-  limited ||= chains.size > 200;
   return {
     files: [...chains.values()]
-      .slice(0, 200)
-      .map((patches) => combine(patches, budget))
+      .map((patches) => combine(patches))
       .filter((f): f is FileSummary => !!f)
       .sort((a, b) => filePathKey(a.path).localeCompare(filePathKey(b.path))),
     limited,

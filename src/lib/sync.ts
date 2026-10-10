@@ -408,7 +408,7 @@ export function mergeShared(
             result.push({
               ...left,
               id: crypto.randomUUID(),
-              name: `${(left as T & { name: string }).name.slice(0, 60)} (conflict copy)`,
+              name: `${(left as T & { name: string }).name} (conflict copy)`,
             });
           continue;
         }
@@ -444,7 +444,7 @@ export function mergeShared(
               result.push({
                 ...older,
                 id: crypto.randomUUID(),
-                title: `${older.title.slice(0, 70)} (conflict copy)`,
+                title: `${older.title} (conflict copy)`,
                 titleStatus: 'fallback',
               } as unknown as T);
             }
@@ -466,7 +466,7 @@ export function mergeShared(
           result.push({
             ...left,
             id: crypto.randomUUID(),
-            title: `${(left as T & { title: string }).title.slice(0, 70)} (conflict copy)`,
+            title: `${(left as T & { title: string }).title} (conflict copy)`,
             titleStatus: 'fallback',
           });
       } else

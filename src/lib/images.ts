@@ -3,19 +3,13 @@ import { z } from 'zod';
 export const imageTypes = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export type ImageType = (typeof imageTypes)[number];
 /**
- * A conversation holds as many images as it likes: a message keeps a reference to each one, and
- * the bytes live apart from the chat data (the image store below). What remains bounds one
- * message, which becomes one provider request and one preview each: enough for a batch of 4K
- * screenshots, and small enough that a hostile or damaged synced workspace cannot make a device
- * allocate without limit. A provider that accepts less than this reports its own limit.
+ * A conversation, and each of its messages, holds as many images of any size as it likes: a
+ * message keeps a reference to each one, and the bytes live apart from the chat data (the image
+ * store below). A provider that accepts fewer or smaller ones reports its own limit.
  */
-export const maxImagesPerMessage = 16;
-export const maxImageBytes = 16 * 1024 * 1024;
-export const maxImageLabel = `${maxImageBytes / 1024 / 1024} MB`;
-const maxBase64Length = 4 * Math.ceil(maxImageBytes / 3);
 const fields = {
   id: z.string().uuid(),
-  name: z.string().min(1).max(200),
+  name: z.string().min(1),
   mediaType: z.enum(imageTypes),
 };
 /**
@@ -28,7 +22,7 @@ const fields = {
 export const storedImageSchema = z.object({
   ...fields,
   hash: z.string().regex(/^[0-9a-f]{64}$/),
-  bytes: z.number().int().min(1).max(maxImageBytes),
+  bytes: z.number().int().min(1),
 });
 /**
  * An image as releases before the image store kept it: its bytes inline as base64. It is still
@@ -40,17 +34,13 @@ export const inlineImageSchema = z
     data: z
       .string()
       .min(4)
-      .max(maxBase64Length)
       // A group repeated once per four characters recurses in the regex engine and overflows its
       // stack on a large image, so the alphabet is one character class and the groups of four are
       // checked by length instead.
       .regex(/^[A-Za-z0-9+/]*={0,2}$/)
       .refine((data) => data.length % 4 === 0, 'Invalid image encoding'),
   })
-  .refine(
-    (image) => imageByteLength(image) <= maxImageBytes && hasImageHeader(image),
-    'Invalid image data',
-  );
+  .refine((image) => imageByteLength(image) > 0 && hasImageHeader(image), 'Invalid image data');
 export const imageSchema = z.union([storedImageSchema, inlineImageSchema]);
 export type StoredImage = z.infer<typeof storedImageSchema>;
 export type InlineImage = z.infer<typeof inlineImageSchema>;
@@ -123,8 +113,7 @@ export async function referenceInline(
 export async function readImage(file: File): Promise<DraftImage> {
   if (!(imageTypes as readonly string[]).includes(file.type))
     throw new Error('Choose a PNG, JPEG, or WebP image.');
-  if (!file.size || file.size > maxImageBytes)
-    throw new Error(`${file.name}: images must be between 1 byte and ${maxImageLabel}.`);
+  if (!file.size) throw new Error(`${file.name}: this image is empty.`);
   let bytes: ArrayBuffer;
   try {
     bytes = await file.arrayBuffer();
@@ -148,7 +137,7 @@ export async function readImage(file: File): Promise<DraftImage> {
   }
   return {
     id: crypto.randomUUID(),
-    name: file.name.slice(0, 200) || 'Pasted image',
+    name: file.name || 'Pasted image',
     mediaType: file.type as ImageType,
     hash: await imageHash(bytes),
     bytes: bytes.byteLength,

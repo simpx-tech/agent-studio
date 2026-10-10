@@ -60,7 +60,7 @@ it('retains independent thinking budgets through save, relay, reply history and 
   expect(mergeShared(base, local, remote).conversations).toHaveLength(2);
 });
 
-it('validates optional Fast mode and bounded fallback chains without silently coercing settings', () => {
+it('validates optional Fast mode and fallback chains of any length without silently coercing settings', () => {
   const settings = settingsFor(initialWorkspace().preferences, 'claude');
   for (const fastMode of [undefined, false, true])
     expect(chatSettingsSchema.parse({ ...settings, fastMode }).fastMode).toBe(fastMode);
@@ -74,6 +74,10 @@ it('validates optional Fast mode and bounded fallback chains without silently co
     'claude-opus-4-8[1m]',
     'us.anthropic.claude-sonnet-4-6-v1:0',
     'claude-sonnet-4-5@20250929',
+    // However many models, of whatever length: the CLI reports its own limit.
+    'a,b,c,d',
+    'opus,sonnet,haiku,claude-opus-4-8[1m],us.anthropic.claude-sonnet-4-6-v1:0',
+    'a'.repeat(101),
   ])
     expect(chatSettingsSchema.parse({ ...settings, fallbackModel }).fallbackModel).toBe(
       fallbackModel,
@@ -82,8 +86,7 @@ it('validates optional Fast mode and bounded fallback chains without silently co
     '',
     'sonnet,',
     'sonnet,sonnet',
-    'a,b,c,d',
-    'a'.repeat(101),
+    'a,b,c,a',
     '--flag',
     '$(echo)',
     'sonnet\nhaiku',
@@ -94,13 +97,13 @@ it('validates optional Fast mode and bounded fallback chains without silently co
   expect(normalizeFallbackModel(' ')).toBeUndefined();
 });
 
-it('validates default, disabled, and bounded explicit budgets without changing effort', () => {
+it('validates default, disabled, and explicit budgets of any size without changing effort', () => {
   const settings = { ...settingsFor(initialWorkspace().preferences, 'claude'), reasoning: 'high' };
-  for (const maxThinkingTokens of [undefined, 0, 1024, 4096, 128000]) {
+  for (const maxThinkingTokens of [undefined, 0, 1, 1023, 1024, 128000, 128001, 2_000_000]) {
     const parsed = chatSettingsSchema.parse({ ...settings, maxThinkingTokens });
     expect(parsed.maxThinkingTokens).toBe(maxThinkingTokens);
     expect(parsed.reasoning).toBe('high');
   }
-  for (const maxThinkingTokens of [-1, 1, 1023, 1.5, 128001, Infinity, NaN, '4096'])
+  for (const maxThinkingTokens of [-1, 1.5, Infinity, NaN, '4096'])
     expect(chatSettingsSchema.safeParse({ ...settings, maxThinkingTokens }).success).toBe(false);
 });

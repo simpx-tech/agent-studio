@@ -3,14 +3,14 @@ import { z } from 'zod';
 /**
  * Screens (docs/SCREENS.md): lasting pages a chat saves in Agent Studio, kept on the computer
  * that runs their actions (src-tauri/src/screens.rs). Nothing here reaches the workspace: windows
- * read a screen and run its actions through transport, and a reply keeps only the bounded card
- * of each screen it saved.
+ * read a screen and run its actions through transport, and a reply keeps only the card of each
+ * screen it saved.
  */
 
 export const screenIdSchema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-const nameSchema = z.string().regex(/^[a-z][a-z0-9_]{0,39}$/);
+const nameSchema = z.string().regex(/^[a-z][a-z0-9_]*$/);
 const json = (value: unknown) => {
   try {
     return JSON.stringify(value) ?? '';
@@ -18,10 +18,6 @@ const json = (value: unknown) => {
     return undefined;
   }
 };
-/** What one run's values may hold, serialized, before the host checks them against the action. */
-export const maxScreenParams = 64_000;
-/** What a screen keeps with `studio.save`, serialized. */
-export const maxScreenData = 1_000_000;
 
 /**
  * What a window or another device asks the computer that keeps a screen. The relay checks it
@@ -38,7 +34,7 @@ export const screenRequestSchema = z.discriminatedUnion('op', [
       params: z.record(nameSchema, z.unknown()).optional(),
     })
     .strict()
-    .refine((request) => (json(request.params ?? {})?.length ?? Infinity) <= maxScreenParams),
+    .refine((request) => json(request.params ?? {}) !== undefined),
   z
     .object({
       op: z.literal('approve'),
@@ -56,32 +52,24 @@ export const screenRequestSchema = z.discriminatedUnion('op', [
       key: z
         .string()
         .min(1)
-        .max(100)
         .refine((key) => !/[\u0000-\u001f\u007f]/.test(key)),
       value: z.unknown(),
     })
     .strict()
-    .refine((request) => (json(request.value)?.length ?? Infinity) <= maxScreenData),
+    .refine((request) => json(request.value) !== undefined),
 ]);
 export type ScreenRequest = z.infer<typeof screenRequestSchema>;
-/**
- * How long a screen request may take from another device: a run, its action's longest time
- * limit (ten minutes) and the way there and back; anything else, a minute.
- */
-export const screenRequestMs = (request?: { op?: string }) =>
-  request?.op === 'run' ? 660_000 : 60_000;
-
 export const screenSummarySchema = z.object({
   id: screenIdSchema,
   revision: z.number().int().positive(),
-  title: z.string().max(200),
-  description: z.string().max(1000),
+  title: z.string(),
+  description: z.string(),
   environmentId: z.string().uuid(),
-  project: z.string().max(4096),
-  folder: z.string().max(8192),
+  project: z.string(),
+  folder: z.string(),
   conversationId: z.string().uuid(),
-  createdAt: z.string().max(64),
-  updatedAt: z.string().max(64),
+  createdAt: z.string(),
+  updatedAt: z.string(),
   commands: z.number().int().nonnegative(),
   allowed: z.boolean(),
 });
@@ -104,12 +92,13 @@ export const screenActionSchema = z.object({
   shell: z.enum(['powershell', 'bash']),
   script: z.string(),
   params: z.record(z.string(), screenParamSchema).optional(),
-  timeout: z.number().int().positive(),
+  // Seconds; an action without one runs until it ends.
+  timeout: z.number().int().positive().optional(),
 });
 export type ScreenAction = z.infer<typeof screenActionSchema>;
 export const screenDetailSchema = screenSummarySchema.extend({
-  html: z.string().max(600_000),
-  actions: z.array(screenActionSchema).max(24),
+  html: z.string(),
+  actions: z.array(screenActionSchema),
   digest: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type ScreenDetail = z.infer<typeof screenDetailSchema>;
@@ -124,21 +113,19 @@ export const screenOutcomeSchema = z.object({
 });
 export type ScreenOutcome = z.infer<typeof screenOutcomeSchema>;
 
-/** The card a reply shows for a screen it saved: bounded metadata, never the screen. */
+/** The card a reply shows for a screen it saved: its metadata, never the screen. */
 export const screenCardSchema = z.object({
   id: screenIdSchema,
   revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   title: z
     .string()
     .min(1)
-    .max(80)
     .refine((s) => !!s.trim() && !/[\u0000-\u001f\u007f]/.test(s)),
   environmentId: z.string().uuid(),
 });
 export type ScreenCard = z.infer<typeof screenCardSchema>;
 export const screenCardsSchema = z
   .array(screenCardSchema)
-  .max(12)
   .refine((cards) => new Set(cards.map((card) => card.id)).size === cards.length);
 
 /** A reply's cards, each screen at its newest revision. */
@@ -148,7 +135,7 @@ export function mergeScreenCards(left: ScreenCard[] = [], right: ScreenCard[] = 
     const index = result.findIndex((known) => known.id === card.id);
     if (index >= 0) {
       if (result[index].revision < card.revision) result[index] = card;
-    } else if (result.length < 12) result.push(card);
+    } else result.push(card);
   }
   return result;
 }
@@ -163,10 +150,7 @@ export type ScreenCall =
 const plainObject = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 const keyOf = (value: unknown) =>
-  typeof value === 'string' &&
-  value.length >= 1 &&
-  value.length <= 100 &&
-  !/[\u0000-\u001f\u007f]/.test(value)
+  typeof value === 'string' && value.length >= 1 && !/[\u0000-\u001f\u007f]/.test(value)
     ? value
     : undefined;
 
@@ -181,8 +165,7 @@ export function screenCall(data: unknown, token: string): ScreenCall | undefined
   if (data.method === 'run') {
     const params = data.params ?? {};
     if (typeof data.action !== 'string' || !nameSchema.safeParse(data.action).success) return;
-    if (!plainObject(params) || Object.keys(params).length > 12) return;
-    if ((json(params)?.length ?? Infinity) > maxScreenParams) return;
+    if (!plainObject(params) || json(params) === undefined) return;
     return { id, method: 'run', action: data.action, params };
   }
   if (data.method === 'load') {
@@ -192,11 +175,11 @@ export function screenCall(data: unknown, token: string): ScreenCall | undefined
   if (data.method === 'save') {
     const key = keyOf(data.key);
     const value = data.value === undefined ? null : data.value;
-    if (!key || (json(value)?.length ?? Infinity) > maxScreenData) return;
+    if (!key || json(value) === undefined) return;
     return { id, method: 'save', key, value };
   }
   if (data.method === 'chat') {
-    if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 8000) return;
+    if (typeof data.text !== 'string' || !data.text.trim()) return;
     return { id, method: 'chat', text: data.text };
   }
 }
@@ -208,7 +191,7 @@ export function screenReply(
   result: { value: unknown } | { error: string },
 ) {
   return 'error' in result
-    ? { type: 'studio-screen-reply', token, id, ok: false, error: result.error.slice(0, 4000) }
+    ? { type: 'studio-screen-reply', token, id, ok: false, error: result.error }
     : { type: 'studio-screen-reply', token, id, ok: true, value: result.value };
 }
 

@@ -19,10 +19,7 @@ use std::{
 use tauri::{Emitter, Manager};
 
 pub const EVENT: &str = "studio-background-work";
-const MAX_TRACKED: usize = 32;
-const MAX_TASKS: usize = 256;
 const MAX_ELAPSED_MS: u64 = 31_536_000_000;
-const MAX_HANDED: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,10 +199,7 @@ impl Watch {
                     state.tracked.remove(index);
                     events.push(self.list(&state));
                 }
-                None if tool.background
-                    && tool.status == "running"
-                    && state.tracked.len() < MAX_TRACKED =>
-                {
+                None if tool.background && tool.status == "running" => {
                     state.tracked.push(Tracked {
                         run_id: run_id.into(),
                         tool: tool.clone(),
@@ -229,7 +223,7 @@ impl Watch {
     }
     /// Each stdout line of the CLI, including while its process is parked between replies.
     pub fn observe(&self, line: &str) {
-        if line.len() > 64_000 || !line.contains("\"task_") {
+        if !line.contains("\"task_") {
             return;
         }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -238,27 +232,14 @@ impl Watch {
         if value["type"] != "system" {
             return;
         }
-        let task = value["task_id"]
-            .as_str()
-            .filter(|id| !id.is_empty() && id.len() <= 64);
-        let call = value["tool_use_id"]
-            .as_str()
-            .filter(|id| !id.is_empty() && id.len() <= 240);
+        let task = value["task_id"].as_str().filter(|id| !id.is_empty());
+        let call = value["tool_use_id"].as_str().filter(|id| !id.is_empty());
         let mut events = vec![];
         if let Ok(mut state) = self.state.lock() {
             match value["subtype"].as_str() {
                 Some("task_started") => {
                     if let (Some(task), Some(call)) = (task, call) {
-                        if state.tasks.len() >= MAX_TASKS {
-                            let tracked: Vec<_> =
-                                state.tracked.iter().map(|t| t.tool.id.clone()).collect();
-                            state
-                                .tasks
-                                .retain(|_, call| tracked.contains(&format!("claude:{call}")));
-                        }
-                        if state.tasks.len() < MAX_TASKS {
-                            state.tasks.insert(task.into(), call.into());
-                        }
+                        state.tasks.insert(task.into(), call.into());
                     }
                 }
                 Some("task_notification") => {
@@ -343,7 +324,7 @@ impl Watch {
             outputs,
         };
         if let Ok(mut state) = self.state.lock() {
-            if handed.running() && state.handed.len() < MAX_HANDED {
+            if handed.running() {
                 state.handed.push(handed);
             }
         }
@@ -763,8 +744,9 @@ mod tests {
         assert!(snapshots[0].runs[0].elapsed_ms >= 5000);
         drop(first);
         assert!(registry.snapshots().is_empty());
-        let (bounded, _) = watch();
-        for index in 0..MAX_TRACKED + 4 {
+        // Every launch is listed, past the 32 earlier releases listed.
+        let (all, _) = watch();
+        for index in 0..36 {
             let call = format!("call{index}");
             let tool = launch(
                 &mut decoder,
@@ -773,8 +755,8 @@ mod tests {
                 json!({"run_in_background":true}),
                 json!({"backgroundTaskId":call}),
             );
-            bounded.tool("run", &tool);
+            all.tool("run", &tool);
         }
-        assert_eq!(bounded.snapshot().runs.len(), MAX_TRACKED);
+        assert_eq!(all.snapshot().runs.len(), 36);
     }
 }

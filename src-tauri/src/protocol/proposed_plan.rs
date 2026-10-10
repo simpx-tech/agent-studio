@@ -2,7 +2,6 @@
 use serde::Serialize;
 use serde_json::Value;
 
-const LIMIT: usize = 64_000;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProposedPlan {
     pub id: String,
@@ -34,7 +33,7 @@ impl ProposedPlans {
         } else {
             p["item"]["id"].as_str()?
         };
-        if id.is_empty() || id.len() > 240 {
+        if id.is_empty() {
             return None;
         }
         let text = if delta {
@@ -45,9 +44,6 @@ impl ProposedPlans {
         let index = if let Some(i) = self.0.iter().position(|v| v.id == id) {
             i
         } else {
-            if self.0.len() >= 8 {
-                return None;
-            }
             self.0.push(ProposedPlan {
                 id: id.into(),
                 revision: 0,
@@ -66,11 +62,8 @@ impl ProposedPlans {
         let mut next = current.clone();
         if !delta {
             next.text.clear();
-            next.truncated = false;
         }
-        let remaining = LIMIT.saturating_sub(next.text.chars().count());
-        next.text.extend(text.chars().take(remaining));
-        next.truncated |= text.chars().count() > remaining;
+        next.text.push_str(text);
         next.complete = complete;
         if next == *current && current.revision > 0 {
             return None;
@@ -115,13 +108,18 @@ mod tests {
         assert!(d.codex(&final_item).is_none());
     }
     #[test]
-    fn bounded_stream_can_be_replaced_by_full_final_text() {
+    fn plans_stream_whole_and_can_be_replaced_by_the_final_text() {
+        // Past the 64,000 characters and 8 plans a reply earlier releases kept.
         let mut d = ProposedPlans::default();
-        let p = d.codex(&json!({"method":"item/plan/delta","params":{"itemId":"p","delta":"x".repeat(LIMIT+1)}})).unwrap();
-        assert!(p.truncated);
-        assert_eq!(p.text.len(), LIMIT);
+        let p = d.codex(&json!({"method":"item/plan/delta","params":{"itemId":"p","delta":"x".repeat(70_000)}})).unwrap();
+        assert!(!p.truncated);
+        assert_eq!(p.text.len(), 70_000);
         let p = d.codex(&json!({"method":"item/completed","params":{"item":{"id":"p","type":"plan","text":""}}})).unwrap();
         assert!(!p.truncated);
         assert!(!d.completed());
+        for index in 0..10 {
+            let plan = json!({"method":"item/completed","params":{"item":{"id":format!("plan{index}"),"type":"plan","text":"Step"}}});
+            assert!(d.codex(&plan).is_some());
+        }
     }
 }

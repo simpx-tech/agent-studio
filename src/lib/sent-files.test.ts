@@ -100,11 +100,27 @@ it('rejects foreign runs, duplicates, unsupported types and user messages', () =
     sentFilesSchema.safeParse({ ...group, files: [group.files[0], group.files[0]] }).success,
   ).toBe(false);
   expect(sentFileGroupsSchema.safeParse([group, group]).success).toBe(false);
+  // Any number of groups and files, with names, captions and dimensions of any size.
   expect(
     sentFileGroupsSchema.safeParse(
       Array.from({ length: 13 }, (_, i) => ({ ...group, id: `g${i}` })),
     ).success,
-  ).toBe(false);
+  ).toBe(true);
+  const files = Array.from({ length: 20 }, (_, index) => ({
+    index: index * 10,
+    name: `${'n'.repeat(200)}.png`,
+    mediaType: 'image/png' as const,
+    bytes: 1,
+    width: 200_000,
+    height: 200_000,
+  }));
+  const large = {
+    ...group,
+    id: 'g'.repeat(100),
+    toolId: 't'.repeat(300),
+    caption: 'c'.repeat(400),
+  };
+  expect(sentFilesSchema.parse({ ...large, files })).toEqual({ ...large, files });
   // A group belongs to the run that kept its images on the executing computer.
   const other = reply();
   applyRunEvent(other, { kind: 'sentfiles', sentFiles: { ...group, runId: crypto.randomUUID() } });

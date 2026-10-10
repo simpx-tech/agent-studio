@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
 import { expectVisibleQuotaComparison } from './quota-helper';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -271,7 +271,21 @@ async function host(page: Page, relay: string, token: string, name: string, plat
             localStorage.removeItem('fixture-relay-origin');
             return;
           }
-          if (command === 'relay_request') return w.relayBridge(args.method, args.path, args.body);
+          if (command === 'relay_request') {
+            // A relay that cannot carry a whole model's result, as relays before 2026-10-10
+            // refused a result past 24 MB.
+            if (
+              localStorage.getItem('fixture-relay-refuses-models') &&
+              args.method === 'PUT' &&
+              typeof args.body?.result?.data === 'string' &&
+              args.body.result.format
+            )
+              return {
+                status: 413,
+                body: { code: 'too_large', error: 'Request exceeds its size limit.' },
+              };
+            return w.relayBridge(args.method, args.path, args.body);
+          }
           const status = (id: string) => ({
             id,
             installed: true,
@@ -346,7 +360,14 @@ async function host(page: Page, relay: string, token: string, name: string, plat
               ),
             );
           }
-          // A model this computer keeps, with the views its window renders of it for others.
+          // A model this computer keeps: read whole for another device, raw for this window,
+          // and drawn as views for a device the whole model cannot reach.
+          if (command === 'read_tool_output_model') {
+            w.modelReads = (w.modelReads ?? 0) + 1;
+            const data = localStorage.getItem('fixture-model');
+            if (!data) throw 'This output was not kept on the computer that ran it.';
+            return { format: 'glb', data, bytes: atob(data).length };
+          }
           if (command === 'read_tool_output_model_file') {
             w.modelFileReads = (w.modelFileReads ?? 0) + 1;
             const data = localStorage.getItem('fixture-model');
@@ -439,7 +460,7 @@ async function host(page: Page, relay: string, token: string, name: string, plat
                 },
               });
             emit({ kind: 'text', text: `Response from ${identity.name}, completed.` });
-            // A model kept at full detail, far larger than one relay request carries.
+            // A model kept at full detail, 40 MB by its record.
             if (localStorage.getItem('fixture-model'))
               emit({
                 kind: 'sentfiles',
@@ -1587,10 +1608,16 @@ test('two app environments pair, share accounts, route chats, retain progress an
   }
 });
 
-test('another computer shows a model too large for the relay as eight views its own computer draws', async ({
-  browser,
-}) => {
-  test.setTimeout(90_000);
+/**
+ * Runs `check` on a reply the MacBook runs for the desktop through a real relay, which sends a
+ * model the MacBook keeps, 40 MB by its record. With `refused`, the way to the relay cannot carry
+ * the whole model, as relays before 2026-10-10 refused a result past 24 MB.
+ */
+async function modelReply(
+  browser: Browser,
+  refused: boolean,
+  check: (reply: { desktop: Page; mac: Page; answer: Locator }) => Promise<void>,
+) {
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
   const token = 'synthetic-relay-key-for-browser-checks-123456';
   const relay = createRelay({ token, directory });
@@ -1603,10 +1630,12 @@ test('another computer shows a model too large for the relay as eight views its 
       mac = await b.newPage();
     await host(desktop, url, token, 'Desktop', 'windows');
     await host(mac, url, token, 'MacBook', 'macos');
-    // The MacBook keeps the model its reply sends, at 40 MB by its record.
     await mac.evaluate(
-      (data) => localStorage.setItem('fixture-model', data),
-      triangleGlbBase64({ animated: false }),
+      ({ data, refused }) => {
+        localStorage.setItem('fixture-model', data);
+        if (refused) localStorage.setItem('fixture-relay-refuses-models', '1');
+      },
+      { data: triangleGlbBase64({ animated: false }), refused },
     );
     await mac.getByRole('button', { name: 'Add account', exact: true }).click();
     await mac.getByLabel('Account name', { exact: true }).fill('Claude personal 1');
@@ -1637,7 +1666,38 @@ test('another computer shows a model too large for the relay as eight views its 
       .getByTestId('message')
       .filter({ hasText: 'Response from MacBook, completed.' });
     await expect(answer).toHaveAttribute('data-status', 'complete', { timeout: 20_000 });
-    // The desktop asks for views, which the MacBook's window draws from the model it keeps.
+    await check({ desktop, mac, answer });
+  } finally {
+    await a.close();
+    await b.close();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('another computer’s model comes whole through the relay, whatever its size', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  await modelReply(browser, false, async ({ desktop, mac, answer }) => {
+    // The desktop builds the scene of the model the MacBook keeps, read whole through the relay.
+    await expect(answer.getByLabel('3D model figure.glb')).toBeVisible({ timeout: 30_000 });
+    await expect(answer.getByText('GLB · 40 MB', { exact: true })).toBeVisible();
+    await expect(answer.getByRole('slider', { name: 'Turn figure.glb' })).toHaveCount(0);
+    // The MacBook read it once for the desktop, and drew no views of it.
+    expect(await mac.evaluate(() => (window as any).modelReads)).toBe(1);
+    expect(await mac.evaluate(() => (window as any).modelFileReads)).toBeUndefined();
+    expect(await mac.evaluate(() => localStorage.getItem('fixture-model-views'))).toBeNull();
+    expect(await desktop.evaluate(() => (window as any).modelFileReads)).toBeUndefined();
+  });
+});
+
+test('another computer shows a model the relay cannot carry whole as eight views its own computer draws', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  await modelReply(browser, true, async ({ desktop, mac, answer }) => {
+    // The desktop asks for views instead, which the MacBook's window draws from the model it keeps.
     const turntable = answer.getByRole('slider', { name: 'Turn figure.glb' });
     await expect(turntable).toHaveAttribute('aria-valuetext', 'View 1 of 8', { timeout: 30_000 });
     await expect(answer.getByText('GLB · 40 MB · 8 views')).toBeVisible();
@@ -1670,7 +1730,8 @@ test('another computer shows a model too large for the relay as eight views its 
       'View 2 of 8',
     );
     await desktop.getByRole('button', { name: 'Close model preview' }).click();
-    // The model never left the MacBook: it read it once, and keeps the views it drew.
+    // The model never left the MacBook: the relay refused it whole, and the MacBook read its
+    // file once to draw the views, which it keeps.
     expect(await mac.evaluate(() => (window as any).modelFileReads)).toBe(1);
     expect(await desktop.evaluate(() => (window as any).modelFileReads)).toBeUndefined();
     const kept = await mac.evaluate(() =>
@@ -1679,10 +1740,5 @@ test('another computer shows a model too large for the relay as eight views its 
     expect(kept.renderer).toBe(1);
     expect(kept.views).toHaveLength(8);
     expect(new Set(kept.views.map((view: { data: string }) => view.data)).size).toBeGreaterThan(1);
-  } finally {
-    await a.close();
-    await b.close();
-    await new Promise<void>((resolve) => relay.close(() => resolve()));
-    rmSync(directory, { recursive: true, force: true });
-  }
+  });
 });

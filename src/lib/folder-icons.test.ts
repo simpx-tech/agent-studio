@@ -7,7 +7,6 @@ import {
   folderIconKey,
   folderIconOf,
   folderIconsSchema,
-  maxFolderIcons,
   mergeFolderIcons,
   sameFolderIcons,
   withFolderIcon,
@@ -90,15 +89,15 @@ describe('folder icons', () => {
     expect(sameFolderIcons(replaced, [...replaced].reverse())).toBe(true);
     expect(sameFolderIcons(replaced, icons)).toBe(false);
     expect(sameFolderIcons(undefined, [])).toBe(true);
-    // Past the limit, the icons chosen longest ago go.
-    const many = Array.from({ length: maxFolderIcons }, (_, i) =>
+    // Every folder keeps its icon, however many there are.
+    const many = Array.from({ length: 2500 }, (_, i) =>
       icon(`/p/${i}`, 'code', new Date(Date.parse('2026-01-01') + i * 60_000).toISOString()),
     );
-    const bounded = withFolderIcon(many, icon('/p/new', 'bot'));
-    expect(bounded).toHaveLength(maxFolderIcons);
-    expect(bounded.some((i) => i.path === '/p/0')).toBe(false);
-    expect(bounded.some((i) => i.path === '/p/new')).toBe(true);
-    expect(folderIconsSchema.safeParse(bounded).success).toBe(true);
+    const all = withFolderIcon(many, icon('/p/new', 'bot'));
+    expect(all).toHaveLength(many.length + 1);
+    expect(all.some((i) => i.path === '/p/0')).toBe(true);
+    expect(all.some((i) => i.path === '/p/new')).toBe(true);
+    expect(folderIconsSchema.safeParse(all).success).toBe(true);
   });
 
   it('accepts names a newer release adds and refuses malformed or repeated folders', () => {

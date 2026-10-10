@@ -319,20 +319,18 @@ it('draws the views of a model it keeps once for other devices, and answers late
   scene.renderModelViews.mockResolvedValue(Array(8).fill(view));
   await transport.readToolOutputModelViews(runId, 'claude:figure', 0, connectionId);
   expect(scene.renderModelViews).toHaveBeenCalledTimes(2);
-  // A model this computer keeps opens whole here however large, as raw bytes.
-  expect(transport.modelShownAsViews(connectionId, 900 * 1024 ** 2)).toBe(false);
+  // A model this computer keeps opens whole here, as raw bytes.
+  expect(transport.modelFromAnotherComputer(connectionId)).toBe(false);
   const model = await transport.readToolOutputModel(runId, 'claude:figure', 0, 'glb', connectionId);
   expect(model.format).toBe('glb');
   expect(model.bytes.byteLength).toBe(16);
   await transport.disconnectRelay();
 });
 
-it('shows another computer’s model as views only when one relay request cannot carry it', async () => {
+it('reads another computer’s model through the relay, whatever its size', async () => {
   const remote = crypto.randomUUID();
   const transport = await fixture(remote);
-  expect(transport.modelShownAsViews(remote, 12 * 1024 ** 2)).toBe(false);
-  expect(transport.modelShownAsViews(remote, 12 * 1024 ** 2 + 1)).toBe(true);
-  expect(transport.modelShownAsViews(remote, 900 * 1024 ** 2)).toBe(true);
+  expect(transport.modelFromAnotherComputer(remote)).toBe(true);
 });
 
 it("sends a job's question at once and its other events shortly after they arrive", async () => {
@@ -1899,27 +1897,30 @@ it('reads conversations the relay leaves for another request', async () => {
   await transport.disconnectRelay();
 });
 
-it('leaves a conversation too large to send unpublished, and still sends the others', async () => {
+it('sends a conversation larger than one upload in an upload of its own, beside the others', async () => {
   const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
   const [first, second] = workspace.conversations;
-  // Past what one upload may carry, as a conversation holding many images can be.
+  // Past what one upload carries, as a conversation holding a long transcript can be.
+  const large = { type: 'markdown' as const, text: 'x'.repeat(49_000_000) };
   first.messages.push({
     id: crypto.randomUUID(),
     role: 'user',
     createdAt: '2026-09-27',
     status: 'complete',
-    blocks: [{ type: 'markdown', text: 'x'.repeat(49_000_000) }],
+    blocks: [large],
   });
   second.title = 'Renamed here';
   local.changes++;
   marks.mark(first.id);
   marks.mark(second.id);
   const { state } = await polls(1);
-  expect(state).toContain('POST v1/state/patch');
+  // Each goes out in an upload of its own, and nothing is left out.
+  expect(state.filter((r) => r === 'POST v1/state/patch')).toHaveLength(2);
   expect(relay.workspace.conversations.find((c) => c.id === second.id)?.title).toBe('Renamed here');
-  expect(relay.workspace.conversations.find((c) => c.id === first.id)?.messages).toEqual([]);
-  expect(transport.relaySyncNotice()).toMatch(/^“First” is too large to sync\./);
-  // The relay keeps its own copy, so an edit there still merges with the one here.
+  const sent = relay.workspace.conversations.find((c) => c.id === first.id)!;
+  expect(sent.messages.map((m) => m.blocks)).toEqual([[large]]);
+  expect(transport.relaySyncNotice()).toBe('');
+  // The relay holds what this device wrote, so an edit there merges with it, with no copy.
   relay.revision++;
   relay.workspace = {
     ...relay.workspace,
@@ -1931,10 +1932,11 @@ it('leaves a conversation too large to send unpublished, and still sends the oth
   await polls(1);
   const here = workspace.conversations.find((c) => c.id === first.id)!;
   expect(here.title).toBe('Renamed elsewhere');
-  // Nothing written here is lost: as for any conversation edited on both sides, the version
-  // the relay never received stays beside it as a copy.
-  const copy = workspace.conversations.find((c) => c.title === 'First (conflict copy)');
-  expect(copy?.messages).toHaveLength(1);
+  expect(here.messages.map((m) => m.blocks)).toEqual([[large]]);
+  expect(workspace.conversations.map((c) => c.title)).toEqual([
+    'Renamed elsewhere',
+    'Renamed here',
+  ]);
   await transport.disconnectRelay();
 });
 

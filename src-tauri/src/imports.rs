@@ -3,8 +3,8 @@
 //! Every account keeps its own sessions: a separate profile in its own directory, while the
 //! terminal and the desktop apps share their environment's default CLI directory. A source is
 //! one of those directories on this computer or one of its managed WSL distributions. Listing
-//! reads bounded metadata and hands out opaque keys, so a native session id or transcript path
-//! never comes from a window. Importing reads one session whole through the decoders a live
+//! reads metadata and hands out opaque keys, so a native session id or transcript path never
+//! comes from a window. Importing reads one session whole through the decoders a live
 //! reply uses, keeps its images and tool results on this computer, and records where it came
 //! from in `imports/<conversation>.json`. The conversation's first reply then forks that
 //! session into the selected account's profile (`sessions::Session::prepare`), so the model
@@ -21,8 +21,6 @@ use tauri::Manager;
 mod claude;
 mod codex;
 
-/// Sessions one source lists at most, newest first.
-const LISTED: usize = 5_000;
 const OUT_OF_DATE: &str = "This list of chats is out of date. Refresh it and try again.";
 
 /// Inputs Agent Studio sends ahead of a prompt: context, never the person's own words.
@@ -177,8 +175,7 @@ pub fn record(root: &Path, conversation: &str) -> Result<Option<Record>, String>
         uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
     let path = records_dir(root).join(format!("{conversation}.json"));
     let bytes = match std::fs::read(&path) {
-        Ok(bytes) if bytes.len() <= 16_000 => bytes,
-        Ok(_) => return Err("This chat's import record is unreadable".into()),
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("Cannot read this chat's import record".into()),
     };
@@ -340,8 +337,6 @@ pub struct Chat {
 pub struct SourceChats {
     source: String,
     chats: Vec<Chat>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
 }
 
 fn app_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -533,7 +528,6 @@ impl Known {
                 .into_iter()
                 .flatten()
                 .flatten()
-                .take(200_000)
                 .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     let conversation = name.strip_suffix(".json")?.to_string();
@@ -672,7 +666,7 @@ impl<'a> Places<'a> {
     /// `recorded` is the distribution a Windows app recorded for the chat's Linux folder.
     fn place(&mut self, source: &str, cwd: &str, recorded: Option<&str>) -> Option<Placement> {
         let environment = self.environment(source)?.clone();
-        if cwd.is_empty() || cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+        if cwd.is_empty() || cwd.chars().any(char::is_control) {
             return None;
         }
         if source != self.local {
@@ -837,8 +831,14 @@ fn codex_origin(thread: &codex::Thread) -> &'static str {
     }
 }
 
+/// Text on one line.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The start of a prompt, as a title for a chat that has none of its own.
 fn short_title(text: &str) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = one_line(text);
     let mut chars = line.chars();
     let start: String = chars.by_ref().take(99).collect();
     if chars.next().is_some() {
@@ -933,16 +933,15 @@ pub async fn chats(
     // The desktop app's chats are in an environment's default directory: this computer's, or a
     // WSL distribution's for the chats it ran there.
     let desktop_store = source.provider == "claude" && source.connection_id.is_none();
-    let (sessions, truncated) = if source.provider == "claude" {
+    let sessions = if source.provider == "claude" {
         let cached: HashMap<PathBuf, (u64, u128, claude::Summary)> = catalog
             .summaries
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
         let scan_root = root.clone();
-        let (summaries, truncated) = tauri::async_runtime::spawn_blocking(move || {
-            let (files, truncated) = claude::sessions(&scan_root, LISTED);
-            let summaries: Vec<(PathBuf, u64, u128, claude::Summary)> = files
+        let summaries = tauri::async_runtime::spawn_blocking(move || {
+            claude::sessions(&scan_root)
                 .into_iter()
                 .filter_map(|(path, bytes, modified)| {
                     let summary = match cached.get(&path) {
@@ -951,8 +950,7 @@ pub async fn chats(
                     };
                     Some((path, bytes, modified, summary))
                 })
-                .collect();
-            (summaries, truncated)
+                .collect::<Vec<(PathBuf, u64, u128, claude::Summary)>>()
         })
         .await
         .map_err(|_| "Cannot read Claude's chats")?;
@@ -1007,7 +1005,7 @@ pub async fn chats(
                 }
             })
             .collect::<Vec<_>>();
-        (sessions, truncated)
+        sessions
     } else {
         // A profile without threads lists none, even where Codex is not installed.
         let store = root.clone();
@@ -1017,12 +1015,12 @@ pub async fn chats(
         .await
         .map_err(|_| "Cannot read Codex's chats")?;
         let profile = source_profile(app, &source)?;
-        let (threads, truncated) = if empty {
-            (vec![], false)
+        let threads = if empty {
+            vec![]
         } else {
-            crate::profiles::scope(profile, codex::list(LISTED)).await?
+            crate::profiles::scope(profile, codex::list()).await?
         };
-        let sessions = threads
+        threads
             .into_iter()
             .map(|thread| Listed {
                 recorded: None,
@@ -1043,8 +1041,7 @@ pub async fn chats(
                 path: None,
                 session: thread.id,
             })
-            .collect::<Vec<_>>();
-        (sessions, truncated)
+            .collect::<Vec<_>>()
     };
     let placed = {
         let fleet = fleet.clone();
@@ -1152,7 +1149,6 @@ pub async fn chats(
     Ok(SourceChats {
         source: source.id(),
         chats,
-        truncated,
     })
 }
 
@@ -1225,9 +1221,7 @@ pub struct Imported {
 }
 
 fn valid_model(model: Option<String>) -> Option<String> {
-    model.filter(|m| {
-        !m.is_empty() && m.len() <= 100 && !m.starts_with('-') && !m.chars().any(char::is_control)
-    })
+    model.filter(|m| !m.is_empty() && !m.starts_with('-') && !m.chars().any(char::is_control))
 }
 
 fn valid_reasoning(provider: &str, reasoning: Option<String>) -> Option<String> {
@@ -1246,12 +1240,7 @@ fn image_bytes(image: &ImageInput, distribution: Option<&str>) -> Option<Vec<u8>
     use base64::{engine::general_purpose::STANDARD, Engine};
     use std::io::Read;
     match image {
-        ImageInput::Base64(data) => {
-            if data.len() > crate::chat_images::MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-                return None;
-            }
-            STANDARD.decode(data).ok()
-        }
+        ImageInput::Base64(data) => STANDARD.decode(data).ok(),
         ImageInput::File(path) => {
             let path = match distribution {
                 Some(distribution) if path.starts_with('/') => share_path(distribution, path),
@@ -1262,9 +1251,7 @@ fn image_bytes(image: &ImageInput, distribution: Option<&str>) -> Option<Vec<u8>
                 return None;
             }
             let mut bytes = vec![];
-            file.take(crate::chat_images::MAX_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
+            (&file).read_to_end(&mut bytes).ok()?;
             Some(bytes)
         }
     }
@@ -1426,11 +1413,7 @@ pub async fn import(
     for turn in conversion.turns {
         if let Some(user) = turn.user {
             let mut images = vec![];
-            for image in user
-                .images
-                .iter()
-                .take(crate::providers::MAX_IMAGES_PER_MESSAGE)
-            {
+            for image in &user.images {
                 let stored = image_bytes(image, distribution.as_deref())
                     .and_then(|bytes| crate::chat_images::store(&images_root, &bytes).ok());
                 match stored {
@@ -1450,10 +1433,6 @@ pub async fn import(
                     None => skipped_images += 1,
                 }
             }
-            skipped_images += user
-                .images
-                .len()
-                .saturating_sub(crate::providers::MAX_IMAGES_PER_MESSAGE);
             let text = if user.text.is_empty() && images.is_empty() {
                 "An image that could not be imported".to_string()
             } else {
@@ -1541,7 +1520,7 @@ pub async fn import(
         .map(short_title);
     let title: String = conversion
         .title
-        .map(|t| short_title(&t))
+        .map(|t| one_line(&t))
         .or(first_prompt)
         .unwrap_or_else(|| "Imported chat".into());
     let updated = conversion
@@ -1914,7 +1893,7 @@ mod tests {
                 PathBuf::from(std::env::var_os("USERPROFILE").unwrap()).join(".claude")
             });
         let started = std::time::Instant::now();
-        let (files, truncated) = claude::sessions(&root, LISTED);
+        let files = claude::sessions(&root);
         let summaries: Vec<_> = files
             .iter()
             .filter_map(|(path, bytes, _)| {
@@ -1922,7 +1901,7 @@ mod tests {
             })
             .collect();
         println!(
-            "listed {} of {} sessions (truncated {truncated}) in {:?}; titled {}, with prompt {}, with cwd {}, studio {}",
+            "listed {} of {} sessions in {:?}; titled {}, with prompt {}, with cwd {}, studio {}",
             summaries.len(),
             files.len(),
             started.elapsed(),
@@ -2048,7 +2027,7 @@ mod tests {
         let mut copies: HashMap<String, Vec<Copy>> = HashMap::new();
         for (environment, root) in &stores {
             let started = std::time::Instant::now();
-            let (files, _) = claude::sessions(root, LISTED);
+            let files = claude::sessions(root);
             let mut places = Places::new(&fleet, &local);
             let mut placed: HashMap<String, usize> = HashMap::new();
             for (path, bytes, _) in &files {
@@ -2119,15 +2098,21 @@ mod tests {
     #[ignore]
     async fn installed_codex_imports_read_this_computers_threads() {
         let started = std::time::Instant::now();
-        let (threads, truncated) = codex::list(LISTED).await.unwrap();
+        let threads = codex::list().await.unwrap();
         println!(
-            "listed {} threads (truncated {truncated}) in {:?}; named {}, archived {}, desktop {}, studio {}",
+            "listed {} threads in {:?}; named {}, archived {}, desktop {}, studio {}",
             threads.len(),
             started.elapsed(),
             threads.iter().filter(|t| t.name.is_some()).count(),
             threads.iter().filter(|t| t.archived).count(),
-            threads.iter().filter(|t| codex_origin(t) == "desktop").count(),
-            threads.iter().filter(|t| codex_origin(t) == "studio").count(),
+            threads
+                .iter()
+                .filter(|t| codex_origin(t) == "desktop")
+                .count(),
+            threads
+                .iter()
+                .filter(|t| codex_origin(t) == "studio")
+                .count(),
         );
         for thread in threads
             .iter()

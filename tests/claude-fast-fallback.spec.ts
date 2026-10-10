@@ -39,10 +39,13 @@ test('Fast mode and fallback settings preserve drafts, validate, and survive rep
   await expect(fallback).toHaveValue('');
   await fast.click();
   await page.getByRole('option', { name: 'On', exact: true }).click();
-  for (const invalid of ['sonnet,', 'sonnet,sonnet', 'a,b,c,d', '--flag']) {
+  for (const invalid of ['sonnet,', 'sonnet,sonnet', '--flag']) {
     await fallback.fill(invalid);
     await expect(save).toBeDisabled();
   }
+  // However many models the chain names.
+  await fallback.fill('opus,sonnet,haiku,claude-sonnet-4-5');
+  await expect(save).toBeEnabled();
   await fallback.fill(' sonnet, haiku ');
   await page.setViewportSize({ width: 390, height: 844 });
   await fast.scrollIntoViewIfNeeded();

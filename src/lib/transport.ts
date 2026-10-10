@@ -52,12 +52,9 @@ import {
   createFetchCache,
   keptModelViewsSchema,
   modelBytes,
-  modelViewBytes,
   modelViewCount,
-  modelViewsBytes,
   modelViewsRenderer,
   modelViewsSchema,
-  relayModelBytes,
   toolOutputImageSchema,
   toolOutputModelSchema,
   toolOutputSchema,
@@ -74,14 +71,12 @@ import type { ConsoleShell } from './code-blocks';
 import {
   screenDetailSchema,
   screenOutcomeSchema,
-  screenRequestMs,
   screenSummarySchema,
   type ScreenDetail,
   type ScreenOutcome,
   type ScreenRequest,
   type ScreenSummary,
 } from './screens';
-import { runTimeoutMs } from './workflows';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import {
   importedChatSchema,
@@ -172,7 +167,7 @@ export async function appVersion(): Promise<string> {
   if (!desktop()) return buildVersion;
   try {
     const version: unknown = await getVersion();
-    if (typeof version === 'string' && /^\d+\.\d+\.\d+\S{0,40}$/.test(version)) return version;
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+\S*$/.test(version)) return version;
   } catch {
     // The desktop app bundles this frontend, so the build's version describes it too.
   }
@@ -275,10 +270,7 @@ export const checkCliUpdates = async (): Promise<CliUpdates> =>
  */
 export async function installCli(provider: UpdatedCli, environmentId: string): Promise<string> {
   if (!desktop()) throw new Error('Install CLIs from Agent Studio on the computer that runs them.');
-  return z
-    .string()
-    .max(40)
-    .parse(await invoke('install_cli', { provider, environmentId }));
+  return z.string().parse(await invoke('install_cli', { provider, environmentId }));
 }
 /**
  * Asks Windows once to let this computer's separate Claude accounts share settings.json and
@@ -611,11 +603,12 @@ let checkpointSavedAt = 0;
 const CHECKPOINT_INTERVAL = 60_000;
 // Relays before v1/state/revision answer it with 404; they get the full state each poll.
 let revisionEndpoint = true;
-// What one upload may carry, in serialized characters, below the relay's own limit
-// (`stateUploadLimit` in relay/server.ts), which counts bytes.
+// How much one upload carries before the rest goes in the next, in serialized characters; a
+// conversation larger than that goes in one of its own. Relays before 2026-10-10 refuse uploads
+// over 64 MB, with 413.
 const uploadBudget = 48_000_000;
 const tooLarge = 'This workspace change is too large to sync.';
-// A problem the last sync met that did not stop it, such as a conversation too large to send.
+// A problem the last sync met that did not stop it, such as images the relay does not have yet.
 let syncNotice = '';
 /** What the last sync could not do while still syncing everything else, or an empty string. */
 export const relaySyncNotice = () => syncNotice;
@@ -798,7 +791,6 @@ async function startAccountUpdates() {
 function accountHeartbeat() {
   if (!desktop() || !runtime) return [];
   const updates: AccountUpdate[] = [];
-  let bytes = 0;
   const fleet = runtime.fleet();
   for (const update of [...localAccountUpdates.values()].sort(
     (a, b) => b.snapshot.checkedAt - a.snapshot.checkedAt,
@@ -810,9 +802,6 @@ function accountHeartbeat() {
       Date.now() - update.snapshot.checkedAt * 1000 > 180_000
     )
       continue;
-    const size = new TextEncoder().encode(JSON.stringify(update)).length;
-    if (bytes + size > 60_000 || updates.length >= 32) break;
-    bytes += size;
     updates.push(update);
   }
   return updates;
@@ -965,9 +954,8 @@ async function relayRaw(
   if (!sessionRequest && !browserWorkspaceId)
     throw new Error('Pair this device with your private workspace first.');
   const text = body === undefined ? undefined : JSON.stringify(body);
-  // No request may stall for 30 seconds, while a large one takes as long as it keeps moving:
-  // an upload gets time for its size at 1 Mbit/s, and the clock restarts with each part of
-  // the answer that arrives.
+  // A request takes as long as it needs to send and for the relay to answer; once the answer
+  // comes, it may not stall for 30 seconds, and the clock restarts with each part that arrives.
   const controller = new AbortController();
   let stalled: ReturnType<typeof setTimeout> | undefined;
   const allow = (ms: number) => {
@@ -977,7 +965,6 @@ async function relayRaw(
       ms,
     );
   };
-  allow(30_000 + (text?.length ?? 0) / 125);
   let result: { status: number; body: any };
   try {
     const response = await fetch(`/${path}`, {
@@ -1542,11 +1529,10 @@ async function syncIncremental(
       remoteMeta,
     });
     let current = relayed;
-    // Uploads stay within what a relay accepts at once, and within its thousand removals. A
-    // conversation too large for that by itself stays unpublished, and the relay keeps its last
-    // copy, while every other one still goes out.
+    // Uploads go out in turns of about the upload budget, a conversation larger than that in one
+    // of its own, and removals a thousand at a time.
     const { send, held } = await publishable(plan.send);
-    const { batches, oversized } = uploadBatches(send, plan.sizes, uploadBudget);
+    const batches = uploadBatches(send, plan.sizes, uploadBudget);
     const removals: string[][] = [];
     for (let at = 0; at < plan.remove.length; at += 1000)
       removals.push(plan.remove.slice(at, at + 1000));
@@ -1575,14 +1561,7 @@ async function syncIncremental(
       if (current.instanceId !== relayInstance) throw new Error(relayReplaced);
     }
     published = true;
-    syncNotice = [
-      oversized.length
-        ? `${chatNames(oversized)} ${oversized.length === 1 ? 'is' : 'are'} too large to sync. Other conversations still sync.`
-        : '',
-      heldNotice(held),
-    ]
-      .filter(Boolean)
-      .join(' ');
+    syncNotice = heldNotice(held);
     // Their images may reach the relay later, so they are tried again on the next poll.
     if (held.length)
       runtime.restoreUnsynced({ chats: new Set(held.map((c) => c.id)), meta: false });
@@ -1590,7 +1569,7 @@ async function syncIncremental(
     // The relay now holds every message of what it took, so saves from here on, such as the one
     // applying this sync, leave that work out.
     if (lightSession) {
-      const kept = new Set([...oversized, ...held].map((c) => c.id));
+      const kept = new Set(held.map((c) => c.id));
       for (const [id, conversation] of plan.result)
         if (!kept.has(id)) for (const message of messageIds([conversation])) relayHeld.add(message);
     }
@@ -1654,7 +1633,7 @@ async function syncIncremental(
     if (since.size) runtime.restoreUnsynced({ chats: since, meta: false });
     // The relay still holds its own copy of a conversation this poll could not send.
     const result = new Map(plan.result);
-    for (const { id } of [...oversized, ...held]) {
+    for (const { id } of held) {
       const remote = remoteChat(id);
       if (remote) result.set(id, remote);
       else result.delete(id);
@@ -2167,24 +2146,10 @@ async function routed<T>(
       method,
       args,
     });
-    const deadline =
-      Date.now() +
-      (method === 'plugins'
-        ? 660_000
-        : method === 'screens'
-          ? screenRequestMs(args.request as ScreenRequest)
-          : method === 'folders'
-            ? 30_000
-            : method === 'toolOutput' ||
-                method === 'toolOutputImage' ||
-                method === 'toolOutputModel' ||
-                method === 'toolOutputModelViews'
-              ? 120_000
-              : runTimeoutMs(
-                  method === 'run' ? (args.request as RunRequest)?.agent?.provider : undefined,
-                ) + 10_000);
     let previous: string[] = [];
-    while (Date.now() < deadline) {
+    // A request lasts as long as its computer keeps reporting it, however long that is: the relay
+    // ends one whose computer stops.
+    for (;;) {
       currentSession();
       const job = await relayApi<RelayJob>('GET', `v1/jobs/${id}`);
       currentSession();
@@ -2198,8 +2163,6 @@ async function routed<T>(
       if (job.status === 'complete') return job.result as T;
       await new Promise((resolve) => setTimeout(resolve, 700));
     }
-    await relayApi('POST', `v1/jobs/${id}/cancel`).catch(() => {});
-    throw new Error('Remote request timed out. Check the executing environment before retrying.');
   } finally {
     remoteRuns.delete(id);
   }
@@ -2300,7 +2263,7 @@ async function executeJob(job: RelayJob) {
     status = result === 'cancelled' ? 'cancelled' : 'complete';
   } catch (e) {
     status = 'error';
-    error = String(e).slice(0, 4000);
+    error = String(e);
   } finally {
     clearInterval(timer);
     clearTimeout(soon);
@@ -2311,16 +2274,16 @@ async function executeJob(job: RelayJob) {
     );
     await checkpoint.catch(() => {});
     await publish().catch(async (e) => {
-      // The relay may refuse a finished request's result: larger than it accepts, or without
-      // room beside the results it holds. Say so, rather than leave the request to expire as
-      // though this computer had gone. A reply ends with its saved conversation instead.
+      // The relay may refuse a finished request's result (relays before 2026-10-10 refuse one
+      // larger than 24 MB). Say so, rather than leave the request to expire as though this
+      // computer had gone. A reply ends with its saved conversation instead.
       if (job.method === 'run' || status === 'error') return;
       status = 'error';
       result = undefined;
       error =
         e instanceof RelayResponseError && e.status === 413
           ? 'The result is larger than the relay accepts.'
-          : `The result could not be sent through the relay: ${String(e instanceof Error ? e.message : e).slice(0, 500)}`;
+          : `The result could not be sent through the relay: ${String(e instanceof Error ? e.message : e)}`;
       await publish().catch(() => {});
     });
     workerRuns.delete(job.id);
@@ -2505,7 +2468,8 @@ function largeRead<T>(connectionId: string | undefined, read: () => Promise<T>):
 /**
  * A finished tool call's result, read from the computer that ran it: through native
  * commands here, or the owning host through the relay. It is never synced or exported.
- * Each stream comes whole up to 512 KB, or up to 8 MB when `full` is set.
+ * Each stream comes whole. Computers before 2026-10-10 sent the beginning and end of a long one,
+ * up to 8 MB of it when `full` is set.
  */
 export async function readToolOutput(
   runId: string,
@@ -2515,13 +2479,12 @@ export async function readToolOutput(
 ): Promise<ToolOutput> {
   const read = () =>
     routed('toolOutput', { runId, toolId, connectionId, ...(full ? { full } : {}) }, connectionId);
-  return toolOutputSchema.parse(await (full ? largeRead(connectionId, read) : read()));
+  return toolOutputSchema.parse(await largeRead(connectionId, read));
 }
 /**
  * One 3D model of a finished tool call's result, whole: as raw bytes from this computer's own
- * store however large it is, or as base64 through the relay from the computer that ran it, up
- * to what one relay request carries. `format` is the one the reply recorded, which that
- * computer recognized in the file.
+ * store, or as base64 through the relay from the computer that ran it, whatever its size.
+ * `format` is the one the reply recorded, which that computer recognized in the file.
  */
 export async function readToolOutputModel(
   runId: string,
@@ -2546,11 +2509,10 @@ export async function readToolOutputModel(
   return { format: model.format, bytes: await modelBytes(model) };
 }
 /**
- * Whether this window shows a model only through views: one of another computer, larger than
- * a relay request carries. A model this computer keeps opens whole however large it is.
+ * Whether a model comes from another computer: read whole through the relay however large it
+ * is, and shown through views that computer renders only when that read fails on the way.
  */
-export function modelShownAsViews(connectionId: string | undefined, bytes: number): boolean {
-  if (bytes <= relayModelBytes) return false;
+export function modelFromAnotherComputer(connectionId: string | undefined): boolean {
   try {
     return !desktop() || !!remoteTarget(connectionId);
   } catch {
@@ -2560,7 +2522,7 @@ export function modelShownAsViews(connectionId: string | undefined, bytes: numbe
 }
 /**
  * Views of a model, a turn apart, rendered by the window of the computer that keeps it,
- * which sends them instead of a model too large for the relay.
+ * which sends them instead of a model that could not come whole through the relay.
  */
 export async function readToolOutputModelViews(
   runId: string,
@@ -2607,8 +2569,6 @@ async function keptOrRenderedViews(request: {
       count: modelViewCount,
       width: 1600,
       height: 1600,
-      viewBytes: modelViewBytes,
-      totalBytes: modelViewsBytes,
     });
     // Views that cannot be kept are still sent; the next request draws them again.
     await invoke('store_tool_output_model_views', {
@@ -2782,7 +2742,6 @@ async function relayImage(
       ...(body ? { 'Content-Type': 'application/octet-stream' } : {}),
     },
     body,
-    signal: AbortSignal.timeout(300_000),
   });
   if (generation !== relayGeneration)
     throw new Error('The private workspace connection changed. Try again after pairing.');
@@ -3107,8 +3066,7 @@ export async function undoFiles(
   if (
     !result ||
     !Array.isArray(result.files) ||
-    result.files.length > 32 ||
-    !result.files.every((p) => typeof p === 'string' && p.length <= 4096) ||
+    !result.files.every((p) => typeof p === 'string') ||
     typeof result.undone !== 'boolean'
   )
     throw new Error('The execution computer returned an invalid Undo result.');
@@ -3155,10 +3113,7 @@ export async function signIn(provider: string, connectionId?: string): Promise<S
 /** The sign-ins this computer waits on, for a window that opens or reloads. */
 export async function listSignIns(): Promise<SignInView[]> {
   if (!desktop()) return [];
-  return z
-    .array(signInViewSchema)
-    .max(64)
-    .parse(await invoke('sign_ins'));
+  return z.array(signInViewSchema).parse(await invoke('sign_ins'));
 }
 /** Sends the code a Claude sign-in page showed to the CLI waiting for it. */
 export async function submitSignInCode(id: string, code: string): Promise<SignInView> {
@@ -3197,7 +3152,7 @@ export async function runInConsole(
     code,
   });
   const name = opened?.shell;
-  return typeof name === 'string' && name.length <= 80 ? name : 'a console';
+  return typeof name === 'string' && name ? name : 'a console';
 }
 /**
  * A screen's request, answered by the computer that keeps it (`manage_screen`, src-tauri/src/
@@ -3219,10 +3174,7 @@ async function screenRequest(environmentId: string, request: ScreenRequest): Pro
 /** The screens one computer keeps, named by an environment it owns. */
 export async function listScreens(environmentId: string): Promise<ScreenSummary[]> {
   const answer = (await screenRequest(environmentId, { op: 'list' })) as { screens?: unknown };
-  return z
-    .array(screenSummarySchema)
-    .max(1000)
-    .parse(answer?.screens ?? []);
+  return z.array(screenSummarySchema).parse(answer?.screens ?? []);
 }
 export async function readScreen(environmentId: string, id: string): Promise<ScreenDetail> {
   return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'read', id }));

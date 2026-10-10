@@ -176,24 +176,19 @@ export function nextBaselineChats(
 }
 
 /**
- * Splits conversations to send into uploads of at most `budget` serialized characters, in their
- * order. One larger than the budget by itself is left out, for the caller to report.
+ * Splits conversations to send into uploads of about `budget` serialized characters, in their
+ * order. One larger than the budget goes in an upload of its own; none is left out.
  */
 export function uploadBatches(
   send: Conversation[],
   sizes: Map<string, number>,
   budget: number,
-): { batches: Conversation[][]; oversized: Conversation[] } {
+): Conversation[][] {
   const batches: Conversation[][] = [];
-  const oversized: Conversation[] = [];
   let batch: Conversation[] = [];
   let size = 0;
   for (const conversation of send) {
     const bytes = sizes.get(conversation.id) ?? JSON.stringify(conversation).length;
-    if (bytes > budget) {
-      oversized.push(conversation);
-      continue;
-    }
     if (batch.length && size + bytes > budget) {
       batches.push(batch);
       batch = [];
@@ -203,5 +198,5 @@ export function uploadBatches(
     size += bytes;
   }
   if (batch.length) batches.push(batch);
-  return { batches, oversized };
+  return batches;
 }

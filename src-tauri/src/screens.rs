@@ -18,32 +18,6 @@ use tauri::Manager;
 mod run;
 pub mod tools;
 
-pub const MAX_TITLE: usize = 80;
-pub const MAX_DESCRIPTION: usize = 300;
-pub const MAX_HTML: usize = 512_000;
-pub const MAX_ACTIONS: usize = 24;
-pub const MAX_SCRIPT: usize = 32_000;
-pub const MAX_PARAMS: usize = 12;
-const MAX_NAME: usize = 40;
-const MAX_CHOICES: usize = 64;
-const MAX_CHOICE: usize = 200;
-const MAX_PATTERN: usize = 300;
-const MAX_STRING: u64 = 8_000;
-const DEFAULT_STRING: usize = 1_000;
-const DEFAULT_TIMEOUT: u32 = 60;
-pub const MAX_TIMEOUT: u32 = 600;
-/// What one run's parameter values hold together, well within what an environment carries.
-const MAX_ARGUMENTS: usize = 16_000;
-/// Screens one computer keeps.
-const MAX_SCREENS: usize = 200;
-/// What one screen keeps with `studio.save`, serialized.
-pub const MAX_DATA: usize = 1_000_000;
-const MAX_KEY: usize = 100;
-/// Actions running at once on this computer, across its screens.
-const MAX_RUNNING: usize = 6;
-/// How long an action waits for its turn when that many already run.
-const QUEUE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shell {
@@ -93,7 +67,9 @@ pub struct Action {
     pub script: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Param>,
-    pub timeout: u32,
+    /// Seconds the script may run before it is stopped; none lets it run until it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
 }
 
 /// Where a screen's actions run, recorded from the reply that created it. Only this computer
@@ -112,7 +88,7 @@ pub struct Site {
     pub project: String,
 }
 
-/// The card a reply shows for a screen it saved: bounded metadata only, never the screen.
+/// The card a reply shows for a screen it saved: metadata only, never the screen.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
@@ -250,9 +226,9 @@ pub struct Definition {
     pub actions: Vec<Action>,
 }
 
-/// Text the user reads when allowing a screen: bounded, on one line, and without characters
-/// that hide or reorder what it says.
-fn line(value: Option<&Value>, field: &str, max: usize, required: bool) -> Result<String, String> {
+/// Text the user reads when allowing a screen: on one line, and without characters that hide
+/// or reorder what it says.
+fn line(value: Option<&Value>, field: &str, required: bool) -> Result<String, String> {
     let text = match value {
         None | Some(Value::Null) if !required => return Ok(String::new()),
         Some(Value::String(text)) => text,
@@ -278,15 +254,12 @@ fn line(value: Option<&Value>, field: &str, max: usize, required: bool) -> Resul
     if required && text.is_empty() {
         return Err(format!("{field} must not be empty."));
     }
-    if text.chars().count() > max {
-        return Err(format!("{field} must be at most {max} characters."));
-    }
     Ok(text.into())
 }
 
 /// A name a screen's script calls an action or reads a parameter by.
 fn identifier(name: &str) -> bool {
-    (1..=MAX_NAME).contains(&name.len())
+    !name.is_empty()
         && name.as_bytes()[0].is_ascii_lowercase()
         && name
             .bytes()
@@ -297,7 +270,6 @@ fn unexpected(object: &Map<String, Value>, accepted: &[&str]) -> Result<(), Stri
     let extra: Vec<_> = object
         .keys()
         .filter(|key| !accepted.contains(&key.as_str()))
-        .take(5)
         .cloned()
         .collect();
     if extra.is_empty() {
@@ -311,8 +283,8 @@ fn unexpected(object: &Map<String, Value>, accepted: &[&str]) -> Result<(), Stri
     }
 }
 
-/// A script as its shell will read it: plain line ends, bounded, and nothing in it the user
-/// could not see when allowing it.
+/// A script as its shell will read it: plain line ends, and nothing in it the user could not
+/// see when allowing it.
 fn script(value: Option<&Value>) -> Result<String, String> {
     let text = value
         .and_then(Value::as_str)
@@ -321,9 +293,6 @@ fn script(value: Option<&Value>) -> Result<String, String> {
     let text = text.trim_end_matches('\n');
     if text.trim().is_empty() {
         return Err("script must not be empty.".into());
-    }
-    if text.len() > MAX_SCRIPT {
-        return Err(format!("script must be at most {MAX_SCRIPT} bytes."));
     }
     if let Some(c) = text.chars().find(|c| crate::console::hidden(*c)) {
         return Err(format!(
@@ -362,22 +331,15 @@ fn param(spec: &Value) -> Result<Param, String> {
         Some("boolean") => Kind::Boolean,
         _ => return Err("type must be string, number, integer or boolean.".into()),
     };
-    let description = line(
-        object.get("description"),
-        "description",
-        MAX_DESCRIPTION,
-        false,
-    )?;
+    let description = line(object.get("description"), "description", false)?;
     let choices = match object.get("enum") {
         None | Some(Value::Null) => None,
-        Some(Value::Array(values)) if (1..=MAX_CHOICES).contains(&values.len()) => {
+        Some(Value::Array(values)) if !values.is_empty() => {
             for value in values {
                 let fits = match kind {
                     Kind::String => value.as_str().is_some_and(|s| {
-                        s.chars().count() <= MAX_CHOICE
-                            && !s
-                                .chars()
-                                .any(|c| c.is_control() || crate::console::hidden(c))
+                        !s.chars()
+                            .any(|c| c.is_control() || crate::console::hidden(c))
                     }),
                     Kind::Number => value.as_f64().is_some_and(f64::is_finite),
                     Kind::Integer => value.as_f64().is_some_and(whole),
@@ -387,7 +349,7 @@ fn param(spec: &Value) -> Result<Param, String> {
                     return Err(format!(
                         "enum values must each be a {} of this parameter's type.",
                         if kind == Kind::String {
-                            "line of at most 200 characters"
+                            "line"
                         } else {
                             "value"
                         }
@@ -396,14 +358,11 @@ fn param(spec: &Value) -> Result<Param, String> {
             }
             Some(values.clone())
         }
-        Some(_) => return Err(format!("enum must list 1 to {MAX_CHOICES} values.")),
+        Some(_) => return Err("enum must list at least one value.".into()),
     };
     let pattern = match object.get("pattern") {
         None | Some(Value::Null) => None,
         Some(Value::String(pattern)) if kind == Kind::String => {
-            if pattern.chars().count() > MAX_PATTERN {
-                return Err(format!("pattern must be at most {MAX_PATTERN} characters."));
-            }
             // The user reads it when allowing the action; escape such characters instead.
             if let Some(c) = pattern
                 .chars()
@@ -424,8 +383,7 @@ fn param(spec: &Value) -> Result<Param, String> {
         Some(value) if kind == Kind::String => Some(
             value
                 .as_u64()
-                .filter(|n| (1..=MAX_STRING).contains(n))
-                .ok_or(format!("maxLength must be from 1 to {MAX_STRING}."))?,
+                .ok_or("maxLength must be a whole number of characters.")?,
         ),
         Some(_) => return Err("maxLength applies only to a string.".into()),
     };
@@ -487,16 +445,10 @@ fn action(item: &Value) -> Result<Action, String> {
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| identifier(name))
-        .ok_or("name must be 1 to 40 lowercase letters, digits or _, starting with a letter.")?
+        .ok_or("name must be lowercase letters, digits or _, starting with a letter.")?
         .to_string();
     let named = |error: String| format!("Action {name}: {error}");
-    let description = line(
-        object.get("description"),
-        "description",
-        MAX_DESCRIPTION,
-        false,
-    )
-    .map_err(named)?;
+    let description = line(object.get("description"), "description", false).map_err(named)?;
     let shell = match object.get("shell").and_then(Value::as_str) {
         Some("powershell") => Shell::Powershell,
         Some("bash") => Shell::Bash,
@@ -506,16 +458,11 @@ fn action(item: &Value) -> Result<Action, String> {
     let params = match object.get("params") {
         None | Some(Value::Null) => BTreeMap::new(),
         Some(Value::Object(params)) => {
-            if params.len() > MAX_PARAMS {
-                return Err(named(format!(
-                    "declare at most {MAX_PARAMS} parameters."
-                )));
-            }
             let mut declared = BTreeMap::new();
             for (key, spec) in params {
                 if !identifier(key) {
                     return Err(named(format!(
-                        "parameter {key} must be named with 1 to 40 lowercase letters, digits or _, starting with a letter."
+                        "parameter {key} must be named with lowercase letters, digits or _, starting with a letter."
                     )));
                 }
                 declared.insert(
@@ -532,15 +479,14 @@ fn action(item: &Value) -> Result<Action, String> {
             ))
         }
     };
-    let timeout = match object.get("timeout") {
-        None | Some(Value::Null) => DEFAULT_TIMEOUT,
-        Some(value) => value
-            .as_u64()
-            .filter(|seconds| (1..=u64::from(MAX_TIMEOUT)).contains(seconds))
-            .ok_or_else(|| {
-                named("timeout must be a whole number of seconds from 1 to 600.".into())
-            })? as u32,
-    };
+    // Without a timeout the script runs until it ends or the user stops it.
+    let timeout =
+        match object.get("timeout") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_u64().filter(|seconds| *seconds >= 1).ok_or_else(
+                || named("timeout must be a whole number of seconds, at least 1.".into()),
+            )?),
+        };
     Ok(Action {
         name,
         description,
@@ -571,27 +517,19 @@ pub fn definition(args: &Value) -> Result<Definition, String> {
             )
         }
     };
-    let title = line(object.get("title"), "title", MAX_TITLE, true)?;
-    let description = line(
-        object.get("description"),
-        "description",
-        MAX_DESCRIPTION,
-        false,
-    )?;
+    let title = line(object.get("title"), "title", true)?;
+    let description = line(object.get("description"), "description", false)?;
     let html = object
         .get("html")
         .and_then(Value::as_str)
         .filter(|html| !html.trim().is_empty())
         .ok_or("html must be the screen's complete HTML.")?;
-    if html.len() > MAX_HTML || html.contains('\0') {
-        return Err(format!("html must be at most {MAX_HTML} UTF-8 bytes."));
+    if html.contains('\0') {
+        return Err("html must not contain a NUL character.".into());
     }
     let actions = match object.get("actions") {
         None | Some(Value::Null) => vec![],
         Some(Value::Array(list)) => {
-            if list.len() > MAX_ACTIONS {
-                return Err(format!("A screen declares at most {MAX_ACTIONS} actions."));
-            }
             let mut actions: Vec<Action> = Vec::new();
             for item in list {
                 let action = action(item)?;
@@ -653,9 +591,11 @@ pub fn arguments(
         let text = match param.kind {
             Kind::String => {
                 let text = value.as_str().ok_or_else(wrong)?;
-                let limit = param.max_length.map_or(DEFAULT_STRING, |n| n as usize);
-                if text.chars().count() > limit {
-                    return Err(format!("{name} must be at most {limit} characters."));
+                // Only the length the action itself declares.
+                if let Some(limit) = param.max_length {
+                    if text.chars().count() as u64 > limit {
+                        return Err(format!("{name} must be at most {limit} characters."));
+                    }
                 }
                 if text.contains('\0') {
                     return Err(format!("{name} must not contain a NUL character."));
@@ -698,16 +638,6 @@ pub fn arguments(
             }
         }
         variables.push((variable(name), text));
-    }
-    if variables
-        .iter()
-        .map(|(name, value)| name.len() + value.len())
-        .sum::<usize>()
-        > MAX_ARGUMENTS
-    {
-        return Err(format!(
-            "The values of one run must total at most {MAX_ARGUMENTS} bytes."
-        ));
     }
     Ok(variables)
 }
@@ -851,30 +781,23 @@ pub(crate) fn store(
                 false,
             )
         }
-        None => {
-            if all(root).len() >= MAX_SCREENS {
-                return Err(format!(
-                    "This computer already keeps {MAX_SCREENS} screens. Ask the user to delete one, or update an existing screen by its id."
-                ));
-            }
-            (
-                Screen {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    revision: 1,
-                    title: definition.title,
-                    description: definition.description,
-                    html: definition.html,
-                    actions: definition.actions,
-                    site,
-                    conversation_id: conversation_id.into(),
-                    run_id: run_id.into(),
-                    created_at: time.clone(),
-                    updated_at: time,
-                    approval: None,
-                },
-                true,
-            )
-        }
+        None => (
+            Screen {
+                id: uuid::Uuid::new_v4().to_string(),
+                revision: 1,
+                title: definition.title,
+                description: definition.description,
+                html: definition.html,
+                actions: definition.actions,
+                site,
+                conversation_id: conversation_id.into(),
+                run_id: run_id.into(),
+                created_at: time.clone(),
+                updated_at: time,
+                approval: None,
+            },
+            true,
+        ),
     };
     let mut screen = screen;
     // An approval of other actions never carries over: it stays only while it names these.
@@ -890,17 +813,10 @@ pub(crate) fn store(
 }
 
 /// This computer's screens and the actions they run, one request at a time for each change.
+/// Actions run side by side, as many at once as they are asked for.
+#[derive(Default)]
 pub struct Screens {
     changes: tokio::sync::Mutex<()>,
-    running: tokio::sync::Semaphore,
-}
-impl Default for Screens {
-    fn default() -> Self {
-        Self {
-            changes: tokio::sync::Mutex::new(()),
-            running: tokio::sync::Semaphore::new(MAX_RUNNING),
-        }
-    }
 }
 
 /// What a window or another device asks of this computer's screens.
@@ -978,13 +894,6 @@ impl Screens {
                     return Err(NOT_ALLOWED.into());
                 }
                 let variables = arguments(declared, &params)?;
-                let _turn = tokio::time::timeout(QUEUE_LIMIT, self.running.acquire())
-                    .await
-                    .map_err(|_| {
-                        "Too many screen actions are running on this computer. Try again in a moment."
-                            .to_string()
-                    })?
-                    .map_err(|_| "Screen actions are unavailable".to_string())?;
                 let outcome =
                     run::execute(&root, &namespace, &screen.site, declared, variables).await?;
                 encode(&outcome)
@@ -1039,13 +948,8 @@ impl Screens {
                 Ok(json!({ "values": values }))
             }
             Request::Save { id, key, value } => {
-                if key.is_empty()
-                    || key.chars().count() > MAX_KEY
-                    || key.chars().any(|c| c.is_control())
-                {
-                    return Err(format!(
-                        "A saved value needs a key of 1 to {MAX_KEY} characters."
-                    ));
+                if key.is_empty() || key.chars().any(|c| c.is_control()) {
+                    return Err("A saved value needs a key without control characters.".into());
                 }
                 let _change = self.changes.lock().await;
                 let bytes = blocking(move || {
@@ -1058,11 +962,6 @@ impl Screens {
                     }
                     let bytes = serde_json::to_vec(&values)
                         .map_err(|_| "Cannot save this value".to_string())?;
-                    if bytes.len() > MAX_DATA {
-                        return Err(format!(
-                            "A screen keeps at most {MAX_DATA} bytes of saved values. Save less, or remove values it no longer needs."
-                        ));
-                    }
                     replace(&data_file(&root, &id), &bytes)?;
                     Ok(bytes.len())
                 })
@@ -1147,7 +1046,7 @@ mod tests {
     fn a_submission_is_checked_whole_before_anything_is_saved() {
         let parsed = definition(&submission()).unwrap();
         assert_eq!(parsed.title, "My pull requests");
-        assert_eq!(parsed.actions[0].timeout, 30);
+        assert_eq!(parsed.actions[0].timeout, Some(30));
         assert_eq!(parsed.actions[0].params["since"].kind, Kind::String);
         let refuse = |change: &dyn Fn(&mut Value), expected: &str| {
             let mut args = submission();
@@ -1160,16 +1059,12 @@ mod tests {
             "unknown field path",
         );
         refuse(&|a| a["title"] = json!("  "), "title must not be empty");
-        refuse(&|a| a["title"] = json!("x".repeat(81)), "at most 80");
         refuse(
             &|a| a["title"] = json!("safe\u{202e}txt"),
             "hidden character",
         );
         refuse(&|a| a["html"] = json!(""), "html must be");
-        refuse(
-            &|a| a["html"] = json!("x".repeat(MAX_HTML + 1)),
-            "at most 512000",
-        );
+        refuse(&|a| a["html"] = json!("a\u{0}b"), "NUL");
         refuse(&|a| a["id"] = json!("my-screen"), "id must be the id");
         refuse(
             &|a| a["actions"][0]["name"] = json!("ListPRs"),
@@ -1183,10 +1078,7 @@ mod tests {
             &|a| a["actions"][0]["script"] = json!("rm\u{200b} -rf x"),
             "U+200B",
         );
-        refuse(
-            &|a| a["actions"][0]["timeout"] = json!(601),
-            "from 1 to 600",
-        );
+        refuse(&|a| a["actions"][0]["timeout"] = json!(0), "at least 1");
         refuse(
             &|a| a["actions"][0]["command"] = json!("x"),
             "unknown field command",
@@ -1222,6 +1114,32 @@ mod tests {
         let mut plain = submission();
         plain.as_object_mut().unwrap().remove("actions");
         assert!(definition(&plain).unwrap().actions.is_empty());
+        // Screens of any size, past what earlier releases accepted: an 80-character title, a
+        // 512,000-byte page, 24 actions of 32,000-byte scripts with 12 parameters and a timeout
+        // of at most 600 seconds. An action without a timeout runs until it ends.
+        let mut large = submission();
+        large["title"] = json!("t".repeat(200));
+        large["description"] = json!("d".repeat(400));
+        large["html"] = json!("x".repeat(600_000));
+        let mut params = serde_json::Map::new();
+        for index in 0..13 {
+            params.insert(
+                format!("p{index}_{}", "n".repeat(50)),
+                json!({"type":"string","maxLength":20_000,"enum":(0..70).map(|i| format!("{i}{}", "v".repeat(210))).collect::<Vec<_>>()}),
+            );
+        }
+        large["actions"] = json!((0..25)
+            .map(|index| json!({"name":format!("action_{index}"),"shell":"bash","script":"s".repeat(33_000),"params":params,"timeout":86_400}))
+            .collect::<Vec<_>>());
+        large["actions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeout");
+        let parsed = definition(&large).unwrap();
+        assert_eq!(parsed.actions.len(), 25);
+        assert_eq!(parsed.actions[0].timeout, None);
+        assert_eq!(parsed.actions[1].timeout, Some(86_400));
+        assert_eq!(parsed.html.len(), 600_000);
     }
 
     #[test]
@@ -1272,6 +1190,10 @@ mod tests {
             (json!({"query": "a", "limit": 51}), "outside the range"),
             (json!({"query": "x".repeat(21), "limit": 5}), "at most 20"),
             (
+                json!({"query": "a", "limit": 5, "state": "x".repeat(2000)}),
+                "one of the values",
+            ),
+            (
                 json!({"query": "a", "limit": 5, "state": "merged"}),
                 "one of the values",
             ),
@@ -1294,6 +1216,16 @@ mod tests {
         let since = |value: &str| arguments(action, json!({ "since": value }).as_object().unwrap());
         assert!(since("2026-09-28").is_ok());
         assert!(since("2026-09-28; whoami").unwrap_err().contains("pattern"));
+        // A string without a declared maxLength passes whole, past the 1,000 characters and
+        // 16,000 bytes a run earlier releases allowed.
+        let open = definition(&json!({"title":"x","html":"x","actions":[{"name":"echo","shell":"bash","script":"echo","params":{"text":{"type":"string"}}}]})).unwrap();
+        let text = "y".repeat(50_000);
+        let variables = arguments(
+            &open.actions[0],
+            json!({ "text": text }).as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(variables[0].1.len(), 50_000);
     }
 
     #[test]
@@ -1433,7 +1365,7 @@ mod tests {
         assert!(invalid.contains("pattern"), "{invalid}");
         let revoked = ask(json!({"op": "revoke", "id": screen.id})).await.unwrap();
         assert_eq!(revoked["allowed"], false);
-        // Saved values stay with the screen, bounded.
+        // Saved values stay with the screen, whatever their size.
         ask(json!({"op": "save", "id": screen.id, "key": "filters", "value": {"state": "open"}}))
             .await
             .unwrap();
@@ -1445,11 +1377,11 @@ mod tests {
         let loaded = ask(json!({"op": "load", "id": screen.id})).await.unwrap();
         assert!(loaded["values"].as_object().unwrap().is_empty());
         let large = ask(
-            json!({"op": "save", "id": screen.id, "key": "big", "value": "x".repeat(MAX_DATA)}),
+            json!({"op": "save", "id": screen.id, "key": "k".repeat(500), "value": "x".repeat(2_000_000)}),
         )
         .await
-        .unwrap_err();
-        assert!(large.contains("at most"), "{large}");
+        .unwrap();
+        assert!(large["bytes"].as_u64().unwrap() > 2_000_000);
         let key = ask(json!({"op": "save", "id": screen.id, "key": "", "value": 1}))
             .await
             .unwrap_err();

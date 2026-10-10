@@ -94,7 +94,7 @@ describe('transient account push', () => {
     incoming.creditsCheckedAt = 500;
     expect(mergeLiveUsage(baseline(), incoming).credits).toEqual(baseline().credits);
   });
-  it('rejects duplicate, reversed, foreign-epoch and oversized payloads', () => {
+  it('rejects duplicate, reversed and foreign-epoch payloads, however large or many', () => {
     const gate = new AccountUpdateGate(),
       first = update();
     expect(gate.accept(first)).toBe(true);
@@ -102,12 +102,15 @@ describe('transient account push', () => {
     expect(gate.accept({ ...first, revision: 0 })).toBe(false);
     expect(gate.accept({ ...first, epoch: crypto.randomUUID(), revision: 1 })).toBe(true);
     expect(gate.accept({ ...first, revision: 100 })).toBe(false);
-    expect(
-      accountUpdateSchema.safeParse({
-        ...first,
-        snapshot: { ...first.snapshot, detail: 'x'.repeat(301) },
-      }).success,
-    ).toBe(false);
+    // Any number of connections, and of restarts of one connection.
+    for (let i = 0; i < 150; i++)
+      expect(gate.accept({ ...update(), connectionId: crypto.randomUUID() })).toBe(true);
+    for (let i = 0; i < 40; i++)
+      expect(gate.accept({ ...first, epoch: crypto.randomUUID(), revision: 1 })).toBe(true);
+    const windows = Array.from({ length: 40 }, (_, i) => ({ ...window, id: `w${i}` }));
+    const large = { ...first, snapshot: { ...first.snapshot, detail: 'x'.repeat(5000), windows } };
+    expect(accountUpdateSchema.parse(large)).toEqual(large);
+    expect(mergeLiveUsage(baseline(), large).windows).toHaveLength(42);
     expect(
       accountActionSchema.safeParse({
         action: 'consumeResetCredit',

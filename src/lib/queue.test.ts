@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   enqueueMessage,
-  maxQueuedMessages,
   queuedPreview,
   restoreToDraft,
   sameProcess,
@@ -22,7 +21,7 @@ const image = (name: string): DraftImage => ({
 });
 
 describe('message queue', () => {
-  it('queues trimmed text, images, and skills in order up to the limit', () => {
+  it('queues trimmed text, images, and skills in order, however many', () => {
     let queue: QueuedMessage[] = [];
     const first = enqueueMessage(queue, { text: '  first  ', images: [] });
     expect(first.error).toBeUndefined();
@@ -39,24 +38,29 @@ describe('message queue', () => {
     expect(queue[0].id).not.toBe(queue[1].id);
     expect(enqueueMessage(queue, { text: '   ', images: [] }).error).toMatch(/Enter a message/);
     expect(enqueueMessage(queue, { text: '', images: [image('only.png')] }).error).toBeUndefined();
-    while (queue.length < maxQueuedMessages)
+    while (queue.length < 30)
       queue = enqueueMessage(queue, { text: `m${queue.length}`, images: [] }).queue;
-    const full = enqueueMessage(queue, { text: 'one more', images: [] });
-    expect(full.error).toMatch(/Up to 8 messages/);
-    expect(full.queue).toBe(queue);
+    const more = enqueueMessage(queue, { text: 'one more', images: [] });
+    expect(more.error).toBeUndefined();
+    expect(more.queue).toHaveLength(31);
   });
 
-  it('returns queued messages to the draft ahead of the current text and caps images', () => {
+  it('returns queued messages to the draft ahead of the current text, with every image', () => {
     const queue = [
       enqueueMessage([], { text: 'earlier', images: [image('1.png'), image('2.png')] }).queue[0],
       enqueueMessage([], { text: 'later', images: [image('3.png')] }).queue[0],
     ];
-    const restored = restoreToDraft(queue, '  typing now ', [image('4.png'), image('5.png')], 4);
+    const restored = restoreToDraft(queue, '  typing now ', [image('4.png'), image('5.png')]);
     expect(restored.draft).toBe('earlier\n\nlater\n\ntyping now');
-    expect(restored.images.map((i) => i.name)).toEqual(['1.png', '2.png', '3.png', '4.png']);
-    expect(restored.droppedImages).toBe(1);
-    expect(restoreToDraft([], '', [], 4)).toEqual({ draft: '', images: [], droppedImages: 0 });
-    expect(restoreToDraft(queue, '', [], 4).draft).toBe('earlier\n\nlater');
+    expect(restored.images.map((i) => i.name)).toEqual([
+      '1.png',
+      '2.png',
+      '3.png',
+      '4.png',
+      '5.png',
+    ]);
+    expect(restoreToDraft([], '', [])).toEqual({ draft: '', images: [] });
+    expect(restoreToDraft(queue, '', []).draft).toBe('earlier\n\nlater');
   });
 
   it('previews queued messages on one line with image counts', () => {

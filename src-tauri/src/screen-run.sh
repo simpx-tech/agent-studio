@@ -1,8 +1,8 @@
 # Screens (screens/run.rs): runs one action of a screen inside this distribution. What it runs
 # arrives on stdin as lines of base64 or digits, never on a command line: the folder, the script,
-# the time limit, then each parameter's variable and value. The script runs in a process group of
-# its own, in the folder, with stdin closed, and ends when it is done, when its time is up or when
-# Agent Studio stops it (wsl-cancel.sh, through the marker of this job).
+# the time limit (0 for none), then each parameter's variable and value. The script runs in a
+# process group of its own, in the folder, with stdin closed, and ends when it is done, when its
+# time is up or when Agent Studio stops it (wsl-cancel.sh, through the marker of this job).
 set -u
 namespace=$1
 job=$2
@@ -57,7 +57,9 @@ state="${state##*) }"
 start="$(printf '%s' "$state" | awk '{print $20}')"
 printf '%s %s\n' "$child" "$start" > "$marker"
 if [ -f "$marker.cancel" ]; then exit 130; fi
-# Should Windows lose this run, its time limit still ends it here.
-setsid sh -c 'sleep "$1"; kill -TERM -- "-$2" 2> /dev/null; sleep 3; kill -KILL -- "-$2" 2> /dev/null' agent-studio "$limit" "$child" < /dev/null > /dev/null 2>&1 &
-watchdog=$!
+# Should Windows lose this run, its time limit, when it declares one, still ends it here.
+if [ "$limit" != 0 ]; then
+  setsid sh -c 'sleep "$1"; kill -TERM -- "-$2" 2> /dev/null; sleep 3; kill -KILL -- "-$2" 2> /dev/null' agent-studio "$limit" "$child" < /dev/null > /dev/null 2>&1 &
+  watchdog=$!
+fi
 wait "$child"

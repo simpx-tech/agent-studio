@@ -4,21 +4,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub const INVALID: &str = "This MCP form is unsupported or exceeds the input limits.";
-pub fn text(value: &Value, max: usize) -> Result<String, &'static str> {
+pub const INVALID: &str = "This MCP form is unsupported.";
+pub fn text(value: &Value) -> Result<String, &'static str> {
     value
         .as_str()
-        .filter(|s| !s.trim().is_empty() && s.encode_utf16().count() <= max && !s.contains('\0'))
+        .filter(|s| !s.trim().is_empty() && !s.contains('\0'))
         .map(String::from)
         .ok_or(INVALID)
 }
-fn optional_text(value: &Value, max: usize) -> Result<String, &'static str> {
+fn optional_text(value: &Value) -> Result<String, &'static str> {
     if value.is_null() {
         Ok(String::new())
     } else {
         value
             .as_str()
-            .filter(|s| s.encode_utf16().count() <= max && !s.contains('\0'))
+            .filter(|s| !s.contains('\0'))
             .map(String::from)
             .ok_or(INVALID)
     }
@@ -51,13 +51,12 @@ fn allowed(v: &Value, keys: &[&str]) -> bool {
     v.as_object()
         .is_some_and(|o| o.keys().all(|k| keys.contains(&k.as_str())))
 }
-fn count(v: &Value, max: usize) -> Result<Option<usize>, &'static str> {
+fn count(v: &Value) -> Result<Option<usize>, &'static str> {
     if v.is_null() {
         return Ok(None);
     }
     v.as_u64()
-        .filter(|n| *n <= max as u64)
-        .map(|n| Some(n as usize))
+        .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
         .ok_or(INVALID)
 }
 fn number(v: &Value) -> Result<Option<f64>, &'static str> {
@@ -87,10 +86,10 @@ fn choices(v: &Value, titled: &str) -> Result<Vec<Choice>, &'static str> {
             )
         };
         for (i, value) in values.iter().enumerate() {
-            let value = text(value, 200)?;
+            let value = text(value)?;
             result.push(Choice {
                 label: labels
-                    .map(|l| text(&l[i], 200))
+                    .map(|l| text(&l[i]))
                     .transpose()?
                     .unwrap_or_else(|| value.clone()),
                 value,
@@ -102,15 +101,14 @@ fn choices(v: &Value, titled: &str) -> Result<Vec<Choice>, &'static str> {
                 return Err(INVALID);
             }
             result.push(Choice {
-                value: text(&value["const"], 200)?,
-                label: text(&value["title"], 200)?,
+                value: text(&value["const"])?,
+                label: text(&value["title"])?,
             });
         }
     } else {
         return Ok(result);
     }
     if result.is_empty()
-        || result.len() > 32
         || result
             .iter()
             .map(|c| &c.value)
@@ -141,10 +139,7 @@ pub fn parse(schema: &Value) -> Result<Vec<Field>, &'static str> {
     {
         return Err(INVALID);
     }
-    let props = schema["properties"]
-        .as_object()
-        .filter(|p| p.len() <= 16)
-        .ok_or(INVALID)?;
+    let props = schema["properties"].as_object().ok_or(INVALID)?;
     let required: Vec<String> = if schema["required"].is_null() {
         vec![]
     } else {
@@ -157,7 +152,7 @@ pub fn parse(schema: &Value) -> Result<Vec<Field>, &'static str> {
     }
     let mut fields = vec![];
     for (key, v) in props {
-        text(&Value::String(key.clone()), 100)?;
+        text(&Value::String(key.clone()))?;
         if !allowed(
             v,
             &[
@@ -181,7 +176,7 @@ pub fn parse(schema: &Value) -> Result<Vec<Field>, &'static str> {
         ) {
             return Err(INVALID);
         }
-        let kind = text(&v["type"], 16)?;
+        let kind = text(&v["type"])?;
         if !matches!(
             kind.as_str(),
             "string" | "number" | "integer" | "boolean" | "array"
@@ -193,20 +188,20 @@ pub fn parse(schema: &Value) -> Result<Vec<Field>, &'static str> {
             title: if v["title"].is_null() {
                 key.clone()
             } else {
-                text(&v["title"], 200)?
+                text(&v["title"])?
             },
-            description: optional_text(&v["description"], 1000)?,
+            description: optional_text(&v["description"])?,
             kind,
             required: required.contains(key),
             options: vec![],
-            min_length: count(&v["minLength"], 4000)?,
-            max_length: count(&v["maxLength"], 4000)?,
+            min_length: count(&v["minLength"])?,
+            max_length: count(&v["maxLength"])?,
             minimum: number(&v["minimum"])?,
             maximum: number(&v["maximum"])?,
-            min_items: count(&v["minItems"], 32)?,
-            max_items: count(&v["maxItems"], 32)?,
-            format: v.get("format").map(|v| text(v, 32)).transpose()?,
-            pattern: v.get("pattern").map(|v| text(v, 500)).transpose()?,
+            min_items: count(&v["minItems"])?,
+            max_items: count(&v["maxItems"])?,
+            format: v.get("format").map(text).transpose()?,
+            pattern: v.get("pattern").map(text).transpose()?,
             default: None,
         };
         if field.kind == "array" {
@@ -278,8 +273,7 @@ pub fn valid_value(f: &Field, v: &Value) -> bool {
     match f.kind.as_str() {
         "string" => v.as_str().is_some_and(|s| {
             let len = s.chars().count();
-            s.encode_utf16().count() <= 4000
-                && !s.contains('\0')
+            !s.contains('\0')
                 && f.min_length.is_none_or(|n| len >= n)
                 && f.max_length.is_none_or(|n| len <= n)
                 && (f.options.is_empty() || f.options.iter().any(|o| o.value == s))
@@ -311,8 +305,7 @@ pub fn valid_value(f: &Field, v: &Value) -> bool {
         }),
         "boolean" => v.is_boolean(),
         "array" => v.as_array().is_some_and(|a| {
-            a.len() <= 32
-                && f.min_items.is_none_or(|m| a.len() >= m)
+            f.min_items.is_none_or(|m| a.len() >= m)
                 && f.max_items.is_none_or(|m| a.len() <= m)
                 && a.iter().all(|v| {
                     v.as_str()
@@ -333,7 +326,7 @@ pub fn valid_content(fields: &[Field], content: &Value) -> bool {
     })
 }
 pub fn safe_url(value: &Value) -> Result<String, &'static str> {
-    let raw = text(value, 8000)?;
+    let raw = text(value)?;
     let url = reqwest::Url::parse(&raw).map_err(|_| INVALID)?;
     if !url.username().is_empty()
         || url.password().is_some()

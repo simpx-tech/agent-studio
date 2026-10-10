@@ -35,7 +35,7 @@ impl Compactions {
         let index = self.items.iter().position(|(k, _)| *k == key);
         let index = match index {
             Some(i) => i,
-            None if self.items.len() < 32 => {
+            None => {
                 let id = format!("compaction-{}", self.items.len() + 1);
                 self.items.push((
                     key,
@@ -51,7 +51,6 @@ impl Compactions {
                 ));
                 self.items.len() - 1
             }
-            _ => return None,
         };
         let c = &mut self.items[index].1;
         if c.status == "complete" || (!done && c.revision > 0) {
@@ -61,12 +60,8 @@ impl Compactions {
         c.status = if done { "complete" } else { "running" }.into();
         c.trigger = trigger.into();
         // Never expose the summary, preserved message IDs, or arbitrary provider data.
-        c.pre_tokens = metadata["pre_tokens"]
-            .as_u64()
-            .filter(|n| *n <= 1_000_000_000);
-        c.post_tokens = metadata["post_tokens"]
-            .as_u64()
-            .filter(|n| *n <= 1_000_000_000);
+        c.pre_tokens = metadata["pre_tokens"].as_u64();
+        c.post_tokens = metadata["post_tokens"].as_u64();
         Some(c.clone())
     }
     pub fn claude(&mut self, v: &Value) -> Option<Compaction> {
@@ -82,9 +77,7 @@ impl Compactions {
                 if self.boundaries.iter().any(|s| s == id) {
                     return None;
                 }
-                if self.boundaries.len() < 32 {
-                    self.boundaries.push(id.chars().take(240).collect());
-                }
+                self.boundaries.push(id.into());
             }
         }
         let key = self
@@ -127,9 +120,7 @@ impl Compactions {
                 None => legacy_key,
             }
         } else {
-            let id = p["item"]["id"]
-                .as_str()
-                .filter(|id| !id.is_empty() && id.len() <= 240)?;
+            let id = p["item"]["id"].as_str().filter(|id| !id.is_empty())?;
             if let Some((key, _)) = self.items.iter_mut().find(|(key, _)| *key == legacy_key) {
                 *key = format!("{prefix}{id}");
                 return None;
@@ -152,7 +143,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn claude_boundary_is_bounded_parent_metadata_and_clears_old_context() {
+    fn claude_boundary_is_parent_metadata_and_clears_old_context() {
         let mut d = Decoder::default();
         d.decode(
             "claude",
@@ -199,20 +190,15 @@ mod tests {
         }
     }
     #[test]
-    fn completed_compaction_cannot_regress_to_running_and_records_are_bounded() {
+    fn completed_compaction_cannot_regress_to_running() {
+        // Every compaction is recorded, past the 32 earlier releases kept.
         let mut c = Compactions::default();
         for i in 0..50 {
             let start = json!({"method":"item/started","params":{"turnId":"t","item":{"id":format!("c{i}"),"type":"contextCompaction"}}});
             let mut end = start.clone();
             end["method"] = json!("item/completed");
-            let first = c.codex(&start);
-            let last = c.codex(&end);
-            if i < 32 {
-                assert_eq!(first.unwrap().revision, 1);
-                assert_eq!(last.unwrap().revision, 2);
-            } else {
-                assert!(first.is_none() && last.is_none());
-            }
+            assert_eq!(c.codex(&start).unwrap().revision, 1);
+            assert_eq!(c.codex(&end).unwrap().revision, 2);
             assert!(c.codex(&start).is_none());
         }
     }

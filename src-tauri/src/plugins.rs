@@ -10,7 +10,6 @@ use std::{
     collections::HashMap,
     fs::File,
     sync::{LazyLock, Mutex},
-    time::Duration,
 };
 use tauri::Manager;
 use tokio::io::AsyncWriteExt;
@@ -140,14 +139,14 @@ pub fn claude_args(command: &mut tokio::process::Command, runtime: &Runtime) {
         command.args(["--plugin-url", url]);
     }
 }
-fn valid_text(s: &str, limit: usize) -> bool {
-    !s.is_empty() && s.len() <= limit && s.trim() == s && !s.chars().any(char::is_control)
+fn valid_text(s: &str) -> bool {
+    !s.is_empty() && s.trim() == s && !s.chars().any(char::is_control)
 }
 fn valid_id(s: &str) -> bool {
-    valid_text(s, 200) && !s.starts_with('-')
+    valid_text(s) && !s.starts_with('-')
 }
 fn absolute(s: &str) -> bool {
-    valid_text(s, 4096)
+    valid_text(s)
         && (s.starts_with('/')
             || s.starts_with("\\\\")
             || (s.len() > 2
@@ -156,7 +155,7 @@ fn absolute(s: &str) -> bool {
                 && matches!(s.as_bytes()[2], b'/' | b'\\')))
 }
 fn public_zip(s: &str) -> bool {
-    valid_text(s, 4096)
+    valid_text(s)
         && tauri::Url::parse(s).is_ok_and(|u| {
             u.scheme() == "https"
                 && u.host_str().is_some()
@@ -188,10 +187,7 @@ impl Action {
                 plugin_dirs,
                 plugin_urls,
                 skill_roots,
-            } if [plugin_dirs.len(), plugin_urls.len(), skill_roots.len()]
-                .iter()
-                .any(|n| *n > 8)
-                || !plugin_dirs.iter().chain(skill_roots).all(|s| absolute(s))
+            } if !plugin_dirs.iter().chain(skill_roots).all(|s| absolute(s))
                 || !plugin_urls.iter().all(|s| public_zip(s))
                 || (provider == "codex"
                     && (!plugin_dirs.is_empty() || !plugin_urls.is_empty()))
@@ -211,7 +207,7 @@ impl Action {
             if provider != "claude"
                 || !trusted
                 || !max_cost_usd.is_finite()
-                || !(0.01..=100.0).contains(max_cost_usd)
+                || *max_cost_usd <= 0.0
                 || uuid::Uuid::parse_str(operation_id).is_err()
             {
                 return Err(
@@ -226,30 +222,26 @@ impl Action {
         Ok(())
     }
 }
-fn bounded(v: &Value, key: &str, max: usize) -> String {
+fn plain(v: &Value, key: &str) -> String {
     v[key]
         .as_str()
         .unwrap_or_default()
         .chars()
         .filter(|c| !c.is_control())
-        .take(max)
         .collect()
 }
 fn claude_inventory(v: &Value) -> Result<Vec<PluginView>, String> {
     let rows = v
         .as_array()
         .ok_or("The CLI did not return an installed plugin list")?;
-    if rows.len() > 200 {
-        return Err("Plugin inventory exceeds the 200-plugin limit".into());
-    }
     Ok(rows
         .iter()
         .filter(|p| p["id"].as_str().is_some_and(valid_id))
         .map(|p| PluginView {
-            id: bounded(p, "id", 200),
-            name: bounded(p, "id", 200),
-            version: bounded(p, "version", 80),
-            scope: bounded(p, "scope", 40),
+            id: plain(p, "id"),
+            name: plain(p, "id"),
+            version: plain(p, "version"),
+            scope: plain(p, "scope"),
             enabled: p["enabled"].as_bool(),
         })
         .collect())
@@ -276,19 +268,16 @@ fn codex_inventory(v: &Value) -> Result<Vec<PluginView>, String> {
                 continue;
             }
             rows.push(PluginView {
-                id: bounded(p, "id", 200),
-                name: bounded(p, "name", 200),
+                id: plain(p, "id"),
+                name: plain(p, "name"),
                 version: if p["localVersion"].is_string() {
-                    bounded(p, "localVersion", 80)
+                    plain(p, "localVersion")
                 } else {
-                    bounded(p, "version", 80)
+                    plain(p, "version")
                 },
-                scope: bounded(market, "name", 200),
+                scope: plain(market, "name"),
                 enabled: p["enabled"].as_bool(),
             });
-            if rows.len() > 200 {
-                return Err("Plugin inventory exceeds the 200-plugin limit".into());
-            }
         }
     }
     Ok(rows)
@@ -305,21 +294,23 @@ pub(crate) async fn rpc(
         .write_all(format!("{}\n", json!({"id":id,"method":method,"params":params})).as_bytes())
         .await
         .map_err(|_| "Could not send plugin request")?;
-    let result=tokio::time::timeout(Duration::from_secs(90),async {
-        while let Some(line)=process.lines.recv().await {
-            let Line::Out(line)=line else{continue};
-            if line.len()>2_000_000 {return Err("Plugin response exceeded its limit".into());}
-            let Ok(value)=serde_json::from_str::<Value>(&line) else{continue};
-            if value["id"]==id && value.get("method").is_none() {
-                return if value.get("error").is_some(){Err("The CLI rejected this action. Check plugin availability, policy and CLI version.".into())}else{Ok(value["result"].clone())};
-            }
-            if value.get("id").is_some() && value["method"].is_string() {
-                process.stdin.write_all(format!("{}\n",json!({"id":value["id"],"error":{"code":-32601,"message":"Interactive requests are unavailable during plugin management"}})).as_bytes()).await.map_err(|_|"Plugin response failed")?;
-            }
+    while let Some(line) = process.lines.recv().await {
+        let Line::Out(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value["id"] == id && value.get("method").is_none() {
+            return if value.get("error").is_some() {
+                Err("The CLI rejected this action. Check plugin availability, policy and CLI version.".into())
+            } else {
+                Ok(value["result"].clone())
+            };
         }
-        Err("The CLI exited without confirming the plugin request".into())
-    }).await.map_err(|_|"Plugin request timed out; check the CLI before retrying")?;
-    result
+        if value.get("id").is_some() && value["method"].is_string() {
+            process.stdin.write_all(format!("{}\n",json!({"id":value["id"],"error":{"code":-32601,"message":"Interactive requests are unavailable during plugin management"}})).as_bytes()).await.map_err(|_|"Plugin response failed")?;
+        }
+    }
+    Err("The CLI exited without confirming the plugin request".into())
 }
 async fn codex_start(exe: &Executable, folder: &str, roots: &[String]) -> Result<Process, String> {
     let child = crate::mcp::command(exe, folder)
@@ -344,7 +335,6 @@ async fn cli(
     folder: &str,
     args: Vec<String>,
     cancel: CancellationToken,
-    seconds: u64,
 ) -> Result<(i32, String), String> {
     if cancel.is_cancelled() {
         return Err("Plugin operation cancelled".into());
@@ -366,9 +356,6 @@ async fn cli(
         let mut output = String::new();
         while let Some(line) = process.lines.recv().await {
             if let Line::Out(line) = line {
-                if output.len() + line.len() > 2_000_000 {
-                    return Err("Plugin output exceeded its limit".into());
-                }
                 output.push_str(&line);
                 output.push('\n');
             }
@@ -380,7 +367,7 @@ async fn cli(
             .map_err(|_| "Plugin command did not exit")?;
         Ok((status.code().unwrap_or(-1), output))
     };
-    let result = tokio::select! { _=cancel.cancelled()=>Err("Plugin evaluation cancelled".into()), result=tokio::time::timeout(Duration::from_secs(seconds),work)=>result.map_err(|_|"Plugin command timed out; check its state before retrying".to_string()).and_then(|r|r) };
+    let result = tokio::select! { _=cancel.cancelled()=>Err("Plugin evaluation cancelled".into()), result=work=>result };
     process.kill().await;
     result
 }
@@ -489,7 +476,7 @@ async fn codex_action(
         Action::Details { .. } => {
             let v = rpc(p, "plugin/read", target).await?;
             let d = &v["plugin"];
-            let description = bounded(d, "description", 1200);
+            let description = plain(d, "description");
             if !description.is_empty() {
                 out.details.push(description);
             }
@@ -523,7 +510,6 @@ async fn claude_action(
         folder,
         args(&["plugin", "list", "--json"]),
         cancel.clone(),
-        30,
     )
     .await?;
     if code != 0 {
@@ -587,18 +573,7 @@ async fn claude_action(
         ]),
         _ => unreachable!(),
     };
-    let result = cli(
-        exe,
-        folder,
-        command,
-        cancel,
-        if matches!(action, Action::Eval { .. }) {
-            600
-        } else {
-            90
-        },
-    )
-    .await;
+    let result = cli(exe, folder, command, cancel).await;
     let (code, text) = result?;
     if matches!(action, Action::Eval { .. }) {
         if !serde_json::from_str::<Value>(&text).is_ok_and(|v| v.is_object()) {
@@ -632,10 +607,7 @@ async fn claude_action(
             .any(|p| line.starts_with(p))
             {
                 if let Some(end) = line.find(')') {
-                    let item = &line[..=end];
-                    if item.len() < 80 {
-                        out.details.push(item.into());
-                    }
+                    out.details.push(line[..=end].into());
                 }
             }
         }
@@ -781,25 +753,18 @@ async fn manage_scoped(
             skill_roots: skill_roots.clone(),
             revision: out.runtime.revision,
         };
-        let runtimes = RUNTIMES
-            .lock()
-            .map_err(|_| "Runtime registry unavailable")?;
-        if runtimes.len() >= 64 && !runtimes.contains_key(&scope) {
-            return Err(
-                "Temporary source limit reached. Restart the host to clear temporary sources."
-                    .into(),
-            );
-        }
     }
     let result = if provider == "codex" {
-        let mut p = codex_start(&exe, &folder, &out.runtime.skill_roots).await?;
+        let started = tokio::select! {_=cancel.cancelled()=>Err("Plugin operation cancelled".into()),started=codex_start(&exe, &folder, &out.runtime.skill_roots)=>started};
+        let mut p = started?;
         let result = tokio::select! {_=cancel.cancelled()=>Err("Plugin operation cancelled".into()),result=codex_action(&mut p,&folder,&action,&mut out)=>result};
         p.kill().await;
         result
     } else {
         claude_action(&exe, &folder, &action, &mut out, cancel).await
     };
-    // Also invalidate after uncertain writes: a timeout is not proof the write failed.
+    // Also invalidate after uncertain writes: a cancelled or lost request is not proof the
+    // write failed.
     if mutation {
         let mut revisions = REVISIONS
             .lock()
@@ -822,6 +787,7 @@ async fn manage_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     #[tokio::test]
     async fn evaluation_keeps_arguments_structured_never_publishes_and_can_be_cancelled() {
         let dir = tempfile::tempdir().unwrap();
@@ -919,7 +885,7 @@ else { fs.writeFileSync('eval-args.json',JSON.stringify(a)); console.log('{}'); 
                 let id="demo@studio-fixture".to_string();
                 let mut out=ResultView::default();
                 if provider=="claude" {
-                    let (code,_)=cli(&exe,folder,args(&["plugin","marketplace","add",market.to_str().unwrap()]),CancellationToken::new(),30).await.unwrap();
+                    let (code,_)=cli(&exe,folder,args(&["plugin","marketplace","add",market.to_str().unwrap()]),CancellationToken::new()).await.unwrap();
                     assert_eq!(code,0,"Claude local fixture registration");
                     for action in [Action::Install{id:id.clone()},Action::Details{id:id.clone()},Action::Toggle{id:id.clone(),enabled:false},Action::List,Action::Toggle{id:id.clone(),enabled:true},Action::Uninstall{id:id.clone()}] {
                         claude_action(&exe,folder,&action,&mut out,CancellationToken::new()).await.unwrap();
@@ -975,9 +941,28 @@ else { fs.writeFileSync('eval-args.json',JSON.stringify(a)); console.log('{}'); 
         assert!(public_zip("https://example.com/a.zip"));
         assert!(!absolute("relative/SKILL.md"));
         assert!(absolute("C:\\skills\\demo"));
+        // Any number of temporary sources and any positive budget, past the 8 sources and
+        // US$100 earlier releases accepted.
+        let roots: Vec<String> = (0..9).map(|i| format!("/skills/root{i}")).collect();
+        assert!(Action::Runtime {
+            plugin_dirs: vec![],
+            plugin_urls: vec![],
+            skill_roots: roots
+        }
+        .validate("codex")
+        .is_ok());
+        let eval = |max_cost_usd| Action::Eval {
+            id: "demo@local".into(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            max_cost_usd,
+            trusted: true,
+        };
+        assert!(eval(250.0).validate("claude").is_ok());
+        assert!(eval(0.0).validate("claude").is_err());
+        assert!(eval(f64::INFINITY).validate("claude").is_err());
     }
     #[test]
-    fn inventory_is_bounded_metadata_and_preserves_unknown() {
+    fn inventory_is_whole_metadata_and_preserves_unknown() {
         let list =
             claude_inventory(&json!([{"id":"demo@local","scope":"user","credential":"secret"}]))
                 .unwrap();
@@ -987,5 +972,14 @@ else { fs.writeFileSync('eval-args.json',JSON.stringify(a)); console.log('{}'); 
         let list = codex_inventory(&v).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].enabled, Some(false));
+        // Every installed plugin and whole names, past the 200 plugins earlier releases listed.
+        let rows: Vec<_> = (0..250)
+            .map(
+                |i| json!({"id":format!("demo{i}@local"),"scope":"user","version":"v".repeat(120)}),
+            )
+            .collect();
+        let list = claude_inventory(&json!(rows)).unwrap();
+        assert_eq!(list.len(), 250);
+        assert_eq!(list[0].version.len(), 120);
     }
 }

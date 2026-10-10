@@ -59,7 +59,6 @@
     deleted: () => void;
   } = $props();
   /** Answers one frame waits for at once; more is a page calling in a loop. */
-  const maxWaiting = 8;
   const notAllowed =
     'The user has not allowed this screen’s actions yet. They can review and allow them above the screen.';
   let detail = $state<ScreenDetail>();
@@ -70,7 +69,6 @@
   let frame = $state<HTMLIFrameElement>();
   // The frame shown now; calls of an earlier one are never answered.
   let token = '';
-  let waiting = 0;
   let serial = 0;
   let running = $state<Record<number, string>>({});
   const runningNames = $derived([...new Set(Object.values(running))]);
@@ -124,7 +122,6 @@
     if (target.dataset.initialized || !detail) return;
     target.dataset.initialized = 'true';
     token = crypto.randomUUID();
-    waiting = 0;
     running = {};
     target.contentWindow?.postMessage(
       screenPreview(
@@ -147,19 +144,10 @@
       if (token !== callToken || frame?.contentWindow !== target) return;
       target?.postMessage(screenReply(callToken, call.id, result), '*');
     };
-    if (waiting >= maxWaiting) {
-      reply({ error: `This screen already waits for ${maxWaiting} answers. Wait for them first.` });
-      return;
-    }
-    waiting++;
-    void answer(call)
-      .then(
-        (value) => reply({ value }),
-        (e) => reply({ error: message(e) }),
-      )
-      .finally(() => {
-        if (token === callToken) waiting--;
-      });
+    void answer(call).then(
+      (value) => reply({ value }),
+      (e) => reply({ error: message(e) }),
+    );
   }
   async function answer(call: ScreenCall): Promise<unknown> {
     if (call.method === 'run') {

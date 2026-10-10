@@ -1,5 +1,35 @@
 # Verification — 2026-09-08
 
+## Artificial limits are gone — 2026-10-10
+
+Requested 2026-10-10. A 512 MiB memory cap took the relay down for 21 hours. The user asked to "just remove these caps… the moment something freezes or crashes I know it reached it's limit not an artificial limit", then, shown the app's own limits, "Yes, remove them all".
+
+- Server: the relay's unit has no `MemoryMax`, `CPUQuota` or `TasksMax` and sets `NODE_OPTIONS=--max-old-space-size=32768`. Release builds run without memory, task or time limits (176f31c, after the VPS smoke test, with the updater reinstalled from it).
+- Inventory: three read-only agents listed about 400 limits across the Rust host, the frontend, the relay and the docs. Every cap on the size, number or duration of content and work went:
+  - Run requests: 200 messages and 400 KB of history, instructions, mentions, skills, fallback models, thinking and compaction ranges.
+  - CLI output: the 2 MB line limit that failed a reply.
+  - Attachments and shown files: images (16 × 16 MiB), visuals and previews, and send_files (8 files, 12 groups, 16 MiB, 1 GiB, 30 s). Another device now reads a model whole and falls back to its views only when that read fails, instead of always showing views above 12 MiB.
+  - Records: tool results (512 KB / 8 MB), activity records, and file changes, including the 100 Claude edits per reply after which edits went missing and Undo reported success. Also Undo itself, transcripts (4 GiB), screens and console code.
+  - Interaction: questions, forms, steering, plans and workflows; the queue (8), drafts, templates, app sessions and folder icons.
+  - Discovery and inspection lists, plugins, MCP, shared context and live usage.
+  - Relay: uploads, job bodies, updates, events, counts, file guards and job ages (remote Claude/Codex runs were cut off at 61 minutes).
+  - Host timeouts on work that may still be progressing: Gemini's 5-minute reply deadline, titles, sign-ins, MCP, plugins, models, updates and WSL lookups.
+- Kept, as CLAUDE.md's new first rule says:
+  - The relay's limits before sign-in: the 4 KB pairing body, 10 attempts a minute, and now a 30-second idle cutoff while that body is read, since Node's request timeout is off.
+  - Liveness: Stop's grace, the relay's 45-second job liveness, and connect and idle network checks. The desktop's relay client adds TCP keepalive, so a dead connection fails while a slow one does not.
+  - Correctness locks, queues, caches and pacing.
+  - The live window of a remote run's job: calls, progress, notes, reasoning and visuals. Everything still arrives with the synced chat.
+  - Display shortening and the small model's prompt shaping.
+- Waits a removed timeout used to end now end on Stop, Cancel or Quit: Codex thread preparation, plugin startup and each MCP operation.
+- Two removed limits had guarded against runaway loops: the context walk no longer recurses, and Codex model paging stops on a repeated cursor.
+- Images attached while earlier ones are still being read now wait for them instead of being ignored.
+- Rust no longer sends `limited` on file changes and workflow runs, so both schemas read it as optional, and older replies keep theirs.
+- Tests:
+  - Rust: the cap tests now accept large input (over 200 messages, a 3 MB CLI line, 600 context entries, 700 hooks, 250 plugins).
+  - Unit: the tests that refused oversized input now accept it.
+  - Browser: `tests/federation.spec.ts` adds a model read whole through the relay, and its views test forces a refused read. `screens.spec.ts`, `compaction.spec.ts`, `claude-fast-fallback.spec.ts`, `claude-settings.spec.ts`, `input-templates.spec.ts`, `model-viewer.spec.ts` and `workspace.spec.ts` follow the removed limits.
+- Pipeline: `npm run check` (0 errors), 631 Vitest tests, the build, 345 browser tests, `cargo fmt --check`, clippy and 450 Rust tests passed. Logs: `artifacts/relay-memory/`.
+
 ## Copies of one reply no longer split a chat into conflict copies — 2026-10-09
 
 Requested 2026-10-09: chats kept gaining "(conflict copy)" versions, which should not happen.

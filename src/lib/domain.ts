@@ -1,19 +1,19 @@
 import { z } from 'zod';
 import { fallbackModelSetting } from './claude-options.ts';
 import { outputSchemaSetting } from './structured-output.ts';
-import { mentionSchema, maxMentions, type Mention } from './mentions.ts';
+import { mentionSchema, type Mention } from './mentions.ts';
 import { compactionsSchema, type Compaction } from './compaction.ts';
 import { accountUsageSchema, type AccountUsage } from './spend.ts';
 import { emptyFleet, fleetSchema } from './fleet.ts';
 import { toolActivitySchema, type ToolActivity } from './activity.ts';
-import { imageSchema, maxImagesPerMessage, type ChatImage } from './images.ts';
+import { imageSchema, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
-import { reasoningBlockSchema, maxReasoningBlocks } from './reasoning.ts';
+import { reasoningBlockSchema } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import type { QuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
@@ -76,11 +76,11 @@ export const providers = {
 
 export const agentSchema = z.object({
   id: z.string().uuid(),
-  name: z.string().trim().min(1).max(60),
+  name: z.string().trim().min(1),
   provider: z.enum(providerIds),
-  model: z.string().max(100),
-  instructions: z.string().max(16000),
-  description: z.string().max(180),
+  model: z.string(),
+  instructions: z.string(),
+  description: z.string(),
 });
 export type Agent = z.infer<typeof agentSchema>;
 export const reasoningSchema = z.enum([
@@ -98,19 +98,16 @@ export type Reasoning = z.infer<typeof reasoningSchema>;
 export const chatSettingsSchema = z.object({
   fastMode: z.boolean().optional(),
   fallbackModel: fallbackModelSetting.optional(),
-  maxThinkingTokens: z
-    .number()
-    .int()
-    .refine((n) => n === 0 || (n >= 1024 && n <= 128_000))
-    .optional(),
+  // Any budget; a provider that accepts less reports its own limit.
+  maxThinkingTokens: z.number().int().nonnegative().optional(),
   outputSchema: outputSchemaSetting.optional(),
   planMode: z.boolean().optional(),
-  autoCompactTokens: z.number().int().min(100_000).max(1_000_000).optional(),
+  autoCompactTokens: z.number().int().positive().optional(),
   connectionId: z.string().uuid().optional(),
   provider: z.enum(providerIds),
-  model: z.string().max(100),
+  model: z.string(),
   reasoning: reasoningSchema,
-  instructions: z.string().max(16000),
+  instructions: z.string(),
 });
 export type ChatSettings = z.infer<typeof chatSettingsSchema>;
 export const locationSchema = z.object({
@@ -118,18 +115,18 @@ export const locationSchema = z.object({
   environmentId: z.string().uuid(),
   // Folder ownership and CLI execution can differ for Desktop + a WSL folder.
   executionEnvironmentId: z.string().uuid().optional(),
-  path: z.string().max(4096),
+  path: z.string(),
 });
 export type ChatLocation = z.infer<typeof locationSchema>;
 export const preferencesSchema = z.object({
   recentLocations: z.array(locationSchema).max(30).optional(),
   connectionByProvider: z.partialRecord(z.enum(providerIds), z.string().uuid()).optional(),
   lastProvider: z.enum(providerIds),
-  modelByProvider: z.partialRecord(z.enum(providerIds), z.string().max(100)),
+  modelByProvider: z.partialRecord(z.enum(providerIds), z.string()),
   reasoningByProvider: z.partialRecord(z.enum(providerIds), z.record(z.string(), reasoningSchema)),
   // Every account each WSL distribution this computer manages has had, so adding its accounts
   // there never brings back one removed there (`addHostAccounts`). Kept on this device only.
-  distributionAccounts: z.record(z.string().uuid(), z.array(z.string().uuid()).max(500)).optional(),
+  distributionAccounts: z.record(z.string().uuid(), z.array(z.string().uuid())).optional(),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 const blockSchema = z.discriminatedUnion('type', [
@@ -139,9 +136,7 @@ const blockSchema = z.discriminatedUnion('type', [
     type: z.literal('activity'),
     text: z.string(),
     tool: toolActivitySchema.optional(),
-    progress: z
-      .object({ id: z.string().max(240), revision: z.number().int().nonnegative() })
-      .optional(),
+    progress: z.object({ id: z.string(), revision: z.number().int().nonnegative() }).optional(),
     order: z.number().int().nonnegative().optional(),
   }),
 ]);
@@ -178,12 +173,10 @@ export const skillReferenceSchema = z.object({
   name: z
     .string()
     .min(1)
-    .max(200)
     .regex(/^[a-zA-Z0-9_:.-]+$/),
   path: z
     .string()
     .min(1)
-    .max(4096)
     .refine((path) => !/[\u0000-\u001f]/.test(path)),
 });
 export type SkillReference = z.infer<typeof skillReferenceSchema>;
@@ -191,15 +184,10 @@ export const messageSchema = z
   .object({
     id: z.string().uuid(),
     role: z.enum(['user', 'assistant']),
-    blocks: z
-      .array(blockSchema)
-      .refine(
-        (blocks) => blocks.filter((b) => b.type === 'reasoning').length <= maxReasoningBlocks,
-        'Too many reasoning blocks',
-      ),
-    images: z.array(imageSchema).max(maxImagesPerMessage).optional(),
-    skills: z.array(skillReferenceSchema).max(4).optional(),
-    mentions: z.array(mentionSchema).max(maxMentions).optional(),
+    blocks: z.array(blockSchema),
+    images: z.array(imageSchema).optional(),
+    skills: z.array(skillReferenceSchema).optional(),
+    mentions: z.array(mentionSchema).optional(),
     status: z.enum(['complete', 'running', 'error', 'cancelled']),
     createdAt: z.string(),
     error: z.string().optional(),
@@ -208,7 +196,7 @@ export const messageSchema = z
     promptTokensEstimate: z.number().nonnegative().optional(),
     durationMs: z.number().optional(),
     settings: chatSettingsSchema.optional(),
-    modelName: z.string().max(200).optional(),
+    modelName: z.string().optional(),
     authorName: z.string().optional(),
     executionLabel: z.string().optional(),
     runId: z.string().uuid().optional(),
@@ -268,7 +256,7 @@ export const conversationSchema = z.object({
   location: locationSchema.optional(),
   archived: z.boolean().optional(),
   settings: chatSettingsSchema,
-  title: z.string().max(100),
+  title: z.string(),
   titleStatus: z.enum(['pending', 'generated', 'fallback']).optional(),
   titleSource: z.object({ provider: z.enum(providerIds), model: z.string() }).optional(),
   createdAt: z.string(),
@@ -277,7 +265,7 @@ export const conversationSchema = z.object({
   historyRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   rewind: z
     .object({
-      removed: z.array(messageSchema).min(1).max(200),
+      removed: z.array(messageSchema).min(1),
       createdAt: z.string(),
     })
     .optional(),
@@ -289,7 +277,7 @@ export const workspaceSchema = z.object({
   preferences: preferencesSchema,
   legacyAgents: z.array(agentSchema).optional(),
   conversations: z.array(conversationSchema),
-  workflows: z.array(workflowSchema).max(100).optional(),
+  workflows: z.array(workflowSchema).optional(),
   inputTemplates: inputTemplatesSchema.optional(),
   claudeInstructions: claudeInstructionsSchema.optional(),
   // Starts of the desktop app, which History groups chats by.

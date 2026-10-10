@@ -221,12 +221,9 @@ pub fn bound_id(
         Err(_) => return Err("Cannot read the native session binding".into()),
     };
     let mut bytes = Vec::new();
-    file.take(32_001)
+    (&file)
         .read_to_end(&mut bytes)
         .map_err(|_| "Cannot read the native session binding")?;
-    if bytes.len() > 32_000 {
-        return Err("The native session binding exceeds its size limit".into());
-    }
     let record: Record =
         serde_json::from_slice(&bytes).map_err(|_| "The native session binding is unreadable")?;
     let identity = identity(provider, location)?;
@@ -284,8 +281,9 @@ impl Session {
             "This conversation is already running in another app window. Wait for it to finish."
         })?;
         let mut previous: Option<Record> = match std::fs::read(&path) {
-            Ok(bytes) if bytes.len() <= 32_000 => Some(serde_json::from_slice(&bytes).map_err(|_| "Native session binding is unreadable. It was preserved; start a new conversation.")?),
-            Ok(_) => return Err("Native session binding exceeds its limit. Start a new conversation.".into()),
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|_| {
+                "Native session binding is unreadable. It was preserved; start a new conversation."
+            })?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err("Cannot read native session binding".into()),
         };
@@ -530,9 +528,7 @@ impl Session {
                 return Ok(());
             }
         }
-        let snapshot =
-            snapshot_off_thread(source, target, provider, &previous.id, None, TRANSFER_LIMIT)
-                .await?;
+        let snapshot = snapshot_off_thread(source, target, provider, &previous.id, None).await?;
         let native =
             crate::shared_context::native_path(&snapshot, selected.distribution.as_deref())?;
         self.transfer_path = Some(native);
@@ -595,15 +591,8 @@ impl Session {
         let Some(found) = found else {
             return self.import_unavailable();
         };
-        let snapshot = snapshot_off_thread(
-            source,
-            target,
-            provider,
-            &import.session,
-            Some(found),
-            IMPORT_LIMIT,
-        )
-        .await?;
+        let snapshot =
+            snapshot_off_thread(source, target, provider, &import.session, Some(found)).await?;
         self.transfer_path = Some(crate::shared_context::native_path(
             &snapshot,
             selected.distribution.as_deref(),
@@ -698,12 +687,8 @@ struct Transcript {
     base: Option<(String, u64)>,
     prefix: bool,
 }
-/// The most an account switch carries: the copy streams, so a long chat moves whole.
-const TRANSFER_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
-/// An imported chat carries its session whole, however long it ran in its own app.
-const IMPORT_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
-
 /// `path` names the transcript when the caller already found it; otherwise it is found by id.
+/// The copy streams, so an account switch or an import carries a session whole, however long.
 fn read_transcript(
     source: &Path,
     target: &Path,
@@ -711,7 +696,6 @@ fn read_transcript(
     id: &str,
     path: Option<PathBuf>,
     prefix: Option<u64>,
-    limit: u64,
 ) -> Result<Transcript, String> {
     use std::io::{BufRead, BufReader, BufWriter, Read};
     let path = match path {
@@ -720,8 +704,8 @@ fn read_transcript(
             "The previous native transcript or its history ancestor is unavailable. No display-history fallback was sent.",
         )?,
     };
-    if prefix.is_some_and(|size| size == 0 || size > limit) {
-        return Err("The native history boundary exceeds the transfer limit".into());
+    if prefix == Some(0) {
+        return Err("The native history boundary is invalid".into());
     }
     let mut copy = tempfile::Builder::new()
         .prefix("studio-transfer-")
@@ -729,7 +713,7 @@ fn read_transcript(
         .tempfile_in(target)
         .map_err(|_| "Cannot prepare the native transcript snapshot")?;
     let file = File::open(&path).map_err(|_| "Cannot read the bound native transcript")?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, file.take(prefix.unwrap_or(limit + 1)));
+    let mut reader = BufReader::with_capacity(1024 * 1024, file.take(prefix.unwrap_or(u64::MAX)));
     let mut writer = BufWriter::with_capacity(1024 * 1024, copy.as_file_mut());
     let mut line = Vec::new();
     let mut len = 0u64;
@@ -744,9 +728,6 @@ fn read_transcript(
             break;
         }
         len += read as u64;
-        if len > limit {
-            return Err("The native transcript exceeds the transfer limit".into());
-        }
         if !line.ends_with(b"\n") {
             if prefix.is_some_and(|size| len != size) {
                 return Err(
@@ -864,24 +845,16 @@ fn transcript_snapshot(
     provider: &str,
     id: &str,
     path: Option<PathBuf>,
-    limit: u64,
 ) -> Result<tempfile::TempPath, String> {
     std::fs::create_dir_all(target).map_err(|_| "Cannot access the selected profile")?;
-    let current = read_transcript(source, target, provider, id, path, None, limit)?;
+    let current = read_transcript(source, target, provider, id, path, None)?;
     let mut records = vec![current];
     let mut visited = std::collections::HashSet::from([id.to_string()]);
-    let mut total = records[0].len;
     while let Some((parent, end)) = records.last().and_then(|r| r.base.clone()) {
-        if records.len() >= 128 || !visited.insert(parent.clone()) {
-            return Err(
-                "The native history lineage is cyclic or exceeds the transfer limit".into(),
-            );
+        if !visited.insert(parent.clone()) {
+            return Err("The native history lineage is cyclic".into());
         }
-        let record = read_transcript(source, target, provider, &parent, None, Some(end), limit)?;
-        total += record.len;
-        if total > limit {
-            return Err("The native history lineage exceeds the transfer limit".into());
-        }
+        let record = read_transcript(source, target, provider, &parent, None, Some(end))?;
         records.push(record);
     }
     if provider == "codex" {
@@ -939,14 +912,11 @@ async fn snapshot_off_thread(
     provider: &str,
     id: &str,
     path: Option<PathBuf>,
-    limit: u64,
 ) -> Result<tempfile::TempPath, String> {
     let (provider, id) = (provider.to_string(), id.to_string());
-    tokio::task::spawn_blocking(move || {
-        transcript_snapshot(&source, &target, &provider, &id, path, limit)
-    })
-    .await
-    .map_err(|_| "Cannot copy the native transcript".to_string())?
+    tokio::task::spawn_blocking(move || transcript_snapshot(&source, &target, &provider, &id, path))
+        .await
+        .map_err(|_| "Cannot copy the native transcript".to_string())?
 }
 
 /// Whether the Claude profile at `config` holds the transcript of session `id`, kept as
@@ -1004,15 +974,8 @@ mod tests {
             json!({"type":"session_meta","payload":{"id":child,"history_mode":"paginated","forked_from_id":parent,"history_base":{"thread_id":parent,"end_byte_offset":ancestor.len(),"end_ordinal_exclusive":2}}})
         );
         std::fs::write(directory.join(name(&child)), &leaf).unwrap();
-        let temporary = transcript_snapshot(
-            source.path(),
-            target.path(),
-            "codex",
-            &child,
-            None,
-            TRANSFER_LIMIT,
-        )
-        .unwrap();
+        let temporary =
+            transcript_snapshot(source.path(), target.path(), "codex", &child, None).unwrap();
         drop(temporary);
         let imported = target.path().join("sessions/2026/09/20");
         assert_eq!(
@@ -1029,46 +992,25 @@ mod tests {
         );
         // A subsequent transfer can resolve the entire native lineage from the recipient.
         let next = tempfile::tempdir().unwrap();
-        transcript_snapshot(
-            target.path(),
-            next.path(),
-            "codex",
-            &child,
-            None,
-            TRANSFER_LIMIT,
-        )
-        .unwrap();
+        transcript_snapshot(target.path(), next.path(), "codex", &child, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(next.path().join("sessions/2026/09/20").join(name(&parent)))
                 .unwrap(),
             ancestor
         );
         // Existing longer original histories are preserved when returning to their account.
-        transcript_snapshot(
-            target.path(),
-            source.path(),
-            "codex",
-            &child,
-            None,
-            TRANSFER_LIMIT,
-        )
-        .unwrap();
+        transcript_snapshot(target.path(), source.path(), "codex", &child, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(directory.join(name(&parent))).unwrap(),
             source_bytes
         );
         std::fs::remove_file(directory.join(name(&parent))).unwrap();
         let missing_target = tempfile::tempdir().unwrap();
-        assert!(transcript_snapshot(
-            source.path(),
-            missing_target.path(),
-            "codex",
-            &child,
-            None,
-            TRANSFER_LIMIT
-        )
-        .unwrap_err()
-        .contains("ancestor is unavailable"));
+        assert!(
+            transcript_snapshot(source.path(), missing_target.path(), "codex", &child, None,)
+                .unwrap_err()
+                .contains("ancestor is unavailable")
+        );
         assert_eq!(std::fs::read_dir(missing_target.path()).unwrap().count(), 0);
     }
 
@@ -1082,16 +1024,11 @@ mod tests {
         let path = directory.join(format!("rollout-2026-09-20-{id}.jsonl"));
         let row = json!({"type":"session_meta","payload":{"id":id,"history_mode":"paginated","history_base":{"thread_id":id,"end_byte_offset":1,"end_ordinal_exclusive":1}}});
         std::fs::write(path, format!("{row}\n")).unwrap();
-        assert!(transcript_snapshot(
-            source.path(),
-            target.path(),
-            "codex",
-            &id,
-            None,
-            TRANSFER_LIMIT
-        )
-        .unwrap_err()
-        .contains("cyclic"));
+        assert!(
+            transcript_snapshot(source.path(), target.path(), "codex", &id, None,)
+                .unwrap_err()
+                .contains("cyclic")
+        );
         assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
     }
 
@@ -1120,15 +1057,8 @@ mod tests {
             let bytes = format!("{record}\n");
             std::fs::write(&path, &bytes).unwrap();
             std::fs::write(target.path().join("auth.json"), "do-not-copy-or-change").unwrap();
-            let snapshot = transcript_snapshot(
-                source.path(),
-                target.path(),
-                provider,
-                &id,
-                None,
-                TRANSFER_LIMIT,
-            )
-            .unwrap();
+            let snapshot =
+                transcript_snapshot(source.path(), target.path(), provider, &id, None).unwrap();
             assert_eq!(std::fs::read(&snapshot).unwrap(), bytes.as_bytes());
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
             assert_eq!(
@@ -1139,39 +1069,24 @@ mod tests {
             drop(snapshot);
             assert!(!snapshot_path.exists());
             std::fs::write(&path, record.to_string()).unwrap();
-            assert!(transcript_snapshot(
-                source.path(),
-                target.path(),
-                provider,
-                &id,
-                None,
-                TRANSFER_LIMIT
-            )
-            .unwrap_err()
-            .contains("unfinished"));
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id, None,)
+                    .unwrap_err()
+                    .contains("unfinished")
+            );
             std::fs::write(&path, "{broken}\n").unwrap();
-            assert!(transcript_snapshot(
-                source.path(),
-                target.path(),
-                provider,
-                &id,
-                None,
-                TRANSFER_LIMIT
-            )
-            .unwrap_err()
-            .contains("malformed"));
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id, None,)
+                    .unwrap_err()
+                    .contains("malformed")
+            );
             let foreign = bytes.replace(&id, &uuid::Uuid::new_v4().to_string());
             std::fs::write(&path, foreign).unwrap();
-            assert!(transcript_snapshot(
-                source.path(),
-                target.path(),
-                provider,
-                &id,
-                None,
-                TRANSFER_LIMIT
-            )
-            .unwrap_err()
-            .contains("identity"));
+            assert!(
+                transcript_snapshot(source.path(), target.path(), provider, &id, None,)
+                    .unwrap_err()
+                    .contains("identity")
+            );
         }
     }
 

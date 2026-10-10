@@ -259,12 +259,17 @@ describe('structured tool activity', () => {
     const restored = restoreWorkspace(JSON.parse(JSON.stringify(w)));
     expect(restored.conversations[0].messages[0].blocks).toEqual(m.blocks);
     expect(JSON.stringify(historyFor(restored.conversations[0]))).not.toContain('PRIVATE');
+    // Commands and inputs are kept whole, and a result may hold any number of images.
+    for (const large of [
+      { command: 'x'.repeat(100_000) },
+      { input: 'x'.repeat(100_000) },
+      { output: { lines: 1, bytes: 1, images: 500 } },
+    ])
+      expect(toolActivitySchema.parse({ ...command, ...large })).toMatchObject(large);
     for (const invalid of [
       { shell: 'fish' },
-      { command: 'x'.repeat(16_001) },
-      { input: 'x'.repeat(8_001) },
       { output: { lines: -1, bytes: 0 } },
-      { output: { lines: 1, bytes: 1, images: 65 } },
+      { output: { lines: 1, bytes: 1, images: -1 } },
       { output: { lines: 1, bytes: 1, exitCode: 1.5 } },
     ])
       expect(toolActivitySchema.safeParse({ ...command, ...invalid }).success).toBe(false);
@@ -428,7 +433,7 @@ describe('structured tool activity', () => {
       expect(tools.find((t) => t.id === 'search1')?.progress?.kind).toBe('heartbeat');
     }
   });
-  it('delivers every call of a long remote reply while each job update fits the relay', () => {
+  it('delivers every call of a long remote reply while its job keeps a window of the newest', () => {
     const events: RunEvent[] = [];
     const host = message();
     const sender = message();
@@ -449,7 +454,7 @@ describe('structured tool activity', () => {
       retainRunEvent(events, event);
       // The computer running the reply saves every event in its own copy.
       applyRunEvent(host, event);
-      expect(events.length).toBeLessThanOrEqual(448);
+      expect(events.length).toBeLessThanOrEqual(336);
     };
     run({ kind: 'tool', tool: tool('watch') });
     for (let i = 0; i < 1000; i++) {
@@ -515,20 +520,16 @@ describe('structured tool activity', () => {
       draft('ask', 4, true),
       { kind: 'question', question, draft: 'ask' },
     ]);
-    // A closed draft stays closed, and makes room once the job holds four.
+    // A closed draft stays closed, and the job keeps every other draft, however many.
     retainRunEvent(events, draft('ask', 9));
-    for (const id of ['b', 'c', 'd']) retainRunEvent(events, draft(id, 1));
-    retainRunEvent(events, draft('e', 1));
+    const ids = ['b', 'c', 'd', 'e', 'f', ...Array.from({ length: 15 }, (_, i) => `g${i}`)];
+    for (const id of ids) retainRunEvent(events, draft(id, 1));
     const drafts = events.flatMap((e) => (e.kind === 'questiondraft' ? [e.questionDraft!] : []));
     expect(drafts.map((d) => [d.id, !!d.closed])).toEqual([
-      ['b', false],
-      ['c', false],
-      ['d', false],
-      ['e', false],
+      ['ask', true],
+      ...ids.map((id) => [id, false]),
     ]);
-    // With four open drafts a fifth waits for its question, and drafts change no saved reply.
-    retainRunEvent(events, draft('f', 1));
-    expect(events.filter((e) => e.kind === 'questiondraft')).toHaveLength(4);
+    // Drafts change no saved reply.
     const m = message();
     const before = structuredClone(m);
     applyRunEvent(m, draft('b', 2));

@@ -9,7 +9,7 @@ import {
   type RunEvent,
 } from './domain';
 import { emptyShared, mergeShared, sharedWorkspace } from './sync';
-import { compactionLabel } from './compaction';
+import { compactionLabel, compactionsSchema } from './compaction';
 import { contextFor } from './usage';
 import { fallbackModels } from './models';
 
@@ -96,7 +96,7 @@ describe('compaction history', () => {
     expect(contextFor(c, settings, '', fallbackModels.codex[0]).reported).toBe(6000);
     expect(compactionLabel(event().compaction!, 'cancelled')).toContain('not confirmed');
   });
-  it('rejects malformed events, ignores user targets, and bounds retained metadata', () => {
+  it('rejects malformed events, ignores user targets, and keeps every compaction of a reply', () => {
     const m = reply(),
       events: RunEvent[] = [];
     applyRunEvent(m, { ...event(), compaction: { ...event().compaction!, preTokens: -1 } });
@@ -110,7 +110,9 @@ describe('compaction history', () => {
       applyRunEvent(m, e);
       retainRunEvent(events, e);
     }
-    expect(m.compactions).toHaveLength(32);
-    expect(events).toHaveLength(32);
+    expect(m.compactions).toHaveLength(50);
+    expect(compactionsSchema.parse(m.compactions)).toEqual(m.compactions);
+    // A remote run's job carries every one of them too.
+    expect(events).toHaveLength(50);
   });
 });

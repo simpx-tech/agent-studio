@@ -85,7 +85,7 @@ const outputs = {
     images: [{ mediaType: 'image/png', data: png, bytes: 72, width: 2, height: 1 }],
   },
   'claude:docs': { stdout: 'Layout guide\n' },
-  // The host previews long streams by their ends and returns them whole on request.
+  // A host before 2026-10-10 previews a long stream by its ends and returns it whole on request.
   'claude:build': {
     stdout: buildLog,
     previewStdout: 'module 0 built\n[… 51 KB not shown …]\nmodule 2999 built\n',
@@ -245,7 +245,7 @@ for (const mobile of [false, true]) {
     await expect(quiet.locator('.result-meta')).toHaveText('No output');
     expect(await outputCalls(page)).not.toContain('claude:quiet');
 
-    // A long result shows its ends until the whole of it is asked for.
+    // A long result from such a host shows its ends until the whole of it is asked for.
     const build = card(page, 'npm run build');
     await build.locator('summary').click();
     const log = build.getByRole('region', { name: 'Output text', exact: true });

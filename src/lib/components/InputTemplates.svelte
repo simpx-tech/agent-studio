@@ -4,8 +4,6 @@
   import {
     appendTemplateInput,
     inputTemplateSchema,
-    maxInputLength,
-    maxInputTemplates,
     renderInputTemplate,
     templateFields,
     type InputTemplate,
@@ -148,12 +146,7 @@
     let index = 1;
     while (fieldInfo.names.includes(`input ${index}`)) index++;
     const field = `input ${index}`;
-    const next = body.slice(0, start) + `{{${field}}}` + body.slice(end);
-    if (next.length > maxInputLength) {
-      error = 'Template text exceeds 30,000 characters.';
-      return;
-    }
-    body = next;
+    body = body.slice(0, start) + `{{${field}}}` + body.slice(end);
     await tick();
     bodyInput.focus();
     bodyInput.setSelectionRange(start + 2, start + 2 + field.length);
@@ -278,11 +271,8 @@
     </div>
     <footer>
       <button type="button" class="secondary" disabled={busy} onclick={close}>Close</button>
-      <button
-        type="button"
-        class="primary"
-        disabled={busy || templates.length >= maxInputTemplates}
-        onclick={() => edit()}><Plus size={16} />New template</button
+      <button type="button" class="primary" disabled={busy} onclick={() => edit()}
+        ><Plus size={16} />New template</button
       >
     </footer>
   {:else if mode === 'edit'}
@@ -296,7 +286,6 @@
         <label
           >Template name<input
             bind:value={name}
-            maxlength="80"
             required
             placeholder="e.g. Review a change"
             disabled={busy}
@@ -307,17 +296,13 @@
             bind:this={bodyInput}
             bind:value={body}
             rows="8"
-            maxlength={maxInputLength}
             required
             disabled={busy}
             placeholder={'Review {{change}}. Focus on {{areas to check}}.'}></textarea></label
         >
         <div class="template-actions">
-          <button
-            type="button"
-            class="secondary"
-            disabled={busy || fieldInfo.names.length >= 20}
-            onclick={addField}><Plus size={14} />Add input field</button
+          <button type="button" class="secondary" disabled={busy} onclick={addField}
+            ><Plus size={14} />Add input field</button
           >
         </div>
         {#if fieldInfo.error}<p class="template-error" role="alert">{fieldInfo.error}</p>
@@ -350,7 +335,6 @@
               }}
               rows="2"
               required
-              maxlength={maxInputLength}
               placeholder={`Enter ${field}`}></textarea></label
           >
         {/each}

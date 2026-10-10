@@ -1,13 +1,5 @@
 import { createHmac } from 'node:crypto';
-import {
-  closeSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -19,7 +11,7 @@ const sessionSchema = z.object({
 const diskSchema = z.object({
   version: z.literal(1),
   keyId: z.string().regex(/^[a-f0-9]{64}$/),
-  sessions: z.array(z.tuple([z.string().regex(/^[a-f0-9]{64}$/), sessionSchema])).max(1000),
+  sessions: z.array(z.tuple([z.string().regex(/^[a-f0-9]{64}$/), sessionSchema])),
 });
 type Session = z.infer<typeof sessionSchema>;
 
@@ -46,7 +38,6 @@ export function sessionStore(directory: string, token: string, now: () => number
     sessions = next;
   }
   try {
-    if (statSync(file).size > 256_000) throw new Error('Session file exceeds its limit.');
     const stored = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
     if (stored.keyId === keyId)
       sessions = new Map(stored.sessions.filter(([, session]) => session.expires > now()));

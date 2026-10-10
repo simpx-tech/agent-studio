@@ -19,7 +19,6 @@ import { serveDownloads } from './downloads.ts';
 import { siteIcons, siteOrigin, type SiteIcons } from './icons.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
 import { lightChat, messagesById, restoreChat } from '../src/lib/light-chats.ts';
-import { runTimeoutMs } from '../src/lib/workflows.ts';
 import { jobAwaitsAnswer, pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
 import { answerSchema } from '../src/lib/questions.ts';
@@ -30,7 +29,7 @@ import { pluginRequestSchema } from '../src/lib/plugins.ts';
 import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
-import { screenRequestMs, screenRequestSchema } from '../src/lib/screens.ts';
+import { screenRequestSchema } from '../src/lib/screens.ts';
 import {
   ImageUploadError,
   imageStore,
@@ -95,8 +94,8 @@ const jobInput = z
         .object({
           conversationId: uuid,
           provider: z.enum(['claude', 'codex', 'gemini']),
-          folder: z.string().min(1).max(4096),
-          firstMessage: z.string().max(4000),
+          folder: z.string().min(1),
+          firstMessage: z.string(),
           connectionId: uuid,
         })
         .strict()
@@ -154,7 +153,6 @@ const jobInput = z
     const toolId = z
       .string()
       .min(1)
-      .max(240)
       .refine((id) => !/[\u0000-\u001f\u007f]/.test(id));
     if (
       job.method === 'toolOutput' &&
@@ -170,7 +168,7 @@ const jobInput = z
         .object({
           runId: uuid,
           toolId,
-          index: z.number().int().nonnegative().max(1_000_000),
+          index: z.number().int().nonnegative(),
           connectionId: uuid,
         })
         .strict()
@@ -183,7 +181,7 @@ const jobInput = z
         .object({
           runId: uuid,
           toolId,
-          index: z.number().int().nonnegative().max(1_000_000),
+          index: z.number().int().nonnegative(),
           connectionId: uuid,
         })
         .strict()
@@ -200,20 +198,18 @@ const jobInput = z
       ctx.addIssue({ code: 'custom', message: 'Invalid question response' });
   });
 const presenceInput = z.object({
-  accountUpdates: z.array(accountUpdateSchema).max(32).optional(),
+  accountUpdates: z.array(accountUpdateSchema).optional(),
   environmentId: uuid,
-  connections: z
-    .array(
-      z.object({
-        connectionId: uuid,
-        installed: z.boolean(),
-        auth: z.enum(['ready', 'login', 'unknown']),
-        detail: z.string().max(1000),
-        version: z.string().max(100).nullable(),
-      }),
-    )
-    .max(100),
-  running: z.array(uuid).max(100),
+  connections: z.array(
+    z.object({
+      connectionId: uuid,
+      installed: z.boolean(),
+      auth: z.enum(['ready', 'login', 'unknown']),
+      detail: z.string(),
+      version: z.string().nullable(),
+    }),
+  ),
+  running: z.array(uuid),
 });
 const count = z.number().int().nonnegative();
 // Version 2 records which revision last changed each conversation and the rest of the workspace,
@@ -243,7 +239,7 @@ const patchInput = z.object({
   revision: count,
   meta: metaSchema.optional(),
   upsert: z.array(chatSchema).optional(),
-  remove: z.array(uuid).max(1000).optional(),
+  remove: z.array(uuid).optional(),
 });
 /** Everything but the conversations, as stored. */
 const metaOf = (workspace: z.infer<typeof sharedSchema>): z.infer<typeof metaSchema> => {
@@ -258,21 +254,11 @@ const runMessages = (job: { method: string; args: Record<string, unknown> }) => 
   return Array.isArray(messages) ? (messages as { images?: unknown[] }[]) : undefined;
 };
 /**
- * The largest workspace upload, whole or patched, refused before it is read. A body is held about
- * four times over while it is read and parsed, beside every workspace this relay keeps in memory;
- * the bound dates from the 512 MiB cap the service ran under until 2026-10-10 (docs/DEPLOYMENT.md).
+ * How much conversation data one answer to `v1/state/chats` carries before it names the rest for
+ * the device to ask for next: it always carries at least one, whatever its size, and refuses none.
+ * Uploads, requests and their updates have no size limit (requested 2026-10-10).
  */
-export const stateUploadLimit = 64_000_000;
-/** How much conversation data one answer to `v1/state/chats` carries; the rest is named. */
 const chatsAnswerBudget = 32_000_000;
-/**
- * The largest update of one request. A finished read of a kept tool result carries a whole
- * image (16 MiB, a third larger as base64), a model of up to 12 MiB or the views of a larger
- * one (12 MiB together), or both streams of its full output.
- */
-export const jobUpdateLimit = 24_000_000;
-/** What one workspace's requests may hold at once, their results included. */
-const jobStorageBudget = 64_000_000;
 /**
  * Optional reads of a kept tool result, and screen requests, whose large results leave as soon
  * as the requester has them, or a minute after they finish when it never asks.
@@ -283,11 +269,6 @@ const resultRead = (method: string) =>
   method === 'toolOutputImage' ||
   method === 'toolOutputModel' ||
   method === 'toolOutputModelViews';
-class TooLargeError extends Error {
-  constructor() {
-    super('Request exceeds its size limit.');
-  }
-}
 export function createRelay({
   token,
   directory,
@@ -296,12 +277,7 @@ export function createRelay({
   now = Date.now,
   pushSender,
   icons = siteIcons({ now }),
-  limits: {
-    upload = stateUploadLimit,
-    answer = chatsAnswerBudget,
-    jobUpdate = jobUpdateLimit,
-    jobStorage = jobStorageBudget,
-  } = {},
+  limits: { answer = chatsAnswerBudget } = {},
 }: {
   token: string;
   directory: string;
@@ -310,11 +286,8 @@ export function createRelay({
   now?: () => number;
   pushSender?: PushSender;
   icons?: SiteIcons;
-  /**
-   * The workspace upload limit, the conversation answer budget, the largest request update
-   * and what a workspace's requests may hold, in bytes.
-   */
-  limits?: { upload?: number; answer?: number; jobUpdate?: number; jobStorage?: number };
+  /** The conversation answer budget, in characters. */
+  limits?: { answer?: number };
 }) {
   if (token.length < 32)
     throw new Error('AGENT_STUDIO_RELAY_TOKEN must have at least 32 characters.');
@@ -385,14 +358,6 @@ export function createRelay({
     }
     const peers = new Map<string, Presence>();
     const jobs = new Map<string, RelayJob & { created: number; updated: number }>();
-    const jobBytes = new Map<string, number>();
-    const reserveJob = (job: RelayJob) => {
-      const bytes = Buffer.byteLength(JSON.stringify(job));
-      const total = [...jobBytes.values()].reduce((sum, size) => sum + size, 0);
-      if (total - (jobBytes.get(job.id) ?? 0) + bytes > jobStorage) return false;
-      jobBytes.set(job.id, bytes);
-      return true;
-    };
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
     /**
      * Conversations as a device sent them, with the recorded work of each message that left it out
@@ -490,20 +455,9 @@ export function createRelay({
     let imagesPrunedAt = 0;
     const expire = () => {
       for (const [id, job] of jobs) {
-        if (
-          !terminal(job.status) &&
-          (now() - job.updated > 45_000 ||
-            now() - job.created >
-              (job.method === 'plugins'
-                ? 660_000
-                : job.method === 'screens'
-                  ? screenRequestMs(job.args.request as { op?: string })
-                  : runTimeoutMs(
-                      job.method === 'run'
-                        ? (job.args.request as { agent?: { provider?: unknown } })?.agent?.provider
-                        : undefined,
-                    )))
-        ) {
+        // A request runs as long as its computer keeps reporting it, however long that is; only a
+        // computer that stops reporting for 45 seconds ends it.
+        if (!terminal(job.status) && now() - job.updated > 45_000) {
           job.status = 'error';
           job.error =
             'The execution environment disconnected or the request expired. It will not be replayed automatically.';
@@ -513,10 +467,8 @@ export function createRelay({
         if (
           terminal(job.status) &&
           now() - job.updated > (resultRead(job.method) ? 60_000 : 600_000)
-        ) {
+        )
           jobs.delete(id);
-          jobBytes.delete(id);
-        }
       }
       for (const [id, peer] of peers)
         if (now() - peer.seenAt > 24 * 60 * 60 * 1000) peers.delete(id);
@@ -527,19 +479,11 @@ export function createRelay({
         images.prune(referencedImages(state.workspace.conversations, [runs]));
       }
     };
-    async function body(
-      req: IncomingMessage,
-      authorized: () => boolean,
-      limit = 20_000_000,
-      allowEmpty = false,
-    ) {
-      // A declared size past the limit is refused before any of it is read into memory.
-      if (Number(req.headers['content-length']) > limit) throw new TooLargeError();
+    async function body(req: IncomingMessage, authorized: () => boolean, allowEmpty = false) {
       let length = 0;
       const chunks: Buffer[] = [];
       for await (const chunk of req) {
         length += chunk.length;
-        if (length > limit) throw new TooLargeError();
         chunks.push(chunk);
       }
       if (!authorized()) throw new Error('Workspace access was revoked. Pair this device again.');
@@ -602,7 +546,7 @@ export function createRelay({
                 'An administrator role is required to manage workspaces.',
               );
             if (url.pathname === '/v1/workspace-admin/workspaces' && req.method === 'POST') {
-              const input = await body(req, authorized, 4096);
+              const input = await body(req, authorized);
               send(201, registry.adminCreate(workspace, authorized, input, now));
               return;
             }
@@ -614,14 +558,14 @@ export function createRelay({
               return;
             }
             if (!match[2] && req.method === 'PUT') {
-              const input = await body(req, authorized, 4096);
+              const input = await body(req, authorized);
               send(200, registry.adminEdit(workspace, authorized, match[1], input));
               return;
             }
             if (match[2] && req.method === 'POST') {
               z.object({})
                 .strict()
-                .parse(await body(req, authorized, 4096, true));
+                .parse(await body(req, authorized, true));
               send(
                 200,
                 match[2] === 'rotate'
@@ -639,11 +583,7 @@ export function createRelay({
               });
             else if (error instanceof WorkspaceAdminError)
               send(error.status, { code: error.code, error: error.message });
-            else if (
-              error instanceof z.ZodError ||
-              error instanceof SyntaxError ||
-              (error instanceof Error && error.message === 'Request exceeds its size limit.')
-            )
+            else if (error instanceof z.ZodError || error instanceof SyntaxError)
               send(400, {
                 code: 'invalid_admin_payload',
                 error: 'Invalid workspace administration request.',
@@ -663,7 +603,7 @@ export function createRelay({
               conversationId: uuid.nullable(),
             })
             .strict()
-            .parse(await body(req, authorized, 1024));
+            .parse(await body(req, authorized));
           push.view(
             `${sessionIdentity ?? actor}:${value.viewId}`,
             value.revision,
@@ -690,7 +630,7 @@ export function createRelay({
               push.subscribe(
                 session,
                 browserActor,
-                await body(req, authorized, 8192),
+                await body(req, authorized),
                 req.headers.origin!,
               );
               send(200, push.status(session));
@@ -704,10 +644,7 @@ export function createRelay({
               error:
                 error instanceof z.ZodError
                   ? 'Invalid push subscription.'
-                  : error instanceof Error &&
-                      /^(Enable notifications|Wait 30 seconds|Notification device limit)/.test(
-                        error.message,
-                      )
+                  : error instanceof Error && /^Enable notifications/.test(error.message)
                     ? error.message
                     : 'Notification settings could not be saved. Please try again.',
             });
@@ -755,13 +692,13 @@ export function createRelay({
         if (url.pathname === '/v1/state/chats' && req.method === 'POST') {
           const value = z
             .object({
-              ids: z.array(uuid).max(1000),
+              ids: z.array(uuid),
               // Light chats, except those named in `full`, such as the one the Viewer shows.
               light: z.boolean().optional(),
-              full: z.array(uuid).max(1000).optional(),
+              full: z.array(uuid).optional(),
             })
             .strict()
-            .parse(await body(req, authorized, 128_000));
+            .parse(await body(req, authorized));
           const wanted = new Set(value.ids);
           const whole = new Set(value.full ?? []);
           // One answer carries conversations up to a budget, always at least one, and names
@@ -789,7 +726,7 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/state/patch' && req.method === 'POST') {
-          const value = patchInput.parse(await body(req, authorized, upload));
+          const value = patchInput.parse(await body(req, authorized));
           storeInlineImages(value.upsert ?? [], images);
           if (value.revision !== state.revision) {
             // The sender's manifest is stale; it can retry without downloading everything.
@@ -805,7 +742,7 @@ export function createRelay({
         if (url.pathname === '/v1/state' && req.method === 'PUT') {
           const value = z
             .object({ revision: z.number().int().nonnegative(), workspace: sharedSchema })
-            .parse(await body(req, authorized, upload));
+            .parse(await body(req, authorized));
           storeInlineImages(value.workspace.conversations, images);
           if (value.revision !== state.revision) {
             send(409, { ...forApp(state), workspaceId: workspace.id });
@@ -827,9 +764,9 @@ export function createRelay({
         // Which of these images this relay lacks, so a device uploads each one once.
         if (url.pathname === '/v1/images/missing' && req.method === 'POST') {
           const value = z
-            .object({ hashes: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(1000) })
+            .object({ hashes: z.array(z.string().regex(/^[0-9a-f]{64}$/)) })
             .strict()
-            .parse(await body(req, authorized, 128_000));
+            .parse(await body(req, authorized));
           send(200, { missing: value.hashes.filter((hash) => !images.has(hash)) });
           return;
         }
@@ -855,7 +792,7 @@ export function createRelay({
           return;
         }
         if (url.pathname === '/v1/heartbeat' && req.method === 'POST') {
-          const value = presenceInput.parse(await body(req, authorized, 128_000));
+          const value = presenceInput.parse(await body(req, authorized));
           if (
             !bearer &&
             (value.connections.length || value.running.length || value.accountUpdates?.length)
@@ -883,10 +820,6 @@ export function createRelay({
             })
           ) {
             send(403, { error: 'Account updates belong to another execution host.' });
-            return;
-          }
-          if (!peers.has(value.environmentId) && peers.size >= 1000) {
-            send(429, { error: 'Workspace device limit reached. Try again later.' });
             return;
           }
           peers.set(value.environmentId, { ...value, seenAt: now(), online: true });
@@ -929,10 +862,6 @@ export function createRelay({
             });
             return;
           }
-          if (jobs.size >= 500) {
-            send(429, { error: 'Relay is busy. Try again later.' });
-            return;
-          }
           const job = {
             ...value,
             status: 'queued' as const,
@@ -941,10 +870,6 @@ export function createRelay({
             created: now(),
             updated: now(),
           };
-          if (!reserveJob(job)) {
-            send(429, { error: 'Workspace request storage is busy. Try again later.' });
-            return;
-          }
           jobs.set(job.id, job);
           send(200, job);
           return;
@@ -1005,27 +930,20 @@ export function createRelay({
           if (req.method === 'GET') {
             send(200, job);
             // Only the requester reads a finished read, so its result leaves once sent.
-            if (resultRead(job.method) && terminal(job.status) && actor === job.source) {
+            if (resultRead(job.method) && terminal(job.status) && actor === job.source)
               jobs.delete(job.id);
-              jobBytes.delete(job.id);
-            }
             return;
           }
           if (req.method === 'PUT' && actor === job.target && !terminal(job.status)) {
             const update = z
               .object({
                 status: z.enum(['running', 'complete', 'cancelled', 'error']),
-                events: z.array(z.unknown()).max(448),
+                events: z.array(z.unknown()),
                 result: z.unknown().optional(),
-                error: z.string().max(4000).optional(),
+                error: z.string().optional(),
               })
-              .parse(await body(req, authorized, jobUpdate));
-            const next = { ...job, ...update, updated: now() };
-            if (!reserveJob(next)) {
-              send(429, { error: 'Workspace request storage is busy. Try again later.' });
-              return;
-            }
-            Object.assign(job, next);
+              .parse(await body(req, authorized));
+            Object.assign(job, { ...update, updated: now() });
             push.jobUpdated(job);
             send(200, job);
             return;
@@ -1040,12 +958,6 @@ export function createRelay({
         if (e instanceof ImageUploadError) {
           if (e.status === 413) res.setHeader('Connection', 'close');
           send(e.status, { error: e.message });
-          return;
-        }
-        if (e instanceof TooLargeError) {
-          // The rest of the body is never read, so the connection cannot be reused.
-          res.setHeader('Connection', 'close');
-          send(413, { code: 'too_large', error: e.message });
           return;
         }
         send(400, {
@@ -1094,8 +1006,14 @@ export function createRelay({
   }
   const sessions = browserSessions(registry, (workspace) => context(workspace).sessions, now);
   const server = createServer(async (req, res) => {
+    // Refusals before a workspace is known close their connection, so a request that will never
+    // be read cannot hold one open by sending its body slowly.
     const send = (code: number, data: unknown) => {
-      res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.writeHead(code, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        Connection: 'close',
+      });
       res.end(JSON.stringify(data));
     };
     try {
@@ -1201,5 +1119,9 @@ export function createRelay({
   // connections now outlive the proxy's.
   server.keepAliveTimeout = 125_000;
   server.headersTimeout = 126_000;
+  // A request takes as long as it needs: Node's five-minute limit on receiving one cut off a large
+  // upload on a slow connection. Headers keep their limit, and requests refused before
+  // authentication close their connection instead of reading on.
+  server.requestTimeout = 0;
   return server;
 }

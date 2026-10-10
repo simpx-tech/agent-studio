@@ -2,7 +2,7 @@
 //! Queries never submit a prompt, execute tools, or return configuration bodies.
 use super::{Executable, RunRequest};
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -81,9 +81,6 @@ pub async fn claude_model(
             .await
             .map_err(|_| "Default-model query output failed")?
         {
-            if line.len() > 2_000_000 {
-                return Err("Default-model query exceeded its output limit");
-            }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -97,14 +94,14 @@ pub async fn claude_model(
             if response["request_id"] == "init" {
                 input.write_all(format!("{}\n", json!({"type":"control_request","request_id":"context","request":{"subtype":"get_context_usage","detail":"full"}})).as_bytes()).await.map_err(|_| "Default-model query input failed")?;
             } else if response["request_id"] == "context" {
-                return response["response"]["model"].as_str().filter(|m| !m.is_empty() && m.len() <= 256).map(String::from).ok_or("Claude did not report its default model. Select an explicit model to continue.");
+                return response["response"]["model"].as_str().filter(|m| !m.is_empty()).map(String::from).ok_or("Claude did not report its default model. Select an explicit model to continue.");
             }
         }
         Err("Claude exited before reporting its default model")
     };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err("Default-model query cancelled"),
-        result = tokio::time::timeout(Duration::from_secs(25), query) => result.unwrap_or(Err("Default-model query timed out. Select an explicit model to continue.")),
+        result = query => result,
     };
     exe.kill(&mut child).await;
     result.map_err(String::from)
@@ -112,7 +109,7 @@ pub async fn claude_model(
 
 pub fn codex_config(request: &mut RunRequest, config: &Value) {
     if request.agent.model.is_empty() {
-        if let Some(model) = config["model"].as_str().filter(|s| s.len() <= 256) {
+        if let Some(model) = config["model"].as_str() {
             request.agent.model = model.into();
         }
     }

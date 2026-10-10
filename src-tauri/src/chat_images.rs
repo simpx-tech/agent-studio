@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::Manager;
 
-pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Told when a window or a reply needs an image neither this computer nor the relay can give.
 pub const UNAVAILABLE: &str =
     "This image is not on this computer, and the relay cannot provide it. Open the chat on the computer that attached it while it is connected to the relay.";
@@ -68,9 +67,6 @@ pub struct Stored {
 /// Keeps an image's bytes under their hash, written whole before they are named.
 pub fn store(root: &Path, bytes: &[u8]) -> Result<Stored, String> {
     let media_type = image_type(bytes).ok_or("Attach a PNG, JPEG, or WebP image")?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("Images must be 16 MB or smaller".into());
-    }
     let hash = hash(bytes);
     let path = root.join(&hash);
     if !path.is_file() {
@@ -218,7 +214,7 @@ pub fn store_request(root: &Path, request: &mut RunRequest) -> Result<(), String
                 .map_err(|_| "Invalid image encoding")?;
             let stored = store(root, &bytes)?;
             if stored.media_type != image.media_type {
-                return Err("Attach a valid PNG, JPEG, or WebP image up to 16 MB".into());
+                return Err("Attach a valid PNG, JPEG, or WebP image".into());
             }
             image.hash = Some(stored.hash);
             image.bytes = Some(stored.bytes);

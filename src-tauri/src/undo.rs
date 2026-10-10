@@ -12,9 +12,6 @@ use std::{
 };
 use tauri::Manager;
 
-const MAX_FILE: usize = 512_000;
-const MAX_RECORD: usize = 8_000_000;
-
 #[derive(Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
@@ -37,7 +34,7 @@ pub struct Preview {
     pub undone: bool,
 }
 
-fn read(path: &Path, limit: usize) -> Result<Option<String>, String> {
+fn read(path: &Path) -> Result<Option<String>, String> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -51,11 +48,11 @@ fn read(path: &Path, limit: usize) -> Result<Option<String>, String> {
         return Err("Undo supports regular files only".into());
     }
     let mut bytes = Vec::new();
-    file.take(limit as u64 + 1)
+    (&file)
         .read_to_end(&mut bytes)
         .map_err(|_| "Cannot read a file for Undo")?;
-    if bytes.len() > limit || bytes.contains(&0) {
-        return Err("A file exceeds Undo's text-file limit".into());
+    if bytes.contains(&0) {
+        return Err("Undo supports text files only".into());
     }
     String::from_utf8(bytes)
         .map(Some)
@@ -167,9 +164,6 @@ fn reverse(current: Option<&str>, patch: &FilePatch) -> Result<Option<String>, S
         lines.splice(index..end, old);
     }
     let value = lines.concat();
-    if value.len() > MAX_FILE {
-        return Err("An original file exceeds Undo's text-file limit".into());
-    }
     if patch.kind == "added" {
         if !value.is_empty() {
             return Err("The newly added file has other content".into());
@@ -225,15 +219,12 @@ fn checkpoint(
     reported_root: Option<&str>,
     snapshot: &Snapshot,
 ) -> Result<Vec<Entry>, String> {
-    if snapshot.limited {
-        return Err("The recorded changes are incomplete".into());
-    }
     let mut states: BTreeMap<PathBuf, (Option<String>, Option<String>)> = BTreeMap::new();
     for edit in snapshot.edits.iter().rev() {
         for patch in edit.files.iter().rev() {
             let path = path_for(&root, reported_root, &patch.path)?;
             if !states.contains_key(&path) {
-                let content = read(&path, MAX_FILE)?;
+                let content = read(&path)?;
                 states.insert(path.clone(), (content.clone(), content));
             }
             let current = states.get(&path).unwrap().0.as_deref();
@@ -242,7 +233,7 @@ fn checkpoint(
                 let previous = path_for(&root, reported_root, previous)?;
                 if previous != path {
                     if !states.contains_key(&previous) {
-                        let content = read(&previous, MAX_FILE)?;
+                        let content = read(&previous)?;
                         states.insert(previous.clone(), (content.clone(), content));
                     }
                     if states[&previous].0.is_some() {
@@ -250,16 +241,10 @@ fn checkpoint(
                     }
                     states.get_mut(&previous).unwrap().0 = original;
                     states.get_mut(&path).unwrap().0 = None;
-                    if states.len() > 32 {
-                        return Err("Too many files for Undo".into());
-                    }
                     continue;
                 }
             }
             states.get_mut(&path).unwrap().0 = original;
-            if states.len() > 32 {
-                return Err("Too many files for Undo".into());
-            }
         }
     }
     Ok(states
@@ -275,9 +260,6 @@ fn checkpoint(
 
 fn save(path: &Path, record: &Record) -> Result<(), String> {
     let bytes = serde_json::to_vec(record).map_err(|_| "Cannot encode Undo checkpoint")?;
-    if bytes.len() > MAX_RECORD {
-        return Err("Undo checkpoint exceeds its limit".into());
-    }
     let parent = path.parent().ok_or("Invalid checkpoint path")?;
     std::fs::create_dir_all(parent).map_err(|_| "Cannot create Undo storage")?;
     let mut file =
@@ -339,11 +321,10 @@ pub async fn capture(
                     ])
                     .creation_flags(0x08000000)
                     .kill_on_drop(true);
-                let output =
-                    tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
-                        .await
-                        .map_err(|_| "Undo folder lookup timed out")?
-                        .map_err(|_| "Cannot locate Undo folder")?;
+                let output = command
+                    .output()
+                    .await
+                    .map_err(|_| "Cannot locate Undo folder")?;
                 if !output.status.success() {
                     return Err("Cannot locate Undo folder".into());
                 }
@@ -422,7 +403,7 @@ pub fn apply(
     uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid conversation id")?;
     uuid::Uuid::parse_str(run).map_err(|_| "Invalid run id")?;
     let path = data.join("undo").join(format!("{run}.json"));
-    let bytes = read(&path, MAX_RECORD)?.ok_or("No complete Undo checkpoint is available on this computer for that response. Older responses, private files, shell edits, and incomplete diffs cannot be undone here.")?;
+    let bytes = read(&path)?.ok_or("No complete Undo checkpoint is available on this computer for that response. Older responses, private files, shell edits, and incomplete diffs cannot be undone here.")?;
     let mut record: Record = serde_json::from_str(&bytes).map_err(|_| "Invalid Undo checkpoint")?;
     if record.conversation != conversation || record.run != run || record.scope != scope {
         return Err("Undo checkpoint belongs to a different conversation or computer".into());
@@ -451,7 +432,7 @@ pub fn apply(
     // finish only if each file still matches one of its two recorded states.
     for entry in &record.files {
         checked(&record.root, &entry.path)?;
-        let current = read(&entry.path, MAX_FILE)?;
+        let current = read(&entry.path)?;
         if current != entry.after && !(record.state == "applying" && current == entry.before) {
             return Err(format!(
                 "{} has changed since this response. Undo was not applied.",
@@ -466,7 +447,7 @@ pub fn apply(
     save(&path, &record)?;
     for entry in &record.files {
         checked(&record.root, &entry.path)?;
-        let current = read(&entry.path, MAX_FILE)?;
+        let current = read(&entry.path)?;
         if current == entry.before {
             continue;
         }
@@ -514,7 +495,6 @@ mod tests {
         let project = root.join("project").canonicalize().unwrap();
         let snapshot = Snapshot {
             revision: 1,
-            limited: false,
             edits: vec![Edit {
                 id: "edit".into(),
                 files: patches,
@@ -662,6 +642,42 @@ mod tests {
         let mut p = patch("a", "before", "after");
         p.hunks = None;
         assert!(reverse(Some("after\n"), &p).is_err());
+    }
+    #[test]
+    fn large_files_and_many_files_are_undone() {
+        // Past the 512,000 bytes a file and 32 files earlier releases allowed.
+        let (dir, conversation, run) = fixture();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let large = "x".repeat(600_000);
+        std::fs::write(project.join("large.txt"), format!("{large}\nafter\n")).unwrap();
+        let mut patches = vec![FilePatch {
+            path: "large.txt".into(),
+            previous_path: None,
+            kind: "modified".into(),
+            hunks: Some(vec![Hunk {
+                old_start: 2,
+                old_lines: 1,
+                new_start: 2,
+                new_lines: 1,
+                lines: vec!["-before".into(), "+after".into()],
+            }]),
+        }];
+        for index in 0..40 {
+            std::fs::write(project.join(format!("f{index}.txt")), "after\n").unwrap();
+            patches.push(patch(&format!("f{index}.txt"), "before", "after"));
+        }
+        record(dir.path(), &conversation, &run, patches);
+        let preview = apply(dir.path(), &conversation, &run, "scope", true).unwrap();
+        assert_eq!(preview.files.len(), 41);
+        assert_eq!(
+            std::fs::read_to_string(project.join("large.txt")).unwrap(),
+            format!("{large}\nbefore\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("f39.txt")).unwrap(),
+            "before\n"
+        );
     }
     #[test]
     fn an_interrupted_transaction_finishes_only_from_known_states() {

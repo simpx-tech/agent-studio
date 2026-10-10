@@ -169,7 +169,6 @@
               <span>{q.options.length ? 'Your own answer' : 'Your answer'}</span>
               <textarea
                 rows="2"
-                maxlength="4000"
                 aria-label={`Your answer: ${q.question}`}
                 value={custom.get(q.id) ?? ''}
                 oninput={(e) => {

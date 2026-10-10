@@ -15,7 +15,6 @@ for mount in /mnt/*; do
   esac
 done
 shopt -s nullglob dotglob
-count=0
 for child in *; do
   [ -d "$child" ] || continue
   flags=
@@ -26,6 +25,4 @@ for child in *; do
     flags="${flags}g"
   fi
   printf '%s:%s\0' "$flags" "$child"
-  count=$((count + 1))
-  [ "$count" -lt 1001 ] || break
 done

@@ -276,14 +276,12 @@
     readImage,
     imageTypes,
     supportsImages,
-    maxImagesPerMessage,
     storedImage,
     type DraftImage,
     type StoredImage,
   } from '$lib/images';
   import {
     enqueueMessage,
-    maxQueuedMessages,
     queuedPreview,
     restoreToDraft,
     takeOverTarget,
@@ -1433,8 +1431,7 @@
       !selectingLocation &&
       !locationPending &&
       (desktop() || paired) &&
-      (desktop() || online) &&
-      activeQueue.length < maxQueuedMessages,
+      (desktop() || online),
   );
   // The computers that answer for screens: every host, named by its own environment.
   const screenHosts = $derived.by(() => {
@@ -2378,30 +2375,20 @@
       earlier && earlier.rewind === before.rewind?.createdAt && sameReturned(draft, earlier.after)
         ? earlier.before
         : draft;
-    const restored = returnedDraft(
-      base,
-      returning.message,
-      { connectionId: selectedSettings.connectionId, mentionScope: mentionSelection },
-      maxImagesPerMessage,
-    );
+    const restored = returnedDraft(base, returning.message, {
+      connectionId: selectedSettings.connectionId,
+      mentionScope: mentionSelection,
+    });
     setDraftOf(next.id, restored.draft);
     rewoundDrafts.set(next.id, {
       rewind: next.rewind!.createdAt,
       before: base,
       after: restored.draft,
     });
-    const { unread } = returning,
-      dropped = restored.droppedImages;
-    attachmentError = [
-      unread
-        ? `${unread} image${unread === 1 ? '' : 's'} of the rewound message could not be read. Undo rewind restores the message with ${unread === 1 ? 'it' : 'them'}.`
-        : '',
-      dropped
-        ? `${dropped} image${dropped === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`
-        : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
+    const { unread } = returning;
+    attachmentError = unread
+      ? `${unread} image${unread === 1 ? '' : 's'} of the rewound message could not be read. Undo rewind restores the message with ${unread === 1 ? 'it' : 'them'}.`
+      : '';
     return () => {
       if (sameReturned(draftOf(next.id), restored.draft)) setDraftOf(next.id, draft);
       if (earlier) rewoundDrafts.set(next.id, earlier);
@@ -4017,18 +4004,21 @@
       );
     return draftSaves;
   }
-  async function attachImages(files: File[]) {
-    if (!files.length || imagesLoading) return;
+  // Images attached while earlier ones are still being read wait for them, in order.
+  let attaching: Promise<void> = Promise.resolve();
+  function attachImages(files: File[]) {
+    if (!files.length) return;
     attachmentError = '';
     if (!imagesSupported) {
       attachmentError = 'Images need Codex or Claude.';
       return;
     }
-    if (attachedImages.length + files.length > maxImagesPerMessage) {
-      attachmentError = `Up to ${maxImagesPerMessage} images per message.`;
-      return;
-    }
     const generation = attachmentGeneration;
+    attaching = attaching.then(() => readAttachments(files, generation));
+    return attaching;
+  }
+  async function readAttachments(files: File[], generation: number) {
+    if (generation !== attachmentGeneration) return;
     imagesLoading = true;
     try {
       const images = await Promise.all(files.map(readImage));
@@ -4050,11 +4040,7 @@
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
     imageDragDepth = Math.max(1, imageDragDepth);
-    if (event.dataTransfer)
-      event.dataTransfer.dropEffect =
-        imagesSupported && !imagesLoading && attachedImages.length < maxImagesPerMessage
-          ? 'copy'
-          : 'none';
+    if (event.dataTransfer) event.dataTransfer.dropEffect = imagesSupported ? 'copy' : 'none';
   }
   function dropImages(event: DragEvent) {
     const files = Array.from(event.dataTransfer?.files ?? []);
@@ -4072,13 +4058,11 @@
     if (remaining.length) queued[id] = remaining;
     else delete queued[id];
     if (activeId !== id) return;
-    const restored = restoreToDraft(returning, prompt, attachedImages, maxImagesPerMessage);
+    const restored = restoreToDraft(returning, prompt, attachedImages);
     prompt = restored.draft;
     for (const item of returning) restoreDraftMentions(item);
     attachedImages = restored.images;
-    attachmentError = restored.droppedImages
-      ? `${restored.droppedImages} queued image${restored.droppedImages === 1 ? ' was' : 's were'} dropped: up to ${maxImagesPerMessage} images per message.`
-      : '';
+    attachmentError = '';
     void tick().then(() => composerInput?.focus());
   }
   function restoreDraftMentions(item: QueuedMessage) {
@@ -4282,7 +4266,7 @@
     if (activeSteering) return;
     if (preparingCommand) return;
     if (queuedMessage?.mentions?.length && queuedMessage.mentionConnectionId !== selectedSettings.connectionId) {
-      const restored = restoreToDraft([queuedMessage], prompt, attachedImages, maxImagesPerMessage);
+      const restored = restoreToDraft([queuedMessage], prompt, attachedImages);
       prompt = restored.draft;
       attachedImages = restored.images;
       restoreDraftMentions(queuedMessage);
@@ -4741,7 +4725,7 @@
         conversation.title !== fallback
       )
         return;
-      if (!result?.title?.trim() || result.title.length > 100) throw new Error('No title returned');
+      if (!result?.title?.trim()) throw new Error('No title returned');
       conversation.title = result.title;
       conversation.titleStatus = 'generated';
       conversation.titleSource = { provider: result.provider, model: result.model };
@@ -5475,9 +5459,7 @@
                     ? 'Images need Codex or Claude'
                     : imagesLoading
                       ? 'Reading images…'
-                      : attachedImages.length >= maxImagesPerMessage
-                        ? 'Remove an attachment to add more images'
-                        : 'Drop images to attach'}</strong
+                      : 'Drop images to attach'}</strong
                 >
               </div>
             </div>
@@ -5885,7 +5867,6 @@
                   : `Message ${selectedAgent.name}…`}
                 bind:value={prompt}
                 rows="3"
-                maxlength="30000"
                 onpaste={(event) => {
                   const files = Array.from(event.clipboardData?.files ?? []);
                   if (files.length) {
@@ -5974,9 +5955,7 @@
                     class="attach-button"
                     aria-label="Attach images"
                     title={imagesSupported ? 'Attach images' : 'Images need Codex or Claude'}
-                    disabled={!imagesSupported ||
-                      imagesLoading ||
-                      attachedImages.length >= maxImagesPerMessage}
+                    disabled={!imagesSupported}
                     onclick={() => imageInput?.click()}><Paperclip size={17} /></button
                   >
                   <button

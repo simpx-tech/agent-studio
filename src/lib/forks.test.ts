@@ -76,8 +76,11 @@ describe('conversation forks', () => {
     fork.settings.instructions = 'Different';
     fork.location!.path = '/another';
     expect(original).toEqual(before);
-    original.title = '😀'.repeat(50);
-    expect(forkConversation(original).title).toBe(`${'😀'.repeat(46)} (fork)`);
+    // A title of any length is kept whole.
+    original.title = '😀'.repeat(500);
+    const long = forkConversation(original);
+    expect(long.title).toBe(`${'😀'.repeat(500)} (fork)`);
+    expect(conversationSchema.parse(long).title).toBe(long.title);
   });
   it('branches at the chosen finished reply and retains that reply settings', () => {
     const original = source();

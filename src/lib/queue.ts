@@ -17,19 +17,12 @@ export type QueuedMessage = {
   mentionConnectionId?: string;
 };
 
-export const maxQueuedMessages = 8;
-
 export function enqueueMessage(
   queue: QueuedMessage[],
   message: Omit<QueuedMessage, 'id'> & { id?: string },
 ): { queue: QueuedMessage[]; error?: string } {
   const text = message.text.trim();
   if (!text && !message.images.length) return { queue, error: 'Enter a message first.' };
-  if (queue.length >= maxQueuedMessages)
-    return {
-      queue,
-      error: `Up to ${maxQueuedMessages} messages can wait for the current reply. Stop the reply or wait for it to finish.`,
-    };
   return {
     queue: [
       ...queue,
@@ -50,13 +43,10 @@ export function restoreToDraft(
   queue: QueuedMessage[],
   draft: string,
   images: DraftImage[],
-  maxImages: number,
-): { draft: string; images: DraftImage[]; droppedImages: number } {
+): { draft: string; images: DraftImage[] } {
   const texts = queue.map((message) => message.text.trim()).filter(Boolean);
   const merged = [...texts, draft.trim()].filter(Boolean).join('\n\n');
-  const all = [...queue.flatMap((message) => message.images), ...images];
-  const kept = all.slice(0, Math.max(0, maxImages));
-  return { draft: merged, images: kept, droppedImages: all.length - kept.length };
+  return { draft: merged, images: [...queue.flatMap((message) => message.images), ...images] };
 }
 
 /**

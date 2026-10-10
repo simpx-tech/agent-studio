@@ -9,8 +9,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// What the screen receives of each output stream.
-const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 /// How long output may keep arriving after an action ended, from what it left running.
 const DRAIN: Duration = Duration::from_secs(2);
 
@@ -19,8 +17,10 @@ const DRAIN: Duration = Duration::from_secs(2);
 pub struct Outcome {
     /// None when the action was stopped, at its time limit or by a signal.
     pub exit_code: Option<i32>,
+    /// Each stream whole.
     pub stdout: String,
     pub stderr: String,
+    /// Always false: the screen receives everything the action printed.
     pub truncated: bool,
     pub timed_out: bool,
     pub duration_ms: u64,
@@ -63,7 +63,8 @@ pub(super) fn available(site: &Site, shell: Shell) -> Result<(), String> {
     }
 }
 
-/// Runs one checked action with its checked values and waits for it, within its time limit.
+/// Runs one checked action with its checked values and waits for it, within the time limit
+/// it declares, if any.
 pub(super) async fn execute(
     root: &Path,
     namespace: &str,
@@ -72,7 +73,7 @@ pub(super) async fn execute(
     variables: Vec<(String, String)>,
 ) -> Result<Outcome, String> {
     available(site, action.shell)?;
-    let limit = Duration::from_secs(u64::from(action.timeout));
+    let limit = action.timeout.map(Duration::from_secs);
     let started = Instant::now();
     if let Some(distribution) = &site.distribution {
         #[cfg(windows)]
@@ -247,7 +248,7 @@ async fn native(
     site: &Site,
     action: &Action,
     variables: Vec<(String, String)>,
-    limit: Duration,
+    limit: Option<Duration>,
     started: Instant,
 ) -> Result<Outcome, String> {
     let folder = PathBuf::from(&site.folder);
@@ -305,7 +306,6 @@ struct Collected {
     status: Option<std::process::ExitStatus>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    truncated: bool,
     timed_out: bool,
     /// Both streams ended: nothing the action started still holds them.
     drained: bool,
@@ -316,14 +316,14 @@ impl Collected {
             exit_code: self.status.and_then(|status| status.code()),
             stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
-            truncated: self.truncated,
+            truncated: false,
             timed_out: self.timed_out,
             duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         }
     }
 }
 
-async fn read_bounded(pipe: Option<impl AsyncRead + Unpin>, kept: &mut Vec<u8>, cut: &mut bool) {
+async fn read_all(pipe: Option<impl AsyncRead + Unpin>, kept: &mut Vec<u8>) {
     let Some(mut pipe) = pipe else {
         return;
     };
@@ -331,32 +331,32 @@ async fn read_bounded(pipe: Option<impl AsyncRead + Unpin>, kept: &mut Vec<u8>, 
     loop {
         match pipe.read(&mut buffer).await {
             Ok(0) | Err(_) => return,
-            Ok(read) => {
-                let room = MAX_OUTPUT.saturating_sub(kept.len());
-                if read > room {
-                    *cut = true;
-                }
-                kept.extend_from_slice(&buffer[..read.min(room)]);
-            }
+            Ok(read) => kept.extend_from_slice(&buffer[..read]),
         }
     }
 }
 
-/// Reads both streams while the action runs, until it ends and they close or its time is up.
-async fn collect(child: &mut tokio::process::Child, limit: Duration) -> Collected {
+/// Reads both streams while the action runs, until it ends and they close or its time, when it
+/// declares one, is up.
+async fn collect(child: &mut tokio::process::Child, limit: Option<Duration>) -> Collected {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let (mut out_cut, mut err_cut) = (false, false);
     let mut status = None;
     let mut exited = false;
     let mut timed_out = false;
     let (mut out_done, mut err_done) = (false, false);
     {
-        let reading_out = read_bounded(child.stdout.take(), &mut stdout, &mut out_cut);
-        let reading_err = read_bounded(child.stderr.take(), &mut stderr, &mut err_cut);
+        let reading_out = read_all(child.stdout.take(), &mut stdout);
+        let reading_err = read_all(child.stderr.take(), &mut stderr);
         tokio::pin!(reading_out, reading_err);
-        let deadline = tokio::time::sleep(limit);
+        let deadline = async {
+            match limit {
+                Some(limit) => tokio::time::sleep(limit).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::pin!(deadline);
-        let drain = tokio::time::sleep(limit + DRAIN);
+        // Polled only once the action exited, which sets it.
+        let drain = tokio::time::sleep(DRAIN);
         tokio::pin!(drain);
         while !(exited && out_done && err_done) {
             tokio::select! {
@@ -379,7 +379,6 @@ async fn collect(child: &mut tokio::process::Child, limit: Duration) -> Collecte
         status,
         stdout,
         stderr,
-        truncated: out_cut || err_cut,
         timed_out,
         drained: out_done && err_done,
     }
@@ -395,17 +394,20 @@ mod distribution {
     /// the host be gone before it stops it.
     const BACKSTOP: u64 = 10;
 
-    /// What the fixed script reads on stdin: one line each of base64 or digits.
+    /// What the fixed script reads on stdin: one line each of base64 or digits. The limit line
+    /// is 0 for an action without a time limit, which the distribution then never stops itself.
     fn input(
         folder: &str,
         action: &Action,
         variables: &[(String, String)],
-        limit: Duration,
+        limit: Option<Duration>,
     ) -> String {
         let mut lines = vec![
             STANDARD.encode(folder),
             STANDARD.encode(&action.script),
-            (limit.as_secs() + BACKSTOP).to_string(),
+            limit
+                .map_or(0, |limit| limit.as_secs().saturating_add(BACKSTOP))
+                .to_string(),
             variables.len().to_string(),
         ];
         for (name, value) in variables {
@@ -421,7 +423,7 @@ mod distribution {
         folder: &str,
         action: &Action,
         variables: &[(String, String)],
-        limit: Duration,
+        limit: Option<Duration>,
         started: Instant,
     ) -> Result<Outcome, String> {
         // wsl.exe reads its own options as written, so the name goes there bare.
@@ -506,13 +508,13 @@ mod distribution {
                 shell: Shell::Bash,
                 script: "echo \"$PARAM_QUERY\"\nls".into(),
                 params: Default::default(),
-                timeout: 30,
+                timeout: Some(30),
             };
             let text = input(
                 "/home/me/it's here",
                 &action,
                 &[("PARAM_QUERY".into(), "a\nb $(x)".into())],
-                Duration::from_secs(30),
+                Some(Duration::from_secs(30)),
             );
             let lines: Vec<_> = text.lines().collect();
             assert_eq!(lines.len(), 6);
@@ -523,6 +525,9 @@ mod distribution {
             assert_eq!(lines[4], "PARAM_QUERY");
             assert_eq!(STANDARD.decode(lines[5]).unwrap(), b"a\nb $(x)");
             assert!(text.ends_with('\n'));
+            // Without a time limit the distribution leaves the action to end by itself.
+            let unlimited = input("/tmp", &action, &[], None);
+            assert_eq!(unlimited.lines().nth(2), Some("0"));
         }
 
         fn first_distribution() -> String {
@@ -551,13 +556,13 @@ mod distribution {
         #[ignore = "Opt-in: runs real actions in the first WSL distribution"]
         async fn a_real_wsl_action_runs_in_its_folder_and_stops_at_its_limit() {
             let distribution = first_distribution();
-            let action = |script: &str, timeout: u32| Action {
+            let action = |script: &str, timeout: u64| Action {
                 name: "probe".into(),
                 description: String::new(),
                 shell: Shell::Bash,
                 script: script.into(),
                 params: Default::default(),
-                timeout,
+                timeout: Some(timeout),
             };
             let outcome = execute(
                 "agent-studio-test",
@@ -571,7 +576,7 @@ mod distribution {
                     ("PARAM_QUERY".into(), "a 'b' \"c\" $(whoami); ñ\nline".into()),
                     ("PARAM_EMPTY".into(), String::new()),
                 ],
-                Duration::from_secs(60),
+                Some(Duration::from_secs(60)),
                 Instant::now(),
             )
             .await
@@ -586,7 +591,7 @@ mod distribution {
                 "/nonexistent/agent-studio",
                 &action("echo ran", 60),
                 &[],
-                Duration::from_secs(60),
+                Some(Duration::from_secs(60)),
                 Instant::now(),
             )
             .await
@@ -605,7 +610,7 @@ mod distribution {
                     3,
                 ),
                 &[],
-                Duration::from_secs(3),
+                Some(Duration::from_secs(3)),
                 Instant::now(),
             )
             .await
@@ -651,14 +656,14 @@ mod tests {
             project: String::new(),
         }
     }
-    fn action(shell: Shell, script: &str, timeout: u32) -> Action {
+    fn action(shell: Shell, script: &str, timeout: u64) -> Action {
         Action {
             name: "probe".into(),
             description: String::new(),
             shell,
             script: script.into(),
             params: Default::default(),
-            timeout,
+            timeout: Some(timeout),
         }
     }
 
@@ -771,6 +776,30 @@ mod tests {
         assert_eq!(outcome.exit_code, None);
         assert!(outcome.stdout.contains("started") && !outcome.stdout.contains("never"));
         assert!(outcome.duration_ms < 15_000, "{}", outcome.duration_ms);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_action_without_a_timeout_runs_until_it_ends_and_keeps_all_it_printed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut whole = action(
+            Shell::Powershell,
+            "Start-Sleep -Seconds 1\n[Console]::Out.Write('x' * 5242880)\nWrite-Output 'done'",
+            1,
+        );
+        whole.timeout = None;
+        let outcome = execute(root.path(), "test", &site(root.path()), &whole, vec![])
+            .await
+            .unwrap();
+        // Past the 4 MB a stream earlier releases kept.
+        assert!(!outcome.timed_out && !outcome.truncated);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(
+            outcome.stdout.len() > 5 * 1024 * 1024,
+            "{}",
+            outcome.stdout.len()
+        );
+        assert!(outcome.stdout.trim_end().ends_with("done"));
     }
 
     #[tokio::test]

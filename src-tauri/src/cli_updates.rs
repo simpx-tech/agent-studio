@@ -27,12 +27,6 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 const TICK: Duration = Duration::from_secs(30 * 60);
 const CHECK_EVERY_MS: u64 = 6 * 60 * 60 * 1000;
 const RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// A first install downloads the whole CLI, about 240 MB for Claude Code.
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
-const OUTPUT_LIMIT: u64 = 64 * 1024;
-const MESSAGE_LIMIT: usize = 240;
 const SETTINGS_FILE: &str = "cli-updates.json";
 /// The newest published Codex, the release every installer of it resolves as latest.
 const CODEX_LATEST: &str = "https://registry.npmjs.org/@openai/codex/latest";
@@ -381,7 +375,7 @@ async fn check(app: &AppHandle, forced: bool) -> Snapshot {
                 }
             }
         }
-        let run = run(&exe, &["update"], UPDATE_TIMEOUT).await;
+        let run = run(&exe, &["update"]).await;
         let after = version(&exe).await;
         record(
             app,
@@ -430,7 +424,6 @@ fn newer(latest: &str, installed: &str) -> bool {
 
 async fn latest_codex_version() -> Option<String> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
         .user_agent(concat!("AgentStudio/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
@@ -482,14 +475,14 @@ struct Output {
 
 async fn read(stream: Option<impl AsyncRead + Unpin>) -> String {
     let mut bytes = Vec::new();
-    if let Some(stream) = stream {
-        let _ = stream.take(OUTPUT_LIMIT).read_to_end(&mut bytes).await;
+    if let Some(mut stream) = stream {
+        let _ = stream.read_to_end(&mut bytes).await;
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Run the CLI without input, keeping the beginning of what it printed.
-async fn run(exe: &Executable, args: &[&str], limit: Duration) -> Result<Output, String> {
+/// Run the CLI without input, keeping what it printed, for as long as it takes.
+async fn run(exe: &Executable, args: &[&str]) -> Result<Output, String> {
     let name = cli_name(&exe.provider);
     let mut command = exe.command();
     command
@@ -502,26 +495,18 @@ async fn run(exe: &Executable, args: &[&str], limit: Duration) -> Result<Output,
         .spawn()
         .map_err(|_| format!("Could not start {name}"))?;
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-    let finished = tokio::time::timeout(limit, async {
-        let (stdout, stderr) = tokio::join!(read(stdout), read(stderr));
-        (child.wait().await, stdout, stderr)
-    })
-    .await;
-    match finished {
-        Ok((Ok(status), stdout, stderr)) => Ok(Output {
+    let (stdout, stderr) = tokio::join!(read(stdout), read(stderr));
+    match child.wait().await {
+        Ok(status) => Ok(Output {
             success: status.success(),
             text: plain(&format!("{stdout}\n{stderr}")),
         }),
-        Ok((Err(_), ..)) => Err(format!("{name} stopped unexpectedly.")),
-        Err(_) => {
-            exe.kill(&mut child).await;
-            Err(format!("{name} did not finish updating in time."))
-        }
+        Err(_) => Err(format!("{name} stopped unexpectedly.")),
     }
 }
 
 async fn version(exe: &Executable) -> Option<String> {
-    let output = run(exe, &["--version"], VERSION_TIMEOUT).await.ok()?;
+    let output = run(exe, &["--version"]).await.ok()?;
     output
         .success
         .then(|| parse_version(&output.text))
@@ -534,10 +519,9 @@ fn parse_version(text: &str) -> Option<String> {
     let token = text
         .split_whitespace()
         .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
-    let valid = token.len() <= 40
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c));
+    let valid = token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c));
     valid.then(|| token.to_string())
 }
 
@@ -562,14 +546,9 @@ fn plain(text: &str) -> String {
     out
 }
 
-fn bounded(line: &str) -> String {
-    let line = line.trim();
-    if line.chars().count() <= MESSAGE_LIMIT {
-        return line.to_string();
-    }
-    let mut short: String = line.chars().take(MESSAGE_LIMIT - 1).collect();
-    short.push('…');
-    short
+/// A line as a message shows it, whole.
+fn trimmed(line: &str) -> String {
+    line.trim().to_string()
 }
 
 fn line_with<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
@@ -608,7 +587,7 @@ fn failure(text: &str, name: &str) -> String {
     if reason.is_empty() {
         format!("{name} could not update.")
     } else {
-        bounded(&reason.join(" "))
+        trimmed(&reason.join(" "))
     }
 }
 
@@ -659,7 +638,7 @@ fn outcome(
                 .iter()
                 .any(|prefix| line.starts_with(prefix))
         });
-        status.message = Some(bounded(&match command {
+        status.message = Some(trimmed(&match command {
             Some(command) => format!("{} Update it with {command}.", line.trim()),
             None => line.to_string(),
         }));
@@ -680,7 +659,7 @@ fn outcome(
         status.message = ["Staying on", "newer than the", "predates release-signature"]
             .iter()
             .find_map(|needle| line_with(text, needle))
-            .map(bounded);
+            .map(trimmed);
     }
     status
 }
@@ -815,18 +794,13 @@ async fn install_in(provider: &'static str, distribution: &str) -> Result<Output
             .spawn()
             .map_err(|_| format!("Could not start WSL to install {name}."))?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-        let finished = tokio::time::timeout(INSTALL_TIMEOUT, async {
-            let (stdout, stderr) = tokio::join!(read(stdout), read(stderr));
-            (child.wait().await, stdout, stderr)
-        })
-        .await;
-        match finished {
-            Ok((Ok(status), stdout, stderr)) => Ok(Output {
+        let (stdout, stderr) = tokio::join!(read(stdout), read(stderr));
+        match child.wait().await {
+            Ok(status) => Ok(Output {
                 success: status.success(),
                 text: plain(&format!("{stdout}\n{stderr}")),
             }),
-            Ok((Err(_), ..)) => Err(format!("The {name} installer stopped unexpectedly.")),
-            Err(_) => Err(format!("The {name} installer did not finish in time.")),
+            Err(_) => Err(format!("The {name} installer stopped unexpectedly.")),
         }
     }
     #[cfg(not(windows))]
@@ -1075,8 +1049,9 @@ mod tests {
         let timeout = read_out(Some("2.1.278"), None, Err("timed out".into()));
         assert_eq!(timeout.phase, Phase::Failed);
         assert_eq!(timeout.version.as_deref(), Some("2.1.278"));
+        // A reason is shown whole, past the 240 characters earlier releases showed.
         let long = read_out(None, None, ok(false, &"x".repeat(1000)));
-        assert_eq!(long.message.unwrap().chars().count(), MESSAGE_LIMIT);
+        assert_eq!(long.message.unwrap().chars().count(), 1000);
     }
 
     #[test]
@@ -1237,16 +1212,14 @@ mod tests {
             };
             let before = version(&exe).await;
             assert_eq!(before.as_deref(), Some("1.0.0"), "{provider}");
-            let result = run(&exe, &["update"], Duration::from_secs(60)).await;
+            let result = run(&exe, &["update"]).await;
             let after = version(&exe).await;
             let status = outcome(provider, "env".into(), before, after, result, 1);
             assert_eq!(status.phase, Phase::Updated, "{provider}");
             assert_eq!(status.version.as_deref(), Some("1.1.0"));
             assert_eq!(status.previous.as_deref(), Some("1.0.0"));
             // An unknown command fails and is reported as such.
-            let failed = run(&exe, &["unknown"], Duration::from_secs(60))
-                .await
-                .unwrap();
+            let failed = run(&exe, &["unknown"]).await.unwrap();
             assert!(!failed.success);
         }
     }

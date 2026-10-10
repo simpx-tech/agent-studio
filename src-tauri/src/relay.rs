@@ -150,11 +150,7 @@ pub async fn disconnect(state: &Relay, identifier: &str, environment: &str) -> R
     Ok(())
 }
 
-/// The largest relay answer read into memory: past it a request fails instead of exhausting
-/// memory. Sync asks for conversations in batches well below it.
-const RESPONSE_LIMIT: usize = 256_000_000;
-/// A relay that sends nothing for this long, or has not begun to answer a small request, has
-/// stalled.
+/// A relay that sends nothing for this long while answering has stalled.
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
 /// Sent with every request: this app keeps chat images as references to the relay's image
 /// store (src-tauri/src/chat_images.rs), so the relay answers with references, not bytes.
@@ -163,23 +159,18 @@ const IMAGES: (&str, &str) = ("x-studio-images", "1");
 pub const OLD_RELAY: &str = "Update the relay to sync conversations with images.";
 
 fn relay_client() -> Result<reqwest::Client, String> {
-    // No total timeout: a large conversation takes as long as the link needs, and a stalled
-    // relay is caught by the send and idle limits below instead.
+    // No total timeout: a request takes as long as the link and the relay need, and a relay
+    // that stalls while answering is caught by the idle limit below. Keepalive probes notice a
+    // connection that died while a request waits for its answer, which a slow relay never fails.
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "Cannot initialize relay client".into())
 }
 
-/// How long sending a request and waiting for the start of its answer may take: longer for a
-/// larger body, such as a patch carrying a conversation with images, at about a megabit per
-/// second.
-fn send_limit(body_bytes: usize) -> Duration {
-    IDLE_LIMIT + Duration::from_secs((body_bytes / 125_000) as u64)
-}
-
-/// Reads an answer whole, failing when the relay stalls or sends more than the limit.
+/// Reads an answer whole, however large, failing when the relay stalls.
 async fn read_body(response: &mut reqwest::Response) -> Result<Vec<u8>, String> {
     let mut bytes = vec![];
     loop {
@@ -190,9 +181,6 @@ async fn read_body(response: &mut reqwest::Response) -> Result<Vec<u8>, String> 
         let Some(chunk) = chunk else {
             return Ok(bytes);
         };
-        if bytes.len() + chunk.len() > RESPONSE_LIMIT {
-            return Err("Relay response exceeds the size limit".into());
-        }
         bytes.extend_from_slice(&chunk);
     }
 }
@@ -211,9 +199,8 @@ async fn identify(
         .header("x-environment-id", environment)
         .header(IMAGES.0, IMAGES.1)
         .send();
-    let mut response = tokio::time::timeout(send_limit(0), request)
+    let mut response = request
         .await
-        .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?
         .map_err(|_| "Cannot connect to the relay. Check its URL, TLS, and network connection.")?;
     let status = response.status();
     let bytes = read_body(&mut response).await?;
@@ -273,17 +260,15 @@ pub async fn request(
         .bearer_auth(token)
         .header("x-environment-id", environment)
         .header(IMAGES.0, IMAGES.1);
-    let mut size = 0;
     if let Some(body) = body {
         let bytes = serde_json::to_vec(&body).map_err(|_| "Cannot encode the relay request")?;
-        size = bytes.len();
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(bytes);
     }
-    let mut response = tokio::time::timeout(send_limit(size), request.send())
+    let mut response = request
+        .send()
         .await
-        .map_err(|_| "Relay connection timed out. Local changes remain on this device.")?
         .map_err(|_| "Relay connection lost. Local changes remain on this device.")?;
     let status = response.status().as_u16();
     let bytes = read_body(&mut response).await?;
@@ -327,15 +312,11 @@ pub async fn missing_images(state: &Relay, hashes: &[String]) -> Result<Vec<Stri
     let connection = connection(state)?;
     let body = serde_json::to_vec(&json!({ "hashes": hashes }))
         .map_err(|_| "Cannot encode the relay request")?;
-    let size = body.len();
     let request = image_request(&connection, reqwest::Method::POST, "v1/images/missing")?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send();
-    let mut response = tokio::time::timeout(send_limit(size), request)
-        .await
-        .map_err(|_| "Relay connection timed out.")?
-        .map_err(|_| "Relay connection lost.")?;
+    let mut response = request.await.map_err(|_| "Relay connection lost.")?;
     let status = response.status();
     let bytes = read_body(&mut response).await?;
     if !status.is_success() {
@@ -355,7 +336,6 @@ pub async fn missing_images(state: &Relay, hashes: &[String]) -> Result<Vec<Stri
 /// Uploads one image's bytes, which the relay checks against their hash.
 pub async fn upload_image(state: &Relay, hash: &str, bytes: Vec<u8>) -> Result<(), String> {
     let connection = connection(state)?;
-    let size = bytes.len();
     let request = image_request(
         &connection,
         reqwest::Method::PUT,
@@ -364,9 +344,8 @@ pub async fn upload_image(state: &Relay, hash: &str, bytes: Vec<u8>) -> Result<(
     .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
     .body(bytes)
     .send();
-    let mut response = tokio::time::timeout(send_limit(size), request)
+    let mut response = request
         .await
-        .map_err(|_| "Relay connection timed out while uploading an image.")?
         .map_err(|_| "Relay connection lost while uploading an image.")?;
     let status = response.status();
     let answer = read_body(&mut response).await?;
@@ -385,10 +364,7 @@ pub async fn download_image(state: &Relay, hash: &str) -> Result<Vec<u8>, String
         &format!("v1/images/{hash}"),
     )?
     .send();
-    let mut response = tokio::time::timeout(send_limit(0), request)
-        .await
-        .map_err(|_| "Relay connection timed out.")?
-        .map_err(|_| "Relay connection lost.")?;
+    let mut response = request.await.map_err(|_| "Relay connection lost.")?;
     let status = response.status();
     let bytes = read_body(&mut response).await?;
     if status.is_success() {
@@ -480,13 +456,5 @@ mod tests {
         ] {
             assert!(endpoint(url).is_err());
         }
-    }
-
-    #[test]
-    fn a_larger_upload_gets_longer_before_the_relay_must_answer() {
-        assert_eq!(send_limit(0), IDLE_LIMIT);
-        assert_eq!(send_limit(1_000_000), IDLE_LIMIT + Duration::from_secs(8));
-        // A 64 MB patch on a one-megabit uplink still has time to arrive.
-        assert!(send_limit(64_000_000) >= Duration::from_secs(64 * 8));
     }
 }

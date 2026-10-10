@@ -26,32 +26,36 @@ describe('input templates', () => {
     expect(templateFields('{{Título}} {{areas to check}}')).toEqual(['Título', 'areas to check']);
     expect(renderInputTemplate('{{constructor}} {{toString}}', {})).toBe(' ');
   });
-  it('rejects malformed fields and bounded storage violations', () => {
+  it('rejects malformed fields and repeated IDs, and keeps templates of any size or number', () => {
+    for (const body of ['{{unfinished', '{{}}', '{{path.to.value}}', '   '])
+      expect(inputTemplateSchema.safeParse({ ...template(), body }).success).toBe(false);
+    // Field names, text and fields of any length or number.
     for (const body of [
-      '{{unfinished',
-      '{{}}',
-      '{{path.to.value}}',
-      '   ',
       '{{' + 'a'.repeat(61) + '}}',
       'x'.repeat(30001),
       Array.from({ length: 21 }, (_, i) => `{{input ${i}}}`).join(' '),
     ])
-      expect(inputTemplateSchema.safeParse({ ...template(), body }).success).toBe(false);
+      expect(inputTemplateSchema.safeParse({ ...template(), body }).success).toBe(true);
+    expect(inputTemplateSchema.safeParse({ ...template(), name: 'n'.repeat(81) }).success).toBe(
+      true,
+    );
     const item = template();
     expect(inputTemplatesSchema.safeParse([item, item]).success).toBe(false);
     expect(inputTemplatesSchema.safeParse(Array.from({ length: 101 }, template)).success).toBe(
-      false,
+      true,
     );
   });
-  it('preserves draft bytes and rejects combined overflow without truncation', () => {
+  it('preserves draft bytes and combines text of any length without truncation', () => {
     expect(appendTemplateInput('Existing draft  ', 'Filled template')).toBe(
       'Existing draft  \n\nFilled template',
     );
     expect(appendTemplateInput('Draft\n\n', 'Text')).toBe('Draft\n\nText');
     expect(appendTemplateInput('', 'x'.repeat(30000))).toHaveLength(30000);
-    expect(() => appendTemplateInput('draft', 'x'.repeat(30000))).toThrow('30,000');
-    expect(() => renderInputTemplate('{{a}}'.repeat(6000), { a: 'x'.repeat(30000) })).toThrow(
-      '30,000',
+    expect(appendTemplateInput('draft', 'x'.repeat(100_000))).toBe(
+      `draft\n\n${'x'.repeat(100_000)}`,
+    );
+    expect(renderInputTemplate('{{a}}'.repeat(100), { a: 'x'.repeat(30000) })).toHaveLength(
+      3_000_000,
     );
     expect(renderInputTemplate('{{a}}{{missing}}', { a: 'x'.repeat(30000) })).toHaveLength(30000);
   });

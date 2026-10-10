@@ -24,15 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 /// The event windows follow sign-ins by.
 pub const EVENT: &str = "studio-sign-in";
-/// How long a CLI may take to show its sign-in page; a WSL distribution may have to start first.
-const START: Duration = Duration::from_secs(60);
-/// How long a sign-in waits for the browser before it ends by itself.
-const WAIT: Duration = Duration::from_secs(10 * 60);
 /// The most CLI output kept while it signs in, to find its page and its last error.
 const OUTPUT: usize = 64 * 1024;
 const ENDED: &str = "This sign-in has ended. Open sign-in to start again.";
 const CANCELLED: &str = "Sign-in was cancelled.";
-const EXPIRED: &str = "Sign-in was not finished within 10 minutes. Open sign-in to try again.";
 const REPLACED: &str =
     "Replaced by another Codex sign-in. Codex signs in one account at a time on a computer.";
 
@@ -43,7 +38,6 @@ pub enum Phase {
     Connected,
     Failed,
     Cancelled,
-    Expired,
 }
 
 /// One sign-in, as windows show it.
@@ -64,7 +58,7 @@ pub struct View {
     /// Whether the page that opened always ends with that code (Claude in WSL), rather than
     /// returning to the CLI by itself.
     pub code_expected: bool,
-    /// What to do now, or why the sign-in ended, as bounded plain text.
+    /// What to do now, or why the sign-in ended, as plain text.
     pub message: String,
 }
 
@@ -141,22 +135,13 @@ enum Ended {
     Connected,
     Failed(String),
     Cancelled,
-    Expired,
 }
 
-/// The sign-ins this computer runs, by id.
-#[derive(Clone)]
+/// The sign-ins this computer runs, by id. Each waits for the browser until its CLI reports how
+/// it ended, the user cancels it or the app quits.
+#[derive(Clone, Default)]
 pub struct SignIns {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
-    wait: Duration,
-}
-impl Default for SignIns {
-    fn default() -> Self {
-        Self {
-            entries: Arc::default(),
-            wait: WAIT,
-        }
-    }
 }
 
 impl SignIns {
@@ -343,7 +328,6 @@ impl SignIns {
             } => {
                 let ended = tokio::select! {
                     _ = cancel.cancelled() => Ended::Cancelled,
-                    _ = tokio::time::sleep(self.wait) => Ended::Expired,
                     status = child.wait() => match status {
                         Ok(status) if status.success() => Ended::Connected,
                         _ => {
@@ -371,7 +355,6 @@ impl SignIns {
             } => {
                 let ended = tokio::select! {
                     _ = cancel.cancelled() => Ended::Cancelled,
-                    _ = tokio::time::sleep(self.wait) => Ended::Expired,
                     outcome = codex_outcome(&mut input, &mut lines, &login) => match outcome {
                         Ok(()) => Ended::Connected,
                         Err(error) => Ended::Failed(error),
@@ -387,7 +370,6 @@ impl SignIns {
                 Ended::Failed(message) => (Phase::Failed, message),
                 Ended::Cancelled if entry.replaced => (Phase::Cancelled, REPLACED.into()),
                 Ended::Cancelled => (Phase::Cancelled, String::new()),
-                Ended::Expired => (Phase::Expired, EXPIRED.into()),
             };
             entry.view.url = None;
             entry.view.code = false;
@@ -431,10 +413,9 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
     let collector = tokio::spawn(collect(stderr, errors.clone()));
     let found = tokio::select! {
         _ = cancel.cancelled() => Err(CANCELLED.to_string()),
-        found = tokio::time::timeout(START, claude_page_in(&mut stdout)) => match found {
-            Ok(Some(page)) => Ok(page),
-            Ok(None) => Err("Claude Code ended before it showed its sign-in page.".to_string()),
-            Err(_) => Err("Claude Code did not show its sign-in page. Try again.".to_string()),
+        found = claude_page_in(&mut stdout) => match found {
+            Some(page) => Ok(page),
+            None => Err("Claude Code ended before it showed its sign-in page.".to_string()),
         },
     };
     match found {
@@ -501,8 +482,7 @@ async fn codex(start: &Start, cancel: &CancellationToken) -> Result<Started, Str
     let mut lines = BufReader::new(stdout).lines();
     let found = tokio::select! {
         _ = cancel.cancelled() => Err(CANCELLED.to_string()),
-        found = tokio::time::timeout(START, codex_page(&mut input, &mut lines)) => found
-            .unwrap_or_else(|_| Err("Codex did not show its sign-in page. Try again.".into())),
+        found = codex_page(&mut input, &mut lines) => found,
     };
     match found {
         Ok((login, page)) => Ok((
@@ -547,7 +527,7 @@ async fn codex_page(
             send(input, &login).await.map_err(|_| STOPPED)?;
         } else if response && value["id"] == 2 {
             if let Some(error) = value.get("error") {
-                return Err(match error["message"].as_str().map(|m| plain(m, 300)) {
+                return Err(match error["message"].as_str().map(plain) {
                     Some(reason) if !reason.is_empty() => {
                         format!("Codex could not start its sign-in: {reason}")
                     }
@@ -555,9 +535,7 @@ async fn codex_page(
                 });
             }
             let result = &value["result"];
-            let login = result["loginId"]
-                .as_str()
-                .filter(|id| !id.is_empty() && id.len() <= 200);
+            let login = result["loginId"].as_str().filter(|id| !id.is_empty());
             return match (login, result["authUrl"].as_str().and_then(sign_in_page)) {
                 (Some(login), Some(page)) => Ok((login.into(), page)),
                 _ => Err("Codex did not return a sign-in page this app can open.".into()),
@@ -587,7 +565,7 @@ async fn codex_outcome(
             if params["success"] == true {
                 return Ok(());
             }
-            return Err(match params["error"].as_str().map(|e| plain(e, 300)) {
+            return Err(match params["error"].as_str().map(plain) {
                 Some(reason) if !reason.is_empty() => format!("Codex could not sign in: {reason}"),
                 _ => "Codex could not sign in. Open sign-in to try again.".into(),
             });
@@ -714,7 +692,7 @@ fn last_error(errors: &str) -> Option<String> {
         .find(|line| line.starts_with("Login failed:"))
         .or(lines.last())
         .copied()?;
-    let reason = plain(line.strip_prefix("Login failed:").unwrap_or(line), 300);
+    let reason = plain(line.strip_prefix("Login failed:").unwrap_or(line));
     (!reason.is_empty()).then_some(reason)
 }
 
@@ -731,21 +709,14 @@ fn claude_failure(errors: &str, pasted: bool) -> String {
     }
 }
 
-/// One line of plain text from a CLI, without escapes or characters that hide or reorder text,
-/// cut to `max` characters.
-fn plain(text: &str, max: usize) -> String {
+/// One line of plain text from a CLI, whole, without escapes or characters that hide or
+/// reorder text.
+fn plain(text: &str) -> String {
     let text = ESCAPES.replace_all(text, "");
-    let line = text
-        .split(|c: char| c.is_whitespace() || crate::console::hidden(c))
+    text.split(|c: char| c.is_whitespace() || crate::console::hidden(c))
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
-        .join(" ");
-    if line.chars().count() <= max {
-        return line;
-    }
-    let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
+        .join(" ")
 }
 
 /// `WSLENV` naming one more variable that wsl.exe passes into the distribution.
@@ -1024,20 +995,20 @@ mod tests {
         );
         assert!(signs.tokens().is_empty());
 
-        // A sign-in nobody finishes ends by itself.
+        // A sign-in nobody finishes waits, however long, until it is cancelled.
         let (exe, dir) = cli("claude", CLAUDE);
-        let waiting = SignIns {
-            wait: Duration::from_millis(300),
-            ..SignIns::default()
-        };
+        let waiting = SignIns::default();
         let view = waiting
             .start(request(exe, dir.path(), "third"), notify, browser(true).0)
             .await
             .unwrap();
-        let expired = end_of(&views, &view.id).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(waiting.list().len(), 1);
+        waiting.cancel(&view.id);
+        let ended = end_of(&views, &view.id).await;
         assert_eq!(
-            (expired.phase, expired.message.as_str()),
-            (Phase::Expired, EXPIRED)
+            (ended.phase, ended.message.as_str()),
+            (Phase::Cancelled, "")
         );
         assert!(waiting.tokens().is_empty());
     }
@@ -1219,17 +1190,17 @@ mod tests {
     }
 
     #[test]
-    fn cli_reasons_become_one_bounded_plain_line() {
+    fn cli_reasons_become_one_whole_plain_line() {
         assert_eq!(
             last_error("noise\nLogin failed: Request failed\nwith detail\n"),
             Some("Request failed".into())
         );
         assert_eq!(last_error("\n  \n"), None);
         assert_eq!(
-            plain("a\u{202e}b \u{1b}[1mbold\u{1b}[0m\tend", 100),
+            plain("a\u{202e}b \u{1b}[1mbold\u{1b}[0m\tend"),
             "a b bold end"
         );
-        assert_eq!(plain(&"x".repeat(400), 300).chars().count(), 300);
+        assert_eq!(plain(&"x".repeat(400)).chars().count(), 400);
         assert_eq!(
             claude_failure("", false),
             "Claude Code's sign-in ended before you signed in. Open sign-in to try again."

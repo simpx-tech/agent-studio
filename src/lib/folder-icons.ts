@@ -4,23 +4,18 @@ import { z } from 'zod';
 // when the folder's first conversation starts, like a chat's title. The workspace keeps one per
 // folder, so every device shows it. Names are kept as written: a name a newer release adds shows
 // the folder mark on older ones.
-export const maxFolderIcons = 2000;
-export const folderIconNameSchema = z
-  .string()
-  .max(64)
-  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+export const folderIconNameSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const folderIconSchema = z.object({
   // The folder: the environment that holds it and its path there.
   environmentId: z.string().uuid(),
-  path: z.string().min(1).max(4096),
+  path: z.string().min(1),
   icon: folderIconNameSchema,
   // The model that chose it.
-  source: z.object({ provider: z.string().min(1).max(40), model: z.string().max(100) }).optional(),
+  source: z.object({ provider: z.string().min(1), model: z.string() }).optional(),
   chosenAt: z.iso.datetime(),
 });
 export const folderIconsSchema = z
   .array(folderIconSchema)
-  .max(maxFolderIcons)
   .refine(
     (icons) => new Set(icons.map(folderIconKey)).size === icons.length,
     'Each folder has one icon.',
@@ -74,16 +69,9 @@ function later(a: FolderIcon, b: FolderIcon) {
   if (difference) return difference > 0 ? a : b;
   return JSON.stringify(a) <= JSON.stringify(b) ? a : b;
 }
-/**
- * The order every device stores icons in, by folder, so equal lists compare equal as text. Past
- * the limit, the folders whose icons were chosen longest ago lose theirs.
- */
+/** The order every device stores icons in, by folder, so equal lists compare equal as text. */
 function stored(icons: FolderIcon[]): FolderIcon[] {
-  const kept =
-    icons.length > maxFolderIcons
-      ? [...icons].sort((a, b) => chosen(b) - chosen(a)).slice(0, maxFolderIcons)
-      : icons;
-  return kept
+  return icons
     .map((icon) => ({ icon, key: folderIconKey(icon) }))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .map(({ icon }) => icon);

@@ -1,15 +1,14 @@
 import { z } from 'zod';
 
 export const proposedPlanSchema = z.object({
-  id: z.string().min(1).max(240),
+  id: z.string().min(1),
   revision: z.number().int().nonnegative(),
-  text: z.string().max(128_000), // 64K Unicode scalar values from the native decoder.
+  text: z.string(), // 64K Unicode scalar values from the native decoder.
   complete: z.boolean(),
   truncated: z.boolean(),
 });
 export const proposedPlansSchema = z
   .array(proposedPlanSchema)
-  .max(8)
   .refine((items) => new Set(items.map((p) => p.id)).size === items.length);
 export type ProposedPlan = z.infer<typeof proposedPlanSchema>;
 export function mergeProposedPlans(left: ProposedPlan[] = [], right: ProposedPlan[] = []) {
@@ -18,7 +17,7 @@ export function mergeProposedPlans(left: ProposedPlan[] = [], right: ProposedPla
     const i = result.findIndex((p) => p.id === next.id);
     if (i >= 0) {
       if (!result[i].complete && next.revision > result[i].revision) result[i] = next;
-    } else if (result.length < 8) result.push(next);
+    } else result.push(next);
   }
   return result;
 }

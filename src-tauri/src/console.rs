@@ -28,8 +28,6 @@ pub struct Opened {
     shell: String,
 }
 
-const MAX_CODE: usize = 64 * 1024;
-
 // Characters a block cannot show: controls, and format characters that hide or reorder text.
 pub(crate) fn hidden(character: char) -> bool {
     (character.is_control() && character != '\n' && character != '\t')
@@ -48,19 +46,13 @@ pub(crate) fn hidden(character: char) -> bool {
         )
 }
 
-/// The code as a console reads it: bounded, with plain line ends, and with nothing in it that
-/// its block could not show, so what runs is what was read.
+/// The code as a console reads it, whole: with plain line ends, and with nothing in it that its
+/// block could not show, so what runs is what was read.
 fn checked(code: &str) -> Result<String, String> {
     let code = code.replace("\r\n", "\n").replace('\r', "\n");
     let code = code.trim_end_matches('\n');
     if code.trim().is_empty() {
         return Err("This block has no code to run.".into());
-    }
-    if code.len() > MAX_CODE {
-        return Err(
-            "This code is longer than the 64 KB a console run accepts. Copy it into a file and run that."
-                .into(),
-        );
     }
     if let Some(character) = code.chars().find(|character| hidden(*character)) {
         return Err(format!(
@@ -467,7 +459,7 @@ async fn launch_distribution(
     code: String,
     hidden: bool,
 ) -> Result<Launched, String> {
-    use std::{process::Stdio, time::Duration};
+    use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     use window::quote;
     // wsl.exe reads its own options as written, quotes included, so the name goes there bare.
@@ -509,16 +501,10 @@ async fn launch_distribution(
         .await
         .map_err(|_| unavailable())?;
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
-        .await
-        .map_err(|_| {
-            format!("{distribution} did not answer. Check that it starts, then run the code again.")
-        })?
-        .map_err(|_| unavailable())?;
+    let output = child.wait_with_output().await.map_err(|_| unavailable())?;
     let directory = String::from_utf8(output.stdout).map_err(|_| unavailable())?;
     if !output.status.success()
         || !directory.starts_with('/')
-        || directory.len() > 4096
         || directory.chars().any(char::is_control)
     {
         return Err(unavailable());
@@ -668,7 +654,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_is_bounded_and_holds_nothing_its_block_cannot_show() {
+    fn code_runs_whole_and_holds_nothing_its_block_cannot_show() {
         assert_eq!(
             checked("npm test\r\nnpm run build\r\n").unwrap(),
             "npm test\nnpm run build"
@@ -676,10 +662,8 @@ mod tests {
         let plain = "echo 'tab\there' \"日本語\" ñ";
         assert_eq!(checked(plain).unwrap(), plain);
         assert!(checked(" \n\t\n").unwrap_err().contains("no code"));
-        assert!(checked(&"a".repeat(MAX_CODE + 1))
-            .unwrap_err()
-            .contains("64 KB"));
-        assert!(checked(&"a".repeat(MAX_CODE)).is_ok());
+        // Code of any length runs, past the 64 KB earlier releases ran.
+        assert_eq!(checked(&"a".repeat(100 * 1024)).unwrap().len(), 100 * 1024);
         // A right-to-left override shows `echo safe` while another order runs.
         for (code, point) in [
             ("echo \u{202e}efas", "U+202E"),

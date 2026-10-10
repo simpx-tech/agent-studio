@@ -6,7 +6,6 @@ import {
   screenDocument,
   screenFolderName,
   screenReply,
-  screenRequestMs,
   screenRequestSchema,
   type ScreenCard,
 } from './screens';
@@ -39,6 +38,10 @@ describe('screen requests', () => {
       { op: 'load', id },
       { op: 'save', id, key: 'filter', value: { state: 'open' } },
       { op: 'save', id, key: 'filter', value: null },
+      // Action names, keys and values of any length.
+      { op: 'run', id, action: 'list_prs', params: { text: 'x'.repeat(100_000) } },
+      { op: 'run', id, action: `a${'b'.repeat(100)}` },
+      { op: 'save', id, key: 'k'.repeat(200), value: 'x'.repeat(2_000_000) },
     ])
       expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
     for (const request of [
@@ -48,17 +51,16 @@ describe('screen requests', () => {
       { op: 'run', id, action: 'Remove-Item' },
       { op: 'run', id, action: 'list_prs', script: 'whoami' },
       { op: 'run', id, action: 'list_prs', params: { 'not a name': 1 } },
-      { op: 'run', id, action: 'list_prs', params: { text: 'x'.repeat(64_001) } },
       { op: 'approve', id, digest: 'yes' },
       { op: 'save', id, key: '', value: 1 },
       { op: 'save', id, key: 'line\nbreak', value: 1 },
-      { op: 'save', id, key: 'big', value: 'x'.repeat(1_000_000) },
       { op: 'exec', id },
     ])
       expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(false);
-    // A run waits for its action's longest limit; anything else answers within a minute.
-    expect(screenRequestMs({ op: 'run' })).toBe(660_000);
-    expect(screenRequestMs({ op: 'list' })).toBe(60_000);
+    // A value that cannot travel as JSON.
+    expect(screenRequestSchema.safeParse({ op: 'save', id, key: 'big', value: 1n }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -93,6 +95,28 @@ describe('the bridge of a screen page', () => {
       value: null,
     });
     expect(screenCall(message({ method: 'chat', text: 'Review #12' }), token)?.method).toBe('chat');
+    // Values, keys and messages of any size, and any number of params.
+    const params = Object.fromEntries(
+      Array.from({ length: 13 }, (_, i) => [`p${i}`, 'x'.repeat(10_000)]),
+    );
+    expect(screenCall(message({ method: 'run', action: 'list_prs', params }), token)).toEqual({
+      id: 1,
+      method: 'run',
+      action: 'list_prs',
+      params,
+    });
+    const value = 'x'.repeat(1_000_000);
+    expect(screenCall(message({ method: 'save', key: 'k'.repeat(101), value }), token)).toEqual({
+      id: 1,
+      method: 'save',
+      key: 'k'.repeat(101),
+      value,
+    });
+    expect(screenCall(message({ method: 'chat', text: 'x'.repeat(8001) }), token)).toEqual({
+      id: 1,
+      method: 'chat',
+      text: 'x'.repeat(8001),
+    });
     for (const call of [
       message({ method: 'run', action: 'list_prs', token: 'other' }),
       { ...message({ method: 'run', action: 'list_prs' }), type: 'studio-artifact' },
@@ -100,17 +124,9 @@ describe('the bridge of a screen page', () => {
       message({ method: 'run', action: 'list_prs', id: 1.5 }),
       message({ method: 'run', action: 'Remove-Item' }),
       message({ method: 'run', action: 'list_prs', params: ['x'] }),
-      message({ method: 'run', action: 'list_prs', params: { text: 'x'.repeat(64_001) } }),
-      message({
-        method: 'run',
-        action: 'list_prs',
-        params: Object.fromEntries(Array.from({ length: 13 }, (_, i) => [`p${i}`, i])),
-      }),
       message({ method: 'load', key: '' }),
-      message({ method: 'save', key: 'k'.repeat(101), value: 1 }),
-      message({ method: 'save', key: 'big', value: 'x'.repeat(1_000_000) }),
+      message({ method: 'save', key: 'line\nbreak', value: 1 }),
       message({ method: 'chat', text: '   ' }),
-      message({ method: 'chat', text: 'x'.repeat(8001) }),
       message({ method: 'exec', script: 'whoami' }),
       null,
       'studio-screen',
@@ -123,7 +139,8 @@ describe('the bridge of a screen page', () => {
       ok: true,
       value: { exitCode: 0 },
     });
-    expect(screenReply(token, 4, { error: 'x'.repeat(5000) }).error).toHaveLength(4000);
+    // An error goes back whole.
+    expect(screenReply(token, 4, { error: 'x'.repeat(5000) }).error).toBe('x'.repeat(5000));
   });
 
   it('starts every page with the bridge, the theme and data that cannot end its script', () => {
@@ -217,14 +234,15 @@ describe('a reply’s screen cards', () => {
     expect(merged.conversations[0].messages[0].screens?.map((s) => s.revision)).toEqual([4, 1]);
   });
 
-  it('are bounded and unique', () => {
+  it('are unique, however many a reply saves', () => {
     expect(screenCardsSchema.safeParse([card, card]).success).toBe(false);
     const many = Array.from({ length: 13 }, (_, i) => ({
       ...card,
       id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(i).padStart(12, '0')}`,
+      title: 't'.repeat(200),
     }));
-    expect(screenCardsSchema.safeParse(many).success).toBe(false);
-    expect(mergeScreenCards(many.slice(0, 12), many.slice(12))).toHaveLength(12);
+    expect(screenCardsSchema.safeParse(many).success).toBe(true);
+    expect(mergeScreenCards(many.slice(0, 12), many.slice(12))).toEqual(many);
     expect(messageSchema.safeParse({ ...reply(), screens: [{ ...card, title: '' }] }).success).toBe(
       false,
     );

@@ -3,17 +3,15 @@ import type { Message } from './domain';
 
 export const planSchema = z.object({
   revision: z.number().int().nonnegative(),
-  explanation: z.string().max(2000).optional(),
-  steps: z
-    .array(
-      z.object({
-        id: z.string().max(240),
-        title: z.string().min(1).max(1000),
-        status: z.enum(['pending', 'running', 'complete']),
-        activeForm: z.string().max(1000).optional(),
-      }),
-    )
-    .max(64),
+  explanation: z.string().optional(),
+  steps: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string().min(1),
+      status: z.enum(['pending', 'running', 'complete']),
+      activeForm: z.string().optional(),
+    }),
+  ),
 });
 export type Plan = z.infer<typeof planSchema>;
 

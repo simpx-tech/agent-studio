@@ -3,6 +3,7 @@ import { applyRunEvent, retainRunEvent } from './activity';
 import {
   historyFor,
   initialWorkspace,
+  messageSchema,
   restoreWorkspace,
   settingsFor,
   type Message,
@@ -86,13 +87,14 @@ describe('reasoning history', () => {
       differentRun.conversations[0].messages[0].blocks.some((b) => b.type === 'reasoning'),
     ).toBe(false);
   });
-  it('bounds retained blocks, rejects malformed data and ignores reasoning on user messages', () => {
+  it('keeps every block whole, rejects malformed data and ignores reasoning on user messages', () => {
     const message = reply(),
       events: RunEvent[] = [];
     for (const invalid of [
       { ...event(), id: '' },
+      { ...event(), id: 'a\u0000b' },
       { ...event(), revision: -1 },
-      { ...event(), text: 'x'.repeat(32001) },
+      { ...event(), text: '' },
       { ...event(), truncated: undefined },
     ]) {
       applyRunEvent(message, invalid);
@@ -108,10 +110,12 @@ describe('reasoning history', () => {
       applyRunEvent(message, event(`r${i}`));
       retainRunEvent(events, event(`r${i}`));
     }
-    expect(message.blocks).toHaveLength(64);
+    expect(message.blocks).toHaveLength(80);
+    // A remote run's job carries at most 64 of them; the rest arrive with the saved conversation.
     expect(events).toHaveLength(64);
-    applyRunEvent(message, event('r0', 2, 'Latest'));
-    expect(message.blocks[0].text).toBe('Latest');
+    applyRunEvent(message, event('r0', 2, 'x'.repeat(100_000)));
+    expect(message.blocks[0].text).toBe('x'.repeat(100_000));
+    expect(messageSchema.parse(message).blocks).toEqual(message.blocks);
     retainRunEvent(events, { kind: 'text', text: 'Final answer still retained' });
     expect(events.at(-1)?.text).toBe('Final answer still retained');
   });

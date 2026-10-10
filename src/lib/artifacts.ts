@@ -9,21 +9,19 @@ export type Artifact = {
   visualization?: boolean;
   revision?: number;
 };
-export const maxArtifactBytes = 512_000;
 
 // Only complete, explicitly labelled output blocks become artifacts. Never read
 // provider tool arguments or arbitrary local paths to manufacture a preview.
 export function responseArtifacts(text: string, messageId: string): Artifact[] {
   const artifacts: Artifact[] = [];
   for (const token of marked.lexer(text)) {
-    if (token.type !== 'code' || artifacts.length >= 12) continue;
+    if (token.type !== 'code') continue;
     const language = token.lang?.split(/\s/)[0]?.toLowerCase();
     if (language !== 'html' && language !== 'svg') continue;
     // A streaming unclosed fence is still a code token in marked.
     const fence = token.raw.match(/^ {0,3}(`{3,}|~{3,})/);
     if (!fence || !new RegExp(`\\n {0,3}${fence[1][0]}{${fence[1].length},}\\s*$`).test(token.raw))
       continue;
-    if (new TextEncoder().encode(token.text).length > maxArtifactBytes) continue;
     const name = token.lang
       ?.slice(language.length)
       .trim()
@@ -68,7 +66,6 @@ export function messageArtifacts(message: Message): Artifact[] {
     for (const artifact of responseArtifacts(block.text, `${message.id}:${index}`)) {
       if (!result.some((a) => a.language === artifact.language && a.source === artifact.source))
         result.push(artifact);
-      if (result.length >= 12) return result;
     }
   }
   return result;

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-const MAX_BYTES: usize = 900_000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hunk {
@@ -33,7 +32,6 @@ pub struct Edit {
 pub struct Snapshot {
     pub revision: u64,
     pub edits: Vec<Edit>,
-    pub limited: bool,
 }
 pub struct FileChangeDecoder {
     snapshot: Snapshot,
@@ -44,7 +42,6 @@ impl Snapshot {
         Self {
             revision: 1,
             edits: vec![],
-            limited: false,
         }
     }
 }
@@ -59,7 +56,7 @@ impl Default for FileChangeDecoder {
 fn valid_path(value: &Value) -> Option<String> {
     value
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
         .map(String::from)
 }
 pub(crate) fn private_path(path: &str) -> bool {
@@ -76,18 +73,8 @@ pub(crate) fn private_path(path: &str) -> bool {
             .any(|ext| name.ends_with(ext))
 }
 fn valid_hunks(hunks: &[Hunk]) -> bool {
-    if hunks.len() > 200 {
-        return false;
-    }
-    let mut previous_end = 0;
+    let mut previous_end: u64 = 0;
     for h in hunks {
-        if [h.old_start, h.old_lines, h.new_start, h.new_lines]
-            .iter()
-            .any(|n| *n > 1_000_000)
-            || h.lines.len() > 10_000
-        {
-            return false;
-        }
         let index = if h.old_lines == 0 {
             h.old_start
         } else {
@@ -99,12 +86,12 @@ fn valid_hunks(hunks: &[Hunk]) -> bool {
         {
             return false;
         }
-        previous_end = index + h.old_lines;
+        let Some(end) = index.checked_add(h.old_lines) else {
+            return false;
+        };
+        previous_end = end;
         let (mut old, mut new) = (0, 0);
         for (i, line) in h.lines.iter().enumerate() {
-            if line.len() > 64_000 {
-                return false;
-            }
             match line.as_bytes().first() {
                 Some(b' ') => {
                     old += 1;
@@ -128,7 +115,7 @@ fn range(s: &str) -> Option<(u64, u64)> {
     Some((start.parse().ok()?, count.parse().ok()?))
 }
 fn unified(text: &str) -> Option<Vec<Hunk>> {
-    if text.len() > 128_000 || text.contains('\0') {
+    if text.contains('\0') {
         return None;
     }
     let mut hunks: Vec<Hunk> = vec![];
@@ -163,23 +150,13 @@ fn unified(text: &str) -> Option<Vec<Hunk>> {
 }
 fn structured(value: &Value) -> Option<Vec<Hunk>> {
     let mut hunks = vec![];
-    let values = value.as_array()?;
-    if values.len() > 200 {
-        return None;
-    }
-    let mut bytes = 0;
-    for h in values {
-        let lines = h["lines"].as_array()?;
-        if lines.len() > 10_000 {
-            return None;
-        }
-        let lines = lines
+    for h in value.as_array()? {
+        let lines = h["lines"]
+            .as_array()?
             .iter()
             .map(|line| {
                 let text = line.as_str()?;
-                bytes += text.len();
-                (text.len() <= 64_000 && bytes <= 128_000 && !text.contains('\0'))
-                    .then(|| text.to_owned())
+                (!text.contains('\0')).then(|| text.to_owned())
             })
             .collect::<Option<Vec<_>>>()?;
         hunks.push(Hunk {
@@ -193,7 +170,7 @@ fn structured(value: &Value) -> Option<Vec<Hunk>> {
     valid_hunks(&hunks).then_some(hunks)
 }
 fn created(content: &str) -> Option<Vec<Hunk>> {
-    if content.len() > 128_000 || content.contains('\0') {
+    if content.contains('\0') {
         return None;
     }
     let mut lines: Vec<String> = content
@@ -218,28 +195,14 @@ fn created(content: &str) -> Option<Vec<Hunk>> {
     valid_hunks(&hunks).then_some(hunks)
 }
 impl FileChangeDecoder {
-    fn publish(&mut self, edit: Option<Edit>, limited: bool) -> Option<Snapshot> {
+    fn publish(&mut self, edit: Option<Edit>) -> Option<Snapshot> {
         let mut next = self.snapshot.clone();
-        next.limited |= limited;
-        if let Some(mut edit) = edit {
+        if let Some(edit) = edit {
             if let Some(index) = next.edits.iter().position(|e| e.id == edit.id) {
                 next.edits[index] = edit;
-            } else if next.edits.len() < 100 {
-                next.edits.push(edit.clone());
-                if serde_json::to_vec(&next).ok()?.len() > MAX_BYTES {
-                    for file in &mut edit.files {
-                        file.hunks = None;
-                    }
-                    *next.edits.last_mut()? = edit;
-                    next.limited = true;
-                }
             } else {
-                next.limited = true;
+                next.edits.push(edit);
             }
-        }
-        if serde_json::to_vec(&next).ok()?.len() > MAX_BYTES {
-            next = self.snapshot.clone();
-            next.limited = true;
         }
         if next == self.snapshot {
             return None;
@@ -259,16 +222,16 @@ impl FileChangeDecoder {
             );
             self.codex_item(item, &id)
         } else {
-            self.publish(None, false)
+            self.publish(None)
         }
     }
     fn codex_item(&mut self, item: &Value, id: &str) -> Option<Snapshot> {
-        if id.len() > 240 || !matches!(item["status"].as_str(), Some("completed" | "complete")) {
-            return self.publish(None, false);
+        if !matches!(item["status"].as_str(), Some("completed" | "complete")) {
+            return self.publish(None);
         }
         let changes = item["changes"].as_array()?;
         let mut files = vec![];
-        for change in changes.iter().take(32) {
+        for change in changes {
             let Some(path) = valid_path(&change["path"]) else {
                 continue;
             };
@@ -326,13 +289,10 @@ impl FileChangeDecoder {
                 hunks,
             });
         }
-        self.publish(
-            Some(Edit {
-                id: id.into(),
-                files,
-            }),
-            changes.len() > 32,
-        )
+        self.publish(Some(Edit {
+            id: id.into(),
+            files,
+        }))
     }
     pub fn decode(&mut self, provider: &str, value: &Value) -> Option<Snapshot> {
         if provider == "codex" {
@@ -342,7 +302,7 @@ impl FileChangeDecoder {
                     &format!("codex:{}", value["item"]["id"].as_str()?),
                 );
             }
-            return self.publish(None, false);
+            return self.publish(None);
         }
         if provider != "claude" {
             return None;
@@ -356,10 +316,7 @@ impl FileChangeDecoder {
                         block["name"].as_str(),
                         valid_path(&block["input"]["file_path"]),
                     ) {
-                        if matches!(name, "Edit" | "Write" | "MultiEdit")
-                            && id.len() <= 220
-                            && self.claude_calls.len() < 100
-                        {
+                        if matches!(name, "Edit" | "Write" | "MultiEdit") {
                             self.claude_calls.insert(id.into(), (name.into(), path));
                         }
                     }
@@ -394,7 +351,7 @@ impl FileChangeDecoder {
                             hunks,
                         }],
                     });
-                    if let Some(next) = self.publish(edit, false) {
+                    if let Some(next) = self.publish(edit) {
                         changed = Some(next);
                     }
                 }
@@ -438,7 +395,7 @@ mod tests {
         assert!(d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"failed","is_error":true}]},"tool_use_result":{"structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-old","+new"]}]}})).is_none());
     }
     #[test]
-    fn codex_changes_are_confirmed_bounded_and_not_command_output() {
+    fn codex_changes_are_confirmed_and_not_command_output() {
         let mut d = FileChangeDecoder::default();
         let event = json!({"method":"item/completed","params":{"threadId":"root","item":{"id":"1","type":"fileChange","status":"completed","changes":[{"path":"src/a.ts","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]}}});
         let s = d.codex_server(&event).unwrap();
@@ -464,9 +421,17 @@ mod tests {
         assert!(d.decode("claude", &event).is_none());
     }
     #[test]
-    fn malformed_large_and_private_diffs_are_not_published_as_source() {
+    fn malformed_and_private_diffs_are_not_published_as_source() {
         assert!(unified("@@ -1,2 +1 @@\n-before\n+after").is_none());
-        assert!(unified(&"x".repeat(128_001)).is_none());
+        assert!(unified("@@ -1 +1 @@\n-before\0\n+after").is_none());
+        // Diffs of any size are recorded, past the 128,000 bytes earlier releases kept.
+        let long = format!(
+            "@@ -1 +1 @@\n-{}\n+{}\n",
+            "a".repeat(100_000),
+            "b".repeat(100_000)
+        );
+        assert_eq!(unified(&long).unwrap()[0].lines[1].len(), 100_001);
+        assert!(created(&"line\n".repeat(50_000)).is_some());
         assert!(private_path("C:\\Project\\.env.local"));
         assert!(private_path("/home/test/.codex/auth.json"));
         assert!(!private_path("src/auth.ts"));
@@ -485,6 +450,20 @@ mod tests {
         assert_eq!(deleted.old_lines, 1);
         assert_eq!(deleted.new_lines, 0);
         assert_eq!(deleted.lines, vec!["-gone", "\\ No newline at end of file"]);
+    }
+    #[test]
+    fn every_claude_edit_of_a_reply_is_recorded() {
+        // Past the 100 calls earlier releases tracked, which lost later edits.
+        let mut d = FileChangeDecoder::default();
+        let mut last = None;
+        for index in 0..150 {
+            let id = format!("edit{index}");
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Edit","input":{"file_path":format!("f{index}.ts")}}]}}));
+            last = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id}]},"tool_use_result":{"structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-old","+new"]}]}}));
+        }
+        let snapshot = last.unwrap();
+        assert_eq!(snapshot.edits.len(), 150);
+        assert!(snapshot.edits.iter().all(|e| e.files[0].hunks.is_some()));
     }
     #[test]
     fn source_line_endings_are_not_normalized() {

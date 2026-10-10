@@ -190,7 +190,7 @@ test('a screen can neither open chats by itself nor reach undeclared or stale ca
     // Not a call of this frame's bridge: wrong names and tokens are ignored.
     parent.postMessage({ type: 'studio-screen', token: 'guess', id: 99, method: 'run', action: 'list_prs' }, '*');
     parent.postMessage({ type: 'studio-screen', token: 'guess', id: 98, method: 'run', action: 'Remove-Item' }, '*');
-    // More waiting calls than a frame may have are refused at once.
+    // However many calls wait at once, each reaches the computer.
     for (let call = 0; call < 9; call++)
       studio.run('list_prs', { since: '2026-09-28' }).catch((error) => {
         document.getElementById('flood').textContent += error.message;
@@ -205,14 +205,14 @@ test('a screen can neither open chats by itself nor reach undeclared or stale ca
   await expect(frame.locator('#chat')).toHaveText(
     'studio.chat works right after the user clicks or types in the screen.',
   );
-  await expect(frame.locator('#flood')).toContainText('already waits for 8 answers');
   await expect(page.getByLabel('Message', { exact: true })).toBeHidden();
-  // Only the bridge's own calls reached the computer, as many as a frame may wait for.
-  await expect.poll(() => page.evaluate(() => (window as any).screenRuns?.length)).toBe(8);
+  // Only the bridge's own calls reached the computer, every one of them.
+  await expect.poll(() => page.evaluate(() => (window as any).screenRuns?.length)).toBe(9);
   expect(
     await page.evaluate(
       () => (window as any).screenRequests.filter((r: { op: string }) => r.op === 'run').length,
     ),
-  ).toBe(8);
+  ).toBe(9);
+  await expect(frame.locator('#flood')).toBeEmpty();
   await expect(page.getByRole('status').filter({ hasText: 'Running list_prs' })).toBeVisible();
 });

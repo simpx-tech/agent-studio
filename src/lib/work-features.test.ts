@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   responseArtifacts,
   messageArtifacts,
-  maxArtifactBytes,
   artifactFilename,
 } from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
@@ -43,8 +42,8 @@ describe('artifacts and portable progress', () => {
     expect(a[0].title).toBe('Dashboard');
     expect(responseArtifacts('```html\n' + source, 'reply')).toEqual([]);
     expect(
-      responseArtifacts('```html\n' + 'x'.repeat(maxArtifactBytes + 1) + '\n```', 'reply'),
-    ).toEqual([]);
+      responseArtifacts('```html\n' + 'x'.repeat(600_000) + '\n```', 'reply'),
+    ).toHaveLength(1);
     expect(artifactFilename({ ...a[0], title: '../unsafe:thing' })).not.toContain('/');
   });
   it('keeps the latest plans across replay, history, and conflicts without inventing completion', () => {
@@ -206,10 +205,15 @@ describe('artifacts and portable progress', () => {
     const merged = mergeShared(base, left, right);
     expect(merged.conversations).toHaveLength(1);
     expect(merged.conversations[0].messages[0].nativeWorkflows!.runs[0].status).toBe('complete');
+    // However many runs a snapshot reports; a malformed one changes nothing.
+    const many = { ...snapshot, revision: 99, runs: Array(17).fill(snapshot.runs[0]) };
+    applyRunEvent(message, { kind: 'nativeworkflow', nativeWorkflows: many });
+    expect(message.nativeWorkflows).toEqual(many);
+    const malformed = { ...snapshot.runs[0], tokens: -1 };
     applyRunEvent(message, {
       kind: 'nativeworkflow',
-      nativeWorkflows: { ...snapshot, revision: 99, runs: Array(17).fill(snapshot.runs[0]) },
+      nativeWorkflows: { ...snapshot, revision: 100, runs: [malformed] },
     });
-    expect(message.nativeWorkflows!.revision).toBe(3);
+    expect(message.nativeWorkflows!.revision).toBe(99);
   });
 });

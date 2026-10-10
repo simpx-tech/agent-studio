@@ -60,7 +60,8 @@
       <section class="screen-action" aria-label={`Action ${action.name}`}>
         <header>
           <code class="action-name">{action.name}</code><span
-            >{shells[action.shell]} · stops after {seconds(action.timeout)}</span
+            >{shells[action.shell]}{#if action.timeout}
+              · stops after {seconds(action.timeout)}{/if}</span
           >
         </header>
         {#if action.description}<p>{action.description}</p>{/if}

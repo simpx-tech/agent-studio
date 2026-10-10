@@ -3,7 +3,7 @@ use crate::protocol::hooks::{event_name, handler_type, identifier, source_label}
 
 impl Scan {
     fn hook(&mut self, path: &str, name: String, scope: &str, status: &str, detail: String) {
-        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+        if path.is_empty() || path.chars().any(char::is_control) {
             self.note("Some hook metadata was invalid and could not be displayed.");
             return;
         }
@@ -13,10 +13,6 @@ impl Scan {
             .iter()
             .any(|e| e.kind == "hooks" && e.path == path && e.name == name)
         {
-            return;
-        }
-        if self.snapshot.entries.len() >= MAX_ENTRIES {
-            self.snapshot.truncated = true;
             return;
         }
         self.snapshot.entries.push(ContextEntry {
@@ -37,33 +33,23 @@ impl Scan {
             return;
         };
         let mut count = 0;
-        if events.len() > MAX_ENTRIES {
-            self.snapshot.truncated = true;
-        }
-        for (event, groups) in events.iter().take(MAX_ENTRIES) {
+        for (event, groups) in events {
             let Some(groups) = groups.as_array() else {
                 self.note("Some Claude hook definitions could not be inspected.");
                 continue;
             };
-            if groups.len() > MAX_ENTRIES {
-                self.snapshot.truncated = true;
-            }
-            for group in groups.iter().take(MAX_ENTRIES) {
+            for group in groups {
                 let Some(handlers) = group["hooks"].as_array() else {
                     self.note("Some Claude hook definitions could not be inspected.");
                     continue;
                 };
                 for handler in handlers {
                     count += 1;
-                    if count > MAX_ENTRIES {
-                        self.snapshot.truncated = true;
-                        return;
-                    }
                     let event = event_name(&json!(event));
                     let kind = handler_type(&handler["type"]);
                     let detail = facts(
                         None,
-                        identifier(&group["matcher"], 200),
+                        identifier(&group["matcher"]),
                         handler["async"] == true,
                         handler["timeout"].as_u64(),
                     );
@@ -82,7 +68,7 @@ impl Scan {
     pub(super) fn claude_hook_file(&mut self, path: &Path, scope: &str) {
         match std::fs::metadata(self.physical(path)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Ok(meta) if meta.is_file() && meta.len() <= 2_000_000 => {}
+            Ok(meta) if meta.is_file() => {}
             _ => {
                 self.note("Some hook configuration files could not be inspected.");
                 return;
@@ -104,9 +90,8 @@ impl Scan {
         let mut paths = vec![root.join("hooks/hooks.json")];
         for entry in std::iter::once(&manifest["hooks"])
             .chain(manifest["hooks"].as_array().into_iter().flatten())
-            .take(32)
         {
-            if let Some(path) = identifier(entry, 4096) {
+            if let Some(path) = identifier(entry) {
                 let relative = path.strip_prefix("${CLAUDE_PLUGIN_ROOT}/").unwrap_or(path);
                 paths.push(root.join(relative));
             }
@@ -156,7 +141,7 @@ pub(super) fn codex_report(report: &mut Value, result: &Value, folder: &str) {
     };
     let mut hooks = vec![];
     let mut matched = false;
-    for group in groups.iter().take(MAX_ENTRIES) {
+    for group in groups {
         if group["cwd"]
             .as_str()
             .is_none_or(|cwd| !path_within(cwd, folder) || !path_within(folder, cwd))
@@ -174,11 +159,7 @@ pub(super) fn codex_report(report: &mut Value, result: &Value, folder: &str) {
             report["hookIncomplete"] = json!(true);
         }
         for hook in entries {
-            if hooks.len() >= MAX_ENTRIES {
-                report["hookTruncated"] = json!(true);
-                break;
-            }
-            let Some(path) = identifier(&hook["sourcePath"], 4096) else {
+            let Some(path) = identifier(&hook["sourcePath"]) else {
                 report["hookIncomplete"] = json!(true);
                 continue;
             };
@@ -189,7 +170,7 @@ pub(super) fn codex_report(report: &mut Value, result: &Value, folder: &str) {
             hooks.push(json!({
                 "path":path, "event":event_name(&hook["eventName"]), "handler":handler_type(&hook["handlerType"]),
                 "scope":source_label(&hook["source"]), "enabled":hook["enabled"].as_bool(), "trust":trust,
-                "matcher":identifier(&hook["matcher"], 200), "async":hook["async"] == true,
+                "matcher":identifier(&hook["matcher"]), "async":hook["async"] == true,
                 "timeout":hook["timeoutSec"].as_u64(),
             }));
         }
@@ -207,10 +188,7 @@ pub(super) fn merge_codex(scan: &mut Scan, report: &Value) {
     if report["hookIncomplete"] == true {
         scan.note("The Codex hook catalog may be incomplete.");
     }
-    if report["hookTruncated"] == true {
-        scan.snapshot.truncated = true;
-    }
-    for (index, hook) in hooks.iter().take(MAX_ENTRIES).enumerate() {
+    for (index, hook) in hooks.iter().enumerate() {
         let event = hook["event"].as_str().unwrap_or("Unknown event");
         let kind = hook["handler"].as_str().unwrap_or("Unknown handler");
         let trust = hook["trust"].as_str().unwrap_or("unknown");
@@ -245,7 +223,7 @@ mod tests {
     use crate::context::tests::{file, scanner};
 
     #[test]
-    fn codex_catalog_is_scoped_bounded_and_keeps_disabled_and_review_states() {
+    fn codex_catalog_is_scoped_whole_and_keeps_disabled_and_review_states() {
         let entries: Vec<_> = [(true,"trusted"), (false,"trusted"), (true,"untrusted"), (true,"modified"), (true,"managed")].iter().map(|(enabled,trust)| json!({
             "eventName":"preToolUse","handlerType":"command","source":"project","sourcePath":"/fixture/hooks.json",
             "enabled":enabled,"trustStatus":trust,"matcher":"Bash","timeoutSec":10,"command":"PRIVATE_COMMAND","currentHash":"PRIVATE_HASH","statusMessage":"PRIVATE_STATUS"
@@ -292,14 +270,18 @@ mod tests {
         let mut empty = scanner("codex", Path::new("/fixture"));
         merge_codex(&mut empty, &json!({"hooks":[]}));
         assert!(!empty.snapshot.notes.iter().any(|n| n.contains("unknown")));
+        // Every hook, past the 600 earlier releases listed.
         let mut report = json!({});
         codex_report(
             &mut report,
-            &json!({"data":[{"cwd":"/fixture","hooks":vec![json!({"sourcePath":"/fixture/hooks.json"}); MAX_ENTRIES + 1]}]}),
+            &json!({"data":[{"cwd":"/fixture","hooks":vec![json!({"sourcePath":"/fixture/hooks.json"}); 700]}]}),
             "/fixture",
         );
-        assert_eq!(report["hooks"].as_array().unwrap().len(), MAX_ENTRIES);
-        assert_eq!(report["hookTruncated"], true);
+        assert_eq!(report["hooks"].as_array().unwrap().len(), 700);
+        let mut scan = scanner("codex", Path::new("/fixture"));
+        merge_codex(&mut scan, &report);
+        assert_eq!(scan.snapshot.entries.len(), 700);
+        assert!(!scan.snapshot.truncated);
     }
 
     #[test]

@@ -221,7 +221,7 @@ describe('recorded file changes', () => {
       summarizeFileChanges([reply([{ path: 'empty', kind: 'added', hunks: [] }])]).files[0],
     ).toMatchObject({ kind: 'added', added: 0 });
   });
-  it('never invents a continuous diff after an external edit, missing source or excessive span', () => {
+  it('never invents a continuous diff after an external edit or missing source, however long the file', () => {
     const discontinuous = summarizeFileChanges([
       reply([patch('a', 'b')]),
       reply([patch('external', 'c')]),
@@ -231,11 +231,20 @@ describe('recorded file changes', () => {
     expect(
       summarizeFileChanges([reply([{ path: 'binary.png', kind: 'modified' }])]).files[0].added,
     ).toBeUndefined();
-    expect(
-      summarizeFileChanges([
-        reply([{ path: 'large', kind: 'modified', hunks: [hunk(200_000, 200_000, ['a'], ['b'])] }]),
-      ]).files[0].unavailable,
-    ).toBeTruthy();
+    // An edit far into a long file keeps its diff, and every file of a chat is summarized.
+    const far = summarizeFileChanges([
+      reply([{ path: 'large', kind: 'modified', hunks: [hunk(200_000, 200_000, ['a'], ['b'])] }]),
+    ]).files[0];
+    expect(far.unavailable).toBeUndefined();
+    expect(far).toMatchObject({
+      added: 1,
+      removed: 1,
+      hunks: [{ oldStart: 200_000, newStart: 200_000, lines: ['-a', '+b'] }],
+    });
+    const files = Array.from({ length: 250 }, (_, i) => patch('a', 'b', `src/${i}.ts`));
+    const all = summarizeFileChanges([reply(files)]);
+    expect(all.files).toHaveLength(250);
+    expect(all.limited).toBe(false);
   });
   it('distinguishes unrecorded history and successful zero changes and preserves non-newline source', () => {
     const old = reply([]);
@@ -292,7 +301,7 @@ describe('recorded file changes', () => {
       mergeShared(base, local, remote).conversations[0].messages[0].fileChanges,
     ).toBeUndefined();
   });
-  it('rejects malformed hunks, duplicate IDs and oversized source', () => {
+  it('rejects malformed hunks and duplicate IDs, and accepts edits of any size', () => {
     const data = snapshot([patch('a', 'b')]);
     expect(fileChangesSchema.safeParse(data).success).toBe(true);
     data.edits[0].files[0].hunks![0].oldLines = 5;
@@ -306,5 +315,29 @@ describe('recorded file changes', () => {
         ],
       }).success,
     ).toBe(false);
+    // However many edits, files, hunks and lines, of whatever length.
+    const long = 'x'.repeat(1_200_000);
+    const large: FileChanges = {
+      revision: 1,
+      limited: false,
+      edits: [
+        ...Array.from({ length: 101 }, (_, i) => ({ id: `edit${i}`, files: [patch('a', 'b')] })),
+        { id: 'files', files: Array.from({ length: 33 }, (_, i) => patch('a', 'b', `f${i}.ts`)) },
+        {
+          id: 'hunks',
+          files: [
+            {
+              path: 'long.ts',
+              kind: 'modified',
+              hunks: [
+                ...Array.from({ length: 200 }, (_, i) => hunk(i * 2 + 1, i * 2 + 1, ['a'], ['b'])),
+                hunk(1000, 1000, Array(5001).fill('a'), [long, ...Array(5000).fill('b')]),
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(fileChangesSchema.parse(large)).toEqual(large);
   });
 });

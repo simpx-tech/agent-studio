@@ -4,31 +4,21 @@ export const visualizationSchema = z.object({
   id: z
     .string()
     .min(1)
-    .max(80)
     .regex(/^[a-zA-Z0-9_-]+$/),
   revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   title: z
     .string()
     .min(1)
-    .max(100)
     .refine((s) => !!s.trim() && !/[\u0000-\u001f\u007f]/.test(s)),
   source: z
     .string()
     .min(1)
-    .max(512_000)
-    .refine(
-      (s) => !!s.trim() && !s.includes('\0') && new TextEncoder().encode(s).length <= 512_000,
-    ),
+    .refine((s) => !!s.trim() && !s.includes('\0')),
 });
 export type Visualization = z.infer<typeof visualizationSchema>;
 export const visualizationsSchema = z
   .array(visualizationSchema)
-  .max(12)
-  .refine(
-    (items) =>
-      new Set(items.map((v) => v.id)).size === items.length &&
-      items.reduce((total, v) => total + new TextEncoder().encode(v.source).length, 0) <= 2_000_000,
-  );
+  .refine((items) => new Set(items.map((v) => v.id)).size === items.length);
 
 export function mergeVisualizations(left: Visualization[] = [], right: Visualization[] = []) {
   const result = [...left];

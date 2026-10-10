@@ -176,7 +176,6 @@
               >Evaluation budget (USD)<input
                 type="number"
                 min="0.01"
-                max="100"
                 step="0.01"
                 bind:value={budget}
                 disabled={busy}
@@ -188,12 +187,7 @@
             >
             <button
               class="secondary"
-              disabled={busy ||
-                running ||
-                !trusted ||
-                !Number.isFinite(budget) ||
-                budget < 0.01 ||
-                budget > 100}
+              disabled={busy || running || !trusted || !Number.isFinite(budget) || budget <= 0}
               onclick={() => {
                 evaluation = crypto.randomUUID();
                 void run({
@@ -221,7 +215,6 @@
           bind:value={installId}
           placeholder="plugin@configured-source"
           disabled={busy || running}
-          maxlength="200"
         /></label
       >
       <button class="secondary" disabled={busy || running || !installId.trim()}

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { UsageSnapshot, CreditUsage } from './usage';
 
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const short = z.string().max(100);
+const short = z.string();
 const amount = z.number().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 export const accountUpdateSchema = z.object({
   connectionId: z.string().uuid(),
@@ -24,20 +24,18 @@ export const accountUpdateSchema = z.object({
   snapshot: z.object({
     provider: z.enum(['claude', 'codex']),
     checkedAt: time,
-    windows: z
-      .array(
-        z.object({
-          id: z.string().max(120),
-          label: short,
-          usedPercent: z.number().min(0).max(100).nullable(),
-          resetsAt: z.union([time, z.string().max(100), z.null()]),
-          windowMinutes: time.nullable(),
-          model: short.nullable(),
-          bucket: short,
-          checkedAt: time.optional(),
-        }),
-      )
-      .max(32),
+    windows: z.array(
+      z.object({
+        id: z.string(),
+        label: short,
+        usedPercent: z.number().min(0).max(100).nullable(),
+        resetsAt: z.union([time, z.string(), z.null()]),
+        windowMinutes: time.nullable(),
+        model: short.nullable(),
+        bucket: short,
+        checkedAt: time.optional(),
+      }),
+    ),
     credits: z
       .object({
         kind: z.literal('codex'),
@@ -48,7 +46,7 @@ export const accountUpdateSchema = z.object({
       })
       .nullable(),
     context: z.null(),
-    detail: z.string().max(300),
+    detail: z.string(),
   }),
 });
 export type AccountUpdate = z.infer<typeof accountUpdateSchema>;
@@ -65,9 +63,7 @@ export const accountActionSchema = z.discriminatedUnion('action', [
 export type AccountAction = z.infer<typeof accountActionSchema>;
 export const workspaceMessagesSchema = z.object({
   featureEnabled: z.boolean(),
-  messages: z
-    .array(z.object({ messageId: z.string().max(200), messageBody: z.string().max(4000) }))
-    .max(12),
+  messages: z.array(z.object({ messageId: z.string(), messageBody: z.string() })),
 });
 export type WorkspaceMessages = z.infer<typeof workspaceMessagesSchema>;
 
@@ -90,11 +86,9 @@ export class AccountUpdateGate {
     if (previous && previous.epoch !== update.epoch) {
       if (update.snapshot.checkedAt < previous.snapshot.checkedAt) return false;
       const epochs = this.retired.get(update.connectionId) ?? new Set<string>();
-      if (epochs.size >= 32) return false;
       epochs.add(previous.epoch);
       this.retired.set(update.connectionId, epochs);
     }
-    if (!previous && this.latest.size >= 100) return false;
     this.latest.set(update.connectionId, update);
     return true;
   }
@@ -146,7 +140,7 @@ export function mergeLiveUsage(
     ...update.snapshot,
     connectionId: update.connectionId,
     checkedAt: Math.max(previous?.checkedAt ?? 0, update.snapshot.checkedAt),
-    windows: [...windows.values()].slice(0, 32),
+    windows: [...windows.values()],
     context: previous?.context ?? null,
     credits: useCredits ? credits(previous?.credits, update.snapshot.credits) : previous?.credits,
     creditsCheckedAt: useCredits ? update.creditsCheckedAt! : previous?.creditsCheckedAt,

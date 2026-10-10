@@ -173,9 +173,6 @@ impl Decoder {
         let index = if let Some(index) = self.progress.iter().position(|p| p.0 == id) {
             index
         } else {
-            if self.progress.len() >= 64 {
-                return None;
-            }
             self.progress.push((id, String::new(), 0));
             self.progress.len() - 1
         };
@@ -185,7 +182,6 @@ impl Decoder {
         } else {
             text
         };
-        let next: String = next.chars().take(16000).collect();
         if item.1 == next || next.is_empty() {
             return None;
         }
@@ -214,7 +210,7 @@ impl Decoder {
         Some(RunEvent::UsageLimit { usage_limit })
     }
     pub fn reported_model(&mut self, model: Option<&str>) {
-        self.model = model.map(|value| value.chars().take(200).collect());
+        self.model = model.map(String::from);
     }
     /// The reply's usage with the context of its latest Claude request, as soon as that request
     /// reports it. A turn reports its result only when it ends, which can be hundreds of calls
@@ -457,7 +453,6 @@ impl Decoder {
             let name: String = string(v, "/event/content_block/name")
                 .chars()
                 .filter(|c| !c.is_control())
-                .take(80)
                 .collect();
             events.push(RunEvent::Activity {
                 text: format!("Using {name}"),

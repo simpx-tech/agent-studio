@@ -1,19 +1,19 @@
 import { z } from 'zod';
 
 const id = z.string().uuid();
-export const computerSchema = z.object({ id, name: z.string().trim().min(1).max(60) });
+export const computerSchema = z.object({ id, name: z.string().trim().min(1) });
 export const environmentSchema = z.object({
   id,
   computerId: id,
-  name: z.string().trim().min(1).max(60),
+  name: z.string().trim().min(1),
   platform: z.enum(['windows', 'macos', 'linux', 'wsl', 'preview']),
-  distribution: z.string().trim().min(1).max(255).optional(),
+  distribution: z.string().trim().min(1).optional(),
   // The Windows app executes this distribution's CLI connections through wsl.exe.
   discoveredOn: id.optional(),
 });
 export const accountSchema = z.object({
   id,
-  name: z.string().trim().min(1).max(60),
+  name: z.string().trim().min(1),
   provider: z.enum(['codex', 'claude', 'gemini']),
   purpose: z.enum(['personal', 'work']),
 });
@@ -92,8 +92,7 @@ export function registerInstallation(fleet: Fleet, installation: Installation) {
   if (existing) {
     if (installation.distribution) {
       existing.distribution = installation.distribution;
-      if (existing.name === 'WSL')
-        existing.name = `WSL · ${installation.distribution}`.slice(0, 60);
+      if (existing.name === 'WSL') existing.name = `WSL · ${installation.distribution}`;
     }
     delete existing.discoveredOn;
     reconcileDiscoveredWsl(fleet);
@@ -106,7 +105,7 @@ export function registerInstallation(fleet: Fleet, installation: Installation) {
     computerId: installation.computerId,
     name:
       installation.platform === 'wsl'
-        ? `WSL${installation.distribution ? ` · ${installation.distribution}` : ''}`.slice(0, 60)
+        ? `WSL${installation.distribution ? ` · ${installation.distribution}` : ''}`
         : installation.platform === 'windows'
           ? 'Windows'
           : installation.platform === 'macos'
@@ -158,7 +157,7 @@ export function registerWslEnvironments(
     fleet.environments.push({
       id: distro.id,
       computerId: host.computerId,
-      name: `WSL · ${distro.name}`.slice(0, 60),
+      name: `WSL · ${distro.name}`,
       platform: 'wsl',
       distribution: distro.name,
       discoveredOn: host.id,

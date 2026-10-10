@@ -1,4 +1,4 @@
-//! Bounded account observations, never a claim of per-chat billing attribution.
+//! Account observations, never a claim of per-chat billing attribution.
 use crate::usage::{CreditUsage, UsageSnapshot};
 use serde::Serialize;
 use serde_json::Value;
@@ -42,20 +42,16 @@ impl From<UsageSnapshot> for Point {
             windows: snapshot
                 .windows
                 .into_iter()
-                .take(16)
                 .map(|w| Window {
-                    id: w.id.chars().take(200).collect(),
+                    id: w.id,
                     label: format!(
                         "{}{}",
                         w.model.map(|m| format!("{m} · ")).unwrap_or_default(),
                         w.label
-                    )
-                    .chars()
-                    .take(200)
-                    .collect(),
+                    ),
                     used_percent: w.used_percent,
                     resets_at: match w.resets_at {
-                        Value::String(s) if s.len() <= 80 => Value::String(s),
+                        Value::String(s) => Value::String(s),
                         Value::Number(n) => Value::Number(n),
                         _ => Value::Null,
                     },

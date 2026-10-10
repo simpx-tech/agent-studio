@@ -66,11 +66,10 @@ impl Hub {
     ) -> Result<(), String> {
         if uuid::Uuid::parse_str(&input.id).is_err()
             || input.text.trim().is_empty()
-            || input.text.encode_utf16().count() > 30000
             || input.text.contains('\0')
             || input.text.trim_start().starts_with('/')
         {
-            return Err("Steering requires plain text, up to 30,000 characters. Queue commands, skills, and images for the next reply.".into());
+            return Err("Steering requires plain text. Queue commands, skills, and images for the next reply.".into());
         }
         let rx = {
             let mut runs = self.0.lock().map_err(|_| "Steering is unavailable")?;
@@ -93,19 +92,6 @@ impl Hub {
             }
             if !run.ready {
                 return Err("This reply is not ready for steering. Keep the draft and try when the agent is running.".into());
-            }
-            if run.entries.len() >= 8
-                || run
-                    .entries
-                    .iter()
-                    .map(|(v, _)| v.text.encode_utf16().count())
-                    .sum::<usize>()
-                    + input.text.encode_utf16().count()
-                    > 60000
-            {
-                return Err(
-                    "This reply reached its steering limit. Queue a follow-up instead.".into(),
-                );
             }
             let (ack, rx) = oneshot::channel();
             run.entries.push((input.clone(), None));
@@ -234,17 +220,6 @@ mod tests {
                 .await
                 .is_err());
         }
-        assert!(hub
-            .send(
-                "run",
-                None,
-                Input {
-                    text: "😀".repeat(15001),
-                    ..input()
-                }
-            )
-            .await
-            .is_err());
         for reject in [true, false] {
             let sender = hub.clone();
             let task = tokio::spawn(async move { sender.send("run", None, input()).await });
@@ -255,6 +230,26 @@ mod tests {
                 drop(delivery);
             }
             assert!(task.await.unwrap().is_err());
+        }
+    }
+    #[tokio::test]
+    async fn steering_of_any_length_and_number_reaches_the_reply() {
+        // Past the 30,000 characters, 8 inputs and 60,000 characters a reply earlier releases took.
+        let hub = Hub::default();
+        let mut session = hub.open("run", None, EventSink::new(|_| Ok(())));
+        session.ready(true);
+        for index in 0..10 {
+            let text = format!("{index}{}", "😀".repeat(15_001));
+            let sender = hub.clone();
+            let value = Input {
+                text: text.clone(),
+                ..input()
+            };
+            let task = tokio::spawn(async move { sender.send("run", None, value).await });
+            let delivery = session.rx.recv().await.unwrap();
+            assert_eq!(delivery.input.text, text);
+            session.delivered(delivery, Ok(()));
+            task.await.unwrap().unwrap();
         }
     }
 }

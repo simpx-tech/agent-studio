@@ -5,7 +5,6 @@
   import {
     mentionQuery,
     retainMentions,
-    maxMentions,
     hasMention,
     type Mention,
     type MentionResult,
@@ -163,17 +162,9 @@
   function chooseMention(path: string) {
     const selected = mentionResults?.entries.find((m) => m.path === path);
     if (!selected || !mention || !input || !available || !mentionSupported) return;
-    if (references.length >= maxMentions && !references.some((m) => m.token === selected.token)) {
-      error = `Use up to ${maxMentions} mentions per message.`;
-      return;
-    }
     const before = prompt.slice(0, mention.start),
       after = prompt.slice(mention.end);
     const nextCaret = before.length + selected.token.length + 1;
-    if (before.length + selected.token.length + after.length + 1 > 30_000) {
-      error = 'The message is too long to insert this mention.';
-      return;
-    }
     prompt = `${before}${selected.token}${/^\s/.test(after) ? '' : ' '}${after}`;
     if (settings.provider === 'codex')
       references = [...references.filter((m) => m.token !== selected.token), selected];
@@ -338,10 +329,6 @@
   > {
     error = '';
     const mentions = settings.provider === 'codex' ? retainMentions(prompt, references) : [];
-    if (mentions.length > maxMentions) {
-      error = `The restored draft has more than ${maxMentions} mentions. Remove some before sending.`;
-      return;
-    }
     if (staleTokens.some((t) => hasMention(prompt, t))) {
       error = 'The mention selection changed. Choose those mentions again, or remove their text.';
       return;

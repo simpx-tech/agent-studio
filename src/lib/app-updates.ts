@@ -3,7 +3,7 @@ import { z } from 'zod';
 const size = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /** Desktop update state reported by the native updater. See docs/UPDATES.md. */
 export const appUpdateStatusSchema = z.object({
-  currentVersion: z.string().max(64),
+  currentVersion: z.string(),
   phase: z.enum([
     'unavailable',
     'idle',
@@ -14,12 +14,12 @@ export const appUpdateStatusSchema = z.object({
     'installing',
     'failed',
   ]),
-  version: z.string().max(64).optional(),
-  notes: z.string().max(4000).optional(),
+  version: z.string().optional(),
+  notes: z.string().optional(),
   downloaded: size.optional(),
   total: size.optional(),
   checkedAt: size.optional(),
-  message: z.string().max(300).optional(),
+  message: z.string().optional(),
   repliesRunning: z.boolean(),
 });
 export type AppUpdateStatus = z.infer<typeof appUpdateStatusSchema>;

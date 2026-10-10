@@ -96,8 +96,8 @@ fn percent(v: &Value) -> Option<f64> {
 fn amount(v: &Value) -> Option<f64> {
     let n = v.as_f64().or_else(|| {
         let s = v.as_str()?;
-        // Only bounded decimal balances, never arbitrary provider text.
-        if s.is_empty() || s.len() > 32 || !s.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
+        // Only decimal balances, never arbitrary provider text.
+        if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
             return None;
         }
         s.parse().ok()
@@ -187,14 +187,7 @@ pub fn parse_codex(v: &Value) -> Vec<LimitWindow> {
                 model: if key == "codex" {
                     None
                 } else {
-                    Some(
-                        bucket["limitName"]
-                            .as_str()
-                            .unwrap_or(key)
-                            .chars()
-                            .take(100)
-                            .collect(),
-                    )
+                    Some(bucket["limitName"].as_str().unwrap_or(key).into())
                 },
                 bucket: key.clone(),
             });
@@ -279,7 +272,7 @@ pub fn parse_gemini(v: &Value) -> Vec<LimitWindow> {
                 label: if minutes.is_some() {
                     label(minutes)
                 } else {
-                    name.chars().take(60).collect()
+                    name.into()
                 },
                 used_percent: used,
                 resets_at: reset(&w["reset_time"]),
@@ -309,7 +302,6 @@ pub async fn read_cancellable(
     cancel: CancellationToken,
 ) -> Result<UsageSnapshot, String> {
     if !crate::providers::valid_provider(provider)
-        || model.len() > 100
         || !model
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-._:/[]".contains(c))

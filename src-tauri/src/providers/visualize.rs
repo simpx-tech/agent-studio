@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-const MAX_SOURCE: usize = 512_000;
-const MAX_TOTAL: usize = 2_000_000;
 pub const GUIDANCE: &str = "For interactive charts, diagrams, simulations, or visual explanations in this conversation, call the visualize tool (Claude: mcp__agent_studio__visualize). Supply a stable id, concise title, and complete self-contained HTML fragment in html. After a successful call, put <!-- visualize:ID --> on its own line between blank lines at the relevant point in your final explanation, replacing ID with the submitted id. Write explanatory prose before and after the visual so it flows with the answer. Each visual appears once. Design a transparent, unframed fragment that blends with the reply: no outer card, page background, repeated title, or dashboard shell. The host supplies the chat font (Geist, 14px), text color, transparent background, and content-based height. Use CSS variables --foreground, --muted-foreground, --border, --primary and --viz-series-1 through --viz-series-6. Use responsive content with natural height; avoid viewport/min-height sizing and hard-coded page colors or fonts. Use inline CSS/JavaScript, SVG, and data images only; network resources and host APIs are unavailable. Viewing controls are supplied by the host. Do not duplicate its source in your final answer. If an installed visualize skill directs a local-file content reference, submit the fragment through this tool instead: Agent Studio does not load paths from replies. Use ordinary Markdown for simple tables or prose. This tool displays content; it does not execute project work.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -18,9 +16,7 @@ pub struct Visualization {
 }
 
 pub fn valid_history(items: &[Visualization]) -> bool {
-    items.len() <= 12
-        && items.iter().map(|v| v.source.len()).sum::<usize>() <= MAX_TOTAL
-        && items.iter().map(|v| &v.id).collect::<HashSet<_>>().len() == items.len()
+    items.iter().map(|v| &v.id).collect::<HashSet<_>>().len() == items.len()
         && items.iter().all(|v| {
             v.revision > 0
                 && v.revision <= 9_007_199_254_740_991
@@ -31,9 +27,9 @@ pub fn valid_history(items: &[Visualization]) -> bool {
 pub fn tool() -> Value {
     json!({"name":"visualize","description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{
-            "id":{"type":"string","minLength":1,"maxLength":80,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this visual within the current reply."},
-            "title":{"type":"string","minLength":1,"maxLength":100},
-            "html":{"type":"string","minLength":1,"maxLength":512000,"description":"Complete self-contained HTML/SVG fragment with inline styles and scripts."}
+            "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this visual within the current reply."},
+            "title":{"type":"string","minLength":1},
+            "html":{"type":"string","minLength":1,"description":"Complete self-contained HTML/SVG fragment with inline styles and scripts."}
         },"required":["id","title","html"],"additionalProperties":false}})
 }
 pub fn codex_tool() -> Value {
@@ -42,8 +38,7 @@ pub fn codex_tool() -> Value {
     tool["deferLoading"] = json!(false);
     tool
 }
-const INVALID: &str = "Provide id (letters, digits, _ or -, at most 80), title (at most 100), and html (at most 512000 UTF-8 bytes). No other fields or file paths are accepted.";
-const TOO_MANY: &str = "This reply already contains 12 visuals. Update an existing id.";
+const INVALID: &str = "Provide id (letters, digits, _ or -), title (one line), and html. No other fields or file paths are accepted.";
 
 /// The fault in an invalid call, naming any field this tool does not accept before its own
 /// field list, so a caller that guessed a name is corrected by the refusal itself.
@@ -59,16 +54,15 @@ fn valid(args: &Value) -> bool {
     args.as_object().is_some_and(|o| o.len() == 3)
         && args["id"].as_str().is_some_and(|s| {
             !s.is_empty()
-                && s.len() <= 80
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
-        && args["title"].as_str().is_some_and(|s| {
-            !s.trim().is_empty() && s.chars().count() <= 100 && !s.chars().any(char::is_control)
-        })
+        && args["title"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
         && args["html"]
             .as_str()
-            .is_some_and(|s| !s.trim().is_empty() && s.len() <= MAX_SOURCE && !s.contains('\0'))
+            .is_some_and(|s| !s.trim().is_empty() && !s.contains('\0'))
 }
 
 #[derive(Default)]
@@ -88,22 +82,7 @@ impl Visualizer {
             return Err(invalid_message(args));
         }
         let index = self.visuals.iter().position(|v| v.id == args["id"]);
-        if index.is_none() && self.visuals.len() >= 12 {
-            return Err(TOO_MANY.into());
-        }
         let source = args["html"].as_str().unwrap();
-        if self
-            .visuals
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| Some(*i) != index)
-            .map(|(_, v)| v.source.len())
-            .sum::<usize>()
-            + source.len()
-            > MAX_TOTAL
-        {
-            return Err("Visuals in one reply must total at most 2000000 UTF-8 bytes.".into());
-        }
         let visual = Visualization {
             id: args["id"].as_str().unwrap().into(),
             revision: index.map_or(1, |i| self.visuals[i].revision + 1),
@@ -155,8 +134,8 @@ impl Visualizer {
                     && block["type"] == "tool_use"
                     && block["name"] == "mcp__agent_studio__visualize"
                 {
-                    if let Some(id) = block["id"].as_str().filter(|id| id.len() <= 240) {
-                        if self.pending.len() < 12 && valid(&block["input"]) {
+                    if let Some(id) = block["id"].as_str() {
+                        if valid(&block["input"]) {
                             self.pending.insert(id.into(), block["input"].clone());
                         }
                     }
@@ -213,8 +192,6 @@ impl Visualizer {
                     // Registration needs valid arguments, so a malformed call reaches here.
                     // Say so: an unregistered-caller refusal reads as a missing capability.
                     Err(invalid_message(args))
-                } else if self.pending.len() >= 12 {
-                    Err(TOO_MANY.into())
                 } else {
                     Err(
                         "Only a registered parent-conversation visualize call can display a visual."
@@ -363,7 +340,7 @@ mod tests {
         json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"tool-1","name":"mcp__agent_studio__visualize","input":input}]}})
     }
     #[test]
-    fn codex_scopes_sources_bounds_and_revisions_to_parent() {
+    fn codex_scopes_sources_and_revisions_to_parent() {
         let mut state = Visualizer::default();
         let mut value = json!({"id":1,"method":"item/tool/call","params":{"threadId":"child","tool":"visualize","arguments":args()}});
         assert_eq!(
@@ -378,25 +355,27 @@ mod tests {
                 matches!(event, Some(RunEvent::Visualization{visualization}) if visualization.revision == revision && visualization.source == args()["html"])
             );
         }
-        value["params"]["arguments"]["html"] = json!("é".repeat(256_001));
-        assert_eq!(
-            state.codex_response(&value, "root").unwrap().0["result"]["success"],
-            false
+        // A visual of any size, past the 512,000 bytes earlier releases took.
+        value["params"]["arguments"]["html"] = json!("é".repeat(1_100_000));
+        let (result, event) = state.codex_response(&value, "root").unwrap();
+        assert_eq!(result["result"]["success"], true);
+        assert!(
+            matches!(event, Some(RunEvent::Visualization{visualization}) if visualization.revision == 3)
         );
         value["params"]["arguments"] = json!({"id":"x","title":"x","path":"C:/private.html"});
         assert_eq!(
             state.codex_response(&value, "root").unwrap().0["result"]["success"],
             false
         );
-        for i in 1..12 {
+        // Any number of visuals, past the 12 and 2 MB a reply earlier releases took.
+        for i in 1..20 {
             let mut input = args();
             input["id"] = json!(format!("v{i}"));
+            input["title"] = json!("t".repeat(150));
             assert!(state.submit(&input).is_ok());
         }
-        let mut input = args();
-        input["id"] = json!("thirteenth");
-        assert!(state.submit(&input).is_err());
         assert!(state.submit(&args()).is_ok());
+        assert!(valid_history(&state.visuals));
     }
     #[test]
     fn claude_reports_the_fault_a_caller_can_act_on() {
@@ -415,7 +394,7 @@ mod tests {
         );
         assert!(text.contains("Provide id"), "{text}");
         assert!(!text.contains("registered parent-conversation"), "{text}");
-        // A thirteenth visual is refused for the ceiling, which names the way out.
+        // A thirteenth visual is shown like the first.
         let mut state = Visualizer::default();
         for index in 0..=12 {
             let mut input = args();
@@ -426,13 +405,9 @@ mod tests {
         }
         let mut last = args();
         last["id"] = json!("v12");
-        let refused = state.claude_response(&control(last));
-        let result = &refused["response"]["response"]["mcp_response"]["result"];
-        assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("already contains 12 visuals"));
+        let accepted = state.claude_response(&control(last));
+        let result = &accepted["response"]["response"]["mcp_response"]["result"];
+        assert_eq!(result["isError"], false);
     }
     #[test]
     fn claude_requires_parent_call_accepted_by_our_server_and_successful_result() {

@@ -1079,7 +1079,6 @@
           >Account name<input
             aria-label="Account name"
             bind:value={name}
-            maxlength="60"
             required
             disabled={busy || !!createdConnectionId || !!linkedAccountId}
           /></label
@@ -1200,7 +1199,6 @@
           aria-label="Edit account name"
           bind:value={accountName}
           required
-          maxlength="60"
         /></label
       >
       {#each managedConnections as connection}
@@ -1336,12 +1334,7 @@
       }}
     >
       <label
-        >Computer name<input
-          aria-label="Computer name"
-          bind:value={computerName}
-          required
-          maxlength="60"
-        /></label
+        >Computer name<input aria-label="Computer name" bind:value={computerName} required /></label
       >
       <details>
         <summary>Advanced: group environments</summary>

@@ -120,7 +120,7 @@
       }
     } catch (reason) {
       if (current === generation) {
-        error = String(reason).slice(0, 500);
+        error = String(reason);
         if (action.kind === 'poll') {
           cancelPending?.();
           cancelPending = undefined;
@@ -153,7 +153,7 @@
       void act(mcpActionSchema.parse({ kind: 'setServers', servers: JSON.parse(sessionJson) }));
     } catch {
       error =
-        'Enter up to 20 named HTTP, SSE, or stdio server definitions. The agent_studio name is reserved.';
+        'Enter named HTTP, SSE, or stdio server definitions. The agent_studio name is reserved.';
     }
   }
 </script>
@@ -184,7 +184,7 @@
       >
         <strong>Add to this CLI profile</strong>
         <p>Only add servers you trust.</p>
-        <label>Server name<input bind:value={name} maxlength="200" required /></label>
+        <label>Server name<input bind:value={name} required /></label>
         <ChoicePicker
           field
           label="Server transport"
@@ -199,7 +199,6 @@
         <label
           >{type === 'stdio' ? 'Command' : 'Server URL'}<input
             bind:value={endpoint}
-            maxlength="4096"
             required
             placeholder={type === 'stdio' ? 'npx' : 'https://example.com/mcp'}
           /></label
@@ -207,8 +206,7 @@
         {#if type === 'stdio'}<label
             >Arguments (JSON array)<textarea
               bind:value={argumentsText}
-              placeholder={'["-y", "my-mcp-server"]'}
-              maxlength="32000"></textarea></label
+              placeholder={'["-y", "my-mcp-server"]'}></textarea></label
           >{/if}
         <div class="actions">
           <button class="primary" {disabled}>Save server</button><button
@@ -264,7 +262,6 @@
                     type="password"
                     autocomplete="off"
                     bind:value={callback}
-                    maxlength="8192"
                     required
                   /></label
                 >
@@ -335,11 +332,8 @@
       <details class="editor">
         <summary>Live session servers</summary>
         <label
-          >Server definitions (JSON)<textarea
-            bind:value={sessionJson}
-            maxlength="64000"
-            rows="5"
-            spellcheck="false"></textarea></label
+          >Server definitions (JSON)<textarea bind:value={sessionJson} rows="5" spellcheck="false"
+          ></textarea></label
         >
         <button class="secondary" disabled={disabled || !conversationId} onclick={setServers}
           >Apply session servers</button

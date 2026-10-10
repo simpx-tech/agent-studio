@@ -138,8 +138,8 @@ async fn import_chat(
 ) -> Result<imports::Imported, String> {
     imports::import(&app, &catalog, &key, &conversation_id, connection_id).await
 }
-/// A finished tool call's result, kept on this computer by the run that made it: a preview
-/// of each stream, or all of it up to the full size when `full` is set.
+/// A finished tool call's result, kept on this computer by the run that made it, with each
+/// stream whole. `full`, which windows of earlier releases send, changes nothing.
 #[tauri::command]
 async fn read_tool_output(
     app: tauri::AppHandle,
@@ -148,18 +148,12 @@ async fn read_tool_output(
     tool_id: String,
     full: Option<bool>,
 ) -> Result<tool_output::View, String> {
+    let _ = full;
     let root = tool_output::root(&app)?;
-    tool_output::read(
-        root,
-        pending.inner().clone(),
-        run_id,
-        tool_id,
-        full.unwrap_or(false),
-    )
-    .await
+    tool_output::read(root, pending.inner().clone(), run_id, tool_id).await
 }
-/// One 3D model a finished tool call kept, whole, for a viewer on another device: as base64,
-/// within what one relay request carries.
+/// One 3D model a finished tool call kept, whole and however large, for a viewer on another
+/// device: as base64.
 #[tauri::command]
 async fn read_tool_output_model(
     app: tauri::AppHandle,
@@ -346,7 +340,7 @@ async fn generate_title(
     let cancel = CancellationToken::new();
     {
         let mut active = titles.0.lock().map_err(|_| "Title registry lock failed")?;
-        if active.contains_key(&conversation_id) || active.len() >= 2 {
+        if active.contains_key(&conversation_id) {
             return Err("Title generation is already busy".into());
         }
         active.insert(conversation_id.clone(), cancel.clone());
@@ -385,7 +379,7 @@ async fn generate_folder_icon(
             .0
             .lock()
             .map_err(|_| "Folder icon registry lock failed")?;
-        if active.contains_key(&conversation_id) || active.len() >= 2 {
+        if active.contains_key(&conversation_id) {
             return Err("Folder icon choice is already busy".into());
         }
         active.insert(conversation_id.clone(), cancel.clone());
@@ -999,9 +993,6 @@ async fn upload_chat_images(
     app: tauri::AppHandle,
     hashes: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    if hashes.len() > 100_000 {
-        return Err("Too many images".into());
-    }
     chat_images::upload(&app, hashes).await
 }
 #[tauri::command]

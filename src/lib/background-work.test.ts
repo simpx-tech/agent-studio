@@ -92,18 +92,28 @@ describe('background work', () => {
     expect(messageBackgroundWork({ ...earlier, role: 'user' } as Message, host)).toEqual([]);
   });
 
-  it('accepts only bounded host lists and outcomes', () => {
+  it('accepts well-formed host lists of any length and outcomes', () => {
     const snapshot = {
       kind: 'snapshot',
       conversationId: 'chat',
       runs: [{ id: 'claude:a', runId: 'run', kind: 'monitor', label: 'Watch', elapsedMs: 5 }],
     };
     expect(backgroundWorkEventSchema.safeParse(snapshot).success).toBe(true);
+    // However much work the host lists, with labels of any length.
+    const many = {
+      ...snapshot,
+      runs: Array.from({ length: 100 }, (_, i) => ({
+        ...snapshot.runs[0],
+        id: `claude:${i}`,
+        label: 'x'.repeat(5000),
+      })),
+    };
+    expect(backgroundWorkEventSchema.parse(many)).toMatchObject({ runs: many.runs });
     for (const invalid of [
       { ...snapshot, runs: [{ ...snapshot.runs[0], kind: 'agent' }] },
       { ...snapshot, runs: [{ ...snapshot.runs[0], elapsedMs: -1 }] },
       { ...snapshot, conversationId: '' },
-      { ...snapshot, runs: Array(33).fill(snapshot.runs[0]) },
+      { ...snapshot, runs: [{ ...snapshot.runs[0], runId: '' }] },
       { kind: 'tool', conversationId: 'chat', runId: 'run', tool: { id: 'claude:a' } },
     ])
       expect(backgroundWorkEventSchema.safeParse(invalid).success).toBe(false);

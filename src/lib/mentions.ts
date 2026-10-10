@@ -1,18 +1,15 @@
 import { z } from 'zod';
 
-const clean = (max: number) =>
-  z
-    .string()
-    .min(1)
-    .max(max)
-    .refine((s) => !/[\x00-\x1f\x7f]/.test(s));
-export const maxMentions = 16;
+const clean = z
+  .string()
+  .min(1)
+  .refine((s) => !/[\x00-\x1f\x7f]/.test(s));
 export const mentionSchema = z
   .object({
     kind: z.enum(['file', 'app']),
-    name: clean(4096),
-    path: clean(4096),
-    token: clean(4100),
+    name: clean,
+    path: clean,
+    token: clean,
   })
   .strict()
   .refine((m) =>
@@ -24,9 +21,9 @@ export const mentionSchema = z
   );
 export type Mention = z.infer<typeof mentionSchema>;
 export const mentionResultSchema = z.object({
-  entries: z.array(mentionSchema).max(200),
+  entries: z.array(mentionSchema),
   truncated: z.boolean(),
-  notice: z.string().max(1000),
+  notice: z.string(),
 });
 export type MentionResult = z.infer<typeof mentionResultSchema>;
 export const mentionRequestSchema = z
@@ -39,15 +36,12 @@ export const mentionRequestSchema = z
         computerId: z.string().uuid(),
         environmentId: z.string().uuid(),
         executionEnvironmentId: z.string().uuid().optional(),
-        path: clean(4096),
+        path: clean,
       })
       .strict()
       .nullable(),
     kind: z.enum(['file', 'app']),
-    query: z
-      .string()
-      .max(256)
-      .refine((s) => !/[\x00-\x1f\x7f]/.test(s)),
+    query: z.string().refine((s) => !/[\x00-\x1f\x7f]/.test(s)),
   })
   .strict()
   .refine((r) => r.kind !== 'app' || r.provider === 'codex');
@@ -65,7 +59,6 @@ export function mentionQuery(text: string, caret: number): MentionQuery | undefi
   const raw = match[2];
   if (match[1] === '$' && raw && !/^[A-Za-z_][\w-]*$/.test(raw)) return;
   const query = raw.startsWith('"') ? raw.slice(1) : raw;
-  if (query.length > 256) return;
   const start = caret - raw.length - 1;
   const after = text.slice(caret);
   const tail = raw.startsWith('"')

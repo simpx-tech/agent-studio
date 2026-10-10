@@ -81,12 +81,23 @@ describe('CLI updates', () => {
     // Claude Code's earlier update does not hide Codex's in the same environment.
     expect(newlyUpdated(reading(1), reading(1, 'updated', 'codex'))).toEqual(windows('codex'));
   });
-  it('accepts only bounded native readings', () => {
+  it('accepts only well-formed native readings, of any number and length', () => {
     expect(cliUpdatesSchema.safeParse({ automatic, statuses: [] }).success).toBe(true);
+    const failed = { provider: 'codex', environmentId: 'windows', phase: 'failed' } as const;
+    const long = {
+      automatic,
+      notice: 'n'.repeat(5000),
+      statuses: Array.from({ length: 100 }, (_, i) => ({
+        ...failed,
+        environmentId: `wsl-${i}`,
+        message: 'x'.repeat(5000),
+      })),
+    };
+    expect(cliUpdatesSchema.parse(long)).toEqual(long);
     for (const statuses of [
       [{ provider: 'claude', environmentId: 'windows', phase: 'unknown' }],
       [{ provider: 'gemini', environmentId: 'windows', phase: 'current' }],
-      [{ provider: 'codex', environmentId: 'windows', phase: 'failed', message: 'x'.repeat(301) }],
+      [{ ...failed, checkedAt: -1 }],
     ])
       expect(cliUpdatesSchema.safeParse({ automatic, statuses }).success).toBe(false);
     expect(cliUpdatesSchema.safeParse({ automatic: true, statuses: [] }).success).toBe(false);

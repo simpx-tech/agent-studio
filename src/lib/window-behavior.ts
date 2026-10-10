@@ -8,7 +8,7 @@ export const windowBehaviorSchema = z.object({
   /** A click on the icon opens the window (Windows); elsewhere the icon opens its menu. */
   clickOpens: z.boolean(),
   /** Why this computer shows no icon, so closing the window quits. */
-  unavailable: z.string().max(300).optional(),
+  unavailable: z.string().optional(),
 });
 export type WindowBehavior = z.infer<typeof windowBehaviorSchema>;
 

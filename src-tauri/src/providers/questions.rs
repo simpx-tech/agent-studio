@@ -1,5 +1,5 @@
-//! Bounded, run-owned questions. Only an explicit answer command can resolve a
-//! pending call; checkpoints and provider text can never submit an answer.
+//! Run-owned questions. Only an explicit answer command can resolve a pending call;
+//! checkpoints and provider text can never submit an answer.
 use crate::{protocol::RunEvent, runner::EventSink};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,17 +13,17 @@ mod plan_approval;
 pub use draft::Draft;
 pub use plan_approval::PlanApproval;
 
-pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask one to four concise questions with stable ids and optional choices. Set multiSelect=false for one answer (radio buttons), or true only when multiple answers are allowed (checkboxes), independently for each question. Multiple questions do not imply multiple answers per question. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
+pub const GUIDANCE: &str = "When you need clarification or a decision from the user, call studio_ask_user (Claude: mcp__agent_studio__studio_ask_user). Ask concise questions with stable ids and optional choices. Set multiSelect=false for one answer (radio buttons), or true only when multiple answers are allowed (checkboxes), independently for each question. Multiple questions do not imply multiple answers per question. The tool waits for explicitly submitted answers or a skip; never assume a default was accepted. Use it only in the parent conversation. Do not request passwords, tokens or other secrets. Native request_user_input and AskUserQuestion are also supported.";
 pub fn tool() -> Value {
     json!({"name":"studio_ask_user","description":GUIDANCE,"inputSchema":{
-        "type":"object","properties":{"questions":{"type":"array","minItems":1,"maxItems":4,"items":{
+        "type":"object","properties":{"questions":{"type":"array","minItems":1,"items":{
             "type":"object","properties":{
-                "id":{"type":"string","minLength":1,"maxLength":100},
-                "header":{"type":"string","maxLength":100},
-                "question":{"type":"string","minLength":1,"maxLength":2000},
+                "id":{"type":"string","minLength":1},
+                "header":{"type":"string"},
+                "question":{"type":"string","minLength":1},
                 "multiSelect":{"type":"boolean","description":"false: choose one answer using radio buttons. true: choose multiple answers using checkboxes. Set per question, regardless of how many questions are in this call."},
-                "options":{"type":"array","maxItems":12,"items":{"type":"object","properties":{
-                    "label":{"type":"string","minLength":1,"maxLength":200},"description":{"type":"string","maxLength":1000}
+                "options":{"type":"array","items":{"type":"object","properties":{
+                    "label":{"type":"string","minLength":1},"description":{"type":"string"}
                 },"required":["label","description"],"additionalProperties":false}}
             },"required":["id","header","question","options","multiSelect"],"additionalProperties":false
         }}},"required":["questions"],"additionalProperties":false}})
@@ -74,16 +74,14 @@ pub struct Request {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Answer>,
 }
-fn bounded(s: &str, max: usize) -> bool {
-    !s.trim().is_empty() && s.chars().count() <= max && !s.contains('\0')
+/// Text with something in it and no NUL character.
+fn filled(s: &str) -> bool {
+    !s.trim().is_empty() && !s.contains('\0')
 }
 fn parse(args: &Value, native_claude: bool) -> Result<Vec<Question>, &'static str> {
-    let invalid = "Questions must contain 1–4 unique ids, concise text, and at most 12 distinct choices each. Secret input is unavailable.";
-    if args.to_string().len() > 32000 {
-        return Err(invalid);
-    }
+    let invalid = "Questions must contain unique ids, text, and distinct choices. Secret input is unavailable.";
     let items = args["questions"].as_array().ok_or(invalid)?;
-    if items.is_empty() || items.len() > 4 {
+    if items.is_empty() {
         return Err(invalid);
     }
     let mut result = vec![];
@@ -95,14 +93,14 @@ fn parse(args: &Value, native_claude: bool) -> Result<Vec<Question>, &'static st
         }
         let question = item["question"]
             .as_str()
-            .filter(|s| bounded(s, 2000))
+            .filter(|s| filled(s))
             .ok_or(invalid)?;
         let id = if native_claude {
             format!("q{}", index + 1)
         } else {
             item["id"]
                 .as_str()
-                .filter(|s| bounded(s, 100))
+                .filter(|s| filled(s))
                 .ok_or(invalid)?
                 .into()
         };
@@ -110,24 +108,18 @@ fn parse(args: &Value, native_claude: bool) -> Result<Vec<Question>, &'static st
             return Err(invalid);
         }
         let header = item["header"].as_str().unwrap_or_default();
-        if header.chars().count() > 100 {
-            return Err(invalid);
-        }
         let options: Vec<OptionItem> = if item["options"].is_null() {
             vec![]
         } else {
             serde_json::from_value(item["options"].clone()).map_err(|_| invalid)?
         };
-        if options.len() > 12
-            || options
-                .iter()
-                .map(|o| &o.label)
-                .collect::<HashSet<_>>()
-                .len()
-                != options.len()
-            || options
-                .iter()
-                .any(|o| !bounded(&o.label, 200) || o.description.chars().count() > 1000)
+        if options
+            .iter()
+            .map(|o| &o.label)
+            .collect::<HashSet<_>>()
+            .len()
+            != options.len()
+            || options.iter().any(|o| !filled(&o.label))
         {
             return Err(invalid);
         }
@@ -142,9 +134,7 @@ fn parse(args: &Value, native_claude: bool) -> Result<Vec<Question>, &'static st
     Ok(result)
 }
 fn valid_answer(request: &Request, answer: &Answer) -> bool {
-    if answer.request_id != request.id
-        || serde_json::to_vec(answer).map_or(true, |s| s.len() > 24000)
-    {
+    if answer.request_id != request.id {
         return false;
     }
     if answer.skipped {
@@ -161,10 +151,10 @@ fn valid_answer(request: &Request, answer: &Answer) -> bool {
             let Some(a) = answer.answers.iter().find(|a| a.id == q.id) else {
                 return false;
             };
+            // Choices of the question and, at most, one answer in the user's own words.
             !a.values.is_empty()
-                && a.values.len() <= 13
                 && (q.multi_select || a.values.len() == 1)
-                && a.values.iter().all(|v| bounded(v, 4000))
+                && a.values.iter().all(|v| filled(v))
                 && a.values.iter().collect::<HashSet<_>>().len() == a.values.len()
                 && a.values
                     .iter()
@@ -238,17 +228,6 @@ struct Entry {
     request: Request,
     wire: Wire,
     submitted: Option<Answer>,
-}
-impl Entry {
-    fn retained_size(&self) -> usize {
-        let mut request = self.request.clone();
-        if let Some(answer) = &self.submitted {
-            request.status = "answered".into();
-            request.revision = 2;
-            request.response = Some(answer.clone());
-        }
-        serde_json::to_vec(&request).map_or(256000, |v| v.len())
-    }
 }
 struct Run {
     connection: Option<String>,
@@ -334,7 +313,6 @@ impl Questions {
             if run.connection.as_deref() != connection {
                 return Err("This question belongs to another connection.".into());
             }
-            let retained_size: usize = run.entries.values().map(Entry::retained_size).sum();
             let entry = run
                 .entries
                 .get_mut(&answer.request_id)
@@ -361,14 +339,6 @@ impl Questions {
             request.status = "answered".into();
             request.revision = 2;
             request.response = Some(answer.clone());
-            let size = serde_json::to_vec(&request)
-                .map_err(|_| "Invalid answer")?
-                .len();
-            if size > 32000
-                || retained_size - serde_json::to_vec(&entry.request).unwrap().len() + size > 256000
-            {
-                return Err("These answers exceed the reply's storage limit. Shorten your text or skip the questions.".into());
-            }
             entry.submitted = Some(answer);
             run.tx
                 .send(Delivery {
@@ -473,23 +443,8 @@ impl Session {
             questions,
             response: None,
         };
-        if serde_json::to_vec(&request).unwrap().len() > 32000 {
-            return Some(wire.response(
-                None,
-                None,
-                Some("These questions exceed the display limit. Use shorter text."),
-            ));
-        }
         let mut runs = self.hub.0.lock().ok()?;
         let run = runs.get_mut(&self.run_id)?;
-        let size = run
-            .entries
-            .values()
-            .map(Entry::retained_size)
-            .sum::<usize>();
-        if run.entries.len() >= 16 || size + serde_json::to_vec(&request).unwrap().len() > 200000 {
-            return Some(wire.response(None, None, Some("This reply reached its question limit.")));
-        }
         run.entries.insert(
             request.id.clone(),
             Entry {
@@ -558,12 +513,9 @@ impl Session {
                     block["name"].as_str(),
                     Some("AskUserQuestion" | "mcp__agent_studio__studio_ask_user")
                 )
-                && self.parents.len() < 32
             {
-                if let Some(id) = block["id"].as_str().filter(|s| bounded(s, 240)) {
-                    if block["input"].to_string().len() <= 32000 {
-                        self.parents.insert(id.into(), block["input"].clone());
-                    }
+                if let Some(id) = block["id"].as_str().filter(|s| filled(s)) {
+                    self.parents.insert(id.into(), block["input"].clone());
                 }
             }
         }
@@ -749,8 +701,13 @@ mod tests {
             .unwrap()
             .push(args()["questions"][0].clone());
         assert!(parse(&duplicates, false).is_err());
-        duplicates["questions"][0]["question"] = json!("a".repeat(2001));
-        assert!(parse(&duplicates, false).is_err());
+        // Any number of questions and choices of any length, past the 4 questions of 2,000
+        // characters with 12 choices earlier releases took.
+        let many: Vec<Value> = (0..6)
+            .map(|i| json!({"id":format!("q{i}"),"header":"h".repeat(150),"question":"a".repeat(3000),"options":(0..15).map(|o| json!({"label":format!("{o}{}", "l".repeat(250)),"description":"d".repeat(1500)})).collect::<Vec<_>>(),"multiSelect":true}))
+            .collect();
+        let parsed = parse(&json!({ "questions": many }), false).unwrap();
+        assert_eq!((parsed.len(), parsed[5].options.len()), (6, 15));
     }
     #[tokio::test]
     async fn claude_native_and_sdk_tools_return_user_answers_without_approving_other_tools() {
@@ -920,15 +877,16 @@ mod tests {
         assert_eq!(pending(&session).status, "cancelled");
     }
     #[tokio::test]
-    async fn queued_answers_reserve_history_space_before_provider_delivery() {
+    async fn a_reply_takes_any_number_of_questions_and_answers_of_any_length() {
         use std::{
             future::Future,
             task::{Context, Poll, Waker},
         };
+        // Past the 16 calls and 256 KB of questions and answers a reply earlier releases kept.
         let hub = Questions::default();
         let mut session = hub.open("run", None, sink()).unwrap();
         let questions: Vec<Value> = (0..4).map(|i| json!({"id":format!("q{i}"),"header":"","question":"q".repeat(2000),"options":[],"multiSelect":false})).collect();
-        for id in 0..16 {
+        for id in 0..20 {
             assert_eq!(session.codex(&json!({"id":id,"method":"item/tool/requestUserInput","params":{"threadId":"root","questions":questions}}), "root"), Some(None));
         }
         let requests: Vec<Request> = hub.0.lock().unwrap()["run"]
@@ -947,7 +905,7 @@ mod tests {
                     .into_iter()
                     .map(|q| AnswerItem {
                         id: q.id,
-                        values: vec!["a".repeat(4000)],
+                        values: vec!["a".repeat(5000)],
                     })
                     .collect(),
             };
@@ -958,16 +916,12 @@ mod tests {
             {
                 Poll::Pending => waiting.push(future),
                 Poll::Ready(result) => {
-                    assert!(result.is_err());
+                    assert!(result.is_ok());
                     rejected += 1;
                 }
             }
         }
-        assert!(
-            rejected > 0,
-            "Pending deliveries must count toward the 256 KB reply limit"
-        );
-        assert!(!waiting.is_empty());
+        assert_eq!((rejected, waiting.len()), (0, 20));
         while let Ok(delivery) = session.rx.try_recv() {
             session.delivered(delivery, Ok(()));
         }

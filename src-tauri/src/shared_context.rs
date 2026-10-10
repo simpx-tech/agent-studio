@@ -25,8 +25,6 @@ pub struct SharedContext {
     pub mcp_names: Vec<String>,
     pub mcp_digest: u64,
 }
-/// Launch arguments have bounded length on Windows; shared MCP definitions stay well under it.
-const MCP_LAUNCH_LIMIT: usize = 24_000;
 #[derive(Clone, Serialize)]
 pub struct Source {
     pub path: String,
@@ -170,10 +168,7 @@ fn claude_project_key(folder: &str, distribution: Option<&str>) -> String {
     key.to_lowercase()
 }
 fn valid_server_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 100
-        && name != "agent_studio"
-        && !name.chars().any(char::is_control)
+    !name.is_empty() && name != "agent_studio" && !name.chars().any(char::is_control)
 }
 /// User-scope servers plus the selected folder's local-scope servers, definitions only. Every
 /// other key of the file, including MCP sign-in state, is never read into the result.
@@ -183,11 +178,8 @@ fn claude_mcp_servers(
     distribution: Option<&str>,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut result = serde_json::Map::new();
-    let Ok(meta) = std::fs::metadata(file) else {
+    if std::fs::metadata(file).is_err() {
         return Ok(result);
-    };
-    if meta.len() > 8_000_000 {
-        return Err("Shared MCP configuration exceeds the size limit".into());
     }
     let config: serde_json::Value = serde_json::from_slice(
         &std::fs::read(file).map_err(|_| "Cannot read shared MCP configuration")?,
@@ -206,10 +198,6 @@ fn claude_mcp_servers(
                 result.insert(name.clone(), definition.clone());
             }
         }
-    }
-    if result.len() > 64 || serde_json::to_string(&result).map_or(0, |s| s.len()) > MCP_LAUNCH_LIMIT
-    {
-        return Err("Shared MCP configuration exceeds the launch limit. Remove servers from the source account or choose This account only.".into());
     }
     Ok(result)
 }
@@ -278,11 +266,8 @@ fn flatten_overrides(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
 }
 /// Codex mcp_servers tables flattened into -c launch overrides, definitions only.
 fn codex_mcp_overrides(file: &Path) -> Result<Vec<String>, String> {
-    let Ok(meta) = std::fs::metadata(file) else {
+    if std::fs::metadata(file).is_err() {
         return Ok(Vec::new());
-    };
-    if meta.len() > 1_000_000 {
-        return Err("Shared MCP configuration exceeds the size limit".into());
     }
     let text = std::fs::read_to_string(file).map_err(|_| "Cannot read shared MCP configuration")?;
     let config: toml::Value =
@@ -294,9 +279,6 @@ fn codex_mcp_overrides(file: &Path) -> Result<Vec<String>, String> {
                 flatten_overrides(&format!("mcp_servers.{name}"), table, &mut out);
             }
         }
-    }
-    if out.len() > 512 || out.iter().map(String::len).sum::<usize>() > MCP_LAUNCH_LIMIT {
-        return Err("Shared MCP configuration exceeds the launch limit. Remove servers from the source account or choose This account only.".into());
     }
     Ok(out)
 }
@@ -314,9 +296,6 @@ fn collect(
     };
     let mut add = |path: PathBuf, kind: &str| -> Result<(), String> {
         if path.is_file() {
-            if result.files.len() >= 128 {
-                return Err("Shared context contains too many instruction sources".into());
-            }
             result.files.push(Source {
                 path: native_path(&path, distribution)?,
                 kind: kind.into(),
@@ -342,25 +321,21 @@ fn collect(
         }
     } else if provider == "claude" {
         add(config.join("CLAUDE.md"), "instructions")?;
-        let mut pending = vec![(config.join("rules"), 0)];
-        let mut visits = 0;
-        while let Some((dir, depth)) = pending.pop() {
+        // Every rule, however many and however deep; links inside are not followed.
+        let mut pending = vec![config.join("rules")];
+        while let Some(dir) = pending.pop() {
             if !dir.is_dir() {
                 continue;
             }
             for entry in
                 std::fs::read_dir(dir).map_err(|_| "Cannot inspect shared instruction rules")?
             {
-                visits += 1;
-                if visits > 1000 {
-                    return Err("Shared instruction rules exceed the discovery limit".into());
-                }
                 let entry = entry.map_err(|_| "Cannot inspect shared instruction rules")?;
                 let kind = entry
                     .file_type()
                     .map_err(|_| "Cannot inspect shared instruction rules")?;
-                if kind.is_dir() && depth < 4 {
-                    pending.push((entry.path(), depth + 1));
+                if kind.is_dir() {
+                    pending.push(entry.path());
                 } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "md") {
                     add(entry.path(), "instructions")?;
                 }
@@ -372,13 +347,6 @@ fn collect(
         }
         let settings_path = config.join("settings.json");
         let settings: serde_json::Value = if settings_path.is_file() {
-            if std::fs::metadata(&settings_path)
-                .map_err(|_| "Cannot inspect shared memory settings")?
-                .len()
-                > 1_000_000
-            {
-                return Err("Shared memory settings exceed the size limit".into());
-            }
             serde_json::from_slice(
                 &std::fs::read(settings_path)
                     .map_err(|_| "Cannot inspect shared memory settings")?,
@@ -478,6 +446,22 @@ mod tests {
         shared.mcp_servers.remove("unreal");
         shared.describe_mcp();
         assert_ne!(digest, shared.mcp_digest);
+        // Every server and long names, past the 64 servers, 24,000 characters and 100-character
+        // names earlier releases took.
+        let servers: serde_json::Map<_, _> = (0..70)
+            .map(|index| {
+                (
+                    format!("server{index}-{}", "n".repeat(120)),
+                    serde_json::json!({"type": "http", "url": format!("https://example.test/{}", "p".repeat(500))}),
+                )
+            })
+            .collect();
+        std::fs::write(
+            &config,
+            serde_json::json!({ "mcpServers": servers }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(claude_mcp_servers(&config, "C:/p", None).unwrap().len(), 70);
     }
     #[test]
     fn codex_shared_mcp_flattens_server_tables_into_launch_overrides() {
@@ -513,6 +497,12 @@ mod tests {
         assert!(codex_mcp_overrides(&root.path().join("missing.toml"))
             .unwrap()
             .is_empty());
+        // Every override, past the 512 earlier releases took.
+        let tables: String = (0..600)
+            .map(|index| format!("[mcp_servers.s{index}]\ncommand = \"tool\"\n"))
+            .collect();
+        std::fs::write(&config, tables).unwrap();
+        assert_eq!(codex_mcp_overrides(&config).unwrap().len(), 600);
     }
     fn file(root: &Path, path: &str, contents: &str) {
         let path = root.join(path);
@@ -611,6 +601,27 @@ mod tests {
         .unwrap()
         .memory_dir
         .is_none());
+    }
+    #[test]
+    fn claude_rules_are_shared_however_many_and_however_deep() {
+        // Past the 128 sources, 1,000 entries and four levels earlier releases read.
+        let root = tempfile::tempdir().unwrap();
+        file(root.path(), "CLAUDE.md", "instructions");
+        for index in 0..130 {
+            file(root.path(), &format!("rules/rule{index}.md"), "rule");
+        }
+        file(root.path(), "rules/a/b/c/d/e/f/deep.md", "rule");
+        let folder = root.path().join("project");
+        let result = collect(
+            "claude",
+            folder.to_str().unwrap(),
+            root.path(),
+            None,
+            "source",
+        )
+        .unwrap();
+        assert_eq!(result.files.len(), 132);
+        assert!(result.files.iter().any(|f| f.path.ends_with("deep.md")));
     }
     #[test]
     fn wsl_paths_stay_on_the_selected_distribution() {

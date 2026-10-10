@@ -1,6 +1,6 @@
-//! Bounded presentation data from provider tool events: targets, commands, bounded inputs
-//! and result sizes. Results themselves leave through `ToolDecoder::take_outputs` for the
-//! executing computer's store; configuration and skill bodies are never forwarded.
+//! Presentation data from provider tool events: targets, commands, inputs and result sizes.
+//! Results themselves leave through `ToolDecoder::take_outputs` for the executing computer's
+//! store; configuration and skill bodies are never forwarded.
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -65,15 +65,11 @@ pub struct ToolActivity {
     /// The script a shell call ran, unwrapped from the shell's own command line.
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    command_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     shell: Option<&'static str>,
-    /// Arguments of a connected or unrecognized tool, as bounded JSON text.
+    /// Arguments of a connected or unrecognized tool, as JSON text.
     #[serde(skip_serializing_if = "Option::is_none")]
     input: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    input_truncated: bool,
     /// The size of a result kept on the executing computer.
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<OutputSummary>,
@@ -100,33 +96,28 @@ pub struct ActivityFact {
     value: String,
 }
 fn fact(tool: &mut ToolActivity, label: &str, value: impl ToString) {
-    let value = clean(&value.to_string(), 4096);
+    let value = clean(&value.to_string());
     if value.is_empty() {
         return;
     }
     if let Some(existing) = tool.facts.iter_mut().find(|f| f.label == label) {
         existing.value = value;
-    } else if tool.facts.len() < 12 {
+    } else {
         tool.facts.push(ActivityFact {
             label: label.into(),
             value,
         });
     }
 }
-/// No limit: a sub-agent's task, messages and result are kept whole.
-const WHOLE: usize = usize::MAX;
-fn clean(value: &str, limit: usize) -> String {
+/// Text without control characters other than line breaks and tabs, kept whole.
+fn clean(value: &str) -> String {
     value
         .chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .take(limit)
         .collect()
 }
-fn field(v: &Value, key: &str, limit: usize) -> Option<String> {
-    v[key]
-        .as_str()
-        .map(|s| clean(s, limit))
-        .filter(|s| !s.is_empty())
+fn field(v: &Value, key: &str) -> Option<String> {
+    v[key].as_str().map(clean).filter(|s| !s.is_empty())
 }
 pub(crate) fn status(value: &str) -> &'static str {
     match value {
@@ -144,7 +135,7 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         id,
         revision: 0,
         category: category.into(),
-        name: clean(name, 200),
+        name: clean(name),
         status: "running".into(),
         elapsed_ms: None,
         progress: None,
@@ -155,10 +146,8 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         operation: None,
         command_run: false,
         command: None,
-        command_truncated: false,
         shell: None,
         input: None,
-        input_truncated: false,
         output: None,
         background: false,
         facts: vec![],
@@ -189,7 +178,7 @@ fn studio_tool(name: &str) -> bool {
 /// The title of the screen a save_screen call saves, which its row shows.
 fn screen_title(name: &str, input: &Value) -> Option<String> {
     name.ends_with("save_screen")
-        .then(|| field(input, "title", 100))
+        .then(|| field(input, "title"))
         .flatten()
 }
 /// Claude tools whose inputs other panels show or that carry file bodies.
@@ -227,9 +216,9 @@ fn claude_builtin(name: &str) -> bool {
             | "ListAgents"
     )
 }
-fn text_content(value: &Value, limit: usize) -> String {
+fn text_content(value: &Value) -> String {
     if let Some(text) = value.as_str() {
-        return clean(text, limit);
+        return clean(text);
     }
     clean(
         &value
@@ -237,16 +226,11 @@ fn text_content(value: &Value, limit: usize) -> String {
             .into_iter()
             .flatten()
             .filter_map(|b| b["text"].as_str())
-            .take(20)
             .collect::<Vec<_>>()
             .join("\n"),
-        limit,
     )
 }
 fn source(url: &str, title: &str) -> Option<Source> {
-    if url.len() > 2048 {
-        return None;
-    }
     let parsed = reqwest::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()
@@ -255,40 +239,35 @@ fn source(url: &str, title: &str) -> Option<Source> {
         return None;
     }
     Some(Source {
-        title: clean(title, 300),
+        title: clean(title),
         url: parsed.to_string(),
     })
 }
-fn sources(value: &Value, output: &mut Vec<Source>, depth: usize) {
-    if depth > 5 || output.len() >= 12 {
-        return;
-    }
+fn sources(value: &Value, output: &mut Vec<Source>) {
     if let Some(items) = value.as_array() {
-        for item in items.iter().take(30) {
-            sources(item, output, depth + 1);
+        for item in items {
+            sources(item, output);
         }
     } else if value.is_object() {
         if let (Some(url), Some(title)) = (value["url"].as_str(), value["title"].as_str()) {
             if let Some(item) = source(url, title) {
-                if output.len() < 12 && !output.iter().any(|s| s.url == item.url) {
+                if !output.iter().any(|s| s.url == item.url) {
                     output.push(item);
                 }
             }
         }
         for key in ["content", "results", "links", "sources"] {
-            sources(&value[key], output, depth + 1);
+            sources(&value[key], output);
         }
         if let Some(text) = value["text"].as_str() {
-            sources(&Value::String(text.into()), output, depth + 1);
+            sources(&Value::String(text.into()), output);
         }
     } else if let Some(text) = value.as_str() {
         // Claude WebSearch can return a text envelope with one JSON Links array.
-        for line in text.lines().take(40) {
+        for line in text.lines() {
             if let Some(links) = line.trim().strip_prefix("Links: ") {
-                if links.len() <= 32_000 {
-                    if let Ok(value) = serde_json::from_str::<Value>(links) {
-                        sources(&value, output, depth + 1);
-                    }
+                if let Ok(value) = serde_json::from_str::<Value>(links) {
+                    sources(&value, output);
                 }
             }
         }
@@ -312,9 +291,6 @@ pub struct ToolDecoder {
     agent_lifecycle: std::collections::HashSet<String>,
     /// Results waiting for `take_outputs`.
     captured: Vec<CapturedOutput>,
-    /// Complete commands and inputs of calls whose records show shortened ones.
-    full_commands: HashMap<String, String>,
-    full_inputs: HashMap<String, String>,
     /// Records whose newest state a streamed update held back, and when each sub-agent
     /// group last went out.
     held: std::collections::HashSet<String>,
@@ -351,8 +327,8 @@ impl ToolDecoder {
             return out;
         }
         if matches!(method, "item/started" | "item/completed") && kind == "dynamicToolCall" {
-            if let Some(id) = field(item, "id", 220) {
-                let name = field(item, "tool", 200).unwrap_or_else(|| "Application tool".into());
+            if let Some(id) = field(item, "id") {
+                let name = field(item, "tool").unwrap_or_else(|| "Application tool".into());
                 let mut tool = fresh(format!("codex:{thread}:{id}"), "tool", &name);
                 tool.status = if method == "item/started" {
                     "running"
@@ -460,7 +436,7 @@ impl ToolDecoder {
             tool.revision += 1;
             self.tools[index] = tool.clone();
         } else {
-            // Every call a reply makes is recorded, however long it runs: each record is bounded
+            // Every call a reply makes is recorded, however long it runs: each record is
             // metadata, and results stay on the executing computer.
             tool.revision = 1;
             self.tools.push(tool.clone());
@@ -594,12 +570,8 @@ impl ToolDecoder {
         if let Some(index) = group.agents.iter().position(|a| a.id == id) {
             return Some(&mut group.agents[index]);
         }
-        if group.agents.len() >= 64 {
-            group.detail = Some("Only the first 64 sub-agents are shown.".into());
-            return None;
-        }
         group.agents.push(AgentActivity {
-            id: clean(id, 240),
+            id: clean(id),
             agent_id: None,
             name: format!("Sub-agent {}", group.agents.len() + 1),
             status: "running".into(),
@@ -627,7 +599,7 @@ impl ToolDecoder {
             return;
         }
         let item = &v["item"];
-        let Some(id) = field(item, "id", 220) else {
+        let Some(id) = field(item, "id") else {
             return;
         };
         let kind = item["type"].as_str().unwrap_or_default();
@@ -643,10 +615,9 @@ impl ToolDecoder {
                 .into_iter()
                 .flatten()
                 .filter_map(|id| id.as_str().map(String::from))
-                .take(64)
                 .collect();
             if let Some(states) = item["agents_states"].as_object() {
-                for id in states.keys().take(64) {
+                for id in states.keys() {
                     if !ids.contains(id) {
                         ids.push(id.clone());
                     }
@@ -655,16 +626,16 @@ impl ToolDecoder {
             for id in ids {
                 if let Some(agent) = Self::agent(&mut group, &id) {
                     if action == "spawn_agent" {
-                        if let Some(task) = field(item, "prompt", WHOLE) {
+                        if let Some(task) = field(item, "prompt") {
                             agent.task = Some(task);
                         }
-                        agent.parent_id = field(item, "sender_thread_id", 240);
+                        agent.parent_id = field(item, "sender_thread_id");
                     }
                     let state = &item["agents_states"][&id];
                     if let Some(reported) = state["status"].as_str() {
                         agent.status = status(reported).into();
                     }
-                    if let Some(result) = field(state, "message", WHOLE) {
+                    if let Some(result) = field(state, "message") {
                         agent.result = Some(result);
                     }
                     if action == "close_agent"
@@ -695,7 +666,7 @@ impl ToolDecoder {
             tool.elapsed_ms = progress::duration_ms(&item["durationMs"])
                 .or_else(|| progress::duration_ms(&item["duration_ms"]));
         }
-        tool.parent_id = field(item, "parent_id", 240);
+        tool.parent_id = field(item, "parent_id");
         tool.status = if let Some(value) = item["status"].as_str() {
             status(value)
         } else if event == "item.completed" {
@@ -705,18 +676,17 @@ impl ToolDecoder {
         }
         .into();
         if kind == "web_search" {
-            tool.query =
-                field(item, "query", 2048).or_else(|| field(&item["action"], "query", 2048));
+            tool.query = field(item, "query").or_else(|| field(&item["action"], "query"));
             if let Some(url) = item["action"]["url"].as_str() {
                 if let Some(link) = source(url, url) {
                     tool.sources = vec![link];
                     tool.name = "Open web page".into();
                 }
             }
-            sources(item, &mut tool.sources, 0);
+            sources(item, &mut tool.sources);
         } else if kind == "image_view" {
             tool.operation = Some("viewImage".into());
-            tool.path = field(item, "path", 4096);
+            tool.path = field(item, "path");
             if event == "item.completed" {
                 if let Some(path) = tool.path.clone() {
                     let mut output = CapturedOutput::new(&tool.id);
@@ -736,7 +706,7 @@ impl ToolDecoder {
                 tool.operation = Some("read".into());
                 tool.path = Some(path);
             }
-            if let Some(cwd) = field(item, "cwd", 4096) {
+            if let Some(cwd) = field(item, "cwd") {
                 fact(&mut tool, "Folder", cwd);
             }
             let exit_code = item["exitCode"]
@@ -752,30 +722,25 @@ impl ToolDecoder {
                 output.exit_code = exit_code;
                 self.capture(&mut tool, output);
             }
-            for action in item["commandActions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(12)
-            {
+            for action in item["commandActions"].as_array().into_iter().flatten() {
                 match action["type"].as_str().unwrap_or_default() {
                     "read" => {
                         tool.name = "Read file".into();
                         tool.operation = Some("read".into());
-                        if let Some(path) = field(action, "path", 4096) {
+                        if let Some(path) = field(action, "path") {
                             tool.path = Some(path);
                         }
                     }
                     "listFiles" | "list_files" => {
                         tool.name = "List files".into();
                         tool.operation = Some("glob".into());
-                        tool.path = field(action, "path", 4096);
+                        tool.path = field(action, "path");
                     }
                     "search" => {
                         tool.name = "Search files".into();
                         tool.operation = Some("grep".into());
-                        tool.query = field(action, "query", 2048);
-                        tool.path = field(action, "path", 4096);
+                        tool.query = field(action, "query");
+                        tool.path = field(action, "path");
                     }
                     _ => {}
                 }
@@ -785,7 +750,7 @@ impl ToolDecoder {
                 .into_iter()
                 .flatten()
                 .filter(|action| action["type"] == "read")
-                .find_map(|action| field(action, "path", 4096).filter(|path| is_skill_path(path)));
+                .find_map(|action| field(action, "path").filter(|path| is_skill_path(path)));
             if let Some(path) =
                 reported_read.or_else(|| item["command"].as_str().and_then(skill_read_path))
             {
@@ -802,10 +767,10 @@ impl ToolDecoder {
                 tool.detail = Some("A skill file read was reported by the CLI. This does not establish that every skill instruction was followed.".into());
             }
         } else if kind == "mcp_tool_call" {
-            if let Some(name) = field(item, "tool", 160) {
+            if let Some(name) = field(item, "tool") {
                 tool.name = format!("Connected tool: {name}");
             }
-            if let Some(server) = field(item, "server", 200) {
+            if let Some(server) = field(item, "server") {
                 fact(&mut tool, "Connection", server);
             }
             self.set_input(&mut tool, &item["arguments"]);
@@ -830,8 +795,7 @@ impl ToolDecoder {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .take(12)
-                .filter_map(|change| field(change, "path", 4096))
+                .filter_map(|change| field(change, "path"))
                 .collect::<Vec<_>>();
             if !paths.is_empty() {
                 fact(&mut tool, "Files", paths.join("\n"));
@@ -850,15 +814,15 @@ impl ToolDecoder {
         if matches!(name, "Agent" | "Task") {
             let mut group = self.group("claude");
             if let Some(agent) = Self::agent(&mut group, id) {
-                if let Some(resume) = field(input, "resume", 240) {
+                if let Some(resume) = field(input, "resume") {
                     agent.agent_id = Some(resume);
                 }
                 if let Some(name) =
-                    field(input, "description", 200).or_else(|| field(input, "subagent_type", 200))
+                    field(input, "description").or_else(|| field(input, "subagent_type"))
                 {
                     agent.name = name;
                 }
-                if let Some(task) = field(input, "prompt", WHOLE) {
+                if let Some(task) = field(input, "prompt") {
                     agent.task = Some(task);
                 }
                 agent.parent_id = parent;
@@ -882,17 +846,17 @@ impl ToolDecoder {
         }
         match name {
             "Skill" => {
-                tool.name = field(input, "skill", 180)
+                tool.name = field(input, "skill")
                     .map(|s| format!("Skill: {s}"))
                     .unwrap_or_else(|| "Load skill".into());
                 tool.detail = Some("Skill invocation reported by Claude.".into());
-                if let Some(args) = field(input, "args", 2000) {
+                if let Some(args) = field(input, "args") {
                     fact(&mut tool, "Arguments", args);
                 }
             }
             "Read" => {
                 tool.operation = Some("read".into());
-                if let Some(path) = field(input, "file_path", 4096) {
+                if let Some(path) = field(input, "file_path") {
                     if is_skill_path(&path) {
                         tool.category = "skill".into();
                         tool.name = "Read skill file".into();
@@ -907,7 +871,7 @@ impl ToolDecoder {
                         fact(&mut tool, label, value);
                     }
                 }
-                if let Some(pages) = field(input, "pages", 100) {
+                if let Some(pages) = field(input, "pages") {
                     fact(&mut tool, "Pages", pages);
                 }
             }
@@ -919,27 +883,27 @@ impl ToolDecoder {
                 }
                 .into();
                 tool.operation = Some(if name == "Glob" { "glob" } else { "grep" }.into());
-                if let Some(pattern) = field(input, "pattern", 2048) {
+                if let Some(pattern) = field(input, "pattern") {
                     tool.query = Some(pattern);
                 }
-                if let Some(path) = field(input, "path", 4096) {
+                if let Some(path) = field(input, "path") {
                     tool.path = Some(path);
                 }
-                if let Some(glob) = field(input, "glob", 2048) {
+                if let Some(glob) = field(input, "glob") {
                     fact(&mut tool, "File filter", glob);
                 }
             }
             "mcp__agent_studio__await_background_tasks" => {
                 tool.name = "Wait for background tasks".into();
                 if let Some(ids) = input["task_ids"].as_array() {
-                    let ids: Vec<_> = ids.iter().filter_map(Value::as_str).take(8).collect();
+                    let ids: Vec<_> = ids.iter().filter_map(Value::as_str).collect();
                     fact(&mut tool, "Tasks", ids.join(", "));
                 }
             }
             "Monitor" => {
                 // A background watch over a shell command.
                 tool.operation = Some("monitor".into());
-                if let Some(description) = field(input, "description", 2048) {
+                if let Some(description) = field(input, "description") {
                     tool.detail = Some(description);
                 }
                 if let Some(command) = input["command"].as_str() {
@@ -949,7 +913,7 @@ impl ToolDecoder {
             "ToolSearch" => {
                 tool.name = "Find tools".into();
                 tool.operation = Some("toolSearch".into());
-                if let Some(query) = field(input, "query", 2048) {
+                if let Some(query) = field(input, "query") {
                     tool.query = Some(query);
                 }
             }
@@ -957,7 +921,7 @@ impl ToolDecoder {
                 tool.name = "Run command".into();
                 tool.command_run = true;
                 tool.operation = Some("command".into());
-                if let Some(description) = field(input, "description", 2048) {
+                if let Some(description) = field(input, "description") {
                     tool.detail = Some(description);
                 }
                 if let Some(command) = input["command"].as_str() {
@@ -967,12 +931,11 @@ impl ToolDecoder {
             }
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
                 tool.operation = Some("edit".into());
-                tool.path =
-                    field(input, "file_path", 4096).or_else(|| field(input, "notebook_path", 4096));
+                tool.path = field(input, "file_path").or_else(|| field(input, "notebook_path"));
             }
             "WebSearch" => {
                 tool.name = "Web search".into();
-                if let Some(query) = field(input, "query", 2048) {
+                if let Some(query) = field(input, "query") {
                     tool.query = Some(query);
                 }
             }
@@ -983,7 +946,7 @@ impl ToolDecoder {
                         tool.sources = vec![link];
                     }
                 }
-                if let Some(prompt) = field(input, "prompt", 2000) {
+                if let Some(prompt) = field(input, "prompt") {
                     fact(&mut tool, "Prompt", prompt);
                 }
             }
@@ -1027,7 +990,7 @@ impl ToolDecoder {
                 output.stderr = result["stderr"].as_str().unwrap_or_default().into();
                 // A launch that moved to the background has no exit status yet.
                 if !tool.background {
-                    if let Some(meaning) = field(result, "returnCodeInterpretation", 200) {
+                    if let Some(meaning) = field(result, "returnCodeInterpretation") {
                         fact(tool, "Result", meaning);
                     } else if result["interrupted"] != true {
                         output.exit_code = Some(0);
@@ -1058,7 +1021,6 @@ impl ToolDecoder {
                         .into_iter()
                         .flatten()
                         .filter_map(Value::as_str)
-                        .take(10_000)
                         .collect::<Vec<_>>()
                         .join("\n"),
                 };
@@ -1070,7 +1032,7 @@ impl ToolDecoder {
             _ if tool.category == "search" && tool.name == "Open web page" && !failed => {
                 output.stdout = result["result"].as_str().map(str::to_owned).unwrap_or(text);
                 if let Some(code) = result["code"].as_u64() {
-                    let label = field(result, "codeText", 60).unwrap_or_default();
+                    let label = field(result, "codeText").unwrap_or_default();
                     fact(tool, "HTTP status", format!("{code} {label}").trim());
                 }
             }
@@ -1098,7 +1060,7 @@ impl ToolDecoder {
             return;
         }
         let kind = v["type"].as_str().unwrap_or_default();
-        let parent = field(v, "parent_tool_use_id", 240);
+        let parent = field(v, "parent_tool_use_id");
         if !v["parent_tool_use_id"].is_null() && parent.is_none() {
             return;
         }
@@ -1110,32 +1072,24 @@ impl ToolDecoder {
                 "content_block_start" => {
                     let block = &event["content_block"];
                     if matches!(block["type"].as_str(), Some("tool_use" | "server_tool_use")) {
-                        if let (Some(id), Some(name)) =
-                            (field(block, "id", 220), field(block, "name", 200))
-                        {
+                        if let (Some(id), Some(name)) = (field(block, "id"), field(block, "name")) {
                             self.claude_tool(&id, &name, &block["input"], parent.clone(), out);
-                            if self.partial.len() < 64 {
-                                self.partial.insert(
-                                    key,
-                                    PartialTool {
-                                        id,
-                                        name,
-                                        parent: parent.clone(),
-                                        json: String::new(),
-                                    },
-                                );
-                            }
+                            self.partial.insert(
+                                key,
+                                PartialTool {
+                                    id,
+                                    name,
+                                    parent: parent.clone(),
+                                    json: String::new(),
+                                },
+                            );
                         }
                     }
                 }
                 "content_block_delta" if event["delta"]["type"] == "input_json_delta" => {
                     if let Some(tool) = self.partial.get_mut(&key) {
                         if let Some(partial) = event["delta"]["partial_json"].as_str() {
-                            if tool.json.len() + partial.len() <= 64_000 {
-                                tool.json.push_str(partial);
-                            } else {
-                                self.partial.remove(&key);
-                            }
+                            tool.json.push_str(partial);
                         }
                     }
                 }
@@ -1153,14 +1107,12 @@ impl ToolDecoder {
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str().unwrap_or_default() {
                     "tool_use" | "server_tool_use" => {
-                        if let (Some(id), Some(name)) =
-                            (field(block, "id", 220), field(block, "name", 200))
-                        {
+                        if let (Some(id), Some(name)) = (field(block, "id"), field(block, "name")) {
                             self.claude_tool(&id, &name, &block["input"], parent.clone(), out);
                         }
                     }
                     "tool_result" | "web_search_tool_result" => {
-                        let Some(id) = field(block, "tool_use_id", 220) else {
+                        let Some(id) = field(block, "tool_use_id") else {
                             continue;
                         };
                         let mut group = self.group("claude");
@@ -1168,7 +1120,7 @@ impl ToolDecoder {
                             if agent.parent_id != parent {
                                 continue;
                             }
-                            if let Some(agent_id) = field(&v["tool_use_result"], "agentId", 240) {
+                            if let Some(agent_id) = field(&v["tool_use_result"], "agentId") {
                                 agent.agent_id = Some(agent_id);
                             }
                             let failed = block["is_error"] == true;
@@ -1181,9 +1133,9 @@ impl ToolDecoder {
                                 agent.status = if failed { "error" } else { "complete" }.into();
                             }
                             if !background {
-                                let result = text_content(&v["tool_use_result"]["content"], WHOLE);
+                                let result = text_content(&v["tool_use_result"]["content"]);
                                 agent.result = Some(if result.is_empty() {
-                                    text_content(&block["content"], WHOLE)
+                                    text_content(&block["content"])
                                 } else {
                                     result
                                 });
@@ -1212,8 +1164,8 @@ impl ToolDecoder {
                                 tool.status = if failed { "error" } else { "complete" }.into();
                             }
                             if tool.category == "search" {
-                                sources(&block["content"], &mut tool.sources, 0);
-                                sources(result, &mut tool.sources, 0);
+                                sources(&block["content"], &mut tool.sources);
+                                sources(result, &mut tool.sources);
                             }
                             if tool.operation.as_deref() == Some("listAgents") {
                                 Self::claude_agent_list(&mut tool, result);
@@ -1243,9 +1195,8 @@ impl ToolDecoder {
                                         .as_array()
                                         .into_iter()
                                         .flatten()
-                                        .take(12)
                                         .filter_map(|p| p.as_str())
-                                        .map(|p| clean(p, 4096))
+                                        .map(clean)
                                         .collect::<Vec<_>>();
                                     if !paths.is_empty() {
                                         fact(&mut tool, "Matching files", paths.join("\n"));
@@ -1256,9 +1207,8 @@ impl ToolDecoder {
                                         .as_array()
                                         .into_iter()
                                         .flatten()
-                                        .take(30)
                                         .filter(|b| b["type"] == "tool_reference")
-                                        .filter_map(|b| field(b, "tool_name", 200))
+                                        .filter_map(|b| field(b, "tool_name"))
                                         .collect::<Vec<_>>();
                                     if !names.is_empty() {
                                         fact(&mut tool, "Tools found", names.join("\n"));
@@ -1290,18 +1240,14 @@ impl ToolDecoder {
         {
             if let Some(progress) = v["workflow_progress"].as_array() {
                 let mut group = self.group("claude");
-                for entry in progress
-                    .iter()
-                    .filter(|e| e["type"] == "workflow_agent")
-                    .take(128)
-                {
-                    let Some(id) = field(entry, "agentId", 240) else {
+                for entry in progress.iter().filter(|e| e["type"] == "workflow_agent") {
+                    let Some(id) = field(entry, "agentId") else {
                         continue;
                     };
                     if let Some(agent) = Self::agent(&mut group, &id) {
                         agent.agent_id = Some(id);
                         agent.name =
-                            field(entry, "label", 200).unwrap_or_else(|| "Workflow agent".into());
+                            field(entry, "label").unwrap_or_else(|| "Workflow agent".into());
                         agent.status = match entry["state"].as_str() {
                             Some("done" | "cached") => "complete",
                             Some("start") => "running",
@@ -1310,13 +1256,13 @@ impl ToolDecoder {
                             _ => "unknown",
                         }
                         .into();
-                        agent.result = field(entry, "resultPreview", 2000);
+                        agent.result = field(entry, "resultPreview");
                     }
                 }
                 self.publish_group(group, out);
             }
-            let task = field(v, "task_id", 240).unwrap_or_default();
-            let reported = field(v, "tool_use_id", 240);
+            let task = field(v, "task_id").unwrap_or_default();
+            let reported = field(v, "tool_use_id");
             // SendMessage reports the task of a sub-agent it resumes under its own call, while
             // the child still answers the call that started it, so the task stays with that
             // sub-agent.
@@ -1366,7 +1312,7 @@ impl ToolDecoder {
                         // what it is, and an older CLI resumed a child under that description:
                         // only a start names a child its own call left unnamed.
                         if unnamed(&agent.name) {
-                            if let Some(name) = field(v, "description", 200) {
+                            if let Some(name) = field(v, "description") {
                                 agent.name = name;
                             }
                         }
@@ -1378,7 +1324,7 @@ impl ToolDecoder {
                     }
                     if v["subtype"] == "task_notification" {
                         agent.status = status(v["status"].as_str().unwrap_or_default()).into();
-                        if let Some(result) = field(v, "summary", WHOLE) {
+                        if let Some(result) = field(v, "summary") {
                             agent.result = Some(result);
                         }
                     }
@@ -1396,21 +1342,21 @@ fn unnamed(name: &str) -> bool {
 /// A short description of the git operation Claude Code reports for a shell call.
 fn git_operation(value: &Value) -> Option<String> {
     if let Some(push) = value.get("push") {
-        return Some(match field(push, "branch", 200) {
+        return Some(match field(push, "branch") {
             Some(branch) => format!("Pushed {branch}"),
             None => "Pushed".into(),
         });
     }
     if let Some(commit) = value.get("commit") {
-        let sha: String = field(commit, "sha", 64)?.chars().take(7).collect();
-        return Some(match field(commit, "branch", 200) {
+        let sha: String = field(commit, "sha")?.chars().take(7).collect();
+        return Some(match field(commit, "branch") {
             Some(branch) => format!("Committed {sha} on {branch}"),
             None => format!("Committed {sha}"),
         });
     }
     let branch = value.get("branch")?;
-    let name = field(branch, "ref", 200)?;
-    let action = field(branch, "action", 40).unwrap_or_else(|| "Changed".into());
+    let name = field(branch, "ref")?;
+    let action = field(branch, "action").unwrap_or_else(|| "Changed".into());
     let mut action = action.chars();
     let first = action.next()?.to_uppercase().collect::<String>();
     Some(format!("{first}{} branch {name}", action.as_str()))
@@ -1479,7 +1425,7 @@ fn read_path(command: &str, skill_only: bool) -> Option<String> {
         }
     }
     statements.push(&script[start..]);
-    for statement in statements.into_iter().take(100) {
+    for statement in statements {
         let statement = statement.trim();
         for marker in ["get-content ", "cat "] {
             if !statement.to_lowercase().starts_with(marker) {
@@ -1503,7 +1449,7 @@ fn read_path(command: &str, skill_only: bool) -> Option<String> {
                 && !path.contains(['$', '`'])
                 && (!skill_only || is_skill_path(path))
             {
-                return Some(clean(path, 4096));
+                return Some(clean(path));
             }
         }
     }

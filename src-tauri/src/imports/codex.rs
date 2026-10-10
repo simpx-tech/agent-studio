@@ -5,17 +5,10 @@ use super::{Conversion, ImageInput, Reply, Turn, UserInput};
 use crate::protocol::{Decoder, RunEvent};
 use serde_json::{json, Value};
 use std::process::Stdio;
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// One response of the app-server; a page of turns with their items can be large.
-const RESPONSE_LIMIT: usize = 256 * 1024 * 1024;
+/// The characters of the first prompt a listing shows.
 const PREVIEW: usize = 300;
-/// What one import reads at most.
-const TURN_LIMIT: usize = 10_000;
-const BYTES_LIMIT: usize = 1024 * 1024 * 1024;
-/// Steering inputs one reply keeps, as a live reply does.
-const STEERING_LIMIT: usize = 8;
 
 /// A thread a listing shows.
 #[derive(Clone, Debug)]
@@ -76,31 +69,15 @@ impl Client {
             .map_err(|_| "Codex stopped reading")?;
         Ok(client)
     }
-    /// One line of output, refusing one past the response limit.
+    /// One line of output, whole however long.
     async fn line(&mut self, line: &mut Vec<u8>) -> Result<bool, String> {
         line.clear();
-        loop {
-            let available = self
-                .output
-                .fill_buf()
-                .await
-                .map_err(|_| "Codex output failed")?;
-            if available.is_empty() {
-                return Ok(!line.is_empty());
-            }
-            let (length, done) = match available.iter().position(|b| *b == b'\n') {
-                Some(end) => (end + 1, true),
-                None => (available.len(), false),
-            };
-            if line.len() + length > RESPONSE_LIMIT {
-                return Err("A Codex chat record is too large to import".into());
-            }
-            line.extend_from_slice(&available[..length]);
-            self.output.consume(length);
-            if done {
-                return Ok(true);
-            }
-        }
+        let read = self
+            .output
+            .read_until(b'\n', line)
+            .await
+            .map_err(|_| "Codex output failed")?;
+        Ok(read > 0)
     }
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next;
@@ -111,48 +88,47 @@ impl Client {
             .await
             .map_err(|_| "Codex stopped reading")?;
         let mut line = Vec::new();
-        let read = async {
-            while self.line(&mut line).await? {
-                let Ok(v) = serde_json::from_slice::<Value>(&line) else {
-                    continue;
-                };
-                if v["id"] != id {
-                    continue;
-                }
-                if v["error"].is_object() {
-                    let message = v["error"]["message"]
-                        .as_str()
-                        .unwrap_or("Codex could not read this chat");
-                    return Err(message.chars().take(300).collect::<String>());
-                }
-                return Ok(v["result"].clone());
+        while self.line(&mut line).await? {
+            let Ok(v) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if v["id"] != id {
+                continue;
             }
-            Err("Codex exited before answering".into())
-        };
-        tokio::time::timeout(Duration::from_secs(120), read)
-            .await
-            .map_err(|_| "Codex took too long to read its chats".to_string())?
+            if v["error"].is_object() {
+                let message = v["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Codex could not read this chat");
+                return Err(message.into());
+            }
+            return Ok(v["result"].clone());
+        }
+        Err("Codex exited before answering".into())
     }
     async fn close(mut self) {
         self.exe.kill(&mut self.child).await;
     }
 }
 
-fn text(value: &Value, limit: usize) -> Option<String> {
+/// A value's text on one line.
+fn one_line(value: &Value) -> Option<String> {
     value
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            let line = s.split_whitespace().collect::<Vec<_>>().join(" ");
-            let mut chars = line.chars();
-            let start: String = chars.by_ref().take(limit).collect();
-            if chars.next().is_some() {
-                format!("{start}…")
-            } else {
-                start
-            }
-        })
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+/// The start of a value's text, as a listing previews it.
+fn preview(value: &Value) -> Option<String> {
+    one_line(value).map(|line| {
+        let mut chars = line.chars();
+        let start: String = chars.by_ref().take(PREVIEW).collect();
+        if chars.next().is_some() {
+            format!("{start}…")
+        } else {
+            start
+        }
+    })
 }
 
 fn thread(value: &Value, archived: bool) -> Option<Thread> {
@@ -161,17 +137,13 @@ fn thread(value: &Value, archived: bool) -> Option<Thread> {
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())?;
     Some(Thread {
         id: id.to_string(),
-        name: text(&value["name"], 200),
-        preview: text(&value["preview"], PREVIEW),
+        name: one_line(&value["name"]),
+        preview: preview(&value["preview"]),
         cwd: value["cwd"].as_str().unwrap_or_default().to_string(),
         created: value["createdAt"].as_i64(),
         updated: value["updatedAt"].as_i64(),
-        model: value["model"]
-            .as_str()
-            .map(|m| m.chars().take(100).collect()),
-        originator: value["originator"]
-            .as_str()
-            .map(|o| o.chars().take(60).collect()),
+        model: value["model"].as_str().map(String::from),
+        originator: value["originator"].as_str().map(String::from),
         source: match &value["source"] {
             Value::String(source) => source.clone(),
             Value::Object(source) => source.keys().next().cloned().unwrap_or_default(),
@@ -182,11 +154,10 @@ fn thread(value: &Value, archived: bool) -> Option<Thread> {
 }
 
 /// The selected profile's threads, newest first; sub-agent threads stay with their parents.
-pub async fn list(limit: usize) -> Result<(Vec<Thread>, bool), String> {
+pub async fn list() -> Result<Vec<Thread>, String> {
     let mut client = Client::start().await?;
     let listed = async {
         let mut threads = vec![];
-        let mut truncated = false;
         for archived in [false, true] {
             let mut cursor = Value::Null;
             loop {
@@ -205,18 +176,13 @@ pub async fn list(limit: usize) -> Result<(Vec<Thread>, bool), String> {
                         }
                     }
                 }
-                if threads.len() >= limit {
-                    truncated = true;
-                    break;
-                }
                 match page["nextCursor"].as_str() {
                     Some(next) if !next.is_empty() => cursor = json!(next),
                     _ => break,
                 }
             }
         }
-        threads.truncate(limit);
-        Ok::<_, String>((threads, truncated))
+        Ok::<_, String>(threads)
     }
     .await;
     client.close().await;
@@ -233,7 +199,6 @@ pub async fn read(id: &str) -> Result<(Value, Vec<Value>), String> {
             .await?["thread"]
             .clone();
         let mut turns = vec![];
-        let mut bytes = 0;
         let mut cursor = Value::Null;
         loop {
             let page = client
@@ -242,14 +207,7 @@ pub async fn read(id: &str) -> Result<(Value, Vec<Value>), String> {
                     json!({"threadId":id,"cursor":cursor,"limit":10,"sortDirection":"asc","itemsView":"full"}),
                 )
                 .await?;
-            bytes += page.to_string().len();
-            if bytes > BYTES_LIMIT {
-                return Err("This Codex chat is too large to import".to_string());
-            }
             turns.extend(page["data"].as_array().cloned().unwrap_or_default());
-            if turns.len() > TURN_LIMIT {
-                return Err("This Codex chat has too many turns to import".to_string());
-            }
             match page["nextCursor"].as_str() {
                 Some(next) if !next.is_empty() => cursor = json!(next),
                 _ => break,
@@ -351,13 +309,7 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
                 }
                 if current.user.is_none() && !current.any {
                     current.user = Some(input);
-                } else if current.steering.len() < STEERING_LIMIT
-                    && input.images.is_empty()
-                    && !input.text.trim_start().starts_with('/')
-                    && input.text.chars().count() <= 30_000
-                    && current.steering.iter().map(String::len).sum::<usize>() + input.text.len()
-                        <= 60_000
-                {
+                } else if input.images.is_empty() && !input.text.trim_start().starts_with('/') {
                     current.steering.push(input.text);
                 } else {
                     exchanges.push(Exchange::new(Some(input), model.as_deref()));
@@ -392,9 +344,7 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
                         turn["error"]["message"]
                             .as_str()
                             .unwrap_or("Codex reported that this turn failed.")
-                            .chars()
-                            .take(2000)
-                            .collect(),
+                            .into(),
                     ),
                 ),
                 _ => ("complete", None),
@@ -432,7 +382,7 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
             .as_str()
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .map(|n| n.chars().take(200).collect()),
+            .map(String::from),
         model,
         reasoning,
         cwd: thread["cwd"].as_str().map(String::from),
@@ -506,10 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn listed_threads_keep_bounded_metadata() {
-        let value = json!({"id":"019a0000-0000-7000-8000-000000000002","preview":"x".repeat(1000),"cwd":"/home/me/app","createdAt":1,"updatedAt":2,"model":"gpt-6","originator":"Codex Desktop","source":{"custom":"desktop"}});
+    fn listed_threads_preview_their_first_prompt_and_keep_their_names_whole() {
+        let value = json!({"id":"019a0000-0000-7000-8000-000000000002","name":"n".repeat(500),"preview":"x".repeat(1000),"cwd":"/home/me/app","createdAt":1,"updatedAt":2,"model":"gpt-6","originator":"Codex Desktop","source":{"custom":"desktop"}});
         let thread = thread(&value, true).unwrap();
         assert_eq!(thread.preview.unwrap().chars().count(), PREVIEW + 1);
+        assert_eq!(thread.name.unwrap().len(), 500);
         assert_eq!(thread.source, "custom");
         assert!(thread.archived);
         assert!(super::thread(&json!({"id":"not-a-uuid"}), false).is_none());

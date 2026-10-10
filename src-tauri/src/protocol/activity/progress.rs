@@ -25,7 +25,7 @@ pub(super) fn duration_ms(value: &Value) -> Option<u64> {
 fn identifier(value: &Value) -> Option<&str> {
     value
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 220 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
 }
 
 impl ToolDecoder {
@@ -111,9 +111,6 @@ impl ToolDecoder {
             return true;
         };
         let key = format!("codex:{thread}:{id}");
-        if key.len() > 226 {
-            return false;
-        }
         if let Some((bound_turn, _)) = self.progress_bindings.get(&key) {
             return bound_turn == turn;
         }

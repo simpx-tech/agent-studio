@@ -514,7 +514,7 @@ describe('workspace administration over real HTTP', () => {
     expect(readFileSync(file, 'utf8')).toBe('{invalid-admin-registry');
   });
 
-  it('rejects unknown fields, invalid roles, oversized names and bodies without changing the registry', async () => {
+  it('refuses unknown fields, invalid roles and malformed names without changing the registry, and takes names of any length', async () => {
     const f = await fixture();
     const file = join(f.directory, 'workspaces.json');
     const before = readFileSync(file, 'utf8');
@@ -523,8 +523,8 @@ describe('workspace administration over real HTTP', () => {
       { name: 'Injected secret', role: 'admin', sessionSecret: 'injected-secret' },
       { name: 'Injected identity', role: 'member', workspaceId: 'owner' },
       { name: 'Bad role', role: 'owner' },
-      { name: 'x'.repeat(81), role: 'member' },
-      { name: 'x'.repeat(5000), role: 'admin' },
+      { name: '   ', role: 'member' },
+      { name: 'Line\nbreak', role: 'member' },
     ]) {
       for (const [method, path] of [
         ['POST', 'workspace-admin/workspaces'],
@@ -545,6 +545,20 @@ describe('workspace administration over real HTTP', () => {
       expect(response.status).toBe(400);
     }
     expect(readFileSync(file, 'utf8')).toBe(before);
+    // A name of any length, in a body of any size.
+    const long = 'x'.repeat(5000);
+    const created = await f.call(f.ownerKey, 'POST', 'workspace-admin/workspaces', {
+      name: long,
+      role: 'member',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.workspace).toMatchObject({ name: long, role: 'member' });
+    const renamed = await f.edit(f.ownerKey, f.alice.workspace.id, `${long}y`, 'member');
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.workspace).toMatchObject({ name: `${long}y`, role: 'member' });
+    expect(listWorkspaces(f.directory).map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([long, `${long}y`]),
+    );
   });
 
   it('preserves syntactically valid registry data with no enabled administrator and fails closed', async () => {

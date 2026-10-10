@@ -1,14 +1,9 @@
-//! Commands, inputs and results of tool calls. A command and input travel with the activity
-//! record, shortened there when long; the result, and the complete command or input, go to
-//! the executing computer's store (`crate::tool_output`) whole. Only the result's size and
-//! exit status reach the activity, since outputs and images are far too large for the
-//! synced workspace.
+//! Commands, inputs and results of tool calls. A command and input travel whole with the
+//! activity record; the result goes to the executing computer's store (`crate::tool_output`)
+//! whole. Only the result's size and exit status reach the activity, since outputs and images
+//! are far too large for the synced workspace.
 use super::*;
 
-/// Characters of a command shown in the activity record; the store keeps all of it.
-pub(super) const COMMAND_LIMIT: usize = 8_000;
-/// Characters of a tool input shown in the activity record; the store keeps all of it.
-pub(super) const INPUT_LIMIT: usize = 4_000;
 pub const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// What the activity record says about a result kept on the executing computer.
@@ -54,12 +49,8 @@ pub struct CapturedOutput {
     pub images: Vec<ImageSource>,
     /// Paths of 3D models a reply shows, reported by Agent Studio's own tool alone.
     pub models: Vec<String>,
-    /// Files a reply shows: kept in the places the reply numbered them, within the sizes
-    /// they were checked against.
+    /// Files a reply shows: kept in the places the reply numbered them.
     pub sent: bool,
-    /// The complete command or input when the activity record shows a shortened one.
-    pub command: Option<String>,
-    pub input: Option<String>,
 }
 impl CapturedOutput {
     pub(crate) fn new(tool_id: &str) -> Self {
@@ -73,8 +64,6 @@ impl CapturedOutput {
             images: vec![],
             models: vec![],
             sent: false,
-            command: None,
-            input: None,
         }
     }
     fn summary(&self) -> OutputSummary {
@@ -157,20 +146,10 @@ pub(crate) fn terminal_text(value: &str) -> String {
     out
 }
 
-/// Cuts a string to `limit` characters, reporting whether anything was removed.
-pub(super) fn shortened(value: &str, limit: usize) -> (String, bool) {
-    let cleaned = clean(value, limit + 1);
-    if cleaned.chars().count() > limit {
-        (cleaned.chars().take(limit).collect(), true)
-    } else {
-        (cleaned, false)
-    }
-}
-
 /// Words of a quoted command line. Single quotes are literal; double quotes take `\` escapes
 /// before `"`, `\`, `$` and backquote, as the Codex app-server writes them. Unquoted
 /// backslashes stay literal for Windows paths.
-fn words(command: &str, limit: usize) -> Option<Vec<String>> {
+fn words(command: &str) -> Option<Vec<String>> {
     let mut words = vec![];
     let mut current = String::new();
     let mut in_word = false;
@@ -206,9 +185,6 @@ fn words(command: &str, limit: usize) -> Option<Vec<String>> {
                 if in_word {
                     words.push(std::mem::take(&mut current));
                     in_word = false;
-                    if words.len() > limit {
-                        return None;
-                    }
                 }
             }
             c => {
@@ -227,7 +203,7 @@ fn words(command: &str, limit: usize) -> Option<Vec<String>> {
 /// reports `"…\powershell.exe" -Command '<script>'` or `/bin/bash -lc '<script>'`.
 pub(super) fn unwrap_shell(command: &str) -> (Option<&'static str>, String) {
     let unchanged = (None, command.to_string());
-    let Some(words) = words(command, 64) else {
+    let Some(words) = words(command) else {
         return unchanged;
     };
     let Some(first) = words.first() else {
@@ -349,60 +325,31 @@ pub(super) fn claude_error_text(text: &str) -> &str {
 }
 
 impl ToolDecoder {
-    /// Records a shell call's command, shortened in the activity record when long; the
-    /// complete command then goes to the store with the call's result.
+    /// Records a shell call's command, whole.
     pub(super) fn set_command(
         &mut self,
         tool: &mut ToolActivity,
         command: &str,
         shell: Option<&'static str>,
     ) {
-        let (short, truncated) = shortened(command, COMMAND_LIMIT);
-        if short.trim().is_empty() {
+        let command = clean(command);
+        if command.trim().is_empty() {
             return;
         }
-        tool.command = Some(short);
-        tool.command_truncated = truncated;
+        tool.command = Some(command);
         tool.shell = shell;
-        Self::remember(
-            &mut self.full_commands,
-            &tool.id,
-            truncated.then_some(command),
-        );
     }
-    /// Records a tool's arguments, shortened in the activity record when long.
+    /// Records a tool's arguments, whole.
     pub(super) fn set_input(&mut self, tool: &mut ToolActivity, value: &Value) {
-        let Some(text) = input_text(value) else {
-            return;
-        };
-        let (short, truncated) = shortened(&text, INPUT_LIMIT);
-        tool.input = Some(short);
-        tool.input_truncated = truncated;
-        Self::remember(&mut self.full_inputs, &tool.id, truncated.then_some(&text));
-    }
-    fn remember(map: &mut HashMap<String, String>, id: &str, full: Option<&str>) {
-        match full {
-            Some(full) if map.len() < 256 || map.contains_key(id) => {
-                map.insert(id.into(), clean(full, usize::MAX));
-            }
-            Some(_) => {}
-            None => {
-                map.remove(id);
-            }
+        if let Some(text) = input_text(value) {
+            tool.input = Some(clean(&text));
         }
     }
 
     /// Queues a result for the executing computer's store and records its summary.
-    pub(super) fn capture(&mut self, tool: &mut ToolActivity, mut output: CapturedOutput) {
-        output.command = self.full_commands.remove(&tool.id);
-        output.input = self.full_inputs.remove(&tool.id);
+    pub(super) fn capture(&mut self, tool: &mut ToolActivity, output: CapturedOutput) {
         tool.output = Some(output.summary());
-        if output.stdout.is_empty()
-            && output.stderr.is_empty()
-            && output.images.is_empty()
-            && output.command.is_none()
-            && output.input.is_none()
-        {
+        if output.stdout.is_empty() && output.stderr.is_empty() && output.images.is_empty() {
             return;
         }
         self.captured.retain(|o| o.tool_id != output.tool_id);
@@ -693,13 +640,19 @@ mod tests {
     #[test]
     fn large_results_and_long_commands_are_kept_whole() {
         let mut d = ToolDecoder::default();
+        // The record keeps the whole command, past the 8,000 characters earlier releases kept.
         let heredoc = format!("cat > big.txt <<'EOF'\n{}EOF", "line\n".repeat(3000));
         claude_call(&mut d, "big", "Bash", json!({ "command": heredoc }));
-        assert_eq!(
-            d.tools[0].command.as_ref().map(|c| c.chars().count()),
-            Some(COMMAND_LIMIT)
+        assert_eq!(d.tools[0].command.as_deref(), Some(heredoc.as_str()));
+        // And whole inputs, past the 4,000 characters earlier releases kept.
+        let query = "q".repeat(10_000);
+        claude_call(
+            &mut d,
+            "mcp",
+            "mcp__docs__search",
+            json!({ "query": query }),
         );
-        assert!(d.tools[0].command_truncated);
+        assert!(d.tools[1].input.as_ref().unwrap().contains(&query));
         let stdout = ("x".repeat(99) + "\n").repeat(50_000);
         let big = claude_result(
             &mut d,
@@ -715,17 +668,6 @@ mod tests {
         );
         let output = d.take_outputs().remove(0);
         assert_eq!(output.stdout.len(), 5_000_000);
-        assert_eq!(output.command.as_deref(), Some(heredoc.as_str()));
-        // A short command has nothing more to keep.
-        claude_call(&mut d, "small", "Bash", json!({"command":"ls"}));
-        claude_result(
-            &mut d,
-            "small",
-            false,
-            json!(""),
-            json!({"stdout":"a\n","stderr":""}),
-        );
-        assert_eq!(d.take_outputs()[0].command, None);
         let images = json!((0..20).map(|_| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}})).collect::<Vec<_>>());
         claude_call(&mut d, "shots", "mcp__browser__screenshots", json!({}));
         let shots = claude_result(&mut d, "shots", false, images, Value::Null);

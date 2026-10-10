@@ -13,7 +13,7 @@ const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /** One installation's last update check, reported by the desktop host. See docs/UPDATES.md. */
 export const cliUpdateStatusSchema = z.object({
   provider: z.enum(['claude', 'codex']),
-  environmentId: z.string().max(80),
+  environmentId: z.string(),
   phase: z.enum([
     'checking',
     'current',
@@ -24,16 +24,16 @@ export const cliUpdateStatusSchema = z.object({
     'blocked',
     'failed',
   ]),
-  version: z.string().max(40).optional(),
-  previous: z.string().max(40).optional(),
+  version: z.string().optional(),
+  previous: z.string().optional(),
   checkedAt: time.optional(),
-  message: z.string().max(300).optional(),
+  message: z.string().optional(),
 });
 export type CliUpdateStatus = z.infer<typeof cliUpdateStatusSchema>;
 export const cliUpdatesSchema = z.object({
   automatic: z.object({ claude: z.boolean(), codex: z.boolean() }),
-  notice: z.string().max(300).optional(),
-  statuses: z.array(cliUpdateStatusSchema).max(64),
+  notice: z.string().optional(),
+  statuses: z.array(cliUpdateStatusSchema),
 });
 export type CliUpdates = z.infer<typeof cliUpdatesSchema>;
 

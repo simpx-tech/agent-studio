@@ -5,32 +5,29 @@ import { z } from 'zod';
 export const elicitationReceiptSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
-  revision: z.number().int().min(1).max(100),
+  revision: z.number().int().min(1),
   status: z.enum(['pending', 'accepted', 'declined', 'cancelled']),
   mode: z.enum(['form', 'url']),
-  serverName: z.string().min(1).max(200),
+  serverName: z.string().min(1),
 });
 export type ElicitationReceipt = z.infer<typeof elicitationReceiptSchema>;
 export const elicitationReceiptsSchema = z
   .array(elicitationReceiptSchema)
-  .max(16)
   .refine((items) => new Set(items.map((i) => i.id)).size === items.length);
 const valueSchema = z.union([
-  z.string().max(4000),
+  z.string(),
   z.number().finite().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER),
   z.boolean(),
-  z.array(z.string().max(200)).max(32),
+  z.array(z.string()),
 ]);
-const count = z.number().int().nonnegative().max(4000).nullable();
+const count = z.number().int().nonnegative().nullable();
 const fieldSchema = z.object({
-  key: z.string().min(1).max(100),
-  title: z.string().min(1).max(200),
-  description: z.string().max(1000),
+  key: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string(),
   kind: z.enum(['string', 'number', 'integer', 'boolean', 'array']),
   required: z.boolean(),
-  options: z
-    .array(z.object({ value: z.string().min(1).max(200), label: z.string().min(1).max(200) }))
-    .max(32),
+  options: z.array(z.object({ value: z.string().min(1), label: z.string().min(1) })),
   minLength: count,
   maxLength: count,
   minimum: z.number().finite().nullable(),
@@ -38,7 +35,7 @@ const fieldSchema = z.object({
   minItems: count,
   maxItems: count,
   format: z.enum(['email', 'uri', 'date', 'date-time']).nullable(),
-  pattern: z.string().max(500).nullable(),
+  pattern: z.string().nullable(),
   default: valueSchema.nullable(),
 });
 export type ElicitationField = z.infer<typeof fieldSchema>;
@@ -46,7 +43,6 @@ export function safeElicitationUrl(raw: string) {
   try {
     const url = new URL(raw);
     return (
-      raw.length <= 8000 &&
       !url.username &&
       !url.password &&
       !!url.hostname &&
@@ -59,9 +55,9 @@ export function safeElicitationUrl(raw: string) {
 }
 export const elicitationRequestSchema = elicitationReceiptSchema
   .extend({
-    message: z.string().min(1).max(4000),
-    fields: z.array(fieldSchema).max(16),
-    url: z.string().max(8000).refine(safeElicitationUrl).nullable(),
+    message: z.string().min(1),
+    fields: z.array(fieldSchema),
+    url: z.string().refine(safeElicitationUrl).nullable(),
   })
   .refine(
     (r) =>
@@ -72,10 +68,10 @@ export const elicitationInputSchema = z
   .object({
     requestId: z.string().uuid(),
     action: z.enum(['accept', 'decline', 'cancel']).optional(),
-    content: z.record(z.string().min(1).max(100), valueSchema).optional(),
+    content: z.record(z.string().min(1), valueSchema).optional(),
   })
   .strict()
-  .refine((v) => (!v.content || v.action === 'accept') && JSON.stringify(v).length <= 24000);
+  .refine((v) => !v.content || v.action === 'accept');
 export type ElicitationInput = z.infer<typeof elicitationInputSchema>;
 export function mergeElicitations(
   left: ElicitationReceipt[] = [],
@@ -86,7 +82,7 @@ export function mergeElicitations(
     const parsed = elicitationReceiptSchema.safeParse(item);
     if (!parsed.success) continue;
     const index = result.findIndex((r) => r.id === item.id);
-    if (index < 0 && result.length < 16) result.push(parsed.data);
+    if (index < 0) result.push(parsed.data);
     else if (
       index >= 0 &&
       result[index].runId === item.runId &&

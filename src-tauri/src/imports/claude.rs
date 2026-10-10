@@ -14,10 +14,7 @@ use std::path::{Path, PathBuf};
 const WHOLE_LISTING: u64 = 1024 * 1024;
 /// How much of each end of a larger file a listing reads.
 const LISTING_WINDOW: u64 = 512 * 1024;
-/// Records a listing skips: a pasted image makes one line many megabytes long.
-const LISTING_LINE: usize = 1024 * 1024;
-/// The longest record an import reads; longer ones (rare, image-heavy) are left out.
-const IMPORT_LINE: usize = 128 * 1024 * 1024;
+/// The characters of the first prompt a listing shows.
 const PREVIEW: usize = 300;
 /// What Agent Studio's own first input to a session starts with.
 pub const STUDIO_GUIDANCE: &str = "You are having a conversation in Agent Studio";
@@ -46,12 +43,11 @@ pub struct Summary {
 
 /// The transcripts of a profile, newest first: `projects/<folder>/<uuid>.jsonl` only, never a
 /// sub-agent's own file inside a session folder.
-pub fn sessions(root: &Path, limit: usize) -> (Vec<(PathBuf, u64, u128)>, bool) {
+pub fn sessions(root: &Path) -> Vec<(PathBuf, u64, u128)> {
     let mut found = vec![];
     let Ok(folders) = std::fs::read_dir(root.join("projects")) else {
-        return (found, false);
+        return found;
     };
-    let mut visited = 0;
     for folder in folders.flatten() {
         if !folder.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
@@ -60,10 +56,6 @@ pub fn sessions(root: &Path, limit: usize) -> (Vec<(PathBuf, u64, u128)>, bool) 
             continue;
         };
         for file in files.flatten() {
-            visited += 1;
-            if visited > 200_000 {
-                break;
-            }
             let name = file.file_name().to_string_lossy().into_owned();
             let Some(stem) = name.strip_suffix(".jsonl") else {
                 continue;
@@ -90,42 +82,16 @@ pub fn sessions(root: &Path, limit: usize) -> (Vec<(PathBuf, u64, u128)>, bool) 
     // that went on.
     let mut sessions = HashSet::new();
     found.retain(|(path, _, _)| sessions.insert(path.file_name().map(|n| n.to_os_string())));
-    let truncated = found.len() > limit;
-    found.truncate(limit);
-    (found, truncated)
+    found
 }
 
-/// Reads one line of at most `cap` bytes into `line`; a longer one is consumed and reported
-/// as `Some(false)`. `None` at the end of the file.
-fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>, cap: usize) -> Option<(usize, bool)> {
+/// Reads one line into `line`, whole however long, and returns the bytes it took. `None` at
+/// the end of the file.
+fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> Option<usize> {
     line.clear();
-    let mut consumed = 0;
-    let mut whole = true;
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(available) => available,
-            Err(_) => return None,
-        };
-        if available.is_empty() {
-            return (consumed > 0).then_some((consumed, whole));
-        }
-        let (length, done) = match available.iter().position(|b| *b == b'\n') {
-            Some(end) => (end + 1, true),
-            None => (available.len(), false),
-        };
-        if whole {
-            if line.len() + length > cap {
-                whole = false;
-                line.clear();
-            } else {
-                line.extend_from_slice(&available[..length]);
-            }
-        }
-        reader.consume(length);
-        consumed += length;
-        if done {
-            return Some((consumed, whole));
-        }
+    match reader.read_until(b'\n', line) {
+        Ok(0) | Err(_) => None,
+        Ok(consumed) => Some(consumed),
     }
 }
 
@@ -259,7 +225,7 @@ impl Titles {
                 .as_str()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .map(|t| t.chars().take(200).collect::<String>())
+                .map(String::from)
         };
         match v["type"].as_str() {
             Some("custom-title") => self.custom = take("customTitle").or(self.custom.take()),
@@ -322,7 +288,7 @@ pub fn summarize(path: &Path, bytes: u64) -> Option<Summary> {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .map(|t| t.chars().take(200).collect::<String>())
+                .map(String::from)
         };
         match kind {
             "custom-title" => titles.custom = take(&peek.custom_title).or(titles.custom.take()),
@@ -348,14 +314,14 @@ pub fn summarize(path: &Path, bytes: u64) -> Option<Summary> {
                 .and_then(Value::as_str)
                 .filter(|m| *m != crate::protocol::usage_limit::SYNTHETIC_MODEL)
             {
-                summary.model = Some(model.chars().take(100).collect());
+                summary.model = Some(model.into());
             }
         }
         if kind != "user" || peek.sidechain {
             return;
         }
         if summary.entrypoint.is_none() {
-            summary.entrypoint = peek.entrypoint.map(|e| e.chars().take(40).collect());
+            summary.entrypoint = peek.entrypoint;
         }
         // Only the first prompt and the first user record need the record's content.
         if !(head && (first_user || summary.prompt.is_none())) {
@@ -384,10 +350,8 @@ pub fn summarize(path: &Path, bytes: u64) -> Option<Summary> {
             256 * 1024,
             (&mut file).take(if whole { bytes } else { LISTING_WINDOW }),
         );
-        while let Some((_, complete)) = read_line(&mut reader, &mut line, LISTING_LINE) {
-            if complete {
-                note(&line, true, &mut summary);
-            }
+        while read_line(&mut reader, &mut line).is_some() {
+            note(&line, true, &mut summary);
         }
     }
     if !whole {
@@ -396,11 +360,9 @@ pub fn summarize(path: &Path, bytes: u64) -> Option<Summary> {
             .ok()?;
         let mut reader = BufReader::with_capacity(256 * 1024, &mut file);
         // The window starts inside a record; the first line is never whole.
-        read_line(&mut reader, &mut line, LISTING_LINE);
-        while let Some((_, complete)) = read_line(&mut reader, &mut line, LISTING_LINE) {
-            if complete {
-                note(&line, false, &mut summary);
-            }
+        read_line(&mut reader, &mut line);
+        while read_line(&mut reader, &mut line).is_some() {
+            note(&line, false, &mut summary);
         }
     }
     summary.title = titles.best();
@@ -430,12 +392,9 @@ fn active_branch(path: &Path) -> Result<HashSet<u64>, String> {
     let mut offset = 0u64;
     let mut records: HashMap<String, (Option<String>, u64)> = HashMap::new();
     let mut leaf = None;
-    while let Some((consumed, complete)) = read_line(&mut reader, &mut line, IMPORT_LINE) {
+    while let Some(consumed) = read_line(&mut reader, &mut line) {
         let at = offset;
         offset += consumed as u64;
-        if !complete {
-            continue;
-        }
         let Ok(link) = serde_json::from_slice::<Link>(&line) else {
             continue;
         };
@@ -546,7 +505,7 @@ impl Building {
                 .unwrap_or_else(|| format!("message-{}", self.texts.len()));
             if message["model"] != crate::protocol::usage_limit::SYNTHETIC_MODEL {
                 if let Some(model) = message["model"].as_str() {
-                    self.model = Some(model.chars().take(100).collect());
+                    self.model = Some(model.into());
                 }
                 if !message["usage"].is_null() {
                     match self.usage.iter_mut().find(|(m, _)| *m == id) {
@@ -609,7 +568,7 @@ impl Building {
             self.events.push(RunEvent::Progress {
                 id,
                 revision: u64::MAX >> 12,
-                text: text.chars().take(16000).collect(),
+                text: text.clone(),
             });
             self.events.push(RunEvent::Text { text });
         }
@@ -684,16 +643,11 @@ pub fn convert(path: &Path) -> Result<Conversion, String> {
     let mut titles = Titles::default();
     let mut turns = vec![];
     let mut current: Option<Building> = None;
-    let mut skipped = 0;
     let mut cwd = None;
     let mut updated = None;
-    while let Some((consumed, complete)) = read_line(&mut reader, &mut line, IMPORT_LINE) {
+    while let Some(consumed) = read_line(&mut reader, &mut line) {
         let at = offset;
         offset += consumed as u64;
-        if !complete {
-            skipped += 1;
-            continue;
-        }
         let Ok(v) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
@@ -745,14 +699,6 @@ pub fn convert(path: &Path) -> Result<Conversion, String> {
     let created = turns
         .iter()
         .find_map(|t| t.user.as_ref().and_then(|u| u.created_at.clone()));
-    let mut notes = vec![];
-    if skipped > 0 {
-        notes.push(format!(
-            "{skipped} oversized {} could not be read and {} left out.",
-            if skipped == 1 { "record" } else { "records" },
-            if skipped == 1 { "was" } else { "were" }
-        ));
-    }
     Ok(Conversion {
         title: titles.best(),
         model,
@@ -761,7 +707,7 @@ pub fn convert(path: &Path) -> Result<Conversion, String> {
         created,
         updated,
         turns,
-        notes,
+        notes: vec![],
     })
 }
 
@@ -790,14 +736,13 @@ fn desktop_session(v: &Value, organization: &str) -> Option<(String, DesktopSess
                 .as_str()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .map(|t| t.chars().take(200).collect()),
+                .map(String::from),
             archived: v["isArchived"] == true,
             cwd: v["cwd"].as_str().map(String::from),
             distribution: v["wslConfig"]["distro"]
                 .as_str()
                 .filter(|d| {
                     !d.is_empty()
-                        && d.len() <= 64
                         && d.chars()
                             .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
                 })
@@ -837,7 +782,7 @@ fn desktop_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// The Claude desktop app's Code sessions by CLI session id, from its own bounded index files
+/// The Claude desktop app's Code sessions by CLI session id, from its own index files
 /// (`claude-code-sessions/<account>/<organization>/local_<id>.json`).
 pub fn desktop_index() -> HashMap<String, DesktopSession> {
     desktop_index_in(&desktop_roots())
@@ -853,7 +798,6 @@ pub fn desktop_distributions() -> HashSet<String> {
 
 fn desktop_index_in(roots: &[PathBuf]) -> HashMap<String, DesktopSession> {
     let mut sessions = HashMap::new();
-    let mut read = 0;
     for root in roots {
         let Ok(accounts) = std::fs::read_dir(root.join("claude-code-sessions")) else {
             continue;
@@ -873,13 +817,6 @@ fn desktop_index_in(roots: &[PathBuf]) -> HashMap<String, DesktopSession> {
                 for file in files.flatten() {
                     let name = file.file_name().to_string_lossy().into_owned();
                     if !name.starts_with("local_") || !name.ends_with(".json") {
-                        continue;
-                    }
-                    read += 1;
-                    if read > 20_000 {
-                        return sessions;
-                    }
-                    if file.metadata().map_or(true, |m| m.len() > 4 * 1024 * 1024) {
                         continue;
                     }
                     let Ok(bytes) = std::fs::read(file.path()) else {
@@ -1169,22 +1106,26 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.path().join("projects/C--new/notes.jsonl"), "{}\n").unwrap();
-        let (found, truncated) = sessions(root.path(), 10);
-        assert!(!truncated);
+        let found = sessions(root.path());
         assert_eq!(found.len(), 1);
         assert!(found[0].0.parent().unwrap().ends_with("C--new"));
     }
 
     #[test]
-    fn oversized_records_are_skipped_without_losing_the_rest() {
-        let mut reader = BufReader::new(&b"short\nthis line is too long\nok\n"[..]);
+    fn records_are_read_whole_however_long() {
+        // Past the 128 MB earlier releases left out of an import, in a smaller form: no length
+        // makes a record unreadable.
+        let long = "x".repeat(3 * 1024 * 1024);
+        let text = format!("short\n{long}\nok");
+        let mut reader = BufReader::with_capacity(1024, text.as_bytes());
         let mut line = Vec::new();
-        assert_eq!(read_line(&mut reader, &mut line, 8), Some((6, true)));
+        assert_eq!(read_line(&mut reader, &mut line), Some(6));
         assert_eq!(line, b"short\n");
-        assert_eq!(read_line(&mut reader, &mut line, 8), Some((22, false)));
-        assert_eq!(read_line(&mut reader, &mut line, 8), Some((3, true)));
-        assert_eq!(line, b"ok\n");
-        assert_eq!(read_line(&mut reader, &mut line, 8), None);
+        assert_eq!(read_line(&mut reader, &mut line), Some(long.len() + 1));
+        assert_eq!(line.len(), long.len() + 1);
+        assert_eq!(read_line(&mut reader, &mut line), Some(2));
+        assert_eq!(line, b"ok");
+        assert_eq!(read_line(&mut reader, &mut line), None);
     }
 
     #[test]

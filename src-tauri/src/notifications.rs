@@ -11,8 +11,6 @@ use tauri::{Emitter, Manager};
 
 const CHIME: &[u8] = include_bytes!("../sounds/agent-chime.wav");
 static AUDIO: Mutex<Option<Instant>> = Mutex::new(None);
-#[cfg(not(target_os = "windows"))]
-static LISTENERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -69,33 +67,30 @@ enum Kind {
 impl Notice {
     fn validate(&self) -> Result<(), String> {
         let (id, event) = self.tag.split_once(':').ok_or("Invalid notification")?;
-        let bounded = self.title.as_ref().is_none_or(|t| t.len() <= 1_000)
-            && self.body.as_ref().is_none_or(|b| b.len() <= 2_000);
-        let valid = bounded
-            && if self.kind == Kind::Test {
-                id == "test"
-                    && uuid::Uuid::parse_str(event).is_ok()
-                    && self.conversation_id.is_none()
-                    && self.title.is_none()
-                    && self.body.is_none()
-            } else {
-                uuid::Uuid::parse_str(id).is_ok()
-                    && if self.kind == Kind::Attention {
-                        // `attentionKeys` in the page: the first question call, then later
-                        // calls and MCP input requests by their UUID.
-                        event == "attention"
-                            || event
-                                .strip_prefix("attention:")
-                                .or_else(|| event.strip_prefix("elicitation:"))
-                                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-                    } else {
-                        event == "terminal"
-                    }
-                    && self
-                        .conversation_id
-                        .as_deref()
-                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-            };
+        let valid = if self.kind == Kind::Test {
+            id == "test"
+                && uuid::Uuid::parse_str(event).is_ok()
+                && self.conversation_id.is_none()
+                && self.title.is_none()
+                && self.body.is_none()
+        } else {
+            uuid::Uuid::parse_str(id).is_ok()
+                && if self.kind == Kind::Attention {
+                    // `attentionKeys` in the page: the first question call, then later
+                    // calls and MCP input requests by their UUID.
+                    event == "attention"
+                        || event
+                            .strip_prefix("attention:")
+                            .or_else(|| event.strip_prefix("elicitation:"))
+                            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                } else {
+                    event == "terminal"
+                }
+                && self
+                    .conversation_id
+                    .as_deref()
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        };
         if valid {
             Ok(())
         } else {
@@ -306,7 +301,6 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        use std::sync::atomic::Ordering;
         #[cfg(all(unix, not(target_os = "macos")))]
         let body = if notify_rust::get_capabilities()
             .is_ok_and(|capabilities| capabilities.iter().any(|c| c == "body-markup"))
@@ -333,26 +327,18 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
             notification.action("default", "Open chat");
         }
         let handle = notification.show().map_err(|_| "Could not send a desktop notification. Check your system notification settings and try the test again.")?;
-        // Some Linux notification servers never emit dismissal. Bound listener threads
-        // while continuing to deliver banners and sound if such a server is used.
-        if LISTENERS
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n < 32).then_some(n + 1)
-            })
-            .is_ok()
-        {
-            let app = app.clone();
-            let id = notice.conversation_id.clone();
-            std::thread::spawn(move || {
-                let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
+        // Every banner keeps a listener for its click. Some Linux notification servers never
+        // report a dismissal, so such a listener waits until the app quits.
+        let app = app.clone();
+        let id = notice.conversation_id.clone();
+        std::thread::spawn(move || {
+            let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
                 if matches!(response, notify_rust::NotificationResponse::Default)
                     || matches!(response, notify_rust::NotificationResponse::Action(action) if action == "default") {
                     open(&app, id.as_deref());
                 }
             });
-                LISTENERS.fetch_sub(1, Ordering::SeqCst);
-            });
-        }
+        });
         Ok(())
     }
 }
@@ -409,7 +395,7 @@ pub async fn desktop_notification(app: tauri::AppHandle, notice: Notice) -> Resu
 mod tests {
     use super::*;
     #[test]
-    fn accepts_only_bounded_lifecycle_notices() {
+    fn accepts_only_lifecycle_notices() {
         let id = uuid::Uuid::new_v4().to_string();
         let mut n = Notice {
             kind: Kind::Complete,
@@ -419,8 +405,11 @@ mod tests {
             body: Some("Done. The login flow now keeps the session.".into()),
         };
         assert!(n.validate().is_ok());
-        n.body = Some("x".repeat(2_001));
-        assert!(n.validate().is_err());
+        // Any length is accepted; the banner shows the start of it.
+        n.body = Some("x".repeat(5_000));
+        n.title = Some("t".repeat(5_000));
+        assert!(n.validate().is_ok());
+        n.title = Some("Fix the login flow".into());
         n.body = None;
         n.tag = format!("{id}:attention");
         assert!(n.validate().is_err());

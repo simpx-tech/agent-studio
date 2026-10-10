@@ -737,9 +737,14 @@ it('authenticates real HTTP subscription management per browser session and disc
   expect(
     (await call('PUT', '/v1/push', { ...subscription(), endpoint: 'https://127.0.0.1' })).status,
   ).toBe(400);
+  // An allowed push service's endpoint of any length.
+  const long = `https://fcm.googleapis.com/fcm/send/${'x'.repeat(5000)}`;
+  expect((await call('PUT', '/v1/push', { ...subscription(), endpoint: long })).status).toBe(200);
   expect((await call('POST', '/v1/push/test')).status).toBe(202);
   await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-  expect((await call('POST', '/v1/push/test')).status).toBe(400);
+  // A test goes out each time it is asked for.
+  expect((await call('POST', '/v1/push/test')).status).toBe(202);
+  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
   await call('DELETE', '/v1/push');
   expect((await (await call('GET', '/v1/push')).json()).enabled).toBe(false);
   await call('PUT', '/v1/push', subscription());
@@ -750,7 +755,7 @@ it('authenticates real HTTP subscription management per browser session and disc
     body: JSON.stringify({ revision: 0, workspace: workspace('complete') }),
   });
   expect(result.status).toBe(200);
-  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledTimes(2);
 });
 it('hands a paired browser its alerts for chats read since with its notification view, once', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'studio-push-stale-'));

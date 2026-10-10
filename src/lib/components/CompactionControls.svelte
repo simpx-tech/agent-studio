@@ -51,13 +51,11 @@
         }}
       />
       {#if custom}
-        <p>100,000–1,000,000 tokens.</p>
         <div class="custom-size">
           <input
             aria-label="Auto-compaction tokens"
             type="number"
-            min="100000"
-            max="1000000"
+            min="1"
             step="1"
             bind:value={tokens}
             {disabled}
@@ -65,11 +63,7 @@
           <button
             type="button"
             class="button secondary small"
-            disabled={disabled ||
-              !Number.isInteger(tokens) ||
-              !tokens ||
-              tokens < 100000 ||
-              tokens > 1000000}
+            disabled={disabled || !Number.isInteger(tokens) || !tokens || tokens < 1}
             onclick={() => {
               change(tokens);
               custom = false;
@@ -88,12 +82,6 @@
   }
   .compaction-controls > button {
     justify-self: start;
-  }
-  .compaction-controls p {
-    margin: 0;
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
-    color: var(--text-muted);
   }
   .custom-size {
     display: flex;

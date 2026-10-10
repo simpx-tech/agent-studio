@@ -146,8 +146,7 @@ pub fn environment_distribution(
     ))
 }
 pub fn validate_path(path: &str, linux: bool) -> Result<(), String> {
-    if path.len() > 4096
-        || path.chars().any(char::is_control)
+    if path.chars().any(char::is_control)
         || (!path.is_empty()
             && if linux {
                 !path.starts_with('/')
@@ -180,7 +179,7 @@ pub async fn windows_path(distribution: &str, path: &str) -> Result<PathBuf, Str
     }
     #[cfg(windows)]
     {
-        use std::{process::Stdio, time::Duration};
+        use std::process::Stdio;
         let script = crate::wsl::embedded_script(include_str!("folders-windows-path.sh"));
         let mut command = tokio::process::Command::new("wsl.exe");
         command
@@ -197,9 +196,9 @@ pub async fn windows_path(distribution: &str, path: &str) -> Result<PathBuf, Str
             .creation_flags(0x08000000)
             .kill_on_drop(true)
             .stdin(Stdio::null());
-        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        let output = command
+            .output()
             .await
-            .map_err(|_| "Opening the selected WSL folder from Windows timed out")?
             .map_err(|_| "Cannot access the selected WSL folder from Windows")?;
         if !output.status.success() {
             return Err(
@@ -292,16 +291,11 @@ fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
     let read = std::fs::read_dir(&path)
         .map_err(|_| "Cannot open this folder. Check its path and permissions.")?;
     let mut entries = Vec::new();
-    let mut truncated = false;
     for entry in read {
         let entry = entry.map_err(|_| "Could not finish reading this folder")?;
         let child = entry.path();
         if !child.is_dir() {
             continue;
-        }
-        if entries.len() == 1000 {
-            truncated = true;
-            break;
         }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.chars().any(char::is_control) {
@@ -319,7 +313,7 @@ fn native_listing(path: PathBuf) -> Result<FolderListing, String> {
         parent: path.parent().map(|p| p.to_string_lossy().to_string()),
         path: path.to_string_lossy().to_string(),
         entries,
-        truncated,
+        truncated: false,
         places: native_places(),
     })
 }
@@ -351,9 +345,9 @@ pub async fn list(
                 .creation_flags(0x08000000)
                 .kill_on_drop(true)
                 .stdin(std::process::Stdio::null());
-            let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+            let output = command
+                .output()
                 .await
-                .map_err(|_| "WSL folder browsing timed out")?
                 .map_err(|_| "Cannot start WSL folder browsing")?;
             if !output.status.success() {
                 return Err("Cannot open this WSL folder. Check its path and permissions.".into());
@@ -388,7 +382,6 @@ fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
         .to_string();
     let mut places = Vec::new();
     let mut entries = Vec::new();
-    let mut truncated = false;
     for record in values.filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) {
         if let Some(place) = record.strip_prefix('@') {
             let Some((kind, target)) = place.split_once(':') else {
@@ -428,10 +421,6 @@ fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
         if name.is_empty() || flags.chars().any(|c| !matches!(c, 'h' | 'g')) {
             continue;
         }
-        if entries.len() == 1000 {
-            truncated = true;
-            break;
-        }
         entries.push(FolderEntry {
             name: name.to_string(),
             path: format!("{}/{name}", path.trim_end_matches('/')),
@@ -446,7 +435,7 @@ fn parse_wsl(bytes: &[u8]) -> Result<FolderListing, String> {
             .map(|p| p.to_string_lossy().to_string()),
         path,
         entries,
-        truncated,
+        truncated: false,
         places,
     })
 }
@@ -516,15 +505,22 @@ mod tests {
         );
     }
     #[test]
-    fn wsl_listing_truncates_after_one_thousand_entries() {
+    fn listings_keep_every_folder() {
+        // Past the 1,000 folders earlier releases listed.
         let mut bytes = b"/srv\0".to_vec();
-        for index in 0..1001 {
+        for index in 0..1500 {
             bytes.extend_from_slice(format!(":dir{index:04}\0").as_bytes());
         }
         let listing = parse_wsl(&bytes).unwrap();
-        assert_eq!(listing.entries.len(), 1000);
-        assert!(listing.truncated);
-        assert!(!parse_wsl(b"/srv\0:one\0").unwrap().truncated);
+        assert_eq!(listing.entries.len(), 1500);
+        assert!(!listing.truncated);
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..1100 {
+            std::fs::create_dir(root.path().join(format!("dir{index:04}"))).unwrap();
+        }
+        let native = native_listing(root.path().into()).unwrap();
+        assert_eq!(native.entries.len(), 1100);
+        assert!(!native.truncated);
     }
     #[test]
     fn rejects_relative_and_control_paths() {

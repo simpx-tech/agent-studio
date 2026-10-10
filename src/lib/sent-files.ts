@@ -8,12 +8,12 @@ import {
 /** Files one call showed, kept as metadata; their bytes live on the computer that ran it. */
 export const sentFileSchema = z.object({
   /** This file's place among the call's images, or among its models. */
-  index: z.number().int().nonnegative().max(64),
-  name: z.string().min(1).max(120),
+  index: z.number().int().nonnegative(),
+  name: z.string().min(1),
   mediaType: z.enum([...toolOutputImageTypes, ...toolOutputModelTypes]),
   bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  width: z.number().int().positive().max(100_000).optional(),
-  height: z.number().int().positive().max(100_000).optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
 });
 export type SentFile = z.infer<typeof sentFileSchema>;
 /** A 3D model opens in the reply's viewer; every other shown file is an image. */
@@ -85,21 +85,18 @@ export const sentFilesSchema = z.object({
   id: z
     .string()
     .min(1)
-    .max(80)
     .regex(/^[a-zA-Z0-9_-]+$/),
   revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   runId: z.string().uuid(),
-  toolId: z.string().min(1).max(240),
+  toolId: z.string().min(1),
   caption: z
     .string()
     .min(1)
-    .max(300)
     .refine((s) => !!s.trim() && !/[\u0000-\u001f\u007f]/.test(s))
     .optional(),
   files: z
     .array(sentFileSchema)
     .min(1)
-    .max(8)
     // Images and models are numbered within their own kind, so both start at zero.
     .refine(
       (files) =>
@@ -111,7 +108,6 @@ export type SentFiles = z.infer<typeof sentFilesSchema>;
 
 export const sentFileGroupsSchema = z
   .array(sentFilesSchema)
-  .max(12)
   .refine((groups) => new Set(groups.map((g) => g.id)).size === groups.length);
 
 export function mergeSentFiles(left: SentFiles[] = [], right: SentFiles[] = []) {

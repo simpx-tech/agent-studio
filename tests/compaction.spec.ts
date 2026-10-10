@@ -87,16 +87,17 @@ test('Claude sizing and slash compaction preserve arguments, while unsupported a
   await page.getByRole('button', { name: /Show context usage details/ }).click();
   await page.getByRole('combobox', { name: 'Claude auto-compaction window' }).click();
   await page.getByRole('option', { name: 'Custom size…', exact: true }).click();
-  await page.getByLabel('Auto-compaction tokens').fill('99999');
+  await page.getByLabel('Auto-compaction tokens').fill('0');
   await expect(page.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
-  await page.getByLabel('Auto-compaction tokens').fill('150000');
+  // Any positive size.
+  await page.getByLabel('Auto-compaction tokens').fill('99999');
   await page.getByRole('button', { name: 'Apply', exact: true }).click();
   await page.getByRole('button', { name: 'Close usage details' }).click();
   await input.fill('/compact Preserve the lighthouse code');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.compact).toBe(true);
-  expect(request.agent.autoCompactTokens).toBe(150000);
+  expect(request.agent.autoCompactTokens).toBe(99999);
   expect(request.messages.at(-1).text).toBe('/compact Preserve the lighthouse code');
   await input.fill('/compact');
   await page.getByRole('button', { name: 'Queue message', exact: true }).click();

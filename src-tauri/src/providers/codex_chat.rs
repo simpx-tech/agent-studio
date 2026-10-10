@@ -14,9 +14,9 @@ fn plan_tool() -> Value {
     json!({"type":"function","name":"studio_update_plan","deferLoading":false,
         "description":"Update the plan and progress panel for this conversation. For multi-step work, report the complete ordered plan before starting and update statuses as work progresses. Mark only finished steps completed. This tool only displays progress; it does not execute work.",
         "inputSchema":{"type":"object","properties":{
-            "explanation":{"type":"string","maxLength":2000},
-            "plan":{"type":"array","maxItems":64,"items":{"type":"object","properties":{
-                "step":{"type":"string","minLength":1,"maxLength":1000},
+            "explanation":{"type":"string"},
+            "plan":{"type":"array","items":{"type":"object","properties":{
+                "step":{"type":"string","minLength":1},
                 "status":{"type":"string","enum":["pending","inProgress","completed"]}
             },"required":["step","status"],"additionalProperties":false}}
         },"required":["plan"],"additionalProperties":false}})
@@ -34,22 +34,18 @@ fn plan_response(
     let valid = !root.is_empty()
         && params["threadId"] == root
         && params["namespace"].is_null()
-        && args.to_string().len() <= 128_000
         && args["plan"].as_array().is_some_and(|steps| {
-            steps.len() <= 64
-                && steps.iter().all(|s| {
-                    s["step"].as_str().is_some_and(|title| {
-                        !title.trim().is_empty() && title.chars().count() <= 1000
-                    }) && matches!(
+            steps.iter().all(|s| {
+                s["step"]
+                    .as_str()
+                    .is_some_and(|title| !title.trim().is_empty())
+                    && matches!(
                         s["status"].as_str(),
                         Some("pending" | "inProgress" | "completed")
                     )
-                })
+            })
         })
-        && (args.get("explanation").is_none()
-            || args["explanation"]
-                .as_str()
-                .is_some_and(|s| s.chars().count() <= 2000));
+        && (args.get("explanation").is_none() || args["explanation"].is_string());
     let events = if valid {
         // Normalize the actual model tool call through the same revisioned plan decoder.
         let mut update = args.clone();
@@ -59,7 +55,7 @@ fn plan_response(
         vec![]
     };
     Some((
-        json!({"id":value["id"],"result":{"success":valid,"contentItems":[{"type":"inputText","text":if valid {"Plan updated."} else {"Plan rejected. Report at most 64 named steps with pending, inProgress, or completed status in the parent conversation."}}]}}),
+        json!({"id":value["id"],"result":{"success":valid,"contentItems":[{"type":"inputText","text":if valid {"Plan updated."} else {"Plan rejected. Report named steps with pending, inProgress, or completed status in the parent conversation."}}]}}),
         events,
     ))
 }
@@ -229,22 +225,23 @@ async fn start_turn(
 }
 
 // After initialization (and signing in with a borrowed login): set this run's skill roots, then
-// read the defaults it lacks or open its thread.
+// read the defaults it lacks or open its thread. A stop while Codex has not answered leaves the
+// thread unopened, and the run loop ends the reply as stopped.
 async fn prepare_thread(
     process: &mut Process,
     pending: &mut HashMap<u64, Kind>,
     request: &RunRequest,
     resolve_defaults: bool,
     config_cwd: Option<&str>,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let runtime = crate::plugins::for_run(request);
     if !runtime.skill_roots.is_empty() {
-        crate::plugins::rpc(
-            process,
-            "skills/extraRoots/set",
-            json!({"extraRoots":runtime.skill_roots}),
-        )
-        .await?;
+        let roots = json!({"extraRoots":runtime.skill_roots});
+        tokio::select! {
+            result = crate::plugins::rpc(process, "skills/extraRoots/set", roots) => result?,
+            _ = cancel.cancelled() => return Ok(()),
+        };
     }
     if resolve_defaults {
         send(
@@ -282,7 +279,6 @@ pub async fn run(
         && effective.native_session.as_ref().is_some_and(|s| s.resumed)
         && (effective.agent.model.is_empty() || effective.agent.reasoning.is_empty());
     let request = &mut effective;
-    let mut model_pages = 0;
     let mut pending: HashMap<u64, Kind> = HashMap::new();
     let mut steering = HashMap::new();
     let mut decoder = Decoder::default();
@@ -301,10 +297,8 @@ pub async fn run(
     } else {
         send(process, &mut pending, Kind::Init, "initialize", json!({"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await.map_err(|_| "Could not initialize Codex")?;
     }
-    // Bound startup and cancellation only; an active turn may run or wait for
-    // the user for as long as needed.
-    let initialization_deadline = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(initialization_deadline);
+    // Bound cancellation only; startup and an active turn may run or wait for the user for as
+    // long as needed.
     let cancellation_deadline = tokio::time::sleep(INTERRUPT_GRACE);
     tokio::pin!(cancellation_deadline);
     let mut cancelling = false;
@@ -321,8 +315,8 @@ pub async fn run(
         &request.run_id,
         process.exe.wsl.as_ref().map(|w| w.distribution.clone()),
         channel,
+        cancel.clone(),
     );
-    let output_limit = request.output_line_limit();
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -348,10 +342,6 @@ pub async fn run(
                 }
                 cancellation_deadline.as_mut().reset(tokio::time::Instant::now() + INTERRUPT_GRACE);
             },
-            _ = &mut initialization_deadline, if !cancelling && turn.is_empty() => {
-                process.healthy = false;
-                return Err("Codex did not initialize the conversation within two minutes. Check its CLI and configured integrations.".into());
-            }
             _ = &mut cancellation_deadline, if cancelling => {
                 // The interrupt was never confirmed; the process state is unknown.
                 process.healthy = false;
@@ -382,7 +372,6 @@ pub async fn run(
             line = process.lines.recv() => {
                 let Some(line) = line else { process.healthy = false; return Err("Codex exited before confirming the reply. Check its login and CLI version.".into()); };
                 let Line::Out(line) = line else { continue; };
-                if line.len() > output_limit { process.healthy = false; return Err("Provider output exceeded the message limit".into()); }
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue; };
                 if value["method"] == "skills/changed" && value.get("id").is_none() {
                     if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::SkillsChanged); }
@@ -420,10 +409,10 @@ pub async fn run(
                                 let login = crate::lending::codex_login(&lender, false).await.inspect_err(|_| process.healthy = false)?;
                                 send(process, &mut pending, Kind::Login, "account/login/start", login).await?;
                             } else {
-                                prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd).await?;
+                                prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd, &cancel).await?;
                             }
                         }
-                        Kind::Login => prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd).await?,
+                        Kind::Login => prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd, &cancel).await?,
                         Kind::Config => {
                             super::defaults::codex_config(request, &value["result"]["config"]);
                             if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
@@ -433,10 +422,9 @@ pub async fn run(
                             }
                         }
                         Kind::Models => {
-                            model_pages += 1;
                             if super::defaults::codex_models(request, value["result"]["data"].as_array().ok_or("Codex did not report model defaults")?) {
                                 send(process, &mut pending, Kind::Thread, thread_method(request), start_params(request)).await?;
-                            } else if let Some(cursor) = value["result"]["nextCursor"].as_str().filter(|_| model_pages < 10) {
+                            } else if let Some(cursor) = value["result"]["nextCursor"].as_str() {
                                 send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true,"cursor":cursor})).await?;
                             } else {
                                 process.healthy = false;
@@ -512,9 +500,7 @@ pub async fn run(
                     continue;
                 }
                 if thread.is_empty() {
-                    if startup_hooks.len() < 400 {
-                        if let Some(hook) = crate::protocol::hooks::startup_hook(&value) { startup_hooks.push(hook); }
-                    }
+                    if let Some(hook) = crate::protocol::hooks::startup_hook(&value) { startup_hooks.push(hook); }
                     continue;
                 }
                 if value["method"] == "turn/started" && value["params"]["threadId"] == thread {
@@ -582,7 +568,6 @@ pub async fn run(
                         process.stdin.write_all(format!("{}\n", json!({"id":usage_id,"method":"account/usage/read","params":{"threadId":thread}})).as_bytes()).await.ok()?;
                         while let Some(line) = process.lines.recv().await {
                             let Line::Out(line) = line else { continue; };
-                            if line.len() > 2_000_000 { return None; }
                             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue; };
                             if v["id"] == usage_id {
                                 let usage = &v["result"]["threadUsage"];
@@ -803,8 +788,17 @@ mod tests {
         assert!(
             matches!(&plan_response(&value, "root", &mut decoder).unwrap().1[0], crate::protocol::RunEvent::Plan{plan} if plan.revision == 2)
         );
+        // Any number of steps of any length, past the 64 steps earlier releases accepted.
+        let long = "Check ".repeat(500);
         value["params"]["arguments"]["plan"] =
-            json!(vec![json!({"step":"Check","status":"pending"}); 65]);
+            json!(vec![json!({"step":long,"status":"pending"}); 65]);
+        value["params"]["arguments"]["explanation"] = json!("Why ".repeat(1000));
+        let (response, events) = plan_response(&value, "root", &mut decoder).unwrap();
+        assert_eq!(response["result"]["success"], true);
+        assert!(
+            matches!(&events[0], crate::protocol::RunEvent::Plan{plan} if plan.steps.len() == 65 && plan.steps[64].title == long)
+        );
+        value["params"]["arguments"]["explanation"] = json!(7);
         assert_eq!(
             plan_response(&value, "root", &mut decoder).unwrap().0["result"]["success"],
             false

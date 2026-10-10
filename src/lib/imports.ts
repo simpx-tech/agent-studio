@@ -24,7 +24,7 @@ export const importProviders = ['claude', 'codex'] as const;
 export type ImportProvider = (typeof importProviders)[number];
 
 export const importSourceSchema = z.object({
-  id: z.string().max(200),
+  id: z.string(),
   provider: z.enum(importProviders),
   environmentId: z.string().uuid(),
   connectionId: z.string().uuid().optional(),
@@ -38,25 +38,25 @@ export const importableChatSchema = z.object({
   key: z.string().regex(/^[0-9a-f]{32}$/),
   // Shared by copies of one session in several stores.
   session: z.string().regex(/^[0-9a-f]{32}$/),
-  title: z.string().max(400),
-  preview: z.string().max(2000).optional(),
-  path: z.string().max(4096),
-  createdAt: z.string().max(64).optional(),
-  updatedAt: z.string().max(64).optional(),
-  model: z.string().max(200).optional(),
+  title: z.string(),
+  preview: z.string().optional(),
+  path: z.string(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  model: z.string().optional(),
   origin: z.enum(importOrigins),
   archived: z.boolean().optional(),
   bytes: z.number().int().nonnegative().optional(),
   location: locationSchema.optional(),
   connectionId: z.string().uuid().optional(),
-  unavailable: z.string().max(5000).optional(),
+  unavailable: z.string().optional(),
   conversationId: z.string().uuid().optional(),
   imported: z.boolean().optional(),
 });
 export type ImportableChat = z.infer<typeof importableChatSchema>;
 
 export const sourceChatsSchema = z.object({
-  source: z.string().max(200),
+  source: z.string(),
   chats: z.array(importableChatSchema),
   truncated: z.boolean().optional(),
 });
@@ -69,24 +69,24 @@ const importedMessageSchema = z.object({
   runId: z.string().uuid().optional(),
   status: z.enum(['complete', 'error', 'cancelled']),
   error: z.string().optional(),
-  createdAt: z.string().max(64),
+  createdAt: z.string(),
   durationMs: z.number().nonnegative().optional(),
-  model: z.string().max(100).optional(),
+  model: z.string().optional(),
   reasoning: reasoningSchema.optional(),
   // Each event is checked where it is applied, as a live reply's are.
   events: z.array(z.object({ kind: z.string() }).passthrough()).optional(),
 });
 export const importedChatSchema = z.object({
-  title: z.string().max(400),
+  title: z.string(),
   provider: z.enum(importProviders),
-  model: z.string().max(100),
+  model: z.string(),
   reasoning: reasoningSchema,
   location: locationSchema.optional(),
   connectionId: z.string().uuid().optional(),
-  createdAt: z.string().max(64),
-  updatedAt: z.string().max(64),
+  createdAt: z.string(),
+  updatedAt: z.string(),
   messages: z.array(importedMessageSchema),
-  notes: z.array(z.string().max(1000)).optional(),
+  notes: z.array(z.string()).optional(),
 });
 export type ImportedChat = z.infer<typeof importedChatSchema>;
 
@@ -119,10 +119,8 @@ function iso(time: string): string {
   return new Date(Number.isFinite(ms) ? ms : Date.now()).toISOString();
 }
 
-function shortTitle(title: string): string {
-  const text = title.replace(/\s+/g, ' ').trim() || 'Imported chat';
-  if (text.length <= 100) return text;
-  return text.slice(0, 99).replace(/[\uD800-\uDBFF]$/, '') + '…';
+function oneLineTitle(title: string): string {
+  return title.replace(/\s+/g, ' ').trim() || 'Imported chat';
 }
 
 /**
@@ -173,7 +171,7 @@ export function importedConversation(chat: ImportedChat, id: string, fleet: Flee
   });
   return conversationSchema.parse({
     id,
-    title: shortTitle(chat.title),
+    title: oneLineTitle(chat.title),
     titleStatus: 'generated',
     settings,
     ...(chat.location ? { location: chat.location } : {}),

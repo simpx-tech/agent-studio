@@ -8,7 +8,7 @@ import type { ContentBlock, Message } from './domain';
  */
 export const usageLimitSchema = z.object({
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  text: z.string().min(1).max(1000),
+  text: z.string().min(1),
 });
 export type UsageLimit = z.infer<typeof usageLimitSchema>;
 

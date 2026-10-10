@@ -212,7 +212,6 @@
                 <input
                   aria-label={field.title}
                   type={field.format === 'email' ? 'email' : 'text'}
-                  maxlength={4000}
                   value={String(values.get(field.key) ?? '')}
                   oninput={(e) => values.set(field.key, e.currentTarget.value)}
                   autocomplete="off"

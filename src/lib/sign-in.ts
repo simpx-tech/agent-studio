@@ -6,9 +6,9 @@ import { z } from 'zod';
  * pasted code stay on this computer, in memory: never saved, synced or relayed.
  */
 export const signInViewSchema = z.object({
-  id: z.string().min(1).max(80),
+  id: z.string().min(1),
   provider: z.enum(['claude', 'codex', 'gemini']),
-  connectionId: z.string().max(80).optional(),
+  connectionId: z.string().optional(),
   phase: z.enum(['waiting', 'connected', 'failed', 'cancelled', 'expired']),
   /** The sign-in page, to open again while the sign-in waits. */
   url: z.string().max(8192).optional(),
@@ -17,7 +17,7 @@ export const signInViewSchema = z.object({
   /** Whether the page that opened always ends with that code (Claude in WSL). */
   codeExpected: z.boolean().optional(),
   /** What to do now, or why the sign-in ended. */
-  message: z.string().max(600),
+  message: z.string(),
 });
 export type SignInView = z.infer<typeof signInViewSchema>;
 

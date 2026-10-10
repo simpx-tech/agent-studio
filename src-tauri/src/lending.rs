@@ -58,10 +58,8 @@ pub(crate) fn codex_params(status: &Value) -> Option<(Value, i64)> {
     let auth = &claims["https://api.openai.com/auth"];
     let account = auth["chatgpt_account_id"]
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 200)?;
-    let plan = auth["chatgpt_plan_type"]
-        .as_str()
-        .filter(|s| s.len() <= 100);
+        .filter(|s| !s.is_empty())?;
+    let plan = auth["chatgpt_plan_type"].as_str();
     let expires_at = claims["exp"].as_i64()?.checked_mul(1000)?;
     Some((
         json!({

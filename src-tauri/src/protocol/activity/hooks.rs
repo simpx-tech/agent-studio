@@ -9,18 +9,15 @@ impl ToolDecoder {
         {
             return false;
         }
-        let Some(id) = identifier(&v["hook_id"], 160) else {
+        let Some(id) = identifier(&v["hook_id"]) else {
             return true;
         };
-        let parent = identifier(&v["parent_tool_use_id"], 160);
+        let parent = identifier(&v["parent_tool_use_id"]);
         if !v["parent_tool_use_id"].is_null() && parent.is_none() {
             return true;
         }
         // Parent tool identity prevents a child's hook from revising the parent's hook.
         let id = format!("claude:hook:{}:{id}", parent.unwrap_or("root"));
-        if id.len() > 240 {
-            return true;
-        }
         let previous = self.existing(&id);
         if previous.as_ref().is_some_and(|t| t.status != "running") && subtype != "hook_response" {
             return true;
@@ -29,7 +26,7 @@ impl ToolDecoder {
         let mut tool = previous.unwrap_or_else(|| fresh(id, "hook", &format!("{event} hook")));
         tool.parent_id = parent.map(String::from);
         fact(&mut tool, "Event", event);
-        if let Some(name) = identifier(&v["hook_name"], 200) {
+        if let Some(name) = identifier(&v["hook_name"]) {
             fact(&mut tool, "Hook", name);
         }
         fact(
@@ -75,16 +72,13 @@ impl ToolDecoder {
             return false;
         }
         let value = if prompt { &p["item"] } else { &p["run"] };
-        let Some(id) = identifier(&value["id"], 160) else {
+        let Some(id) = identifier(&value["id"]) else {
             return true;
         };
         let id = format!(
             "codex:{}:{thread}:{id}",
             if prompt { "hook-prompt" } else { "hook" }
         );
-        if id.len() > 240 {
-            return true;
-        }
         let previous = self.existing(&id);
         if previous.as_ref().is_some_and(|t| t.status != "running") && method.ends_with("/started")
         {
@@ -106,8 +100,7 @@ impl ToolDecoder {
                 fact(&mut tool, "Context fragments", fragments.len());
                 let ids: Vec<_> = fragments
                     .iter()
-                    .take(12)
-                    .filter_map(|f| identifier(&f["hookRunId"], 160))
+                    .filter_map(|f| identifier(&f["hookRunId"]))
                     .collect();
                 if !ids.is_empty() {
                     fact(&mut tool, "Hook runs", ids.join("\n"));
@@ -127,7 +120,7 @@ impl ToolDecoder {
                 }
             }
             .into();
-            tool.path = identifier(&value["sourcePath"], 4096).map(String::from);
+            tool.path = identifier(&value["sourcePath"]).map(String::from);
             fact(&mut tool, "Event", event);
             fact(&mut tool, "Handler", handler_type(&value["handlerType"]));
             fact(&mut tool, "Source", source_label(&value["source"]));
@@ -207,12 +200,10 @@ mod tests {
         let child = d.decode("claude", &v);
         assert_ne!(child[0].id, done[0].id);
         assert_eq!(child[0].parent_id.as_deref(), Some("child"));
-        for bad in [
-            json!(""),
-            json!("x".repeat(161)),
-            json!("bad\nidentity"),
-            json!(22),
-        ] {
+        // An identity of any length is one, past the 160 characters earlier releases took.
+        v["hook_id"] = json!("x".repeat(500));
+        assert_eq!(d.decode("claude", &v).len(), 1);
+        for bad in [json!(""), json!("bad\nidentity"), json!(22)] {
             v["hook_id"] = bad;
             assert!(d.decode("claude", &v).is_empty());
         }

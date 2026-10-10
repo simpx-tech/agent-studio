@@ -140,7 +140,7 @@ test('input insertion keeps a History chat archived until the user explicitly se
   await expect(page.locator('.message.user').last()).toContainText('Explain the next step');
 });
 
-test('validation, save failure recovery and combined length limits keep user input intact', async ({
+test('validation, save failure recovery and inputs of any length keep user input intact', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -148,10 +148,12 @@ test('validation, save failure recovery and combined length limits keep user inp
   await createTemplate(page, 'Small prompt', 'Use {{constructor}}');
   await page.getByRole('button', { name: 'Use Small prompt' }).click();
   await expect(page.getByLabel('constructor', { exact: true })).toHaveValue('');
+  // A value of any length goes into the message whole.
   await page.getByLabel('constructor', { exact: true }).fill('x'.repeat(30000));
-  await expect(page.getByRole('alert')).toContainText('30,000');
-  await expect(page.getByRole('button', { name: 'Insert into message' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('dialog').getByRole('alert')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Insert into message' }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(`Use ${'x'.repeat(30000)}`);
+  await page.getByRole('button', { name: 'Templates', exact: true }).click();
   await page.getByRole('button', { name: 'Edit Small prompt' }).click();
   await page.getByLabel('Template text').fill('Broken {{field');
   await expect(page.getByRole('alert')).toContainText('Close each field');

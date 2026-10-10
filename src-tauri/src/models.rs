@@ -1,7 +1,11 @@
 use crate::providers::resolve;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+    process::Stdio,
+};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// Claude Code's documented aliases. The selected CLI decides which model each one means.
@@ -153,13 +157,9 @@ async fn claude_aliases(directory: &Path) -> Option<BTreeMap<String, String>> {
         .spawn()
         .ok()?;
     let result = match (child.stdin.take(), child.stdout.take()) {
-        (Some(mut input), Some(output)) => tokio::time::timeout(
-            Duration::from_secs(20),
-            resolve_aliases(&mut input, BufReader::new(output)),
-        )
-        .await
-        .ok()
-        .flatten(),
+        (Some(mut input), Some(output)) => {
+            resolve_aliases(&mut input, BufReader::new(output)).await
+        }
         _ => None,
     };
     exe.kill(&mut child).await;
@@ -198,9 +198,6 @@ async fn resolve_aliases(
         input.write_all(format!("{line}\n").as_bytes()).await.ok()?;
         let response = loop {
             let line = lines.next_line().await.ok()??;
-            if line.len() > 2_000_000 {
-                return None;
-            }
             let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -218,7 +215,7 @@ async fn resolve_aliases(
             Ask::Read if answered => {
                 if let Some(model) = response["response"]["model"]
                     .as_str()
-                    .filter(|m| !m.is_empty() && m.len() <= 200 && !m.contains(char::is_control))
+                    .filter(|m| !m.is_empty() && !m.contains(char::is_control))
                 {
                     resolved.insert(alias.to_string(), model.to_string());
                 }
@@ -290,9 +287,6 @@ fn codex_contexts() -> BTreeMap<String, u64> {
                     })
             })?;
         let path = root.join("models_cache.json");
-        if std::fs::metadata(&path).ok()?.len() > 10_000_000 {
-            return None;
-        }
         let data: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
         Some(
             data["models"]
@@ -338,10 +332,8 @@ async fn codex_models() -> Option<Vec<ModelInfo>> {
             .await
             .ok()?;
         let mut data = vec![];
+        let mut cursors = HashSet::new();
         while let Some(line) = lines.next_line().await.ok()? {
-            if line.len() > 2_000_000 {
-                return None;
-            }
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -363,8 +355,9 @@ async fn codex_models() -> Option<Vec<ModelInfo>> {
                 input.write_all(format!("{list}\n").as_bytes()).await.ok()?;
             } else if value["id"] == 2 {
                 data.extend(value["result"]["data"].as_array()?.iter().cloned());
+                // Every page; a cursor that repeats would never end.
                 if let Some(cursor) = value["result"]["nextCursor"].as_str() {
-                    if data.len() > 500 {
+                    if !cursors.insert(cursor.to_string()) {
                         return None;
                     }
                     let request = json!({"id":2,"method":"model/list","params":{"cursor":cursor,"limit":100,"includeHidden":false}});
@@ -379,10 +372,7 @@ async fn codex_models() -> Option<Vec<ModelInfo>> {
         }
         None
     };
-    let result = tokio::time::timeout(Duration::from_secs(20), query)
-        .await
-        .ok()
-        .flatten();
+    let result = query.await;
     exe.kill(&mut child).await;
     result
 }
@@ -465,18 +455,15 @@ async fn gemini_models() -> Option<Vec<ModelInfo>> {
     crate::providers::require_gemini_login(&exe, &tokio_util::sync::CancellationToken::new())
         .await
         .ok()?;
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        exe.command()
-            .arg("models")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let output = exe
+        .command()
+        .arg("models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }

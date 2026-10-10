@@ -47,7 +47,6 @@ impl Default for LiveUsage {
 fn identifier(v: &Value) -> Option<String> {
     let s = v.as_str()?;
     (!s.is_empty()
-        && s.len() <= 100
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c)))
     .then(|| s.into())
@@ -103,7 +102,7 @@ fn merge_window(windows: &mut Vec<LimitWindow>, mut next: LimitWindow, at: u64) 
             next.model = old.model.clone();
         }
         *old = next;
-    } else if windows.len() < 32 {
+    } else {
         windows.push(next);
     }
 }
@@ -143,9 +142,6 @@ impl LiveUsage {
             return None;
         }
         let mut updates = self.updates.lock().ok()?;
-        if !updates.contains_key(connection) && updates.len() >= 100 {
-            return None;
-        }
         let update = updates.entry(connection.into()).or_insert_with(|| Update {
             connection_id: connection.into(),
             epoch: self.epoch.clone(),
@@ -247,10 +243,9 @@ pub fn observer(app: &tauri::AppHandle, provider: &str) -> Option<crate::pool::O
     let app = app.clone();
     let provider = provider.to_owned();
     Some(std::sync::Arc::new(move |line| {
-        if line.len() > 64_000
-            || !(line.contains("rate_limit_event")
-                || line.contains("account/rateLimits/updated")
-                || line.contains("account/updated"))
+        if !(line.contains("rate_limit_event")
+            || line.contains("account/rateLimits/updated")
+            || line.contains("account/updated"))
         {
             return;
         }
@@ -292,11 +287,8 @@ pub fn workspace_messages(value: &Value) -> Value {
         .into_iter()
         .flatten()
         .filter(|m| enabled && m["archivedAt"].is_null())
-        .take(12)
         .filter_map(|m| {
-            let id = m["messageId"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 200)?;
+            let id = m["messageId"].as_str().filter(|s| !s.is_empty())?;
             let body = m["messageBody"].as_str().filter(|s| !s.is_empty())?;
             if !seen.insert(id) {
                 return None;
@@ -306,7 +298,6 @@ pub fn workspace_messages(value: &Value) -> Value {
                 message_body: body
                     .chars()
                     .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-                    .take(2000)
                     .collect(),
             })
         })
@@ -358,9 +349,6 @@ pub async fn manage(app: &tauri::AppHandle, action: Action) -> Result<Value, Str
             }
             let retry = attempts.contains_key(&key);
             if !retry {
-                if attempts.len() >= 64 {
-                    return Err("Reset attempt limit reached for this app session.".into());
-                }
                 attempts.insert(key.clone(), None);
             }
             let sent = std::sync::atomic::AtomicBool::new(retry);
@@ -419,6 +407,20 @@ mod tests {
         assert_eq!(u.plan_type.as_deref(), Some("pro"));
         assert!(state.update("invalid", "codex", &first, 400).is_none());
         assert!(state.update(CONNECTION, "claude", &first, 400).is_none());
+        // Every reported window, past the 32 earlier releases kept.
+        for index in 0..40 {
+            let bucket = json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":format!("model{index}"),"primary":{"usedPercent":1,"windowDurationMins":300}}}});
+            state.update(CONNECTION, "codex", &bucket, 500).unwrap();
+        }
+        assert_eq!(
+            state
+                .update(CONNECTION, "codex", &empty, 600)
+                .unwrap()
+                .snapshot
+                .windows
+                .len(),
+            42
+        );
     }
     #[test]
     fn account_changes_invalidate_prior_readings_and_claude_status_is_not_a_percentage() {
@@ -447,7 +449,7 @@ mod tests {
         assert!(state.update(&claude, "claude", &event, 300).is_none());
     }
     #[test]
-    fn redemption_requires_confirmation_and_core_eligibility_and_messages_are_bounded() {
+    fn redemption_requires_confirmation_and_core_eligibility_and_messages_stay_whole() {
         assert!(serde_json::from_value::<Action>(json!({"action":"consumeResetCredit","confirmed":true,"idempotencyKey":"key","command":"no"})).is_err());
         let mut limits = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":20,"windowDurationMins":10080}},"spark":{"primary":{"usedPercent":100,"windowDurationMins":300}}},"rateLimitResetCredits":{"availableCount":2}});
         assert!(!reset_eligible(&limits));
@@ -459,10 +461,17 @@ mod tests {
             &json!({"featureEnabled":true,"messages":[{"messageId":"one","messageBody":"<script>inert</script>","secret":"private"},{"messageId":"old","messageBody":"hidden","archivedAt":1},{"messageId":"long","messageBody":"x".repeat(5000)}]}),
         );
         assert_eq!(output["messages"].as_array().unwrap().len(), 2);
+        // Whole, past the 2,000 characters earlier releases kept.
         assert_eq!(
             output["messages"][1]["messageBody"].as_str().unwrap().len(),
-            2000
+            5000
         );
+        // Every message, past the 12 earlier releases showed.
+        let messages: Vec<_> = (0..15)
+            .map(|index| json!({"messageId":format!("m{index}"),"messageBody":"notice"}))
+            .collect();
+        let output = workspace_messages(&json!({"featureEnabled":true,"messages":messages}));
+        assert_eq!(output["messages"].as_array().unwrap().len(), 15);
         assert!(!output.to_string().contains("private"));
         assert_eq!(
             workspace_messages(

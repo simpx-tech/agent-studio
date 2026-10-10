@@ -209,19 +209,20 @@ describe('rewinding saved conversations', () => {
       mentionConnectionId: connectionId,
     };
     const draft = { ...noDraft(), text: 'Keep my draft\n', images: [image('draft.png')] };
-    const same = returnedDraft(draft, message, { connectionId, mentionScope: 'scope' }, 2);
+    const same = returnedDraft(draft, message, { connectionId, mentionScope: 'scope' });
     expect(same.draft.text).toBe('Second question\n\nKeep my draft');
-    expect(same.draft.images.map((i) => i.name)).toEqual(['returned.png', 'second.png']);
-    expect(same.droppedImages).toBe(1);
+    expect(same.draft.images.map((i) => i.name)).toEqual([
+      'returned.png',
+      'second.png',
+      'draft.png',
+    ]);
     expect(same.draft.mentions).toEqual([mention]);
     expect(same.draft.staleMentions).toEqual([]);
     // Under another account they are chosen again, like mentions left from another scope.
-    const other = returnedDraft(
-      noDraft(),
-      message,
-      { connectionId: crypto.randomUUID(), mentionScope: 'scope' },
-      16,
-    );
+    const other = returnedDraft(noDraft(), message, {
+      connectionId: crypto.randomUUID(),
+      mentionScope: 'scope',
+    });
     expect(other.draft.text).toBe('Second question');
     expect(other.draft.mentions).toEqual([]);
     expect(other.draft.staleMentions).toEqual([mention.token]);
@@ -229,7 +230,6 @@ describe('rewinding saved conversations', () => {
       { ...noDraft(), text: mention.token, mentions: [mention], mentionScope: 'earlier' },
       { ...message, mentions: undefined },
       { connectionId, mentionScope: 'scope' },
-      16,
     );
     expect(moved.draft.mentions).toEqual([]);
     expect(moved.draft.staleMentions).toEqual([mention.token]);

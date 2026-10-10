@@ -3,7 +3,6 @@ import {
   appSessionsSchema,
   dayLabel,
   lastUsed,
-  maxAppSessions,
   mergeAppSessions,
   recordAppSession,
   sessionAt,
@@ -55,14 +54,14 @@ describe('app sessions', () => {
     // A page reload keeps the session of its app process.
     expect(recordAppSession(sessions, started, chats)).toBe(sessions);
     expect(recordAppSession(undefined, started, [])).toEqual([started]);
-    // The newest starts are kept, in the same order on every device.
-    const many = Array.from({ length: maxAppSessions }, (_, i) =>
+    // Every start with chats is kept, however many, in the same order on every device.
+    const many = Array.from({ length: 1500 }, (_, i) =>
       session(new Date(Date.parse('2026-01-01') + i * 3_600_000).toISOString()),
     );
     const everyUsed = many.map((s) => chat(s.startedAt, s.startedAt));
     const kept = recordAppSession([...many].reverse(), started, everyUsed);
-    expect(kept).toHaveLength(maxAppSessions);
-    expect(kept[0]).toBe(many[1]);
+    expect(kept).toHaveLength(many.length + 1);
+    expect(kept[0]).toBe(many[0]);
     expect(kept.at(-1)).toBe(started);
     expect(appSessionsSchema.safeParse(kept).success).toBe(true);
     expect(appSessionsSchema.safeParse([...kept, started]).success).toBe(false);

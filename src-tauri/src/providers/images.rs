@@ -1,12 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
-/// One message becomes one provider request and one preview each. A conversation has no image
-/// budget: messages keep references to the image store (src-tauri/src/chat_images.rs), so its
-/// images no longer set the cost of a reply. A provider that accepts less than this reports its
-/// own limit.
-pub const MAX_IMAGE_BYTES: usize = crate::chat_images::MAX_IMAGE_BYTES;
-pub const MAX_IMAGES_PER_MESSAGE: usize = 16;
+// Neither a message nor a conversation has an image budget: messages keep references to the
+// image store (src-tauri/src/chat_images.rs), and a provider that accepts fewer or smaller images
+// reports its own limit.
 
 /// An image of a message: a reference to the image store, or, from an app older than the store,
 /// its bytes inline. The fields serialize in this order, so an inline image fingerprints exactly
@@ -31,7 +28,7 @@ pub struct ChatImage {
 impl ChatImage {
     pub fn validate(&self) -> Result<usize, String> {
         uuid::Uuid::parse_str(&self.id).map_err(|_| "Invalid image id")?;
-        if self.name.is_empty() || self.name.chars().count() > 200 {
+        if self.name.is_empty() {
             return Err("Invalid image name".into());
         }
         let (data, hash) = (self.data.as_deref(), self.hash.as_deref());
@@ -46,17 +43,11 @@ impl ChatImage {
             {
                 return Err("Invalid image reference".into());
             }
-            if bytes > MAX_IMAGE_BYTES {
-                return Err("Images must be 16 MB or smaller".into());
-            }
             return Ok(bytes);
         }
         let Some(data) = data.filter(|_| hash.is_none()) else {
             return Err("Invalid image reference".into());
         };
-        if data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-            return Err("Images must be 16 MB or smaller".into());
-        }
         let bytes = STANDARD
             .decode(data)
             .map_err(|_| "Invalid image encoding")?;
@@ -66,8 +57,8 @@ impl ChatImage {
             "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
             _ => false,
         };
-        if !valid || bytes.len() > MAX_IMAGE_BYTES {
-            return Err("Attach a valid PNG, JPEG, or WebP image up to 16 MB".into());
+        if !valid {
+            return Err("Attach a valid PNG, JPEG, or WebP image".into());
         }
         Ok(bytes.len())
     }
@@ -77,12 +68,6 @@ impl ChatImage {
     /// The bytes as base64, which a reply's request holds for the images it sends.
     pub fn base64(&self) -> &str {
         self.data.as_deref().unwrap_or_default()
-    }
-    /// The length of the bytes as base64, for the output a provider may echo.
-    pub fn encoded_len(&self) -> usize {
-        self.bytes.map_or(self.base64().len(), |bytes| {
-            (bytes as usize).div_ceil(3) * 4
-        })
     }
     pub fn label(&self, message: usize, image: usize) -> String {
         format!(
@@ -169,28 +154,30 @@ mod tests {
         bad.messages[0].images[0].media_type = "image/svg+xml".into();
         assert!(bad.validate().is_err());
         bad = r.clone();
-        bad.messages[0].images = vec![r.messages[0].images[0].clone(); MAX_IMAGES_PER_MESSAGE + 1];
-        assert!(bad.validate().unwrap_err().contains("16 images"));
-        bad = r.clone();
-        bad.messages[0].images[0].data = Some(STANDARD.encode(vec![0; MAX_IMAGE_BYTES + 1]));
+        bad.messages[0].images[0].data = Some(STANDARD.encode(vec![0; 64]));
         assert!(bad.validate().is_err());
-        // A conversation has no image budget of its own: every message may carry a full one.
-        let mut bytes = vec![0; MAX_IMAGE_BYTES];
+        // Neither a message nor a conversation has an image budget: any number of images of any
+        // size, past the 16 images of 16 MB earlier releases allowed.
+        let mut many = r.clone();
+        many.messages[0].images = vec![r.messages[0].images[0].clone(); 17];
+        assert!(many.validate().is_ok());
+        let mut bytes = vec![0; 17 * 1024 * 1024];
         bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-        let mut full = r.clone();
-        full.messages[0].images[0].data = Some(STANDARD.encode(bytes));
-        full.messages = vec![full.messages[0].clone(); 5];
-        assert!(full.validate().is_ok());
-        // A reference to the image store names its bytes by hash, within the same bound.
+        let mut large = r.clone();
+        large.messages[0].images[0].data = Some(STANDARD.encode(bytes));
+        assert!(large.validate().is_ok());
+        // A reference to the image store names its bytes by hash, whatever their size.
         let mut stored = r.clone();
         let image = &mut stored.messages[0].images[0];
         (image.data, image.hash, image.bytes) = (None, Some("a".repeat(64)), Some(68));
         assert!(stored.validate().is_ok());
+        stored.messages[0].images[0].bytes = Some(64 * 1024 * 1024 * 1024);
+        assert!(stored.validate().is_ok());
+        stored.messages[0].images[0].bytes = Some(68);
         for (hash, bytes) in [
             ("A".repeat(64), 68),
             ("a".repeat(63), 68),
             ("a".repeat(64), 0),
-            ("a".repeat(64), MAX_IMAGE_BYTES as u64 + 1),
         ] {
             let mut bad = stored.clone();
             let image = &mut bad.messages[0].images[0];

@@ -163,7 +163,7 @@ it('keeps the baseline order, drops what went and appends what arrived', () => {
   ]);
 });
 
-it('splits uploads by size and leaves out a conversation too large to send alone', () => {
+it('splits uploads by size and sends a conversation larger than the budget alone', () => {
   const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => chat(id, id));
   const sizes = new Map([
     ['a', 60],
@@ -171,9 +171,7 @@ it('splits uploads by size and leaves out a conversation too large to send alone
     ['c', 150],
     ['d', 30],
   ]);
-  expect(uploadBatches([a, b, c, d], sizes, 100)).toEqual({
-    batches: [[a], [b, d]],
-    oversized: [c],
-  });
-  expect(uploadBatches([], sizes, 100)).toEqual({ batches: [], oversized: [] });
+  expect(uploadBatches([a, b, c, d], sizes, 100)).toEqual([[a], [b], [c], [d]]);
+  expect(uploadBatches([a, d, b], sizes, 100)).toEqual([[a, d], [b]]);
+  expect(uploadBatches([], sizes, 100)).toEqual([]);
 });

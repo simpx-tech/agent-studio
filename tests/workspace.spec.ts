@@ -1,7 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
 import { expectVisibleQuotaComparison } from './quota-helper';
-import { maxImageBytes, maxImagesPerMessage } from '../src/lib/images';
 import { mockDesktop } from './desktop-helper';
 import { createHash } from 'node:crypto';
 
@@ -199,7 +198,7 @@ test('pasting and dropping images preserves drafts and supports removal at compa
   expect(request.messages.at(-1).text).toBe('And what shape is it?');
 });
 
-test('invalid and excess images stay out of the draft and Gemini attachment input is explicit', async ({
+test('invalid images stay out of the draft, any number attach, and Gemini attachment input is explicit', async ({
   page,
 }) => {
   await mockDesktop(page);
@@ -212,14 +211,6 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
       { name: 'bad.png', mimeType: 'image/png', buffer: Buffer.from('not an image') },
       'not a valid image',
     ],
-    [
-      {
-        name: 'large.png',
-        mimeType: 'image/png',
-        buffer: Buffer.alloc(maxImageBytes + 1),
-      },
-      '16 MB',
-    ],
   ] as const) {
     await page.getByLabel('Image files').setInputFiles(file);
     await expect(page.getByRole('alert').filter({ hasText: error })).toBeVisible();
@@ -227,13 +218,8 @@ test('invalid and excess images stay out of the draft and Gemini attachment inpu
   const file = await imageFixture(page);
   await page
     .getByLabel('Image files')
-    .setInputFiles(
-      Array.from({ length: maxImagesPerMessage + 1 }, (_, n) => ({ ...file, name: `${n}.png` })),
-    );
-  await expect(
-    page.getByRole('alert').filter({ hasText: `up to ${maxImagesPerMessage}` }),
-  ).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Remove .*\.png$/ })).toHaveCount(0);
+    .setInputFiles(Array.from({ length: 20 }, (_, n) => ({ ...file, name: `${n}.png` })));
+  await expect(page.getByRole('button', { name: /^Remove .*\.png$/ })).toHaveCount(20);
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   await page
     .getByRole('option', { name: /^Gemini/ })

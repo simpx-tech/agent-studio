@@ -27,12 +27,12 @@ describe('window behavior', () => {
     expect(keepsRunning(missing)).toBe(false);
   });
 
-  it('accepts only the reported shape', () => {
+  it('accepts only the reported shape, with a reason of any length', () => {
     expect(windowBehaviorSchema.parse(windows)).toEqual(windows);
     expect(() => windowBehaviorSchema.parse({ ...windows, area: 'dock' })).toThrow();
     expect(() => windowBehaviorSchema.parse({ closeToTray: true, area: 'tray' })).toThrow();
-    expect(() =>
-      windowBehaviorSchema.parse({ ...windows, unavailable: 'x'.repeat(301) }),
-    ).toThrow();
+    expect(() => windowBehaviorSchema.parse({ ...windows, unavailable: 1 })).toThrow();
+    const long = { ...windows, unavailable: 'x'.repeat(5000) };
+    expect(windowBehaviorSchema.parse(long)).toEqual(long);
   });
 });

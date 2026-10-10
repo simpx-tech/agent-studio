@@ -39,11 +39,8 @@ impl Session {
             {
                 continue;
             }
-            if let Some(id) = b["id"].as_str().filter(|s| bounded(s, 240)) {
-                if self.approvals.parents.len() < 32
-                    && b["input"].is_object()
-                    && b["input"].to_string().len() <= 32_000
-                {
+            if let Some(id) = b["id"].as_str().filter(|s| filled(s)) {
+                if b["input"].is_object() {
                     self.approvals.parents.entry(id.into()).or_insert_with(|| {
                         (b["name"].as_str().unwrap().into(), b["input"].clone())
                     });
@@ -74,9 +71,7 @@ impl Session {
         if !active
             || parent.is_none()
             || !value["parent_tool_use_id"].is_null()
-            || !value["request_id"]
-                .as_str()
-                .is_some_and(|s| bounded(s, 240))
+            || !value["request_id"].as_str().is_some_and(filled)
         {
             return invalid("Only a current parent plan-mode request can ask for approval.");
         }
@@ -84,9 +79,9 @@ impl Session {
         self.consumed.insert(id);
         let exit = r["tool_name"] == "ExitPlanMode";
         let text = if exit {
-            match r["input"]["plan"].as_str().filter(|s| bounded(s,24000) && s.len() <= 24000) {
+            match r["input"]["plan"].as_str().filter(|s| filled(s)) {
                 Some(text) => Some(text.to_owned()),
-                None => return invalid("Include the complete proposed plan as text (at most 24 KB). Agent Studio cannot approve a missing or oversized plan or read a plan file path."),
+                None => return invalid("Include the complete proposed plan as text. Agent Studio cannot approve a missing plan or read a plan file path."),
             }
         } else {
             None
@@ -128,19 +123,6 @@ impl Session {
         let Some(run) = runs.get_mut(&self.run_id) else {
             return invalid("This run ended.");
         };
-        let size = serde_json::to_vec(&request).unwrap().len();
-        if size > 32000
-            || run.entries.len() >= 16
-            || run
-                .entries
-                .values()
-                .map(Entry::retained_size)
-                .sum::<usize>()
-                + size
-                > 200000
-        {
-            return invalid("This plan exceeds the reply's approval limit. Use a shorter plan.");
-        }
         run.entries.insert(
             request.id.clone(),
             Entry {
@@ -272,12 +254,11 @@ mod tests {
         }
     }
     #[test]
-    fn child_foreign_inactive_malformed_and_oversized_plans_fail_closed() {
+    fn child_foreign_inactive_and_malformed_plans_fail_closed() {
         for (child, active, input) in [
             (true, true, json!({"plan":"x"})),
             (false, false, json!({"plan":"x"})),
             (false, true, json!({"planFilePath":"do-not-read"})),
-            (false, true, json!({"plan":"x".repeat(24001)})),
         ] {
             let hub = Questions::default();
             let mut s = hub.open("run", None, EventSink::new(|_| Ok(()))).unwrap();
@@ -293,5 +274,12 @@ mod tests {
             response(&c, None, None)["response"]["response"]["behavior"],
             "deny"
         );
+        // A plan of any length asks for approval, past the 24 KB earlier releases showed.
+        let hub = Questions::default();
+        let mut s = hub.open("run", None, EventSink::new(|_| Ok(()))).unwrap();
+        let c = call("ExitPlanMode", json!({"plan":"x".repeat(100_000)}));
+        observed(&mut s, &c, false);
+        assert!(s.claude_plan(&c, true).unwrap().is_none());
+        assert!(s.pending());
     }
 }

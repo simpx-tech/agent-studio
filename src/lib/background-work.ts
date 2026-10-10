@@ -41,12 +41,12 @@ export function replyBackgroundWork(message?: Message): BackgroundRun[] {
   );
 }
 
-const identity = z.string().min(1).max(240);
+const identity = z.string().min(1);
 const hostRunSchema = z.object({
   id: identity,
   runId: identity,
   kind: z.enum(['command', 'monitor']),
-  label: z.string().max(2048),
+  label: z.string(),
   elapsedMs: z.number().int().min(0).max(31_536_000_000),
 });
 // The executing computer lists work its chat processes still run, including after the
@@ -56,7 +56,7 @@ export const backgroundWorkEventSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('snapshot'),
     conversationId: identity,
-    runs: z.array(hostRunSchema).max(32),
+    runs: z.array(hostRunSchema),
   }),
   z.object({
     kind: z.literal('tool'),

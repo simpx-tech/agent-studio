@@ -1,10 +1,10 @@
 //! Shared, allowlisted hook metadata. Never include hook commands, output or prompts.
 use serde_json::Value;
 
-pub fn identifier(value: &Value, limit: usize) -> Option<&str> {
+pub fn identifier(value: &Value) -> Option<&str> {
     value
         .as_str()
-        .filter(|s| !s.trim().is_empty() && s.len() <= limit && !s.chars().any(char::is_control))
+        .filter(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
 }
 
 pub fn event_name(value: &Value) -> &'static str {
@@ -75,13 +75,13 @@ pub fn is_codex_hook(value: &Value) -> bool {
 }
 
 /// SessionStart hooks can arrive before thread/start returns its validated identity.
-/// Buffer only bounded lifecycle metadata, then decode after the binding succeeds.
+/// Buffer only lifecycle metadata, then decode after the binding succeeds.
 pub fn startup_hook(value: &Value) -> Option<Value> {
     if !matches!(
         value["method"].as_str(),
         Some("hook/started" | "hook/completed")
     ) || !value["params"]["turnId"].is_null()
-        || identifier(&value["params"]["threadId"], 160).is_none()
+        || identifier(&value["params"]["threadId"]).is_none()
     {
         return None;
     }
@@ -98,10 +98,7 @@ pub fn startup_hook(value: &Value) -> Option<Value> {
         "durationMs",
     ] {
         let v = &value["params"]["run"][key];
-        if v.is_null()
-            || v.is_number()
-            || identifier(v, if key == "sourcePath" { 4096 } else { 160 }).is_some()
-        {
+        if v.is_null() || v.is_number() || identifier(v).is_some() {
             run.insert(key.into(), v.clone());
         }
     }

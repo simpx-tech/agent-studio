@@ -36,11 +36,10 @@ export function forkConversation(source: Conversation, messageId?: string): Conv
     }
   }
   const now = new Date().toISOString();
-  const title = source.title.slice(0, 93).replace(/[\uD800-\uDBFF]$/, '');
   return {
     id: crypto.randomUUID(),
     forked: true,
-    title: `${title} (fork)`,
+    title: `${source.title} (fork)`,
     titleStatus: 'generated',
     settings: structuredClone(
       messageId ? (source.messages[end].settings ?? source.settings) : source.settings,

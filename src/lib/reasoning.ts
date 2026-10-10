@@ -1,16 +1,14 @@
 import { z } from 'zod';
 
-export const maxReasoningBlocks = 64;
 export const reasoningBlockSchema = z.object({
   type: z.literal('reasoning'),
   id: z
     .string()
     .min(1)
-    .max(240)
     .refine((id) => !/[\u0000-\u001f\u007f]/.test(id)),
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  // Native decoding caps at 16,000 Unicode scalars (up to 32,000 JS code units).
-  text: z.string().min(1).max(32000),
+  // Kept whole. Computers before 2026-10-10 cut it at 16,000 characters, marking it truncated.
+  text: z.string().min(1),
   truncated: z.boolean(),
 });
 export type ReasoningBlock = z.infer<typeof reasoningBlockSchema>;
@@ -21,7 +19,7 @@ export function mergeReasoningBlocks(left: ReasoningBlock[], right: ReasoningBlo
     const index = result.findIndex((b) => b.id === block.id);
     if (index >= 0) {
       if (block.revision > result[index].revision) result[index] = block;
-    } else if (result.length < maxReasoningBlocks) result.push(block);
+    } else result.push(block);
   }
   return result;
 }

@@ -1,7 +1,7 @@
 //! Tool results kept on the computer that ran them: complete, as the provider sent them, and
 //! for as long as their conversation exists. Commands and result sizes travel with the synced
-//! activity record; text, images and complete commands stay here and are read on demand
-//! through transport, so the workspace and relay sync never carry them.
+//! activity record; text and images stay here and are read on demand through transport, so the
+//! workspace and relay sync never carry them.
 //!
 //! Layout: `tool-output/<run id>/run.json` (conversation, start, bytes) and one folder per
 //! call, named by a name-based UUID of the call's activity ID, holding `stdout.txt` and
@@ -22,30 +22,12 @@ use std::{
 use tauri::Manager;
 
 const DIRECTORY: &str = "tool-output";
-/// Text of each stream a window receives when it opens a call.
-pub const PREVIEW_BYTES: u64 = 512 * 1024;
-/// Text of each stream a full read returns, so both fit in one relay request of 20 MB.
-pub const FULL_BYTES: u64 = 8 * 1024 * 1024;
 /// Runs not yet saved in the workspace keep their results this long.
 const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
-/// A call's `meta.json` larger than this is not read.
-const META_LIMIT: u64 = 64 * 1024 * 1024;
-/// The largest model file a reply shows: what a window on this computer loads whole, as raw
-/// bytes. Senders keep their models at full detail below it instead of shrinking them.
-pub const MODEL_BYTES: u64 = 1024 * 1024 * 1024;
-/// The largest model another device reads whole, so one relay request carries it. Other
-/// devices see a larger one through views this computer's window renders (`MODEL_VIEWS`).
-pub const RELAY_MODEL_BYTES: u64 = 12 * 1024 * 1024;
-/// Views of a model, a turn apart, for devices that do not read the model itself.
+/// Views of a model, a turn apart, for devices that cannot load the model itself.
 pub const MODEL_VIEWS: usize = 8;
-/// The largest view kept, and all of a model's views together, which one relay request
-/// carries as base64 with room to spare.
-const VIEW_BYTES: u64 = 4 * 1024 * 1024;
-const VIEWS_BYTES: u64 = 12 * 1024 * 1024;
-/// The widest or tallest view kept.
+/// The widest or tallest view kept: the size this computer's window renders them at.
 const VIEW_SIDE: u32 = 4096;
-/// The largest image a reply shows, matching one chat attachment.
-pub const IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes read to recognize an image file and its dimensions.
 const SNIFF_BYTES: usize = 512 * 1024;
 const KEY_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6d1f_1c8e_52a4_4f0e_9a4b_7c1e_2d3f_4a5b);
@@ -101,7 +83,8 @@ struct Meta {
     images_omitted: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     models: Vec<ModelMeta>,
-    /// The complete command or input when the activity record shows a shortened one.
+    /// The complete command or input, which earlier releases kept here when the activity
+    /// record showed a shortened one.
     #[serde(default)]
     command: Option<String>,
     #[serde(default)]
@@ -120,7 +103,7 @@ struct Manifest {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Text {
-    /// Cleaned for display; the beginning and end of a longer stream, with a marker between.
+    /// The whole stream, cleaned for display.
     pub text: String,
     /// The whole stream's size as kept.
     pub bytes: u64,
@@ -221,7 +204,7 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 fn valid_tool_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control)
+    !id.is_empty() && !id.chars().any(char::is_control)
 }
 fn valid_request(run_id: &str, tool_id: &str) -> Result<(), String> {
     if uuid::Uuid::parse_str(run_id).is_err() || !valid_tool_id(tool_id) {
@@ -260,10 +243,7 @@ pub fn sniff(bytes: &[u8]) -> Option<(&'static str, Option<(u32, u32)>)> {
     } else {
         return None;
     };
-    Some((
-        kind,
-        size.filter(|(w, h)| (1..=100_000).contains(w) && (1..=100_000).contains(h)),
-    ))
+    Some((kind, size.filter(|(w, h)| *w > 0 && *h > 0)))
 }
 fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
     match b.get(12..16)? {
@@ -366,7 +346,7 @@ fn plain_path(path: &Path) -> bool {
     }
 }
 /// A file the conversation offers to show, checked before its bytes are copied.
-fn offered_file(path: &Path, limit: u64) -> Result<std::fs::Metadata, String> {
+fn offered_file(path: &Path) -> Result<std::fs::Metadata, String> {
     if !plain_path(path) {
         return Err("needs an absolute path to a file".into());
     }
@@ -374,18 +354,11 @@ fn offered_file(path: &Path, limit: u64) -> Result<std::fs::Metadata, String> {
     if !metadata.is_file() {
         return Err("is not a file".into());
     }
-    if metadata.len() > limit {
-        return Err(format!(
-            "is {}, larger than the {} a reply can show",
-            human(metadata.len()),
-            human(limit)
-        ));
-    }
     Ok(metadata)
 }
 /// Recognizes a file a conversation offers to show, with the reason when it cannot.
-pub fn inspect_image(path: &Path, limit: u64) -> Result<ImageFile, String> {
-    let metadata = offered_file(path, limit)?;
+pub fn inspect_image(path: &Path) -> Result<ImageFile, String> {
+    let metadata = offered_file(path)?;
     let mut file = std::fs::File::open(path).map_err(|_| "cannot be opened".to_string())?;
     let mut head = Vec::with_capacity(SNIFF_BYTES.min(metadata.len() as usize + 1));
     (&mut file)
@@ -408,8 +381,8 @@ pub struct ModelFile {
 }
 /// Recognizes glTF, GLB, OBJ, STL and FBX from a file's own content. A glTF document that
 /// names files beside it is refused, because only the file itself is sent.
-pub fn inspect_model(path: &Path, limit: u64) -> Result<ModelFile, String> {
-    let metadata = offered_file(path, limit)?;
+pub fn inspect_model(path: &Path) -> Result<ModelFile, String> {
+    let metadata = offered_file(path)?;
     let size = metadata.len();
     let mut file = std::fs::File::open(path).map_err(|_| "cannot be opened".to_string())?;
     let mut head = Vec::with_capacity(SNIFF_BYTES.min(size as usize + 1));
@@ -596,33 +569,19 @@ fn gltf_is_viewable(document: &GltfDocument, kind_name: &str) -> Result<(), Stri
         if let Some(compression) = undecodable_extension(&name) {
             return Err(format!(
                 "needs {compression} ({name}), which the 3D viewer cannot decode; \
-                 export it uncompressed, at full detail: a reply shows models up to {}",
-                human(MODEL_BYTES)
+                 export it uncompressed, at full detail"
             ));
         }
     }
     Ok(())
 }
-/// Copies `source`, at most `limit` bytes of it when one applies, and fails when there are
-/// more: the file may have grown since it was checked.
-fn copy_within(
-    source: &mut std::fs::File,
-    target: &mut impl Write,
-    limit: Option<u64>,
-) -> Option<u64> {
-    let Some(limit) = limit else {
-        return std::io::copy(source, target).ok();
-    };
-    let bytes = std::io::copy(&mut source.take(limit + 1), target).ok()?;
-    (bytes <= limit).then_some(bytes)
-}
-/// Copies a model file the conversation offered, keeping its recognized format.
-fn copy_model(path: &Path, directory: &Path, index: usize, limit: u64) -> Option<ModelMeta> {
-    let model = inspect_model(path, limit).ok()?;
+/// Copies a model file the conversation offered, whole, keeping its recognized format.
+fn copy_model(path: &Path, directory: &Path, index: usize) -> Option<ModelMeta> {
+    let model = inspect_model(path).ok()?;
     let file = format!("model-{index}.{}", model.format);
     let mut source = std::fs::File::open(path).ok()?;
     let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
-    let bytes = copy_within(&mut source, &mut target, Some(limit))?;
+    let bytes = std::io::copy(&mut source, &mut target).ok()?;
     target.persist(directory.join(&file)).ok()?;
     Some(ModelMeta {
         file,
@@ -630,14 +589,9 @@ fn copy_model(path: &Path, directory: &Path, index: usize, limit: u64) -> Option
         bytes,
     })
 }
-/// Copies an image file a provider reported viewing or a reply shows: a regular file of a
-/// supported type, within `limit` when one applies.
-fn copy_image(
-    path: &Path,
-    directory: &Path,
-    index: usize,
-    limit: Option<u64>,
-) -> Option<ImageMeta> {
+/// Copies an image file a provider reported viewing or a reply shows, whole: a regular file
+/// of a supported type.
+fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> {
     if !plain_path(path) {
         return None;
     }
@@ -654,7 +608,7 @@ fn copy_image(
     source.seek(SeekFrom::Start(0)).ok()?;
     let file = format!("image-{index}.{}", extension(media_type));
     let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
-    let bytes = copy_within(&mut source, &mut target, limit)?;
+    let bytes = std::io::copy(&mut source, &mut target).ok()?;
     target.persist(directory.join(&file)).ok()?;
     Some(ImageMeta {
         file,
@@ -706,12 +660,11 @@ fn write_call(
         });
     }
     // Files a reply shows keep their place when one cannot be kept, since the reply names each
-    // by its position, and stay within the sizes they were checked against.
-    let limit = output.sent.then_some(IMAGE_BYTES);
+    // by its position.
     for path in files {
         match path
             .as_deref()
-            .and_then(|path| copy_image(path, directory, images.len(), limit))
+            .and_then(|path| copy_image(path, directory, images.len()))
         {
             Some(image) => {
                 written += image.bytes;
@@ -725,7 +678,7 @@ fn write_call(
     for path in models {
         match path
             .as_deref()
-            .and_then(|path| copy_model(path, directory, kept.len(), MODEL_BYTES))
+            .and_then(|path| copy_model(path, directory, kept.len()))
         {
             Some(model) => {
                 written += model.bytes;
@@ -747,8 +700,8 @@ fn write_call(
         images,
         images_omitted: omitted,
         models: kept,
-        command: output.command.clone(),
-        input: output.input.clone(),
+        command: None,
+        input: None,
     };
     Ok(written + write_json(&directory.join("meta.json"), &meta)?)
 }
@@ -929,10 +882,6 @@ async fn written(pending: &Pending, run_id: &str, tool_id: &str) {
 }
 fn read_meta(directory: &Path, tool_id: &str) -> Result<Meta, String> {
     let path = directory.join("meta.json");
-    let metadata = std::fs::metadata(&path).map_err(|_| NOT_KEPT.to_string())?;
-    if metadata.len() > META_LIMIT {
-        return Err(NOT_KEPT.into());
-    }
     let meta: Meta = serde_json::from_slice(&std::fs::read(&path).map_err(|_| NOT_KEPT)?)
         .map_err(|_| NOT_KEPT.to_string())?;
     if meta.tool_id != tool_id {
@@ -940,100 +889,36 @@ fn read_meta(directory: &Path, tool_id: &str) -> Result<Meta, String> {
     }
     Ok(meta)
 }
-fn human(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.0} KB");
-    }
-    let mb = kb / 1024.0;
-    if mb < 1024.0 {
-        return format!("{mb:.1} MB");
-    }
-    let gb = mb / 1024.0;
-    if gb.fract() == 0.0 {
-        format!("{gb:.0} GB")
-    } else {
-        format!("{gb:.1} GB")
-    }
-}
-/// A stream as a window shows it: whole when it fits in `limit`, otherwise its beginning and
-/// end on line boundaries with a marker for what is not shown.
-fn read_text(path: &Path, limit: u64) -> Text {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Text {
-            complete: true,
-            ..Text::default()
-        };
-    };
-    let size = file.metadata().map_or(0, |m| m.len());
-    let mut read = |length: u64| {
-        let mut buffer = Vec::with_capacity(length as usize);
-        let _ = (&mut file).take(length).read_to_end(&mut buffer);
-        buffer
-    };
-    if size <= limit {
-        return Text {
-            text: terminal_text(&String::from_utf8_lossy(&read(size))),
-            bytes: size,
-            complete: true,
-        };
-    }
-    let head = read(limit / 4 * 3);
-    let mut tail = vec![];
-    if file.seek(SeekFrom::End(-((limit / 4) as i64))).is_ok() {
-        let _ = file.read_to_end(&mut tail);
-    }
-    // Whole characters and lines only at the cuts.
-    let head = match std::str::from_utf8(&head) {
-        Ok(text) => text,
-        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()]).unwrap_or_default(),
-    };
-    let head = head.rfind('\n').map_or(head, |i| &head[..=i]);
-    let start = tail
-        .iter()
-        .position(|b| (*b as i8) >= -0x40)
-        .unwrap_or(tail.len());
-    let tail = String::from_utf8_lossy(&tail[start..]);
-    let tail = tail.find('\n').map_or(&tail[..], |i| &tail[i + 1..]);
-    let hidden = size.saturating_sub((head.len() + tail.len()) as u64);
+/// A stream as a window shows it: whole, however large.
+fn read_text(path: &Path) -> Text {
+    let bytes = std::fs::read(path).unwrap_or_default();
     Text {
-        text: format!(
-            "{}[… {} not shown …]\n{}",
-            terminal_text(head),
-            human(hidden),
-            terminal_text(tail)
-        ),
-        bytes: size,
-        complete: false,
+        text: terminal_text(&String::from_utf8_lossy(&bytes)),
+        bytes: bytes.len() as u64,
+        complete: true,
     }
 }
 
-/// One call's result for a window: whole streams up to the preview size, or up to the full
-/// size when asked, and its images' descriptions.
+/// One call's result for a window: its streams whole and its images' descriptions.
 pub async fn read(
     root: PathBuf,
     pending: Arc<Pending>,
     run_id: String,
     tool_id: String,
-    full: bool,
 ) -> Result<View, String> {
     valid_request(&run_id, &tool_id)?;
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
         let meta = read_meta(&directory, &tool_id)?;
-        let limit = if full { FULL_BYTES } else { PREVIEW_BYTES };
         Ok(View {
             version: meta.version,
             tool_id,
             exit_code: meta.exit_code,
             start_line: meta.start_line,
             truncated: meta.truncated,
-            stdout: read_text(&directory.join("stdout.txt"), limit),
-            stderr: read_text(&directory.join("stderr.txt"), limit),
+            stdout: read_text(&directory.join("stdout.txt")),
+            stderr: read_text(&directory.join("stderr.txt")),
             images: meta
                 .images
                 .into_iter()
@@ -1088,12 +973,11 @@ pub async fn read_image(
     .map_err(|_| "Cannot read the tool output".to_string())?
 }
 
-/// A kept model of a call and the path of its file, which is never larger than `limit`.
+/// A kept model of a call and the path of its file.
 fn kept_model(
     directory: &Path,
     tool_id: &str,
     index: usize,
-    limit: u64,
 ) -> Result<(ModelMeta, PathBuf), String> {
     let meta = read_meta(directory, tool_id)?;
     let model = meta.models.into_iter().nth(index).ok_or(NOT_KEPT)?;
@@ -1102,22 +986,12 @@ fn kept_model(
         return Err(NOT_KEPT.to_string());
     }
     let path = directory.join(&model.file);
-    let size = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
-    if size > MODEL_BYTES {
-        return Err(NOT_KEPT.to_string());
-    }
-    if size > limit {
-        return Err(format!(
-            "This model is {}, larger than the {} another device reads whole; it shows views of it instead.",
-            human(size),
-            human(limit)
-        ));
-    }
+    std::fs::metadata(&path).map_err(|_| NOT_KEPT)?;
     Ok((model, path))
 }
 
-/// One 3D model of a call's result, whole, for a window on another device: as base64 within
-/// what one relay request carries.
+/// One 3D model of a call's result, whole and however large, as base64 for a window on another
+/// device.
 pub async fn read_model(
     root: PathBuf,
     pending: Arc<Pending>,
@@ -1129,7 +1003,7 @@ pub async fn read_model(
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        let (model, path) = kept_model(&directory, &tool_id, index, RELAY_MODEL_BYTES)?;
+        let (model, path) = kept_model(&directory, &tool_id, index)?;
         let bytes = std::fs::read(&path).map_err(|_| NOT_KEPT)?;
         Ok(ModelData {
             format: model.format,
@@ -1154,7 +1028,7 @@ pub async fn read_model_file(
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        let (_, path) = kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        let (_, path) = kept_model(&directory, &tool_id, index)?;
         std::fs::read(&path).map_err(|_| NOT_KEPT.to_string())
     })
     .await
@@ -1168,9 +1042,6 @@ fn views_file(index: usize) -> String {
 /// Views kept beside a model, whole, or none when any of them is missing or unreadable.
 fn kept_views(directory: &Path, index: usize) -> Option<(u32, Vec<ImageData>)> {
     let path = directory.join(views_file(index));
-    if std::fs::metadata(&path).ok()?.len() > META_LIMIT {
-        return None;
-    }
     let meta: ViewsMeta = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     let prefix = format!("model-{index}-view-");
     let views = meta
@@ -1208,7 +1079,7 @@ pub async fn read_model_views(
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        let (model, path) = kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        let (model, path) = kept_model(&directory, &tool_id, index)?;
         let bytes = std::fs::metadata(&path).map_err(|_| NOT_KEPT)?.len();
         let (renderer, views) = kept_views(&directory, index).unzip();
         Ok(ModelViews {
@@ -1224,8 +1095,8 @@ pub async fn read_model_views(
 
 /// Keeps the views this computer's window rendered of one of its models, beside the model,
 /// so other devices get them without another rendering until the call's result goes. Each
-/// must be a PNG, JPEG or WebP image within the size one relay request carries for all of
-/// them, and there must be exactly `MODEL_VIEWS`.
+/// must be a PNG, JPEG or WebP image no wider or taller than the window renders them, and there
+/// must be exactly `MODEL_VIEWS`.
 pub async fn store_model_views(
     root: PathBuf,
     pending: Arc<Pending>,
@@ -1242,13 +1113,9 @@ pub async fn store_model_views(
     written(&pending, &run_id, &tool_id).await;
     let directory = root.join(&run_id).join(key(&tool_id));
     tauri::async_runtime::spawn_blocking(move || {
-        kept_model(&directory, &tool_id, index, MODEL_BYTES)?;
+        kept_model(&directory, &tool_id, index)?;
         let mut decoded = vec![];
-        let mut total = 0;
         for data in &views {
-            if data.len() as u64 > VIEW_BYTES / 3 * 4 + 4 {
-                return Err("A view is too large to keep".to_string());
-            }
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|_| "A view is not an image")?;
@@ -1257,11 +1124,7 @@ pub async fn store_model_views(
                 .ok_or("A view is not a PNG, JPEG or WebP image")?;
             let (width, height) = size.ok_or("A view has no readable size")?;
             if width == 0 || height == 0 || width > VIEW_SIDE || height > VIEW_SIDE {
-                return Err("A view is too large to keep".into());
-            }
-            total += bytes.len() as u64;
-            if bytes.len() as u64 > VIEW_BYTES || total > VIEWS_BYTES {
-                return Err("The views are too large to keep".into());
+                return Err("A view is larger than the window renders".into());
             }
             decoded.push((bytes, media_type, width, height));
         }
@@ -1397,8 +1260,6 @@ mod tests {
             images: vec![],
             models: vec![],
             sent: false,
-            command: Some("npm test -- --long".into()),
-            input: None,
         };
         output.images = [PNG, b"<svg/>".as_slice()]
             .iter()
@@ -1482,7 +1343,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            inspect_model(&self_contained, MODEL_BYTES).map(|m| m.format),
+            inspect_model(&self_contained).map(|m| m.format),
             Ok("gltf".into())
         );
         let external = dir.path().join("external.gltf");
@@ -1491,7 +1352,7 @@ mod tests {
             r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"scene.bin"}]}"#,
         )
         .unwrap();
-        let error = inspect_model(&external, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&external).unwrap_err();
         assert!(
             error.contains("send a self-contained .glb instead"),
             "{error}"
@@ -1507,7 +1368,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = inspect_model(&compressed, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&compressed).unwrap_err();
         assert!(error.contains("Draco mesh compression"), "{error}");
         assert!(error.contains("export it uncompressed"), "{error}");
         let binary_external = dir.path().join("external.glb");
@@ -1516,7 +1377,7 @@ mod tests {
             glb(r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"scene.bin"}]}"#),
         )
         .unwrap();
-        let error = inspect_model(&binary_external, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&binary_external).unwrap_err();
         assert!(error.contains("loads its buffers"), "{error}");
         // meshopt the document merely uses has fallback data beside it and still opens, and
         // an extension the viewer implements itself is never refused. three.js sets up Draco
@@ -1529,10 +1390,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(
-            inspect_model(&optional, MODEL_BYTES).map(|m| m.format),
-            Ok("glb".into())
-        );
+        assert_eq!(inspect_model(&optional).map(|m| m.format), Ok("glb".into()));
         for (name, document) in [
             (
                 "draco.glb",
@@ -1545,31 +1403,27 @@ mod tests {
         ] {
             let path = dir.path().join(name);
             std::fs::write(&path, glb(document)).unwrap();
-            let error = inspect_model(&path, MODEL_BYTES).unwrap_err();
+            let error = inspect_model(&path).unwrap_err();
             assert!(
                 error.contains("the 3D viewer cannot decode"),
                 "{name}: {error}"
             );
         }
-        // Size, kind and path are reported before anything is copied.
-        let big = dir.path().join("big.glb");
-        std::fs::write(&big, glb(&format!("{{\"x\":\"{}\"}}", "0".repeat(2048)))).unwrap();
-        let error = inspect_model(&big, 512).unwrap_err();
-        assert!(error.contains("larger than"), "{error}");
-        assert!(inspect_model(&dir.path().join("gone.glb"), MODEL_BYTES).is_err());
-        assert!(inspect_model(Path::new("relative.glb"), MODEL_BYTES).is_err());
+        // Kind and path are reported before anything is copied.
+        assert!(inspect_model(&dir.path().join("gone.glb")).is_err());
+        assert!(inspect_model(Path::new("relative.glb")).is_err());
         // A GLB is read by its own header: a glTF 1.0 container and a cut file are named.
         let mut version_one = glb(r#"{"asset":{"version":"1.0"}}"#);
         version_one[4] = 1;
         let old = dir.path().join("old.glb");
         std::fs::write(&old, version_one).unwrap();
-        let error = inspect_model(&old, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&old).unwrap_err();
         assert!(error.contains("version 1 GLB"), "{error}");
         let mut cut = glb(r#"{"asset":{"version":"2.0"}}"#);
         cut.truncate(cut.len() - 4);
         let truncated = dir.path().join("truncated.glb");
         std::fs::write(&truncated, cut).unwrap();
-        let error = inspect_model(&truncated, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&truncated).unwrap_err();
         assert!(error.contains("not a readable GLB file"), "{error}");
         // The document is read whole past the sniffed head, where a buffer beside the file
         // listed after a long node list used to go unnoticed.
@@ -1582,15 +1436,12 @@ mod tests {
             )),
         )
         .unwrap();
-        let error = inspect_model(&large, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&large).unwrap_err();
         assert!(error.contains("loads its buffers"), "{error}");
         // A byte-order mark before a glTF document is read past, as the viewer does.
         let marked = dir.path().join("marked.gltf");
         std::fs::write(&marked, "\u{feff}{\"asset\":{\"version\":\"2.0\"}}").unwrap();
-        assert_eq!(
-            inspect_model(&marked, MODEL_BYTES).map(|m| m.format),
-            Ok("gltf".into())
-        );
+        assert_eq!(inspect_model(&marked).map(|m| m.format), Ok("gltf".into()));
     }
 
     #[test]
@@ -1607,7 +1458,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = inspect_model(&inline, MODEL_BYTES).unwrap_err();
+        let error = inspect_model(&inline).unwrap_err();
         assert!(error.contains("loads its images"), "{error}");
         let embedded = dir.path().join("embedded.glb");
         std::fs::write(
@@ -1617,10 +1468,7 @@ mod tests {
             )),
         )
         .unwrap();
-        assert_eq!(
-            inspect_model(&embedded, MODEL_BYTES).map(|m| m.format),
-            Ok("glb".into())
-        );
+        assert_eq!(inspect_model(&embedded).map(|m| m.format), Ok("glb".into()));
         // A URI that is not text, or a document cut short, is no readable document.
         for (name, document) in [
             (
@@ -1631,16 +1479,12 @@ mod tests {
         ] {
             let path = dir.path().join(name);
             std::fs::write(&path, document).unwrap();
-            let error = inspect_model(&path, MODEL_BYTES).unwrap_err();
+            let error = inspect_model(&path).unwrap_err();
             assert!(
                 error.contains("not a readable glTF document"),
                 "{name}: {error}"
             );
         }
-        // Sizes past a megabyte read in the unit a person would use.
-        assert_eq!(human(MODEL_BYTES), "1 GB");
-        assert_eq!(human(3 * MODEL_BYTES / 2), "1.5 GB");
-        assert_eq!(human(RELAY_MODEL_BYTES), "12.0 MB");
     }
 
     #[test]
@@ -1660,21 +1504,6 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert!(plain_path(Path::new("/home/me/front.png")));
-    }
-
-    #[test]
-    fn a_copy_stops_at_the_size_its_file_was_checked_against() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("grown.png");
-        std::fs::write(&path, [7u8; 10]).unwrap();
-        let copy = |limit| {
-            let mut source = std::fs::File::open(&path).unwrap();
-            let mut target = vec![];
-            copy_within(&mut source, &mut target, limit).map(|bytes| (bytes, target.len()))
-        };
-        assert_eq!(copy(None), Some((10, 10)));
-        assert_eq!(copy(Some(10)), Some((10, 10)));
-        assert_eq!(copy(Some(9)), None);
     }
 
     #[tokio::test]
@@ -1729,19 +1558,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_model_larger_than_one_relay_request_opens_only_on_its_computer() {
+    async fn a_model_of_any_size_is_read_whole_on_every_device() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
         let pending = Arc::new(Pending::default());
         let mut captured = output("claude:large");
         captured.images.clear();
-        // Kept whole at full detail, a little past what one relay request carries.
+        // Kept whole at full detail, past the 12 MB earlier releases sent other devices.
         let mut bytes = glb(r#"{"asset":{"version":"2.0"}}"#);
-        bytes.resize(RELAY_MODEL_BYTES as usize + 4096, 0);
+        bytes.resize(13 * 1024 * 1024, 0);
         let model = dir.path().join("large.glb");
         std::fs::write(&model, &bytes).unwrap();
         assert_eq!(
-            inspect_model(&model, MODEL_BYTES).map(|m| m.bytes),
+            inspect_model(&model).map(|m| m.bytes),
             Ok(bytes.len() as u64)
         );
         captured.models = vec![model.to_string_lossy().into()];
@@ -1758,8 +1587,8 @@ mod tests {
         .await
         .unwrap();
         assert!(raw == bytes);
-        // Another device is told to show views instead of receiving it through the relay.
-        let error = read_model(
+        // Another device reads it whole as well.
+        let data = read_model(
             root.clone(),
             pending.clone(),
             RUN.into(),
@@ -1767,9 +1596,14 @@ mod tests {
             0,
         )
         .await
-        .unwrap_err();
-        assert!(error.contains("another device reads whole"), "{error}");
-        assert!(error.contains("views"), "{error}");
+        .unwrap();
+        assert_eq!(data.bytes, bytes.len() as u64);
+        assert!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&data.data)
+                .unwrap()
+                == bytes
+        );
         assert!(
             read_model_file(root, pending, RUN.into(), "claude:large".into(), 1)
                 .await
@@ -1829,11 +1663,21 @@ mod tests {
         assert!(store(0, vec!["not base64!".into(); 8]).await.is_err());
         assert!(store(1, vec![png.clone(); 8]).await.is_err());
         assert!(store(2, vec![png.clone(); 8]).await.is_err());
-        let mut large = PNG.to_vec();
-        large.resize(VIEWS_BYTES as usize / 7, 0);
-        let error = store(0, vec![encode(&large); 8]).await.unwrap_err();
-        assert!(error.contains("too large"), "{error}");
         assert!(read(0).await.unwrap().views.is_empty());
+        // Views of any size are kept, past the 4 MB each and 12 MB together earlier releases
+        // allowed.
+        let mut large = PNG.to_vec();
+        large.resize(5 * 1024 * 1024, 0);
+        let mut larger = vec![encode(&large)];
+        large.truncate(2 * 1024 * 1024);
+        larger.extend(vec![encode(&large); 7]);
+        store(0, larger.clone()).await.unwrap();
+        let kept = read(0).await.unwrap();
+        assert!(kept
+            .views
+            .iter()
+            .zip(&larger)
+            .all(|(view, data)| view.data == *data));
         store(0, vec![png.clone(); 8]).await.unwrap();
         let kept = read(0).await.unwrap();
         assert_eq!(kept.renderer, Some(1));
@@ -1867,7 +1711,6 @@ mod tests {
             pending.clone(),
             RUN.into(),
             "claude:sent".into(),
-            false,
         )
         .await
         .unwrap();
@@ -1891,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn results_are_kept_whole_and_read_as_previews_full_views_and_images() {
+    async fn results_are_kept_whole_and_read_whole_with_their_images() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
         let pending = Arc::new(Pending::default());
@@ -1910,14 +1753,12 @@ mod tests {
             pending.clone(),
             RUN.into(),
             "claude:one".into(),
-            false,
         )
         .await
         .unwrap();
         assert_eq!(view.stdout.text, "hello\n");
         assert!(view.stdout.complete && view.stderr.complete);
         assert_eq!(view.exit_code, Some(1));
-        assert_eq!(view.command.as_deref(), Some("npm test -- --long"));
         assert_eq!((view.images.len(), view.images_omitted), (2, 2));
         assert_eq!(view.images[1].width, Some(4));
         // The raw stream is kept as the provider sent it.
@@ -1950,35 +1791,21 @@ mod tests {
         )
         .await
         .is_err());
-        // A long stream is previewed by its ends and read whole on request.
+        // A long stream is read whole, past the 8 MB earlier releases read at most.
         let mut long = CapturedOutput::new("claude:long");
-        long.stdout = (0..40_000).map(|i| format!("line {i} é\n")).collect();
+        long.stdout = (0..900_000).map(|i| format!("line {i} é\n")).collect();
+        assert!(long.stdout.len() > 9 * 1024 * 1024);
         write_call(&root.join(RUN).join(key("claude:long")), &long, &[], &[]).unwrap();
-        let preview = read(
-            root.clone(),
-            pending.clone(),
-            RUN.into(),
-            "claude:long".into(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(!preview.stdout.complete);
-        assert_eq!(preview.stdout.bytes, long.stdout.len() as u64);
-        assert!(preview.stdout.text.starts_with("line 0 é\n"));
-        assert!(preview.stdout.text.ends_with("line 39999 é\n"));
-        assert!(preview.stdout.text.contains(" not shown …]\n"));
-        assert!(preview.stdout.text.len() <= PREVIEW_BYTES as usize + 64);
         let whole = read(
             root.clone(),
             pending.clone(),
             RUN.into(),
             "claude:long".into(),
-            true,
         )
         .await
         .unwrap();
         assert!(whole.stdout.complete);
+        assert_eq!(whole.stdout.bytes, long.stdout.len() as u64);
         assert_eq!(whole.stdout.text, long.stdout);
         assert_eq!(
             read(
@@ -1986,22 +1813,17 @@ mod tests {
                 pending.clone(),
                 RUN.into(),
                 "claude:two".into(),
-                false
             )
             .await,
             Err(NOT_KEPT.into())
         );
         for (run, tool) in [("../escape", "claude:one"), (RUN, ""), (RUN, "a\nb")] {
-            assert!(read(
-                root.clone(),
-                pending.clone(),
-                run.into(),
-                tool.into(),
-                false
-            )
-            .await
-            .unwrap_err()
-            .contains("Invalid"));
+            assert!(
+                read(root.clone(), pending.clone(), run.into(), tool.into(),)
+                    .await
+                    .unwrap_err()
+                    .contains("Invalid")
+            );
         }
     }
 
@@ -2021,7 +1843,6 @@ mod tests {
             pending.clone(),
             RUN.into(),
             "claude:one".into(),
-            false,
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
         write_call(

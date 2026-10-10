@@ -1,37 +1,35 @@
 import { z } from 'zod';
 
 export const toolOutputImageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
-const dimension = z.number().int().min(1).max(100_000).optional();
+const dimension = z.number().int().min(1).optional();
 const size = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /**
- * One stream of a result as the computer that ran it returns it: whole, or its beginning
- * and end when the stream is larger than the requested view (512 KB, or 8 MB in full).
+ * One stream of a result as the computer that ran it returns it: whole. Computers before
+ * 2026-10-10 returned only the beginning and end of a long one, with `complete` false.
  */
 const textSchema = z.object({
-  text: z.string().max(9_000_000),
+  text: z.string(),
   bytes: size,
   complete: z.boolean(),
 });
 /** A tool call's result as its computer keeps it. Images are read one at a time. */
 export const toolOutputSchema = z.object({
   version: z.number().int().positive(),
-  toolId: z.string().min(1).max(240),
+  toolId: z.string().min(1),
   exitCode: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
   startLine: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   truncated: z.boolean(),
   stdout: textSchema,
   stderr: textSchema,
-  images: z
-    .array(
-      z.object({
-        index: z.number().int().nonnegative(),
-        mediaType: z.enum(toolOutputImageTypes),
-        bytes: size,
-        width: dimension,
-        height: dimension,
-      }),
-    )
-    .max(100_000),
+  images: z.array(
+    z.object({
+      index: z.number().int().nonnegative(),
+      mediaType: z.enum(toolOutputImageTypes),
+      bytes: size,
+      width: dimension,
+      height: dimension,
+    }),
+  ),
   imagesOmitted: z.number().int().nonnegative(),
   command: z.string().optional(),
   input: z.string().optional(),
@@ -81,21 +79,12 @@ export const toolOutputModelSchema = z.object({
 });
 export type ToolOutputModel = z.infer<typeof toolOutputModelSchema>;
 /**
- * The largest model another device reads whole, which one relay request carries. The computer
- * that keeps a model opens it whole up to 1 GiB (`MODEL_BYTES` in src-tauri/src/tool_output.rs);
- * other devices see a larger one through views that computer renders.
+ * Views of a model, a turn apart, starting where the viewer's camera starts: what another device
+ * shows when it cannot read the model itself whole through the relay.
  */
-export const relayModelBytes = 12 * 1024 * 1024;
-/** Views of a model, a turn apart, starting where the viewer's camera starts. */
 export const modelViewCount = 8;
 /** The version of the views a window renders; views kept by an earlier one are drawn again. */
 export const modelViewsRenderer = 1;
-/**
- * The largest view, and all of a model's views together, that the computer keeping the model
- * stores and one relay request carries (`VIEW_BYTES` and `VIEWS_BYTES` in tool_output.rs).
- */
-export const modelViewBytes = 4 * 1024 * 1024;
-export const modelViewsBytes = 12 * 1024 * 1024;
 /** A model's views as another device receives them. */
 export const modelViewsSchema = z.object({
   views: z.array(toolOutputImageSchema).length(modelViewCount),

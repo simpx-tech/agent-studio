@@ -15,10 +15,7 @@ const EVENT: &str = "studio-app-update";
 const FIRST_CHECK: Duration = Duration::from_secs(30);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
-const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
-const MAX_NOTES: usize = 4_000;
 const NOT_READY: &str = "No update is ready to install.";
 const REPLY_RUNNING: &str = "Wait for running replies to finish, then restart to update.";
 const INSTALL_FAILED: &str =
@@ -168,14 +165,13 @@ fn download_error(error: &Error) -> &'static str {
     }
 }
 
-/// Release notes are shown as plain text; keep them bounded and single-spaced.
+/// Release notes are shown as plain text, whole.
 fn notes(body: &str) -> Option<String> {
     let text: String = body
         .trim()
         .chars()
         .map(|c| if c == '\t' { ' ' } else { c })
         .filter(|c| *c == '\n' || !c.is_control())
-        .take(MAX_NOTES)
         .collect();
     let text = text.trim_end().to_string();
     (!text.is_empty()).then_some(text)
@@ -247,7 +243,7 @@ async fn check(app: &AppHandle) -> Status {
         inner.status.message = None;
     }
     let _ = app.emit(EVENT, snapshot(app));
-    let found = match app.updater_builder().timeout(CHECK_TIMEOUT).build() {
+    let found = match app.updater_builder().build() {
         Ok(updater) => updater.check().await,
         Err(error) => Err(error),
     };
@@ -271,9 +267,8 @@ async fn check(app: &AppHandle) -> Status {
     snapshot(app)
 }
 
-async fn download(app: &AppHandle, mut update: Update, checked_at: Option<u64>) {
-    update.timeout = Some(DOWNLOAD_TIMEOUT);
-    let version = update.version.chars().take(64).collect::<String>();
+async fn download(app: &AppHandle, update: Update, checked_at: Option<u64>) {
+    let version = update.version.clone();
     let notes = update.body.as_deref().and_then(notes);
     set(app, |inner| {
         let status = &mut inner.status;
@@ -480,14 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn release_notes_are_plain_bounded_text() {
+    fn release_notes_are_plain_whole_text() {
         assert_eq!(notes(" \n\t "), None);
         assert_eq!(
             notes("- Fix\tsync\r\n- Add updates\u{7}\n").as_deref(),
             Some("- Fix sync\n- Add updates")
         );
-        let long = notes(&"é".repeat(MAX_NOTES + 10)).unwrap();
-        assert_eq!(long.chars().count(), MAX_NOTES);
+        let long = notes(&"é".repeat(10_000)).unwrap();
+        assert_eq!(long.chars().count(), 10_000);
     }
 
     #[test]

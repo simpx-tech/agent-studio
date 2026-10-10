@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { chatSettingsSchema, locationSchema, type ChatLocation, type ChatSettings } from './domain';
 import type { DraftImage } from './images';
-import { hasMention, maxMentions, mentionSchema, retainMentions, type Mention } from './mentions';
+import { hasMention, mentionSchema, retainMentions, type Mention } from './mentions';
 
 /**
  * Unsent composer content for one conversation, or for one scratch chat. Drafts belong to this
@@ -62,13 +62,8 @@ export function scratchTitle(content: Pick<DraftContent, 'text' | 'images'>) {
   return line ? line.slice(0, 120) : content.images.length ? 'Image conversation' : '';
 }
 
-export const maxSavedDrafts = 100;
-export const maxSavedDraftText = 300_000;
-export const maxSavedDraftBytes = 2_000_000;
-const maxStaleMentions = 64;
-
 const savedScratchSchema = z.object({
-  computerId: z.string().max(100),
+  computerId: z.string(),
   location: locationSchema.optional(),
   settings: chatSettingsSchema.optional(),
   createdAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -76,13 +71,12 @@ const savedScratchSchema = z.object({
 const savedDraftSchema = z.object({
   key: z
     .string()
-    .max(5000)
     // `folder:` and `computer:` are the new-chat drafts of earlier releases.
     .regex(/^(?:chat|scratch|folder|computer):/),
-  text: z.string().min(1).max(maxSavedDraftText),
-  mentions: z.array(mentionSchema).min(1).max(maxMentions).optional(),
-  staleMentions: z.array(z.string().min(1).max(4100)).min(1).max(maxStaleMentions).optional(),
-  mentionScope: z.string().min(1).max(10_000).optional(),
+  text: z.string().min(1),
+  mentions: z.array(mentionSchema).min(1).optional(),
+  staleMentions: z.array(z.string().min(1)).min(1).optional(),
+  mentionScope: z.string().min(1).optional(),
   scratch: savedScratchSchema.optional(),
   updatedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 });
@@ -119,7 +113,7 @@ export function readSavedDrafts(value: unknown): Map<string, SavedDraft> {
   const drafts = new Map<string, SavedDraft>();
   const file = z.object({ version: z.literal(1), drafts: z.array(z.unknown()) }).safeParse(value);
   if (!file.success) return drafts;
-  for (const entry of file.data.drafts.slice(0, maxSavedDrafts * 4)) {
+  for (const entry of file.data.drafts) {
     const draft = parseSavedDraft(entry);
     if (draft && (drafts.get(draft.key)?.updatedAt ?? -1) < draft.updatedAt)
       drafts.set(draft.key, draft);
@@ -152,7 +146,7 @@ export function savedScratch(saved: SavedDraft): ScratchChat | undefined {
   if (saved.key.startsWith('computer:'))
     return {
       id: crypto.randomUUID(),
-      computerId: saved.key.slice('computer:'.length).slice(0, 100),
+      computerId: saved.key.slice('computer:'.length),
       createdAt: saved.updatedAt,
     };
   if (!saved.key.startsWith('folder:')) return;
@@ -183,11 +177,11 @@ export function savedDraft(
   draft?: Draft,
   scratch?: SavedScratch,
 ): SavedDraft | undefined {
-  if (!draft?.text || draft.text.length > maxSavedDraftText) return;
-  const mentions = retainMentions(draft.text, draft.mentions).slice(0, maxMentions);
-  const staleMentions = [...new Set(draft.staleMentions)]
-    .filter((token) => hasMention(draft.text, token))
-    .slice(0, maxStaleMentions);
+  if (!draft?.text) return;
+  const mentions = retainMentions(draft.text, draft.mentions);
+  const staleMentions = [...new Set(draft.staleMentions)].filter((token) =>
+    hasMention(draft.text, token),
+  );
   return parseSavedDraft({
     key,
     text: draft.text,
@@ -199,19 +193,9 @@ export function savedDraft(
   });
 }
 
-/** Keeps the most recently edited drafts within the saved count and size limits. */
+/** Every draft, the most recently edited first. */
 export function savedDraftsFile(drafts: Iterable<SavedDraft>): SavedDrafts {
-  const encoder = new TextEncoder();
-  const kept: SavedDraft[] = [];
-  let bytes = 0;
-  for (const draft of [...drafts].sort((a, b) => b.updatedAt - a.updatedAt)) {
-    if (kept.length >= maxSavedDrafts) break;
-    const size = encoder.encode(JSON.stringify(draft)).length + 1;
-    if (bytes + size > maxSavedDraftBytes) continue;
-    bytes += size;
-    kept.push(draft);
-  }
-  return { version: 1, drafts: kept };
+  return { version: 1, drafts: [...drafts].sort((a, b) => b.updatedAt - a.updatedAt) };
 }
 
 /**

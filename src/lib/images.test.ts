@@ -8,8 +8,6 @@ import {
   imageHashes,
   imageSchema,
   imageByteLength,
-  maxImageBytes,
-  maxImagesPerMessage,
   referenceInline,
 } from './images';
 import {
@@ -76,7 +74,7 @@ describe('portable image attachments', () => {
       ]),
     ).toBe(estimatePromptTokens(workspace.conversations[0].settings, [{ role: 'user', text: '' }]));
   });
-  it('rejects URLs, SVGs, mismatched headers, invalid encoding and oversized images without throwing from safeParse', () => {
+  it('rejects URLs, SVGs, mismatched headers and invalid encoding without throwing from safeParse', () => {
     expect(imageSchema.safeParse(image).success).toBe(true);
     for (const patch of [
       { mediaType: 'image/svg+xml' },
@@ -84,14 +82,12 @@ describe('portable image attachments', () => {
       { data: 'https://example.com/image.png' },
       { data: '%%%=' },
       { data: '' },
-      { data: 'iVBORw0KGgoA' + 'AAAA'.repeat(Math.ceil(maxImageBytes / 3)) },
     ])
       expect(imageSchema.safeParse({ ...image, ...patch }).success).toBe(false);
     expect(imageByteLength(image)).toBe(Buffer.from(image.data, 'base64').length);
   });
-  it('bounds one image and one message, and no longer bounds a conversation', () => {
-    // A full-size image is valid, and every message may carry its own.
-    const bytes = Buffer.alloc(maxImageBytes);
+  it('accepts images of any size, and any number of them in one message', () => {
+    const bytes = Buffer.alloc(20 * 1024 * 1024);
     Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
     const large = { ...image, data: bytes.toString('base64') };
     expect(imageSchema.safeParse(large).success).toBe(true);
@@ -103,12 +99,8 @@ describe('portable image attachments', () => {
       status: 'complete',
       createdAt: new Date().toISOString(),
     });
-    expect(messageSchema.safeParse(message(Array(maxImagesPerMessage).fill(large))).success).toBe(
-      true,
-    );
-    expect(
-      messageSchema.safeParse(message(Array(maxImagesPerMessage + 1).fill(image))).success,
-    ).toBe(false);
+    expect(messageSchema.safeParse(message(Array(40).fill(image))).success).toBe(true);
+    expect(messageSchema.safeParse(message([large, large])).success).toBe(true);
   });
 });
 

@@ -18,8 +18,11 @@ test('Claude thinking budget validates, preserves the draft, and applies to save
   const save = page.getByRole('button', { name: 'Save instructions', exact: true });
   await input.fill('Keep my draft');
   await page.getByRole('button', { name: 'Chat instructions', exact: true }).click();
-  await budget.fill('100');
+  await budget.fill('-1');
   await expect(save).toBeDisabled();
+  // Any whole number of tokens.
+  await budget.fill('100');
+  await expect(save).toBeEnabled();
   await budget.fill('4096');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Chat instructions', exact: true }).click();

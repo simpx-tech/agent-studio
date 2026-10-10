@@ -41,9 +41,7 @@
     normalizedFallback !== undefined && !fallbackModelSetting.safeParse(normalizedFallback).success,
   );
   const tokensError = $derived(
-    provider === 'claude' &&
-      tokens != null &&
-      (!Number.isInteger(tokens) || (tokens !== 0 && (tokens < 1024 || tokens > 128000))),
+    provider === 'claude' && tokens != null && (!Number.isInteger(tokens) || tokens < 0),
   );
   const schemaError = $derived(schema.trim() ? outputSchemaError(schema) : undefined);
   let input: HTMLTextAreaElement;
@@ -86,12 +84,8 @@
       }}
     >
       <label
-        >Instructions<textarea
-          bind:this={input}
-          bind:value={draft}
-          rows="8"
-          maxlength="16000"
-          placeholder="Optional"></textarea></label
+        >Instructions<textarea bind:this={input} bind:value={draft} rows="8" placeholder="Optional"
+        ></textarea></label
       >
       {#if provider === 'claude' || provider === 'codex'}
         <label
@@ -99,7 +93,6 @@
             bind:value={schema}
             rows="7"
             spellcheck="false"
-            maxlength="16000"
             placeholder={'{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'}
             aria-invalid={!!schemaError}></textarea></label
         >
@@ -124,24 +117,20 @@
         <label
           >Fallback models<input
             bind:value={fallback}
-            maxlength="308"
             placeholder="CLI default"
             spellcheck="false"
             aria-describedby="fallback-model-hint"
             aria-invalid={fallbackError}
           /></label
         >
-        <p id="fallback-model-hint" class="field-hint">
-          Up to three, comma-separated: sonnet,haiku
-        </p>
+        <p id="fallback-model-hint" class="field-hint">Comma-separated: sonnet,haiku</p>
         {#if fallbackError}<p role="alert">
-            Enter up to three distinct model aliases or IDs, separated by commas.
+            Enter distinct model aliases or IDs, separated by commas.
           </p>{/if}
         <label
           >Thinking token budget<input
             type="number"
             min="0"
-            max="128000"
             step="1"
             bind:value={tokens}
             placeholder="Automatic"
@@ -149,8 +138,8 @@
             aria-invalid={!!tokensError}
           /></label
         >
-        <p id="thinking-budget-hint" class="field-hint">0 turns thinking off; or 1,024–128,000.</p>
-        {#if tokensError}<p role="alert">Use 0 or a whole number from 1,024 to 128,000.</p>{/if}
+        <p id="thinking-budget-hint" class="field-hint">0 turns thinking off.</p>
+        {#if tokensError}<p role="alert">Use a whole number.</p>{/if}
       {/if}
       <footer>
         <button type="button" class="secondary" onclick={close}>Cancel</button><button

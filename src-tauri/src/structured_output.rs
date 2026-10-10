@@ -1,41 +1,22 @@
 use serde_json::Value;
 
-pub const MAX_SCHEMA_BYTES: usize = 16_000;
-pub const MAX_RESULT_BYTES: usize = 512_000;
-
-fn bounded(value: &Value, depth: usize) -> bool {
-    depth <= 32
-        && match value {
-            Value::Object(values) => values.values().all(|v| bounded(v, depth + 1)),
-            Value::Array(values) => values.iter().all(|v| bounded(v, depth + 1)),
-            _ => true,
-        }
-}
-
+/// A schema of any size or depth that describes an object; the provider reports what it cannot
+/// use.
 pub fn schema(text: &str) -> Result<Value, String> {
-    if text.len() > MAX_SCHEMA_BYTES {
-        return Err("JSON Schema must be at most 16,000 bytes.".into());
-    }
     let value: Value =
         serde_json::from_str(text).map_err(|_| "Enter valid JSON for the output schema.")?;
     if !value.is_object() || value["type"] != "object" {
         return Err("JSON Schema must describe an object (\"type\": \"object\").".into());
     }
-    if !bounded(&value, 0) {
-        return Err("JSON Schema is too deeply nested (maximum 32 levels).".into());
-    }
     Ok(value)
 }
 
+/// The reply's structured object as exact JSON, whole.
 pub fn result(value: &Value) -> Result<String, String> {
     if !value.is_object() {
         return Err("The provider did not return a structured JSON object. Try again or disable structured output.".into());
     }
-    let text = serde_json::to_string_pretty(value).map_err(|_| "Invalid structured output.")?;
-    if text.len() > MAX_RESULT_BYTES {
-        return Err("Structured output exceeds the 512,000-byte limit.".into());
-    }
-    Ok(text)
+    serde_json::to_string_pretty(value).map_err(|_| "Invalid structured output.".into())
 }
 
 #[cfg(test)]
@@ -43,7 +24,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn bounds_and_object_roots_are_checked_without_changing_the_schema() {
+    fn object_roots_are_checked_without_changing_the_schema() {
         let input = r##"{"type":"object","$defs":{"n":{"type":"string"}},"properties":{"answer":{"$ref":"#/$defs/n"}},"required":["answer"],"additionalProperties":false}"##;
         assert_eq!(
             schema(input).unwrap(),
@@ -52,14 +33,15 @@ mod tests {
         for input in ["{", "null", "[]", "true", r#"{"type":"string"}"#, r#"{}"#] {
             assert!(schema(input).is_err());
         }
+        // Past the 16,000 bytes and 32 levels earlier releases accepted.
         assert!(
-            schema(&json!({"type":"object","description":"é".repeat(9000)}).to_string()).is_err()
+            schema(&json!({"type":"object","description":"é".repeat(9000)}).to_string()).is_ok()
         );
         let mut nested = json!({});
-        for _ in 0..33 {
+        for _ in 0..40 {
             nested = json!({"items":nested});
         }
-        assert!(schema(&json!({"type":"object","properties":nested}).to_string()).is_err());
+        assert!(schema(&json!({"type":"object","properties":nested}).to_string()).is_ok());
     }
     #[test]
     fn structured_result_is_exact_json_and_never_truncated() {
@@ -70,7 +52,12 @@ mod tests {
         );
         assert_eq!(result(&json!({})).unwrap(), "{}");
         assert!(result(&Value::Null).is_err());
-        assert!(result(&json!({"big":"x".repeat(MAX_RESULT_BYTES)})).is_err());
+        // Past the 512,000 bytes earlier releases accepted.
+        let big = json!({"big":"x".repeat(600_000)});
+        assert_eq!(
+            serde_json::from_str::<Value>(&result(&big).unwrap()).unwrap(),
+            big
+        );
     }
     #[test]
     fn claude_result_is_authoritative_parent_only_and_missing_output_fails() {

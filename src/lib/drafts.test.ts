@@ -2,9 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   draftKey,
   hasDraft,
-  maxSavedDraftBytes,
-  maxSavedDrafts,
-  maxSavedDraftText,
   mergeSavedDrafts,
   readSavedDrafts,
   restoredDraft,
@@ -109,7 +106,7 @@ describe('composer drafts', () => {
     );
     expect(savedDraft('chat:a', draft('', { images: [image('only.png')] }))).toBeUndefined();
     expect(savedDraft('chat:a', undefined)).toBeUndefined();
-    expect(savedDraft('chat:a', draft('x'.repeat(maxSavedDraftText + 1)))).toBeUndefined();
+    expect(savedDraft('chat:a', draft('x'.repeat(500_000)))?.text).toHaveLength(500_000);
     expect(savedDraft('other:a', draft('Unknown key'))).toBeUndefined();
     // A scratch chat's draft also records its computer, folder and settings; a chat's never does.
     const id = crypto.randomUUID();
@@ -161,17 +158,18 @@ describe('composer drafts', () => {
     ).toEqual(draft(file.token, { mentions: [file], mentionScope: 'scope' }));
   });
 
-  it('keeps the newest drafts within the count and size limits', () => {
-    const many = Array.from({ length: maxSavedDrafts + 5 }, (_, i) =>
-      saved(`chat:${i}`, `Draft ${i}`, i),
-    );
+  it('keeps every draft, however many and large, the newest first', () => {
+    const many = Array.from({ length: 150 }, (_, i) => saved(`chat:${i}`, `Draft ${i}`, i));
     const kept = savedDraftsFile(many).drafts;
-    expect(kept).toHaveLength(maxSavedDrafts);
-    expect(kept[0].key).toBe(`chat:${maxSavedDrafts + 4}`);
-    expect(kept.some((d) => d.key === 'chat:0')).toBe(false);
-    const large = saved('chat:large', 'x'.repeat(maxSavedDraftBytes), 10);
+    expect(kept).toHaveLength(150);
+    expect(kept[0].key).toBe('chat:149');
+    expect(kept.at(-1)!.key).toBe('chat:0');
+    const large = saved('chat:large', 'x'.repeat(3_000_000), 10);
     const result = savedDraftsFile([large, saved('chat:small', 'Still saved', 1)]).drafts;
-    expect(result.map((d) => d.key)).toEqual(['chat:small']);
+    expect(result.map((d) => d.key)).toEqual(['chat:large', 'chat:small']);
+    expect(readSavedDrafts({ version: 1, drafts: result }).get('chat:large')?.text).toHaveLength(
+      3_000_000,
+    );
   });
 
   it('merges this window’s changes without dropping or replacing newer saves elsewhere', () => {

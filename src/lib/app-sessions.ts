@@ -3,7 +3,6 @@ import { z } from 'zod';
 // Each start of the desktop app opens an app session: its saved chats move to History, and the
 // chats used until the next start belong to the new session. History groups chats by the session
 // they were last used in, the latest start at or before their newest message.
-export const maxAppSessions = 1000;
 export const appSessionSchema = z.object({
   id: z.string().uuid(),
   // The installation that started, which names its computer.
@@ -12,7 +11,6 @@ export const appSessionSchema = z.object({
 });
 export const appSessionsSchema = z
   .array(appSessionSchema)
-  .max(maxAppSessions)
   .refine(
     (sessions) => new Set(sessions.map((session) => session.id)).size === sessions.length,
     'App session IDs must be unique.',
@@ -49,10 +47,7 @@ export function sessionAt(timeline: SessionTimeline, time: number): AppSession |
   return low ? timeline[low - 1].session : undefined;
 }
 // Every device stores sessions in the same order, so equal lists compare equal as text.
-const newest = (sessions: AppSession[]) =>
-  sessionTimeline(sessions)
-    .slice(-maxAppSessions)
-    .map((entry) => entry.session);
+const ordered = (sessions: AppSession[]) => sessionTimeline(sessions).map((entry) => entry.session);
 
 /**
  * Records this start. A reload of the same app process keeps its session. This installation's
@@ -67,7 +62,7 @@ export function recordAppSession(
   if (sessions?.some((session) => session.id === started.id)) return sessions;
   const timeline = sessionTimeline(sessions);
   const used = new Set(conversations.map((c) => sessionAt(timeline, lastUsed(c))?.id));
-  return newest([
+  return ordered([
     ...(sessions ?? []).filter(
       (session) => used.has(session.id) || session.environmentId !== started.environmentId,
     ),
@@ -91,7 +86,7 @@ export function mergeAppSessions(
   const ours = new Set(local.map((session) => session.id));
   const theirs = new Set(remote.map((session) => session.id));
   const all = new Map([...remote, ...local].map((session) => [session.id, session]));
-  return newest(
+  return ordered(
     [...all.values()].filter(
       (session) => (ours.has(session.id) && theirs.has(session.id)) || !before.has(session.id),
     ),

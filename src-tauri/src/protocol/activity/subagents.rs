@@ -19,7 +19,7 @@ pub(super) struct AgentMessage {
 fn identity(value: &Value) -> Option<&str> {
     value
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 220 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
 }
 
 impl AgentActivity {
@@ -45,7 +45,7 @@ impl AgentActivity {
         if !append {
             message.text.clear();
         }
-        message.text.push_str(&clean(text, WHOLE));
+        message.text.push_str(&clean(text));
         message.complete = complete;
     }
 }
@@ -79,7 +79,6 @@ impl ToolDecoder {
                 .flatten()
                 .filter(|b| b["type"] == "text")
                 .filter_map(|b| b["text"].as_str())
-                .take(20)
                 .collect::<Vec<_>>()
                 .join("\n");
             if !text.is_empty() {
@@ -90,7 +89,7 @@ impl ToolDecoder {
                     agent.message(id, &text, false, true, calls);
                 }
                 // Compatibility with CLI versions that omit message identities.
-                agent.result = Some(clean(&text, WHOLE));
+                agent.result = Some(clean(&text));
             }
         } else {
             return;
@@ -130,7 +129,7 @@ impl ToolDecoder {
             }
             let mut group = self.group("codex");
             if let Some(agent) = Self::agent(&mut group, id) {
-                if let Some(name) = field(item, "agentPath", 200) {
+                if let Some(name) = field(item, "agentPath") {
                     agent.name = name;
                 }
                 // Interactions can come from siblings; only creation establishes ancestry.
@@ -198,7 +197,7 @@ impl ToolDecoder {
                         }
                     }
                     "item/completed" if item["type"] == "agentMessage" => {
-                        if let Some(text) = field(item, "text", WHOLE) {
+                        if let Some(text) = field(item, "text") {
                             if let Some(id) = identity(&item["id"]) {
                                 if agent.messages.iter().any(|m| m.id == id && m.complete) {
                                     return true;
@@ -209,7 +208,7 @@ impl ToolDecoder {
                         }
                     }
                     "item/completed" => {
-                        let task = text_content(&item["content"], WHOLE);
+                        let task = text_content(&item["content"]);
                         if !task.is_empty() {
                             agent.task = Some(task);
                         }
@@ -237,12 +236,10 @@ impl ToolDecoder {
             "SendMessage" => {
                 tool.name = "Message agent".into();
                 tool.operation = Some("sendMessage".into());
-                if let Some(target) =
-                    field(input, "to", 240).or_else(|| field(input, "recipient", 240))
-                {
+                if let Some(target) = field(input, "to").or_else(|| field(input, "recipient")) {
                     fact(tool, "Recipient", target);
                 }
-                if let Some(summary) = field(input, "summary", 200) {
+                if let Some(summary) = field(input, "summary") {
                     tool.detail = Some(summary);
                 }
                 if let Some(kind) = input["type"].as_str().filter(|s| {
@@ -277,9 +274,8 @@ impl ToolDecoder {
             fact(tool, "Agents listed", agents.len());
             let names = agents
                 .iter()
-                .take(12)
                 .filter_map(|a| {
-                    let name = field(a, "name", 200)?;
+                    let name = field(a, "name")?;
                     let state = a["status"].as_str().map(status).unwrap_or("unknown");
                     Some(format!("{name} — {state}"))
                 })

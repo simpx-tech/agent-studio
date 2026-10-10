@@ -301,9 +301,7 @@ test('a structured-output reply shows the files it sent after its JSON', async (
   expect((await image.boundingBox())!.y).toBeGreaterThan((await json.boundingBox())!.y);
 });
 
-test('a model larger than the relay carries opens whole on the computer that keeps it', async ({
-  page,
-}) => {
+test('a model of any size opens whole on the computer that keeps it', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.addInitScript((data) => {
     (window as any).toolOutputs = { toolu_large: { models: [{ format: 'glb', data, bytes: 1 }] } };
@@ -358,8 +356,6 @@ test('views of a model start where the viewer starts and turn as dragging right 
       count: 8,
       width: 240,
       height: 160,
-      viewBytes: 4 * 1024 * 1024,
-      totalBytes: 12 * 1024 * 1024,
     });
     // How much of each view the model covers, read back from its pixels.
     const covered = [];

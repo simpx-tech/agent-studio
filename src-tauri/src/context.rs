@@ -5,13 +5,11 @@ use serde_json::{json, Value};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const MAX_ENTRIES: usize = 600;
-const MAX_VISITS: usize = 6000;
 mod hooks;
 
 #[derive(Debug, Serialize)]
@@ -53,11 +51,9 @@ fn command_catalog(value: &Value) -> Vec<ContextCommand> {
         .as_array()
         .into_iter()
         .flatten()
-        .take(MAX_ENTRIES)
         .filter_map(|entry| {
             let name = entry["name"].as_str()?.trim_start_matches('/');
             if name.is_empty()
-                || name.len() > 200
                 || !name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
@@ -65,19 +61,18 @@ fn command_catalog(value: &Value) -> Vec<ContextCommand> {
             {
                 return None;
             }
-            let bounded = |key: &str, limit| {
+            let plain = |key: &str| {
                 entry[key]
                     .as_str()
                     .unwrap_or_default()
                     .chars()
                     .filter(|c| !c.is_control())
-                    .take(limit)
                     .collect()
             };
             Some(ContextCommand {
                 name: name.into(),
-                description: bounded("description", 500),
-                argument_hint: bounded("argumentHint", 200),
+                description: plain("description"),
+                argument_hint: plain("argumentHint"),
             })
         })
         .collect()
@@ -88,7 +83,6 @@ struct Scan {
     // WSL paths remain Linux paths in the UI, and are inspected through the owning distribution.
     bridge: Option<PathBuf>,
     visited: HashSet<PathBuf>,
-    visits: usize,
 }
 impl Scan {
     fn display(&self, path: &Path) -> String {
@@ -123,23 +117,6 @@ impl Scan {
             }
             return;
         }
-        if self.snapshot.entries.len() >= MAX_ENTRIES {
-            self.snapshot.truncated = true;
-            if status == "reported" || status == "disabled" {
-                if let Some(index) = self
-                    .snapshot
-                    .entries
-                    .iter()
-                    .rposition(|e| e.status != "reported" && e.status != "disabled")
-                {
-                    self.snapshot.entries.remove(index);
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
-        }
         self.snapshot.entries.push(ContextEntry {
             name: Path::new(&path)
                 .file_name()
@@ -166,34 +143,24 @@ impl Scan {
             _ => false,
         }
     }
-    fn walk(&mut self, dir: &Path, kind: &str, scope: &str, skills: bool, depth: usize) {
-        if depth > 12 || self.visits >= MAX_VISITS || self.snapshot.entries.len() >= MAX_ENTRIES {
-            self.snapshot.truncated = true;
-            return;
+    /// Every file of a kind under a folder, depth first in name order, however many and however
+    /// deep: folders still being read wait on a list instead of the stack.
+    fn walk(&mut self, dir: &Path, kind: &str, scope: &str, skills: bool) {
+        let mut folders = vec![];
+        if let Some(items) = self.open(dir) {
+            folders.push((dir.to_path_buf(), items.into_iter()));
         }
-        self.visits += 1;
-        let physical = self.physical(dir);
-        let Ok(canonical) = std::fs::canonicalize(&physical) else {
-            return;
-        };
-        if !self.visited.insert(canonical) {
-            return;
-        }
-        let Ok(files) = std::fs::read_dir(physical) else {
-            self.note("Some locations could not be inspected.");
-            return;
-        };
-        let mut files: Vec<_> = files.take(MAX_VISITS + 1).filter_map(Result::ok).collect();
-        files.sort_by_key(|f| f.file_name());
-        for item in files {
-            self.visits += 1;
-            if self.visits >= MAX_VISITS {
-                self.snapshot.truncated = true;
-                break;
-            }
+        while let Some((dir, items)) = folders.last_mut() {
+            let Some(item) = items.next() else {
+                folders.pop();
+                continue;
+            };
+            let dir = dir.clone();
             let logical = dir.join(item.file_name());
             if item.path().is_dir() {
-                self.walk(&logical, kind, scope, skills, depth + 1);
+                if let Some(items) = self.open(&logical) {
+                    folders.push((logical, items.into_iter()));
+                }
             } else if (skills && item.file_name() == "SKILL.md")
                 || (!skills && logical.extension().is_some_and(|e| e == "md"))
             {
@@ -209,12 +176,23 @@ impl Scan {
             }
         }
     }
-    fn json(&self, path: &Path) -> Option<Value> {
-        let physical = self.physical(path);
-        if std::fs::metadata(&physical).ok()?.len() > 2_000_000 {
+    /// A folder's entries in name order, read once however often it is reached.
+    fn open(&mut self, dir: &Path) -> Option<Vec<std::fs::DirEntry>> {
+        let physical = self.physical(dir);
+        let canonical = std::fs::canonicalize(&physical).ok()?;
+        if !self.visited.insert(canonical) {
             return None;
         }
-        serde_json::from_slice(&std::fs::read(physical).ok()?).ok()
+        let Ok(files) = std::fs::read_dir(physical) else {
+            self.note("Some locations could not be inspected.");
+            return None;
+        };
+        let mut files: Vec<_> = files.filter_map(Result::ok).collect();
+        files.sort_by_key(|f| f.file_name());
+        Some(files)
+    }
+    fn json(&self, path: &Path) -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(self.physical(path)).ok()?).ok()
     }
     fn memory_index(&mut self, directory: &Path, folder: &Path) {
         for name in ["memory_summary.md", "MEMORY.md"] {
@@ -223,18 +201,14 @@ impl Scan {
         // The Codex memory registry labels source references with their workspace cwd.
         // Inspect only those labels and paths, never return memory text or crawl archives.
         let index = self.physical(&directory.join("MEMORY.md"));
-        let Some(body) = std::fs::metadata(&index)
-            .ok()
-            .filter(|m| m.len() <= 2_000_000)
-            .and_then(|_| std::fs::read_to_string(&index).ok())
-        else {
+        let Ok(body) = std::fs::read_to_string(&index) else {
             return;
         };
         let dirs = ancestors(folder, true, |p| self.physical(p));
         let project = dirs.first().map_or(folder, PathBuf::as_path);
         let project_path = self.display(project);
         let is_repository = self.physical(project).join(".git").exists();
-        for line in body.lines().take(MAX_VISITS) {
+        for line in body.lines() {
             let Some((reference, metadata)) =
                 line.strip_prefix("- ").and_then(|s| s.split_once(" (cwd="))
             else {
@@ -266,7 +240,7 @@ impl Scan {
         }
     }
     fn mcp(&mut self, name: &str, scope: &str, status: &str) {
-        if name.is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+        if name.is_empty() || name.chars().any(char::is_control) {
             return;
         }
         if let Some(entry) = self
@@ -277,10 +251,6 @@ impl Scan {
         {
             entry.scope = scope.into();
             entry.status = status.into();
-            return;
-        }
-        if self.snapshot.entries.len() >= MAX_ENTRIES {
-            self.snapshot.truncated = true;
             return;
         }
         self.snapshot.entries.push(ContextEntry {
@@ -369,11 +339,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
     let folder = PathBuf::from(&scan.snapshot.folder);
     let dirs = ancestors(&folder, provider == "codex", |p| scan.physical(p));
     if provider == "codex" {
-        let config_path = scan.physical(&config.join("config.toml"));
-        let config_text = std::fs::metadata(&config_path)
-            .ok()
-            .filter(|m| m.len() <= 2_000_000)
-            .and_then(|_| std::fs::read_to_string(config_path).ok());
+        let config_text = std::fs::read_to_string(scan.physical(&config.join("config.toml"))).ok();
         let config_value = config_text
             .as_deref()
             .and_then(|s| toml::from_str::<toml::Value>(s).ok());
@@ -388,22 +354,16 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
         scan.codex_guidance(&config, "User", &[]);
         for dir in &dirs {
             scan.codex_guidance(dir, "Project", &fallbacks);
-            scan.walk(&dir.join(".agents/skills"), "skills", "Project", true, 0);
+            scan.walk(&dir.join(".agents/skills"), "skills", "Project", true);
         }
-        scan.walk(&home.join(".agents/skills"), "skills", "User", true, 0);
-        scan.walk(&config.join("skills"), "skills", "Profile", true, 0);
+        scan.walk(&home.join(".agents/skills"), "skills", "User", true);
+        scan.walk(&config.join("skills"), "skills", "Profile", true);
         scan.memory_index(&config.join("memories"), &folder);
     } else if provider == "claude" {
         scan.file(&config.join("CLAUDE.md"), "instructions", "User");
-        scan.walk(&config.join("rules"), "instructions", "User", false, 0);
-        scan.walk(&config.join("skills"), "skills", "User", true, 0);
-        scan.walk(
-            &config.join("commands"),
-            "skills",
-            "User commands",
-            false,
-            0,
-        );
+        scan.walk(&config.join("rules"), "instructions", "User", false);
+        scan.walk(&config.join("skills"), "skills", "User", true);
+        scan.walk(&config.join("commands"), "skills", "User commands", false);
         let mut enabled = serde_json::Map::new();
         let user_settings = scan
             .json(&config.join("settings.json"))
@@ -422,15 +382,13 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 "instructions",
                 "Project rules",
                 false,
-                0,
             );
-            scan.walk(&dir.join(".claude/skills"), "skills", "Project", true, 0);
+            scan.walk(&dir.join(".claude/skills"), "skills", "Project", true);
             scan.walk(
                 &dir.join(".claude/commands"),
                 "skills",
                 "Project commands",
                 false,
-                0,
             );
             for name in ["settings.json", "settings.local.json"] {
                 scan.claude_hook_file(&dir.join(".claude").join(name), "Project");
@@ -457,13 +415,12 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                     }
                     if let Some(path) = install["installPath"].as_str() {
                         scan.claude_plugin_hooks(Path::new(path));
-                        scan.walk(&Path::new(path).join("skills"), "skills", "Plugin", true, 0);
+                        scan.walk(&Path::new(path).join("skills"), "skills", "Plugin", true);
                         scan.walk(
                             &Path::new(path).join("commands"),
                             "skills",
                             "Plugin commands",
                             false,
-                            0,
                         );
                     }
                 }
@@ -499,7 +456,7 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             if path.is_absolute()
                 || (scan.bridge.is_some() && path.to_string_lossy().starts_with('/'))
             {
-                scan.walk(&path, "memories", "Project memory", false, 0);
+                scan.walk(&path, "memories", "Project memory", false);
             }
         }
         // Only this project's candidate memory folder, never other projects or transcripts.
@@ -519,7 +476,6 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 "memories",
                 "Project memory",
                 false,
-                0,
             );
         }
         let managed = if scan.bridge.is_some() || cfg!(target_os = "linux") {
@@ -540,9 +496,8 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
                 "instructions",
                 "Project rules",
                 false,
-                0,
             );
-            scan.walk(&dir.join(".agents/skills"), "skills", "Project", false, 0);
+            scan.walk(&dir.join(".agents/skills"), "skills", "Project", false);
         }
         scan.file(&home.join(".gemini/GEMINI.md"), "instructions", "User");
         scan.walk(
@@ -550,7 +505,6 @@ fn inventory(mut scan: Scan, home: PathBuf, config: PathBuf) -> Scan {
             "skills",
             "User",
             false,
-            0,
         );
         scan.note("Antigravity reports no context inventory; listed files are candidates.");
         scan.note("Antigravity MCP status is not inspected.");
@@ -600,9 +554,6 @@ async fn codex_report_sources(
             .await
             .map_err(|_| "Context query output failed")?
         {
-            if line.len() > 2_000_000 {
-                return Err("Context query exceeded its output limit");
-            }
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -646,7 +597,6 @@ async fn codex_report_sources(
                                 report["mcpConfig"] = Value::Object(
                                     servers
                                         .iter()
-                                        .take(200)
                                         .map(|(name, config)| {
                                             (
                                                 name.clone(),
@@ -665,13 +615,12 @@ async fn codex_report_sources(
                                     report["mcps"] = json!([]);
                                 }
                                 let entries = report["mcps"].as_array_mut().unwrap();
-                                for server in
-                                    servers.iter().take(200usize.saturating_sub(entries.len()))
-                                {
+                                for server in servers {
                                     entries.push(json!({"name":server["name"],"status":server["runtimeStatus"],"authStatus":server["authStatus"],"plugin":server["pluginId"].is_string()}));
                                 }
+                                // Every page; only a cursor that repeats leaves the list unfinished.
                                 if let Some(cursor) = result["nextCursor"].as_str() {
-                                    if entries.len() < 200 && cursors.insert(cursor.to_string()) {
+                                    if cursors.insert(cursor.to_string()) {
                                         let request = json!({"id":4,"method":"mcpServerStatus/list","params":{"limit":100,"detail":"toolsAndAuthOnly","cursor":cursor}});
                                         input
                                             .write_all(format!("{request}\n").as_bytes())
@@ -694,9 +643,9 @@ async fn codex_report_sources(
         }
         Err("Codex exited without a context report")
     };
-    let result = tokio::time::timeout(Duration::from_secs(25), query).await;
+    let result = query.await;
     exe.kill(&mut child).await;
-    if !matches!(result, Ok(Ok(()))) {
+    if result.is_err() {
         report["incomplete"] = json!(true);
     }
     Ok(report)
@@ -779,9 +728,6 @@ async fn claude_report_sources(
             .await
             .map_err(|_| "Context query output failed")?
         {
-            if line.len() > 2_000_000 {
-                return Err("Context query exceeded its output limit");
-            }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -809,19 +755,14 @@ async fn claude_report_sources(
                 input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"mcp\",\"request\":{\"subtype\":\"mcp_status\"}}\n").await.map_err(|_| "Context query input failed")?;
             } else if response["request_id"] == "mcp" {
                 if let Some(servers) = response["response"]["mcpServers"].as_array() {
-                    report["mcps"] = Value::Array(servers.iter().take(200).map(|server| json!({"name":server["name"],"status":server["status"],"scope":server["scope"]})).collect());
-                    report["mcpTruncated"] = json!(servers.len() > 200);
+                    report["mcps"] = Value::Array(servers.iter().map(|server| json!({"name":server["name"],"status":server["status"],"scope":server["scope"]})).collect());
                 }
                 return Ok(());
             }
         }
         Err("Claude exited without a context report")
     };
-    let result = tokio::time::timeout(Duration::from_secs(25), query)
-        .await
-        .map_err(|_| "Claude context query timed out")
-        .and_then(|r| r)
-        .map_err(String::from);
+    let result = query.await;
     exe.kill(&mut child).await;
     if result.is_err() {
         report["incomplete"] = json!(true);
@@ -834,7 +775,7 @@ fn merge_mcps(scan: &mut Scan, report: &Value) {
         scan.snapshot.truncated = true;
     }
     if let Some(servers) = report["mcpConfig"].as_object() {
-        for (name, config) in servers.iter().take(200) {
+        for (name, config) in servers {
             scan.mcp(
                 name,
                 "CLI",
@@ -847,7 +788,7 @@ fn merge_mcps(scan: &mut Scan, report: &Value) {
         }
     }
     if let Some(servers) = report["mcps"].as_array() {
-        for server in servers.iter().take(200) {
+        for server in servers {
             let Some(name) = server["name"].as_str() else {
                 continue;
             };
@@ -926,7 +867,7 @@ fn merge_report(scan: &mut Scan, report: &Value) {
                     .iter_mut()
                     .find(|e| e.path == path && e.kind == "skills")
                 {
-                    entry.name = name.chars().take(200).collect();
+                    entry.name = name.into();
                 }
             }
         }
@@ -965,7 +906,7 @@ fn merge_report(scan: &mut Scan, report: &Value) {
             );
             if kind == "memories" {
                 if let Some(parent) = Path::new(path).parent() {
-                    scan.walk(parent, "memories", "Project memory", false, 0);
+                    scan.walk(parent, "memories", "Project memory", false);
                 }
             }
         }
@@ -980,7 +921,7 @@ pub async fn read(
     conversation_id: Option<String>,
     forked: bool,
 ) -> Result<ContextSnapshot, String> {
-    if !crate::providers::valid_provider(&provider) || model.len() > 200 {
+    if !crate::providers::valid_provider(&provider) {
         return Err("Invalid context selection".into());
     }
     let exe = crate::providers::resolve(&provider).await?;
@@ -1094,7 +1035,6 @@ pub async fn read(
         },
         bridge,
         visited: HashSet::new(),
-        visits: 0,
     };
     if has_location && !scan.physical(Path::new(&folder)).is_dir() {
         return Err("The selected folder is unavailable. Context was not inspected.".into());
@@ -1109,13 +1049,12 @@ pub async fn read(
         for source in &sources.plugin_dirs {
             let path = Path::new(source);
             if scan.physical(path).is_dir() {
-                scan.walk(&path.join("skills"), "skills", "Temporary plugin", true, 0);
+                scan.walk(&path.join("skills"), "skills", "Temporary plugin", true);
                 scan.walk(
                     &path.join("commands"),
                     "skills",
                     "Temporary plugin commands",
                     false,
-                    0,
                 );
             }
         }
@@ -1318,9 +1257,9 @@ pub(crate) async fn wsl_paths(
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        let output = command
+            .output()
             .await
-            .map_err(|_| "WSL context inspection timed out")?
             .map_err(|_| "Cannot inspect the WSL profile")?;
         let text =
             std::str::from_utf8(&output.stdout).map_err(|_| "Cannot read WSL context locations")?;
@@ -1510,7 +1449,7 @@ mod tests {
         assert!(empty.snapshot.notes.is_empty());
     }
     #[test]
-    fn command_metadata_is_bounded_and_excludes_bodies_and_accounts() {
+    fn command_metadata_is_whole_and_excludes_bodies_and_accounts() {
         let commands = command_catalog(&json!([
             {"name":"/plugin:review","description":"Review files","argumentHint":"[file]","body":"private body","account":"private account"},
             {"name":"plugin:review","description":"duplicate"},
@@ -1519,7 +1458,8 @@ mod tests {
         ]));
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].name, "plugin:review");
-        assert_eq!(commands[1].description.len(), 500);
+        // Whole, past the 500 characters earlier releases kept.
+        assert_eq!(commands[1].description.len(), 1000);
         let serialized = serde_json::to_string(&commands).unwrap();
         assert!(!serialized.contains("private"));
         assert!(!serialized.contains("body"));
@@ -1540,7 +1480,6 @@ mod tests {
             },
             bridge: None,
             visited: HashSet::new(),
-            visits: 0,
         }
     }
     pub(super) fn file(path: &Path, text: &str) {
@@ -1674,16 +1613,35 @@ mod tests {
         assert!(!serialized.contains("sensitive memory contents"));
     }
     #[test]
-    fn traversal_is_bounded_and_deduplicates_repeated_roots() {
+    fn traversal_reaches_any_depth_and_deduplicates_repeated_roots() {
         let root = tempfile::tempdir().unwrap();
         file(&root.path().join("one/SKILL.md"), "skill");
+        // Past the 12 levels earlier releases walked.
+        let deep = (0..20).fold(root.path().join("deep"), |path, level| {
+            path.join(format!("l{level}"))
+        });
+        file(&deep.join("SKILL.md"), "skill");
         let mut scan = scanner("claude", root.path());
-        scan.walk(root.path(), "skills", "User", true, 0);
-        scan.walk(root.path(), "skills", "User", true, 0);
-        assert_eq!(scan.snapshot.entries.len(), 1);
-        scan.visits = MAX_VISITS;
-        scan.walk(root.path(), "skills", "User", true, 0);
-        assert!(scan.snapshot.truncated);
+        scan.walk(root.path(), "skills", "User", true);
+        scan.walk(root.path(), "skills", "User", true);
+        let names: Vec<_> = scan
+            .snapshot
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, ["l19", "one"]);
+        // Past the 600 entries earlier releases listed.
+        for index in 0..700 {
+            scan.add(
+                Path::new(&format!("/skills/{index}/SKILL.md")),
+                "skills",
+                "User",
+                "discovered",
+            );
+        }
+        assert_eq!(scan.snapshot.entries.len(), 702);
+        assert!(!scan.snapshot.truncated);
     }
     #[test]
     fn wsl_paths_keep_linux_display_and_map_to_own_distribution() {

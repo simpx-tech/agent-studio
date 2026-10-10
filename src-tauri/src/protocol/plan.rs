@@ -18,15 +18,10 @@ pub struct Plan {
     pub explanation: Option<String>,
     pub steps: Vec<Step>,
 }
-fn text(v: &Value, key: &str, limit: usize) -> Option<String> {
+fn text(v: &Value, key: &str) -> Option<String> {
     v[key]
         .as_str()
-        .map(|s| {
-            s.chars()
-                .filter(|c| !c.is_control())
-                .take(limit)
-                .collect::<String>()
-        })
+        .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>())
         .filter(|s| !s.trim().is_empty())
 }
 fn status(v: &Value) -> Option<String> {
@@ -43,9 +38,9 @@ fn status(v: &Value) -> Option<String> {
 fn step(v: &Value, id: String, title_key: &str) -> Option<Step> {
     Some(Step {
         id,
-        title: text(v, title_key, 1000)?,
+        title: text(v, title_key)?,
         status: status(&v["status"])?,
-        active_form: text(v, "activeForm", 1000),
+        active_form: text(v, "activeForm"),
     })
 }
 #[derive(Default)]
@@ -65,9 +60,6 @@ impl PlanDecoder {
     }
     pub fn codex(&mut self, params: &Value) -> Option<Plan> {
         let rows = params["plan"].as_array()?;
-        if rows.len() > 64 {
-            return None;
-        }
         let steps = rows
             .iter()
             .enumerate()
@@ -76,7 +68,7 @@ impl PlanDecoder {
         self.publish(Plan {
             revision: 0,
             steps,
-            explanation: text(params, "explanation", 2000),
+            explanation: text(params, "explanation"),
         })
     }
     pub fn claude(&mut self, v: &Value) -> Option<Plan> {
@@ -90,16 +82,14 @@ impl PlanDecoder {
                 if matches!(
                     name,
                     "TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet"
-                ) && self.pending.len() < 128
-                    && block["input"].to_string().len() <= 128_000
-                {
-                    if let Some(id) = text(block, "id", 240) {
+                ) {
+                    if let Some(id) = text(block, "id") {
                         self.pending
                             .insert(id, (name.into(), block["input"].clone()));
                     }
                 }
             } else if block["type"] == "tool_result" {
-                let Some(id) = text(block, "tool_use_id", 240) else {
+                let Some(id) = text(block, "tool_use_id") else {
                     continue;
                 };
                 let Some((name, input)) = self.pending.remove(&id) else {
@@ -122,9 +112,7 @@ impl PlanDecoder {
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         });
-                    if raw.len() <= 128_000 {
-                        result = serde_json::from_str(&raw).unwrap_or(Value::Null);
-                    }
+                    result = serde_json::from_str(&raw).unwrap_or(Value::Null);
                 }
                 let mut next = self.current.clone();
                 if result["success"] == false {
@@ -132,7 +120,7 @@ impl PlanDecoder {
                 }
                 match name.as_str() {
                     "TodoWrite" => {
-                        let Some(rows) = input["todos"].as_array().filter(|r| r.len() <= 64) else {
+                        let Some(rows) = input["todos"].as_array() else {
                             continue;
                         };
                         let Some(steps) = rows
@@ -147,25 +135,24 @@ impl PlanDecoder {
                     }
                     "TaskCreate" => {
                         let task = &result["task"];
-                        let Some(task_id) =
-                            text(task, "id", 240).or_else(|| text(&result, "taskId", 240))
+                        let Some(task_id) = text(task, "id").or_else(|| text(&result, "taskId"))
                         else {
                             continue;
                         };
-                        let Some(title) = text(&input, "subject", 1000) else {
+                        let Some(title) = text(&input, "subject") else {
                             continue;
                         };
-                        if next.steps.len() < 64 && !next.steps.iter().any(|s| s.id == task_id) {
+                        if !next.steps.iter().any(|s| s.id == task_id) {
                             next.steps.push(Step {
                                 id: task_id,
                                 title,
                                 status: "pending".into(),
-                                active_form: text(&input, "activeForm", 1000),
+                                active_form: text(&input, "activeForm"),
                             });
                         }
                     }
                     "TaskUpdate" => {
-                        let Some(task_id) = text(&input, "taskId", 240) else {
+                        let Some(task_id) = text(&input, "taskId") else {
                             continue;
                         };
                         if input["status"] == "deleted" {
@@ -174,25 +161,22 @@ impl PlanDecoder {
                             if let Some(value) = status(&input["status"]) {
                                 item.status = value;
                             }
-                            if let Some(value) = text(&input, "subject", 1000) {
+                            if let Some(value) = text(&input, "subject") {
                                 item.title = value;
                             }
-                            if let Some(value) = text(&input, "activeForm", 1000) {
+                            if let Some(value) = text(&input, "activeForm") {
                                 item.active_form = Some(value);
                             }
                         }
                     }
                     "TaskList" => {
-                        let Some(rows) = result
-                            .as_array()
-                            .or_else(|| result["tasks"].as_array())
-                            .filter(|r| r.len() <= 64)
+                        let Some(rows) = result.as_array().or_else(|| result["tasks"].as_array())
                         else {
                             continue;
                         };
                         let Some(steps) = rows
                             .iter()
-                            .map(|row| step(row, text(row, "id", 240)?, "subject"))
+                            .map(|row| step(row, text(row, "id")?, "subject"))
                             .collect::<Option<Vec<_>>>()
                         else {
                             continue;
@@ -205,14 +189,13 @@ impl PlanDecoder {
                         } else {
                             &result
                         };
-                        let Some(item) =
-                            text(task, "id", 240).and_then(|id| step(task, id, "subject"))
+                        let Some(item) = text(task, "id").and_then(|id| step(task, id, "subject"))
                         else {
                             continue;
                         };
                         if let Some(existing) = next.steps.iter_mut().find(|s| s.id == item.id) {
                             *existing = item;
-                        } else if next.steps.len() < 64 {
+                        } else {
                             next.steps.push(item);
                         }
                     }
@@ -318,5 +301,41 @@ mod tests {
             .codex(&json!({"plan":[{"step":"bad","status":"invented"}]}))
             .is_none());
         assert!(d.codex(&json!({"plan":[]})).unwrap().steps.is_empty());
+    }
+    #[test]
+    fn plans_keep_every_step_whole() {
+        // Past the 64 steps of 1,000 characters earlier releases kept.
+        let long = "Step ".repeat(400);
+        let mut d = PlanDecoder::default();
+        let rows: Vec<_> = (0..100)
+            .map(|i| json!({"content":format!("{long}{i}"),"status":"pending"}))
+            .collect();
+        let p = call(
+            &mut d,
+            "a",
+            "TodoWrite",
+            json!({"todos":rows}),
+            json!({}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(p.steps.len(), 100);
+        assert_eq!(p.steps[99].title, format!("{long}99"));
+        for i in 0..70 {
+            call(
+                &mut d,
+                &format!("create{i}"),
+                "TaskCreate",
+                json!({"subject":format!("Task {i}")}),
+                json!({"task":{"id":format!("t{i}")}}),
+                false,
+            )
+            .unwrap();
+        }
+        assert_eq!(d.current.steps.len(), 170);
+        let rows: Vec<_> = (0..65)
+            .map(|i| json!({"step":format!("Check {i}"),"status":"pending"}))
+            .collect();
+        assert_eq!(d.codex(&json!({"plan":rows})).unwrap().steps.len(), 65);
     }
 }

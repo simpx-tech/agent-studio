@@ -17,24 +17,19 @@ const schema = JSON.stringify({
   required: ['answer'],
   additionalProperties: false,
 });
-it('bounds schema input and rejects malformed JSON and unsupported roots', () => {
+it('accepts schemas of any size or depth and rejects malformed JSON and unsupported roots', () => {
   expect(outputSchemaError(schema)).toBeUndefined();
   for (const value of ['{', 'null', '[]', 'true', '{}', '{"type":"string"}'])
     expect(outputSchemaError(value)).toBeTruthy();
-  expect(
-    outputSchemaError(JSON.stringify({ type: 'object', description: 'é'.repeat(9000) })),
-  ).toContain('bytes');
+  // The provider checks its own limits.
+  const long = JSON.stringify({ type: 'object', description: 'é'.repeat(9000) });
+  expect(outputSchemaError(long)).toBeUndefined();
   let deep: unknown = {};
   for (let i = 0; i < 33; i++) deep = { items: deep };
-  expect(outputSchemaError(JSON.stringify({ type: 'object', properties: deep }))).toContain(
-    'nested',
-  );
-  expect(
-    chatSettingsSchema.safeParse({
-      ...settingsFor(initialWorkspace().preferences),
-      outputSchema: '{}',
-    }).success,
-  ).toBe(false);
+  expect(outputSchemaError(JSON.stringify({ type: 'object', properties: deep }))).toBeUndefined();
+  const settings = settingsFor(initialWorkspace().preferences);
+  expect(chatSettingsSchema.parse({ ...settings, outputSchema: long }).outputSchema).toBe(long);
+  expect(chatSettingsSchema.safeParse({ ...settings, outputSchema: '{}' }).success).toBe(false);
 });
 
 it('keeps per-reply schema and exact JSON through export, relay, forks and prompt history', () => {

@@ -5,7 +5,14 @@ import { retainRunEvent, applyRunEvent } from './activity';
 import type { Message, RunEvent } from './domain';
 
 describe('plugin management boundaries', () => {
-  it('rejects arbitrary commands, credential URLs, relative paths, untrusted evaluations and excessive inputs', () => {
+  it('rejects arbitrary commands, credential URLs, relative paths and untrusted evaluations, never a count or length', () => {
+    const evaluation = {
+      kind: 'eval',
+      id: 'demo@local',
+      operationId: crypto.randomUUID(),
+      maxCostUsd: 1,
+      trusted: true,
+    };
     for (const action of [
       { kind: 'install', id: '--all' },
       { kind: 'toggle', id: 'demo@local', enabled: true, command: 'arbitrary' },
@@ -16,16 +23,24 @@ describe('plugin management boundaries', () => {
         pluginUrls: ['https://example.com/a.zip?token=secret'],
         skillRoots: [],
       },
-      { kind: 'runtime', pluginDirs: [], pluginUrls: [], skillRoots: Array(9).fill('/skills') },
-      {
-        kind: 'eval',
-        id: 'demo@local',
-        operationId: crypto.randomUUID(),
-        maxCostUsd: 1,
-        trusted: false,
-      },
+      { kind: 'runtime', pluginDirs: [], pluginUrls: [], skillRoots: ['skills'] },
+      { ...evaluation, trusted: false },
+      { ...evaluation, maxCostUsd: 0 },
     ])
       expect(pluginActionSchema.safeParse(action).success).toBe(false);
+    // However many directories, URLs and skill roots, however long, and any budget.
+    const roots = Array.from({ length: 20 }, (_, i) => `/skills/${i}/${'x'.repeat(5000)}`);
+    for (const action of [
+      {
+        kind: 'runtime',
+        pluginDirs: roots,
+        pluginUrls: Array.from({ length: 20 }, (_, i) => `https://example.com/${i}.zip`),
+        skillRoots: roots,
+      },
+      { kind: 'install', id: `${'p'.repeat(300)}@local` },
+      { ...evaluation, maxCostUsd: 500 },
+    ])
+      expect(pluginActionSchema.parse(action)).toEqual(action);
     expect(
       pluginRequestSchema.safeParse({
         provider: 'codex',

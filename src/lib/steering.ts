@@ -6,22 +6,16 @@ export const steeringInputSchema = z
     text: z
       .string()
       .min(1)
-      .max(30000)
       .refine((v) => !!v.trim() && !v.includes('\0') && !v.trimStart().startsWith('/')),
   })
   .strict();
 export const steeringReceiptSchema = steeringInputSchema.extend({
   runId: z.string().uuid(),
-  sequence: z.number().int().min(1).max(8),
+  sequence: z.number().int().min(1),
 });
 export const steeringSchema = z
   .array(steeringReceiptSchema)
-  .max(8)
-  .refine(
-    (items) =>
-      new Set(items.map((i) => i.id)).size === items.length &&
-      items.reduce((n, i) => n + i.text.length, 0) <= 60000,
-  );
+  .refine((items) => new Set(items.map((i) => i.id)).size === items.length);
 export type SteeringInput = z.infer<typeof steeringInputSchema>;
 export type SteeringReceipt = z.infer<typeof steeringReceiptSchema>;
 export function mergeSteering(left: SteeringReceipt[] = [], right: SteeringReceipt[] = []) {

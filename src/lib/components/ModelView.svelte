@@ -37,7 +37,11 @@
     toolOutputImageUrl,
     type ToolOutputModelType,
   } from '$lib/tool-output';
-  import { modelShownAsViews, readToolOutputModel, readToolOutputModelViews } from '$lib/transport';
+  import {
+    modelFromAnotherComputer,
+    readToolOutputModel,
+    readToolOutputModelViews,
+  } from '$lib/transport';
   import type { SentFile } from '$lib/sent-files';
   import {
     createModelViewer,
@@ -76,15 +80,21 @@
   const key = $derived(`${runId}\n${toolId}\n${file.index}\n${file.mediaType}`);
   // A model this window can keep between scenes is read once, ahead of its stage.
   const kept = $derived(file.bytes <= keptBytes);
+  // Another computer's model is read whole, however large. One that cannot come whole (a relay or
+  // device on the way that cannot carry it) shows views that computer renders instead, a turn
+  // apart, which the reader turns through.
+  let viewsFor = $state('');
+  const viewsOnly = $derived(viewsFor === key);
   function load() {
+    const requested = key;
     // The loader follows the format the computer recognized in the file itself.
-    const read = () => readToolOutputModel(runId, toolId, file.index, format, connectionId);
+    const read = () =>
+      readToolOutputModel(runId, toolId, file.index, format, connectionId).catch((cause) => {
+        if (modelFromAnotherComputer(connectionId)) viewsFor = requested;
+        throw cause;
+      });
     return kept ? models.get(key, read) : read();
   }
-
-  // Another computer's model too large for one relay request comes as views that computer
-  // renders, a turn apart, which the reader turns through.
-  const viewsOnly = $derived(modelShownAsViews(connectionId, file.bytes));
   type ViewsStatus =
     | { phase: 'loading' }
     | { phase: 'ready'; urls: string[] }
@@ -378,7 +388,9 @@
         <Maximize2 size={13} aria-hidden="true" />
       </button>
     {/if}
-    <span class="model-size" title="Too large to load here">{label} · {modelViewCount} views</span>
+    <span class="model-size" title="The whole model could not be read here"
+      >{label} · {modelViewCount} views</span
+    >
   </div>
 {/snippet}
 

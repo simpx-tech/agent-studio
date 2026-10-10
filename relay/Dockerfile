@@ -33,6 +33,9 @@ COPY src/lib/question-drafts.ts ./src/lib/
 COPY src/lib/screens.ts ./src/lib/
 COPY src/lib/light-chats.ts ./src/lib/
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
+# Node sizes its heap from the container's memory, stopping well before it; let the container's
+# own memory be the limit.
+ENV NODE_OPTIONS=--max-old-space-size=1048576
 USER node
 EXPOSE 4317
 CMD ["node", "relay/start.ts"]

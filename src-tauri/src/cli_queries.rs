@@ -5,7 +5,6 @@ use std::{
     path::Path,
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -69,9 +68,6 @@ async fn codex_exchange(
             .await
             .map_err(|_| "CLI input failed")?;
         while let Some(line) = lines.next_line().await.map_err(|_| "CLI output failed")? {
-            if line.len() > 2_000_000 {
-                return Err("CLI query exceeded the output limit");
-            }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -137,7 +133,7 @@ async fn codex_exchange(
     };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err("Usage query cancelled".into()),
-        result = tokio::time::timeout(Duration::from_secs(25), query) => result.map_err(|_| "Codex account query timed out").and_then(|r|r).map_err(String::from),
+        result = query => result.map_err(String::from),
     };
     exe.kill(&mut child).await;
     result
@@ -185,9 +181,6 @@ pub async fn claude_usage(
     let query = async {
         input.write_all(b"{\"type\":\"control_request\",\"request_id\":\"init\",\"request\":{\"subtype\":\"initialize\"}}\n").await.map_err(|_| "CLI input failed")?;
         while let Some(line) = lines.next_line().await.map_err(|_| "CLI output failed")? {
-            if line.len() > 2_000_000 {
-                return Err("CLI query exceeded the output limit");
-            }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -223,7 +216,7 @@ pub async fn claude_usage(
     };
     let context = tokio::select! {
         _ = cancel.cancelled() => None,
-        result = tokio::time::timeout(Duration::from_secs(25), query) => result.ok().and_then(Result::ok),
+        result = query => result.ok(),
     };
     exe.kill(&mut child).await;
     if cancel.is_cancelled() {
@@ -250,9 +243,6 @@ pub async fn gemini_usage(directory: &Path, cancel: CancellationToken) -> Result
     let mut lines = BufReader::new(child.stdout.take().ok_or("Missing CLI output")?).lines();
     let query = async {
         while let Some(line) = lines.next_line().await.map_err(|_| "CLI output failed")? {
-            if line.len() > 512_000 {
-                return Err("CLI query exceeded the output limit");
-            }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -264,7 +254,7 @@ pub async fn gemini_usage(directory: &Path, cancel: CancellationToken) -> Result
     };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err("Usage query cancelled".into()),
-        result = tokio::time::timeout(Duration::from_secs(25), query) => result.map_err(|_| "Gemini usage query timed out").and_then(|r|r).map_err(String::from),
+        result = query => result.map_err(String::from),
     };
     exe.kill(&mut child).await;
     result

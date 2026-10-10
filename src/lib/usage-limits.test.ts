@@ -72,9 +72,9 @@ describe('usage limits', () => {
       expect(claudeLimitLine(text), text).toBe(false);
   });
 
-  it('keeps the latest bounded record and saves it at once, apart from other replies', () => {
+  it('keeps the latest record whole and saves it at once, apart from other replies', () => {
     expect(usageLimitSchema.safeParse({ revision: 1, text: '' }).success).toBe(false);
-    expect(usageLimitSchema.safeParse({ revision: 1, text: 'x'.repeat(1001) }).success).toBe(false);
+    expect(usageLimitSchema.safeParse({ revision: 1, text: 'x'.repeat(5000) }).success).toBe(true);
     const first = { revision: 1, text: line };
     const second = { revision: 2, text: "You've hit your weekly limit · resets Oct 7, 1pm" };
     expect(latestUsageLimit(first, second)).toBe(second);

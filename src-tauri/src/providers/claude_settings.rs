@@ -137,15 +137,13 @@ mod tests {
     }
 
     #[test]
-    fn budgets_are_bounded_and_restricted_to_claude_chat() {
+    fn budgets_are_any_size_and_restricted_to_claude_chat() {
         let mut request: super::super::RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":"Hi"}]})).unwrap();
-        for n in [0, 1024, 4096, 128000] {
+        // Any budget, past the 1,024 to 128,000 tokens earlier releases accepted: the CLI
+        // reports the range its model takes.
+        for n in [0, 1, 1023, 1024, 4096, 128000, 128001, u32::MAX] {
             request.agent.max_thinking_tokens = Some(n);
             assert!(request.validate().is_ok());
-        }
-        for n in [1, 1023, 128001, u32::MAX] {
-            request.agent.max_thinking_tokens = Some(n);
-            assert!(request.validate().is_err());
         }
         request.agent.max_thinking_tokens = Some(4096);
         request.conversation_only = true;

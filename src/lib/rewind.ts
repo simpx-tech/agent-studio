@@ -14,7 +14,6 @@ export function rewindConversation(conversation: Conversation, messageId: string
   const index = conversation.messages.findIndex((m) => m.id === messageId && m.role === 'user');
   if (index < 0) throw new Error('This message is no longer in the conversation.');
   const removed = [...conversation.messages.slice(index), ...(conversation.rewind?.removed ?? [])];
-  if (removed.length > 200) throw new Error('This rewind exceeds the saved history limit.');
   const now = new Date().toISOString();
   return {
     ...conversation,
@@ -71,7 +70,7 @@ export async function rewoundMessage(
 
 /**
  * The composer with a rewound message returned ahead of `draft`, as queued messages return after
- * a stopped reply: its text first, its images first within `maxImages`. Its mentions stay chosen
+ * a stopped reply: its text first, its images first. Its mentions stay chosen
  * only while the composer uses the account that answered it, and the draft's own only in the
  * composer's current mention scope; the rest must be chosen again.
  */
@@ -79,9 +78,8 @@ export function returnedDraft(
   draft: DraftContent,
   message: QueuedMessage,
   composer: { connectionId?: string; mentionScope: string },
-  maxImages: number,
-): { draft: DraftContent; droppedImages: number } {
-  const merged = restoreToDraft([message], draft.text, draft.images, maxImages);
+): { draft: DraftContent } {
+  const merged = restoreToDraft([message], draft.text, draft.images);
   const inScope = draft.mentionScope === composer.mentionScope;
   const chosen = message.mentionConnectionId === composer.connectionId;
   const returned = message.mentions ?? [];
@@ -97,7 +95,6 @@ export function returnedDraft(
       ],
       mentionScope: composer.mentionScope,
     },
-    droppedImages: merged.droppedImages,
   };
 }
 

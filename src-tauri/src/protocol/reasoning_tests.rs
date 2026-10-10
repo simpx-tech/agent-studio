@@ -131,17 +131,14 @@ fn reasoning_codex_content_summary_parts_and_exec_snapshots() {
 }
 
 #[test]
-fn reasoning_bounds_unicode_text_and_item_count() {
+fn reasoning_keeps_every_item_whole() {
+    // Past the 64 items of 16,000 characters earlier releases kept.
     let mut d = Decoder::default();
     for index in 0..70 {
         let value = json!({"type":"assistant","message":{"id":format!("m{index}"),"content":[{"type":"thinking","thinking":"✨🦀".repeat(16001)}]}});
         let events = reasoning(d.decode("claude", &value.to_string()));
-        if index < 64 {
-            assert_eq!(events[0]["text"].as_str().unwrap().chars().count(), 16000);
-            assert_eq!(events[0]["truncated"], true);
-        } else {
-            assert!(events.is_empty());
-        }
+        assert_eq!(events[0]["text"].as_str().unwrap().chars().count(), 32002);
+        assert_eq!(events[0]["truncated"], false);
     }
 }
 
@@ -217,9 +214,9 @@ fn reasoning_empty_blocks_and_items_reserve_no_display_slot() {
             );
         }
     }
-    assert_eq!(ids.len(), 64);
+    assert_eq!(ids.len(), 65);
     assert_eq!(ids[0], "m0:1");
-    assert_eq!(ids[63], "m63:1");
+    assert_eq!(ids[64], "m64:1");
 
     let mut codex = Decoder::default();
     for index in 0..70 {

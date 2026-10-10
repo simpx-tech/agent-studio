@@ -1,18 +1,13 @@
 import { z } from 'zod';
 
-const text = (max: number) =>
-  z
-    .string()
-    .min(1)
-    .max(max)
-    .refine((s) => !!s.trim() && !s.includes('\0'));
+const text = z
+  .string()
+  .min(1)
+  .refine((s) => !!s.trim() && !s.includes('\0'));
 const unique = (items: { id: string }[]) => new Set(items.map((q) => q.id)).size === items.length;
 export const answerSchema = z.object({
   requestId: z.string().uuid(),
-  answers: z
-    .array(z.object({ id: text(100), values: z.array(text(4000)).min(1).max(13) }))
-    .max(4)
-    .refine(unique),
+  answers: z.array(z.object({ id: text, values: z.array(text).min(1) })).refine(unique),
   skipped: z.boolean().default(false),
 });
 export type QuestionAnswer = z.infer<typeof answerSchema>;
@@ -24,32 +19,24 @@ export const questionRequestSchema = z
     questions: z
       .array(
         z.object({
-          id: text(100),
-          header: z.string().max(100),
-          question: text(2000),
-          options: z
-            .array(z.object({ label: text(200), description: z.string().max(1000) }))
-            .max(12),
+          id: text,
+          header: z.string(),
+          question: text,
+          options: z.array(z.object({ label: text, description: z.string() })),
           multiSelect: z.boolean(),
         }),
       )
       .min(1)
-      .max(4)
       .refine(unique),
     response: answerSchema.optional(),
     planApproval: z
-      .object({ action: z.enum(['enter', 'exit']), text: z.string().min(1).max(24000).optional() })
+      .object({ action: z.enum(['enter', 'exit']), text: z.string().min(1).optional() })
       .refine((p) => p.action === 'enter' || !!p.text?.trim())
       .optional(),
   })
-  .refine((q) => JSON.stringify(q).length <= 32000)
   .refine((q) => (q.status === 'answered' ? q.response?.requestId === q.id : !q.response));
 export type QuestionRequest = z.infer<typeof questionRequestSchema>;
-export const questionsSchema = z
-  .array(questionRequestSchema)
-  .max(16)
-  .refine(unique)
-  .refine((q) => JSON.stringify(q).length <= 256000);
+export const questionsSchema = z.array(questionRequestSchema).refine(unique);
 
 export function validAnswer(
   question: Pick<QuestionRequest, 'id' | 'questions' | 'planApproval'>,

@@ -38,11 +38,16 @@ describe('sign-ins without a terminal', () => {
     expect(signInUpdate(failed, { ...waiting, id: 'two' })).toBe('show');
   });
 
-  it('accept only bounded sign-ins from the host', () => {
+  it('accept only well-formed sign-ins from the host, with messages of any length', () => {
     expect(signInViewSchema.parse(waiting)).toEqual(waiting);
     expect(signInViewSchema.safeParse({ ...waiting, phase: 'opened' }).success).toBe(false);
-    expect(signInViewSchema.safeParse({ ...waiting, message: 'x'.repeat(601) }).success).toBe(
-      false,
-    );
+    const long = { ...waiting, id: 'i'.repeat(200), connectionId: 'c'.repeat(200) };
+    expect(signInViewSchema.parse({ ...long, message: 'x'.repeat(5000) })).toEqual({
+      ...long,
+      message: 'x'.repeat(5000),
+    });
+    // The sign-in page's address keeps its bound.
+    const url = `https://claude.com/cai/oauth/authorize?state=${'s'.repeat(8192)}`;
+    expect(signInViewSchema.safeParse({ ...waiting, url }).success).toBe(false);
   });
 });

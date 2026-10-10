@@ -15,7 +15,7 @@ const status = (value: Partial<AppUpdateStatus> = {}): AppUpdateStatus => ({
 });
 
 describe('app updates', () => {
-  it('accepts native status and rejects unknown or oversized values', () => {
+  it('accepts native status with notes of any length and rejects unknown values', () => {
     const native = {
       currentVersion: '0.2.0',
       phase: 'downloading',
@@ -26,9 +26,8 @@ describe('app updates', () => {
     };
     expect(appUpdateStatusSchema.parse(native)).toEqual(native);
     expect(appUpdateStatusSchema.safeParse({ ...native, phase: 'paused' }).success).toBe(false);
-    expect(appUpdateStatusSchema.safeParse({ ...native, notes: 'x'.repeat(4001) }).success).toBe(
-      false,
-    );
+    const long = { ...native, notes: 'x'.repeat(100_000), message: 'y'.repeat(10_000) };
+    expect(appUpdateStatusSchema.parse(long)).toEqual(long);
     expect(appUpdateStatusSchema.safeParse({ ...native, downloaded: -1 }).success).toBe(false);
     expect(appUpdateStatusSchema.safeParse({ ...native, repliesRunning: undefined }).success).toBe(
       false,

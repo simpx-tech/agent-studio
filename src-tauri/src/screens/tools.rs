@@ -14,10 +14,6 @@ pub const SAVE: &str = "save_screen";
 pub const LIST: &str = "list_screens";
 pub const READ: &str = "read_screen";
 const NAMES: [&str; 3] = [SAVE, LIST, READ];
-/// Calls one reply may have waiting for their results.
-const MAX_PENDING: usize = 24;
-/// Saved values a read returns whole; larger data is summarized.
-const READ_DATA: usize = 100_000;
 
 pub const GUIDANCE: &str = "For a page the user keeps and reopens in Agent Studio, such as a dashboard, a tracker, a report to revisit or a small tool with its own interface and commands, call save_screen (Claude: mcp__agent_studio__save_screen): it saves a screen on this computer, listed under Screens in the sidebar apart from this chat. Before updating a screen by its id, find it with list_screens and open it with read_screen (Claude: mcp__agent_studio__list_screens, mcp__agent_studio__read_screen). Use visualize for a visual that belongs only in this reply.";
 
@@ -26,12 +22,12 @@ const SAVE_DESCRIPTION: &str = "Save a screen: a lasting page in Agent Studio wi
 html: one self-contained page (a fragment or a whole document) with inline CSS and JavaScript. It fills the window's main area and scrolls by itself, on a transparent background in the app's font at 14px. Style it with the host's CSS variables --foreground, --heading, --muted-foreground, --card, --border, --primary, --primary-foreground and --viz-series-1 to --viz-series-6 so it matches the light and dark themes. The page has no network access: remote scripts, styles, fonts, images and fetch are blocked, so its data comes from actions. Its script reaches Agent Studio through the global studio object:
 - await studio.run(name, params) runs one action with an object of parameter values and resolves to {exitCode, stdout, stderr, truncated, timedOut, durationMs}. It rejects when the action cannot run, for example before the user allowed the screen's actions; show that message in the page.
 - await studio.json(name, params) runs an action and returns its stdout parsed as JSON, rejecting with its stderr when it exits with a code other than 0.
-- await studio.load(key) and await studio.save(key, value) keep JSON values for this screen on this computer (1 MB in all), for preferences and data the screen owns; save(key, null) removes one.
+- await studio.load(key) and await studio.save(key, value) keep JSON values for this screen on this computer, for preferences and data the screen owns; save(key, null) removes one.
 - studio.chat(text) opens a new conversation in this screen's folder with text in its message box for the user to send. It works only right after the user clicked or typed in the screen.
 - studio.theme is 'dark' or 'light'; studio.screen holds its id and title.
 Write command output into the page as text (textContent or text nodes), never as HTML, since it can hold anything. Show loading, empty and error states, and run actions when the page opens and when the user asks (buttons, filters), never in tight loops.
 
-actions: the commands the page may run, each {name, description, shell, script, params, timeout}. name is lowercase letters, digits and _. shell is 'powershell' on Windows (pwsh when installed, otherwise Windows PowerShell 5.1, so write for both) or 'bash' (Git Bash on Windows, bash in WSL, Linux and macOS). The script runs in this conversation's working folder, bash in a login shell, with stdin closed and a limit of timeout seconds (default 60, at most 600); whatever it starts ends with it. It succeeds with exit code 0, and a PowerShell script ends with its own exit code or that of the last program it ran. params declares each value the page may pass, as {name: {type: 'string' | 'number' | 'integer' | 'boolean', description, enum, pattern, maxLength, minimum, maximum, optional}}; the host refuses values that do not fit before anything runs. Each value reaches the script only as the environment variable PARAM_<NAME> (since becomes PARAM_SINCE), never inside the script's text: quote it as \"$PARAM_SINCE\" in bash, use $env:PARAM_SINCE in PowerShell, and never pass it to eval or Invoke-Expression. Print JSON for studio.json (gh --json, ConvertTo-Json -Depth 6 -Compress, jq). Test each script with your own shell tool first, in this folder and with its PARAM_ variables set. The user reviews the actions and must allow them before any runs, and again after they change, so declare only what the page needs and describe what each does; a screen without actions needs no approval.";
+actions: the commands the page may run, each {name, description, shell, script, params, timeout}. name is lowercase letters, digits and _. shell is 'powershell' on Windows (pwsh when installed, otherwise Windows PowerShell 5.1, so write for both) or 'bash' (Git Bash on Windows, bash in WSL, Linux and macOS). The script runs in this conversation's working folder, bash in a login shell, with stdin closed, until it ends; set timeout to a number of seconds to stop it after that long, and whatever it started ends with it. It succeeds with exit code 0, and a PowerShell script ends with its own exit code or that of the last program it ran. params declares each value the page may pass, as {name: {type: 'string' | 'number' | 'integer' | 'boolean', description, enum, pattern, maxLength, minimum, maximum, optional}}; the host refuses values that do not fit before anything runs. Each value reaches the script only as the environment variable PARAM_<NAME> (since becomes PARAM_SINCE), never inside the script's text: quote it as \"$PARAM_SINCE\" in bash, use $env:PARAM_SINCE in PowerShell, and never pass it to eval or Invoke-Expression. Print JSON for studio.json (gh --json, ConvertTo-Json -Depth 6 -Compress, jq). Test each script with your own shell tool first, in this folder and with its PARAM_ variables set. The user reviews the actions and must allow them before any runs, and again after they change, so declare only what the page needs and describe what each does; a screen without actions needs no approval.";
 
 const LIST_DESCRIPTION: &str = "List the screens this computer keeps: id, title, description, the folder their actions run in, their actions, whether the user allowed those, and whether this conversation can update the screen. Call it before reading or updating a screen.";
 
@@ -42,27 +38,27 @@ pub fn tools() -> Vec<Value> {
         json!({"name":SAVE,"description":SAVE_DESCRIPTION,"inputSchema":{
             "type":"object","properties":{
                 "id":{"type":"string","description":"The id of the screen to replace, from save_screen or list_screens. Omit it to create a screen."},
-                "title":{"type":"string","minLength":1,"maxLength":super::MAX_TITLE},
-                "description":{"type":"string","maxLength":super::MAX_DESCRIPTION,"description":"One line the Screens list shows."},
-                "html":{"type":"string","minLength":1,"maxLength":super::MAX_HTML,"description":"The complete page, with inline CSS and JavaScript."},
-                "actions":{"type":"array","maxItems":super::MAX_ACTIONS,"items":{
+                "title":{"type":"string","minLength":1},
+                "description":{"type":"string","description":"One line the Screens list shows."},
+                "html":{"type":"string","minLength":1,"description":"The complete page, with inline CSS and JavaScript."},
+                "actions":{"type":"array","items":{
                     "type":"object","properties":{
-                        "name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,39}$"},
-                        "description":{"type":"string","maxLength":super::MAX_DESCRIPTION},
+                        "name":{"type":"string","pattern":"^[a-z][a-z0-9_]*$"},
+                        "description":{"type":"string"},
                         "shell":{"type":"string","enum":["powershell","bash"]},
-                        "script":{"type":"string","minLength":1,"maxLength":super::MAX_SCRIPT},
+                        "script":{"type":"string","minLength":1},
                         "params":{"type":"object","description":"Each value the page passes, by name.","additionalProperties":{
                             "type":"object","properties":{
                                 "type":{"type":"string","enum":["string","number","integer","boolean"]},
-                                "description":{"type":"string","maxLength":super::MAX_DESCRIPTION},
-                                "enum":{"type":"array","maxItems":64},
-                                "pattern":{"type":"string","maxLength":300},
-                                "maxLength":{"type":"integer","minimum":1,"maximum":8000},
+                                "description":{"type":"string"},
+                                "enum":{"type":"array","minItems":1},
+                                "pattern":{"type":"string"},
+                                "maxLength":{"type":"integer","minimum":0},
                                 "minimum":{"type":"number"},
                                 "maximum":{"type":"number"},
                                 "optional":{"type":"boolean"}
                             },"required":["type"],"additionalProperties":false}},
-                        "timeout":{"type":"integer","minimum":1,"maximum":super::MAX_TIMEOUT}
+                        "timeout":{"type":"integer","minimum":1,"description":"Seconds the script may run before it is stopped. Omit it to let the script run until it ends."}
                     },"required":["name","shell","script"],"additionalProperties":false}}
             },"required":["title","html"],"additionalProperties":false}}),
         json!({"name":LIST,"description":LIST_DESCRIPTION,"inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
@@ -269,7 +265,6 @@ async fn list(context: &Context, args: &Value) -> Result<String, String> {
     }
     let entries: Vec<Value> = screens
         .iter()
-        .take(100)
         .map(|screen| {
             json!({
                 "id": screen.id,
@@ -305,16 +300,6 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
                 error
             }
         })?;
-    let data = serde_json::to_string(&values).unwrap_or_default();
-    let saved = if data.len() <= READ_DATA {
-        json!(values)
-    } else {
-        json!(format!(
-            "{} values, {} bytes in all, too large to show here; the screen reads them with studio.load.",
-            values.len(),
-            data.len()
-        ))
-    };
     serde_json::to_string_pretty(&json!({
         "id": screen.id,
         "title": screen.title,
@@ -324,7 +309,7 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
         "allowed": screen.allowed(),
         "html": screen.html,
         "actions": screen.actions,
-        "savedValues": saved,
+        "savedValues": values,
     }))
     .map_err(|_| "Cannot read this screen".into())
 }
@@ -368,13 +353,9 @@ impl Agent {
                     .as_str()
                     .and_then(|name| name.strip_prefix("mcp__agent_studio__"))
                     .filter(|name| NAMES.contains(name));
-                if let (Some(tool), Some(id)) =
-                    (tool, block["id"].as_str().filter(|id| id.len() <= 240))
-                {
-                    if self.pending.len() < MAX_PENDING {
-                        self.pending
-                            .insert(id.into(), (tool.into(), block["input"].clone()));
-                    }
+                if let (Some(tool), Some(id)) = (tool, block["id"].as_str()) {
+                    self.pending
+                        .insert(id.into(), (tool.into(), block["input"].clone()));
                 }
             }
             if value["type"] == "user" && block["type"] == "tool_result" {
@@ -421,9 +402,6 @@ impl Agent {
                 }
                 answer.map(|(text, _)| text)
             }
-            None if self.pending.len() >= MAX_PENDING => Err(
-                "Too many screen calls are waiting in this reply. Wait for their results.".into(),
-            ),
             None => Err(format!(
                 "Only a registered parent-conversation {name} call reaches this computer's screens."
             )),

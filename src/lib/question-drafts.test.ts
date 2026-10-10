@@ -45,7 +45,13 @@ describe('question drafts', () => {
     // An older revision, applied again from a relay job, never takes the text back.
     expect(applyQuestionDraft(drafts, written(draft(2, 'Which')))).toBeUndefined();
     expect(applyQuestionDraft(drafts, written(draft(3, 'Which')))).toBeUndefined();
-    const invalid = { ...draft(4), questions: Array(5).fill(draft(4).questions[0]) };
+    // However many questions and options it holds, however long.
+    const option = { label: 'o'.repeat(500), description: 'd'.repeat(2000) };
+    const question = { ...draft(4).questions[0], options: Array(20).fill(option) };
+    const long = { ...draft(4, 'q'.repeat(5000)), questions: Array(5).fill(question) };
+    expect(applyQuestionDraft(drafts, written(long))).toEqual([long]);
+    const unlabelled = [{ label: '', description: '' }];
+    const invalid = { ...draft(4), questions: [{ ...question, options: unlabelled }] };
     expect(applyQuestionDraft(drafts, written(invalid))).toBeUndefined();
     expect(applyQuestionDraft(drafts, { kind: 'text', text: 'Answer' })).toBeUndefined();
   });
@@ -68,7 +74,7 @@ describe('question drafts', () => {
     expect(applyQuestionDraft(drafts, plain)).toBeUndefined();
   });
 
-  it('shows only open drafts whose call still runs, at most sixteen per reply', () => {
+  it('shows only open drafts whose call still runs, however many a reply writes', () => {
     const drafts = applyQuestionDraft([], written(draft(1)))!;
     expect(shownQuestionDrafts(drafts, [])).toHaveLength(1);
     expect(shownQuestionDrafts(drafts, [call('running')])).toHaveLength(1);
@@ -77,7 +83,7 @@ describe('question drafts', () => {
     let many: QuestionDraft[] = [];
     for (let i = 0; i < 20; i++)
       many = applyQuestionDraft(many, written({ ...draft(1), id: `call${i}` })) ?? many;
-    expect(many).toHaveLength(16);
+    expect(many.map((d) => d.id)).toEqual(Array.from({ length: 20 }, (_, i) => `call${i}`));
   });
 
   it('takes the shape of the question it becomes', () => {

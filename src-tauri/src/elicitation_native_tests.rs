@@ -83,7 +83,6 @@ async fn elicitation_installed_clis_round_trip_through_the_production_runners() 
                         &request,
                         Some(&channel),
                         cancel,
-                        None,
                         Some(&mut questions),
                         false,
                     )
@@ -202,7 +201,6 @@ async fn elicitation_native_runners_continue_after_form_and_url_accept_decline_c
                                 &request,
                                 Some(&channel),
                                 CancellationToken::new(),
-                                None,
                                 Some(&mut questions),
                                 false,
                             )

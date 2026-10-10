@@ -211,7 +211,7 @@ fn elicitation_preserves_full_access_only_for_empty_codex_tool_approvals() {
 }
 
 #[test]
-fn elicitation_schema_checks_required_types_constraints_choices_formats_and_limits() {
+fn elicitation_schema_checks_required_types_constraints_choices_and_formats() {
     let fields = schema::parse(&form()).unwrap();
     let valid = json!({"name":"Ada","age":32,"ok":false,"tags":["blue"]});
     assert!(schema::valid_content(&fields, &valid));
@@ -232,12 +232,35 @@ fn elicitation_schema_checks_required_types_constraints_choices_formats_and_limi
     for property in [
         json!({"type":"object"}),
         json!({"type":"string","format":"password"}),
-        json!({"type":"string","minLength":5000}),
         json!({"type":"number","multipleOf":2}),
         json!({"type":"string","pattern":"(?=bad)"}),
     ] {
         assert!(schema::parse(&json!({"type":"object","properties":{"field":property}})).is_err());
     }
+    // Forms, fields and values of any size the server declares, past the 16 fields, 4,000
+    // characters and 32 items earlier releases took.
+    let mut properties = serde_json::Map::new();
+    for index in 0..20 {
+        properties.insert(
+            format!("field{index}"),
+            json!({"type":"string","title":"t".repeat(300),"description":"d".repeat(2000),"minLength":5000}),
+        );
+    }
+    properties.insert(
+        "many".into(),
+        json!({"type":"array","maxItems":40,"items":{"type":"string","enum":(0..40).map(|i| i.to_string()).collect::<Vec<_>>()}}),
+    );
+    let large = schema::parse(&json!({"type":"object","properties":properties})).unwrap();
+    assert_eq!(large.len(), 21);
+    let mut content = serde_json::Map::new();
+    for index in 0..20 {
+        content.insert(format!("field{index}"), json!("x".repeat(5000)));
+    }
+    content.insert(
+        "many".into(),
+        json!((0..40).map(|i| i.to_string()).collect::<Vec<_>>()),
+    );
+    assert!(schema::valid_content(&large, &Value::Object(content)));
     for (format, value) in [
         ("email", "ada@example.com"),
         ("uri", "https://example.com"),

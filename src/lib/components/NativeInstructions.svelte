@@ -40,7 +40,7 @@
           if (!cancelled) {
             // No cached prompt after permission loss, scope changes, or provider record failures.
             snapshot = undefined;
-            error = `Native instructions could not be read. ${String(reason).slice(0, 500)}`;
+            error = `Native instructions could not be read. ${String(reason)}`;
           }
         })
         .finally(() => {

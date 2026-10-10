@@ -2,10 +2,10 @@
 // This constant bootstrap is served independently of the privileged application.
 // The iframe and the HTTP CSP sandbox both withhold same-origin privileges.
 window.addEventListener('message', function receive(event) {
-  if (event.source !== parent || event.data?.type !== 'studio-artifact' || typeof event.data.source !== 'string' || new TextEncoder().encode(event.data.source).length > 520000) return;
+  if (event.source !== parent || event.data?.type !== 'studio-artifact' || typeof event.data.source !== 'string') return;
   window.removeEventListener('message', receive);
   // Presentation-only options from the owning parent. No child commands are accepted.
-  const font = typeof event.data.font === 'string' && event.data.font.length < 80000 && /^data:font\/woff2;base64,[A-Za-z0-9+/=]+$/.test(event.data.font) ? event.data.font : null;
+  const font = typeof event.data.font === 'string' && /^data:font\/woff2;base64,[A-Za-z0-9+/=]+$/.test(event.data.font) ? event.data.font : null;
   const token = typeof event.data.sizeToken === 'string' && event.data.sizeToken.length <= 80 ? event.data.sizeToken : null;
   // A screen fills its frame and lays itself out; a visual takes the height of its content.
   const page = event.data.page === true;

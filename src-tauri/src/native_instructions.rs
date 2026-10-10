@@ -1,21 +1,14 @@
-//! On-demand, bounded instruction records from the conversation's own native session.
+//! On-demand instruction records from the conversation's own native session, read whole.
 //! This is not a transcript export or a reconstruction of the complete model request.
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
-
-const MAX_FILE: u64 = 64 * 1024 * 1024;
-// Structured image inputs can exceed 10 MiB in one native JSONL record.
-const MAX_LINE: usize = 32 * 1024 * 1024;
-const MAX_TEXT: usize = 512 * 1024;
-const MAX_TOTAL: usize = 1024 * 1024;
-const MAX_BLOCKS: usize = 40;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,10 +29,10 @@ pub struct NativeInstructions {
     studio_guidance: String,
 }
 
-fn bounded_metadata(value: &Value) -> Option<String> {
+fn metadata(value: &Value) -> Option<String> {
     value
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 100 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
         .map(String::from)
 }
 
@@ -146,15 +139,10 @@ pub(crate) fn find_record(
         .canonicalize()
         .map_err(|_| "Cannot access native session storage")?;
     let mut queue = vec![(root.clone(), 0)];
-    let mut visited = 0;
     let mut found = None;
     while let Some((dir, depth)) = queue.pop() {
         for entry in std::fs::read_dir(dir).map_err(|_| "Cannot inspect native session storage")? {
             let entry = entry.map_err(|_| "Cannot inspect native session storage")?;
-            visited += 1;
-            if visited > 30_000 {
-                return Err("Native session storage exceeds the inspection limit".into());
-            }
             let kind = entry
                 .file_type()
                 .map_err(|_| "Cannot inspect a native session record")?;
@@ -195,46 +183,18 @@ pub(crate) fn find_record(
     Ok(found)
 }
 
-fn add(blocks: &mut Vec<InstructionBlock>, block: InstructionBlock) -> Result<(), String> {
-    if block.text.len() > MAX_TEXT
-        || blocks.len() >= MAX_BLOCKS
-        || blocks.iter().map(|b| b.text.len()).sum::<usize>() + block.text.len() > MAX_TOTAL
-    {
-        return Err(
-            "The recorded instructions exceed the display limit. No partial prompt is shown."
-                .into(),
-        );
-    }
-    blocks.push(block);
-    Ok(())
-}
-
 fn parse_file(path: &Path, provider: &str, id: &str) -> Result<Vec<InstructionBlock>, String> {
     let file = File::open(path).map_err(|_| "Cannot read the native session record")?;
-    if file
-        .metadata()
-        .map_err(|_| "Cannot inspect the native session record")?
-        .len()
-        > MAX_FILE
-    {
-        return Err("The native session record exceeds the inspection limit".into());
-    }
-    let mut reader = BufReader::new(file.take(MAX_FILE + 1));
+    let mut reader = BufReader::new(file);
     let mut blocks = vec![];
     let mut verified = false;
-    let mut total = 0;
     loop {
         let mut bytes = Vec::new();
-        (&mut reader)
-            .take((MAX_LINE + 1) as u64)
+        reader
             .read_until(b'\n', &mut bytes)
             .map_err(|_| "Cannot read the native session record")?;
         if bytes.is_empty() {
             break;
-        }
-        total += bytes.len();
-        if bytes.len() > MAX_LINE || total as u64 > MAX_FILE {
-            return Err("The native session record exceeds the inspection limit".into());
         }
         // A running provider may still be appending the final JSONL record.
         if bytes.last() != Some(&b'\n') {
@@ -242,7 +202,7 @@ fn parse_file(path: &Path, provider: &str, id: &str) -> Result<Vec<InstructionBl
         }
         let row: Value = serde_json::from_slice(&bytes)
             .map_err(|_| "The native session record is unreadable")?;
-        let captured_at = bounded_metadata(&row["timestamp"]);
+        let captured_at = metadata(&row["timestamp"]);
         if provider == "claude" {
             if row["sessionId"].as_str().is_some_and(|value| value != id) {
                 return Err("Native session identity mismatch".into());
@@ -258,24 +218,21 @@ fn parse_file(path: &Path, provider: &str, id: &str) -> Result<Vec<InstructionBl
                 let sections = row["attachment"]["systemPrompt"]
                     .as_array()
                     .ok_or("Unsupported native system-prompt snapshot")?;
-                if sections.is_empty() || sections.len() > MAX_BLOCKS {
+                if sections.is_empty() {
                     return Err("Unsupported native system-prompt snapshot".into());
                 }
                 blocks.clear();
                 for (index, section) in sections.iter().enumerate() {
-                    add(
-                        &mut blocks,
-                        InstructionBlock {
-                            label: format!("System prompt · section {}", index + 1),
-                            text: section
-                                .as_str()
-                                .ok_or("Unsupported native system-prompt section")?
-                                .into(),
-                            captured_at: captured_at.clone(),
-                            version: bounded_metadata(&row["version"]),
-                            model: None,
-                        },
-                    )?;
+                    blocks.push(InstructionBlock {
+                        label: format!("System prompt · section {}", index + 1),
+                        text: section
+                            .as_str()
+                            .ok_or("Unsupported native system-prompt section")?
+                            .into(),
+                        captured_at: captured_at.clone(),
+                        version: metadata(&row["version"]),
+                        model: None,
+                    });
                 }
             }
         } else if row["type"] == "session_meta" {
@@ -284,18 +241,15 @@ fn parse_file(path: &Path, provider: &str, id: &str) -> Result<Vec<InstructionBl
                 return Err("Native session identity mismatch".into());
             }
             verified = true;
-            let version = bounded_metadata(&meta["cli_version"]);
+            let version = metadata(&meta["cli_version"]);
             if let Some(text) = meta["base_instructions"]["text"].as_str() {
-                add(
-                    &mut blocks,
-                    InstructionBlock {
-                        label: "Base instructions at session start".into(),
-                        text: text.into(),
-                        captured_at: bounded_metadata(&meta["timestamp"]).or(captured_at),
-                        version: version.clone(),
-                        model: bounded_metadata(&meta["base_instructions"]["provenance"]["model"]),
-                    },
-                )?;
+                blocks.push(InstructionBlock {
+                    label: "Base instructions at session start".into(),
+                    text: text.into(),
+                    captured_at: metadata(&meta["timestamp"]).or(captured_at),
+                    version: version.clone(),
+                    model: metadata(&meta["base_instructions"]["provenance"]["model"]),
+                });
             }
         } else if provider == "codex"
             && verified
@@ -321,16 +275,13 @@ fn parse_file(path: &Path, provider: &str, id: &str) -> Result<Vec<InstructionBl
                     .iter()
                     .any(|b| b.label == "Recorded developer message" && b.text == text)
                 {
-                    add(
-                        &mut blocks,
-                        InstructionBlock {
-                            label: "Recorded developer message".into(),
-                            text,
-                            captured_at,
-                            version: bounded_metadata(&row["cli_version"]),
-                            model: None,
-                        },
-                    )?;
+                    blocks.push(InstructionBlock {
+                        label: "Recorded developer message".into(),
+                        text,
+                        captured_at,
+                        version: metadata(&row["cli_version"]),
+                        model: None,
+                    });
                 }
             }
         }
@@ -397,7 +348,7 @@ mod tests {
         assert_eq!(blocks[0].model.as_deref(), Some("fixture"));
     }
     #[test]
-    fn rejects_wrong_identity_malformed_and_oversized_records_without_partial_prompts() {
+    fn rejects_wrong_identity_and_malformed_records_without_partial_prompts() {
         let id = uuid::Uuid::new_v4().to_string();
         assert!(parse_file(
             file(&[claude("another-id", "prompt")]).path(),
@@ -405,12 +356,12 @@ mod tests {
             &id
         )
         .is_err());
-        assert!(parse_file(
-            file(&[claude(&id, &"x".repeat(MAX_TEXT + 1))]).path(),
-            "claude",
-            &id
-        )
-        .is_err());
+        // A prompt of any size is shown whole, past the 512 KB earlier releases showed.
+        let large = "x".repeat(600 * 1024);
+        assert_eq!(
+            parse_file(file(&[claude(&id, &large)]).path(), "claude", &id).unwrap()[0].text,
+            large
+        );
         let mut corrupt = file(&[claude(&id, "prompt")]);
         writeln!(corrupt, "invalid json").unwrap();
         assert!(parse_file(corrupt.path(), "claude", &id).is_err());
@@ -420,9 +371,6 @@ mod tests {
             parse_file(partial.path(), "claude", &id).unwrap()[0].text,
             "prompt"
         );
-        let mut oversized = tempfile::NamedTempFile::new().unwrap();
-        oversized.write_all(&vec![b'x'; MAX_LINE + 1]).unwrap();
-        assert!(parse_file(oversized.path(), "codex", &id).is_err());
     }
     #[test]
     fn missing_snapshot_does_not_fabricate_prompt() {

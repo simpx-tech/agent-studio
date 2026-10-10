@@ -183,12 +183,11 @@ describe('imported chats', () => {
     expect(historyFor(conversation)[1].text).toContain('Keep the old cache');
   });
 
-  it('keeps titles short, Codex model ids as reported, and haiku without reasoning', () => {
+  it('keeps titles whole on one line, Codex model ids as reported, and haiku without reasoning', () => {
     const chat = claudeChat();
-    chat.title = `  ${'Long title '.repeat(20)}`;
+    chat.title = `  ${'Long title\n\t'.repeat(20)}`;
     const conversation = importedConversation(chat, crypto.randomUUID(), fleet());
-    expect(conversation.title.length).toBeLessThanOrEqual(100);
-    expect(conversation.title.endsWith('…')).toBe(true);
+    expect(conversation.title).toBe(Array(20).fill('Long title').join(' '));
     expect(pickerModel('codex', 'gpt-6-astra')).toBe('gpt-6-astra');
     expect(pickerModel('claude', 'claude-sonnet-5-20260101')).toBe('sonnet');
     expect(pickerModel('claude', 'my-custom-model')).toBe('my-custom-model');
@@ -199,9 +198,16 @@ describe('imported chats', () => {
     });
   });
 
-  it('refuses host results the workspace cannot keep', () => {
-    const chat = claudeChat();
-    chat.location = { computerId, environmentId, path: 'x'.repeat(5000) };
+  it('keeps host results of any length and refuses ones the workspace cannot keep', () => {
+    const chat = importedChatSchema.parse({
+      ...claudeChat(),
+      title: 'T'.repeat(1000),
+      location: { computerId, environmentId, path: 'x'.repeat(5000) },
+    });
+    const kept = importedConversation(chat, crypto.randomUUID(), fleet());
+    expect(kept.title).toBe('T'.repeat(1000));
+    expect(kept.location?.path).toBe('x'.repeat(5000));
+    chat.location = { computerId: 'desktop', environmentId, path: '/p' };
     expect(() => importedConversation(chat, crypto.randomUUID(), fleet())).toThrow();
     expect(() => importedChatSchema.parse({ ...claudeChat(), provider: 'gemini' })).toThrow();
   });

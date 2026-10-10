@@ -20,12 +20,7 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
-async function fixture(limits?: {
-  upload?: number;
-  answer?: number;
-  jobUpdate?: number;
-  jobStorage?: number;
-}) {
+async function fixture(limits?: { answer?: number }) {
   let time = Date.now();
   const token = 'synthetic-test-pairing-key-'.repeat(2);
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-relay-'));
@@ -302,41 +297,49 @@ describe('image store', () => {
     expect(claimed.body[0].args.request.messages[0].images).toEqual([inline(png, id)]);
   });
 
-  it('refuses an image upload past 16 MB even without a declared length', async () => {
+  it('keeps an image upload of any size, even without a declared length', async () => {
     const f = await fixture();
-    const large = Buffer.alloc(16 * 1024 * 1024 + 1);
+    const large = Buffer.alloc(20 * 1024 * 1024);
     png.copy(large);
     const hash = sha256(large);
     const port = (f.server.address() as { port: number }).port;
-    const outcome = await new Promise<number | 'reset'>((resolve) => {
-      // Without a length the bytes arrive chunked, and the relay counts them as they come.
-      const upload = httpRequest(
-        {
-          host: '127.0.0.1',
-          port,
-          method: 'PUT',
-          path: `/v1/images/${hash}`,
-          headers: {
-            authorization: `Bearer ${f.token}`,
-            'x-environment-id': f.source,
-            'x-studio-images': '1',
-            'content-type': 'application/octet-stream',
+    const upload = (name: string) =>
+      new Promise<number | 'reset'>((resolve) => {
+        // Without a length the bytes arrive chunked, and the relay hashes them as they come.
+        const put = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            method: 'PUT',
+            path: `/v1/images/${name}`,
+            headers: {
+              authorization: `Bearer ${f.token}`,
+              'x-environment-id': f.source,
+              'x-studio-images': '1',
+              'content-type': 'application/octet-stream',
+            },
           },
-        },
-        (response) => {
-          response.resume();
-          resolve(response.statusCode!);
-        },
-      );
-      // The relay stops reading past the limit, which may reset the connection instead.
-      upload.on('error', () => resolve('reset'));
-      for (let at = 0; at < large.length; at += 1 << 20)
-        upload.write(large.subarray(at, at + (1 << 20)));
-      upload.end();
-    });
-    expect([413, 'reset']).toContain(outcome);
-    // Nothing of it stays, not even the partial upload.
-    await vi.waitFor(() => expect(readdirSync(join(f.directory, 'images'))).toEqual([]));
+          (response) => {
+            response.resume();
+            resolve(response.statusCode!);
+          },
+        );
+        put.on('error', () => resolve('reset'));
+        for (let at = 0; at < large.length; at += 1 << 20)
+          put.write(large.subarray(at, at + (1 << 20)));
+        put.end();
+      });
+    expect(await upload(hash)).toBe(200);
+    const read = await request(f, 'GET', `images/${hash}`);
+    expect(read).toMatchObject({ status: 200, type: 'image/png' });
+    expect(sha256(read.body)).toBe(hash);
+    const others = Array.from({ length: 3000 }, (_, i) => sha256(Buffer.from(String(i))));
+    expect(
+      (await request(f, 'POST', 'images/missing', { body: { hashes: [hash, ...others] } })).body,
+    ).toEqual({ missing: others });
+    // The same bytes under another image's hash are refused, and nothing of them stays.
+    expect(await upload(sha256(png))).toBe(400);
+    await vi.waitFor(() => expect(readdirSync(join(f.directory, 'images'))).toEqual([hash]));
   });
 
   it('refuses a run whose inline image is not the image it says', async () => {
@@ -485,26 +488,25 @@ describe('real HTTP relay', () => {
     });
   });
 
-  it('refuses a workspace upload past its limit, whole or patched', async () => {
-    const f = await fixture({ upload: 4_000 });
-    const large = conversation('x'.repeat(8_000));
+  it('takes a workspace upload of any size, whole or patched, and keeps it whole', async () => {
+    const f = await fixture();
+    const whole = conversation('x'.repeat(3_000_000));
     expect(
       await f.call('PUT', 'state', {
         revision: 0,
-        workspace: { ...emptyShared(), conversations: [large] },
+        workspace: { ...emptyShared(), conversations: [whole] },
       }),
-    ).toMatchObject({ status: 413, body: { code: 'too_large' } });
-    expect(await f.call('POST', 'state/patch', { revision: 0, upsert: [large] })).toMatchObject({
-      status: 413,
-      body: { code: 'too_large' },
-    });
-    // Nothing was stored, and an upload within the limit still goes through.
-    const small = conversation('Small');
-    const accepted = await f.call('POST', 'state/patch', { revision: 0, upsert: [small] });
-    expect(accepted).toMatchObject({
+    ).toMatchObject({ status: 200, body: { revision: 1 } });
+    const patched = conversation('y'.repeat(3_000_000));
+    expect(await f.call('POST', 'state/patch', { revision: 1, upsert: [patched] })).toMatchObject({
       status: 200,
-      body: { revision: 1, chats: { [small.id]: 1 } },
+      body: { revision: 2, chats: { [patched.id]: 2 } },
     });
+    // Asking for thousands of conversations at once is fine too.
+    const ids = [whole.id, patched.id, ...Array.from({ length: 4000 }, () => crypto.randomUUID())];
+    const read = await f.call('POST', 'state/chats', { ids });
+    expect(read.status).toBe(200);
+    expect(read.body.chats).toEqual([whole, patched]);
   });
 
   it('answers conversations within a budget and names the rest for another request', async () => {
@@ -633,7 +635,7 @@ describe('real HTTP relay', () => {
       args: job.args,
     });
   });
-  it('routes folder icon choices to the host with only a bounded folder name and message', async () => {
+  it('routes folder icon choices to the host with only a folder name and message, of any length', async () => {
     const f = await fixture();
     await f.call(
       'POST',
@@ -658,14 +660,14 @@ describe('real HTTP relay', () => {
       { ...job.args, path: '/outside/process' },
       { ...job.args, provider: 'shell' },
       { ...job.args, folder: '' },
-      { ...job.args, firstMessage: 'x'.repeat(4001) },
       { ...job.args, connectionId: undefined },
     ])
       expect((await f.call('POST', 'jobs', { ...job, args })).status).toBe(400);
-    expect((await f.call('POST', 'jobs', job)).status).toBe(200);
+    const long = { ...job.args, folder: 'f'.repeat(5000), firstMessage: 'x'.repeat(10_000) };
+    expect((await f.call('POST', 'jobs', { ...job, args: long })).status).toBe(200);
     expect((await f.call('GET', 'jobs', undefined, f.target)).body[0]).toMatchObject({
       method: 'folderIcon',
-      args: job.args,
+      args: long,
     });
   });
   it('routes explicit plan decisions to the owning host and retains proposed plans in checkpoints', async () => {
@@ -763,7 +765,7 @@ describe('real HTTP relay', () => {
       ).status,
     ).toBe(404);
   });
-  it('keeps active plugin evaluations beyond six minutes but bounds their lifetime and heartbeat', async () => {
+  it('keeps plugin evaluations running while their host reports them, and ends abandoned ones', async () => {
     const f = await fixture();
     await f.call(
       'POST',
@@ -789,7 +791,8 @@ describe('real HTTP relay', () => {
       },
     };
     expect((await f.call('POST', 'jobs', job)).status).toBe(200);
-    for (let second = 30; second <= 660; second += 30) {
+    // However long it runs, past the eleven minutes it once had.
+    for (let second = 30; second <= 900; second += 30) {
       f.advance(30_000);
       const update = await f.call(
         'PUT',
@@ -800,6 +803,9 @@ describe('real HTTP relay', () => {
       expect(update.status).toBe(200);
       expect(update.body.status).toBe('running');
     }
+    f.advance(45_000);
+    expect((await f.call('GET', `jobs/${job.id}`)).body.status).toBe('running');
+    // Once its host stops reporting it, it ends.
     f.advance(1);
     expect((await f.call('GET', `jobs/${job.id}`)).body.status).toBe('error');
     await f.call(
@@ -922,7 +928,7 @@ describe('real HTTP relay', () => {
       (await f.call('PUT', `jobs/${job.id}`, { status: 'complete', events: [] }, f.target)).status,
     ).toBe(200);
   });
-  it('carries bounded reasoning alongside a full activity checkpoint', async () => {
+  it('carries reasoning alongside a full activity checkpoint, and updates of any size', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();
     await f.call(
@@ -957,16 +963,17 @@ describe('real HTTP relay', () => {
       (await f.call('PUT', `jobs/${id}`, { status: 'running', events }, f.target)).status,
     ).toBe(200);
     expect((await f.call('GET', `jobs/${id}`)).body.events).toEqual(events);
+    // However many events an update carries, and however long its error.
+    const many = Array.from({ length: 2000 }, (_, i) => ({ kind: 'activity', text: `More ${i}` }));
     expect(
-      (
-        await f.call(
-          'PUT',
-          `jobs/${id}`,
-          { status: 'running', events: Array(449).fill(events[0]) },
-          f.target,
-        )
-      ).status,
-    ).toBe(400);
+      (await f.call('PUT', `jobs/${id}`, { status: 'running', events: many }, f.target)).status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${id}`)).body.events).toEqual(many);
+    const error = 'e'.repeat(10_000);
+    expect(
+      (await f.call('PUT', `jobs/${id}`, { status: 'error', events: [], error }, f.target)).status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${id}`)).body).toMatchObject({ status: 'error', error });
   });
   it('routes bounded native instruction requests as transient jobs and rejects caller-supplied paths', async () => {
     const f = await fixture();
@@ -1049,7 +1056,6 @@ describe('real HTTP relay', () => {
       { ...args, runId: '../run' },
       { ...args, toolId: '' },
       { ...args, toolId: 'a\nb' },
-      { ...args, toolId: 'x'.repeat(241) },
       { ...args, full: 'yes' },
     ])
       expect((await f.call('POST', 'jobs', { ...job, args: invalid })).status).toBe(400);
@@ -1064,7 +1070,13 @@ describe('real HTTP relay', () => {
     expect((await f.call('POST', 'jobs', { ...image, args: { ...args, index: 0 } })).status).toBe(
       200,
     );
-    // Views of a model too large for one request name the model the same way, and nothing else:
+    // A call's ID of any length, and an image at any place among its results.
+    for (const accepted of [
+      { ...job, id: crypto.randomUUID(), args: { ...args, toolId: `claude:${'x'.repeat(5000)}` } },
+      { ...image, id: crypto.randomUUID(), args: { ...args, index: 2_000_000 } },
+    ])
+      expect((await f.call('POST', 'jobs', accepted)).status).toBe(200);
+    // Views of a model a device cannot read whole name the model the same way, and nothing else:
     // the computer keeping it draws them itself.
     const views = { ...job, id: crypto.randomUUID(), method: 'toolOutputModelViews' };
     for (const invalid of [
@@ -1119,8 +1131,8 @@ describe('real HTTP relay', () => {
     expect((await f.call('GET', `jobs/${views.id}`)).body.result).toEqual(drawn);
     expect((await f.call('GET', `jobs/${views.id}`)).status).toBe(404);
   });
-  it('keeps large read results only until they are read, within the storage budget', async () => {
-    const f = await fixture({ jobUpdate: 3_000, jobStorage: 6_000 });
+  it('keeps read results of any size, however many at once, only until they are read', async () => {
+    const f = await fixture();
     await f.call(
       'POST',
       'heartbeat',
@@ -1150,19 +1162,17 @@ describe('real HTTP relay', () => {
         { status: 'complete', events: [], result: image(size) },
         f.target,
       );
-    // An update past its limit is refused before it is read.
-    expect((await finish(first.id, 4_000)).body.code).toBe('too_large');
-    expect((await finish(first.id, 2_000)).status).toBe(200);
-    expect((await finish(second.id, 2_000)).status).toBe(200);
-    // Two held results leave no room for a third until one is read.
-    expect((await finish(third.id, 2_000)).status).toBe(429);
-    expect((await f.call('GET', `jobs/${first.id}`)).body.result).toEqual(image(2_000));
-    expect((await finish(third.id, 2_000)).status).toBe(200);
+    for (const job of [first, second, third])
+      expect((await finish(job.id, 3_000_000)).status).toBe(200);
+    expect((await f.call('GET', `jobs/${first.id}`)).body.result).toEqual(image(3_000_000));
+    // The requester has its result, and nothing else reads it, so it leaves at once.
+    expect((await f.call('GET', `jobs/${first.id}`)).status).toBe(404);
+    expect((await f.call('GET', `jobs/${third.id}`)).body.result).toEqual(image(3_000_000));
     // A result its requester never reads leaves a minute after it finished.
     f.advance(60_001);
     expect((await f.call('GET', `jobs/${second.id}`)).status).toBe(404);
   });
-  it('keeps healthy native workflows past one reply deadline while expiring abandoned work', async () => {
+  it('keeps healthy native workflows running past an hour while expiring abandoned work', async () => {
     const f = await fixture(),
       id = crypto.randomUUID();
     await f.call(
@@ -1179,8 +1189,9 @@ describe('real HTTP relay', () => {
       args: { request: { runId: id, agent: { provider: 'claude' } } },
     });
     await f.call('GET', 'jobs', undefined, f.target);
-    for (let i = 0; i < 13; i++) {
-      f.advance(30_000);
+    // A reply runs as long as its computer keeps reporting it, past the hour it once had.
+    for (let i = 0; i < 84; i++) {
+      f.advance(44_000);
       const updated = await f.call(
         'PUT',
         `jobs/${id}`,

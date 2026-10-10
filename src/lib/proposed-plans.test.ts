@@ -76,15 +76,14 @@ describe('proposed plans', () => {
     old.conversations[0].messages[0].runId = crypto.randomUUID();
     expect(mergeShared(base, base, old).conversations[0].messages[0].proposedPlans).toBeUndefined();
   });
-  it('bounds metadata and keeps unfinished or truncated proposals out of bootstrap context', () => {
+  it('keeps proposals of any number and length, unique and at their newest revision', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ ...proposal, id: String(i) }));
+    expect(proposedPlansSchema.safeParse(many).success).toBe(true);
+    expect(mergeProposedPlans([], many)).toEqual(many);
     expect(
-      proposedPlansSchema.safeParse(
-        Array.from({ length: 9 }, (_, i) => ({ ...proposal, id: String(i) })),
-      ).success,
-    ).toBe(false);
-    expect(proposedPlansSchema.safeParse([{ ...proposal, text: 'x'.repeat(128001) }]).success).toBe(
-      false,
-    );
+      proposedPlansSchema.safeParse([{ ...proposal, text: 'x'.repeat(200_000) }]).success,
+    ).toBe(true);
+    expect(proposedPlansSchema.safeParse([proposal, proposal]).success).toBe(false);
     expect(
       mergeProposedPlans([proposal], [{ ...proposal, revision: 0, text: 'stale' }])[0].text,
     ).toBe('Draft');

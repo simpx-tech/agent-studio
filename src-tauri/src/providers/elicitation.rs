@@ -148,10 +148,11 @@ impl Hub {
             }
             let content = input.content.filter(|v| !v.is_null());
             if action == "accept" && entry.request.receipt.mode == "form" {
-                if content.as_ref().is_none_or(|v| {
-                    v.to_string().len() > 24000 || !schema::valid_content(&entry.request.fields, v)
-                }) {
-                    return Err("Check the required fields and their input limits.".into());
+                if content
+                    .as_ref()
+                    .is_none_or(|v| !schema::valid_content(&entry.request.fields, v))
+                {
+                    return Err("Check the required fields and what each accepts.".into());
                 }
             } else if content.is_some() {
                 return Err("This action does not accept form values.".into());
@@ -183,10 +184,7 @@ impl Session {
     fn submit(&mut self, wire: Wire, params: &Value, claude: bool, parent: bool) -> Option<Value> {
         if !(wire.id().as_i64().is_some()
             || wire.id().as_u64().is_some()
-            || wire
-                .id()
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 240))
+            || wire.id().as_str().is_some_and(|s| !s.is_empty()))
         {
             return Some(wire.error("Invalid MCP request identity."));
         }
@@ -194,9 +192,6 @@ impl Session {
             return Some(wire.respond("cancel", None));
         }
         let parse = || -> Result<Request, &'static str> {
-            if params.to_string().len() > 32000 {
-                return Err(schema::INVALID);
-            }
             let mode = params["mode"].as_str().unwrap_or("form");
             let server_name = schema::text(
                 &params[if claude {
@@ -204,9 +199,8 @@ impl Session {
                 } else {
                     "serverName"
                 }],
-                200,
             )?;
-            let message = schema::text(&params["message"], 4000)?;
+            let message = schema::text(&params["message"])?;
             let (fields, url) = match mode {
                 "form" => (
                     schema::parse(
@@ -225,7 +219,6 @@ impl Session {
                         } else {
                             "elicitationId"
                         }],
-                        240,
                     )?;
                     (vec![], Some(schema::safe_url(&params["url"])?))
                 }
@@ -256,17 +249,6 @@ impl Session {
         let key = wire.id().to_string();
         if run.seen.contains(&key) {
             return None;
-        }
-        if run.seen.len() >= 16
-            || run
-                .entries
-                .values()
-                .map(|e| serde_json::to_vec(&e.request).unwrap().len())
-                .sum::<usize>()
-                + serde_json::to_vec(&request).unwrap().len()
-                > 128000
-        {
-            return Some(wire.error("This reply reached its MCP input limit."));
         }
         run.seen.insert(key);
         self.emit(request.receipt.clone());
@@ -306,7 +288,6 @@ impl Session {
             && meta["codex_requires_user_input"] != true
             && meta["codex_strict_auto_review"] != true
             && meta["codex_sensitive_action"] != true
-            && p.to_string().len() <= 32000
             && schema::parse(&p["requestedSchema"]).is_ok_and(|fields| fields.is_empty())
         {
             return Some(Some(

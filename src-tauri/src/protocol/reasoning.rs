@@ -4,37 +4,25 @@ use super::RunEvent;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 
-const MAX_ITEMS: usize = 64;
-const MAX_TEXT: usize = 16000;
 /// Claude messages remembered while their snapshot lines arrive.
 const RECENT_MESSAGES: usize = 8;
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control)
+    !id.is_empty() && !id.chars().any(char::is_control)
 }
 
+/// The parts of one item's text, each kept whole.
 #[derive(Default)]
 struct Parts {
     text: BTreeMap<usize, String>,
-    truncated: bool,
 }
 impl Parts {
     fn update(&mut self, index: usize, text: &str, append: bool) {
-        if index >= 64 {
-            return;
-        }
-        let used: usize = self
-            .text
-            .iter()
-            .filter(|(i, _)| **i != index)
-            .map(|(_, s)| s.chars().count() + 2)
-            .sum();
         let current = self.text.entry(index).or_default();
-        let prefix = if append { current.as_str() } else { "" };
-        let mut chars = prefix.chars().chain(text.chars());
-        let next: String = chars.by_ref().take(MAX_TEXT.saturating_sub(used)).collect();
-        self.truncated |= chars.next().is_some();
-        *current = next;
+        if !append {
+            current.clear();
+        }
+        current.push_str(text);
     }
     fn joined(&self) -> String {
         self.text
@@ -52,7 +40,6 @@ struct Item {
     summary: Parts,
     content: Parts,
     text: String,
-    truncated: bool,
     revision: u64,
 }
 
@@ -65,7 +52,7 @@ pub struct ReasoningDecoder {
     printed: VecDeque<(String, usize)>,
 }
 impl ReasoningDecoder {
-    /// Only reported text reserves one of the bounded items; an empty start does not.
+    /// Only reported text makes an item; an empty start does not.
     fn item(&mut self, id: &str, create: bool) -> Option<&mut Item> {
         if !valid_id(id) {
             return None;
@@ -73,7 +60,7 @@ impl ReasoningDecoder {
         let index = if let Some(index) = self.items.iter().position(|i| i.id == id) {
             index
         } else {
-            if !create || self.items.len() >= MAX_ITEMS {
+            if !create {
                 return None;
             }
             self.items.push(Item {
@@ -87,22 +74,21 @@ impl ReasoningDecoder {
     fn emit(item: &mut Item) -> Option<RunEvent> {
         // Prefer the summary if both forms are reported for the same Codex item.
         let summary = item.summary.joined();
-        let (text, truncated) = if summary.is_empty() {
-            (item.content.joined(), item.content.truncated)
+        let text = if summary.is_empty() {
+            item.content.joined()
         } else {
-            (summary, item.summary.truncated)
+            summary
         };
-        if text.is_empty() || (text == item.text && truncated == item.truncated) {
+        if text.is_empty() || text == item.text {
             return None;
         }
         item.text = text;
-        item.truncated = truncated;
         item.revision += 1;
         Some(RunEvent::Reasoning {
             id: item.id.clone(),
             revision: item.revision,
             text: item.text.clone(),
-            truncated,
+            truncated: false,
         })
     }
     pub fn text(&mut self, id: &str, text: &str, append: bool) -> Option<RunEvent> {
@@ -121,9 +107,6 @@ impl ReasoningDecoder {
                     "contentIndex"
                 }]
                 .as_u64()?;
-                if index >= 64 {
-                    return None;
-                }
                 let delta = p["delta"].as_str()?;
                 let item = self.item(p["itemId"].as_str()?, !delta.is_empty())?;
                 let parts = if summary {
@@ -140,7 +123,6 @@ impl ReasoningDecoder {
                     source[*key].as_array().is_some_and(|values| {
                         values
                             .iter()
-                            .take(64)
                             .any(|text| text.as_str().is_some_and(|text| !text.is_empty()))
                     })
                 });
@@ -150,7 +132,7 @@ impl ReasoningDecoder {
                     ("content", &mut item.content),
                 ] {
                     if let Some(values) = source[key].as_array() {
-                        for (index, text) in values.iter().take(64).enumerate() {
+                        for (index, text) in values.iter().enumerate() {
                             if let Some(text) = text.as_str() {
                                 parts.update(index, text, false);
                             }
@@ -167,7 +149,7 @@ impl ReasoningDecoder {
         match value["type"].as_str() {
             Some("stream_event") => {
                 let event = &value["event"];
-                let Some(index) = event["index"].as_u64().filter(|i| *i < 256) else {
+                let Some(index) = event["index"].as_u64() else {
                     return events;
                 };
                 let id = format!("{current_message}:{index}");
@@ -210,9 +192,6 @@ impl ReasoningDecoder {
                 }
                 for (index, block) in blocks.iter().enumerate() {
                     let position = offset + index;
-                    if position >= 256 {
-                        break;
-                    }
                     if block["type"] == "thinking" {
                         if let Some(text) = block["thinking"].as_str() {
                             events.extend(self.text(&format!("{id}:{position}"), text, false));

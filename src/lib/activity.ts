@@ -13,7 +13,7 @@ import { applyQuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
 import { steeringReceiptSchema, mergeSteering } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
-import { reasoningBlockSchema, maxReasoningBlocks, mergeReasoningBlocks } from './reasoning.ts';
+import { reasoningBlockSchema, mergeReasoningBlocks } from './reasoning.ts';
 import { usageLimitSchema, latestUsageLimit } from './usage-limits.ts';
 
 export const activityStatusSchema = z.enum([
@@ -28,23 +28,23 @@ export const activityStatusSchema = z.enum([
 export const toolOutputSummarySchema = z.object({
   lines: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  images: z.number().int().nonnegative().max(64).optional(),
+  images: z.number().int().nonnegative().optional(),
   stderr: z.boolean().optional(),
   exitCode: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
   truncated: z.boolean().optional(),
 });
 export type ToolOutputSummary = z.infer<typeof toolOutputSummarySchema>;
 export const toolActivitySchema = z.object({
-  id: z.string().max(240),
+  id: z.string(),
   revision: z.number().int().nonnegative(),
   category: z.enum(['skill', 'search', 'agent', 'tool', 'hook']),
-  name: z.string().max(200),
+  name: z.string(),
   status: activityStatusSchema,
-  // Limits are UTF-16 units: twice the executing computer's limit in characters.
-  command: z.string().max(16_000).optional(),
+  // Kept whole. Computers before 2026-10-10 shortened long ones and flagged them truncated.
+  command: z.string().optional(),
   commandTruncated: z.boolean().optional(),
   shell: z.enum(['bash', 'sh', 'zsh', 'powershell', 'cmd']).optional(),
-  input: z.string().max(8_000).optional(),
+  input: z.string().optional(),
   inputTruncated: z.boolean().optional(),
   output: toolOutputSummarySchema.optional(),
   elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
@@ -54,30 +54,24 @@ export const toolActivitySchema = z.object({
       atElapsedMs: z.number().int().min(0).max(31_536_000_000),
     })
     .optional(),
-  parentId: z.string().max(240).optional(),
-  detail: z.string().max(4096).optional(),
-  query: z.string().max(2048).optional(),
-  path: z.string().max(4096).optional(),
-  operation: z.string().max(40).optional(),
+  parentId: z.string().optional(),
+  detail: z.string().optional(),
+  query: z.string().optional(),
+  path: z.string().optional(),
+  operation: z.string().optional(),
   commandRun: z.boolean().optional(),
   // The launch returned while its task kept running; the status then follows that task.
   background: z.boolean().optional(),
-  facts: z
-    .array(z.object({ label: z.string().max(80), value: z.string().max(4096) }))
-    .max(12)
-    .default([]),
-  sources: z
-    .array(z.object({ title: z.string().max(300), url: z.string().max(2048) }))
-    .max(12)
-    .default([]),
+  facts: z.array(z.object({ label: z.string(), value: z.string() })).default([]),
+  sources: z.array(z.object({ title: z.string(), url: z.string() })).default([]),
   agents: z
     .array(
       z.object({
-        id: z.string().max(240),
-        agentId: z.string().max(240).optional(),
-        name: z.string().max(200),
+        id: z.string(),
+        agentId: z.string().optional(),
+        name: z.string(),
         status: activityStatusSchema,
-        parentId: z.string().max(240).optional(),
+        parentId: z.string().optional(),
         // A sub-agent's task, messages and result are kept whole. Replies saved before
         // 2026-09-29 kept 16 messages of up to 16,000 UTF-16 units and marked the rest.
         task: z.string().optional(),
@@ -85,7 +79,7 @@ export const toolActivitySchema = z.object({
         messages: z
           .array(
             z.object({
-              id: z.string().max(220),
+              id: z.string(),
               text: z.string(),
               complete: z.boolean(),
               // The child's own calls recorded before this message began; older replies lack it.
@@ -97,7 +91,6 @@ export const toolActivitySchema = z.object({
         background: z.boolean().optional(),
       }),
     )
-    .max(64)
     .default([]),
 });
 export type ToolActivity = Omit<z.infer<typeof toolActivitySchema>, 'facts'> & {
@@ -307,11 +300,9 @@ export function applyRunEvent(message: Message, event: RunEvent) {
   } else if (event.kind === 'progress') {
     if (
       typeof event.id !== 'string' ||
-      event.id.length > 240 ||
       !Number.isInteger(event.revision) ||
       event.revision! < 0 ||
-      typeof event.text !== 'string' ||
-      event.text.length > 32000
+      typeof event.text !== 'string'
     )
       return;
     const block = message.blocks.find((b) => b.type === 'activity' && b.progress?.id === event.id);
@@ -321,7 +312,7 @@ export function applyRunEvent(message: Message, event: RunEvent) {
         block.text = event.text;
         block.progress = progress;
       }
-    } else if (message.blocks.filter((b) => b.type === 'activity' && b.progress).length < 64) {
+    } else {
       message.blocks.push({
         type: 'activity',
         text: event.text,
@@ -337,8 +328,7 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     if (
       !message.blocks.some(
         (b) => b.type === 'activity' && !b.tool && !b.progress && b.text === event.text,
-      ) &&
-      message.blocks.filter((b) => b.type === 'activity' && !b.tool && !b.progress).length < 30
+      )
     )
       message.blocks.push({
         type: 'activity',
@@ -391,19 +381,23 @@ export function toolDisplayStatus(tool: ToolActivity, replyStatus: Message['stat
   );
 }
 
-// A relay job sends every event it keeps with each update, and the relay accepts 448 of them.
-// Besides reasoning, a job keeps this many.
+// A relay job sends every event it keeps with each update, every 0.7 seconds, to every device
+// following the reply, so it keeps a window of the newest of the events that grow with a reply
+// (calls, progress, notes, reasoning and visuals): every event still reaches those devices with
+// the conversation the computer running the reply saves and syncs, and nothing a reply records is
+// limited by this window. Besides reasoning, a job keeps this many of those events.
 const jobEvents = 336;
-// The other kinds of events are bounded on their own, 278 together at most, reasoning included,
-// which leaves room for this many calls.
+// Of those, this many calls, progress comments and notes.
 const jobCalls = 160;
-// A job keeps the latest event of each question Claude is writing, so the device that sent the
-// reply shows it as it is written. Closed drafts make room for new ones.
-const jobDrafts = 4;
+const jobProgress = 64;
+const jobNotes = 30;
+const jobReasoning = 64;
+// Visuals can be large, so the window keeps this many.
+const jobVisuals = 12;
 
 /**
- * A reply records every call, but a remote run's job keeps only the calls one update carries.
- * Once it holds as many as it can, a new call moves out the oldest finished ones, 64 at a time,
+ * A reply records every call, but a remote run's job keeps only the newest in its window. Once
+ * it holds as many as that, a new call moves out the oldest finished ones, 64 at a time,
  * so that the device following the job applies its shifted events again only now and then. That
  * device has usually applied them already; otherwise they arrive with the conversation that the
  * computer running the reply saves and syncs, which records every event.
@@ -434,15 +428,9 @@ function retainQuestionDraft(events: RunEvent[], event: RunEvent) {
   const next: RunEvent = { kind: 'questiondraft', questionDraft: draft };
   const index = at(draft.id);
   if (index >= 0) events[index] = next;
-  // A question whose draft the job never kept has nothing to close in it.
-  else if (!draft.closed) {
-    if (drafts.length >= jobDrafts) {
-      const closed = drafts.find((d) => d.closed);
-      if (!closed) return;
-      events.splice(at(closed.id), 1);
-    }
-    if (events.filter((e) => e.kind !== 'reasoning').length < jobEvents) events.push(next);
-  }
+  // A question whose draft the job never kept has nothing to close in it. Drafts reach other
+  // devices only through the job, so it keeps every one.
+  else if (!draft.closed) events.push(next);
 }
 
 export function retainRunEvent(events: RunEvent[], event: RunEvent) {
@@ -460,8 +448,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
       const previous = events[index].proposedPlan!;
       if (!previous.complete && parsed.data.revision > previous.revision)
         events[index] = { kind: 'proposedplan', proposedPlan: parsed.data };
-    } else if (events.filter((e) => e.kind === 'proposedplan').length < 8)
-      events.push({ kind: 'proposedplan', proposedPlan: parsed.data });
+    } else events.push({ kind: 'proposedplan', proposedPlan: parsed.data });
     return;
   }
   if (event.kind === 'skillschanged') {
@@ -478,7 +465,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
       (e) => e.kind === 'elicitation' && e.elicitation?.id === parsed.data.id,
     );
     const next: RunEvent = { kind: 'elicitation', elicitation: parsed.data };
-    if (index < 0 && events.filter((e) => e.kind === 'elicitation').length < 16) events.push(next);
+    if (index < 0) events.push(next);
     else if (
       index >= 0 &&
       events[index].elicitation?.status === 'pending' &&
@@ -496,16 +483,14 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     if (index >= 0) {
       if (parsed.data.revision > (events[index].compaction?.revision ?? -1))
         events[index] = { kind: 'compaction', compaction: parsed.data };
-    } else if (events.filter((e) => e.kind === 'compaction').length < 32)
-      events.push({ kind: 'compaction', compaction: parsed.data });
+    } else events.push({ kind: 'compaction', compaction: parsed.data });
     return;
   }
   if (event.kind === 'steering') {
     const parsed = steeringReceiptSchema.safeParse(event.steering);
     if (
       parsed.success &&
-      !events.some((e) => e.kind === 'steering' && e.steering?.id === parsed.data.id) &&
-      events.filter((e) => e.kind === 'steering').length < 8
+      !events.some((e) => e.kind === 'steering' && e.steering?.id === parsed.data.id)
     )
       events.push({ kind: 'steering', steering: parsed.data });
     return;
@@ -518,7 +503,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     const index = events.findIndex((e) => e.kind === 'reasoning' && e.id === next.id);
     if (index >= 0) {
       if (next.revision! > (events[index].revision ?? -1)) events[index] = next;
-    } else if (events.filter((e) => e.kind === 'reasoning').length < maxReasoningBlocks)
+    } else if (events.filter((e) => e.kind === 'reasoning').length < jobReasoning)
       events.push(next);
     return;
   }
@@ -556,7 +541,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     );
     if (index >= 0) {
       if (parsed.data.revision > (events[index].question?.revision ?? -1)) events[index] = event;
-    } else if (events.filter((e) => e.kind === 'question').length < 16) events.push(event);
+    } else events.push(event);
     return;
   }
   if (event.kind === 'visualization') {
@@ -568,7 +553,8 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     if (index >= 0) {
       if (parsed.data.revision > (events[index].visualization?.revision ?? -1))
         events[index] = event;
-    } else if (events.filter((e) => e.kind === 'visualization').length < 12) events.push(event);
+    } else if (events.filter((e) => e.kind === 'visualization').length < jobVisuals)
+      events.push(event);
     return;
   }
   if (event.kind === 'screen') {
@@ -577,7 +563,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     const index = events.findIndex((e) => e.kind === 'screen' && e.screen?.id === parsed.data.id);
     if (index >= 0) {
       if (parsed.data.revision > (events[index].screen?.revision ?? -1)) events[index] = event;
-    } else if (events.filter((e) => e.kind === 'screen').length < 12) events.push(event);
+    } else events.push(event);
     return;
   }
   if (event.kind === 'sentfiles') {
@@ -586,7 +572,7 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     const index = events.findIndex((e) => e.kind === 'sentfiles' && e.sentFiles?.id === parsed.data.id);
     if (index >= 0) {
       if (parsed.data.revision > (events[index].sentFiles?.revision ?? -1)) events[index] = event;
-    } else if (events.filter((e) => e.kind === 'sentfiles').length < 12) events.push(event);
+    } else events.push(event);
     return;
   }
   const index =
@@ -617,8 +603,9 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
   if (
     events.filter((e) => e.kind !== 'reasoning').length < jobEvents &&
     (event.kind !== 'tool' || events.filter((e) => e.kind === 'tool').length < jobCalls) &&
-    (event.kind !== 'progress' || events.filter((e) => e.kind === 'progress').length < 64) &&
-    (event.kind !== 'activity' || events.filter((e) => e.kind === 'activity').length < 30)
+    (event.kind !== 'progress' ||
+      events.filter((e) => e.kind === 'progress').length < jobProgress) &&
+    (event.kind !== 'activity' || events.filter((e) => e.kind === 'activity').length < jobNotes)
   )
     events.push(event);
 }

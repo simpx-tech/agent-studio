@@ -285,7 +285,6 @@
           >Workspace name<input
             aria-label="Workspace name"
             bind:value={name}
-            maxlength="80"
             autocomplete="off"
             required
             disabled={busy}

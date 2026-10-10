@@ -11,20 +11,16 @@ import type { QuestionRequest } from './questions.ts';
  */
 export const questionDraftSchema = z.object({
   // The tool call writing it.
-  id: z.string().min(1).max(240),
+  id: z.string().min(1),
   revision: z.number().int().min(1),
-  questions: z
-    .array(
-      z.object({
-        header: z.string().max(100),
-        question: z.string().max(2000),
-        multiSelect: z.boolean(),
-        options: z
-          .array(z.object({ label: z.string().min(1).max(200), description: z.string().max(1000) }))
-          .max(12),
-      }),
-    )
-    .max(4),
+  questions: z.array(
+    z.object({
+      header: z.string(),
+      question: z.string(),
+      multiSelect: z.boolean(),
+      options: z.array(z.object({ label: z.string().min(1), description: z.string() })),
+    }),
+  ),
   // The call ended without a question to answer, or its question was recorded.
   closed: z.boolean().optional(),
 });
@@ -50,7 +46,6 @@ export function applyQuestionDraft(
   const index = drafts.findIndex((d) => d.id === id);
   const current = index < 0 ? undefined : drafts[index];
   if (current && (current.closed || current.revision >= next.revision)) return;
-  if (!current && drafts.length >= 16) return;
   const result = [...drafts];
   if (current) result[index] = next;
   else result.push(next);

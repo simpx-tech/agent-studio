@@ -1,7 +1,7 @@
 //! Files a reply shows the user. Paths reach this module only through our registered tool,
 //! are checked on the computer running the conversation, and their bytes stay there with the
-//! run's other tool results. The saved reply keeps bounded metadata and each image is read on
-//! demand, so the workspace, exports and relay sync never carry file contents.
+//! run's other tool results. The saved reply keeps metadata and each image is read on demand,
+//! so the workspace, exports and relay sync never carry file contents.
 use crate::protocol::activity::{CapturedOutput, ImageSource};
 use crate::protocol::RunEvent;
 use crate::runner::EventSink;
@@ -9,22 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 pub const NAME: &str = "send_files";
-/// Files one call shows.
-const MAX_FILES: usize = 8;
-/// Groups one reply shows.
-pub const MAX_GROUPS: usize = 12;
-/// The largest image a reply shows, matching one chat attachment.
-const MAX_BYTES: u64 = crate::tool_output::IMAGE_BYTES;
-const MAX_PATH: usize = 4096;
-/// How long one call's paths may take to check. The reply waits for the call, and so does
-/// its Stop, so a hung share or mount must not hold either for long.
-const CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
-const MAX_CAPTION: usize = 300;
+/// The longest file name a reply shows.
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images of up to 16 MiB and glTF, GLB, OBJ, STL and FBX models of up to 1 GiB are shown, at most 8 files per call and 12 groups per reply. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; other devices show a model over 12 MiB as eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images and glTF, GLB, OBJ, STL and FBX models are shown whatever their size, in as many files and groups as the reply needs. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,9 +49,9 @@ pub struct SentFiles {
 pub fn tool() -> Value {
     json!({"name":NAME,"description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{
-            "id":{"type":"string","minLength":1,"maxLength":80,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
-            "files":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
-            "caption":{"type":"string","minLength":1,"maxLength":300,"description":"Optional single line shown below the files."}
+            "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
+            "files":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
+            "caption":{"type":"string","minLength":1,"description":"Optional single line shown below the files."}
         },"required":["id","files"],"additionalProperties":false}})
 }
 pub fn codex_tool() -> Value {
@@ -70,7 +61,7 @@ pub fn codex_tool() -> Value {
     tool
 }
 
-const INVALID: &str = "Provide id (letters, digits, _ or -, at most 80), files (1 to 8 absolute paths of at most 4096 characters) and an optional single-line caption of at most 300 characters. No other fields are accepted.";
+const INVALID: &str = "Provide id (letters, digits, _ or -), files (one or more absolute paths) and an optional single-line caption. No other fields are accepted.";
 
 struct Submission {
     id: String,
@@ -81,7 +72,7 @@ fn parse(args: &Value) -> Result<Submission, String> {
     if !args.is_object() {
         return Err(INVALID.into());
     }
-    // Keys are unique, so rejecting every unaccepted name also bounds the object's size.
+    // Keys are unique, so rejecting every unaccepted name leaves only these three.
     let unexpected = super::unexpected_fields(args, &["id", "files", "caption"]);
     if !unexpected.is_empty() {
         return Err(super::unexpected_message(&unexpected, INVALID));
@@ -90,13 +81,12 @@ fn parse(args: &Value) -> Result<Submission, String> {
         .as_str()
         .filter(|s| {
             !s.is_empty()
-                && s.len() <= 80
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
         .ok_or(INVALID)?;
     let files = args["files"].as_array().ok_or(INVALID)?;
-    if files.is_empty() || files.len() > MAX_FILES {
+    if files.is_empty() {
         return Err(INVALID.into());
     }
     let files: Option<Vec<String>> = files
@@ -104,11 +94,7 @@ fn parse(args: &Value) -> Result<Submission, String> {
         .map(|file| {
             file.as_str()
                 .map(str::trim)
-                .filter(|path| {
-                    !path.is_empty()
-                        && path.len() <= MAX_PATH
-                        && !path.chars().any(char::is_control)
-                })
+                .filter(|path| !path.is_empty() && !path.chars().any(char::is_control))
                 .map(String::from)
         })
         .collect();
@@ -122,7 +108,7 @@ fn parse(args: &Value) -> Result<Submission, String> {
                 .map(|c| if c.is_control() { ' ' } else { c })
                 .collect();
             let text = text.trim();
-            if text.is_empty() || text.chars().count() > MAX_CAPTION {
+            if text.is_empty() {
                 return Err(INVALID.into());
             }
             Some(text.into())
@@ -142,13 +128,22 @@ pub struct Staging {
     /// The WSL distribution whose Linux paths this conversation reports, if any.
     distribution: Option<String>,
     recorder: Option<crate::tool_output::Recorder>,
+    /// The reply's Stop. A check of a hung share or mount takes as long as it takes, but the
+    /// reply waits for the call, so Stop ends the check.
+    cancel: CancellationToken,
 }
 impl Staging {
-    pub fn new(run_id: &str, distribution: Option<String>, channel: Option<&EventSink>) -> Self {
+    pub fn new(
+        run_id: &str,
+        distribution: Option<String>,
+        channel: Option<&EventSink>,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             run_id: run_id.into(),
             distribution,
             recorder: channel.and_then(EventSink::recorder),
+            cancel,
         }
     }
     /// A reported path on this computer. Linux paths reach Windows through the
@@ -195,11 +190,11 @@ async fn inspect(host: PathBuf, reported: &str) -> Result<Checked, String> {
         Some("glb" | "gltf" | "obj" | "stl" | "fbx")
     );
     tokio::task::spawn_blocking(move || {
-        let image = crate::tool_output::inspect_image(&host, MAX_BYTES);
+        let image = crate::tool_output::inspect_image(&host);
         if let Ok(image) = image.as_ref() {
             return Ok(Checked::Image(image.clone()));
         }
-        match crate::tool_output::inspect_model(&host, crate::tool_output::MODEL_BYTES) {
+        match crate::tool_output::inspect_model(&host) {
             Ok(model) => Ok(Checked::Model(model)),
             Err(model) => Err(if named_model {
                 model
@@ -256,11 +251,6 @@ impl FileSender {
     ) -> Result<String, String> {
         let submission = parse(args)?;
         let index = self.groups.iter().position(|g| g.id == submission.id);
-        if index.is_none() && self.groups.len() >= MAX_GROUPS {
-            return Err(format!(
-                "This reply already shows {MAX_GROUPS} groups of files. Reuse an existing id."
-            ));
-        }
         let Some(recorder) = &staging.recorder else {
             return Err(
                 "This conversation does not keep files on the computer that ran it.".into(),
@@ -270,7 +260,6 @@ impl FileSender {
         let mut images = vec![];
         let mut models = vec![];
         let mut rejected = vec![];
-        let deadline = tokio::time::Instant::now() + CHECK_LIMIT;
         for path in &submission.files {
             let check = async {
                 match staging.host_path(path).await {
@@ -278,9 +267,10 @@ impl FileSender {
                     Err(reason) => Err(reason),
                 }
             };
-            let checked = tokio::time::timeout_at(deadline, check)
-                .await
-                .unwrap_or_else(|_| Err("could not be read in time".into()));
+            let checked = tokio::select! {
+                checked = check => checked,
+                _ = staging.cancel.cancelled() => Err("was not checked: the reply stopped".into()),
+            };
             match checked {
                 Ok(Checked::Image(image)) => {
                     files.push(SentFile {
@@ -392,8 +382,8 @@ impl FileSender {
                 && block["type"] == "tool_use"
                 && block["name"] == format!("mcp__agent_studio__{NAME}")
             {
-                if let Some(id) = block["id"].as_str().filter(|id| id.len() <= 240) {
-                    if self.pending.len() < MAX_GROUPS && parse(&block["input"]).is_ok() {
+                if let Some(id) = block["id"].as_str() {
+                    if parse(&block["input"]).is_ok() {
                         self.pending.insert(id.into(), block["input"].clone());
                     }
                 }
@@ -413,17 +403,12 @@ impl FileSender {
         events
     }
     /// Why a call that matches no registered parent cannot show files. A call is registered
-    /// only when its arguments parse and the reply still has room, so name the fault the
-    /// caller can act on: reporting malformed arguments as an unregistered caller reads as a
-    /// capability this conversation lacks, and a model that believes that stops retrying.
+    /// only when its arguments parse, so name the fault the caller can act on: reporting
+    /// malformed arguments as an unregistered caller reads as a capability this conversation
+    /// lacks, and a model that believes that stops retrying.
     fn unmatched(&self, args: &Value) -> String {
         if let Err(invalid) = parse(args) {
             return invalid;
-        }
-        if self.pending.len() >= MAX_GROUPS {
-            return format!(
-                "This reply already shows {MAX_GROUPS} groups of files. Reuse an existing id."
-            );
         }
         "Only a registered parent-conversation send_files call can show files.".into()
     }
@@ -490,6 +475,9 @@ fn outcome(record: &SentFiles, rejected: &[String]) -> String {
 mod tests {
     use super::*;
 
+    fn stage(distribution: Option<String>) -> Staging {
+        Staging::new("run", distribution, None, CancellationToken::new())
+    }
     fn args(files: Value) -> Value {
         json!({"id":"shots","files":files,"caption":"Before and after"})
     }
@@ -500,7 +488,11 @@ mod tests {
         assert!(parse(&json!({"id":"shots","files":["/tmp/a.png"],"display":"render"})).is_err());
         assert!(parse(&json!({"id":"shots"})).is_err());
         assert!(parse(&args(json!([]))).is_err());
-        assert!(parse(&args(json!(vec!["/tmp/a.png"; MAX_FILES + 1]))).is_err());
+        // Any number of files, ids, paths and captions of any length, past the 8 files, 80, 4,096
+        // and 300 characters earlier releases accepted.
+        let long = format!("/tmp/{}.png", "a".repeat(5000));
+        let many = parse(&json!({"id":"a".repeat(200),"files":vec![long.as_str(); 20],"caption":"c".repeat(1000)})).unwrap();
+        assert_eq!(many.files.len(), 20);
         assert!(parse(&args(json!(["/tmp/a.png", ""]))).is_err());
         assert!(parse(&args(json!(["/tmp/a\u{0}.png"]))).is_err());
         assert!(parse(&json!({"id":"shots and more","files":["/tmp/a.png"]})).is_err());
@@ -522,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_without_a_store_cannot_show_files() {
-        let staging = Staging::new("run", None, None);
+        let staging = stage(None);
         let mut sender = FileSender::default();
         let error = sender
             .submit(&args(json!(["/tmp/a.png"])), "call", &staging)
@@ -533,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreadable_paths_are_reported_without_a_group() {
-        let staging = Staging::new("run", Some("Ubuntu".into()), None);
+        let staging = stage(Some("Ubuntu".into()));
         assert!(staging.host_path("relative.png").await.is_err());
         assert!(staging.host_path("/home/me/").await.is_err());
         assert!(staging.host_path("/home/me/..").await.is_err());
@@ -544,13 +536,13 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("cannot reach from Windows"), "{error}");
         assert!(staging.host_path("/tmp/shot.png.").await.is_err());
-        let local = Staging::new("run", None, None);
+        let local = stage(None);
         assert!(local.host_path("relative.png").await.is_err());
     }
 
     #[tokio::test]
     async fn only_a_registered_parent_call_of_this_conversation_shows_files() {
-        let staging = Staging::new("run", None, None);
+        let staging = stage(None);
         let mut sender = FileSender::default();
         let call = json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":NAME,"arguments":args(json!(["/tmp/a.png"]))}}}});
         // Another server's request and other methods belong to their own handlers.
@@ -591,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_parent_call_hears_the_fault_it_can_act_on() {
-        let staging = Staging::new("run", None, None);
+        let staging = stage(None);
         let control = |arguments: Value| json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":NAME,"arguments":arguments}}}});
         let observed = |tool: &str, input: Value| json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":tool,"name":format!("mcp__agent_studio__{NAME}"),"input":input}]}});
         let refusal = |answer: &Value| {
@@ -611,19 +603,16 @@ mod tests {
             text.contains("sent paths, which this tool does not accept"),
             "{text}"
         );
-        assert!(text.contains("files (1 to 8 absolute paths"), "{text}");
+        assert!(text.contains("files (one or more absolute paths"), "{text}");
         assert!(!text.contains("registered parent-conversation"), "{text}");
-        // Past the ceiling the refusal names the way out rather than the registration.
+        // A reply registers any number of groups.
         let mut sender = FileSender::default();
-        for index in 0..=MAX_GROUPS {
+        for index in 0..20 {
             let input = json!({"id":format!("g{index}"),"files":["/tmp/a.png"]});
             sender.observe_claude(&observed(&format!("t{index}"), input));
         }
-        let last = json!({"id":format!("g{MAX_GROUPS}"),"files":["/tmp/a.png"]});
-        let answer = sender.claude(&control(last), &staging).await.unwrap();
-        let text = refusal(&answer);
-        assert!(text.contains("already shows"), "{text}");
-        // A well-formed call of a reply with room still needs its registered parent.
+        assert_eq!(sender.pending.len(), 20);
+        // A well-formed call still needs its registered parent.
         let mut sender = FileSender::default();
         let answer = sender
             .claude(&control(args(json!(["/tmp/a.png"]))), &staging)
@@ -633,7 +622,7 @@ mod tests {
     }
     #[tokio::test]
     async fn codex_files_come_from_the_parent_thread_alone() {
-        let staging = Staging::new("run", None, None);
+        let staging = stage(None);
         let mut sender = FileSender::default();
         let call = |thread: &str, namespace: Value| json!({"id":7,"method":"item/tool/call","params":{"threadId":thread,"tool":NAME,"namespace":namespace,"arguments":args(json!(["/tmp/a.png"]))}});
         assert!(sender

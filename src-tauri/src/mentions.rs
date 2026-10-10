@@ -6,18 +6,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, path::PathBuf};
 use tauri::Manager;
 use tokio::io::AsyncWriteExt;
-
-const MAX_FILES: usize = 50;
-const MAX_APPS: usize = 200;
-const MAX_VISITS: usize = 20_000;
-static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -33,8 +24,8 @@ pub struct Results {
     pub truncated: bool,
     pub notice: String,
 }
-fn clean(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
+fn clean(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_control)
 }
 fn file_token(name: &str) -> String {
     if name
@@ -47,13 +38,13 @@ fn file_token(name: &str) -> String {
     }
 }
 pub fn valid(m: &Mention) -> bool {
-    clean(&m.name, 4096)
-        && clean(&m.path, 4096)
-        && clean(&m.token, 4100)
+    clean(&m.name)
+        && clean(&m.path)
+        && clean(&m.token)
         && match m.kind.as_str() {
             "app" => {
                 m.path.strip_prefix("app://").is_some_and(|id| {
-                    clean(id, 200)
+                    clean(id)
                         && id
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
@@ -119,11 +110,10 @@ fn files(value: &Value, folder: &str) -> Result<Results, String> {
         .filter(|r| r["root"] == folder && r["match_type"] == "file")
         .filter_map(|r| file(r["path"].as_str()?, folder))
         .filter(|m| seen.insert(m.path.clone()))
-        .take(MAX_FILES)
         .collect();
     Ok(Results {
         entries,
-        truncated: rows.len() >= MAX_FILES,
+        truncated: false,
         notice: String::new(),
     })
 }
@@ -133,7 +123,6 @@ fn apps(value: &Value) -> Result<Vec<Mention>, String> {
         .ok_or("App mentions are unavailable in this Codex version")?;
     Ok(rows
         .iter()
-        .take(MAX_APPS)
         .filter(|r| r["isAccessible"] == true && r["isEnabled"] == true)
         .filter_map(|r| {
             let name = r["name"].as_str()?;
@@ -162,9 +151,6 @@ async fn rpc(p: &mut Process, method: &str, params: Value) -> Result<Value, Stri
         .map_err(|_| "Could not send mention query")?;
     while let Some(line) = p.lines.recv().await {
         let Line::Out(line) = line else { continue };
-        if line.len() > 2_000_000 {
-            return Err("Mention results exceeded their limit".into());
-        }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -196,7 +182,7 @@ pub(crate) async fn codex(
         .spawn()
         .map_err(|_| "Could not start the selected Codex CLI")?;
     let mut p = Process::new(exe.clone(), child, String::new(), String::new())?;
-    let result = tokio::time::timeout(Duration::from_secs(if kind == "app" { 60 } else { 20 }), async {
+    let result = async {
         rpc(&mut p, "initialize", json!({"clientInfo":{"name":"agent_studio","version":"0.1.0"},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["app/list/updated"]}})).await?;
         p.stdin.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|_| "Could not initialize mention discovery")?;
         // Apps belong to the account: a separate WSL profile signs in with its Windows login.
@@ -211,20 +197,18 @@ pub(crate) async fn codex(
         let mut result = Results { entries: vec![], truncated: false, notice: String::new() };
         let mut cursor = Value::Null;
         let mut seen = HashSet::new();
-        for _ in 0..20 {
+        // Every page, until the catalog ends; a cursor that repeats would never end.
+        loop {
             let value = rpc(&mut p, "app/list", json!({"limit":50,"cursor":cursor,"forceRefetch":false})).await?;
             result.entries.extend(apps(&value)?);
             cursor = value["nextCursor"].clone();
             if cursor.is_null() { break; }
-            if result.entries.len() >= MAX_APPS { break; }
-            if !cursor.as_str().is_some_and(|s| clean(s, 4096)) || !seen.insert(cursor.to_string()) { return Err("Invalid app pagination".into()); }
+            if !cursor.as_str().is_some_and(clean) || !seen.insert(cursor.to_string()) { return Err("Invalid app pagination".into()); }
         }
-        result.truncated = !cursor.is_null();
         let mut seen = HashSet::new();
         result.entries.retain(|m| seen.insert(m.path.clone()));
-        result.entries.truncate(MAX_APPS);
         Ok(result)
-    }).await.map_err(|_| "Mention search timed out. Reopen the picker to retry.".to_string()).and_then(|r| r);
+    }.await;
     p.kill().await;
     result
 }
@@ -234,23 +218,17 @@ fn matches(path: &str, query: &str) -> bool {
     query.to_lowercase().chars().all(|c| chars.any(|p| p == c))
 }
 
+/// Every matching file name under the folder, however many and however deep.
 fn claude_files(root: PathBuf, folder: String, query: String) -> Results {
     let mut entries = Vec::new();
-    let mut stack = vec![(root.clone(), 0)];
-    let mut visits = 0;
+    let mut stack = vec![root.clone()];
     let mut truncated = false;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    'scan: while let Some((dir, depth)) = stack.pop() {
+    while let Some(dir) = stack.pop() {
         let Ok(items) = std::fs::read_dir(dir) else {
             truncated = true;
             continue;
         };
         for item in items {
-            visits += 1;
-            if visits > MAX_VISITS || Instant::now() > deadline {
-                truncated = true;
-                break 'scan;
-            }
             let Ok(item) = item else {
                 truncated = true;
                 continue;
@@ -266,11 +244,7 @@ fn claude_files(root: PathBuf, folder: String, query: String) -> Results {
                     && !["node_modules", "target", "build", "dist", "vendor"]
                         .contains(&name.as_str())
                 {
-                    if depth < 20 {
-                        stack.push((path, depth + 1));
-                    } else {
-                        truncated = true;
-                    }
+                    stack.push(path);
                 }
             } else if kind.is_file() {
                 let Ok(relative) = path.strip_prefix(&root) else {
@@ -292,8 +266,6 @@ fn claude_files(root: PathBuf, folder: String, query: String) -> Results {
             m.name.clone(),
         )
     });
-    truncated |= entries.len() > MAX_FILES;
-    entries.truncate(MAX_FILES);
     Results {
         entries,
         truncated,
@@ -311,7 +283,6 @@ pub async fn read(
     if !matches!(provider.as_str(), "codex" | "claude")
         || !matches!(kind.as_str(), "file" | "app")
         || (kind == "app" && provider != "codex")
-        || query.len() > 256
         || query.chars().any(char::is_control)
     {
         return Err("Invalid mention query".into());
@@ -333,10 +304,6 @@ pub async fn read(
             return Err("Choose a project folder, or send the first message to create this Standalone chat's working folder.".into());
         }
     }
-    let _slot = tokio::time::timeout(Duration::from_secs(1), SLOTS.acquire())
-        .await
-        .map_err(|_| "Mention search is busy. Reopen the picker to retry.")?
-        .map_err(|_| "Mention search is unavailable")?;
     let exe = crate::providers::resolve(&provider).await?;
     let folder = crate::mcp::folder(
         &app,
@@ -395,7 +362,7 @@ mod tests {
         assert!(!serde_json::to_string(&rows).unwrap().contains("private"));
     }
     #[test]
-    fn claude_search_is_bounded_name_only_and_omits_generated_directories() {
+    fn claude_search_is_name_only_and_omits_generated_directories() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::create_dir(dir.path().join("node_modules")).unwrap();
@@ -407,5 +374,19 @@ mod tests {
         assert!(!serde_json::to_string(&result)
             .unwrap()
             .contains("secret body"));
+        // Every match, however many and however deep, past the 50 files and 20 levels earlier
+        // releases returned.
+        let mut deep = dir.path().join("deep");
+        for level in 0..25 {
+            deep = deep.join(format!("l{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        for index in 0..60 {
+            std::fs::write(dir.path().join("src").join(format!("match{index}.rs")), "").unwrap();
+        }
+        std::fs::write(deep.join("match-deep.rs"), "").unwrap();
+        let result = claude_files(dir.path().into(), "/selected".into(), "match".into());
+        assert_eq!(result.entries.len(), 61);
+        assert!(!result.truncated);
     }
 }

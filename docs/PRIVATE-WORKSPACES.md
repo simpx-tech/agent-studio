@@ -1,6 +1,6 @@
 # Sharing one VPS with separate users
 
-One Agent Studio relay can host your workspace and up to 100 additional private workspaces at the same HTTPS address. Create a different workspace key for each person. Their chats, computers, environments, account labels, jobs, presence, browser sessions, and notifications stay within that workspace. Devices using the same key intentionally share that person's workspace.
+One Agent Studio relay can host your workspace and any number of additional private workspaces at the same HTTPS address. Create a different workspace key for each person. Their chats, computers, environments, account labels, jobs, presence, browser sessions, and notifications stay within that workspace. Devices using the same key intentionally share that person's workspace.
 
 Your existing `AGENT_STUDIO_RELAY_TOKEN`, root workspace files, and relay instance identity remain the owner's workspace. An upgrade does not copy your data into new workspaces. Do not give your owner key to someone who should have a separate workspace.
 
