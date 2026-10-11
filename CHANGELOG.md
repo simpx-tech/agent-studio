@@ -5,6 +5,19 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.9.3 - 2026-10-11
+
+### Added
+
+- Discard an unsent draft from its row in the sidebar with the Move to history button chats have:
+  a draft has no history to keep, so the button throws it away at once
+
+### Fixed
+
+- Show the Model picker properly on macOS and Linux, and in the Viewer on an iPhone, where each
+  model's picture spread across its row, squeezing the names into a column of single letters,
+  and the selected model's picture covered the Agent picker
+
 ## 0.9.2 - 2026-10-11
 
 ### Fixed
