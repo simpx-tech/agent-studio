@@ -5,6 +5,13 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.9.2 - 2026-10-11
+
+### Fixed
+
+- Stop what a chat started when its chat goes to History or is deleted, as before 0.9.1: a chat on
+  the VPS no longer leaves processes running behind it, and chats in WSL leave no files behind
+
 ## 0.9.1 - 2026-10-11
 
 ### Fixed
