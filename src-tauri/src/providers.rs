@@ -66,8 +66,8 @@ impl Executable {
     /// one leaves a spent token behind, and the account's next renewal signs it out (requested
     /// 2026-10-11, after a sign-in every morning). Once its input ends, Claude Code waits two
     /// seconds for a renewal under way, so one its profile's lock shows holds the end of input
-    /// first, up to the token request's own timeout. The tree is killed as before once the CLI
-    /// is gone, ending whatever it left, or when it is still running after the grace.
+    /// first, up to the token request's own timeout. What the CLI leaves running ends with it,
+    /// as when it is killed, and a CLI still running after the grace is killed with its tree.
     pub async fn end(
         &self,
         mut child: Child,
@@ -89,10 +89,18 @@ impl Executable {
                     let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
                 });
             }
+            #[cfg(unix)]
+            let group = child.id();
             if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_ok() {
-                if let Some(wsl) = &self.wsl {
-                    wsl.cancel().await;
+                // A chat's process group outlives the CLI that led it (`kill_tree`). A WSL launch's
+                // script ends its job's leftovers itself, and Claude Code its own shells on Windows.
+                #[cfg(unix)]
+                if let Some(pid) = group {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
                 }
+                return;
             }
         }
         self.kill(&mut child).await;
