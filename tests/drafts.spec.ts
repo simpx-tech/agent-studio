@@ -264,6 +264,97 @@ test('scratch chats can be discarded, and earlier folder drafts become scratch c
   await expect(page.locator('.scratch-item')).toHaveCount(0);
 });
 
+test('a scratch chat row has the Move to history button, which discards it at once', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await mockDesktop(page);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await send(page, 'Project conversation');
+  for (const idea of ['First idea', 'Second idea', 'Third idea']) {
+    await page
+      .getByRole('button', { name: 'New conversation in studio on Desktop', exact: true })
+      .click();
+    await input(page).fill(idea);
+  }
+  await expect(folderScratches(page, 'studio')).toHaveText([
+    'Third idea',
+    'Second idea',
+    'First idea',
+  ]);
+  const discard = (title: string) =>
+    page.getByRole('button', { name: `Discard draft: ${title}`, exact: true });
+  const scratchLine = (title: string) =>
+    page.locator('.conversation-row').filter({ has: scratchRow(page, title) });
+  // It shows on hover at the row's end, as on a conversation's row, and the title makes room.
+  const button = discard('Second idea');
+  await expect(button).toHaveCSS('opacity', '0');
+  await scratchLine('Second idea').hover();
+  await expect(button).toHaveCSS('opacity', '1');
+  await expect(button).toHaveAttribute('title', 'Discard draft');
+  await expect(scratchRow(page, 'Second idea')).toHaveCSS('padding-right', '32px');
+  const [rowBox, itemBox, buttonBox] = await Promise.all([
+    scratchLine('Second idea').boundingBox(),
+    scratchRow(page, 'Second idea').boundingBox(),
+    button.boundingBox(),
+  ]);
+  expect(rowBox!.height).toBe(itemBox!.height);
+  expect(buttonBox!.y + buttonBox!.height / 2).toBeCloseTo(rowBox!.y + rowBox!.height / 2, 0);
+  expect(rowBox!.x + rowBox!.width - (buttonBox!.x + buttonBox!.width)).toBeCloseTo(3, 0);
+  await page.screenshot({ path: 'artifacts/scratch-discard-hover.png', animations: 'disabled' });
+  // Without a confirmation, and the open scratch chat keeps its text.
+  await button.click();
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(folderScratches(page, 'studio')).toHaveText(['Third idea', 'First idea']);
+  await expect(scratchRow(page, 'Third idea')).toHaveAttribute('aria-current', 'page');
+  await expect(input(page)).toHaveValue('Third idea');
+  await expect.poll(() => savedTexts(page)).toEqual(['First idea', 'Third idea']);
+  // Nothing reaches History.
+  const tab = (name: string) => page.getByRole('tab', { name: new RegExp(`^${name}`) });
+  await expect(tab('Active')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab('Active').locator('.conversation-tab-count')).toHaveText('1');
+  await expect(tab('History').locator('.conversation-tab-count')).toHaveText('0');
+
+  // Keyboard: the open scratch chat empties where it is, and focus moves on to the row now in
+  // its place.
+  await scratchRow(page, 'Third idea').focus();
+  await page.keyboard.press('Tab');
+  await expect(discard('Third idea')).toBeFocused();
+  await expect(discard('Third idea')).toHaveCSS('opacity', '1');
+  await page.keyboard.press('Enter');
+  await expect(input(page)).toHaveValue('');
+  await expect(page.locator('.page-title')).toHaveText('New conversation');
+  await expect(page.getByRole('combobox', { name: 'Folder', exact: true })).toHaveAttribute(
+    'title',
+    'C:\\Projects\\studio',
+  );
+  await expect(folderScratches(page, 'studio')).toHaveText(['First idea']);
+  await expect(scratchRow(page, 'First idea')).toBeFocused();
+  await expect.poll(() => savedTexts(page)).toEqual(['First idea']);
+
+  // Phones show it on every scratch row and keep the drawer open.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
+  const drawer = page.getByRole('dialog', { name: 'Conversations' });
+  await expect(drawer).toBeVisible();
+  await expect(discard('First idea')).toHaveCSS('opacity', '1');
+  const [phoneRow, phoneButton] = await Promise.all([
+    scratchRow(page, 'First idea').boundingBox(),
+    discard('First idea').boundingBox(),
+  ]);
+  expect(phoneButton!.width).toBeGreaterThanOrEqual(44);
+  expect(phoneButton!.height).toBeGreaterThanOrEqual(44);
+  expect(phoneButton!.x + phoneButton!.width).toBeCloseTo(phoneRow!.x + phoneRow!.width, 0);
+  await page.screenshot({ path: 'artifacts/scratch-discard-phone.png', animations: 'disabled' });
+  await discard('First idea').click();
+  await expect(drawer).toBeVisible();
+  await expect(page.locator('.scratch-item')).toHaveCount(0);
+  await expect.poll(() => savedTexts(page)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test('closing the window saves a draft typed a moment earlier', async ({ page }) => {
   await mockDesktop(page);
   await page.goto('/');

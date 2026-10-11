@@ -3455,8 +3455,10 @@
       else composerInput?.focus({ preventScroll: true });
     });
   }
-  // A sidebar row's Move to history. Keyboard focus moves on to the row now in its place.
-  function archiveRow(event: MouseEvent, c: Conversation) {
+  // A sidebar row's Move to history. A scratch chat has no history to move to, so the same
+  // button discards it at once; the open one empties where it is. Keyboard focus moves on to the
+  // row now in its place.
+  function archiveRow(event: MouseEvent, c: Conversation | Scratch) {
     const control = event.currentTarget as HTMLElement;
     const rows = () => [
       ...(sidebarElement?.querySelectorAll<HTMLElement>(
@@ -3466,8 +3468,11 @@
     const index = rows().indexOf(control.previousElementSibling as HTMLElement);
     const focused = document.activeElement === control,
       open = c.id === activeId;
-    archiveConversation(c, true);
-    if (!focused || !c.archived) return;
+    if ('messages' in c) {
+      archiveConversation(c, true);
+      if (!c.archived) return;
+    } else discardScratch(c.id);
+    if (!focused) return;
     void tick().then(() => {
       const listed = rows();
       const row =
@@ -5221,33 +5226,43 @@
                     </div>
                     {#if !collapsedGroups[folderKey]}<div class="folder-conversations">
                         {#each folder.scratches as s (s.id)}{@const current =
-                            !activeId && scratchId === s.id && view === 'chat'}<button
-                            class="scratch-item"
-                            class:current
-                            aria-current={current ? 'page' : undefined}
-                            aria-haspopup="menu"
-                            aria-label={`Unsent draft: ${s.title}`}
-                            oncontextmenu={(event) => openConversationMenu(event, s.id, true)}
-                            onkeydown={(event) => {
-                              if (
-                                event.key === 'ContextMenu' ||
-                                (event.shiftKey && event.key === 'F10')
-                              )
-                                openConversationMenu(event, s.id, true);
-                            }}
-                            onpointerdown={(event) => startTouchMenu(event, s.id, true)}
-                            onpointermove={moveTouchMenu}
-                            onpointerup={cancelTouchMenu}
-                            onpointercancel={cancelTouchMenu}
-                            onclick={(event) => {
-                              if (longPressedConversation === s.id) {
-                                event.preventDefault();
-                                longPressedConversation = undefined;
-                              } else openScratch(s);
-                            }}
-                            title={`Unsent draft · ${s.title}`}
-                            ><PenLine size={13} aria-hidden="true" /><span>{s.title}</span></button
-                          >{/each}
+                            !activeId && scratchId === s.id && view === 'chat'}
+                          <div class="conversation-row">
+                            <button
+                              class="scratch-item"
+                              class:current
+                              aria-current={current ? 'page' : undefined}
+                              aria-haspopup="menu"
+                              aria-label={`Unsent draft: ${s.title}`}
+                              oncontextmenu={(event) => openConversationMenu(event, s.id, true)}
+                              onkeydown={(event) => {
+                                if (
+                                  event.key === 'ContextMenu' ||
+                                  (event.shiftKey && event.key === 'F10')
+                                )
+                                  openConversationMenu(event, s.id, true);
+                              }}
+                              onpointerdown={(event) => startTouchMenu(event, s.id, true)}
+                              onpointermove={moveTouchMenu}
+                              onpointerup={cancelTouchMenu}
+                              onpointercancel={cancelTouchMenu}
+                              onclick={(event) => {
+                                if (longPressedConversation === s.id) {
+                                  event.preventDefault();
+                                  longPressedConversation = undefined;
+                                } else openScratch(s);
+                              }}
+                              title={`Unsent draft · ${s.title}`}
+                              ><PenLine size={13} aria-hidden="true" /><span>{s.title}</span
+                              ></button
+                            ><button
+                              class="conversation-archive"
+                              title="Discard draft"
+                              aria-label={`Discard draft: ${s.title}`}
+                              onclick={(event) => archiveRow(event, s)}
+                              ><Archive size={14} aria-hidden="true" /></button
+                            >
+                          </div>{/each}
                         {#each folder.conversations as c}{@const runningReply = c.messages.find(
                             (m) => m.status === 'running',
                           )}{@const finished = !runningReply && !!finishedChats[c.id]}{@const monitors =

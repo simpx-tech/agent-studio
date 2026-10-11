@@ -853,7 +853,8 @@ pre {
   overflow-wrap: anywhere;
 }
 /* An Active row's Move to history shows on hover or keyboard focus, and always on touch
-   screens. The title makes room for it while it shows. */
+   screens. The title makes room for it while it shows. A scratch chat's row has it too, and
+   discards the draft. */
 .conversation-row {
   position: relative;
   display: flex;
@@ -871,7 +872,7 @@ pre {
   opacity: 0;
 }
 .conversation-row:hover > .conversation-archive,
-.conversation-item:focus-visible + .conversation-archive,
+:is(.conversation-item, .scratch-item):focus-visible + .conversation-archive,
 .conversation-archive:focus-visible {
   opacity: 1;
 }
@@ -879,16 +880,17 @@ pre {
   color: var(--text);
   background: var(--active);
 }
-.conversation-row:hover > .conversation-item:not(:last-child),
-.conversation-item:focus-visible:not(:last-child),
-.conversation-row:has(> .conversation-archive:focus-visible) > .conversation-item {
+.conversation-row:hover > :is(.conversation-item, .scratch-item):not(:last-child),
+:is(.conversation-item, .scratch-item):focus-visible:not(:last-child),
+.conversation-row:has(> .conversation-archive:focus-visible)
+  > :is(.conversation-item, .scratch-item) {
   padding-right: 32px;
 }
 @media (hover: none) {
   .conversation-archive {
     opacity: 1;
   }
-  .conversation-row > .conversation-item:not(:last-child) {
+  .conversation-row > :is(.conversation-item, .scratch-item):not(:last-child) {
     padding-right: 32px;
   }
 }
@@ -2610,7 +2612,7 @@ pre {
     margin-top: -22px;
     opacity: 1;
   }
-  .sidebar .conversation-row > .conversation-item:not(:last-child) {
+  .sidebar .conversation-row > :is(.conversation-item, .scratch-item):not(:last-child) {
     padding-right: 44px;
   }
   .browser-status {

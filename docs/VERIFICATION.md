@@ -1,5 +1,14 @@
 # Verification — 2026-09-08
 
+## Scratch chats have the Move to history button, which discards them — 2026-10-11
+
+Requested 2026-10-11: "Can you allow to archive a scratch (show the button to archive, but in practice it just deletes the chat)?"
+
+- Each scratch chat's sidebar row is now a `.conversation-row` like a conversation's and ends with the same `.conversation-archive` button: the archive icon on hover or keyboard focus, always on touch screens, 44 px on phones, with the title making room. A scratch chat has no history to move to, so the button is named "Discard draft: <title>" and `archiveRow` in `+page.svelte` passes it to `discardScratch` at once, without the context menu's confirmation. Another scratch chat is removed; the open one empties where it is and keeps its computer, folder and agent. Focus moves on to the row now in its place, and the open chat, its draft, the view and the phone drawer stay. The context menu's confirmed **Discard draft** is unchanged, and the toolbar still offers Move to history only for conversations.
+- Browser: `tests/drafts.spec.ts` adds a scenario with three scratch chats in a project. The button is hidden at rest and shows on hover at the row's end, sized and placed as on a conversation's row. It discards another scratch chat without a dialog while the open one keeps its text and the saved drafts follow, and leaves History empty. From the keyboard it empties the open one, keeping its folder, with focus on the next row. On a phone it shows on the scratch row at 44 px and keeps the drawer open. Screenshots: `artifacts/scratch-discard-hover.png` and `artifacts/scratch-discard-phone.png`.
+- Pipeline: `npm run check` (0 errors in 5,232 files), 651 Vitest tests, the build, 347 browser tests on the first run and `cargo fmt --check` passed. Clippy and the Rust tests were not rerun because no Rust file changed. Logs: `artifacts/scratch-discard/`.
+- Not exercised: the native app. The change is frontend-only, and the scenarios ran in Edge, the engine of WebView2.
+
 ## The VPS reads as online, and Claude logins survive the night — 2026-10-11
 
 Requested 2026-10-11: "I tried start a chat on my VPS, but it says it's offline, even though it should not, also the renew token still not working, that the third time I had to login on my account after the update".
