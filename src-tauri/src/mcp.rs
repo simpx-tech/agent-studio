@@ -500,6 +500,8 @@ async fn finish(app: &tauri::AppHandle, pending: &mut Pending) {
             app.state::<crate::pool::Pool>()
                 .park(pending.conversation.as_deref().unwrap(), process)
                 .await;
+        } else if process.healthy {
+            process.finish().await;
         } else {
             process.kill().await;
         }
@@ -780,7 +782,11 @@ async fn perform(
                 || !process.healthy
                 || !process.alive()
             {
-                process.kill().await;
+                if process.healthy {
+                    process.finish().await;
+                } else {
+                    process.kill().await;
+                }
             } else {
                 process.claim();
                 pending.pooled = true;
@@ -803,8 +809,8 @@ async fn perform(
         }
         // This explicit fallback uses Claude's own local browser launch. It never interprets CLI output.
         pending.pooled = false;
-        if let Some(mut process) = pending.process.take() {
-            process.kill().await;
+        if let Some(process) = pending.process.take() {
+            process.finish().await;
         }
         let child = command(&exe, &folder)
             .args(["mcp", "login", name])

@@ -644,7 +644,7 @@ async fn codex_report_sources(
         Err("Codex exited without a context report")
     };
     let result = query.await;
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     if result.is_err() {
         report["incomplete"] = json!(true);
     }
@@ -763,7 +763,7 @@ async fn claude_report_sources(
         Err("Claude exited without a context report")
     };
     let result = query.await;
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     if result.is_err() {
         report["incomplete"] = json!(true);
     }

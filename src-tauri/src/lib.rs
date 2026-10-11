@@ -1407,7 +1407,8 @@ fn has_owned_work(app: &tauri::AppHandle) -> bool {
         || app.state::<mcp::Management>().has_work()
 }
 
-/// Cancel all owned work, release parked CLIs, and wait until owned processes have stopped.
+/// Cancel all owned work, release parked CLIs, and wait until owned processes have stopped,
+/// including the ones still ending after their work, which may be saving a renewed login.
 async fn release_owned_work(app: &tauri::AppHandle) {
     for token in owned_tokens(app) {
         token.cancel();
@@ -1416,7 +1417,7 @@ async fn release_owned_work(app: &tauri::AppHandle) {
     app.state::<pool::Pool>().shutdown().await;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        if owned_tokens(app).is_empty() {
+        if owned_tokens(app).is_empty() && !providers::ending() {
             break;
         }
     }

@@ -135,7 +135,7 @@ async fn codex_exchange(
         _ = cancel.cancelled() => Err("Usage query cancelled".into()),
         result = query => result.map_err(String::from),
     };
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     result
 }
 
@@ -218,7 +218,7 @@ pub async fn claude_usage(
         _ = cancel.cancelled() => None,
         result = query => result.ok(),
     };
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     if cancel.is_cancelled() {
         return Err("Usage query cancelled".into());
     }
@@ -256,7 +256,7 @@ pub async fn gemini_usage(directory: &Path, cancel: CancellationToken) -> Result
         _ = cancel.cancelled() => Err("Usage query cancelled".into()),
         result = query => result.map_err(String::from),
     };
-    exe.kill(&mut child).await;
+    exe.finish(child, None, Some(Box::new(lines.into_inner())));
     result
 }
 

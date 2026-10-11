@@ -414,7 +414,7 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
         // in for a browser) and this app opens the page instead.
         command
             .env("BROWSER", "true")
-            .env("WSLENV", wsl_env("BROWSER/u"));
+            .env("WSLENV", crate::wsl::passing("BROWSER/u"));
     } else {
         // The device that opened this sign-in opens its page, not this computer.
         if start.remote {
@@ -763,14 +763,6 @@ fn plain(text: &str) -> String {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `WSLENV` naming one more variable that wsl.exe passes into the distribution.
-fn wsl_env(entry: &str) -> String {
-    match std::env::var("WSLENV") {
-        Ok(current) if !current.is_empty() => format!("{current}:{entry}"),
-        _ => entry.into(),
-    }
 }
 
 #[cfg(test)]
@@ -1193,7 +1185,7 @@ mod tests {
             .command()
             .args(["-c", r#"printf '%s' "${BROWSER-}""#])
             .env("BROWSER", "true")
-            .env("WSLENV", wsl_env("BROWSER/u"))
+            .env("WSLENV", crate::wsl::passing("BROWSER/u"))
             .stdin(Stdio::null())
             .output()
             .await

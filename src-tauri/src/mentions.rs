@@ -209,7 +209,7 @@ pub(crate) async fn codex(
         result.entries.retain(|m| seen.insert(m.path.clone()));
         Ok(result)
     }.await;
-    p.kill().await;
+    p.finish().await;
     result
 }
 fn matches(path: &str, query: &str) -> bool {

@@ -105,8 +105,9 @@ impl Client {
         }
         Err("Codex exited before answering".into())
     }
-    async fn close(mut self) {
-        self.exe.kill(&mut self.child).await;
+    async fn close(self) {
+        self.exe
+            .finish(self.child, Some(self.input), Some(Box::new(self.output)));
     }
 }
 

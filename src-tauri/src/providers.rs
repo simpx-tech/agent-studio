@@ -3,9 +3,10 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, ChildStdin, Command};
 pub mod background;
 pub mod claude_settings;
 pub mod codex_chat;
@@ -48,6 +49,62 @@ impl Executable {
         }
         crate::runner::kill_tree(child).await;
     }
+    /// Ends a CLI this app started once nothing more is wanted from it, in the background (see
+    /// [`Executable::end`]). Its profile is read now, while the launch's scope still holds.
+    pub fn finish(&self, child: Child, input: Option<ChildStdin>, output: Option<Output>) {
+        let exe = self.clone();
+        let renewal = self.renewal_lock();
+        let ending = Ending::start();
+        tokio::spawn(async move {
+            exe.end(child, input, output, renewal).await;
+            drop(ending);
+        });
+    }
+    /// Ends a CLI the way a terminal ends it: its input closes and it exits by itself. Claude
+    /// Code renews an expired login in the background as it starts, and the server spends the
+    /// old refresh token as soon as the request arrives: a CLI killed before it saves the new
+    /// one leaves a spent token behind, and the account's next renewal signs it out (requested
+    /// 2026-10-11, after a sign-in every morning). Once its input ends, Claude Code waits two
+    /// seconds for a renewal under way, so one its profile's lock shows holds the end of input
+    /// first, up to the token request's own timeout. The tree is killed as before once the CLI
+    /// is gone, ending whatever it left, or when it is still running after the grace.
+    pub async fn end(
+        &self,
+        mut child: Child,
+        input: Option<ChildStdin>,
+        output: Option<Output>,
+        renewal: Option<PathBuf>,
+    ) {
+        if child.try_wait().ok().flatten().is_none() {
+            if let Some(lock) = &renewal {
+                let deadline = tokio::time::Instant::now() + RENEWAL_WAIT;
+                while renewing(lock) && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+            drop(input);
+            drop(child.stdin.take());
+            if let Some(mut output) = output {
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
+                });
+            }
+            if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_ok() {
+                if let Some(wsl) = &self.wsl {
+                    wsl.cancel().await;
+                }
+            }
+        }
+        self.kill(&mut child).await;
+    }
+    /// The lock Claude Code holds while it renews the login of the profile this launch uses
+    /// (`proper-lockfile`'s, in the configuration folder), when this host can see it.
+    pub(crate) fn renewal_lock(&self) -> Option<PathBuf> {
+        (self.provider == "claude" && self.wsl.is_none())
+            .then(crate::profiles::claude_config_dir)
+            .flatten()
+            .map(|folder| folder.join(".oauth_refresh.lock"))
+    }
     pub fn location(&self) -> String {
         self.wsl
             .as_ref()
@@ -62,6 +119,75 @@ impl Executable {
             })
     }
 }
+/// How long a CLI has to exit by itself once its input has ended, before its tree is killed.
+const EXIT_GRACE: Duration = Duration::from_secs(10);
+/// How long a login renewal under way may hold the end of a CLI's input: Claude Code's own
+/// timeout for the token request.
+const RENEWAL_WAIT: Duration = Duration::from_secs(30);
+/// A renewal lock nobody touched for this long belongs to a CLI that died holding it, since its
+/// holder touches it every five seconds.
+const RENEWAL_STALE: Duration = Duration::from_secs(15);
+/// The output of a CLI that is ending, read to its end so the CLI never blocks on a full pipe
+/// or fails on a closed one while it finishes.
+pub type Output = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+/// CLIs `finish` is still ending in the background, which quitting waits for.
+static ENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct Ending;
+impl Ending {
+    fn start() -> Self {
+        ENDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ending
+    }
+}
+impl Drop for Ending {
+    fn drop(&mut self) {
+        ENDING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+/// Whether a CLI is still ending in the background (`Executable::finish`).
+pub fn ending() -> bool {
+    ENDING.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+fn renewing(lock: &Path) -> bool {
+    std::fs::metadata(lock)
+        .and_then(|lock| lock.modified())
+        .is_ok_and(|touched| touched.elapsed().map_or(true, |age| age < RENEWAL_STALE))
+}
+
+/// Keeps a quick CLI command that answers from this computer's files, such as `claude auth
+/// status`, off the network. Claude Code starts renewing an expired login as any command starts
+/// and exits such a command as soon as it has printed: the server has spent the old refresh
+/// token by then, the new one never arrives, and the account's next renewal signs it out, which
+/// happened the first time each day the app checked an account (requested 2026-10-11). With
+/// every connection refused, the renewal never leaves the computer and the login stays for a
+/// reply or a usage reading to renew.
+pub(crate) fn offline(exe: &Executable, command: &mut Command) {
+    // Nothing listens on the discard port, so every connection fails at once.
+    const NOWHERE: &str = "http://127.0.0.1:9";
+    const PROXIES: [&str; 6] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    for name in PROXIES {
+        command.env(name, NOWHERE);
+    }
+    command.env("NO_PROXY", "").env("no_proxy", "");
+    if exe.wsl.is_some() {
+        let names = PROXIES
+            .iter()
+            .chain(&["NO_PROXY", "no_proxy"])
+            .map(|name| format!("{name}/u"))
+            .collect::<Vec<_>>()
+            .join(":");
+        command.env("WSLENV", crate::wsl::passing(&names));
+    }
+}
+
 pub fn valid_provider(provider: &str) -> bool {
     ["codex", "claude", "gemini"].contains(&provider)
 }
@@ -258,6 +384,17 @@ async fn output(exe: &Executable, args: &[&str]) -> Result<std::process::Output,
         .await
         .map_err(|_| "Could not start the CLI".to_string())
 }
+/// `output` for a command that answers from this computer's files, kept off the network.
+async fn local_output(exe: &Executable, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = exe.command();
+    offline(exe, &mut command);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|_| "Could not start the CLI".to_string())
+}
 #[derive(Debug, PartialEq)]
 enum LoginCheck {
     Ready,
@@ -394,7 +531,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
             .into();
         }
     } else if id == "claude" {
-        if let Ok(o) = output(&exe, &["auth", "status"]).await {
+        if let Ok(o) = local_output(&exe, &["auth", "status"]).await {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
                 let (ready, account) = claude_login(&v);
                 s.auth = if ready { "ready" } else { "login" }.into();
@@ -414,7 +551,7 @@ pub async fn detect_one(id: &str) -> ProviderStatus {
 /// reports it. The Claude desktop app files each account's Code sessions under it.
 pub(crate) async fn claude_organization() -> Option<String> {
     let exe = resolve("claude").await.ok()?;
-    let status = output(&exe, &["auth", "status"]).await.ok()?;
+    let status = local_output(&exe, &["auth", "status"]).await.ok()?;
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).ok()?;
     if status["loggedIn"] != true {
         return None;
@@ -2330,5 +2467,166 @@ mod tests {
         let script = login_script(&exe, Path::new("C:/App Data/login"));
         assert!(script.contains("& 'C:/Program Files/Node/node.exe' 'C:/O''Brien/$data/cli.js'"));
         assert!(script.contains("Set-Location -LiteralPath 'C:/App Data/login'"));
+    }
+
+    /// A CLI that, once its input ends, takes a moment to save something before it exits, as
+    /// Claude Code does with a login it is renewing.
+    fn saving_cli(saved: &Path) -> (Executable, Child) {
+        let script = saved.with_extension("cjs");
+        std::fs::write(
+            &script,
+            r#"const [saved] = process.argv.slice(2);
+process.stdout.write('ready\n');
+process.stdin.resume();
+process.stdin.on('end', () => setTimeout(() => {
+  require('node:fs').writeFileSync(saved, 'saved');
+  process.exit(0);
+}, 300));"#,
+        )
+        .unwrap();
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "node".into(),
+            prefix: vec![
+                script.to_string_lossy().into(),
+                saved.to_string_lossy().into(),
+            ],
+            wsl: None,
+        };
+        let child = exe
+            .command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        (exe, child)
+    }
+
+    #[tokio::test]
+    async fn an_ending_cli_finishes_what_it_was_saving_before_its_tree_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved");
+        let (exe, mut child) = saving_cli(&saved);
+        let input = child.stdin.take();
+        let output: Output = Box::new(child.stdout.take().unwrap());
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            exe.end(child, input, Some(output), None),
+        )
+        .await
+        .expect("a CLI that exits by itself ends without the grace");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "saved");
+    }
+
+    #[tokio::test]
+    async fn a_login_renewal_under_way_holds_the_end_of_input_until_its_lock_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved");
+        let lock = dir.path().join(".oauth_refresh.lock");
+        std::fs::create_dir(&lock).unwrap();
+        let (exe, mut child) = saving_cli(&saved);
+        let input = child.stdin.take();
+        let ending = tokio::spawn({
+            let lock = lock.clone();
+            async move { exe.end(child, input, None, Some(lock)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !saved.exists() && !ending.is_finished(),
+            "the input stays open while the renewal holds its lock"
+        );
+        std::fs::remove_dir(&lock).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), ending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "saved");
+    }
+
+    #[tokio::test]
+    async fn a_lock_whose_holder_died_never_holds_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved");
+        let lock = dir.path().join(".oauth_refresh.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        file.set_modified(std::time::SystemTime::now() - RENEWAL_STALE * 2)
+            .unwrap();
+        drop(file);
+        let (exe, mut child) = saving_cli(&saved);
+        let input = child.stdin.take();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            exe.end(child, input, None, Some(lock)),
+        )
+        .await
+        .expect("a stale lock is not waited for");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "saved");
+    }
+
+    #[tokio::test]
+    async fn quick_local_commands_get_no_way_out_to_the_network() {
+        let exe = Executable {
+            provider: "claude".into(),
+            program: "node".into(),
+            prefix: vec![
+                "-e".into(),
+                "console.log(JSON.stringify([process.env.HTTPS_PROXY, process.env.HTTP_PROXY, process.env.NO_PROXY]))".into(),
+            ],
+            wsl: None,
+        };
+        let mut command = exe.command();
+        offline(&exe, &mut command);
+        let output = command.stdin(Stdio::null()).output().await.unwrap();
+        let seen: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        let nowhere = Some("http://127.0.0.1:9".to_string());
+        assert_eq!(seen[..2], [nowhere.clone(), nowhere]);
+        assert_eq!(
+            seen[2].as_deref().unwrap_or(""),
+            "",
+            "no host bypasses the proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_renewal_lock_is_the_one_in_the_folder_the_launch_signs_in_with() {
+        let native = |provider: &str| Executable {
+            provider: provider.into(),
+            program: "claude".into(),
+            prefix: vec![],
+            wsl: None,
+        };
+        let root = PathBuf::from("profiles").join("claude").join("account");
+        let profile = crate::profiles::Profile {
+            provider: "claude".into(),
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        let (separate, codex) = crate::profiles::scope(profile, async {
+            (
+                native("claude").renewal_lock(),
+                native("codex").renewal_lock(),
+            )
+        })
+        .await;
+        assert_eq!(separate, Some(root.join(".oauth_refresh.lock")));
+        assert_eq!(codex, None, "only Claude Code renews through this lock");
+        let computer = crate::context::native_default_root("claude")
+            .map(|folder| folder.join(".oauth_refresh.lock"));
+        assert_eq!(native("claude").renewal_lock(), computer);
+        let wsl = Executable {
+            wsl: Some(crate::wsl::Launch {
+                distribution: "Ubuntu".into(),
+                namespace: "test".into(),
+                job: uuid::Uuid::new_v4().to_string(),
+                shared: false,
+            }),
+            ..native("claude")
+        };
+        assert_eq!(
+            wsl.renewal_lock(),
+            None,
+            "a distribution's folder is not read from here"
+        );
     }
 }

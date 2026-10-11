@@ -9,6 +9,7 @@ use crate::providers::{Executable, RunRequest};
 use std::{
     collections::HashMap,
     io,
+    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -93,6 +94,9 @@ pub struct Process {
     pub carried: Option<crate::providers::visualize::Carried>,
     /// The next reply that takes this process over once its current reply returns it.
     pub hand_off: Option<tokio::sync::oneshot::Sender<Result<Process, String>>>,
+    /// The lock its CLI holds while it renews the profile's login, read at launch, since the
+    /// process ends outside that launch's scope (`Executable::end`).
+    renewal: Option<PathBuf>,
 }
 
 impl Process {
@@ -145,6 +149,7 @@ impl Process {
                 }
             }
         });
+        let renewal = exe.renewal_lock();
         Ok(Self {
             exe,
             child,
@@ -163,6 +168,7 @@ impl Process {
             background: None,
             carried: None,
             hand_off: None,
+            renewal,
         })
     }
     pub fn alive(&mut self) -> bool {
@@ -201,6 +207,18 @@ impl Process {
     pub async fn kill(&mut self) {
         self.exe.kill(&mut self.child).await;
         // Background work belongs to the terminated process tree.
+        if let Some(watch) = self.background.take() {
+            watch.ended();
+        }
+    }
+    /// Ends the CLI once nothing more is wanted from it, letting it finish what it still has
+    /// under way, such as renewing its login, before its tree is killed (`Executable::end`).
+    /// Stop and a process whose protocol state is unknown use `kill`.
+    pub async fn finish(mut self) {
+        // Output is dropped from now on, so the CLI never fills its pipe while it ends.
+        self.idle.store(true, Ordering::Relaxed);
+        let input = self.stdin.0.take();
+        self.exe.end(self.child, input, None, self.renewal).await;
         if let Some(watch) = self.background.take() {
             watch.ended();
         }
@@ -275,15 +293,15 @@ impl Pool {
             Ok(mut parked) => parked.insert(conversation.into(), process),
             Err(_) => Some(process),
         };
-        if let Some(mut replaced) = replaced {
-            replaced.kill().await;
+        if let Some(replaced) = replaced {
+            replaced.finish().await;
         }
     }
     /// Release a conversation's process when its chat is closed (moved to History or
     /// deleted) or changes under it (a rewind or a file Undo).
     pub async fn release(&self, conversation: &str) {
-        if let Some(mut process) = self.take(conversation) {
-            process.kill().await;
+        if let Some(process) = self.take(conversation) {
+            process.finish().await;
         }
     }
     /// Drop processes that exited on their own, recording the background work that ended
@@ -303,14 +321,15 @@ impl Pool {
             process.kill().await;
         }
     }
+    /// Ends every parked process at once, so quitting waits for the slowest rather than all.
     pub async fn shutdown(&self) {
-        let mut all = Vec::new();
+        let mut ending = tokio::task::JoinSet::new();
         if let Ok(mut parked) = self.0.lock() {
-            all.extend(parked.drain().map(|(_, process)| process));
+            for (_, process) in parked.drain() {
+                ending.spawn(process.finish());
+            }
         }
-        for process in all.iter_mut() {
-            process.kill().await;
-        }
+        while ending.join_next().await.is_some() {}
     }
 }
 

@@ -434,6 +434,16 @@ pub fn configure(command: &mut tokio::process::Command, provider: &str) {
         command.args(["-c", "cli_auth_credentials_store=\"file\""]);
     }
 }
+/// The configuration folder a native Claude launch of the current profile uses, as `configure`
+/// gives it: a separate profile's own folder, where its login lives even when its other files
+/// are linked to this computer's, else this computer's own.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    let profile = current();
+    match profile.root {
+        Some(root) if profile.provider == "claude" => Some(root),
+        _ => crate::context::native_default_root("claude"),
+    }
+}
 
 #[cfg(test)]
 mod tests {

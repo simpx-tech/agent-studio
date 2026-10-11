@@ -25,6 +25,14 @@ pub struct Launch {
     /// launch links it there first (`wsl-share.sh`).
     pub shared: bool,
 }
+/// `WSLENV` naming more variables that wsl.exe passes into the distribution (`NAME/u`, joined
+/// with colons).
+pub fn passing(entries: &str) -> String {
+    match std::env::var("WSLENV") {
+        Ok(current) if !current.is_empty() => format!("{current}:{entries}"),
+        _ => entries.into(),
+    }
+}
 /// The launch prefix without its per-launch job id, which only names that launch's cancel
 /// marker: a parked WSL process serves a later reply whose prefix otherwise matches.
 pub fn reusable_prefix(exe: &crate::providers::Executable) -> Vec<String> {

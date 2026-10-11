@@ -156,13 +156,14 @@ async fn claude_aliases(directory: &Path) -> Option<BTreeMap<String, String>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let result = match (child.stdin.take(), child.stdout.take()) {
-        (Some(mut input), Some(output)) => {
-            resolve_aliases(&mut input, BufReader::new(output)).await
-        }
-        _ => None,
+    let (Some(mut input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+        exe.kill(&mut child).await;
+        return None;
     };
-    exe.kill(&mut child).await;
+    let mut output = BufReader::new(output);
+    let result = resolve_aliases(&mut input, &mut output).await;
+    // The CLI started renewing an expired login as it started, which this query never waits for.
+    exe.finish(child, Some(input), Some(Box::new(output)));
     result
 }
 #[derive(Clone, Copy)]
@@ -373,7 +374,7 @@ async fn codex_models() -> Option<Vec<ModelInfo>> {
         None
     };
     let result = query.await;
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     result
 }
 fn parse_gemini(text: &str) -> Vec<ModelInfo> {

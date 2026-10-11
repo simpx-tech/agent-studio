@@ -325,21 +325,28 @@ async fn codex_start(exe: &Executable, folder: &str, roots: &[String]) -> Result
         Ok::<_,String>(())
     }.await;
     if let Err(e) = result {
-        p.kill().await;
+        p.finish().await;
         return Err(e);
     }
     Ok(p)
 }
+/// Runs one plugin command; `offline` keeps one that only reads this computer's files off the
+/// network, which a quick command needs to keep the login (`providers::offline`).
 async fn cli(
     exe: &Executable,
     folder: &str,
     args: Vec<String>,
+    offline: bool,
     cancel: CancellationToken,
 ) -> Result<(i32, String), String> {
     if cancel.is_cancelled() {
         return Err("Plugin operation cancelled".into());
     }
-    let child = crate::mcp::command(exe, folder)
+    let mut command = crate::mcp::command(exe, folder);
+    if offline {
+        crate::providers::offline(exe, &mut command);
+    }
+    let child = command
         .args(args)
         .env("NO_COLOR", "1")
         .env_remove("CLAUDECODE")
@@ -368,7 +375,7 @@ async fn cli(
         Ok((status.code().unwrap_or(-1), output))
     };
     let result = tokio::select! { _=cancel.cancelled()=>Err("Plugin evaluation cancelled".into()), result=work=>result };
-    process.kill().await;
+    process.finish().await;
     result
 }
 fn args(parts: &[&str]) -> Vec<String> {
@@ -509,6 +516,7 @@ async fn claude_action(
         exe,
         folder,
         args(&["plugin", "list", "--json"]),
+        true,
         cancel.clone(),
     )
     .await?;
@@ -573,7 +581,7 @@ async fn claude_action(
         ]),
         _ => unreachable!(),
     };
-    let result = cli(exe, folder, command, cancel).await;
+    let result = cli(exe, folder, command, false, cancel).await;
     let (code, text) = result?;
     if matches!(action, Action::Eval { .. }) {
         if !serde_json::from_str::<Value>(&text).is_ok_and(|v| v.is_object()) {
@@ -758,7 +766,7 @@ async fn manage_scoped(
         let started = tokio::select! {_=cancel.cancelled()=>Err("Plugin operation cancelled".into()),started=codex_start(&exe, &folder, &out.runtime.skill_roots)=>started};
         let mut p = started?;
         let result = tokio::select! {_=cancel.cancelled()=>Err("Plugin operation cancelled".into()),result=codex_action(&mut p,&folder,&action,&mut out)=>result};
-        p.kill().await;
+        p.finish().await;
         result
     } else {
         claude_action(&exe, &folder, &action, &mut out, cancel).await
@@ -885,7 +893,7 @@ else { fs.writeFileSync('eval-args.json',JSON.stringify(a)); console.log('{}'); 
                 let id="demo@studio-fixture".to_string();
                 let mut out=ResultView::default();
                 if provider=="claude" {
-                    let (code,_)=cli(&exe,folder,args(&["plugin","marketplace","add",market.to_str().unwrap()]),CancellationToken::new()).await.unwrap();
+                    let (code,_)=cli(&exe,folder,args(&["plugin","marketplace","add",market.to_str().unwrap()]),false,CancellationToken::new()).await.unwrap();
                     assert_eq!(code,0,"Claude local fixture registration");
                     for action in [Action::Install{id:id.clone()},Action::Details{id:id.clone()},Action::Toggle{id:id.clone(),enabled:false},Action::List,Action::Toggle{id:id.clone(),enabled:true},Action::Uninstall{id:id.clone()}] {
                         claude_action(&exe,folder,&action,&mut out,CancellationToken::new()).await.unwrap();

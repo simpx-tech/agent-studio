@@ -103,7 +103,7 @@ pub async fn claude_model(
         _ = cancel.cancelled() => Err("Default-model query cancelled"),
         result = query => result,
     };
-    exe.kill(&mut child).await;
+    exe.finish(child, Some(input), Some(Box::new(lines.into_inner())));
     result.map_err(String::from)
 }
 

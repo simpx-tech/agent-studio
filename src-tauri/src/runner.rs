@@ -425,9 +425,11 @@ pub(crate) async fn execute(
             if parked.serves(&fingerprint, session) {
                 parked.claim();
                 reused = Some(parked);
-            } else {
+            } else if parked.healthy {
                 // Changed launch identity or session: start over. Claude model and
                 // thinking budgets are acknowledged in-band before the next prompt.
+                parked.finish().await;
+            } else {
                 parked.kill().await;
             }
         }
@@ -596,7 +598,7 @@ pub(crate) async fn execute(
                     Some(conversation) if process.carried.is_some() => {
                         pool.park(conversation, process).await
                     }
-                    _ => process.kill().await,
+                    _ => process.finish().await,
                 }
                 return if cancel.is_cancelled() {
                     Ok(("cancelled".into(), String::new()))
@@ -661,6 +663,8 @@ pub(crate) async fn execute(
     if park {
         pool.park(request.conversation_id.as_deref().unwrap(), process)
             .await;
+    } else if process.healthy {
+        process.finish().await;
     } else {
         process.kill().await;
     }
