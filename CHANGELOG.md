@@ -5,6 +5,27 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.9.0 - 2026-10-10
+
+The VPS that hosts your relay is now a computer of your workspace: chats run on it while your
+other devices are off, and its accounts sign in from your desktop or phone.
+
+### Added
+
+- Run chats on the VPS that hosts the relay. Each release installs and updates Agent Studio there by
+  itself as a server, shown as VPS in Connections, the Computer picker and the sidebar: start a chat
+  on it, browse its folders and use its accounts like any other computer's
+- Sign in to the accounts of the VPS, or of another computer running this release, from any device.
+  Open sign-in shows the page on your device, with Codex's code to enter there or a field for the
+  code Claude's page shows; Add account, Connect on and Disconnect work for those computers too
+
+### Fixed
+
+- Remove every limit Agent Studio set on the size, number or length of your work: replies run on
+  another computer no longer stop after 61 minutes, a Claude reply's edits after its hundredth are
+  no longer missing from Files edited, and messages, images, files, tool results and uploads of any
+  size go through; what remains is what the computer or the provider itself refuses
+
 ## 0.8.1 - 2026-10-09
 
 ### Fixed
