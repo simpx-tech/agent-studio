@@ -15,9 +15,14 @@ export default defineConfig({
   use: {
     baseURL,
     viewport: { width: 1380, height: 900 },
-    channel: 'msedge',
     trace: 'retain-on-failure',
   },
+  projects: [
+    { name: 'edge', use: { channel: 'msedge' } },
+    // The macOS and Linux apps draw with WebKit, which lays out some pages differently from
+    // WebView2. Tests tagged @webkit run there too.
+    { name: 'webkit', grep: /@webkit/, use: { browserName: 'webkit' } },
+  ],
   webServer: {
     // CI verifies the built app without dev dependency optimization or HMR races.
     command: ci

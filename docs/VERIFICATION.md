@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## The Model picker's marks keep their size on macOS and Linux — 2026-10-11
+
+Requested 2026-10-11: "My friend that has the app downloaded complained about this layout bug, can you fix it?", with a screenshot of a Codex chat's Model picker showing each choice's name as a column of single letters beside a wide band, an empty Model trigger, and the selected model's print drawn over the Agent picker.
+
+- Cause: the macOS and Linux apps draw with WebKit (WKWebView, WebKitGTK), as does the Viewer on an iPhone. WebKit measured a mark before it resolved its print square's `height: 100%`, so `aspect-ratio: 1` gave the square no width, and the print's SVG, which has no size of its own, counted as an SVG's default 300px. The Model trigger's chip came out 300px wide, and the trigger, which centers its content, pushed it 53px over the Agent picker while the name beside it shrank to nothing. Each picker pill came out 319 to 329px wide, leaving its name a 9px column in a 182px row. Playwright's WebKit reproduced the screenshot. Edge, whose engine WebView2 shares, drew 20px and 26px squares, so Windows never showed it.
+- Fix: `ModelMark.svelte` gives the chip's and the pill's print square its size outright (`--mark-size`, 20px and 26px). The reply avatar's tile keeps `aspect-ratio`, which WebKit already drew correctly. In WebKit the trigger, pills and names now measure exactly as in Edge, at desktop and phone widths.
+- Browser: `playwright.config.ts` now has an `edge` project, which runs every test as before, and a `webkit` project for tests tagged `@webkit`. The picker scenario of `tests/model-marks.spec.ts` is tagged and also checks that the trigger's print is a square inside the trigger, with the whole name after it. Against the previous component it failed in WebKit (the chip 300px wide where 20px was expected) and passed in Edge. Screenshots of the Codex and Claude Model pickers, the Agent picker with its usage bars, the usage panel, Connections and Settings were reviewed in WebKit, with no other difference from Edge. `docs/DEVELOPMENT.md` notes the WebKit project.
+- Pipeline: `npm run check` (0 errors in 5,232 files), 651 Vitest tests, the build, 348 browser tests (347 in Edge, 1 in WebKit) on the first run and `cargo fmt --check` passed. Clippy and the Rust tests were not rerun because no Rust file changed. Log: `artifacts/model-marks-webkit/verify.log`.
+- Not exercised: the macOS and Linux apps themselves. Playwright's WebKit on Windows stood in for WKWebView and WebKitGTK.
+
 ## Scratch chats have the Move to history button, which discards them — 2026-10-11
 
 Requested 2026-10-11: "Can you allow to archive a scratch (show the button to archive, but in practice it just deletes the chat)?"

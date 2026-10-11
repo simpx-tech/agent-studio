@@ -7,7 +7,7 @@ const output = 'artifacts/model-marks';
 const tint = (locator: Locator) =>
   locator.evaluate((element) => getComputedStyle(element).getPropertyValue('--provider-color'));
 
-test('each Claude line has its own print and tint beside its version, and a reply says when another model ran', async ({
+test('each Claude line has its own print and tint beside its version, and a reply says when another model ran @webkit', async ({
   page,
 }) => {
   await mkdir(output, { recursive: true });
@@ -97,7 +97,7 @@ test('each Claude line has its own print and tint beside its version, and a repl
   await expect(avatar(newer).locator('svg')).toBeVisible();
   await expect(newer.locator('.model-mismatch')).toHaveCount(0);
   expect(await tint(avatar(older))).toBe(await tint(avatar(newer)));
-  await page.screenshot({ path: `${output}/replies.png` });
+  await page.screenshot({ path: `${output}/replies-${test.info().project.name}.png` });
 
   // The toolbar shows the selected model's print and leaves its version to the name beside it,
   // and every choice carries its own mark.
@@ -106,6 +106,19 @@ test('each Claude line has its own print and tint beside its version, and a repl
   await expect(picker.locator('.model-mark svg')).toBeVisible();
   await expect(picker.locator('.model-mark .version')).toHaveCount(0);
   await expect(picker.locator('.selected-name')).toHaveText('Opus 5.5');
+  // The print keeps its square at the start of the trigger, and the name stays whole beside it.
+  // WebKit, which draws the macOS and Linux apps, once measured the print as an SVG's default
+  // 300px, drawing it over the Agent picker and wrapping every choice's name letter by letter.
+  const trigger = (await picker.boundingBox())!;
+  const chip = (await picker.locator('.model-mark').boundingBox())!;
+  expect(chip.width).toBe(chip.height);
+  expect(chip.x).toBeGreaterThan(trigger.x);
+  expect(chip.x + chip.width).toBeLessThan(
+    (await picker.locator('.selected-name').boundingBox())!.x,
+  );
+  expect(
+    await picker.locator('.selected-name').evaluate((name) => name.scrollWidth <= name.clientWidth),
+  ).toBe(true);
   await picker.click();
   const options = page.getByRole('option');
   const marks = options.locator('.model-mark');
@@ -149,7 +162,7 @@ test('each Claude line has its own print and tint beside its version, and a repl
   );
   expect(new Set(tints).size).toBe(4);
   expect(tints[0]).toBe(await tint(avatar(newer)));
-  await page.screenshot({ path: `${output}/picker.png` });
+  await page.screenshot({ path: `${output}/picker-${test.info().project.name}.png` });
   await page.getByRole('option', { name: 'Haiku 4.5', exact: true }).click();
   await expect(picker.locator('.model-mark')).toHaveAttribute('data-line', 'haiku');
   await expect(picker.locator('.model-mark .version')).toHaveCount(0);

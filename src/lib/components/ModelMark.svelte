@@ -44,13 +44,15 @@
     content: '';
     pointer-events: none;
   }
-  /* The print fills a square at the start of the mark; its corners follow the mark's. */
+  /* The print fills a square at the start of the mark; its corners follow the mark's. Chips and
+     pills size the square outright: WebKit measures a mark before it resolves a height of 100%,
+     and the print's SVG, which has no size of its own, then counts as 300px wide. */
   .art {
     display: grid;
     place-items: center;
     flex-shrink: 0;
-    height: 100%;
-    aspect-ratio: 1;
+    width: var(--mark-size);
+    height: var(--mark-size);
   }
   .version {
     font-family: var(--font-sans);
@@ -60,7 +62,8 @@
     white-space: nowrap;
   }
   .chip {
-    height: 20px;
+    --mark-size: 20px;
+    height: var(--mark-size);
     border-radius: var(--radius-sm);
   }
   .chip .glyph {
@@ -68,7 +71,8 @@
   }
   /* Pills share one width for the usual versions, so the names beside them line up. */
   .pill {
-    height: 26px;
+    --mark-size: 26px;
+    height: var(--mark-size);
     min-width: 58px;
     border-radius: var(--radius-md);
     font-size: var(--text-sm);
@@ -95,6 +99,7 @@
   .tile .art {
     width: 100%;
     height: auto;
+    aspect-ratio: 1;
   }
   .tile .version {
     padding: 3px 0 4px;
