@@ -4,14 +4,18 @@ use tauri::Manager;
 #[tauri::command]
 pub async fn save_artifact(
     app: tauri::AppHandle,
+    call: crate::calls::Call,
     source: String,
     filename: String,
     language: String,
 ) -> Result<String, String> {
     // File work stays off the UI thread, which also handles the window's input.
-    tauri::async_runtime::spawn_blocking(move || write(&app, &source, &filename, &language))
-        .await
-        .map_err(|_| "Could not finish saving the artifact")?
+    call.once(async move {
+        tauri::async_runtime::spawn_blocking(move || write(&app, &source, &filename, &language))
+            .await
+            .map_err(|_| "Could not finish saving the artifact")?
+    })
+    .await
 }
 
 fn write(

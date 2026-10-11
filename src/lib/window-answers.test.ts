@@ -4,11 +4,15 @@ const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
 import {
+  answerBytes,
+  callHeader,
   invoke,
   rememberStall,
   takeRememberedStall,
   waitingCalls,
   watchAnswers,
+  watchIpcFallback,
+  type IpcFallback,
   type WindowStall,
 } from './window-answers';
 
@@ -114,6 +118,71 @@ describe('window answers', () => {
     finish('saved');
     await expect(slow).resolves.toBe('saved');
     expect(waitingCalls()).toEqual([]);
+  });
+
+  it('names each call in a header that a postMessage copy of it keeps', async () => {
+    native.invoke.mockReset();
+    native.invoke.mockResolvedValue(null);
+    const image = new Uint8Array([1, 2, 3]);
+    await invoke('store_chat_image', image);
+    await invoke('run_agent', { request: {} }, { headers: { 'X-Kept': 'yes' } });
+    await invoke('relay_resume');
+    const [first, second, third] = native.invoke.mock.calls;
+    expect(first.slice(0, 2)).toEqual(['store_chat_image', image]);
+    expect(second.slice(0, 2)).toEqual(['run_agent', { request: {} }]);
+    expect(second[2].headers['x-kept']).toBe('yes');
+    const names = [first, second, third].map((call) => call[2].headers[callHeader]);
+    for (const name of names) expect(name).toMatch(/^[0-9a-f-]{36}$/);
+    expect(new Set(names).size).toBe(3);
+    // Tauri's postMessage path sends options as JSON, which keeps only a plain object's headers.
+    expect(JSON.parse(JSON.stringify(first[2])).headers[callHeader]).toBe(names[0]);
+  });
+
+  it('notices once when Tauri moves calls to postMessage, with the calls then waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      native.invoke.mockReset();
+      native.invoke.mockImplementation(() => new Promise(() => {}));
+      void invoke('run_agent', { request: {} });
+      const logged: unknown[][] = [];
+      const target = { warn: (...args: unknown[]) => void logged.push(args) };
+      const original = target.warn;
+      const noticed: IpcFallback[] = [];
+      const stop = watchIpcFallback((fallback) => noticed.push(fallback), target);
+      target.warn('something else');
+      const failure = new TypeError('Failed to fetch');
+      target.warn(
+        'IPC custom protocol failed, Tauri will now use the postMessage interface instead',
+        failure,
+      );
+      target.warn(
+        'IPC custom protocol failed, Tauri will now use the postMessage interface instead',
+      );
+      // Every warning still reaches the console, and the record follows Tauri's move.
+      expect(logged).toHaveLength(3);
+      expect(noticed).toEqual([]);
+      vi.runAllTimers();
+      expect(noticed).toEqual([
+        {
+          noticedAt: expect.any(Number),
+          error: 'TypeError: Failed to fetch',
+          calls: [{ command: 'run_agent', waitedMs: expect.any(Number) }],
+        },
+      ]);
+      stop();
+      expect(target.warn).toBe(original);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reads bytes answered raw, or as the numbers a postMessage answer carries', () => {
+    const raw = new Uint8Array([137, 80, 78, 71]);
+    expect(answerBytes(raw.buffer)).toBe(raw.buffer);
+    expect([...new Uint8Array(answerBytes([137, 80, 78, 71]))]).toEqual([...raw]);
+    const view = new Uint8Array([0, 137, 80, 0]).subarray(1, 3);
+    expect([...new Uint8Array(answerBytes(view))]).toEqual([137, 80]);
+    expect(() => answerBytes('PNG')).toThrow('The app answered without the file.');
   });
 
   it('keeps one stall record across a reload until it is taken', () => {

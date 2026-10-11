@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { Channel, convertFileSrc, isTauri } from '@tauri-apps/api/core';
-// Tauri's invoke, remembering the calls the app has not answered yet.
-import { invoke, type WindowStall } from './window-answers';
+// Tauri's invoke, naming each call and remembering the calls the app has not answered yet.
+import { answerBytes, invoke, type IpcFallback, type WindowStall } from './window-answers';
 import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -420,6 +420,10 @@ export async function windowHeartbeat(shown: boolean): Promise<void> {
 /** Keeps this window's record of a time the app did not answer it with the app's diagnostics. */
 export async function recordWindowStall(stall: WindowStall): Promise<void> {
   if (desktop()) await invoke('record_window_stall', { stall });
+}
+/** Keeps the moment Tauri moved this window's calls to `postMessage` with the app's diagnostics. */
+export async function recordIpcFallback(fallback: IpcFallback): Promise<void> {
+  if (desktop()) await invoke('record_ipc_fallback', { fallback });
 }
 let badgeQueue = Promise.resolve();
 let lastBadgeCount: number | undefined;
@@ -2574,12 +2578,12 @@ export async function readToolOutputModel(
   connectionId?: string,
 ): Promise<{ format: ModelFormat; bytes: ArrayBuffer }> {
   if (desktop() && !remoteTarget(connectionId)) {
-    const bytes = await invoke<ArrayBuffer>('read_tool_output_model_file', {
+    const bytes = await invoke<unknown>('read_tool_output_model_file', {
       runId,
       toolId,
       index,
     });
-    return { format, bytes };
+    return { format, bytes: answerBytes(bytes) };
   }
   const model = toolOutputModelSchema.parse(
     await largeRead(connectionId, () =>
@@ -2642,7 +2646,7 @@ async function keptOrRenderedViews(request: {
   if (kept.renderer === modelViewsRenderer && kept.views.length === modelViewCount)
     return { views: kept.views };
   return viewRenders(async () => {
-    const bytes = await invoke<ArrayBuffer>('read_tool_output_model_file', request);
+    const bytes = answerBytes(await invoke<unknown>('read_tool_output_model_file', request));
     // Square, so a model fills the inline stage and keeps its height in the wider expanded
     // one, and sharp there on a high-density display at tens of kilobytes a view.
     const views = await renderModelViews(bytes, kept.format, {
@@ -2793,7 +2797,9 @@ const chatImages = createFetchCache<Blob>((blob) => blob.size, {
  */
 export function readChatImage(hash: string): Promise<Blob> {
   if (desktop())
-    return invoke<ArrayBuffer>('read_chat_image', { hash }).then((bytes) => new Blob([bytes]));
+    return invoke<unknown>('read_chat_image', { hash }).then(
+      (bytes) => new Blob([answerBytes(bytes)]),
+    );
   return chatImages.get(hash, async () => {
     const answer = await relayImage('GET', hash);
     if (answer.status !== 200 || !answer.blob)

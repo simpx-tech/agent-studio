@@ -695,9 +695,15 @@ pub async fn set_cli_auto_update(
 /// Check every installation now, including a WSL distribution the automatic check skipped
 /// because it was not running.
 #[tauri::command]
-pub async fn check_cli_updates(app: AppHandle) -> Result<Snapshot, String> {
-    load_settings(&app).await?;
-    Ok(check(&app, true).await)
+pub async fn check_cli_updates(
+    app: AppHandle,
+    call: crate::calls::Call,
+) -> Result<Snapshot, String> {
+    call.once(async move {
+        load_settings(&app).await?;
+        Ok(check(&app, true).await)
+    })
+    .await
 }
 
 /// The version an installer run reported, from the launcher's last line.
@@ -715,6 +721,15 @@ fn installed_version(text: &str) -> Option<String> {
 /// detection and update checks never do. Returns the installed version.
 #[tauri::command]
 pub async fn install_cli(
+    app: AppHandle,
+    call: crate::calls::Call,
+    provider: String,
+    environment_id: String,
+) -> Result<String, String> {
+    call.once(install(app, provider, environment_id)).await
+}
+
+async fn install(
     app: AppHandle,
     provider: String,
     environment_id: String,

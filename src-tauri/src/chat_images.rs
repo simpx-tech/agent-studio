@@ -64,6 +64,20 @@ pub struct Stored {
     pub media_type: &'static str,
 }
 
+/// The bytes of an image a window sent: the raw body, or the same bytes as a JSON array of
+/// numbers once Tauri has moved the page's calls to `postMessage`, which carries only JSON
+/// (calls.rs). The image bytes failed to arrive on 2026-10-11 because only the raw body counted.
+pub fn sent_bytes(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        tauri::ipc::InvokeBody::Json(Value::Array(numbers)) => numbers
+            .iter()
+            .map(|number| number.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect::<Option<Vec<u8>>>()
+            .ok_or_else(|| "Send the image bytes".into()),
+        _ => Err("Send the image bytes".into()),
+    }
+}
 /// Keeps an image's bytes under their hash, written whole before they are named.
 pub fn store(root: &Path, bytes: &[u8]) -> Result<Stored, String> {
     let media_type = image_type(bytes).ok_or("Attach a PNG, JPEG, or WebP image")?;
@@ -385,6 +399,25 @@ mod tests {
         0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0,
         0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0,
     ];
+
+    #[test]
+    fn takes_the_bytes_raw_or_as_the_numbers_post_message_sends() {
+        use tauri::ipc::InvokeBody;
+        assert_eq!(sent_bytes(&InvokeBody::Raw(PNG.to_vec())), Ok(PNG.to_vec()));
+        let numbers = Value::Array(PNG.iter().map(|&b| json!(b)).collect());
+        assert_eq!(sent_bytes(&InvokeBody::Json(numbers)), Ok(PNG.to_vec()));
+        for refused in [
+            json!([1, 256]),
+            json!([1, -1]),
+            json!([1.5]),
+            json!({"data": [1]}),
+        ] {
+            assert_eq!(
+                sent_bytes(&InvokeBody::Json(refused)),
+                Err("Send the image bytes".into())
+            );
+        }
+    }
 
     #[test]
     fn stores_each_image_once_under_its_hash() {

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub struct Titles(pub Mutex<HashMap<String, CancellationToken>>);
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct GeneratedTitle {
     title: String,
     provider: String,

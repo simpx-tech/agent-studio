@@ -10,7 +10,9 @@ const native = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: native.invoke,
+  // The page names each call in its options (window-answers.ts); these tests compare the rest.
+  invoke: (command: string, args?: unknown) =>
+    args === undefined ? native.invoke(command) : native.invoke(command, args),
   isTauri: () => true,
   Channel: class {},
 }));

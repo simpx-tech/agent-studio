@@ -1,6 +1,7 @@
 mod artifacts;
 mod background_work;
 mod badges;
+mod calls;
 mod chat_images;
 mod cli_queries;
 mod cli_updates;
@@ -65,40 +66,42 @@ struct StorageState {
 #[tauri::command]
 async fn manage_plugins(
     app: tauri::AppHandle,
+    call: calls::Call,
     provider: String,
     connection_id: String,
     conversation_id: Option<String>,
     location: Option<folders::ChatLocation>,
     action: plugins::Action,
 ) -> Result<plugins::ResultView, String> {
-    plugins::manage(
+    call.once(plugins::manage(
         app,
         provider,
         connection_id,
         conversation_id,
         location,
         action,
-    )
+    ))
     .await
 }
 
 #[tauri::command]
 async fn manage_mcp(
     app: tauri::AppHandle,
+    call: calls::Call,
     provider: String,
     connection_id: String,
     conversation_id: Option<String>,
     location: Option<folders::ChatLocation>,
     action: mcp::Action,
 ) -> Result<mcp::ResultView, String> {
-    mcp::manage(
+    call.once(mcp::manage(
         app,
         provider,
         connection_id,
         conversation_id,
         location,
         action,
-    )
+    ))
     .await
 }
 
@@ -314,17 +317,40 @@ async fn background_work(
 #[tauri::command]
 async fn manage_account(
     app: tauri::AppHandle,
+    call: calls::Call,
     connection_id: String,
     input: live_usage::Action,
 ) -> Result<serde_json::Value, String> {
-    let profile = profiles::resolve(&app, "codex", Some(&connection_id))?;
-    profiles::scope(profile, live_usage::manage(&app, input)).await
+    call.once(async move {
+        let profile = profiles::resolve(&app, "codex", Some(&connection_id))?;
+        profiles::scope(profile, live_usage::manage(&app, input)).await
+    })
+    .await
 }
 
 #[tauri::command]
 async fn generate_title(
     app: tauri::AppHandle,
     titles: State<'_, titles::Titles>,
+    call: calls::Call,
+    conversation_id: String,
+    provider: String,
+    first_message: String,
+    connection_id: Option<String>,
+) -> Result<titles::GeneratedTitle, String> {
+    call.once(title(
+        app,
+        &titles,
+        conversation_id,
+        provider,
+        first_message,
+        connection_id,
+    ))
+    .await
+}
+async fn title(
+    app: tauri::AppHandle,
+    titles: &titles::Titles,
     conversation_id: String,
     provider: String,
     first_message: String,
@@ -357,9 +383,31 @@ async fn generate_title(
     result
 }
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn generate_folder_icon(
     app: tauri::AppHandle,
     icons: State<'_, folder_icons::FolderIcons>,
+    call: calls::Call,
+    conversation_id: String,
+    provider: String,
+    folder: String,
+    first_message: String,
+    connection_id: Option<String>,
+) -> Result<folder_icons::ChosenIcon, String> {
+    call.once(folder_icon(
+        app,
+        &icons,
+        conversation_id,
+        provider,
+        folder,
+        first_message,
+        connection_id,
+    ))
+    .await
+}
+async fn folder_icon(
+    app: tauri::AppHandle,
+    icons: &folder_icons::FolderIcons,
     conversation_id: String,
     provider: String,
     folder: String,
@@ -571,8 +619,8 @@ async fn share_files(app: &tauri::AppHandle, explicit: bool) -> Result<(), Strin
     }
 }
 #[tauri::command]
-async fn share_claude_files(app: tauri::AppHandle) -> Result<(), String> {
-    share_files(&app, true).await
+async fn share_claude_files(app: tauri::AppHandle, call: calls::Call) -> Result<(), String> {
+    call.once(share_files(&app, true)).await
 }
 // Read-only check of one environment's existing CLI login, used before a connection exists so
 // the app can tell whether that login is already connected through another profile.
@@ -883,6 +931,23 @@ fn replace_workspace(file: tempfile::NamedTempFile, path: &std::path::Path) -> s
 async fn run_agent(
     app: tauri::AppHandle,
     runs: State<'_, runner::Runs>,
+    call: calls::Call,
+    request: providers::RunRequest,
+    on_event: Channel<protocol::RunEvent>,
+    connection_id: Option<String>,
+) -> Result<String, String> {
+    // A second copy of this call (calls.rs) holds its own handle on the window's channel, which
+    // ends the channel in the window when it goes: keep each until the reply has answered.
+    let channel = on_event.clone();
+    let answer = call
+        .once(reply(app, &runs, request, on_event, connection_id))
+        .await;
+    drop(channel);
+    answer
+}
+async fn reply(
+    app: tauri::AppHandle,
+    runs: &runner::Runs,
     request: providers::RunRequest,
     on_event: Channel<protocol::RunEvent>,
     connection_id: Option<String>,
@@ -964,16 +1029,13 @@ fn prune_chat_images(app: &tauri::AppHandle) {
         tauri::async_runtime::spawn_blocking(move || chat_images::prune(&root));
     }
 }
-/// Keeps an attached image, sent as the raw request body, in the image store.
+/// Keeps an attached image, sent as the request body, in the image store.
 #[tauri::command]
 async fn store_chat_image(
     app: tauri::AppHandle,
     request: tauri::ipc::Request<'_>,
 ) -> Result<chat_images::Stored, String> {
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("Send the image bytes".into());
-    };
-    let bytes = bytes.clone();
+    let bytes = chat_images::sent_bytes(request.body())?;
     let root = chat_images::root(&app)?;
     tauri::async_runtime::spawn_blocking(move || chat_images::store(&root, &bytes))
         .await
@@ -1037,10 +1099,32 @@ async fn release_conversation(
     Ok(())
 }
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn undo_files(
     app: tauri::AppHandle,
     runs: State<'_, runner::Runs>,
     storage: State<'_, Storage>,
+    call: calls::Call,
+    conversation_id: String,
+    run_id: String,
+    connection_id: Option<String>,
+    commit: bool,
+) -> Result<undo::Preview, String> {
+    call.once(undo(
+        app,
+        &runs,
+        &storage,
+        conversation_id,
+        run_id,
+        connection_id,
+        commit,
+    ))
+    .await
+}
+async fn undo(
+    app: tauri::AppHandle,
+    runs: &runner::Runs,
+    storage: &Storage,
     conversation_id: String,
     run_id: String,
     connection_id: Option<String>,
@@ -1175,36 +1259,34 @@ async fn undo_files(
 #[tauri::command]
 async fn answer_question(
     questions: State<'_, providers::questions::Questions>,
+    call: calls::Call,
     run_id: String,
     connection_id: Option<String>,
     answer: providers::questions::Answer,
 ) -> Result<(), String> {
-    questions
-        .answer(&run_id, connection_id.as_deref(), answer)
+    call.once(questions.answer(&run_id, connection_id.as_deref(), answer))
         .await
 }
 #[tauri::command]
 async fn manage_elicitation(
     questions: State<'_, providers::questions::Questions>,
+    call: calls::Call,
     run_id: String,
     connection_id: Option<String>,
     input: providers::elicitation::Input,
 ) -> Result<Option<providers::elicitation::Request>, String> {
-    questions
-        .2
-        .manage(&run_id, connection_id.as_deref(), input)
+    call.once(questions.2.manage(&run_id, connection_id.as_deref(), input))
         .await
 }
 #[tauri::command]
 async fn steer_run(
     questions: State<'_, providers::questions::Questions>,
+    call: calls::Call,
     run_id: String,
     connection_id: Option<String>,
     input: providers::steering::Input,
 ) -> Result<(), String> {
-    questions
-        .1
-        .send(&run_id, connection_id.as_deref(), input)
+    call.once(questions.1.send(&run_id, connection_id.as_deref(), input))
         .await
 }
 /// Signs in to the selected profile's CLI. Claude Code and Codex sign in without a terminal:
@@ -1215,6 +1297,18 @@ async fn steer_run(
 async fn sign_in(
     app: tauri::AppHandle,
     sign_ins: State<'_, sign_in::SignIns>,
+    call: calls::Call,
+    provider: String,
+    connection_id: Option<String>,
+    remote: Option<bool>,
+) -> Result<Option<sign_in::View>, String> {
+    let sign_ins = sign_ins.inner().clone();
+    call.once(open_sign_in(app, sign_ins, provider, connection_id, remote))
+        .await
+}
+async fn open_sign_in(
+    app: tauri::AppHandle,
+    sign_ins: sign_in::SignIns,
     provider: String,
     connection_id: Option<String>,
     remote: Option<bool>,
@@ -1249,7 +1343,6 @@ async fn sign_in(
     } else {
         profile.id.clone()
     };
-    let sign_ins = sign_ins.inner().clone();
     let (notify, open) = (sign_in::notifier(&app), sign_in::browser(&app));
     profiles::scope(profile, async move {
         std::fs::create_dir_all(&directory).map_err(|_| "Cannot prepare the sign-in directory")?;
@@ -1276,10 +1369,12 @@ async fn sign_ins(sign_ins: State<'_, sign_in::SignIns>) -> Result<Vec<sign_in::
 async fn sign_in_code(
     app: tauri::AppHandle,
     sign_ins: State<'_, sign_in::SignIns>,
+    call: calls::Call,
     id: String,
     code: String,
 ) -> Result<sign_in::View, String> {
-    sign_ins.code(&id, &code, &sign_in::notifier(&app)).await
+    call.once(sign_ins.code(&id, &code, &sign_in::notifier(&app)))
+        .await
 }
 #[tauri::command]
 async fn cancel_sign_in(sign_ins: State<'_, sign_in::SignIns>, id: String) -> Result<(), String> {
@@ -1289,8 +1384,10 @@ async fn cancel_sign_in(sign_ins: State<'_, sign_in::SignIns>, id: String) -> Re
 /// Opens a console window on this computer, in a chat's working folder, and runs the code of
 /// one block of a reply there. The chat's own connection names the computer, as for a reply.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn run_in_console(
     app: tauri::AppHandle,
+    call: calls::Call,
     provider: String,
     connection_id: Option<String>,
     location: Option<folders::ChatLocation>,
@@ -1298,22 +1395,25 @@ async fn run_in_console(
     shell: console::Shell,
     code: String,
 ) -> Result<console::Opened, String> {
-    folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
-    let mut profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
-    profile.folder_distribution = location
-        .as_ref()
-        .map(|l| folders::environment_distribution(&app, &l.environment_id))
-        .transpose()?
-        .flatten();
-    profiles::scope(
-        profile,
-        console::open(app, provider, location, conversation_id, shell, code),
-    )
+    call.once(async move {
+        folders::validate_chat(&app, location.as_ref(), connection_id.as_deref())?;
+        let mut profile = profiles::resolve(&app, &provider, connection_id.as_deref())?;
+        profile.folder_distribution = location
+            .as_ref()
+            .map(|l| folders::environment_distribution(&app, &l.environment_id))
+            .transpose()?
+            .flatten();
+        profiles::scope(
+            profile,
+            console::open(app, provider, location, conversation_id, shell, code),
+        )
+        .await
+    })
     .await
 }
 
 /// Where an export went, and how many of its images neither this computer nor the relay held.
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Export {
     path: String,
@@ -1322,29 +1422,33 @@ struct Export {
 #[tauri::command]
 async fn export_workspace(
     app: tauri::AppHandle,
+    call: calls::Call,
     mut workspace: serde_json::Value,
 ) -> Result<Export, String> {
-    // An export stands on its own: its images carry their bytes. Those this computer does not
-    // hold are read from the relay first.
-    if let Some(conversations) = workspace.get_mut("conversations") {
-        for hash in chat_images::hashes(conversations) {
-            let _ = chat_images::ensure(&app, &hash).await;
+    call.once(async move {
+        // An export stands on its own: its images carry their bytes. Those this computer does
+        // not hold are read from the relay first.
+        if let Some(conversations) = workspace.get_mut("conversations") {
+            for hash in chat_images::hashes(conversations) {
+                let _ = chat_images::ensure(&app, &hash).await;
+            }
         }
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = chat_images::root(&app)?;
-        let missing_images = workspace
-            .get_mut("conversations")
-            .map_or(0, |conversations| {
-                chat_images::inline_all(&root, conversations)
-            });
-        Ok(Export {
-            path: write_export(&app, &workspace)?,
-            missing_images,
+        tauri::async_runtime::spawn_blocking(move || {
+            let root = chat_images::root(&app)?;
+            let missing_images = workspace
+                .get_mut("conversations")
+                .map_or(0, |conversations| {
+                    chat_images::inline_all(&root, conversations)
+                });
+            Ok(Export {
+                path: write_export(&app, &workspace)?,
+                missing_images,
+            })
         })
+        .await
+        .map_err(|_| "Cannot write workspace export")?
     })
     .await
-    .map_err(|_| "Cannot write workspace export")?
 }
 fn write_export(app: &tauri::AppHandle, workspace: &serde_json::Value) -> Result<String, String> {
     if workspace["version"] != 3 {
@@ -1500,6 +1604,7 @@ pub fn run() {
         .manage(updates::Updates::new(version))
         .manage(cli_updates::CliUpdates::default())
         .manage(runner::Runs::default())
+        .manage(calls::Calls::default())
         .manage(pool::Pool::default())
         .manage(mcp::Management::default())
         .manage(providers::questions::Questions::default())
@@ -1532,6 +1637,10 @@ pub fn run() {
                 app.manage(overlay);
             }
             watchdog::start(app.handle());
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                watchdog::watch_webview(&window);
+            }
             // When a Claude profile's two shared files need Windows' permission, ask once for
             // every account that needs it.
             {
@@ -1704,7 +1813,8 @@ pub fn run() {
             tray::window_behavior,
             tray::set_close_to_tray,
             watchdog::window_heartbeat,
-            watchdog::record_window_stall
+            watchdog::record_window_stall,
+            watchdog::record_ipc_fallback
         ])
         .build(context)
         .expect("error while building tauri application");
@@ -1850,5 +1960,33 @@ mod app_session_tests {
         assert!(started.started_at > 1_700_000_000_000);
         let value = serde_json::to_value(started).unwrap();
         assert_eq!(value["startedAt"], started.started_at);
+    }
+}
+#[cfg(test)]
+mod command_future_tests {
+    use super::*;
+    fn size<A, B, C, D, E, G, F: std::future::Future>(_: fn(A, B, C, D, E, G) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    /// Tauri moves a command's future on the window thread's stack before spawning it, several
+    /// times over in a debug build: a `run_agent` future of 182 KB, which held its reply inline
+    /// twice, overflowed it as a reply started (calls.rs keeps the work on the heap).
+    #[test]
+    fn a_reply_command_future_stays_small() {
+        let run_agent = size(
+            run_agent
+                as fn(
+                    tauri::AppHandle,
+                    State<'static, runner::Runs>,
+                    calls::Call,
+                    providers::RunRequest,
+                    Channel<protocol::RunEvent>,
+                    Option<String>,
+                ) -> _,
+        );
+        assert!(
+            run_agent < 16 * 1024,
+            "run_agent's future takes {run_agent} bytes"
+        );
     }
 }

@@ -55,16 +55,66 @@ once, and record the next one.
   (`record_window_stall`). A running reply's `run_agent` call stays open for its whole reply, so
   it is listed with its age in any record taken while it runs.
 
+## What happened on 2026-10-11
+
+Two replies in different chats, running for 44 and 57 minutes, failed at the same moment, 17:41:31,
+with **This conversation is already responding. Stop it or wait for it to finish.** while their
+CLIs worked on. Images attached in that window afterwards failed with **The images could not be
+kept: Send the image bytes**. Restarting the app cleared both.
+
+- Only a second `run_agent` call for a conversation whose reply is still registered gets the
+  first message, and only an image body other than raw bytes gets the second.
+- Tauri's IPC script (`ipc-protocol.js`) posts each call with `fetch` to `http://ipc.localhost`.
+  When a fetch fails, it logs *IPC custom protocol failed, Tauri will now use the postMessage
+  interface instead*, sends the same call again through `postMessage`, with the same callbacks,
+  and keeps using `postMessage` until the page reloads. `postMessage` carries only JSON: a
+  `Uint8Array` body arrives as an array of numbers, and raw answers come back as one.
+- Both replies' `run_agent` calls stay open for the whole reply. They failed together, and their
+  second copies were refused as second replies. That refusal answered the page's original calls,
+  so the page marked both replies failed, though they were still running.
+- Windows logged a new `msedgewebview2.exe` process 0.25 seconds before (Application-Experience
+  event 500), and nothing else at that moment: no crash, power, network or GPU event. A scratch
+  app on the same Tauri 2.11.5 and WebView2 154 showed the cause: ending its WebView2 network
+  service process sent every pending call again through `postMessage` 1 ms after WebView2
+  started a new one, while ending the GPU process or the storage service changed nothing. Why
+  the network service ended that day was not recorded; the `webviewProcess` report below now
+  keeps it.
+
+## Calls the window sends twice
+
+- The page names every call with a fresh `studio-call` header (`invoke` in
+  `src/lib/window-answers.ts`). Tauri sends a call's second copy with the same options, so the
+  name survives the move to `postMessage`.
+- A command that acts takes a `calls::Call` and runs its work through `call.once`
+  (`src-tauri/src/calls.rs`). The first arrival runs the work, and a copy waits for its answer
+  and returns the same one. Answers are kept ten minutes, and names a day: a copy after that is
+  refused rather than run again. Replies, file Undo, question answers, MCP forms, steering,
+  sign-ins and their codes, titles, folder icons, console runs, screen actions, CLI installs and
+  update checks, plugin, MCP and account management, Claude file sharing, exports and artifact
+  downloads run once. Reads, saves, imports and desktop alerts, which their tag deduplicates, end
+  the same when repeated.
+- `run_agent` keeps the copy's handle on the window's channel until the reply answers, because
+  Tauri ends a channel in the page when a handle on it goes.
+- `store_chat_image` takes the image bytes raw or as the array of numbers `postMessage` carries.
+  The page reads `read_chat_image` and `read_tool_output_model_file` answers either way
+  (`answerBytes`).
+- The page records the move as an `ipcFallback` report, with the failure and the calls then
+  waiting. The app records each WebView2 process that fails (`ProcessFailed`) as a
+  `webviewProcess` report, with its kind, reason, exit code and description, such as
+  *Network Service*.
+
 ## Reports and dumps
 
 Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
 
-| Kind           | Meaning                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| `windowThread` | A task posted to the window thread waited 10 seconds.                         |
-| `windowSilent` | A shown page stopped calling for 60 seconds while the window thread answered. |
-| `windowQueue`  | Tasks could not be posted to the window thread three times in a row.          |
-| `windowCalls`  | The page's list of calls it waited on, from its own check.                    |
+| Kind             | Meaning                                                                           |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `windowThread`   | A task posted to the window thread waited 10 seconds.                             |
+| `windowSilent`   | A shown page stopped calling for 60 seconds while the window thread answered.     |
+| `windowQueue`    | Tasks could not be posted to the window thread three times in a row.              |
+| `windowCalls`    | The page's list of calls it waited on, from its own check.                        |
+| `ipcFallback`    | Tauri moved the page's calls to `postMessage`: the failure, the calls sent again. |
+| `webviewProcess` | A WebView2 process failed: its kind, reason, exit code and description.           |
 
 Reports hold the time, how long the app had waited, the app version and process id, whether the
 page last said it was shown, the dump's file name or why none was saved, and
@@ -103,7 +153,24 @@ thread waits in.
   pages and sleep owe no calls, reports keep the newest files, stall records accept only bounded
   command names, and the dump helper refuses other programs and names while writing a real dump.
 - `src/lib/window-answers.test.ts`: when a stall begins and ends, hidden checks, and the record
-  of waiting calls.
+  of waiting calls; each call's name in a header that survives JSON, the fallback noticed once
+  with the calls then waiting, and bytes answered raw or as numbers.
+- `src-tauri/src/calls.rs` tests: a copy that arrives while the work runs, or after it ended, gets
+  its answer (errors too) without running it again, work dropped unanswered tells its copies,
+  answers are kept ten minutes and names a day, and only plain short names count.
+  `chat_images` tests take image bytes raw or as numbers and refuse anything else, and
+  `watchdog.rs` tests write `ipcFallback` and `webviewProcess` reports. A `lib.rs` test keeps
+  the `run_agent` future under 16 KB: one of 182 KB overflowed the window thread's stack in a
+  debug build as a reply started.
+- `scripts/ipc-replay-native-smoke.mjs` drives an isolated build of
+  `scripts/native-ipc-replay.tauri.json` (CDP 19831) with a real Codex or Claude reply in a
+  disposable folder. Ten seconds into the reply it fails the reply's `run_agent` fetch, or with
+  `IPC_REPLAY_QA_KILL=network` ends the app's WebView2 network service. The reply then finishes
+  as one reply, the `ipcFallback` report lists `run_agent` among the calls sent again (and the
+  `webviewProcess` report names the Network Service), and an image stores and reads back whole
+  through `postMessage`. On 2026-10-11 both ways passed with Codex. The same driver on the build
+  before this change failed the reply with **This conversation is already responding**, and
+  storing an image after the move failed with **Send the image bytes**.
 - `tests/window-answers.spec.ts`: the banner appears and clears and the stall is recorded; a reply
   starts while its save goes unanswered and the save warning clears; Close closes while the draft
   save goes unanswered.

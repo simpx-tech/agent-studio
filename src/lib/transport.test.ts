@@ -53,7 +53,9 @@ function chatRuntime(get: () => Workspace, marks = chatMarks()) {
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: native.invoke,
+  // The page names each call in its options (window-answers.ts); these tests compare the rest.
+  invoke: (command: string, args?: unknown) =>
+    args === undefined ? native.invoke(command) : native.invoke(command, args),
   isTauri: () => true,
   Channel: class {},
 }));

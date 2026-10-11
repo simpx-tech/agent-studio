@@ -111,11 +111,194 @@ pub async fn record_window_stall(app: AppHandle, stall: WindowStall) -> Result<(
             dump_error: None,
             recovered_after_ms: stall.answered_after_ms,
             calls: stall.calls,
+            error: None,
+            process: None,
         };
         report.write(&folder, &stamp(stall.noticed_at))
     })
     .await
     .map_err(|_| "Cannot keep the stall record".to_string())?
+}
+
+/// The page's record of the moment Tauri moved its calls from its IPC protocol to `postMessage`
+/// for good, after one call's fetch failed on the way (calls.rs): the failure, and the calls
+/// then waiting, which Tauri sends again.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IpcFallback {
+    noticed_at: u64,
+    error: String,
+    calls: Vec<WaitingCall>,
+}
+
+#[tauri::command]
+pub async fn record_ipc_fallback(
+    app: AppHandle,
+    watchdog: State<'_, Watchdog>,
+    fallback: IpcFallback,
+) -> Result<(), String> {
+    WindowStall {
+        noticed_at: fallback.noticed_at,
+        unanswered_ms: 0,
+        answered_after_ms: None,
+        calls: fallback.calls.clone(),
+    }
+    .validate()?;
+    let folder = folder(&app)?;
+    let visible = watchdog.visible.load(Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = Report {
+            kind: "ipcFallback",
+            detected_at: rfc3339(fallback.noticed_at),
+            after_ms: 0,
+            version: version(),
+            process_id: std::process::id(),
+            visible,
+            dump: None,
+            dump_error: None,
+            recovered_after_ms: None,
+            calls: fallback.calls,
+            error: Some(fallback.error.chars().take(500).collect()),
+            process: None,
+        };
+        report.write(&folder, &stamp(fallback.noticed_at))
+    })
+    .await
+    .map_err(|_| "Cannot keep the fallback record".to_string())?
+}
+
+/// A WebView2 process that failed, as WebView2 tells this app (`ProcessFailed`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct ProcessFailure {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    /// What WebView2 calls the process, such as "Network Service".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    description: String,
+    /// The module the failure came from, when WebView2 knows it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    module: String,
+}
+
+/// WebView2's `COREWEBVIEW2_PROCESS_FAILED_KIND`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn failed_kind(kind: i32) -> &'static str {
+    match kind {
+        0 => "browserProcessExited",
+        1 => "renderProcessExited",
+        2 => "renderProcessUnresponsive",
+        3 => "frameRenderProcessExited",
+        4 => "utilityProcessExited",
+        5 => "sandboxHelperProcessExited",
+        6 => "gpuProcessExited",
+        7 => "ppapiPluginProcessExited",
+        8 => "ppapiBrokerProcessExited",
+        _ => "unknownProcessExited",
+    }
+}
+
+/// WebView2's `COREWEBVIEW2_PROCESS_FAILED_REASON`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn failed_reason(reason: i32) -> &'static str {
+    match reason {
+        0 => "unexpected",
+        1 => "unresponsive",
+        2 => "terminated",
+        3 => "crashed",
+        4 => "launchFailed",
+        5 => "outOfMemory",
+        6 => "profileDeleted",
+        _ => "unknown",
+    }
+}
+
+/// Keeps each WebView2 process that fails as a `webviewProcess` report: a restarted network
+/// service, for one, fails every call in flight and moves the page to `postMessage` (calls.rs).
+#[cfg(windows)]
+pub fn watch_webview(window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let _ = window.with_webview(move |platform| {
+        use webview2_com::{
+            Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2ProcessFailedEventArgs2, ICoreWebView2ProcessFailedEventArgs3,
+                COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_REASON,
+            },
+            ProcessFailedEventHandler,
+        };
+        use windows::core::{Interface, PWSTR};
+        let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut failure = ProcessFailure::default();
+            // SAFETY: WebView2 calls this on the window thread with live event arguments, and
+            // each string it returns is freed by `take_pwstr`.
+            unsafe {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                let _ = args.ProcessFailedKind(&mut kind);
+                failure.kind = failed_kind(kind.0);
+                if let Ok(more) = args.cast::<ICoreWebView2ProcessFailedEventArgs2>() {
+                    let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON::default();
+                    if more.Reason(&mut reason).is_ok() {
+                        failure.reason = Some(failed_reason(reason.0));
+                    }
+                    let mut exit_code = 0;
+                    if more.ExitCode(&mut exit_code).is_ok() {
+                        failure.exit_code = Some(exit_code);
+                    }
+                    let mut description = PWSTR::null();
+                    if more.ProcessDescription(&mut description).is_ok() {
+                        failure.description = webview2_com::take_pwstr(description);
+                    }
+                }
+                if let Ok(more) = args.cast::<ICoreWebView2ProcessFailedEventArgs3>() {
+                    let mut module = PWSTR::null();
+                    if more.FailureSourceModulePath(&mut module).is_ok() {
+                        failure.module = webview2_com::take_pwstr(module);
+                    }
+                }
+            }
+            record_process_failure(&app, failure);
+            Ok(())
+        }));
+        let mut token = 0;
+        // SAFETY: the controller is this window's live WebView2, on the window thread.
+        unsafe {
+            if let Ok(webview) = platform.controller().CoreWebView2() {
+                let _ = webview.add_ProcessFailed(&handler, &mut token);
+            }
+        }
+    });
+}
+
+/// Writes a failed process's report off the window thread, which WebView2 tells it on.
+#[cfg(windows)]
+fn record_process_failure(app: &AppHandle, failure: ProcessFailure) {
+    let Ok(folder) = folder(app) else { return };
+    let visible = app.state::<Watchdog>().visible.load(Ordering::SeqCst);
+    let at = now_ms();
+    let _ = std::thread::Builder::new()
+        .name("webview-process-report".into())
+        .spawn(move || {
+            let report = Report {
+                kind: "webviewProcess",
+                detected_at: rfc3339(at),
+                after_ms: 0,
+                version: version(),
+                process_id: std::process::id(),
+                visible,
+                dump: None,
+                dump_error: None,
+                recovered_after_ms: None,
+                calls: vec![],
+                error: None,
+                process: Some(failure),
+            };
+            let _ = report.write(&folder, &stamp(at));
+        });
 }
 
 /// Starts the watch. It runs until the window thread stops taking tasks for good, as the app
@@ -293,7 +476,8 @@ impl Silence {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
-    /// `windowThread`, `windowQueue`, `windowSilent` or `windowCalls`.
+    /// `windowThread`, `windowQueue`, `windowSilent`, `windowCalls`, `ipcFallback` or
+    /// `webviewProcess`.
     kind: &'static str,
     detected_at: String,
     after_ms: u64,
@@ -308,6 +492,11 @@ struct Report {
     recovered_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     calls: Vec<WaitingCall>,
+    /// Why a call's fetch failed, for `ipcFallback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process: Option<ProcessFailure>,
 }
 
 impl Report {
@@ -347,6 +536,8 @@ fn freeze(
         dump_error: None,
         recovered_after_ms: None,
         calls: vec![],
+        error: None,
+        process: None,
     };
     // The report first, in case saving the dump is what fails to finish.
     let _ = report.write(&folder, &stamp);
@@ -628,6 +819,8 @@ mod tests {
                 dump_error: None,
                 recovered_after_ms: None,
                 calls: vec![],
+                error: None,
+                process: None,
             };
             report.write(folder.path(), &stamp(second * 1000)).unwrap();
         }
@@ -674,6 +867,67 @@ mod tests {
             "noticedAt": 0, "unansweredMs": 1, "answeredAfterMs": null, "calls": [], "extra": 1
         }))
         .is_err());
+    }
+
+    #[test]
+    fn fallback_and_process_reports_name_what_failed() {
+        let fallback: IpcFallback = serde_json::from_value(serde_json::json!({
+            "noticedAt": 1_791_000_000_000_u64,
+            "error": "TypeError: Failed to fetch",
+            "calls": [{ "command": "run_agent", "waitedMs": 3_437_000 }]
+        }))
+        .unwrap();
+        assert_eq!(fallback.calls[0].command, "run_agent");
+        assert!(serde_json::from_value::<IpcFallback>(serde_json::json!({
+            "noticedAt": 0, "error": "", "calls": [], "extra": 1
+        }))
+        .is_err());
+        assert_eq!(failed_kind(4), "utilityProcessExited");
+        assert_eq!(failed_kind(6), "gpuProcessExited");
+        assert_eq!(failed_kind(42), "unknownProcessExited");
+        assert_eq!(failed_reason(3), "crashed");
+        assert_eq!(failed_reason(5), "outOfMemory");
+        let folder = tempfile::tempdir().unwrap();
+        let report = Report {
+            kind: "webviewProcess",
+            detected_at: rfc3339(0),
+            after_ms: 0,
+            version: version(),
+            process_id: 1,
+            visible: true,
+            dump: None,
+            dump_error: None,
+            recovered_after_ms: None,
+            calls: vec![],
+            error: None,
+            process: Some(ProcessFailure {
+                kind: failed_kind(4),
+                reason: Some(failed_reason(3)),
+                exit_code: Some(-1_073_741_819),
+                description: "Network Service".into(),
+                module: String::new(),
+            }),
+        };
+        report.write(folder.path(), &stamp(0)).unwrap();
+        let written: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                folder
+                    .path()
+                    .join("1970-01-01T00-00-00-000Z-webviewProcess.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written["process"],
+            serde_json::json!({
+                "kind": "utilityProcessExited",
+                "reason": "crashed",
+                "exitCode": -1_073_741_819,
+                "description": "Network Service"
+            })
+        );
+        assert!(written.get("error").is_none());
     }
 
     #[cfg(windows)]

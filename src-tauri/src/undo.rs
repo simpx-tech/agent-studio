@@ -27,7 +27,7 @@ struct Record {
     files: Vec<Entry>,
     state: String,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
     files: Vec<String>,

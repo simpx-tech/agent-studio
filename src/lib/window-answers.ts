@@ -2,25 +2,54 @@
 // unanswered for an hour while replies ran on in the app: saves, sends, the window's own buttons.
 // The page then only looked alive. These checks show it at once, and keep a record of the calls
 // left waiting for docs/DIAGNOSTICS.md (src-tauri/src/watchdog.rs keeps the app's own).
-import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke, type InvokeOptions } from '@tauri-apps/api/core';
 
 type Waiting = { command: string; since: number };
 const waiting = new Set<Waiting>();
 
-/** Tauri's `invoke`, given exactly its arguments, remembering each call until it is answered. */
+/** The header each call is named in (src-tauri/src/calls.rs). */
+export const callHeader = 'studio-call';
+
+/**
+ * Tauri's `invoke`, naming each call and remembering it until it is answered. When a call's
+ * fetch fails on the way, Tauri sends it again through `postMessage`, with the same name, and the
+ * app runs a command that acts only once per name: on 2026-10-11 the second copies of two
+ * running replies' calls failed both replies.
+ */
 export function invoke<T>(...request: Parameters<typeof tauriInvoke>): Promise<T> {
-  const call = { command: request[0], since: Date.now() };
+  const [command, args, options] = request;
+  const call = { command, since: Date.now() };
   waiting.add(call);
   const done = () => void waiting.delete(call);
   let answer: Promise<T>;
   try {
-    answer = Promise.resolve(tauriInvoke<T>(...request));
+    answer = Promise.resolve(tauriInvoke<T>(command, args, named(options)));
   } catch (error) {
     done();
     throw error;
   }
   answer.then(done, done);
   return answer;
+}
+
+/** The call's options with its name. `postMessage` carries headers only as a plain object. */
+function named(options?: InvokeOptions): InvokeOptions {
+  const headers: Record<string, string> = {};
+  new Headers(options?.headers).forEach((value, key) => (headers[key] = value));
+  headers[callHeader] = crypto.randomUUID();
+  return { ...options, headers };
+}
+
+/**
+ * The bytes a command answered with: an ArrayBuffer, or the same bytes as an array of numbers
+ * once Tauri has moved the page's calls to `postMessage`, which answers in JSON.
+ */
+export function answerBytes(answer: unknown): ArrayBuffer {
+  if (answer instanceof ArrayBuffer) return answer;
+  if (ArrayBuffer.isView(answer))
+    return new Uint8Array(answer.buffer, answer.byteOffset, answer.byteLength).slice().buffer;
+  if (Array.isArray(answer)) return Uint8Array.from(answer).buffer;
+  throw new Error('The app answered without the file.');
 }
 
 export type WaitingCall = { command: string; waitedMs: number };
@@ -31,6 +60,39 @@ export function waitingCalls(now = Date.now(), limit = 50): WaitingCall[] {
     .sort((a, b) => a.since - b.since)
     .slice(0, limit)
     .map(({ command, since }) => ({ command, waitedMs: Math.max(0, now - since) }));
+}
+
+/** The moment Tauri moved this page's calls to `postMessage`, as the app's diagnostics keep it. */
+export type IpcFallback = { noticedAt: number; error: string; calls: WaitingCall[] };
+
+/**
+ * Tells `noticed` once when Tauri moves this page's calls from its IPC protocol to `postMessage`,
+ * after a call's fetch failed on the way, with the failure and the calls waiting then, which
+ * Tauri sends again. Tauri says so only in this console warning.
+ */
+export function watchIpcFallback(
+  noticed: (fallback: IpcFallback) => void,
+  target: Pick<Console, 'warn'> = console,
+): () => void {
+  const warn = target.warn;
+  let seen = false;
+  const watching = (...args: unknown[]) => {
+    if (!seen && typeof args[0] === 'string' && args[0].startsWith('IPC custom protocol failed')) {
+      seen = true;
+      const fallback = {
+        noticedAt: Date.now(),
+        error: String(args[1] ?? ''),
+        calls: waitingCalls(),
+      };
+      // After Tauri has moved to postMessage, which it does right after this warning.
+      setTimeout(() => noticed(fallback), 0);
+    }
+    warn.apply(target, args);
+  };
+  target.warn = watching;
+  return () => {
+    if (target.warn === watching) target.warn = warn;
+  };
 }
 
 /** A time the app did not answer this window, as the native diagnostics keep it. */

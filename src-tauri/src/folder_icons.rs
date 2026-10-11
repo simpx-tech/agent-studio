@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 /// Icon choices under way on this computer, by the conversation that started each.
 #[derive(Default)]
 pub struct FolderIcons(pub Mutex<HashMap<String, CancellationToken>>);
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ChosenIcon {
     icon: String,
     provider: String,

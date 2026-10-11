@@ -23,7 +23,7 @@ pub enum Shell {
 }
 
 /// The shell that opened, by the name the block's control shows.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Opened {
     shell: String,
 }

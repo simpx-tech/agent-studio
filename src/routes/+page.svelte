@@ -33,6 +33,7 @@
     cancelSignIn,
     windowHeartbeat,
     recordWindowStall,
+    recordIpcFallback,
     workingForOthers,
     type AppUpdateStatus,
     type CliUpdates,
@@ -42,6 +43,7 @@
     takeRememberedStall,
     waitingCalls,
     watchAnswers,
+    watchIpcFallback,
     type WindowStall,
   } from '$lib/window-answers';
   import { signInKey, signInUpdate, type SignInView } from '$lib/sign-in';
@@ -2080,8 +2082,12 @@
       },
     });
     document.addEventListener('visibilitychange', answers.check);
+    const stopFallbackWatch = watchIpcFallback(
+      (fallback) => void recordIpcFallback(fallback).catch(() => {}),
+    );
     return () => {
       answers.stop();
+      stopFallbackWatch();
       document.removeEventListener('visibilitychange', answers.check);
     };
   }

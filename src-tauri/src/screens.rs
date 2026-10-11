@@ -980,10 +980,15 @@ pub const NOT_ALLOWED: &str = "The user has not allowed this screen's actions ye
 pub async fn manage_screen(
     app: tauri::AppHandle,
     screens: tauri::State<'_, std::sync::Arc<Screens>>,
+    call: crate::calls::Call,
     request: Request,
 ) -> Result<Value, String> {
     let root = root(&app)?;
     let namespace = app.config().identifier.clone();
+    // An action runs once, however many copies of its call the window sends (calls.rs).
+    if matches!(request, Request::Run { .. }) {
+        return call.once(screens.handle(root, namespace, request)).await;
+    }
     screens.handle(root, namespace, request).await
 }
 

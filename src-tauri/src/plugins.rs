@@ -65,7 +65,7 @@ pub struct Runtime {
     pub skill_roots: Vec<String>,
     pub revision: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
     id: String,
@@ -74,7 +74,7 @@ pub struct PluginView {
     scope: String,
     enabled: Option<bool>,
 }
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultView {
     plugins: Vec<PluginView>,
