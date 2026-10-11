@@ -3,6 +3,7 @@ import type { Conversation } from './domain';
 import {
   mergeShared,
   metaOf,
+  sameMeta,
   sharedChatSchema,
   sharedMetaSchema,
   type MergeOptions,
@@ -105,8 +106,6 @@ export function mergeInvolved({
   );
 }
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-
 /** What to send the relay, and what to apply here, after merging the involved conversations. */
 export function syncPlan({
   involved,
@@ -148,8 +147,9 @@ export function syncPlan({
     // Only the relay's own conversations can be removed there, and only this device's here.
     remove: involved.filter((id) => id in manifest.chats && !result.has(id)),
     forget: involved.filter((id) => !!localChat(id) && !result.has(id)),
-    sendMeta: same(remoteMeta, mergedMeta) ? undefined : mergedMeta,
-    applyMeta: same(localMeta, mergedMeta) ? undefined : mergedMeta,
+    // Lists the same but for their order stay as each side keeps them.
+    sendMeta: sameMeta(remoteMeta, mergedMeta) ? undefined : mergedMeta,
+    applyMeta: sameMeta(localMeta, mergedMeta) ? undefined : mergedMeta,
   };
 }
 

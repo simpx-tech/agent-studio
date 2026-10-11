@@ -149,6 +149,52 @@ it('sends and applies the replicated settings only when they differ', () => {
   expect(plan.applyMeta).toBeUndefined();
 });
 
+it('leaves the fleet alone when two desktops only list it in another order', () => {
+  // A desktop met its own computer first, and the VPS host, which added itself before it took in
+  // the workspace, keeps itself first: each merge keeps its own base's order.
+  const desktop = { id: 'desktop', name: 'Desktop' };
+  const vps = { id: 'vps', name: 'VPS' };
+  const windows = { computerId: 'desktop', id: 'windows', name: 'Windows', platform: 'windows' };
+  const linux = { computerId: 'vps', id: 'linux', name: 'Linux', platform: 'linux' };
+  const fleet = (computers: (typeof desktop)[], environments: (typeof windows)[]) =>
+    ({ ...meta(), fleet: { ...meta().fleet, computers, environments } }) as SharedMeta;
+  const here = fleet([desktop, vps], [windows, linux]);
+  const there = fleet([vps, desktop], [linux, windows]);
+  const plan = (local: SharedMeta, remote: SharedMeta, base = local) => {
+    const merged = mergeInvolved({
+      involved: [],
+      baseline: new Map(),
+      baselineMeta: base,
+      localChat: () => undefined,
+      localMeta: local,
+      remoteChat: () => undefined,
+      remoteMeta: remote,
+    });
+    return syncPlan({
+      involved: [],
+      merged,
+      manifest: manifest({}),
+      localChat: () => undefined,
+      localMeta: local,
+      remoteChat: () => undefined,
+      remoteMeta: remote,
+    });
+  };
+  // Neither the desktop nor the VPS host sends its order back, so the relay stops moving.
+  for (const [local, remote] of [
+    [here, there],
+    [there, here],
+  ]) {
+    const { sendMeta, applyMeta } = plan(local, remote);
+    expect(sendMeta).toBeUndefined();
+    expect(applyMeta).toBeUndefined();
+  }
+  // A real change since the baseline still goes out, whatever the order.
+  const renamed = fleet([{ ...desktop, name: 'Workstation' }, vps], [windows, linux]);
+  const sent = plan(renamed, there, here).sendMeta;
+  expect(sent?.fleet.computers.find((c) => c.id === 'desktop')?.name).toBe('Workstation');
+});
+
 it('keeps the baseline order, drops what went and appends what arrived', () => {
   const baseline = [chat('a', 'First'), chat('b', 'Second'), chat('c', 'Third')];
   const result = new Map([

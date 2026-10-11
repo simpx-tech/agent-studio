@@ -341,6 +341,9 @@
   let workspaceSession = $state(0);
   let syncStatus = $state('');
   let syncError = $state('');
+  // Conversations a working sync leaves on this device, named apart from errors: a notice never
+  // makes another computer read as offline or keeps a chat from running there.
+  let syncNotice = $state('');
   let view = $state<View>('chat');
   // The account Connections was opened for, shown there with its sign-in on that visit.
   let connectionsHighlight = $state('');
@@ -1885,6 +1888,7 @@
                 paired = false;
                 relayRestorePending = false;
                 syncError = reason;
+                syncNotice = '';
                 syncStatus = '';
               }
               await loadSavedDrafts();
@@ -2093,8 +2097,9 @@
         presence = peers;
         // An account signed in on another computer reads connected once that computer says so.
         if (pendingSignIns.size) noteSignIn();
-        // A conversation too large to send is named here while every other one syncs.
-        syncError = relaySyncNotice();
+        syncError = '';
+        // A conversation whose images the relay lacks is named here while every other one syncs.
+        syncNotice = relaySyncNotice();
         syncStatus = `Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       }
     } catch (e) {
@@ -2135,6 +2140,7 @@
     relayRestorePending = false;
     presence = [];
     syncError = '';
+    syncNotice = '';
     syncStatus = '';
   }
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
@@ -6073,6 +6079,7 @@
           reconnecting={relayRestorePending && !!syncError}
           {syncStatus}
           {syncError}
+          {syncNotice}
           {paired}
           save={persist}
           refresh={() => refresh(true)}

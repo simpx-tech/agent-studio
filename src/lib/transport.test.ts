@@ -1007,7 +1007,14 @@ async function settledRelay(revisionEndpoint = true, lacking?: Set<string>) {
     apply,
     checkpointRun: async () => {},
   });
-  const relay = { revision: 5, workspace: sharedWorkspace(workspace), presence: [] as unknown[] };
+  const relay = {
+    revision: 5,
+    workspace: sharedWorkspace(workspace),
+    presence: [] as unknown[],
+    // Workspace requests wait for this, or fail, while the presence and job routes still answer.
+    hold: undefined as Promise<void> | undefined,
+    failing: false,
+  };
   const requests: string[] = [];
   native.invoke.mockImplementation(async (command, args) => {
     if (command === 'relay_resume') return 'https://relay.example.com/';
@@ -1020,6 +1027,10 @@ async function settledRelay(revisionEndpoint = true, lacking?: Set<string>) {
     }
     if (command !== 'relay_request') return null;
     requests.push(`${args.method} ${args.path}`);
+    if (args.path.startsWith('v1/state')) {
+      await relay.hold;
+      if (relay.failing) return { status: 500, body: { error: 'Relay storage failed.' } };
+    }
     // A relay without the incremental routes. Its whole-state path is what these cases cover.
     if (args.path.startsWith('v1/state/manifest'))
       return { status: 404, body: { error: 'Unknown relay operation.' } };
@@ -1075,6 +1086,33 @@ it('polls after an unchanged sync only ask the relay for its revision', async ()
   expect(requests.filter((r) => r === 'POST v1/heartbeat')).toHaveLength(3);
   expect(requests.filter((r) => r === 'GET v1/jobs')).toHaveLength(3);
   expect(apply).not.toHaveBeenCalled();
+  await transport.disconnectRelay();
+});
+
+it('a poll whose sync fails still tells the relay this device is here', async () => {
+  const { transport, relay, requests } = await settledRelay();
+  relay.failing = true;
+  requests.length = 0;
+  await expect(transport.pollRelay()).rejects.toThrow('Relay storage failed.');
+  // The relay counts a device whose heartbeat is 15 seconds old as offline and refuses its work.
+  expect(requests).toContain('POST v1/heartbeat');
+  expect(requests).toContain('GET v1/jobs');
+  await transport.disconnectRelay();
+});
+
+it('a poll that finds the last one still syncing sends a heartbeat instead', async () => {
+  const { transport, relay, requests } = await settledRelay();
+  let release = () => {};
+  relay.hold = new Promise<void>((resolve) => (release = resolve));
+  requests.length = 0;
+  const slow = transport.pollRelay();
+  await vi.waitFor(() => expect(requests).toContain('GET v1/state/revision'));
+  expect(requests).not.toContain('POST v1/heartbeat');
+  expect(await transport.pollRelay()).toBeNull();
+  await vi.waitFor(() => expect(requests).toContain('POST v1/heartbeat'));
+  release();
+  expect(await slow).toEqual([]);
+  expect(requests.filter((r) => r === 'POST v1/heartbeat')).toHaveLength(2);
   await transport.disconnectRelay();
 });
 

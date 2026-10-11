@@ -1794,6 +1794,8 @@ async function saveCheckpoint(
 }
 // Settles when the poll under way ends, so a change that must go out at once can follow it.
 let pollDone: Promise<void> = Promise.resolve();
+// The heartbeat a poll sends while an earlier one still syncs, so a slow relay never piles them up.
+let heartbeating: Promise<unknown> | undefined;
 /**
  * Polls once the poll under way, if any, has ended: that one may have read this device before
  * the change it is called for, such as the end of a reply.
@@ -1803,11 +1805,28 @@ export async function pollRelayNow(): Promise<Presence[] | null> {
   return pollRelay();
 }
 export async function pollRelay(): Promise<Presence[] | null> {
-  if (!relayConnected || !runtime || relayBusy) return null;
+  if (!relayConnected || !runtime) return null;
+  // A sync longer than a poll still tells the relay this computer is here: the relay counts a
+  // computer whose heartbeat is 15 seconds old as offline and refuses work for it, which made
+  // the VPS host read as offline while it saved a large workspace (requested 2026-10-11). A
+  // browser takes no work, so it waits for its sync as before.
+  if (relayBusy) {
+    if (desktop())
+      heartbeating ??= relayTail(relayGeneration)
+        .catch(() => null)
+        .finally(() => (heartbeating = undefined));
+    return null;
+  }
   const generation = relayGeneration;
   relayBusy = true;
   let done = () => {};
   pollDone = new Promise<void>((resolve) => (done = resolve));
+  // Whether this poll got as far as its heartbeat, which a failed sync otherwise still sends.
+  let tailed = false;
+  const tail = () => {
+    tailed = true;
+    return relayTail(generation);
+  };
   try {
     if (!desktop() && Date.now() - browserSessionCheckedAt >= 60_000) {
       if (!(await resumeBrowserRelay()))
@@ -1818,7 +1837,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
       : undefined;
     const incremental = await syncIncremental(generation, options);
     if (incremental === null) return null;
-    if (incremental) return await relayTail(generation);
+    if (incremental) return await tail();
     // The whole-state path compares whole chats, which a light connection does not hold.
     if (lightSession) throw new Error(lightRelayGone);
     // Syncing copies, compares and saves the whole workspace, which stalls the page, so once a
@@ -1980,7 +1999,15 @@ export async function pollRelay(): Promise<Presence[] | null> {
         if (!coveredPublished) runtime.restoreUnsynced(covered);
       }
     }
-    return await relayTail(generation);
+    return await tail();
+  } catch (error) {
+    // A computer whose sync failed is still here and still takes its work, unless the relay it
+    // paired with was replaced. A browser's failure can be its session ending, which a request
+    // made now would only confuse.
+    const replaced = error instanceof Error && error.message === relayReplaced;
+    if (desktop() && !tailed && !replaced && generation === relayGeneration)
+      await tail().catch(() => null);
+    throw error;
   } finally {
     relayBusy = false;
     done();

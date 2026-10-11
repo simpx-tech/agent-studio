@@ -64,6 +64,7 @@
     reconnecting = false,
     syncStatus,
     syncError,
+    syncNotice = '',
     paired,
     save,
     refresh,
@@ -93,6 +94,8 @@
     reconnecting?: boolean;
     syncStatus: string;
     syncError: string;
+    /** Conversations a working sync leaves on this device, which is not an error. */
+    syncNotice?: string;
     paired: boolean;
     save: () => Promise<void>;
     refresh: () => Promise<void>;
@@ -1106,6 +1109,7 @@
       </div>
       <p>{paired ? syncStatus : ''}</p>
       {#if syncError}<p class="sync-error" role="alert">{syncError}</p>{/if}
+      {#if paired && syncNotice}<p class="sync-notice">{syncNotice}</p>{/if}
       {#if syncError.includes('changed on both devices')}<button
           class="secondary"
           disabled={busy}
@@ -1929,8 +1933,12 @@
     color: var(--text-muted);
     margin: 0;
   }
-  .fleet-relay > .sync-error {
+  .fleet-relay > .sync-error,
+  .fleet-relay > .sync-notice {
     grid-column: 1 / -1;
+  }
+  .sync-notice {
+    overflow-wrap: anywhere;
   }
   .sync-settings summary {
     cursor: pointer;

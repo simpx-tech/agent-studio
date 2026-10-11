@@ -74,6 +74,9 @@ export function replaceFields<T extends object>(target: T, source: T): T {
   return Object.assign(target, source);
 }
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const byId = <T extends { id: string }>(items: T[] = []) =>
+  [...items].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+const same = <T extends { id: string }>(x?: T[], y?: T[]) => equal(byId(x), byId(y));
 /**
  * Whether two shared workspaces hold the same data. Lists compare by item id: this device
  * adds new chats at the front, while a merge keeps its base order and appends them. App sessions
@@ -81,9 +84,6 @@ const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b
  * them, and this device keeps its own.
  */
 export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
-  const byId = <T extends { id: string }>(items: T[] = []) =>
-    [...items].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
-  const same = <T extends { id: string }>(x?: T[], y?: T[]) => equal(byId(x), byId(y));
   return (
     same(a.conversations, b.conversations) &&
     same(a.fleet.computers, b.fleet.computers) &&
@@ -95,6 +95,26 @@ export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
     a.claudeInstructions === b.claudeInstructions &&
     (!a.appSessions || same(a.appSessions, b.appSessions)) &&
     (!a.folderIcons || sameFolderIcons(a.folderIcons, b.folderIcons))
+  );
+}
+/**
+ * Whether two copies of the replicated settings hold the same data, lists compared by item id.
+ * A merge keeps its own base's order, so a device that met the computers and accounts in
+ * another order, such as a server host that added itself first, keeps another order for good:
+ * compared in order, the desktop and the VPS host sent the fleet back and forth on every poll,
+ * each saving the whole workspace each time (requested 2026-10-11).
+ */
+export function sameMeta(a: SharedMeta, b: SharedMeta): boolean {
+  return (
+    same(a.fleet.computers, b.fleet.computers) &&
+    same(a.fleet.environments, b.fleet.environments) &&
+    same(a.fleet.accounts, b.fleet.accounts) &&
+    same(a.fleet.connections, b.fleet.connections) &&
+    same(a.workflows, b.workflows) &&
+    same(a.inputTemplates, b.inputTemplates) &&
+    a.claudeInstructions === b.claudeInstructions &&
+    same(a.appSessions, b.appSessions) &&
+    sameFolderIcons(a.folderIcons, b.folderIcons)
   );
 }
 
