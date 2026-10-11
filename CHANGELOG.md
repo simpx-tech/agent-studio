@@ -5,6 +5,18 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.9.1 - 2026-10-11
+
+### Fixed
+
+- Stop asking you to sign in to your Claude accounts again every morning. Checking an account
+  started Claude Code renewing its expired login and ended it before the new login arrived, which
+  signed the account out at its next renewal; the checks no longer renew, and Agent Studio never
+  ends Claude Code in the middle of a renewal
+- Stop the VPS from reading as offline. The desktop and the VPS sent their computer list back and
+  forth on every sync, saving the whole workspace each time, until the VPS fell silent long enough
+  for the relay to count it offline; it now stays online even while a long sync runs
+
 ## 0.9.0 - 2026-10-10
 
 The VPS that hosts your relay is now a computer of your workspace: chats run on it while your
