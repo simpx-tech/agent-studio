@@ -222,6 +222,7 @@
     sessionTimeline,
     startOfDay,
   } from '$lib/app-sessions';
+  import { chatDays } from '$lib/chat-days';
   import {
     folderIconIndex,
     folderIconKey,
@@ -1249,7 +1250,7 @@
       )
       .sort((a, b) => b.createdAt - a.createdAt);
   });
-  // History names session days from today, which the minute timer moves on at midnight.
+  // History names session days, and a chat its days, from today, which moves on at midnight.
   let today = $state(startOfDay(Date.now()));
   const conversationGroups = $derived(
     groupConversations(
@@ -1371,6 +1372,8 @@
       lastReplyConnection !== selectedSettings.connectionId,
   );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
+  // A chat from another day, or continued on one, shows where each of its days begins.
+  const dayStarts = $derived(chatDays(active?.messages ?? [], today));
   const chatChanges = $derived(
     separateMemory(summarizeFileChanges((active?.messages ?? []).filter((m) => !m.filesUndone))),
   );
@@ -1763,6 +1766,16 @@
         if (view === 'connections') void refreshAccountUsage();
       }
     }, 60_000);
+    // A message sent right after midnight already belongs to the new day, so the day moves on as
+    // it begins; the minute timer above covers a computer that slept through midnight.
+    let dayTimer: ReturnType<typeof setTimeout>;
+    const beginDay = () => {
+      today = startOfDay(Date.now());
+      const next = new Date(today);
+      next.setDate(next.getDate() + 1);
+      dayTimer = setTimeout(beginDay, next.getTime() - Date.now());
+    };
+    beginDay();
     const relayPoll = setInterval(() => {
       if (paired) void syncNow();
       else if (
@@ -2043,6 +2056,7 @@
       clearTimeout(focusTimer);
       clearInterval(loginPoll);
       clearInterval(usagePoll);
+      clearTimeout(dayTimer);
       clearInterval(relayPoll);
       clearInterval(wslPoll);
       clearInterval(serverPoll);
@@ -5742,7 +5756,13 @@
               bind:this={chatColumn}
             >
               {#if active?.messages.length}
-                {#each active.messages as m, i (m.id)}<MessageView
+                {#each active.messages as m, i (m.id)}{@const day = dayStarts.get(m.id)}{#if day}<div
+                      class="message-day"
+                      role="separator"
+                      aria-label={day.name}
+                    >
+                      <span title={day.date}>{day.name}</span>
+                    </div>{/if}<MessageView
                     message={m}
                     questionDrafts={m.runId ? questionDrafts[m.runId] : undefined}
                     idle={waitsForWork(m)}

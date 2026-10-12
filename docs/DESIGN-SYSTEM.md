@@ -95,6 +95,10 @@ mark in the script and `BrandMark.svelte` together.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
   accent bar at its left edge.
+- **Day divisions:** where a chat continues on another day, the day's name in `--text-muted` at
+  `--text-xs` sits in the middle of a `--border` hairline that spans the conversation
+  (`.message-day`), with more room above it than below, so it reads as the start of that day's
+  messages.
 - **Live state:** a running reply shows the accent `LoaderCircle` spinner, like running calls and
   plan steps, beside Responding or Compacting context in its heading. Its sidebar row ends with
   its elapsed time instead, in `--accent-text` and the compact form running calls use (12s,
