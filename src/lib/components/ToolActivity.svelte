@@ -9,6 +9,7 @@
     ChevronUp,
     CornerDownRight,
     ExternalLink,
+    FoldVertical,
     Layers,
     PanelRightOpen,
   } from '@lucide/svelte';
@@ -36,6 +37,7 @@
     type ActivitySource,
     type LiveGroupItem,
   } from '$lib/activity-groups';
+  import { compactionLabel, compactionTokens, type Compaction } from '$lib/compaction';
   import type { Message } from '$lib/domain';
   import { relativeFilePath, type FileChanges } from '$lib/file-changes';
   import { renderMarkdown } from '$lib/markdown';
@@ -49,6 +51,7 @@
     tools,
     replyStatus,
     blocks = [],
+    compactions,
     finalText = '',
     runId,
     connectionId,
@@ -64,6 +67,8 @@
     tools: ToolActivity[];
     replyStatus: Message['status'];
     blocks?: ActivitySource[];
+    /** Compactions of the reply's context, shown where each began among its work. */
+    compactions?: Compaction[];
     finalText?: string;
     /** The reply's run, which finds results kept on the computer that ran it. */
     runId?: string;
@@ -95,7 +100,7 @@
     left: 'Left running',
   };
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
-  const entries = $derived(activityEntries(blocks, tools, finalText));
+  const entries = $derived(activityEntries(blocks, tools, finalText, compactions));
   const groups = $derived(groupActivityEntries(entries));
   const disclosures = revealedDisclosures();
   // The sub-agents these calls hold, whose own calls show in their conversations.
@@ -566,6 +571,19 @@
               </p>{/if}
           </div>
         </div>
+      {:else if group.kind === 'compaction'}
+        {@const sizes = compactionTokens(group.compaction)}
+        <div class="compaction-entry" role="group" aria-label="Context compaction">
+          {#if live && group.compaction.status === 'running'}<LoaderCircle
+              size={16}
+              class="spinning"
+              aria-hidden="true"
+            />{:else}<FoldVertical size={16} aria-hidden="true" />{/if}
+          <p>
+            {compactionLabel(group.compaction, replyStatus)}{#if sizes}<span>{` · ${sizes}`}</span
+              >{/if}
+          </p>
+        </div>
       {:else}
         {@const entry = group.entry}
         {#if entry.progress}
@@ -714,6 +732,7 @@
   .live-item > .activity-group,
   .live-row,
   .live-activity .reasoning-entry,
+  .live-activity .compaction-entry,
   .live-activity .progress-message,
   .live-activity .timeline-note {
     animation: live-in var(--duration-slow) var(--ease-out);
@@ -971,6 +990,29 @@
   }
   .reasoning-text > :global(:last-child) {
     margin-bottom: 0;
+  }
+  /* A compaction is a quiet row where it began among the work, aligned with tool group labels. */
+  .compaction-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding-block: 4px;
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+  }
+  .compaction-entry > :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+  .compaction-entry p {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: inherit;
+  }
+  .compaction-entry span {
+    color: var(--text-muted);
   }
   /* Targets and reported facts: a label column beside their values. */
   .tool-facts {

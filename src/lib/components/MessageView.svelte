@@ -29,7 +29,7 @@
   import ModelMark from './ModelMark.svelte';
   import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
-  import { compactionLabel } from '$lib/compaction';
+  import { compactionLabel, compactionTokens } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import type { BackgroundRun } from '$lib/background-work';
@@ -214,6 +214,7 @@
         {tools}
         replyStatus={message.status}
         {blocks}
+        compactions={message.compact ? undefined : message.compactions}
         limited={!!limit}
         finalText={text}
         runId={message.runId}
@@ -224,15 +225,13 @@
         {openedSubagent}
         {writing}
       />
-      {#if message.compactions?.length}
+      <!-- A /compact reply is its compaction; any other reply's are entries of its work above. -->
+      {#if message.compact && message.compactions?.length}
         <div class="compaction-history" aria-label="Context compaction">
           {#each message.compactions as item (item.id)}
+            {@const sizes = compactionTokens(item)}
             <p role="status">
-              {compactionLabel(item, message.status)}{#if item.preTokens != null}
-                <span
-                  >{` · ${item.preTokens.toLocaleString()} tokens before${item.postTokens != null ? ` → ${item.postTokens.toLocaleString()} after` : ''}`}</span
-                >
-              {/if}
+              {compactionLabel(item, message.status)}{#if sizes}<span>{` · ${sizes}`}</span>{/if}
             </p>
           {/each}
         </div>

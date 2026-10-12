@@ -190,6 +190,10 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
   ].includes(event.kind);
 }
 
+/** How many calls, comments, notes and reasoning blocks a reply holds: all but its answer. */
+const recordedWork = (message: Message) =>
+  message.blocks.reduce((count, block) => count + (block.type === 'markdown' ? 0 : 1), 0);
+
 export function applyRunEvent(message: Message, event: RunEvent) {
   if (event.kind === 'backgroundwait') {
     if (message.role !== 'assistant') return;
@@ -215,7 +219,13 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     const parsed = compactionSchema.safeParse(event.compaction);
     if (message.role === 'assistant' && parsed.success) {
       const previous = message.compactions?.find((c) => c.id === parsed.data.id);
-      message.compactions = mergeCompactions(message.compactions, [parsed.data]);
+      // A marker joins the reply's work where it began: its first arrival records how much the
+      // reply held until then, unless its place came with it.
+      const marker =
+        previous || parsed.data.after != null
+          ? parsed.data
+          : { ...parsed.data, after: recordedWork(message) };
+      message.compactions = mergeCompactions(message.compactions, [marker]);
       if (
         parsed.data.status === 'complete' &&
         parsed.data.revision > (previous?.revision ?? -1) &&

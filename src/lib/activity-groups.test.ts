@@ -12,6 +12,7 @@ import {
   type LiveGroupItem,
 } from './activity-groups';
 import type { ToolActivity } from './activity';
+import type { Compaction } from './compaction';
 import type { ContentBlock } from './domain';
 
 const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
@@ -29,6 +30,14 @@ const entry = (value: ToolActivity) => ({
   text: value.name,
   tool: value,
 });
+const described = (group: ReturnType<typeof groupActivityEntries>[number]) =>
+  group.kind === 'reasoning'
+    ? `reasoning ${group.block.id}`
+    : group.kind === 'compaction'
+      ? `compaction ${group.compaction.id}`
+      : group.kind === 'tools'
+        ? group.tools.map((t) => t.id).join(',')
+        : group.entry.text;
 
 describe('activity groups', () => {
   it('keeps comments as boundaries and group identities stable across tool revisions and appends', () => {
@@ -89,15 +98,7 @@ describe('activity groups', () => {
     ];
     const tools = blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
     const groups = groupActivityEntries(activityEntries(blocks, tools, 'Done.'));
-    expect(
-      groups.map((g) =>
-        g.kind === 'reasoning'
-          ? `reasoning ${g.block.id}`
-          : g.kind === 'tools'
-            ? g.tools.map((t) => t.id).join(',')
-            : g.entry.text,
-      ),
-    ).toEqual([
+    expect(groups.map(described)).toEqual([
       'I will check the folder.',
       'read1',
       'reasoning msg1:1',
@@ -105,6 +106,80 @@ describe('activity groups', () => {
       'reasoning msg2:1',
       'reasoning rs_codex',
     ]);
+    expect(new Set(groups.map((g) => g.key)).size).toBe(groups.length);
+  });
+
+  it('places compactions where they began among the work, and unplaced ones after it', () => {
+    const call = (id: string): ContentBlock => ({
+      type: 'activity',
+      text: 'Read',
+      tool: { ...tool(id), facts: [] },
+    });
+    const blocks: ContentBlock[] = [
+      // Hidden from the history, yet counted by the places recorded while the reply ran.
+      { type: 'activity', text: 'Starting the provider CLI', order: 0 },
+      call('read1'),
+      call('read2'),
+      { type: 'markdown', text: 'Done.' },
+      { type: 'reasoning', id: 'r1', revision: 1, text: 'Think.', truncated: false },
+      call('read3'),
+    ];
+    const tools = blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+    const marker = (id: string, after?: number): Compaction => ({
+      id,
+      revision: 2,
+      status: 'complete',
+      trigger: 'auto',
+      ...(after == null ? {} : { after }),
+    });
+    const order = (...compactions: Compaction[]) =>
+      groupActivityEntries(activityEntries(blocks, tools, 'Done.', compactions)).map(described);
+    // Between two calls it splits their group, like a comment; before the first entry it leads.
+    expect(order(marker('c1', 2))).toEqual([
+      'read1',
+      'compaction c1',
+      'read2',
+      'reasoning r1',
+      'read3',
+    ]);
+    expect(order(marker('c1', 0))).toEqual([
+      'compaction c1',
+      'read1,read2',
+      'reasoning r1',
+      'read3',
+    ]);
+    expect(order(marker('c1', 4))).toEqual([
+      'read1,read2',
+      'reasoning r1',
+      'compaction c1',
+      'read3',
+    ]);
+    // Two that began at the same place keep the order the reply recorded them in.
+    expect(order(marker('c1', 3), marker('c2', 3), marker('c3', 1))).toEqual([
+      'compaction c3',
+      'read1,read2',
+      'compaction c1',
+      'compaction c2',
+      'reasoning r1',
+      'read3',
+    ]);
+    // One saved before places were recorded, or placed past what this copy holds, follows the work.
+    expect(order(marker('c1'), marker('c2', 99))).toEqual([
+      'read1,read2',
+      'reasoning r1',
+      'read3',
+      'compaction c1',
+      'compaction c2',
+    ]);
+    // A reply that recorded nothing else, or whose work this device does not hold, still shows it.
+    expect(
+      groupActivityEntries(
+        activityEntries([{ type: 'markdown', text: 'Done.' }], [], 'Done.', [marker('c1', 5)]),
+      ).map(described),
+    ).toEqual(['compaction c1']);
+    const groups = groupActivityEntries(
+      activityEntries(blocks, tools, 'Done.', [marker('c1', 2), marker('c2', 2)]),
+    );
     expect(new Set(groups.map((g) => g.key)).size).toBe(groups.length);
   });
 

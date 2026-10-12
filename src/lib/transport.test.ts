@@ -944,6 +944,78 @@ it('keeps a pending question when an older relay drops it from a successful save
   }
 });
 
+it('keeps a compaction’s place in the work when an older relay drops it from a successful save', async () => {
+  const transport = await fixture();
+  const workspace = initialWorkspace();
+  const now = new Date().toISOString();
+  const compaction = {
+    id: 'compaction-1',
+    revision: 2,
+    status: 'complete' as const,
+    trigger: 'auto' as const,
+    preTokens: 967265,
+    postTokens: 8081,
+    after: 3,
+  };
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Compacted on the way',
+    createdAt: now,
+    updatedAt: now,
+    settings: { provider: 'claude', model: 'opus', reasoning: '', instructions: '' },
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        createdAt: now,
+        runId: crypto.randomUUID(),
+        status: 'complete',
+        blocks: [{ type: 'markdown', text: 'Done.' }],
+        compactions: [compaction],
+      },
+    ],
+  });
+  let current: Workspace = workspace;
+  transport.configureRuntime({
+    installation: {
+      id: crypto.randomUUID(),
+      computerId: crypto.randomUUID(),
+      name: 'QA',
+      platform: 'windows',
+    },
+    workspace: () => current,
+    shared: () => sharedWorkspace(current),
+    ...chatRuntime(() => current),
+    fleet: () => current.fleet,
+    statuses: () => ({}),
+    localRuns: () => [],
+    apply: async (value) => {
+      current = { ...current, ...value };
+    },
+    checkpointRun: async () => {},
+  });
+  const original = native.invoke.getMockImplementation()!;
+  let remote = emptyShared();
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_request' && args.path === 'v1/state') {
+      if (args.method === 'PUT') {
+        remote = structuredClone(args.body.workspace);
+        // An older relay's schema knows the marker, not its place.
+        for (const chat of remote.conversations)
+          for (const message of chat.messages)
+            for (const marker of message.compactions ?? []) delete marker.after;
+      }
+      return { status: 200, body: { instanceId: 'same-relay', revision: 0, workspace: remote } };
+    }
+    return original(command, args);
+  });
+  await transport.resumeRelay();
+  for (let i = 0; i < 3; i++) {
+    await transport.pollRelay();
+    expect(current.conversations[0].messages[0].compactions).toEqual([compaction]);
+  }
+});
+
 // A paired desktop whose relay keeps revisions like the real one. Given `lacking`, the relay
 // keeps an image store, and those are the hashes it still lacks after this computer uploads.
 async function settledRelay(revisionEndpoint = true, lacking?: Set<string>) {

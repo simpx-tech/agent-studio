@@ -4,6 +4,7 @@ import {
   type ActivityDisplayStatus,
   type ToolActivity,
 } from './activity';
+import type { Compaction } from './compaction';
 import type { ContentBlock, Message } from './domain';
 import { filePathKey, relativeFilePath } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
@@ -18,13 +19,16 @@ import {
 type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & {
   tool?: ToolActivity;
 };
-type ActivityEntry = CommentEntry | ReasoningBlock;
+/** A compaction of the reply's context, where it began among the reply's work. */
+type CompactionEntry = { type: 'compaction'; compaction: Compaction };
+type ActivityEntry = CommentEntry | ReasoningBlock | CompactionEntry;
 /** A reply's saved blocks, or activity arranged like them, such as a sub-agent's conversation. */
 export type ActivitySource = ContentBlock | CommentEntry;
 type ActivityGroup =
   | { kind: 'tools'; key: string; tools: ToolActivity[] }
   | { kind: 'comment'; key: string; entry: CommentEntry }
-  | { kind: 'reasoning'; key: string; block: ReasoningBlock };
+  | { kind: 'reasoning'; key: string; block: ReasoningBlock }
+  | { kind: 'compaction'; key: string; compaction: Compaction };
 
 const lifecycleNotes = ['Starting the provider CLI', 'Connected to Claude'];
 const toolNotes = /^(Using |Running command|Editing files|Searching the web|Using connected tool)/;
@@ -33,43 +37,75 @@ const toolNotes = /^(Using |Running command|Editing files|Searching the web|Usin
 export const activityLimitNote =
   'Calls after the first 200 were not recorded: earlier versions kept only 200 per reply.';
 
-/** Reasoning, progress comments and tool calls in their recorded order. */
+/**
+ * Reasoning, progress comments and tool calls in their recorded order, with the reply's
+ * compactions where each began among them (`after` counts the blocks recorded before it, the
+ * hidden ones included). A compaction saved before its place was recorded follows them.
+ */
 export function activityEntries(
   blocks: ActivitySource[],
   tools: ToolActivity[],
   finalText: string,
+  compactions: Compaction[] = [],
 ): ActivityEntry[] {
-  const source: ActivityEntry[] = blocks.length
+  const source: (CommentEntry | ReasoningBlock)[] = blocks.length
     ? blocks.filter((b) => b.type !== 'markdown')
     : tools.map((tool) => ({ type: 'activity' as const, text: tool.name, tool }));
   const reasoning = new Set<string>();
-  return source
-    .filter((b) => {
-      if (b.type === 'reasoning') {
-        // Older Claude replies saved each streamed thinking block again from its snapshot,
-        // numbered within the same message ("message:index").
-        const key = `${b.id.replace(/:\d+$/, '')}\n${b.text}`;
-        if (reasoning.has(key)) return false;
-        reasoning.add(key);
-        return true;
-      }
-      if (b.progress && b.text.trim() === finalText.trim()) return false;
-      if (b.tool || b.progress) return true;
-      return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
-    })
-    .map((b) =>
+  const shown = (b: CommentEntry | ReasoningBlock) => {
+    if (b.type === 'reasoning') {
+      // Older Claude replies saved each streamed thinking block again from its snapshot,
+      // numbered within the same message ("message:index").
+      const key = `${b.id.replace(/:\d+$/, '')}\n${b.text}`;
+      if (reasoning.has(key)) return false;
+      reasoning.add(key);
+      return true;
+    }
+    if (b.progress && b.text.trim() === finalText.trim()) return false;
+    if (b.tool || b.progress) return true;
+    return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
+  };
+  const markers = compactions
+    .map((compaction, index) => ({
+      compaction,
+      at: Math.min(compaction.after ?? source.length, source.length),
+      index,
+    }))
+    .sort((a, b) => a.at - b.at || a.index - b.index);
+  const entries: ActivityEntry[] = [];
+  let next = 0;
+  const mark = (recorded: number) => {
+    while (next < markers.length && markers[next].at <= recorded)
+      entries.push({ type: 'compaction', compaction: markers[next++].compaction });
+  };
+  for (const [index, b] of source.entries()) {
+    mark(index);
+    if (!shown(b)) continue;
+    entries.push(
       b.type === 'activity' && b.tool?.id === 'activity-limit'
         ? { type: 'activity' as const, text: activityLimitNote, order: b.order }
         : b,
     );
+  }
+  mark(source.length);
+  return entries;
 }
 
-/** Consecutive tool calls share a group; reasoning and comments remain chronological boundaries. */
+/**
+ * Consecutive tool calls share a group; reasoning, comments and compactions remain chronological
+ * boundaries.
+ */
 export function groupActivityEntries(entries: ActivityEntry[]): ActivityGroup[] {
   const groups: ActivityGroup[] = [];
   for (const [index, entry] of entries.entries()) {
     if (entry.type === 'reasoning') {
       groups.push({ kind: 'reasoning', key: `reasoning:${entry.id}`, block: entry });
+    } else if (entry.type === 'compaction') {
+      groups.push({
+        kind: 'compaction',
+        key: `compaction:${entry.compaction.id}`,
+        compaction: entry.compaction,
+      });
     } else if (entry.tool) {
       const previous = groups.at(-1);
       if (previous?.kind === 'tools') previous.tools.push(entry.tool);
