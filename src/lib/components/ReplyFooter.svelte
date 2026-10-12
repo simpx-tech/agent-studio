@@ -3,7 +3,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import type { Message } from '$lib/domain';
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
-  import type { ChangeSummary } from '$lib/file-changes';
+  import { changeBase, type ChangeSummary } from '$lib/file-changes';
   import type { BackgroundRun } from '$lib/background-work';
   import type { RunningSubagent } from '$lib/subagents';
   import { planProgress } from '$lib/plans';
@@ -52,6 +52,8 @@
   // background work follow as compact toggles.
   const running = $derived(message.status === 'running');
   const memories = $derived(responseMemory.files.length);
+  // Both cards show paths within the same folder, read once one of them opens.
+  const base = $derived(changeBase([...chatChanges.files, ...chatMemory.files], folder));
   const plan = $derived(planProgress(message));
   const workflows = $derived(message.nativeWorkflows?.runs ?? []);
   // One panel opens below the row at a time. Each renders when first opened and then stays,
@@ -339,7 +341,7 @@
     hidden={expanded !== 'files'}
   >
     {#if opened.has('files')}
-      <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {folder} />
+      <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {base} />
     {/if}
   </div>
   {#if memories}<div
@@ -354,6 +356,7 @@
           response={responseMemory}
           chat={chatMemory}
           id={message.id + '-memory'}
+          {base}
         />
       {/if}
     </div>{/if}

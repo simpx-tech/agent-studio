@@ -104,23 +104,41 @@ export function relativeFilePath(path: string, base?: string): string {
 // Studio's separate profiles.
 const memoryPattern =
   /^((?:.*?\/)?(?:projects\/(?:-|[a-z]--)[a-z0-9-]*\/memory|(?:\.claude|profiles\/claude\/[^/]+)\/agent-memory(?:-local)?|(?:\.codex|profiles\/codex\/[^/]+)\/memories))\//i;
+// Claude Code loads every CLAUDE.md and CLAUDE.local.md as memory too, wherever it is.
+const claudeMemoryName = /(?:^|\/)claude(?:\.local)?\.md$/i;
 
 /** The memory folder an agent keeps this file in, if it is one of its memory files. */
 export const memoryFolder = (path: string) => displaySlashes(path).match(memoryPattern)?.[1];
 
-/** A memory file's path within its memory folder; any other path whole. */
-export function memoryFilePath(path: string): string {
+/** Whether an edited file is the agent's memory: a memory folder's file or a CLAUDE.md. */
+export const memoryFile = (path: string) =>
+  memoryFolder(path) !== undefined || claudeMemoryName.test(displaySlashes(path));
+
+/** The folder Files edited and Memories show paths within: the selected project's, or one the
+ * chat's recorded paths outside memory folders share. */
+export const changeBase = (files: FileSummary[], folder?: string) =>
+  fileChangeBase(
+    files
+      .filter((file) => memoryFolder(file.path) === undefined)
+      .flatMap((file) => (file.previousPath ? [file.previousPath, file.path] : [file.path])),
+    folder,
+  );
+
+/** A changed file's path as shown: a memory folder's file within its folder, any other
+ * relative to the base. */
+export function changedFilePath(path: string, base?: string): string {
   const normalized = displaySlashes(path);
   const folder = memoryFolder(normalized);
-  return folder === undefined ? normalized : normalized.slice(folder.length + 1);
+  return folder === undefined
+    ? relativeFilePath(normalized, base)
+    : normalized.slice(folder.length + 1);
 }
 
 /** Sets edits of the agents' own memory apart from the other file edits. */
 export function separateMemory(summary: ChangeSummary): SeparatedChanges {
   const files: FileSummary[] = [],
     memory: FileSummary[] = [];
-  for (const file of summary.files)
-    (memoryFolder(file.path) === undefined ? files : memory).push(file);
+  for (const file of summary.files) (memoryFile(file.path) ? memory : files).push(file);
   return { files: { ...summary, files }, memory: { ...summary, files: memory } };
 }
 

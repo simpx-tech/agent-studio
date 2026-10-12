@@ -1,5 +1,16 @@
 # Verification — 2026-09-08
 
+## CLAUDE.md edits join the Memories card — 2026-10-12
+
+Requested 2026-10-12, after the Memories card: "Just to confirm, the memories and CLAUDE should not appear on files now".
+
+- `memoryFile` in `src/lib/file-changes.ts` adds every `CLAUDE.md` and `CLAUDE.local.md` (by name, wherever it is, which is how Claude Code loads them as memory) to the memory folders, and `separateMemory` splits by it. `AGENTS.md` and every other file stay in Files edited. `ReplyFooter` reads one base for both cards (`changeBase`: the selected project, or the folder the chat's paths outside memory folders share), so a `CLAUDE.md` shows as `CLAUDE.md` or `.claude/CLAUDE.md` as before, Files edited keeps the base it had in Standalone chats, and `FileChanges` shows each path through `changedFilePath`.
+- Real data: in the user's `workspace.json`, 317 of 11,964 recorded edits now count as memory, with 144 replies in 70 chats showing Memories; the 19 `AGENTS.md` edits stay in Files edited. Only counts were printed.
+- Unit: `file-changes.test.ts` adds four instruction paths (project, `.local`, `.claude/`, home) and keeps `AGENTS.md`, `MY-CLAUDE.md` and `CLAUDE.md.bak` out, checks that memory folders do not widen the shared base, and the paths both cards show.
+- Browser: the Memories scenario's first reply also edits `CLAUDE.md` and `AGENTS.md`. Files edited counts and lists `AGENTS.md`, `README.md` and `src/app.ts`; Memories counts 3 and lists `CLAUDE.md`, `feedback_tests.md` and `MEMORY.md`. Screenshot: `artifacts/memory-changes/claude-md/desktop.png`.
+- Pipeline: another session had uncommitted VPS changes in this checkout (`scripts/vps/install.sh`, which `vps-update.test.ts` reads, among them), so the pipeline ran in a `git archive HEAD` copy with these files, `node_modules` junctioned and its own Vite cache on port 1437. `npm run check` (0 errors in 5,231 files), 655 Vitest tests and the build passed. The first browser run failed only a locator of the new scenario, fixed in the test; after it, `npm run check` passed again and the full suite failed only `usage-limits.spec.ts:138` waiting 30 s for the page to load, which passed alone and in the final run of all 349 browser tests. Rust is unchanged. Logs: `artifacts/memory-changes/claude-md/`.
+- Not exercised: the native app and real Claude or Codex runs.
+
 ## Memory edits open in a Memories card beside Files edited — 2026-10-12
 
 Requested 2026-10-12: "Can you split files changes from claude and memory changes (separated collapsable card like the files changes)?"

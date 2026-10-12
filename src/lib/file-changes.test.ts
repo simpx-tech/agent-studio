@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   fileChangesSchema,
+  changeBase,
+  changedFilePath,
   fileChangeBase,
-  memoryFilePath,
+  memoryFile,
   memoryFolder,
   relativeFilePath,
   separateMemory,
@@ -317,19 +319,41 @@ describe('recorded file changes', () => {
       '/home/ana/.codex/memories/MEMORY.md',
       'C:/Users/Ana/AppData/Local/com.vinicius.agentstudio/profiles/codex/c3/memories/memory_summary.md',
     ];
+    // Claude Code loads every CLAUDE.md and CLAUDE.local.md as memory too.
+    const instructions = [
+      'C:\\repo\\CLAUDE.md',
+      'C:/repo/src/claude.local.md',
+      'C:/repo/.claude/CLAUDE.md',
+      '/home/ana/.claude/CLAUDE.md',
+    ];
     const other = [
       'C:/repo/src/app.ts',
       'D:/Unreal Projects/arcanika/.claude/worktrees/agent-a92/Source/World.cpp',
       'C:/Users/Ana/Documents/agent-studio/artifacts/relay-memory/heap.md',
       'C:/Users/Ana/.claude/projects/C--Users-Ana-repo/scratch/notes.md',
       'C:/repo/projects/app/memory/notes.md',
-      'C:/repo/.claude/CLAUDE.md',
+      'C:/repo/AGENTS.md',
+      'C:/repo/docs/MY-CLAUDE.md',
+      'C:/repo/CLAUDE.md.bak',
       'C:/repo/src/agent-memory/store.ts',
       'C:/repo/memories/MEMORY.md',
     ];
     for (const path of memory) expect(memoryFolder(path), path).toBeDefined();
-    for (const path of other) expect(memoryFolder(path), path).toBeUndefined();
-    expect(memory.map(memoryFilePath)).toEqual([
+    for (const path of [...instructions, ...other])
+      expect(memoryFolder(path), path).toBeUndefined();
+    for (const path of [...memory, ...instructions]) expect(memoryFile(path), path).toBe(true);
+    for (const path of other) expect(memoryFile(path), path).toBe(false);
+    // Memory folders show their own paths; everything else shares the cards' base, which
+    // memory folders do not widen.
+    const base = changeBase(
+      [...memory, ...instructions.slice(0, 3), 'C:/repo/src/app.ts'].map((path) => ({
+        path,
+        kind: 'modified' as const,
+      })),
+    );
+    expect(base).toBe('C:/repo');
+    expect(changeBase([{ path: memory[4], kind: 'added' }], 'C:\\repo\\')).toBe('C:/repo');
+    expect([...memory, ...instructions].map((path) => changedFilePath(path, base))).toEqual([
       'MEMORY.md',
       'feedback.md',
       'notes/topic.md',
@@ -338,13 +362,19 @@ describe('recorded file changes', () => {
       'reviewer/MEMORY.md',
       'MEMORY.md',
       'memory_summary.md',
+      'CLAUDE.md',
+      'src/claude.local.md',
+      '.claude/CLAUDE.md',
+      '/home/ana/.claude/CLAUDE.md',
     ]);
-    expect(memoryFilePath('C:\\repo\\src\\app.ts')).toBe('C:/repo/src/app.ts');
+    expect(changedFilePath('C:\\repo\\src\\app.ts')).toBe('C:/repo/src/app.ts');
     const all = separateMemory(
-      summarizeFileChanges([reply([...memory, ...other].map((path) => patch('a', 'b', path)))]),
+      summarizeFileChanges([
+        reply([...memory, ...instructions, ...other].map((path) => patch('a', 'b', path))),
+      ]),
     );
     expect(all.files.files.map((f) => f.path).sort()).toEqual([...other].sort());
-    expect(all.memory.files.map((f) => f.path).sort()).toEqual([...memory].sort());
+    expect(all.memory.files.map((f) => f.path).sort()).toEqual([...memory, ...instructions].sort());
     expect(all.memory.files.every((f) => f.hunks?.length)).toBe(true);
     expect(all.memory).toMatchObject({ recorded: true, limited: false });
     // An older reply's memory edit keeps its missing diff in the memory card.

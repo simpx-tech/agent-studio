@@ -340,6 +340,9 @@ test('edits of the agent memory open in their own card beside Files edited', asy
     [
       added('C:\\Projects\\studio\\src\\app.ts', 'export {};'),
       added('C:\\Projects\\studio\\README.md', '# Studio'),
+      // Claude Code loads CLAUDE.md as memory; Codex's AGENTS.md stays with the files.
+      added('C:\\Projects\\studio\\CLAUDE.md', '# Studio rules'),
+      added('C:\\Projects\\studio\\AGENTS.md', '# Agent rules'),
       added(memory + 'MEMORY.md', '- [Tests](feedback_tests.md)'),
       added(memory + 'feedback_tests.md', 'Run the tests in the foreground.'),
     ],
@@ -366,8 +369,8 @@ test('edits of the agent memory open in their own card beside Files edited', asy
   await expect(last.getByRole('button', { name: /Memories/ })).toHaveCount(0);
   const filesToggle = first.getByRole('button', { name: /Files edited/ });
   const memoryToggle = first.getByRole('button', { name: /Memories/ });
-  await expect(filesToggle.locator('.count')).toHaveText('2');
-  await expect(memoryToggle.locator('.count')).toHaveText('2');
+  await expect(filesToggle.locator('.count')).toHaveText('3');
+  await expect(memoryToggle.locator('.count')).toHaveText('3');
   await expect(memoryToggle).toHaveAttribute('aria-expanded', 'false');
   const [filesBounds, memoryBounds] = await Promise.all([
     filesToggle.boundingBox(),
@@ -378,26 +381,34 @@ test('edits of the agent memory open in their own card beside Files edited', asy
 
   await filesToggle.click();
   const files = first.locator('.file-changes').first();
-  await expect(files.locator('.file-path')).toHaveText(['README.md', 'src/app.ts']);
+  await expect(files.locator('.file-path')).toHaveText(['AGENTS.md', 'README.md', 'src/app.ts']);
   await memoryToggle.click();
   await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
   await expect(memoryToggle).toHaveAttribute('aria-expanded', 'true');
   await expect(files.locator('.changes-toolbar')).not.toBeVisible();
   const card = page.getByRole('region', { name: /Memories/ });
   await expect(card.getByRole('tablist', { name: 'Memory change scope' })).toBeVisible();
-  await expect(card.locator('.file-path')).toHaveText(['feedback_tests.md', 'MEMORY.md']);
-  await expect(card.locator('.change-totals')).toContainText('2 files');
-  const index = card.locator('.changed-file').filter({ hasText: 'MEMORY.md' });
+  // A memory folder's files show within it, CLAUDE.md within the project like Files edited.
+  const memoryPaths = ['CLAUDE.md', 'feedback_tests.md', 'MEMORY.md'];
+  await expect(card.locator('.file-path')).toHaveText(memoryPaths);
+  await expect(card.locator('.change-totals')).toContainText('3 files');
+  await expect(card.getByTitle('C:\\Projects\\studio\\CLAUDE.md', { exact: true })).toContainText(
+    'Added',
+  );
+  const index = card
+    .locator('.changed-file')
+    .filter({ has: page.getByTitle(memory + 'MEMORY.md', { exact: true }) });
   await expect(index.locator('summary')).toHaveAttribute('title', memory + 'MEMORY.md');
   await expect(index.locator('.file-kind')).toHaveText('Added');
   await index.locator('summary').click();
   await expect(index.locator('.diff-code')).toHaveText('+- [Tests](feedback_tests.md)');
   await card.getByRole('tab', { name: 'All chat changes', exact: true }).click();
-  await expect(card.locator('.file-path')).toHaveText(['feedback_tests.md', 'MEMORY.md']);
+  await expect(card.locator('.file-path')).toHaveText(memoryPaths);
   await filesToggle.click();
   await expect(memoryToggle).toHaveAttribute('aria-expanded', 'false');
   await files.getByRole('tab', { name: 'All chat changes', exact: true }).click();
   await expect(files.locator('.file-path')).toHaveText([
+    'AGENTS.md',
     'docs/notes.md',
     'README.md',
     'src/app.ts',

@@ -1,11 +1,6 @@
 <script lang="ts">
   import { ChevronRight } from '@lucide/svelte';
-  import {
-    fileChangeBase,
-    memoryFilePath,
-    relativeFilePath,
-    type ChangeSummary,
-  } from '$lib/file-changes';
+  import { changedFilePath, type ChangeSummary } from '$lib/file-changes';
   import { fileTypeIcon } from '$lib/tool-presentation';
   import { revealedDisclosures } from '$lib/disclosures';
   import DiffTable from './DiffTable.svelte';
@@ -14,14 +9,15 @@
     response,
     chat,
     id,
-    folder,
+    base,
     memory = false,
   }: {
     response: ChangeSummary;
     chat: ChangeSummary;
     id: string;
-    folder?: string;
-    /** Edits of the agent's memory, each shown within its memory folder. */
+    /** The folder paths are shown within (`changeBase`); memory folders show their own. */
+    base?: string;
+    /** Edits of the agent's memory. */
     memory?: boolean;
   } = $props();
   let mode = $state<'response' | 'chat'>('response');
@@ -35,23 +31,13 @@
   const existingFiles = $derived(selected.files.filter((file) => file.kind !== 'added'));
   const added = $derived(existingFiles.reduce((n, f) => n + (f.added ?? 0), 0));
   const removed = $derived(existingFiles.reduce((n, f) => n + (f.removed ?? 0), 0));
-  const base = $derived(
-    memory
-      ? undefined
-      : fileChangeBase(
-          chat.files.flatMap((file) =>
-            file.previousPath ? [file.previousPath, file.path] : [file.path],
-          ),
-          folder,
-        ),
-  );
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
   // Diffs render when their file is first expanded.
   const diffs = revealedDisclosures();
   const fileKey = (file: ChangeSummary['files'][number]) =>
     `${mode}:${file.previousPath ?? ''}:${file.path}`;
   function displayPath(path: string) {
-    return memory ? memoryFilePath(path) : relativeFilePath(path, base);
+    return changedFilePath(path, base);
   }
   function tabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
