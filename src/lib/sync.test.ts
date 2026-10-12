@@ -10,14 +10,17 @@ import {
 import {
   emptyShared,
   mergeShared,
+  metaOf,
   onlyRepliesMoved,
   replaceFields,
+  sameMeta,
   sameShared,
   sharedSchema,
   sharedWorkspace,
 } from './sync';
 import { registerInstallation } from './fleet';
 import { sameFolderIcons } from './folder-icons';
+import { assignAccountColors, withAccountColor } from './account-colors';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
 const chat = (): Conversation => ({
@@ -97,6 +100,88 @@ describe('workspace replication', () => {
     const saved = restoreWorkspace({ ...initialWorkspace(), folderIcons: local.folderIcons });
     expect(saved.folderIcons).toEqual(local.folderIcons);
     expect(sharedWorkspace(saved).folderIcons).toEqual(local.folderIcons);
+  });
+  it('syncs account colors and keeps them when the relay predates them', () => {
+    const account = (name: string) => ({
+      id: crypto.randomUUID(),
+      name,
+      provider: 'claude' as const,
+      purpose: 'personal' as const,
+    });
+    const [kept, ours, theirs] = [account('Kept'), account('Ours'), account('Theirs')];
+    const fleet = (...accounts: ReturnType<typeof account>[]) => ({
+      ...emptyShared().fleet,
+      accounts,
+    });
+    const base = {
+      ...emptyShared(),
+      fleet: fleet(kept),
+      accountColors: assignAccountColors(undefined, [kept]),
+    };
+    // Each device adds an account, which takes a color there.
+    const local = {
+      ...base,
+      fleet: fleet(kept, ours),
+      accountColors: assignAccountColors(base.accountColors, [kept, ours]),
+    };
+    const remote = {
+      ...base,
+      fleet: fleet(kept, theirs),
+      accountColors: assignAccountColors(base.accountColors, [kept, theirs]),
+    };
+    const merged = mergeShared(base, local, remote);
+    expect(merged.fleet.accounts.map((a) => a.name).sort()).toEqual(['Kept', 'Ours', 'Theirs']);
+    expect(merged.accountColors).toHaveLength(3);
+    expect(sharedSchema.parse(merged).accountColors).toEqual(merged.accountColors);
+    // Both new accounts took the same next color; the relay's keeps it and ours takes another.
+    const colorOf = (list: typeof merged.accountColors, id: string) =>
+      list?.find((c) => c.accountId === id)?.color;
+    expect(colorOf(local.accountColors, ours.id)).toBe(colorOf(remote.accountColors, theirs.id));
+    expect(colorOf(merged.accountColors, theirs.id)).toBe(colorOf(remote.accountColors, theirs.id));
+    expect(new Set(merged.accountColors!.map((c) => c.color)).size).toBe(3);
+    // The color the user chose on one device reaches the other, which kept the one it had.
+    const chosen = {
+      ...local,
+      accountColors: withAccountColor(
+        local.accountColors,
+        kept.id,
+        'teal',
+        new Date(2026, 9, 12).toISOString(),
+      ),
+    };
+    expect(mergeShared(local, local, chosen).accountColors).toEqual(chosen.accountColors);
+    expect(mergeShared(local, chosen, local).accountColors).toEqual(chosen.accountColors);
+    // An older relay drops the list; this device keeps its own and sees no difference.
+    const older = { ...emptyShared(), fleet: local.fleet };
+    expect(mergeShared(base, local, { ...older, fleet: base.fleet }).accountColors).toEqual(
+      local.accountColors,
+    );
+    expect(sameShared(older, local)).toBe(true);
+    // A relay that holds colors this device lacks, or other ones, differs.
+    expect(sameShared(local, older)).toBe(false);
+    expect(sameShared(chosen, local)).toBe(false);
+    expect(
+      sameShared(local, { ...local, accountColors: [...local.accountColors!].reverse() }),
+    ).toBe(true);
+    // The settings alone compare the same way, but a relay without the list differs there: the
+    // incremental path then sends it.
+    expect(sameMeta(metaOf(chosen), metaOf(local))).toBe(false);
+    expect(sameMeta(metaOf(older), metaOf(local))).toBe(false);
+    expect(
+      sameMeta(metaOf(local), {
+        ...metaOf(local),
+        accountColors: [...local.accountColors!].reverse(),
+      }),
+    ).toBe(true);
+    // No list stays absent, as older relays store it, and a saved workspace keeps its colors.
+    expect('accountColors' in mergeShared(emptyShared(), emptyShared(), emptyShared())).toBe(false);
+    const saved = restoreWorkspace({
+      ...initialWorkspace(),
+      fleet: local.fleet,
+      accountColors: local.accountColors,
+    });
+    expect(saved.accountColors).toEqual(local.accountColors);
+    expect(sharedWorkspace(saved).accountColors).toEqual(local.accountColors);
   });
   it('migrates v2 and registers only this installation without inventing remote machines or accounts', () => {
     const old = {

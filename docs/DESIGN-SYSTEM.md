@@ -38,6 +38,7 @@ named colors, so every surface follows the selected theme.
 | Accent       | `--accent`, `--accent-hover`, `--accent-fg`, `--accent-text`, `--accent-soft`, `--accent-border`, `--focus-ring`, `--focus-glow` | Primary buttons, links, selection, focus                    |
 | Status       | `--success`, `--warning`, `--danger`, `--info` with `-soft`/`-border` variants, `--danger-solid`                                 | Meaningful states and destructive actions                   |
 | Usage        | `--pace-*`, `--meter-*`, `--quota-guide`, `--quota-guide-over`, `--quota-excess`                                                 | Limit bars and pace indicators                              |
+| Accounts     | `--account-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-violet`, `-pink`, `-brown`, `-gray`                         | The color that marks each account                           |
 | Code         | `--code-*`, `--syntax-*`, `--diff-*`                                                                                             | Code blocks, highlighting and diffs                         |
 | Type         | `--font-sans` (Geist), `--font-mono` (Geist Mono), `--text-2xs…3xl`, `--leading-*`, `--tracking-*`                               | All text                                                    |
 | Shape        | `--radius-*`, `--control-*`, `--shadow-sm…xl`, `--backdrop`                                                                      | Corners, control heights, elevation                         |
@@ -66,6 +67,17 @@ ground and `-1` to `-4` for its shapes, identical in every theme like the prints
 Overlaps are drawn as paths of their own rather than clipped, so the prints use no ids and a page
 can hold any number of copies: Opus arches under a pale sun, Sonnet three flowing ribbons, Fable two overlapping circles, Haiku a sun over a quiet horizon, Mythos a radiant sun disc, Astra a star cut by four quarter circles, Sol a striped setting sun, Luna a crescent in its halo, Terra layered hills, other GPT models quarter-circle tiles, Flash a zigzag split, Pro a faceted prism, and other Gemini models twin circles.
 
+Account colors are a third identity palette. Each account has one of ten named colors
+(`src/lib/account-colors.ts`), whose tokens have a value per theme like status colors: bright on
+graphite, deeper on white. Unlike provider and model tints they fill their marks, so the hue reads
+at a glance: `AccountMark.svelte` draws the agent's glyph in `--text-inverse` on the account's
+color, as a 28px tile in an Agent picker choice, a 20px chip on the Agent trigger and a 52px tile
+on a new chat's welcome. `.account-dot` is the same color as an 8px dot before an account's name
+in running text, 10px beside a Connections heading. Set `--account-color` from
+`accountColorValue`, never a raw color. Only accounts the Agent picker names are filled: an agent
+with one account on a computer keeps its tinted provider mark and the bot icon. Manage account
+shows the palette as 22px swatches in one radio group, the chosen one ringed in its own color.
+
 ## Themes
 
 Dark is the default. Settings → Appearance offers Dark, Light and System per device; the choice
@@ -93,6 +105,9 @@ mark in the script and `BrandMark.svelte` together.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,
   hover and focus treatment. Checkboxes use `.checkbox`.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
+  The toolbar caps each picker, which its trigger fills, at 220px and the Agent's at 280px (170px
+  and 220px in windows up to 1100px wide): a cap on the trigger alone leaves the room a longer
+  name asked for empty beside it.
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
   accent bar at its left edge.
 - **Day divisions:** where a chat continues on another day, the day's name in `--text-muted` at

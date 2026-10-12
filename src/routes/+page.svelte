@@ -231,6 +231,8 @@
     withFolderIcon,
   } from '$lib/folder-icons';
   import FolderIcon from '$lib/components/FolderIcon.svelte';
+  import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
+  import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
     registerWslEnvironments,
@@ -310,6 +312,7 @@
     type ScratchChat,
   } from '$lib/drafts';
   import {
+    replyAccountSwitches,
     replySettingsChanged,
     replySwitches,
     selectedModelName,
@@ -722,9 +725,6 @@
         scroll.clientHeight >
         64;
   }
-  // Runs after the reader scrolls, expands, or collapses content.
-  function readingPosition() {
-    if (glide) {
   // A scroll event arrives a frame after the scroll it reports. When the window becomes
   // narrower or shorter before the event of the chat's own return to its end arrives, as WebKit
   // orders them, the event finds the end moved away though nobody scrolled: reading the
@@ -738,6 +738,9 @@
     scrolledTo = { scroll, top: scroll.scrollTop };
     if (!known) readingPosition();
   }
+  // Runs after the reader scrolls, expands, or collapses content.
+  function readingPosition() {
+    if (glide) {
       // The glide's own scrolling keeps the chat following; any other scroll ends it here.
       if (!glide.frame || Math.abs((chatScroll?.scrollTop ?? 0) - glide.top) < 1) return;
       stopGlide();
@@ -1022,6 +1025,31 @@
       ),
     ),
   );
+  // Every account's color: those the workspace keeps, and one for each account that has none
+  // yet, which is saved so the account keeps it on every device.
+  const assignedColors = $derived(
+    assignAccountColors(
+      workspace.accountColors,
+      workspace.fleet.accounts,
+      workspace.fleet.connections,
+    ),
+  );
+  const colorsByAccount = $derived(accountColorIndex(assignedColors));
+  $effect(() => {
+    const assigned = assignedColors;
+    if (!loaded || assigned === workspace.accountColors) return;
+    untrack(() => {
+      workspace.accountColors = assigned;
+      void persistSettings().catch(() => {});
+    });
+  });
+  /** The color of the account a connection signs in to, as styles read it. */
+  function connectionColor(connectionId: string | undefined) {
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    return connection
+      ? accountColorValue(colorsByAccount.get(connection.accountId)?.color)
+      : undefined;
+  }
   const agentOptions = $derived.by(() => {
     const preview = !desktop() && !paired && !selectedComputer;
     return providerIds.flatMap((provider) => {
@@ -1050,6 +1078,8 @@
             provider,
             connectionId: c.id,
             name: `${providers[provider].name} · ${workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ?? 'Account'}`,
+            // Named accounts are marked in their own color, in the list and on the trigger.
+            fill: connectionColor(c.id),
             detail: attention
               ? 'Sign-in needed'
               : connectionStatus(c.id)?.installed
@@ -1068,6 +1098,7 @@
           provider,
           connectionId: candidates[0]?.id,
           name: providers[provider].name,
+          fill: undefined,
           detail:
             selectedLocation && !availableProviders.includes(provider)
               ? 'Unavailable on this computer'
@@ -1088,6 +1119,11 @@
         option.connectionId === selectedSettings.connectionId,
     )?.id ?? (active ? selectedSettings.provider : ''),
   );
+  // The selected account when the picker names it, with the color that marks it.
+  const selectedAccount = $derived.by(() => {
+    const option = agentOptions.find((option) => option.id === selectedAgentOption);
+    return option?.fill ? { name: option.name, mark: option.mark, color: option.fill } : undefined;
+  });
   let agentPickerOpen = $state(false);
   // Opening the Agent picker checks the sign-in of the Claude and Codex accounts it lists on
   // this computer.
@@ -1362,6 +1398,7 @@
   const switchNotices = $derived(
     replySwitches(active?.messages ?? [], (id) => accountName(workspace.fleet, id)),
   );
+  const accountSwitches = $derived(replyAccountSwitches(active?.messages ?? []));
   // Other accounts of this chat's agent on its computer that may take the next reply.
   // Claude and Codex conversations start a fresh native session for the new account.
   const switchableConnections = $derived(
@@ -1971,6 +2008,7 @@
               workspace.claudeInstructions = value.claudeInstructions;
               workspace.appSessions = value.appSessions;
               workspace.folderIcons = value.folderIcons;
+              workspace.accountColors = value.accountColors;
               const kept = new Set(value.conversations.map((c) => c.id));
               const deleted = workspace.conversations.filter((c) => !kept.has(c.id));
               // Preserve active object identities while network responses arrive.
@@ -2009,6 +2047,7 @@
                 workspace.claudeInstructions = meta.claudeInstructions;
                 workspace.appSessions = meta.appSessions;
                 workspace.folderIcons = meta.folderIcons;
+                workspace.accountColors = meta.accountColors;
               }
               const gone = new Set(remove);
               if (gone.size)
@@ -5672,7 +5711,11 @@
                     (!!active && !switchableConnections.length)}
                   onchange={chooseAgent}
                 >
-                  {#snippet icon()}<Bot size={16} />{/snippet}
+                  {#snippet icon()}{#if selectedAccount}<AccountMark
+                        glyph={selectedAccount.mark}
+                        color={selectedAccount.color}
+                        size="chip"
+                      />{:else}<Bot size={16} />{/if}{/snippet}
                   {#snippet optionAside(option)}{@const usage = listedUsage(option.id)}{#if usage}<QuotaBars
                         {...usage}
                       />{/if}{/snippet}
@@ -5756,8 +5799,11 @@
             </p>
           {:else if accountSwitchPending}
             <p class="next-reply-settings" role="status">
-              Next message: {accountName(workspace.fleet, selectedSettings.connectionId) ??
-                'Another'} account
+              Next message: <span
+                class="account-dot"
+                style:--account-color={connectionColor(selectedSettings.connectionId)}
+                aria-hidden="true"
+              ></span>{accountName(workspace.fleet, selectedSettings.connectionId) ?? 'Another'} account
             </p>
           {/if}
           <div
@@ -5786,6 +5832,7 @@
                     folder={active.location?.path}
                     timeTotal={timeTotals.get(m.id)}
                     switchNotice={switchNotices.get(m.id)}
+                    switchColor={connectionColor(accountSwitches.get(m.id))}
                     agent={active.settings}
                     canRetry={i === active.messages.length - 1 &&
                       (m.status === 'error' || m.status === 'cancelled') &&
@@ -5824,12 +5871,18 @@
                     >
                   </div>{/if}
               {:else}<div class="chat-empty">
-                  <span
-                    class="large-provider"
-                    style:--provider-color={providers[selectedAgent.provider].color}
-                    >{providers[selectedAgent.provider].mark}</span
-                  ><span class="eyebrow"
-                    >A conversation with {selectedAgent.name}</span
+                  {#if selectedAccount}<div class="welcome-account">
+                      <AccountMark
+                        glyph={selectedAccount.mark}
+                        color={selectedAccount.color}
+                        size="large"
+                      />
+                    </div>{:else}<span
+                      class="large-provider"
+                      style:--provider-color={providers[selectedAgent.provider].color}
+                      >{providers[selectedAgent.provider].mark}</span
+                    >{/if}<span class="eyebrow"
+                    >A conversation with {selectedAccount?.name ?? selectedAgent.name}</span
                   >
                   <h1>What’s on your mind?</h1>
                 </div>{/if}

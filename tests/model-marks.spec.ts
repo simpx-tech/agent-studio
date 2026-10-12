@@ -128,7 +128,7 @@ test('each Claude line has its own print and tint beside its version, and a repl
   ).toEqual(['none', 'opus', 'sonnet', 'fable', 'haiku']);
   // CLI default keeps the provider glyph, since which model it runs is unknown, centered in a
   // mark as wide as the others, so every name starts at the same place.
-  await expect(marks.first()).toHaveText('✳');
+  await expect(marks.first()).toHaveText('✳\uFE0E');
   await expect(marks.first().locator('svg')).toHaveCount(0);
   await expect(marks.locator('.version')).toHaveText(['5.5', '5', '5.1', '4.5']);
   const boxes = await marks.evaluateAll((all) =>

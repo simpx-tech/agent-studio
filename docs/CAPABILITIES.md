@@ -16,6 +16,16 @@ Each project folder gets an icon of its own in the sidebar's Active and History 
 
 The choice is saved with the workspace (`folderIcons`), so every computer and the Viewer show it, and later chats in the folder never ask again. If the choice fails, the folder keeps the plain folder mark and the next chat there after a reload tries again. Standalone chats keep their chat-bubble mark. A device on an older release keeps the icons it holds while syncing with an older relay that drops them, and shows the folder mark for icon names its catalog does not have yet.
 
+## Account colors
+
+Each account has a color of its own, so accounts with similar names can be told apart without reading them. Where a computer has several accounts of an agent, the Agent picker lists each as the agent's glyph on the account's color, the Agent control shows the selected account's mark in place of its bot icon, and a new chat's welcome shows the mark large and names the account. Connections puts the color before each account's name, and a chat that changes account says so in the color of the account it changes to: in the **Next message** hint, then in the **Switched to** notice above the reply. An agent with one account on a computer keeps its own mark. Reply headings and the sidebar are not marked.
+
+An account takes a color by itself the first time the app sees it: the first of ten (blue, orange, green, pink, violet, yellow, teal, red, brown, gray) that no other account has. A workspace with more accounts than colors repeats them where it shows least: an account takes a color that no account on its computers has, its own agent's accounts first, so the accounts one Agent list shows together still differ. **Connections → Manage account → Color** changes it. Colors are names from that palette, each with a value for the dark and the light theme; the app keeps no custom colors.
+
+The colors are saved with the workspace (`accountColors`), so every computer and the Viewer show the same ones, and an account keeps its color when others are added or removed. Two computers that each met their own accounts before they were paired started with the same colors: the one that syncs second gives its accounts better ones where there are any, once. A color you chose is never replaced by one an account took by itself, and of two choices the later wins. A device on an older release keeps the colors it holds while syncing with an older relay that drops them.
+
+The toolbar gives the Agent control room for a long account name (up to 280px, 220px in windows up to 1100px wide), and a name that still does not fit is cut short with the account's color beside it.
+
 ## File and app mentions
 
 Type `@` anywhere at a word boundary in a Claude or Codex draft to search files in the selected working folder. Type `$` in Codex to choose an accessible, enabled app. Arrow keys navigate; Enter, Tab or touch inserts the choice into the draft, and Escape dismisses. Selection never sends a message. Paths with spaces are quoted, and surrounding draft text is preserved. A new Standalone chat needs its first message to create its working folder before file search is available.

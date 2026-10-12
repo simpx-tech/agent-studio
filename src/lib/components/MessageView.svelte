@@ -18,7 +18,12 @@
   import { draftRequest, shownQuestionDrafts, type QuestionDraft } from '$lib/question-drafts';
   import { replyContent, highlightCode } from '$lib/markdown';
   import { openLink } from '$lib/transport';
-  import { replyModelMismatch, replyModelName, type ReplyTimeTotal } from '$lib/replies';
+  import {
+    replyModelMismatch,
+    replyModelName,
+    switchedTo,
+    type ReplyTimeTotal,
+  } from '$lib/replies';
   import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
@@ -48,6 +53,7 @@
     canRetry = false,
     retryDisabled = false,
     switchNotice = '',
+    switchColor,
     timeTotal,
     chatChanges,
     folder,
@@ -72,6 +78,8 @@
     canRetry?: boolean;
     retryDisabled?: boolean;
     switchNotice?: string;
+    /** The color of the account this reply switched to, which the notice names first. */
+    switchColor?: string;
     timeTotal?: ReplyTimeTotal;
     chatChanges?: SeparatedChanges;
     folder?: string;
@@ -154,7 +162,16 @@
 >
   {#if switchNotice && message.role === 'assistant'}
     <p class="reply-switch" role="status">
-      <ArrowRightLeft size={13} aria-hidden="true" />{switchNotice}
+      <ArrowRightLeft
+        size={13}
+        aria-hidden="true"
+      />{#if switchColor && switchNotice.startsWith(switchedTo)}<span
+          >{switchedTo}<span
+            class="account-dot"
+            style:--account-color={switchColor}
+            aria-hidden="true"
+          ></span>{switchNotice.slice(switchedTo.length)}</span
+        >{:else}{switchNotice}{/if}
     </p>
   {/if}
   {#if message.role === 'user'}

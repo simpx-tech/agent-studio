@@ -38,6 +38,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Agent/provider, model, and reasoning controls directly in every chat, plus optional chat instructions.
 - Reusable [input templates](docs/CAPABILITIES.md#input-templates) with custom fields, a message preview, and insertion into the composer for review before sending.
 - Last model remembered per provider; last reasoning level remembered independently per provider and model. New chats start with the agent and account you last chose, even after replying in older chats on another account.
+- A color for each account, on the Agent control, in its list and in Connections, so accounts with similar names differ at a glance; **Manage account** changes it. See [account colors](docs/CAPABILITIES.md#account-colors).
 - Saved conversations with search, multi-turn context, retry, stop, and deletion.
 - Automatic conversation titles from the first message, generated once in the background with a small model.
 - An icon for each project folder in the sidebar, chosen once by the same small model from a catalog of 338 icons when the folder's first conversation starts. See [folder icons](docs/CAPABILITIES.md#folder-icons).
@@ -104,6 +105,7 @@ message content blocks ← normalized events ← JSONL decoder
 - `src-tauri/src/runner.rs`: streaming, deadlines, cancellation, and process cleanup.
 - `src-tauri/src/titles.rs`: bounded first-message title generation and the small-model policy.
 - `src-tauri/src/folder_icons.rs` and `src/lib/folder-icons.json`: folder icon choice from the shared icon catalog.
+- `src/lib/account-colors.ts` and `src/lib/components/AccountMark.svelte`: each account's color, how accounts take one, and how devices agree on it.
 
 There is no terminal emulator. Raw CLI events and ANSI output are not the interface. Scripts, remote images, embeds, and unsafe links are stripped from model output; the desktop CSP limits renderer access. Fonts and icons are bundled locally.
 

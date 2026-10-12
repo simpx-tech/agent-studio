@@ -116,6 +116,9 @@ export function replyAccountName(
   return current || message.executionLabel?.split(' · ')[0] || 'another';
 }
 
+// Every notice starts with this, and names the account first when the account changed.
+export const switchedTo = 'Switched to ';
+
 export function replySwitches(
   messages: Message[],
   accountName?: (connectionId: string) => string | undefined,
@@ -136,9 +139,24 @@ export function replySwitches(
         changes.push(`${reasoningName(after.reasoning)} reasoning`);
       if (!!before.planMode !== !!after.planMode)
         changes.push(after.planMode ? 'Plan mode' : 'Build mode');
-      notices.set(message.id, `Switched to ${changes.join(' · ')}`);
+      notices.set(message.id, `${switchedTo}${changes.join(' · ')}`);
     }
     previous = message;
   }
   return notices;
+}
+
+/** The connection each reply switched to, for the replies whose notice names another account. */
+export function replyAccountSwitches(messages: Message[]): Map<string, string> {
+  const switches = new Map<string, string>();
+  let previous: Message | undefined;
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    const before = previous?.settings;
+    const after = message.settings;
+    if (before && after?.connectionId && replyAccountChanged(before, after))
+      switches.set(message.id, after.connectionId);
+    previous = message;
+  }
+  return switches;
 }

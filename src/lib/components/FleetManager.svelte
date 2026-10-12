@@ -34,6 +34,17 @@
     applySharedContextChoice,
     lendingConnection,
   } from '$lib/fleet';
+  import {
+    accountColorIndex,
+    accountColorLabel,
+    accountColorNames,
+    accountColorValue,
+    assignAccountColors,
+    sameAccountColors,
+    shownAccountColor,
+    withAccountColor,
+    type AccountColorName,
+  } from '$lib/account-colors';
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
@@ -156,11 +167,43 @@
   let managedAccountId = $state('');
   let managedComputerId = $state<string | null>(null);
   let accountName = $state('');
+  let accountColor = $state<AccountColorName>('gray');
   let sharedSources = $state<Record<string, string>>({});
   let sharedSourcesBaseline = $state<Record<string, string>>({});
   let removing = $state('');
   let environmentId = $state('');
   let accountComputerId = $state('');
+  // Each account's color, which the chat marks it with.
+  const accountColors = $derived(
+    assignAccountColors(
+      workspace.accountColors,
+      workspace.fleet.accounts,
+      workspace.fleet.connections,
+    ),
+  );
+  const colorsByAccount = $derived(accountColorIndex(accountColors));
+  const colorOf = (accountId: string) => shownAccountColor(colorsByAccount.get(accountId)?.color);
+  // The palette is one radio group: arrow keys move the choice and its focus.
+  function chooseColor(event: KeyboardEvent) {
+    const move = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    const last = accountColorNames.length - 1;
+    const at = accountColorNames.indexOf(accountColor);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? last
+          : move
+            ? (at + move + accountColorNames.length) % accountColorNames.length
+            : -1;
+    if (next < 0) return;
+    event.preventDefault();
+    accountColor = accountColorNames[next];
+    const swatches = (event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(
+      '[role="radio"]',
+    );
+    swatches[next]?.focus();
+  }
   const computers = $derived(
     computerViews(workspace.fleet).sort(
       (a, b) =>
@@ -497,6 +540,7 @@
     managedAccountId = account.id;
     managedComputerId = computerId;
     accountName = account.name;
+    accountColor = colorOf(account.id);
     sharedSources = Object.fromEntries(
       workspace.fleet.connections.map((c) => [c.id, sharedContextChoice(c)]),
     );
@@ -752,7 +796,13 @@
   >
     <div class="fleet-account-heading">
       <div>
-        <h4>{account.name}</h4>
+        <h4>
+          <span
+            class="account-dot"
+            style:--account-color={accountColorValue(colorOf(account.id))}
+            aria-hidden="true"
+          ></span>{account.name}
+        </h4>
         {#if computerId === null}<small>{providers[account.provider].name}</small>{/if}
       </div>
       <button
@@ -1255,9 +1305,22 @@
           Object.assign(editedAccount, nextAccount);
           for (const connection of managedConnections)
             applySharedContextChoice(connection, sharedSources[connection.id] ?? '');
+          const previousColors = workspace.accountColors;
+          const recolored =
+            accountColor !== colorOf(editedAccount.id)
+              ? withAccountColor(
+                  accountColors,
+                  editedAccount.id,
+                  accountColor,
+                  new Date().toISOString(),
+                )
+              : undefined;
+          if (recolored) workspace.accountColors = recolored;
           try {
             await save();
           } catch (error) {
+            if (recolored && sameAccountColors(workspace.accountColors, recolored))
+              workspace.accountColors = previousColors;
             if (editedAccount.name === nextAccount.name) editedAccount.name = previousName;
             for (const { connection, after, snapshot } of editedConnections) {
               if (sharedContextChoice(connection) !== after) continue;
@@ -1294,6 +1357,29 @@
           required
         /></label
       >
+      <div class="fleet-field">
+        <span id="account-color-label">Color</span>
+        <!-- svelte-ignore a11y_interactive_supports_focus -->
+        <div
+          class="account-palette"
+          role="radiogroup"
+          aria-labelledby="account-color-label"
+          onkeydown={chooseColor}
+        >
+          {#each accountColorNames as name (name)}<button
+              type="button"
+              role="radio"
+              class="account-swatch"
+              aria-checked={accountColor === name}
+              aria-label={accountColorLabel(name)}
+              title={accountColorLabel(name)}
+              tabindex={accountColor === name ? 0 : -1}
+              style:--account-color={accountColorValue(name)}
+              disabled={busy}
+              onclick={() => (accountColor = name)}
+            ></button>{/each}
+        </div>
+      </div>
       {#each managedConnections as connection}
         <section
           class="managed-connection"
@@ -1753,9 +1839,45 @@
     gap: 9px;
   }
   .fleet-account-heading h4 {
+    display: flex;
+    align-items: center;
     margin: 0;
     font-size: var(--text-base);
     font-weight: 600;
+  }
+  .fleet-account-heading h4 > .account-dot {
+    width: 10px;
+    height: 10px;
+    margin-right: 8px;
+  }
+  /* The colors an account can have: the chosen one keeps a ring in its own color. */
+  .account-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 2px;
+  }
+  .account-swatch {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    min-height: 0;
+    padding: 0;
+    border-radius: var(--radius-full);
+    background: var(--account-color);
+    transition: box-shadow var(--duration-fast) ease;
+  }
+  .account-swatch:not(:disabled):hover {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--account-color) 28%, transparent);
+  }
+  .account-swatch[aria-checked='true'] {
+    box-shadow:
+      0 0 0 2px var(--surface-overlay),
+      0 0 0 4px var(--account-color);
+  }
+  .account-swatch:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 5px;
   }
   .fleet-account-heading small {
     font-size: var(--text-xs);

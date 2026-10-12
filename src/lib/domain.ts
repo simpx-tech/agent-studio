@@ -23,6 +23,7 @@ import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
 import { folderIconsSchema } from './folder-icons.ts';
+import { accountColorsSchema } from './account-colors.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -47,7 +48,9 @@ export const providers = {
     name: 'Claude',
     company: 'Anthropic',
     account: 'Claude',
-    mark: '✳',
+    // The selector asks for the text glyph. Without it Apple's engines can draw the green emoji,
+    // which would cover the color of an account's mark.
+    mark: '✳\uFE0E',
     color: '#dda987',
     install: 'irm https://claude.ai/install.ps1 | iex',
     login: 'claude auth login',
@@ -284,6 +287,8 @@ export const workspaceSchema = z.object({
   appSessions: appSessionsSchema.optional(),
   // The icon a model chose for each project folder.
   folderIcons: folderIconsSchema.optional(),
+  // The color that marks each account wherever it is named.
+  accountColors: accountColorsSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

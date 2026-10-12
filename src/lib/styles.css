@@ -276,6 +276,17 @@ pre {
 .spinning {
   animation: spin 1s linear infinite;
 }
+/* The color of the account named beside it, level with its lowercase letters. */
+.account-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: var(--radius-full);
+  background: var(--account-color);
+  vertical-align: -1px;
+}
 .expanded-chevron {
   transform: rotate(90deg);
 }
@@ -1141,8 +1152,16 @@ pre {
   height: 20px;
   margin-inline: 6px;
 }
+/* The picker carries the cap and its trigger fills it: a cap on the trigger alone left the
+   room a longer name asked for empty beside it. An account's name gets more room. */
+.chat-configuration .agent-picker {
+  max-width: 220px;
+}
+.chat-configuration .agent-setting .agent-picker {
+  max-width: 280px;
+}
 .chat-configuration .picker-trigger {
-  max-width: min(220px, 100%);
+  max-width: 100%;
 }
 .setting-badge {
   flex-shrink: 0;
@@ -1185,8 +1204,11 @@ pre {
     padding: 0 8px 0 10px;
     gap: 6px;
   }
-  .chat-configuration .picker-trigger {
-    max-width: min(170px, 100%);
+  .chat-configuration .agent-picker {
+    max-width: 170px;
+  }
+  .chat-configuration .agent-setting .agent-picker {
+    max-width: 220px;
   }
 }
 .chat-scroll {
@@ -1263,6 +1285,12 @@ pre {
   box-shadow:
     0 0 0 6px color-mix(in srgb, var(--provider-color) 5%, transparent),
     var(--shadow-md);
+}
+/* A named account's own mark stands in for its agent's. */
+.chat-empty > .welcome-account {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
 }
 .chat-empty > .eyebrow {
   font-size: var(--text-sm);

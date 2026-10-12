@@ -1655,6 +1655,89 @@ test('two app environments pair, share accounts, route chats, retain progress an
   }
 });
 
+test('an account’s color is the same on every computer, and a choice made on one reaches the other', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
+  const token = 'synthetic-relay-key-for-browser-checks-123456';
+  const relay = createRelay({ token, directory });
+  await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(relay.address() as { port: number }).port}`;
+  const a = await browser.newContext(),
+    b = await browser.newContext();
+  try {
+    const desktop = await a.newPage(),
+      mac = await b.newPage();
+    await host(desktop, url, token, 'Desktop', 'windows');
+    await host(mac, url, token, 'MacBook', 'macos');
+    for (const page of [desktop, mac]) {
+      await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
+      await page.getByLabel('Relay URL', { exact: true }).fill(url);
+      await page.getByLabel('Relay pairing key', { exact: true }).fill(token);
+      await page.getByRole('button', { name: 'Pair & sync', exact: true }).click();
+      await expect(page.getByText(/^Synced /)).toBeVisible({ timeout: 15_000 });
+    }
+    const colors = (page: Page) =>
+      page.evaluate(() => {
+        const workspace = JSON.parse(localStorage.getItem('fixture-workspace')!);
+        return {
+          accounts: workspace.fleet.accounts.length as number,
+          list: (workspace.accountColors ?? []) as { accountId: string; color: string }[],
+        };
+      });
+    // Each computer's own logins took their colors there. Synced, both hold one list with a
+    // color for every account, none of them twice.
+    await expect
+      .poll(
+        async () => {
+          const [here, there] = [await colors(desktop), await colors(mac)];
+          return (
+            here.accounts === 6 &&
+            here.list.length === 6 &&
+            JSON.stringify(here.list) === JSON.stringify(there.list)
+          );
+        },
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    const before = (await colors(desktop)).list;
+    expect(new Set(before.map((c) => c.color)).size).toBe(6);
+
+    // The MacBook's Claude account gets another color from the desktop.
+    const claude = (page: Page) =>
+      page
+        .getByRole('article', { name: 'MacBook computer', exact: true })
+        .locator('.fleet-account')
+        .filter({ has: page.getByRole('heading', { name: 'Claude CLI login', exact: true }) });
+    const dot = (page: Page) =>
+      claude(page)
+        .locator('.account-dot')
+        .evaluate((element) => (element as HTMLElement).style.getPropertyValue('--account-color'));
+    const taken = await dot(desktop);
+    expect(await dot(mac)).toBe(taken);
+    await claude(desktop).getByRole('button', { name: 'Manage account' }).click();
+    const dialog = desktop.getByRole('dialog', { name: 'Manage account', exact: true });
+    await dialog.getByRole('radio', { name: 'Brown', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Save account', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await dot(desktop)).toBe('var(--account-brown)');
+    await expect.poll(() => dot(mac), { timeout: 15_000 }).toBe('var(--account-brown)');
+    // Only that account changed, on both computers.
+    await expect
+      .poll(async () => JSON.stringify((await colors(mac)).list), { timeout: 15_000 })
+      .toBe(JSON.stringify((await colors(desktop)).list));
+    const after = (await colors(mac)).list;
+    expect(after.filter((c, i) => c.color !== before[i].color)).toHaveLength(1);
+    expect(after.map((c) => c.accountId)).toEqual(before.map((c) => c.accountId));
+  } finally {
+    await a.close();
+    await b.close();
+    await new Promise((resolve) => relay.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a server’s accounts are added and signed in from another computer through the relay', async ({
   browser,
 }) => {

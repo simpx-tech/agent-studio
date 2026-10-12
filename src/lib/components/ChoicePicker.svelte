@@ -2,6 +2,7 @@
   import { tick, untrack, type Snippet } from 'svelte';
   import { Check, ChevronDown, CircleAlert } from '@lucide/svelte';
   import { anchorPopover } from '$lib/anchorPopover';
+  import AccountMark from './AccountMark.svelte';
   type Option = {
     id: string;
     name: string;
@@ -9,6 +10,8 @@
     title?: string;
     mark?: string;
     color?: string;
+    /** A color of the option's own, an account's, which fills its mark in place of the tint. */
+    fill?: string;
     /** The option needs the user's attention, as its detail says (an account to sign in to). */
     attention?: boolean;
   };
@@ -254,7 +257,12 @@
             onpointerdown={(event) => event.preventDefault()}
             onclick={() => choose(index)}
           >
-            {#if optionMark}{@render optionMark(option)}{:else if option.mark}<span
+            {#if optionMark}{@render optionMark(
+                option,
+              )}{:else if option.mark && option.fill}<AccountMark
+                glyph={option.mark}
+                color={option.fill}
+              />{:else if option.mark}<span
                 class="option-mark"
                 style:--provider-color={option.color}
                 aria-hidden="true">{option.mark}</span

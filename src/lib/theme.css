@@ -165,6 +165,18 @@
   --model-terra: #b6c98a;
   --model-flash: #f2d56b;
   --model-pro: #8fb6f2;
+  /* Account colors (src/lib/account-colors.ts): each account has one of these, which fills its
+     marks under a glyph in --text-inverse */
+  --account-red: #fb8276;
+  --account-orange: #fca864;
+  --account-yellow: #eed469;
+  --account-green: #7cdd93;
+  --account-teal: #5fd3cf;
+  --account-blue: #71b2fb;
+  --account-violet: #aa94fd;
+  --account-pink: #f79cd0;
+  --account-brown: #c5a482;
+  --account-gray: #abb1be;
   /* Model line prints (ModelIcon.svelte): the ground (-0) and shapes of each line, identical in
      every theme like the prints themselves */
   --art-opus-0: #4a1f2e;
@@ -328,6 +340,16 @@
   --diff-hunk-text: #2c5596;
 
   --provider-ink-mix: 58%;
+  --account-red: #d73431;
+  --account-orange: #ce7005;
+  --account-yellow: #a98f00;
+  --account-green: #1b9247;
+  --account-teal: #048c89;
+  --account-blue: #0075d2;
+  --account-violet: #7850da;
+  --account-pink: #cd3f9b;
+  --account-brown: #84613b;
+  --account-gray: #6d7584;
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
   --shadow-md: 0 4px 14px rgb(0 0 0 / 0.07), 0 1px 3px rgb(0 0 0 / 0.06);
