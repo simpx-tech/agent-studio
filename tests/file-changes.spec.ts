@@ -194,11 +194,12 @@ for (const mobile of [false, true])
     await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
     await expect(usageToggle).toHaveAttribute('aria-expanded', 'false');
     await expect(summary.locator('.changes-toolbar')).not.toBeVisible();
-    const [filesBounds, usageBounds] = await Promise.all([
-      filesToggle.boundingBox(),
-      usageToggle.boundingBox(),
-    ]);
-    expect(Math.abs(filesBounds!.y - usageBounds!.y)).toBeLessThan(2);
+    // Both in one frame: the chat may still be gliding to the end of the reply just sent.
+    const [filesTop, usageTop] = await filesToggle.evaluate(
+      (files, usage) => [files, usage!].map((button) => button.getBoundingClientRect().y),
+      await usageToggle.elementHandle(),
+    );
+    expect(Math.abs(filesTop - usageTop)).toBeLessThan(2);
     await filesToggle.focus();
     await page.keyboard.press('Enter');
     await expect(filesToggle).toHaveAttribute('aria-expanded', 'true');
@@ -372,12 +373,17 @@ test('edits of the agent memory open in their own card beside Files edited', asy
   await expect(filesToggle.locator('.count')).toHaveText('3');
   await expect(memoryToggle.locator('.count')).toHaveText('3');
   await expect(memoryToggle).toHaveAttribute('aria-expanded', 'false');
-  const [filesBounds, memoryBounds] = await Promise.all([
-    filesToggle.boundingBox(),
-    memoryToggle.boundingBox(),
-  ]);
-  expect(Math.abs(filesBounds!.y - memoryBounds!.y)).toBeLessThan(2);
-  expect(memoryBounds!.x).toBeGreaterThan(filesBounds!.x);
+  // Both in one frame: the chat may still be gliding to the end of the reply just sent.
+  const [filesBounds, memoryBounds] = await filesToggle.evaluate(
+    (files, memory) =>
+      [files, memory!].map((button) => {
+        const { x, y } = button.getBoundingClientRect();
+        return { x, y };
+      }),
+    await memoryToggle.elementHandle(),
+  );
+  expect(Math.abs(filesBounds.y - memoryBounds.y)).toBeLessThan(2);
+  expect(memoryBounds.x).toBeGreaterThan(filesBounds.x);
 
   await filesToggle.click();
   const files = first.locator('.file-changes').first();
