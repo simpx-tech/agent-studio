@@ -725,6 +725,19 @@
   // Runs after the reader scrolls, expands, or collapses content.
   function readingPosition() {
     if (glide) {
+  // A scroll event arrives a frame after the scroll it reports. When the window becomes
+  // narrower or shorter before the event of the chat's own return to its end arrives, as WebKit
+  // orders them, the event finds the end moved away though nobody scrolled: reading the
+  // position then stopped following, and the resize observers left the chat short of its end.
+  // So an event that reports the position the chat was last read at or put at changes nothing.
+  let scrolledTo: { scroll: HTMLElement; top: number } | undefined;
+  function scrolled() {
+    const scroll = chatScroll;
+    if (!scroll) return;
+    const known = scrolledTo?.scroll === scroll && Math.abs(scrolledTo.top - scroll.scrollTop) < 1;
+    scrolledTo = { scroll, top: scroll.scrollTop };
+    if (!known) readingPosition();
+  }
       // The glide's own scrolling keeps the chat following; any other scroll ends it here.
       if (!glide.frame || Math.abs((chatScroll?.scrollTop ?? 0) - glide.top) < 1) return;
       stopGlide();
@@ -759,7 +772,9 @@
   const reducedMotion = () =>
     typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
   function stickToEnd(scroll: HTMLElement) {
-    if (!glide) scroll.scrollTop = scroll.scrollHeight;
+    if (glide) return;
+    scroll.scrollTop = scroll.scrollHeight;
+    scrolledTo = { scroll, top: scroll.scrollTop };
   }
   function startGlide(conversation: string) {
     if (glide?.conversation !== conversation || glide.frame || !chatScroll) return;
@@ -783,7 +798,7 @@
     // Output that keeps arriving cannot hold the glide open; following takes over from it.
     if (gap < 1 || now - current.start > 700) {
       glide = undefined;
-      scroll.scrollTop = scroll.scrollHeight;
+      stickToEnd(scroll);
       return;
     }
     const share = 1 - Math.exp(-Math.max(0, now - current.at) / 80);
@@ -5748,7 +5763,7 @@
           <div
             class="chat-scroll"
             bind:this={chatScroll}
-            onscroll={readingPosition}
+            onscroll={scrolled}
           >
             <div
               class="message-column"
