@@ -156,7 +156,8 @@ test('a rewound message brings its images back to the composer and sends them ag
   });
   await input.fill('Describe this');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  // The Stop button is also absent before a reply starts, so wait for the reply itself.
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
   const sent = await page.evaluate(
     () => JSON.parse(localStorage.getItem('test-last-request')!).messages[0].images,
   );
@@ -172,7 +173,7 @@ test('a rewound message brings its images back to the composer and sends them ag
   );
   expect(await page.evaluate(() => (window as any).chatImageReads)).toEqual([sent[0].hash]);
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Stop response' })).toHaveCount(0);
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
   const request = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
   expect(request.messages.map((m: any) => m.text)).toEqual(['Describe this']);
   expect(request.messages[0].images).toEqual([{ ...sent[0], id: expect.any(String) }]);
