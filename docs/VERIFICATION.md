@@ -1,5 +1,16 @@
 # Verification — 2026-09-08
 
+## Memory edits open in a Memories card beside Files edited — 2026-10-12
+
+Requested 2026-10-12: "Can you split files changes from claude and memory changes (separated collapsable card like the files changes)?"
+
+- `separateMemory` in `src/lib/file-changes.ts` splits a reply's and the chat's summarized edits by `memoryFolder`, which reads the recorded path alone: Claude's auto memory (`projects/<key>/memory/`, the key starting with a dash or a drive's `C--`), sub-agent `agent-memory/` and `agent-memory-local/` under `.claude` or a separate Claude profile, and Codex `memories/` under `.codex` or a separate Codex profile. Files edited counts and lists the rest. A **Memories** toggle with a brain icon follows it on replies that edited memory, opening a `FileChanges` card in its memory mode: the same scopes, rows and diffs, paths shown within their memory folder, the full path on hover, and empty texts that say memory. Nothing new is saved or synced, so replies saved earlier split too.
+- Real data: run over the user's `workspace.json`, the classifier put 155 of 11,811 recorded file edits in memory, every one under `~/.claude/projects/<key>/memory/` or `profiles/claude/<id>/projects/<key>/memory/`. Look-alikes stayed in Files edited: `.claude/worktrees/…` project files, `artifacts/relay-memory/…`, `projects/<key>/scratch/…` and a standalone project's own `.claude/` files. 91 replies in 40 chats show the new toggle. Only paths and counts were printed.
+- Unit: `file-changes.test.ts` checks eight memory paths (Windows, WSL and profile auto memory, both sub-agent scopes, Codex in its home and a profile), eight look-alikes, the paths shown within each memory folder, a split that keeps `recorded` and `limited`, and an older reply whose memory edit keeps its missing diff in the memory card.
+- Browser: `tests/file-changes.spec.ts` adds a scenario with a reply that edits two project files and two memory files, then one that edits only a project file. Files edited counts 2 and lists only the project files; Memories counts 2 on the same row, opens in place of Files edited, lists `feedback_tests.md` and `MEMORY.md` with their full paths on hover and diffs, keeps its All chat changes scope across panel switches, and is absent from the reply that left memory alone. Screenshots: `artifacts/memory-changes-desktop.png`, and `artifacts/memory-changes/phone.png` from a throwaway phone-width run, where the toggle wraps to the row's second line.
+- Pipeline: `npm run check` (0 errors in 5,232 files), 655 Vitest tests, the build, 349 browser tests on the first run and `cargo fmt --check` passed. Clippy and the Rust tests were not rerun because no Rust file changed. Logs: `artifacts/memory-changes/`.
+- Not exercised: the native app and real Claude or Codex runs. The split reads paths the app already records, and the scenarios ran in Edge, the engine of WebView2.
+
 ## Running replies survive a WebView2 network service restart, and images attach after it — 2026-10-11
 
 Requested 2026-10-11: "I got this two errors on all my chats, investigate what happened and fix it", with a reply that failed after 57 minutes with **This conversation is already responding. Stop it or wait for it to finish.**, and a draft whose image showed **The images could not be kept: Send the image bytes**.

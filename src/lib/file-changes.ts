@@ -52,6 +52,8 @@ export function latestFileChanges(a?: FileChanges, b?: FileChanges) {
 
 export type FileSummary = FilePatch & { added?: number; removed?: number; unavailable?: string };
 export type ChangeSummary = { files: FileSummary[]; limited: boolean; recorded: boolean };
+/** A reply's or chat's file edits apart from those of the agents' own memory. */
+export type SeparatedChanges = { files: ChangeSummary; memory: ChangeSummary };
 
 const displaySlashes = (path: string) => path.replaceAll('\\', '/').replace(/^\.\//, '');
 const absolutePath = (path: string) => path.startsWith('/') || /^[a-z]:\//i.test(path);
@@ -93,6 +95,33 @@ export function relativeFilePath(path: string, base?: string): string {
   )
     return normalized.slice(prefix.length);
   return normalized;
+}
+
+// Where agents keep their memory: Claude's auto memory in `projects/<project>/memory/` of its
+// configuration folder, whose project key is the project's path with every other character a
+// dash (so it starts with a dash, or with a drive's `C--`), its sub-agents' `agent-memory/` and
+// `agent-memory-local/`, and Codex's `memories/`, in the CLIs' own folders and in Agent
+// Studio's separate profiles.
+const memoryPattern =
+  /^((?:.*?\/)?(?:projects\/(?:-|[a-z]--)[a-z0-9-]*\/memory|(?:\.claude|profiles\/claude\/[^/]+)\/agent-memory(?:-local)?|(?:\.codex|profiles\/codex\/[^/]+)\/memories))\//i;
+
+/** The memory folder an agent keeps this file in, if it is one of its memory files. */
+export const memoryFolder = (path: string) => displaySlashes(path).match(memoryPattern)?.[1];
+
+/** A memory file's path within its memory folder; any other path whole. */
+export function memoryFilePath(path: string): string {
+  const normalized = displaySlashes(path);
+  const folder = memoryFolder(normalized);
+  return folder === undefined ? normalized : normalized.slice(folder.length + 1);
+}
+
+/** Sets edits of the agents' own memory apart from the other file edits. */
+export function separateMemory(summary: ChangeSummary): SeparatedChanges {
+  const files: FileSummary[] = [],
+    memory: FileSummary[] = [];
+  for (const file of summary.files)
+    (memoryFolder(file.path) === undefined ? files : memory).push(file);
+  return { files: { ...summary, files }, memory: { ...summary, files: memory } };
 }
 
 type Token = number | string;

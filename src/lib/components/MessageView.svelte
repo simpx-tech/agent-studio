@@ -22,7 +22,7 @@
   import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
-  import { summarizeFileChanges, type ChangeSummary } from '$lib/file-changes';
+  import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
   import { compactionLabel } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
@@ -73,7 +73,7 @@
     retryDisabled?: boolean;
     switchNotice?: string;
     timeTotal?: ReplyTimeTotal;
-    chatChanges?: ChangeSummary;
+    chatChanges?: SeparatedChanges;
     folder?: string;
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
     fork?: () => void;
@@ -91,7 +91,8 @@
     /** Opens a screen this reply saved, from the computer that keeps it. */
     openScreen?: (card: ScreenCard) => void;
   } = $props();
-  const responseChanges = $derived(summarizeFileChanges([message]));
+  const responseChanges = $derived(separateMemory(summarizeFileChanges([message])));
+  const allChanges = $derived(chatChanges ?? responseChanges);
   // A usage limit that stopped the reply: its Work history stays open, and a card of its own
   // follows it instead of the provider's line standing in for the answer.
   const limit = $derived(replyUsageLimit(message));
@@ -336,8 +337,10 @@
       <ReplyFooter
         {message}
         {timeTotal}
-        {responseChanges}
-        chatChanges={chatChanges ?? responseChanges}
+        responseChanges={responseChanges.files}
+        chatChanges={allChanges.files}
+        responseMemory={responseChanges.memory}
+        chatMemory={allChanges.memory}
         {folder}
         {background}
         {subagents}

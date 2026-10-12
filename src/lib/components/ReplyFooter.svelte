@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Bot, ChevronDown, FileCode2, Layers, ListChecks, Workflow } from '@lucide/svelte';
+  import { Bot, Brain, ChevronDown, FileCode2, Layers, ListChecks, Workflow } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import type { Message } from '$lib/domain';
   import { formatReplyTime, type ReplyTimeTotal } from '$lib/replies';
@@ -21,6 +21,8 @@
     timeTotal,
     responseChanges,
     chatChanges,
+    responseMemory,
+    chatMemory,
     folder,
     background = [],
     subagents = [],
@@ -29,8 +31,12 @@
   }: {
     message: Message;
     timeTotal?: ReplyTimeTotal;
+    /** File edits apart from the agent's memory, of this reply and of the whole chat. */
     responseChanges: ChangeSummary;
     chatChanges: ChangeSummary;
+    /** Edits of the agent's memory files, of this reply and of the whole chat. */
+    responseMemory: ChangeSummary;
+    chatMemory: ChangeSummary;
     folder?: string;
     /** Background work this reply started that still runs. */
     background?: BackgroundRun[];
@@ -42,9 +48,10 @@
     openedSubagent?: string;
   } = $props();
   // A running reply's row starts with its live elapsed time; a finished reply's with its
-  // timing and files. Plans, workflows, sub-agents and background work follow as compact
-  // toggles.
+  // timing, files and, when it edited them, memories. Plans, workflows, sub-agents and
+  // background work follow as compact toggles.
   const running = $derived(message.status === 'running');
+  const memories = $derived(responseMemory.files.length);
   const plan = $derived(planProgress(message));
   const workflows = $derived(message.nativeWorkflows?.runs ?? []);
   // One panel opens below the row at a time. Each renders when first opened and then stays,
@@ -58,7 +65,7 @@
   // Close a panel whose toggle is gone, such as background work that has finished.
   $effect(() => {
     const sections = [
-      ...(running ? [] : ['usage', 'files']),
+      ...(running ? [] : ['usage', 'files', ...(memories ? ['memory'] : [])]),
       ...(plan ? ['plan'] : []),
       ...workflows.map((run) => `workflow:${run.id}`),
       ...(subagents.length ? ['subagents'] : []),
@@ -239,6 +246,18 @@
       >{responseChanges.files.length || (responseChanges.recorded ? '0' : '—')}</span
     >
   </button>
+  {#if memories}<button
+      type="button"
+      class="footer-toggle files-toggle"
+      id={message.id + '-memory-toggle'}
+      aria-expanded={expanded === 'memory'}
+      aria-controls={message.id + '-memory'}
+      onclick={() => toggle('memory')}
+    >
+      <ChevronDown size={13} class="disclosure" aria-hidden="true" />
+      <Brain size={13} aria-hidden="true" />
+      <span>Memories</span><span class="count">{memories}</span>
+    </button>{/if}
 {/snippet}
 
 {#snippet finishedPanels()}
@@ -323,6 +342,21 @@
       <FileChanges response={responseChanges} chat={chatChanges} id={message.id} {folder} />
     {/if}
   </div>
+  {#if memories}<div
+      id={message.id + '-memory'}
+      role="region"
+      aria-labelledby={message.id + '-memory-toggle'}
+      hidden={expanded !== 'memory'}
+    >
+      {#if opened.has('memory')}
+        <FileChanges
+          memory
+          response={responseMemory}
+          chat={chatMemory}
+          id={message.id + '-memory'}
+        />
+      {/if}
+    </div>{/if}
 {/snippet}
 
 <style>

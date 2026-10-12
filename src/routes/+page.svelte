@@ -265,7 +265,7 @@
   let agentPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
   let preparingCommand = false;
-  import { summarizeFileChanges } from '$lib/file-changes';
+  import { separateMemory, summarizeFileChanges } from '$lib/file-changes';
   import MessageView from '$lib/components/MessageView.svelte';
   import ArtifactViewer from '$lib/components/ArtifactViewer.svelte';
   import SubagentPanel from '$lib/components/SubagentPanel.svelte';
@@ -1372,7 +1372,7 @@
   );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
   const chatChanges = $derived(
-    summarizeFileChanges((active?.messages ?? []).filter((m) => !m.filesUndone)),
+    separateMemory(summarizeFileChanges((active?.messages ?? []).filter((m) => !m.filesUndone))),
   );
   const nextReplyChanged = $derived(
     !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),

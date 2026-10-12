@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   fileChangesSchema,
   fileChangeBase,
+  memoryFilePath,
+  memoryFolder,
   relativeFilePath,
+  separateMemory,
   summarizeFileChanges,
   type FilePatch,
   type DiffHunk,
@@ -300,6 +303,73 @@ describe('recorded file changes', () => {
     expect(
       mergeShared(base, local, remote).conversations[0].messages[0].fileChanges,
     ).toBeUndefined();
+  });
+  it('sets edits of the agent memory apart from the other file edits', () => {
+    const memory = [
+      // Claude's auto memory in its own folder, a separate profile and a WSL distribution.
+      'C:\\Users\\Ana\\.claude\\projects\\C--Users-Ana-repo\\memory\\MEMORY.md',
+      'C:/Users/Ana/AppData/Local/com.vinicius.agentstudio/profiles/claude/1a6b0e42-43a9-4655-b340-0f54ca3a2514/projects/D--Unreal-Projects-game/memory/feedback.md',
+      '/home/ana/.claude/projects/-home-ana-repo/memory/notes/topic.md',
+      '/home/ana/.local/share/com.vinicius.agentstudio/profiles/claude/b2/projects/-mnt-c-repo/memory/a.md',
+      // Sub-agent memory in the user and project scopes, and Codex's memories.
+      'C:/Users/Ana/.claude/agent-memory/reviewer/MEMORY.md',
+      'D:/repo/.claude/agent-memory-local/reviewer/MEMORY.md',
+      '/home/ana/.codex/memories/MEMORY.md',
+      'C:/Users/Ana/AppData/Local/com.vinicius.agentstudio/profiles/codex/c3/memories/memory_summary.md',
+    ];
+    const other = [
+      'C:/repo/src/app.ts',
+      'D:/Unreal Projects/arcanika/.claude/worktrees/agent-a92/Source/World.cpp',
+      'C:/Users/Ana/Documents/agent-studio/artifacts/relay-memory/heap.md',
+      'C:/Users/Ana/.claude/projects/C--Users-Ana-repo/scratch/notes.md',
+      'C:/repo/projects/app/memory/notes.md',
+      'C:/repo/.claude/CLAUDE.md',
+      'C:/repo/src/agent-memory/store.ts',
+      'C:/repo/memories/MEMORY.md',
+    ];
+    for (const path of memory) expect(memoryFolder(path), path).toBeDefined();
+    for (const path of other) expect(memoryFolder(path), path).toBeUndefined();
+    expect(memory.map(memoryFilePath)).toEqual([
+      'MEMORY.md',
+      'feedback.md',
+      'notes/topic.md',
+      'a.md',
+      'reviewer/MEMORY.md',
+      'reviewer/MEMORY.md',
+      'MEMORY.md',
+      'memory_summary.md',
+    ]);
+    expect(memoryFilePath('C:\\repo\\src\\app.ts')).toBe('C:/repo/src/app.ts');
+    const all = separateMemory(
+      summarizeFileChanges([reply([...memory, ...other].map((path) => patch('a', 'b', path)))]),
+    );
+    expect(all.files.files.map((f) => f.path).sort()).toEqual([...other].sort());
+    expect(all.memory.files.map((f) => f.path).sort()).toEqual([...memory].sort());
+    expect(all.memory.files.every((f) => f.hunks?.length)).toBe(true);
+    expect(all.memory).toMatchObject({ recorded: true, limited: false });
+    // An older reply's memory edit keeps its missing diff in the memory card.
+    const old = reply([]);
+    delete old.fileChanges;
+    old.blocks.push({
+      type: 'activity',
+      text: 'Edit',
+      tool: {
+        id: 'old',
+        revision: 1,
+        category: 'tool',
+        name: 'Edit',
+        operation: 'edit',
+        status: 'complete',
+        path: memory[0],
+        facts: [],
+        sources: [],
+        agents: [],
+      },
+    });
+    const legacy = separateMemory(summarizeFileChanges([old]));
+    expect(legacy.files).toEqual({ files: [], recorded: false, limited: false });
+    expect(legacy.memory.files).toMatchObject([{ path: memory[0], kind: 'modified' }]);
+    expect(legacy.memory.files[0].unavailable).toBeDefined();
   });
   it('rejects malformed hunks and duplicate IDs, and accepts edits of any size', () => {
     const data = snapshot([patch('a', 'b')]);

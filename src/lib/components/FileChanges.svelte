@@ -1,6 +1,11 @@
 <script lang="ts">
   import { ChevronRight } from '@lucide/svelte';
-  import { fileChangeBase, relativeFilePath, type ChangeSummary } from '$lib/file-changes';
+  import {
+    fileChangeBase,
+    memoryFilePath,
+    relativeFilePath,
+    type ChangeSummary,
+  } from '$lib/file-changes';
   import { fileTypeIcon } from '$lib/tool-presentation';
   import { revealedDisclosures } from '$lib/disclosures';
   import DiffTable from './DiffTable.svelte';
@@ -10,11 +15,14 @@
     chat,
     id,
     folder,
+    memory = false,
   }: {
     response: ChangeSummary;
     chat: ChangeSummary;
     id: string;
     folder?: string;
+    /** Edits of the agent's memory, each shown within its memory folder. */
+    memory?: boolean;
   } = $props();
   let mode = $state<'response' | 'chat'>('response');
   const initialFileLimit = 5;
@@ -28,12 +36,14 @@
   const added = $derived(existingFiles.reduce((n, f) => n + (f.added ?? 0), 0));
   const removed = $derived(existingFiles.reduce((n, f) => n + (f.removed ?? 0), 0));
   const base = $derived(
-    fileChangeBase(
-      chat.files.flatMap((file) =>
-        file.previousPath ? [file.previousPath, file.path] : [file.path],
-      ),
-      folder,
-    ),
+    memory
+      ? undefined
+      : fileChangeBase(
+          chat.files.flatMap((file) =>
+            file.previousPath ? [file.previousPath, file.path] : [file.path],
+          ),
+          folder,
+        ),
   );
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
   // Diffs render when their file is first expanded.
@@ -41,7 +51,7 @@
   const fileKey = (file: ChangeSummary['files'][number]) =>
     `${mode}:${file.previousPath ?? ''}:${file.path}`;
   function displayPath(path: string) {
-    return relativeFilePath(path, base);
+    return memory ? memoryFilePath(path) : relativeFilePath(path, base);
   }
   function tabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -62,7 +72,11 @@
 <div class="file-changes">
   <div class="changes-body">
     <div class="changes-toolbar">
-      <div class="change-tabs" role="tablist" aria-label="File change scope">
+      <div
+        class="change-tabs"
+        role="tablist"
+        aria-label={memory ? 'Memory change scope' : 'File change scope'}
+      >
         <button
           role="tab"
           onkeydown={tabKey}
@@ -100,8 +114,8 @@
       <div class="file-list" id={`${id}-file-list`}>
         {#if !selected.files.length}<p class="empty-changes">
             {selected.recorded
-              ? 'No net file changes recorded.'
-              : 'File changes were not recorded for this response.'}
+              ? `No net ${memory ? 'memory' : 'file'} changes recorded.`
+              : `${memory ? 'Memory' : 'File'} changes were not recorded for this response.`}
           </p>{/if}
         {#each visibleFiles as file (fileKey(file))}
           {@const key = fileKey(file)}

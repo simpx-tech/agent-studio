@@ -326,3 +326,100 @@ for (const mobile of [false, true])
       '+<script>final</script>',
     ]);
   });
+
+test('edits of the agent memory open in their own card beside Files edited', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  const memory = 'C:\\Users\\Ana\\.claude\\projects\\C--Projects-studio\\memory\\';
+  const added = (path: string, line: string) => ({
+    path,
+    kind: 'added',
+    hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: ['+' + line] }],
+  });
+  for (const files of [
+    [
+      added('C:\\Projects\\studio\\src\\app.ts', 'export {};'),
+      added('C:\\Projects\\studio\\README.md', '# Studio'),
+      added(memory + 'MEMORY.md', '- [Tests](feedback_tests.md)'),
+      added(memory + 'feedback_tests.md', 'Run the tests in the foreground.'),
+    ],
+    [added('C:\\Projects\\studio\\docs\\notes.md', 'Notes')],
+  ]) {
+    await page.getByLabel('Message', { exact: true }).fill('Update the fixture');
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+    await page.evaluate((files) => {
+      (window as any).emitCapability({
+        kind: 'filechanges',
+        fileChanges: { revision: 1, limited: false, edits: [{ id: 'edit-1', files }] },
+      });
+      (window as any).emitCapability({ kind: 'text', text: 'Done.' });
+      (window as any).finishCapabilities('complete');
+    }, files);
+    await expect(page.locator('.message[data-status="running"]')).toHaveCount(0);
+  }
+  const footers = page.locator('.reply-footer');
+  const [first, last] = [footers.first(), footers.last()];
+  // A reply that left the memory alone has no Memories toggle.
+  const lastFiles = last.getByRole('button', { name: /Files edited/ });
+  await expect(lastFiles.locator('.count')).toHaveText('1');
+  await expect(last.getByRole('button', { name: /Memories/ })).toHaveCount(0);
+  const filesToggle = first.getByRole('button', { name: /Files edited/ });
+  const memoryToggle = first.getByRole('button', { name: /Memories/ });
+  await expect(filesToggle.locator('.count')).toHaveText('2');
+  await expect(memoryToggle.locator('.count')).toHaveText('2');
+  await expect(memoryToggle).toHaveAttribute('aria-expanded', 'false');
+  const [filesBounds, memoryBounds] = await Promise.all([
+    filesToggle.boundingBox(),
+    memoryToggle.boundingBox(),
+  ]);
+  expect(Math.abs(filesBounds!.y - memoryBounds!.y)).toBeLessThan(2);
+  expect(memoryBounds!.x).toBeGreaterThan(filesBounds!.x);
+
+  await filesToggle.click();
+  const files = first.locator('.file-changes').first();
+  await expect(files.locator('.file-path')).toHaveText(['README.md', 'src/app.ts']);
+  await memoryToggle.click();
+  await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(memoryToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(files.locator('.changes-toolbar')).not.toBeVisible();
+  const card = page.getByRole('region', { name: /Memories/ });
+  await expect(card.getByRole('tablist', { name: 'Memory change scope' })).toBeVisible();
+  await expect(card.locator('.file-path')).toHaveText(['feedback_tests.md', 'MEMORY.md']);
+  await expect(card.locator('.change-totals')).toContainText('2 files');
+  const index = card.locator('.changed-file').filter({ hasText: 'MEMORY.md' });
+  await expect(index.locator('summary')).toHaveAttribute('title', memory + 'MEMORY.md');
+  await expect(index.locator('.file-kind')).toHaveText('Added');
+  await index.locator('summary').click();
+  await expect(index.locator('.diff-code')).toHaveText('+- [Tests](feedback_tests.md)');
+  await card.getByRole('tab', { name: 'All chat changes', exact: true }).click();
+  await expect(card.locator('.file-path')).toHaveText(['feedback_tests.md', 'MEMORY.md']);
+  await filesToggle.click();
+  await expect(memoryToggle).toHaveAttribute('aria-expanded', 'false');
+  await files.getByRole('tab', { name: 'All chat changes', exact: true }).click();
+  await expect(files.locator('.file-path')).toHaveText([
+    'docs/notes.md',
+    'README.md',
+    'src/app.ts',
+  ]);
+  // Each card keeps its own scope across panel switches.
+  await memoryToggle.click();
+  await expect(card.getByRole('tab', { name: 'All chat changes', exact: true })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await card.getByRole('tab', { name: 'This response', exact: true }).click();
+  await card.getByTitle(memory + 'feedback_tests.md', { exact: true }).click();
+  await expect(card.locator('.changed-file[open] .diff-code')).toHaveText(
+    '+Run the tests in the foreground.',
+  );
+  await first.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'artifacts/memory-changes-desktop.png' });
+  await memoryToggle.click();
+  await expect(card).toHaveCount(0);
+  await filesToggle.click();
+  await expect(files.getByRole('tab', { name: 'All chat changes', exact: true })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+});
