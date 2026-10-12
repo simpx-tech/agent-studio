@@ -12,6 +12,7 @@
 // Activation waits for running replies (at most two hours), backs up private data, switches the
 // release and restarts only the relay. A failed health check restores the previous release and
 // data. The installer then replaces the public Windows download, keeping the previous package.
+// A new server, prepared by setup.sh, starts its relay with the first release it activates.
 //
 // The server also runs the desktop app as a host for its workspace (requested 2026-10-10), so
 // the other devices can start chats on it: the release's Linux AppImage, authenticated like the
@@ -340,6 +341,10 @@ export type System = {
   updaterChanged(commit: string): boolean;
   /** The release directory name the current link selects. */
   currentRelease(): string | undefined;
+  /** Whether nothing is at the current link's path yet: a new server, set up by setup.sh. */
+  newServer(): boolean;
+  /** Removes the current link again, after a new server's first release did not start. */
+  deselect(): void;
   serviceActive(): boolean;
   runningReplies(): number;
   stopService(): void;
@@ -363,6 +368,8 @@ export type System = {
   extractHost(version: string, appImage: Buffer): Promise<boolean>;
   /** The host version the host's current link selects. */
   currentHost(): string | undefined;
+  /** Installs the packages the host needs when missing, the app's own libraries among them. */
+  hostPackages(): void;
   /** Installs what the host needs: packages, its user, sudo, Claude Code and Codex, its unit. */
   provisionHost(): Promise<void>;
   selectHost(version: string): void;
@@ -485,6 +492,8 @@ async function stageHost(
       const data = await system.download(appImage);
       const signature = (await system.download(appImageSignature)).toString('utf8');
       authenticateAsset(data, signature, appImage, release, key, 'AppImage');
+      // The check below starts the app, which a new server cannot load without its libraries.
+      system.hostPackages();
       system.log(`Extracting the ${release.tag} host.`);
       if (!(await system.extractHost(release.version, data)))
         return unsupported(`${release.tag} does not run as a server.`);
@@ -780,35 +789,39 @@ async function activate(
     system.log(`${release.tag} is already the current release.`);
     return;
   }
-  if (!current) return fail(`${config.root}/current does not select a release.`);
-  if (!system.serviceActive())
-    return wait('service', `${config.service} is not running; ${release.tag} waits for it.`);
-  let running: number;
-  try {
-    running = system.runningReplies();
-  } catch (error) {
-    system.log(`Cannot read workspace checkpoints (${message(error)}); treating them as busy.`);
-    running = 1;
+  // A new server has no release yet, so no relay runs and no reply can: its first one starts it.
+  const first = !current && system.newServer();
+  if (!current && !first) return fail(`${config.root}/current does not select a release.`);
+  if (current) {
+    if (!system.serviceActive())
+      return wait('service', `${config.service} is not running; ${release.tag} waits for it.`);
+    let running: number;
+    try {
+      running = system.runningReplies();
+    } catch (error) {
+      system.log(`Cannot read workspace checkpoints (${message(error)}); treating them as busy.`);
+      running = 1;
+    }
+    const replies = running === 1 ? '1 reply is' : `${running} replies are`;
+    if (running && system.now().getTime() - Date.parse(release.staged!) < config.deferLimit)
+      return wait(
+        'replies',
+        `Waiting up to two hours before activating ${release.tag}: ${replies} running.`,
+      );
+    if (running) system.log(`Activating ${release.tag} although ${replies} still marked running.`);
   }
-  const replies = running === 1 ? '1 reply is' : `${running} replies are`;
-  if (running && system.now().getTime() - Date.parse(release.staged!) < config.deferLimit)
-    return wait(
-      'replies',
-      `Waiting up to two hours before activating ${release.tag}: ${replies} running.`,
-    );
-  if (running) system.log(`Activating ${release.tag} although ${replies} still marked running.`);
 
   system.stopService();
   let backup: string;
   try {
     backup = system.backup(release.commit);
   } catch (error) {
-    system.startService();
+    if (current) system.startService();
     return fail(
       `Could not back up private data before activating ${release.tag}: ${message(error)}`,
     );
   }
-  release.previous = current;
+  if (current) release.previous = current;
   release.backup = backup;
   save();
   let ok = false;
@@ -821,8 +834,26 @@ async function activate(
   }
   if (ok) {
     complete(backup);
-    system.log(`Activated ${release.tag}; ${current} and the private data backup are retained.`);
+    system.log(
+      current
+        ? `Activated ${release.tag}; ${current} and the private data backup are retained.`
+        : `Activated ${release.tag}, this server's first release.`,
+    );
     return;
+  }
+  if (!current) {
+    // Without a release to go back to, the relay stays stopped, as it was before.
+    let kept = '';
+    try {
+      system.deselect();
+      system.stopService();
+      kept = system.restore(backup, release.commit);
+    } catch (error) {
+      system.log(`Stopping ${release.tag} failed: ${message(error)}`);
+    }
+    return fail(
+      `${release.tag} failed its health check, so the relay stays stopped.${kept ? ` Data it wrote is kept in ${kept}.` : ''}`,
+    );
   }
 
   system.log(`${release.tag} failed its health check; restoring ${current} and its data.`);
@@ -1199,6 +1230,10 @@ export function createSystem(config: Config): System {
         return undefined;
       }
     },
+    newServer: () => !exists(current),
+    deselect() {
+      if (exists(current) && lstatSync(current).isSymbolicLink()) rmSync(current);
+    },
     serviceActive: () =>
       spawnSync('systemctl', ['is-active', '--quiet', config.service]).status === 0,
     runningReplies: () => runningReplies(config.data),
@@ -1329,24 +1364,45 @@ export function createSystem(config: Config): System {
         return undefined;
       }
     },
-    async provisionHost() {
-      const host = config.host;
-      if (!host) return;
+    hostPackages() {
+      const lib = '/usr/lib/x86_64-linux-gnu';
       // A virtual display, a session bus of its own, sudo, and curl for the CLIs' installers.
-      const programs = [
+      // The AppImage leaves some libraries to the system, as every desktop has them, and WebKit
+      // loads GLES as it starts; a new server has none of them (found on a fresh Debian 13).
+      const needs = [
         ['/usr/bin/Xvfb', 'xvfb'],
         ['/usr/bin/xvfb-run', 'xvfb'],
         ['/usr/bin/xauth', 'xauth'],
         ['/usr/bin/dbus-run-session', 'dbus-daemon'],
         ['/usr/bin/sudo', 'sudo'],
         ['/usr/bin/curl', 'curl'],
+        [`${lib}/libasound.so.2`, 'libasound2'],
+        [`${lib}/libfontconfig.so.1`, 'libfontconfig1'],
+        [`${lib}/libharfbuzz.so.0`, 'libharfbuzz0b'],
+        [`${lib}/libfribidi.so.0`, 'libfribidi0'],
+        [`${lib}/libgpg-error.so.0`, 'libgpg-error0'],
+        [`${lib}/libwayland-client.so.0`, 'libwayland-client0'],
+        [`${lib}/libEGL.so.1`, 'libegl1'],
+        [`${lib}/libGLESv2.so.2`, 'libgles2'],
       ];
-      const missing = [...new Set(programs.filter(([file]) => !exists(file)).map(([, p]) => p))];
+      const missing = [...new Set(needs.filter(([file]) => !exists(file)).map(([, p]) => p))];
       if (missing.length) {
         system.log(`Installing ${missing.join(', ')} for the host.`);
         transient(['/usr/bin/apt-get', 'update', '-q']);
-        transient(['/usr/bin/apt-get', 'install', '-y', '-q', '--no-install-recommends', ...missing]);
+        transient([
+          '/usr/bin/apt-get',
+          'install',
+          '-y',
+          '-q',
+          '--no-install-recommends',
+          ...missing,
+        ]);
       }
+    },
+    async provisionHost() {
+      const host = config.host;
+      if (!host) return;
+      system.hostPackages();
       if (spawnSync('id', ['-u', host.user], { stdio: 'ignore' }).status !== 0) {
         transient([
           '/usr/sbin/useradd',

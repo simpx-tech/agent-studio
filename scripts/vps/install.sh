@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs or updates the automatic release updater on the production VPS. Copy the repository's
-# scripts directory and src-tauri/tauri.conf.json to the server, then run as root:
+# Installs or updates the automatic release updater on the production VPS, or on a new server
+# from setup.sh. Copy the repository's scripts directory and src-tauri/tauri.conf.json to the
+# server, then run as root:
 #
 #   bash install.sh <scripts directory> <tauri.conf.json>
 #
@@ -16,7 +17,6 @@ updater="$root/updater"
 test -x "$node"
 test -f "$source/release.ts"
 test -f "$source/vps/update.ts"
-test -L "$root/current"
 
 # Builds run as this account, which cannot read the relay's private data.
 if ! id agent-studio-build >/dev/null 2>&1; then

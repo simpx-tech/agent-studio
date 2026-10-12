@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -96,6 +96,8 @@ function fake() {
     saved: new Map<string, Buffer>(),
     staged: new Set<string>(),
     current: A as string | undefined,
+    /** Something that selects no release is at the current link's path. */
+    foreign: false,
     active: true,
     running: 0,
     healthy: (_release?: string) => true,
@@ -146,6 +148,11 @@ function fake() {
     releaseKey: (commit) => env.releaseKeys[commit],
     updaterChanged: () => false,
     currentRelease: () => env.current,
+    newServer: () => env.current === undefined && !env.foreign,
+    deselect: () => {
+      calls.push('deselect');
+      env.current = undefined;
+    },
     serviceActive: () => env.active,
     runningReplies: () => env.running,
     stopService: () => {
@@ -189,6 +196,9 @@ function fake() {
       return true;
     },
     currentHost: () => env.host,
+    hostPackages: () => {
+      calls.push('host packages');
+    },
     provisionHost: async () => {
       calls.push('provision host');
       if (env.provisionError) throw env.provisionError;
@@ -494,6 +504,72 @@ describe('automatic updates', () => {
     await expect(broken.run()).rejects.toThrow(/Intervene manually/);
   });
 
+  it('starts a new server’s relay with its first release', async () => {
+    const f = fake();
+    f.env.current = undefined;
+    f.env.active = false;
+    // Checkpoints copied from another server cannot hold a relay that never ran here.
+    f.env.running = 2;
+    f.publish('0.2.1', B);
+    await f.run();
+    expect(f.calls).toEqual([
+      'download Agent-Studio_0.2.1_x64-setup.exe',
+      'download Agent-Studio_0.2.1_x64-setup.exe.sig',
+      `build ${B}`,
+      'stop',
+      `backup ${B}`,
+      `select ${B}`,
+      'start',
+      `publish ${B} ${installer.length}`,
+      `discard ${B}`,
+    ]);
+    expect(f.env.state.release).toMatchObject({ phase: 'active', download: 'published' });
+    expect(f.env.state.release?.previous).toBeUndefined();
+    expect(f.env.state.history).toEqual([expect.objectContaining({ tag: 'v0.2.1', commit: B })]);
+    expect(f.logs).toContain("Activated v0.2.1, this server's first release.");
+  });
+
+  it('keeps a new server’s relay stopped when its first release fails, until a retry', async () => {
+    const f = fake();
+    f.env.current = undefined;
+    f.env.active = false;
+    f.env.healthy = () => false;
+    f.publish('0.2.1', B);
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 failed its health check, so the relay stays stopped. Data it wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}.`,
+    );
+    expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
+      'stop',
+      `backup ${B}`,
+      `select ${B}`,
+      'start',
+      'deselect',
+      'stop',
+      `restore /var/backups/agent-studio/pre-${B}.tar.gz`,
+    ]);
+    expect(f.env.current).toBeUndefined();
+    expect(f.env.active).toBe(false);
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(f.env.state.history).toEqual([]);
+
+    f.env.healthy = () => true;
+    retry(f.env.state);
+    await f.run();
+    expect(f.env.state.release).toMatchObject({ phase: 'active' });
+    expect(f.env.current).toBe(B);
+    expect(f.calls.filter((call) => call.startsWith('build'))).toHaveLength(1);
+  });
+
+  it('never replaces a current link that selects no release', async () => {
+    const f = fake();
+    f.env.current = undefined;
+    f.env.foreign = true;
+    f.publish('0.2.1', B);
+    await expect(f.run()).rejects.toThrow('/opt/agent-studio/current does not select a release.');
+    expect(f.calls).not.toContain('stop');
+    expect(f.calls.some((call) => call.startsWith('select'))).toBe(false);
+  });
+
   it('records a release that is already live without restarting it', async () => {
     const f = fake();
     f.env.current = B;
@@ -599,6 +675,7 @@ describe('server host', () => {
       'write host key',
       'download Agent-Studio_0.9.0_amd64.AppImage',
       'download Agent-Studio_0.9.0_amd64.AppImage.sig',
+      'host packages',
       `extract host 0.9.0 ${appImage.length}`,
       'provision host',
       'select host 0.9.0',
@@ -611,6 +688,30 @@ describe('server host', () => {
     f.calls.length = 0;
     await f.run({ host });
     expect(f.calls).toEqual([]);
+  });
+
+  it('sets up a new server’s relay and host in one run', async () => {
+    const f = fake();
+    f.env.current = undefined;
+    f.env.active = false;
+    f.env.relayKey = key;
+    f.publish('0.9.0', B, { linux: true });
+    await f.run({ host });
+    expect(f.calls).toEqual([
+      ...relayCalls(B),
+      'write host key',
+      'download Agent-Studio_0.9.0_amd64.AppImage',
+      'download Agent-Studio_0.9.0_amd64.AppImage.sig',
+      'host packages',
+      `extract host 0.9.0 ${appImage.length}`,
+      'provision host',
+      'select host 0.9.0',
+      'restart host',
+      'prune host 0.9.0',
+    ]);
+    expect(f.env.state.release).toMatchObject({ phase: 'active', download: 'published' });
+    expect(f.env.state.host).toMatchObject({ phase: 'active' });
+    expect(f.env.state.host?.previous).toBeUndefined();
   });
 
   it('restarts the host only once no reply runs, or after two hours', async () => {
@@ -645,6 +746,7 @@ describe('server host', () => {
       expect(f.env.state.release).toMatchObject({ phase: 'active' });
       expect(f.env.state.host).toMatchObject({ phase: 'failed' });
       expect(f.calls.some((call) => call.startsWith('extract host'))).toBe(false);
+      expect(f.calls).not.toContain('host packages');
       expect(f.env.host).toBe('0.8.9');
       await f.run({ host });
     }
@@ -786,5 +888,40 @@ describe('server host', () => {
     expect(relayKeyIn(`# key\nexport AGENT_STUDIO_RELAY_TOKEN="${value}"\r\n`)).toBe(value);
     expect(relayKeyIn('AGENT_STUDIO_RELAY_TOKEN=short')).toBeUndefined();
     expect(relayKeyIn('OTHER=1')).toBeUndefined();
+  });
+});
+
+describe('server setup', () => {
+  const file = (path: string) =>
+    readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const relay = readConfig({});
+
+  it('installs the Node runtime that the services and the updater run', () => {
+    const setup = file('scripts/vps/setup.sh');
+    const version = /^node_version=(\d+\.\d+\.\d+)$/m.exec(setup)?.[1];
+    expect(version).toBeDefined();
+    expect(setup).toMatch(/^node_sha256=[0-9a-f]{64}$/m);
+    for (const path of [
+      'scripts/vps/agent-studio.service',
+      'scripts/vps/agent-studio-update.service',
+      'scripts/vps/install.sh',
+    ])
+      expect(file(path)).toContain(`/runtimes/node-v${version}-linux-x64/bin/node`);
+  });
+
+  it('runs the relay where the updater activates, probes and publishes', () => {
+    const unit = file('scripts/vps/agent-studio.service').split('\n');
+    for (const line of [
+      `WorkingDirectory=${relay.root}/current`,
+      `EnvironmentFile=${relay.host && relay.host.relayEnv}`,
+      `Environment=AGENT_STUDIO_RELAY_PORT=${relay.port}`,
+      `Environment=AGENT_STUDIO_RELAY_DATA=${relay.data}`,
+      `Environment=AGENT_STUDIO_WEB_DIR=${relay.root}/current/build`,
+      `Environment=AGENT_STUDIO_DOWNLOADS_DIR=${relay.root}/downloads`,
+      `ReadWritePaths=${relay.data}`,
+    ])
+      expect(unit).toContain(line);
+    expect(unit.some((line) => /^(MemoryMax|MemoryHigh|CPUQuota)=/.test(line))).toBe(false);
+    expect(file('scripts/vps/setup.sh')).toMatch(new RegExp(`^port=${relay.port}$`, 'm'));
   });
 });

@@ -1,0 +1,36 @@
+[Unit]
+Description=Agent Studio PWA and relay
+Documentation=https://github.com/simpx-tech/agent-studio/blob/main/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-studio
+Group=agent-studio
+WorkingDirectory=/opt/agent-studio/current
+EnvironmentFile=/etc/agent-studio/relay.env
+Environment=NODE_ENV=production
+Environment=AGENT_STUDIO_RELAY_HOST=127.0.0.1
+Environment=AGENT_STUDIO_RELAY_PORT=4317
+Environment=AGENT_STUDIO_RELAY_DATA=/var/lib/agent-studio
+Environment=AGENT_STUDIO_WEB_DIR=/opt/agent-studio/current/build
+Environment=AGENT_STUDIO_DOWNLOADS_DIR=/opt/agent-studio/downloads
+ExecStart=/opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node relay/start.ts
+Restart=on-failure
+RestartSec=3
+# No memory, CPU or task cap (requested 2026-10-10): the relay stops only where the machine does.
+# setup.sh lets Node's heap grow to the machine's memory in the memory.conf drop-in.
+TasksMax=infinity
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-studio
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
