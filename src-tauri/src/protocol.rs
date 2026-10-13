@@ -48,6 +48,10 @@ pub enum RunEvent {
     },
     Steering {
         steering: crate::providers::steering::Receipt,
+        /// When this computer confirmed the input, which dates its place in the reply. Beside
+        /// the receipt, whose shape earlier releases validate strictly.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
     },
     AccountUsage {
         #[serde(rename = "accountUsage")]

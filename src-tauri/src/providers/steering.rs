@@ -128,6 +128,7 @@ impl Session {
                                 run_id: self.run_id.clone(),
                                 sequence: index + 1,
                             },
+                            at: confirmed_at(),
                         });
                     }
                 }
@@ -142,6 +143,14 @@ impl Drop for Session {
             runs.remove(&self.run_id);
         }
     }
+}
+/// The time an input was confirmed, as the page writes its own times.
+fn confirmed_at() -> Option<String> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    chrono::DateTime::from_timestamp_millis(i64::try_from(since.as_millis()).ok()?)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 #[cfg(test)]
@@ -184,10 +193,16 @@ mod tests {
             .is_err());
         session.delivered(delivery, Ok(()));
         task.await.unwrap().unwrap();
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            RunEvent::Steering { .. }
-        ));
+        // The time it was confirmed travels beside the receipt, whose four fields earlier
+        // releases validate strictly.
+        let event = serde_json::to_value(events.recv().await.unwrap()).unwrap();
+        assert_eq!(event["kind"], "steering");
+        let mut fields: Vec<_> = event["steering"].as_object().unwrap().keys().collect();
+        fields.sort();
+        assert_eq!(fields, ["id", "runId", "sequence", "text"]);
+        assert_eq!(event["steering"]["id"], value.id);
+        let at = event["at"].as_str().unwrap();
+        assert!(at.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(at).is_ok());
         hub.send("run", Some("account"), value.clone())
             .await
             .unwrap();

@@ -17,7 +17,12 @@ import { reasoningBlockSchema } from './reasoning.ts';
 import { questionsSchema, questionHistory, type QuestionRequest } from './questions.ts';
 import type { QuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptsSchema, type ElicitationReceipt } from './elicitations.ts';
-import { steeringSchema, steeringHistory, type SteeringReceipt } from './steering.ts';
+import {
+  steeringSchema,
+  steeringPlacesSchema,
+  steeringHistory,
+  type SteeringReceipt,
+} from './steering.ts';
 import { usageLimitSchema, type UsageLimit } from './usage-limits.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
@@ -212,6 +217,8 @@ export const messageSchema = z
     questions: questionsSchema.optional(),
     elicitations: elicitationReceiptsSchema.optional(),
     steering: steeringSchema.optional(),
+    // Where each of those steers arrived among the reply's work, which divides there.
+    steeringPlaces: steeringPlacesSchema.optional(),
     compact: z.boolean().optional(),
     compactions: compactionsSchema.optional(),
     fileChanges: fileChangesSchema.optional(),
@@ -353,6 +360,8 @@ export type RunEvent = TokenUsage & {
   questionDraft?: QuestionDraft;
   elicitation?: ElicitationReceipt;
   steering?: SteeringReceipt;
+  // When the reply's computer confirmed that steer.
+  at?: string;
   compaction?: Compaction;
   fileChanges?: FileChanges;
   workflow?: WorkflowProgress;

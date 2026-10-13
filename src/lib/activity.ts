@@ -11,7 +11,7 @@ import { screenCardSchema, mergeScreenCards } from './screens.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { applyQuestionDraft } from './question-drafts.ts';
 import { elicitationReceiptSchema, mergeElicitations } from './elicitations.ts';
-import { steeringReceiptSchema, mergeSteering } from './steering.ts';
+import { steeringReceiptSchema, mergeSteering, mergeSteeringPlaces } from './steering.ts';
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, mergeReasoningBlocks } from './reasoning.ts';
 import { usageLimitSchema, latestUsageLimit } from './usage-limits.ts';
@@ -238,8 +238,20 @@ export function applyRunEvent(message: Message, event: RunEvent) {
   }
   if (event.kind === 'steering') {
     const parsed = steeringReceiptSchema.safeParse(event.steering);
-    if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId)
+    if (message.role === 'assistant' && parsed.success && parsed.data.runId === message.runId) {
+      const held = message.steering?.length ?? 0;
       message.steering = mergeSteering(message.steering, [parsed.data]);
+      // A steer divides the reply's work where it arrived: its first arrival records how much
+      // the reply held until then. One already held gets no place from what came since.
+      if (message.steering.length > held)
+        message.steeringPlaces = mergeSteeringPlaces(message.steeringPlaces, [
+          {
+            id: parsed.data.id,
+            after: recordedWork(message),
+            ...(typeof event.at === 'string' && event.at ? { at: event.at } : {}),
+          },
+        ]);
+    }
     return;
   }
   if (event.kind === 'usagelimit') {
@@ -502,7 +514,11 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
       parsed.success &&
       !events.some((e) => e.kind === 'steering' && e.steering?.id === parsed.data.id)
     )
-      events.push({ kind: 'steering', steering: parsed.data });
+      events.push({
+        kind: 'steering',
+        steering: parsed.data,
+        ...(typeof event.at === 'string' && event.at ? { at: event.at } : {}),
+      });
     return;
   }
   if (event.kind === 'reasoning') {

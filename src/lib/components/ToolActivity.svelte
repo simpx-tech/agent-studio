@@ -34,6 +34,7 @@
     liveAction,
     liveGroupItems,
     liveMemory,
+    type ActivityEntry,
     type ActivitySource,
     type LiveGroupItem,
   } from '$lib/activity-groups';
@@ -53,6 +54,8 @@
     blocks = [],
     compactions,
     finalText = '',
+    work,
+    continued = false,
     runId,
     connectionId,
     folder,
@@ -70,6 +73,10 @@
     /** Compactions of the reply's context, shown where each began among its work. */
     compactions?: Compaction[];
     finalText?: string;
+    /** One part of a steered reply's work, arranged by the reply, instead of `blocks`. */
+    work?: ActivityEntry[];
+    /** A steer follows this part: the reply went on in the next, which ends it. */
+    continued?: boolean;
     /** The reply's run, which finds results kept on the computer that ran it. */
     runId?: string;
     connectionId?: string;
@@ -100,7 +107,7 @@
     left: 'Left running',
   };
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
-  const entries = $derived(activityEntries(blocks, tools, finalText, compactions));
+  const entries = $derived(work ?? activityEntries(blocks, tools, finalText, compactions));
   const groups = $derived(groupActivityEntries(entries));
   const disclosures = revealedDisclosures();
   // The sub-agents these calls hold, whose own calls show in their conversations.
@@ -117,9 +124,12 @@
   // into its group's summary.
   const live = $derived(replyStatus === 'running');
   const memory = liveMemory();
-  // The latest entry showing anything; its latest call keeps its row until the agent moves on.
+  // The latest entry showing anything; its latest call keeps its row until the agent moves on,
+  // or the user steers the reply, which begins its next part.
   const lastKey = $derived(
-    groups.findLast((group) => group.kind !== 'tools' || group.tools.some(topLevel))?.key,
+    continued
+      ? undefined
+      : groups.findLast((group) => group.kind !== 'tools' || group.tools.some(topLevel))?.key,
   );
   // What a running sub-agent is doing: its latest call.
   function latestChild(tool: ToolActivity) {
@@ -611,9 +621,12 @@
         <summary aria-label="Work history" onclick={disclosures.reveal('history')}>
           <ChevronDown size={14} class="disclosure" />
           <span class="history-title">Work history</span>
-          {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
-            >{:else if limited}<span class="tool-status limited">Limit reached</span
-            >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
+          <!-- A steered reply ended in its last part, which says how. -->
+          {#if !continued}
+            {#if replyStatus === 'cancelled'}<span class="tool-status">Stopped</span
+              >{:else if limited}<span class="tool-status limited">Limit reached</span
+              >{:else if replyStatus === 'error'}<span class="tool-status failed">Failed</span>{/if}
+          {/if}
         </summary>
         {#if limited || disclosures.has('history')}{@render timeline()}
           <div class="history-end">

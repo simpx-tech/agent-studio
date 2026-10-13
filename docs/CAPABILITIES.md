@@ -349,3 +349,14 @@ Verification: `src/lib/drafts.test.ts`, `src/lib/browser-workspace.test.ts`, `te
 ## Message queue
 
 While a reply is running, the composer keeps accepting input. Enter or the queue button holds the message for that conversation and lists it above the composer, in order, with a control that returns it to the draft. Any number of messages can wait. When the reply completes, the first queued message is sent automatically with its images and any selected skill; each later one follows its own completed reply. If the reply is stopped or fails, or the composer cannot send when the reply ends, the queued messages return to the draft, oldest first and ahead of any text already typed, with all their images. Queued messages live only in the open session: they are never saved, exported, or relayed, and they do not steer the running turn. See docs/NATIVE-SESSIONS.md for the persistent process behind this.
+
+## Steers
+
+**Steer now** sends the composer's text to the reply that is running, instead of holding it for the next one. Once the provider acknowledges it, the steer joins the conversation as a message of your own (requested 2026-10-13): your bubble at the right edge, like the message that started the reply, with a small **Steer** mark above it and a tinted border that tell it from an ordinary message. It stands where the reply took it. What the reply had done until then stays above it, and the reply goes on below under its own heading, with the time of the steer:
+
+- While the reply runs, the calls and comments made before the steer keep their place above it, a call that was still running finishes there, and what the agent does next appears below. Until it does something, the part below shows the three waiting dots under **Responding**.
+- Once the reply ends, each part keeps its own **Work history**, closed like any other, and the answer, the reply's times, **Files edited** and its actions follow the last part. A reply that was stopped or failed says so in its last part only.
+- A steer the reply took before it had done anything stands above the reply, and steers taken one after the other stand together, with no empty heading between them.
+- A reply steered on a release before this one recorded no place for its steer, so the steer follows the reply's work, with only the answer after it.
+
+A steer is still part of its reply: it starts no reply of its own, offers no **Rewind here**, and a retry or a fresh native session sends it along as earlier context. See docs/NATIVE-SESSIONS.md for how its place is recorded and synced.

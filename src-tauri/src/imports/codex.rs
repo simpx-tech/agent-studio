@@ -267,7 +267,8 @@ struct Exchange {
     decoder: Decoder,
     events: Vec<RunEvent>,
     outputs: Vec<crate::protocol::activity::CapturedOutput>,
-    steering: Vec<String>,
+    /// The messages sent while this reply ran, each recorded among its events where it arrived.
+    steering: usize,
     any: bool,
 }
 impl Exchange {
@@ -279,7 +280,7 @@ impl Exchange {
             decoder,
             events: vec![],
             outputs: vec![],
-            steering: vec![],
+            steering: 0,
             any: false,
         }
     }
@@ -287,6 +288,20 @@ impl Exchange {
         self.events
             .extend(self.decoder.decode_codex_server(&value, root));
         self.outputs.extend(self.decoder.take_tool_outputs());
+    }
+    /// A message sent while the turn ran, placed after the items the turn had by then. The
+    /// import names its reply's run once it has one.
+    fn steer(&mut self, text: String) {
+        self.steering += 1;
+        self.events.push(RunEvent::Steering {
+            steering: crate::providers::steering::Receipt {
+                id: uuid::Uuid::new_v4().to_string(),
+                text,
+                run_id: String::new(),
+                sequence: self.steering,
+            },
+            at: None,
+        });
     }
 }
 
@@ -311,7 +326,7 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
                 if current.user.is_none() && !current.any {
                     current.user = Some(input);
                 } else if input.images.is_empty() && !input.text.trim_start().starts_with('/') {
-                    current.steering.push(input.text);
+                    current.steer(input.text);
                 } else {
                     exchanges.push(Exchange::new(Some(input), model.as_deref()));
                 }
@@ -350,7 +365,7 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
                 ),
                 _ => ("complete", None),
             };
-            let reply = (exchange.any || !exchange.steering.is_empty()).then(|| Reply {
+            let reply = (exchange.any || exchange.steering > 0).then(|| Reply {
                 events: super::coalesce(exchange.events),
                 outputs: exchange.outputs,
                 status,
@@ -367,7 +382,6 @@ pub fn convert(thread: &Value, turns: &[Value]) -> Conversion {
                 },
                 model: model.clone(),
                 reasoning: reasoning.clone(),
-                steering: exchange.steering,
             });
             if exchange.user.is_some() || reply.is_some() {
                 converted.push(Turn {
@@ -425,7 +439,30 @@ mod tests {
         let reply = first.reply.as_ref().unwrap();
         assert_eq!(reply.status, "complete");
         assert_eq!(reply.duration_ms, Some(9308));
-        assert_eq!(reply.steering, ["Keep the old colors"]);
+        // The message sent while the turn ran is its steering, after the command it followed
+        // and before the answer it changed.
+        let order: Vec<_> = reply
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Tool { .. } => Some("call".to_string()),
+                RunEvent::Steering { steering, at } => {
+                    assert!(at.is_none() && steering.run_id.is_empty());
+                    Some(format!("steer {} {}", steering.sequence, steering.text))
+                }
+                RunEvent::Progress { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "I'll check the menu.",
+                "call",
+                "steer 1 Keep the old colors",
+                "Fixed, with the old colors."
+            ]
+        );
         assert!(reply.events.iter().any(
             |e| matches!(e, RunEvent::Text { text } if text == "Fixed, with the old colors.")
         ));

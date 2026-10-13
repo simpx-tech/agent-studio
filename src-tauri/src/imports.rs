@@ -53,8 +53,6 @@ pub struct Reply {
     pub duration_ms: Option<u64>,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    /// Messages the person sent while the reply ran.
-    pub steering: Vec<String>,
 }
 pub struct Turn {
     pub user: Option<UserInput>,
@@ -1257,6 +1255,16 @@ fn image_bytes(image: &ImageInput, distribution: Option<&str>) -> Option<Vec<u8>
     }
 }
 
+/// Names the reply that took each message sent while it ran. A converter leaves them where
+/// they arrived among the reply's events, which is where the reply's work divides around them.
+fn steered_by(events: &mut [RunEvent], run_id: &str) {
+    for event in events {
+        if let RunEvent::Steering { steering, .. } = event {
+            steering.run_id = run_id.to_string();
+        }
+    }
+}
+
 fn now_iso() -> String {
     chrono::DateTime::from_timestamp_millis(now_ms() as i64)
         .map(|t| t.to_rfc3339())
@@ -1455,16 +1463,7 @@ pub async fn import(
         if let Some(reply) = turn.reply {
             let run_id = uuid::Uuid::new_v4().to_string();
             let mut events = reply.events;
-            for (index, text) in reply.steering.into_iter().enumerate() {
-                events.push(RunEvent::Steering {
-                    steering: crate::providers::steering::Receipt {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        text,
-                        run_id: run_id.clone(),
-                        sequence: index + 1,
-                    },
-                });
-            }
+            steered_by(&mut events, &run_id);
             if !reply.outputs.is_empty() {
                 if let Some(recorder) =
                     crate::tool_output::Recorder::new(app, &conversation, &run_id)
@@ -1817,6 +1816,58 @@ mod tests {
     }
 
     #[test]
+    fn a_message_sent_while_a_reply_ran_keeps_its_place_and_names_that_reply() {
+        let progress = |id: &str, revision: u64, text: &str| RunEvent::Progress {
+            id: id.into(),
+            revision,
+            text: text.into(),
+        };
+        let steer = |sequence: usize| RunEvent::Steering {
+            steering: crate::providers::steering::Receipt {
+                id: uuid::Uuid::new_v4().to_string(),
+                text: format!("steer {sequence}"),
+                run_id: String::new(),
+                sequence,
+            },
+            at: None,
+        };
+        // As a converter leaves them: among the reply's records, here between two states of
+        // one message and before the answer.
+        let mut events = coalesce(vec![
+            progress("a", 1, "one"),
+            steer(1),
+            progress("a", 2, "one, finished"),
+            progress("b", 1, "two"),
+            steer(2),
+            RunEvent::Text {
+                text: "answer".into(),
+            },
+        ]);
+        steered_by(&mut events, "the reply's run");
+        let order: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                RunEvent::Progress { text, .. } | RunEvent::Text { text } => text.clone(),
+                RunEvent::Steering { steering, at } => {
+                    assert!(at.is_none());
+                    format!("{} for {}", steering.text, steering.run_id)
+                }
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "one, finished",
+                "steer 1 for the reply's run",
+                "two",
+                "steer 2 for the reply's run",
+                "answer"
+            ]
+        );
+    }
+
+    #[test]
     fn titles_and_wsl_paths_read_as_people_wrote_them() {
         assert_eq!(short_title("  Fix   the\nbuild  "), "Fix the build");
         assert_eq!(short_title(&"a".repeat(150)).chars().count(), 100);
@@ -2137,7 +2188,11 @@ mod tests {
                         .iter()
                         .filter(|r| r.events.iter().any(|e| matches!(e, RunEvent::Text { .. })))
                         .count();
-                    let steering: usize = replies.iter().map(|r| r.steering.len()).sum();
+                    let steering = replies
+                        .iter()
+                        .flat_map(|r| &r.events)
+                        .filter(|e| matches!(e, RunEvent::Steering { .. }))
+                        .count();
                     let images: usize = conversion
                         .turns
                         .iter()

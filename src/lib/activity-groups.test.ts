@@ -4,16 +4,19 @@ import {
   activityGroupSummary,
   activityLimitNote,
   childIssueLabel,
+  closingComment,
   groupActivityEntries,
   groupIcon,
   liveAction,
   liveGroupItems,
   liveMemory,
+  replyParts,
   type LiveGroupItem,
 } from './activity-groups';
 import type { ToolActivity } from './activity';
 import type { Compaction } from './compaction';
 import type { ContentBlock } from './domain';
+import type { PlacedSteering } from './steering';
 
 const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
   id,
@@ -181,6 +184,154 @@ describe('activity groups', () => {
       activityEntries(blocks, tools, 'Done.', [marker('c1', 2), marker('c2', 2)]),
     );
     expect(new Set(groups.map((g) => g.key)).size).toBe(groups.length);
+  });
+
+  it('divides a reply’s work where the user steered it, each steer beginning a part', () => {
+    const call = (id: string): ContentBlock => ({
+      type: 'activity',
+      text: 'Read',
+      tool: { ...tool(id), facts: [] },
+    });
+    const comment = (id: string, text: string): ContentBlock => ({
+      type: 'activity',
+      text,
+      progress: { id, revision: 1 },
+    });
+    const blocks: ContentBlock[] = [
+      // Hidden from the history, yet counted by the places recorded while the reply ran.
+      { type: 'activity', text: 'Starting the provider CLI', order: 0 },
+      call('read1'),
+      comment('p1', 'Checking the handler.'),
+      call('run1'),
+      { type: 'markdown', text: 'Done.' },
+      { type: 'reasoning', id: 'r1', revision: 1, text: 'Think.', truncated: false },
+      call('edit1'),
+      // The answer's own comment, which the history leaves to the answer.
+      comment('p2', 'Done.'),
+    ];
+    const tools = blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+    const steer = (sequence: number, after?: number): PlacedSteering => ({
+      id: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+      sequence,
+      text: `Steer ${sequence}`,
+      ...(after == null ? {} : { after }),
+    });
+    const parts = (steers: PlacedSteering[], compactions: Compaction[] = []) =>
+      replyParts(blocks, tools, 'Done.', compactions, steers).map((part) => [
+        part.steer?.text ?? 'start',
+        ...groupActivityEntries(part.entries).map(described),
+      ]);
+    const work = ['read1', 'Checking the handler.', 'run1', 'reasoning r1', 'edit1'];
+    // A reply nobody steered is one part, the same entries as before.
+    expect(parts([])).toEqual([['start', ...work]]);
+    expect(replyParts(blocks, tools, 'Done.')[0].entries).toEqual(
+      activityEntries(blocks, tools, 'Done.'),
+    );
+    // A steer begins a part with what the reply recorded after it, splitting a group of calls
+    // like a comment does.
+    expect(parts([steer(1, 3)])).toEqual([
+      ['start', 'read1', 'Checking the handler.'],
+      ['Steer 1', 'run1', 'reasoning r1', 'edit1'],
+    ]);
+    expect(parts([steer(1, 2), steer(2, 5)])).toEqual([
+      ['start', 'read1'],
+      ['Steer 1', 'Checking the handler.', 'run1', 'reasoning r1'],
+      ['Steer 2', 'edit1'],
+    ]);
+    // One that came before anything shown leaves the first part empty: only the hidden note
+    // was recorded by then.
+    expect(parts([steer(1, 0)])).toEqual([['start'], ['Steer 1', ...work]]);
+    expect(parts([steer(1, 1)])).toEqual([['start'], ['Steer 1', ...work]]);
+    // Two the reply took in a row follow each other.
+    expect(parts([steer(1, 3), steer(2, 3)])).toEqual([
+      ['start', 'read1', 'Checking the handler.'],
+      ['Steer 1'],
+      ['Steer 2', 'run1', 'reasoning r1', 'edit1'],
+    ]);
+    // One saved before places were recorded, or placed past what this copy holds, follows the
+    // work and leaves the answer after it.
+    expect(parts([steer(1)])).toEqual([['start', ...work], ['Steer 1']]);
+    expect(parts([steer(1, 99)])).toEqual([['start', ...work], ['Steer 1']]);
+    // Steers keep the order they were sent in, whatever each copy counted: a lower place moves
+    // up to the earlier steer's, and one without a place takes the next steer's.
+    expect(parts([steer(1, 5), steer(2, 2)])).toEqual([
+      ['start', 'read1', 'Checking the handler.', 'run1', 'reasoning r1'],
+      ['Steer 1'],
+      ['Steer 2', 'edit1'],
+    ]);
+    expect(parts([steer(1), steer(2, 3), steer(3)])).toEqual([
+      ['start', 'read1', 'Checking the handler.'],
+      ['Steer 1'],
+      ['Steer 2', 'run1', 'reasoning r1', 'edit1'],
+      ['Steer 3'],
+    ]);
+    // A compaction that began where a steer arrived stays with the work before the steer.
+    const marker: Compaction = {
+      id: 'c1',
+      revision: 2,
+      status: 'complete',
+      trigger: 'auto',
+      after: 3,
+    };
+    expect(parts([steer(1, 3)], [marker])).toEqual([
+      ['start', 'read1', 'Checking the handler.', 'compaction c1'],
+      ['Steer 1', 'run1', 'reasoning r1', 'edit1'],
+    ]);
+    expect(parts([steer(1, 2)], [marker])).toEqual([
+      ['start', 'read1'],
+      ['Steer 1', 'Checking the handler.', 'compaction c1', 'run1', 'reasoning r1', 'edit1'],
+    ]);
+    // A reply whose work this device does not hold still shows its steers before its answer.
+    expect(
+      replyParts([{ type: 'markdown', text: 'Done.' }], [], 'Done.', [], [steer(1, 4)]).map(
+        (part) => [part.steer?.text ?? 'start', part.entries.length],
+      ),
+    ).toEqual([
+      ['start', 0],
+      ['Steer 1', 0],
+    ]);
+  });
+
+  it('lets a reply’s last comment stand for a missing answer only when no steer followed it', () => {
+    const comment = (id: string, text: string): ContentBlock => ({
+      type: 'activity',
+      text,
+      progress: { id, revision: 1 },
+    });
+    const call: ContentBlock = {
+      type: 'activity',
+      text: 'Read',
+      tool: { ...tool('a'), facts: [] },
+    };
+    const blocks: ContentBlock[] = [
+      { type: 'activity', text: 'Starting the provider CLI', order: 0 },
+      comment('p1', 'Reading the handler.'),
+      call,
+      comment('p2', 'Running the tests.'),
+      call,
+    ];
+    const steer = (after?: number): PlacedSteering => ({
+      id: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+      sequence: 1,
+      text: 'Use pnpm',
+      ...(after == null ? {} : { after }),
+    });
+    expect(closingComment(blocks)).toBe('Running the tests.');
+    expect(closingComment(blocks, [])).toBe('Running the tests.');
+    // The comment was written after the steer, so it answers it.
+    expect(closingComment(blocks, [steer(3)])).toBe('Running the tests.');
+    expect(closingComment(blocks, [steer(0)])).toBe('Running the tests.');
+    // The reply stopped before writing anything after the steer: its earlier comment stays
+    // with the work it belongs to instead of reading as an answer to the steer.
+    expect(closingComment(blocks, [steer(4)])).toBe('');
+    expect(closingComment(blocks, [steer(5)])).toBe('');
+    expect(closingComment(blocks, [steer(1), steer(4)])).toBe('');
+    // A steer saved without its place follows all the work.
+    expect(closingComment(blocks, [steer()])).toBe('');
+    expect(closingComment([call], [])).toBe('');
+    expect(closingComment([{ type: 'markdown', text: 'Done.' }])).toBe('');
   });
 
   it('uses reported file operations before the command flag and distinguishes reading a skill from invoking one', () => {

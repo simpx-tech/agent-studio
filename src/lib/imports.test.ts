@@ -18,6 +18,7 @@ const environmentId = crypto.randomUUID();
 const computerId = crypto.randomUUID();
 const connectionId = crypto.randomUUID();
 const runId = crypto.randomUUID();
+const steerId = crypto.randomUUID();
 function fleet(): Workspace['fleet'] {
   const fleet = emptyFleet();
   fleet.computers.push({ id: computerId, name: 'Desktop' });
@@ -92,6 +93,11 @@ function claudeChat(): ImportedChat {
               agents: [],
             },
           },
+          // A message sent while the reply ran, where the importer found it among the work.
+          {
+            kind: 'steering',
+            steering: { id: steerId, text: 'Keep the old cache', runId, sequence: 1 },
+          },
           { kind: 'progress', id: 'm2', revision: 1, text: 'The cache key was stale.' },
           {
             kind: 'progress',
@@ -100,10 +106,6 @@ function claudeChat(): ImportedChat {
             text: 'The cache key was stale.',
           },
           { kind: 'text', text: 'The cache key was stale.' },
-          {
-            kind: 'steering',
-            steering: { id: crypto.randomUUID(), text: 'Keep the old cache', runId, sequence: 1 },
-          },
           {
             kind: 'usage',
             input: 200,
@@ -167,6 +169,8 @@ describe('imported chats', () => {
       'markdown',
     ]);
     expect(answer.steering?.[0].text).toBe('Keep the old cache');
+    // It divides the reply's work where it arrived: after the reasoning and the command.
+    expect(answer.steeringPlaces).toEqual([{ id: steerId, after: 2 }]);
     expect(next.role).toBe('user');
     expect(stopped.status).toBe('cancelled');
     // The model that ran reads as its version, with no mismatch against the picker's alias.

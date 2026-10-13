@@ -627,7 +627,6 @@ impl Building {
                 duration_ms: duration,
                 model: self.model,
                 reasoning: self.effort,
-                steering: vec![],
             }),
         }
     }

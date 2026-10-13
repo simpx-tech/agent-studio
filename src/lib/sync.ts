@@ -14,7 +14,7 @@ import { mergeSentFiles } from './sent-files.ts';
 import { mergeScreenCards } from './screens.ts';
 import { mergeQuestions } from './questions.ts';
 import { mergeElicitations } from './elicitations.ts';
-import { mergeSteering } from './steering.ts';
+import { mergeSteering, mergeSteeringPlaces } from './steering.ts';
 import { mergeCompactions } from './compaction.ts';
 import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
@@ -184,6 +184,11 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         ...(message.steering || previous.steering
           ? { steering: mergeSteering(message.steering, previous.steering) }
           : {}),
+        ...(message.steeringPlaces || previous.steeringPlaces
+          ? {
+              steeringPlaces: mergeSteeringPlaces(message.steeringPlaces, previous.steeringPlaces),
+            }
+          : {}),
         ...(message.fileChanges || previous.fileChanges
           ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
           : {}),
@@ -298,6 +303,9 @@ function sameRun(
         ? { elicitations: mergeElicitations(a.elicitations, b.elicitations) }
         : {}),
       ...(a.steering || b.steering ? { steering: mergeSteering(a.steering, b.steering) } : {}),
+      ...(a.steeringPlaces || b.steeringPlaces
+        ? { steeringPlaces: mergeSteeringPlaces(a.steeringPlaces, b.steeringPlaces) }
+        : {}),
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
       ...(a.visualizations || b.visualizations
         ? { visualizations: mergeVisualizations(a.visualizations, b.visualizations) }

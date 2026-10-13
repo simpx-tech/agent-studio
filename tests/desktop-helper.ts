@@ -953,9 +953,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
             if (w.holdSteering) await new Promise<void>((resolve) => (w.releaseSteering = resolve));
             if (w.steeringFailure)
               throw new Error('This reply has ended. Your steering was not sent.');
+            // Like the host, with the time it confirmed the input beside the receipt.
             w.emitCapability({
               kind: 'steering',
               steering: { ...args.input, runId: args.runId, sequence: w.steeringSent.length },
+              at: new Date().toISOString(),
             });
             return;
           }

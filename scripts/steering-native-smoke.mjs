@@ -125,10 +125,14 @@ try {
     const marker = `STEERED_${crypto.randomUUID().slice(0, 8)}`;
     await type(`Change the final reply to exactly ${marker} instead of ORIGINAL.`);
     await page.button('Steer now');
-    await page.waitFor(() => !!document.querySelector('[aria-label="Steering messages"]'));
+    await page.waitFor(() => !!document.querySelector('[aria-label="Steering message"]'));
     const first = await reply(chat);
     assert(text(first).includes(marker), text(first));
     assert.equal(first.steering?.length, 1);
+    // Where the reply took it: a place among its work, dated by this computer.
+    assert.equal(first.steeringPlaces?.length, 1);
+    assert.equal(first.steeringPlaces[0].id, first.steering[0].id);
+    assert(!Number.isNaN(Date.parse(first.steeringPlaces[0].at)), 'The steer has no time');
     const w = await page.invoke('load_workspace');
     assert.equal(
       w.conversations.find((c) => c.id === chat.id).messages.length,

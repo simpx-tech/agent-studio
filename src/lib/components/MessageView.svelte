@@ -12,6 +12,7 @@
     Hourglass,
     MessageCircleQuestionMark,
     LayoutDashboard,
+    ShipWheel,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { awaitingAnswer } from '$lib/questions';
@@ -29,6 +30,8 @@
   import ModelMark from './ModelMark.svelte';
   import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
   import ToolActivity from './ToolActivity.svelte';
+  import { closingComment, replyParts } from '$lib/activity-groups';
+  import { placedSteering } from '$lib/steering';
   import { compactionLabel, compactionTokens } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
@@ -115,16 +118,35 @@
   // The model that ran, as the picker shows it: its version on its family's tint.
   const mark = $derived(modelMark(author.provider, replyModelName(message)));
   const mismatch = $derived(message.role === 'assistant' ? replyModelMismatch(message) : undefined);
+  // What the user sent while the reply ran, with where each arrived in its work.
+  const steers = $derived(placedSteering(message.steering, message.steeringPlaces));
   const text = $derived(
     messageText(message) ||
       (message.status !== 'running' &&
       !limit &&
       !message.proposedPlans?.length &&
       !message.settings?.outputSchema
-        ? (message.blocks.filter((b) => b.type === 'activity' && b.progress).at(-1)?.text ?? '')
+        ? closingComment(message.blocks, steers)
         : ''),
   );
   const tools = $derived(replyTools(message));
+  // A /compact reply is its compaction; any other reply's are entries of its work.
+  const parts = $derived(
+    replyParts(blocks, tools, text, message.compact ? undefined : message.compactions, steers),
+  );
+  // A steer nothing has followed yet: the reply is about to go on from it.
+  const steered = $derived(parts.length > 1 && !parts.at(-1)!.entries.length);
+  // The first part that shows, which opens the reply.
+  const opening = $derived(
+    parts.findIndex((part, index) => index === parts.length - 1 || part.entries.length > 0),
+  );
+  const clock = (time?: string) => {
+    const date = time ? new Date(time) : undefined;
+    return date && !Number.isNaN(date.getTime())
+      ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '';
+  };
+  const sent = $derived(clock(message.createdAt));
   const subagents = $derived(runningSubagents(tools, message.status));
   // Shown where the question will be, so it appears as Claude writes it.
   const drafts = $derived(
@@ -153,6 +175,177 @@
   }
 </script>
 
+{#snippet liveLabel()}
+  <span
+    class="live-label"
+    class:waiting
+    class:idle={!waiting && idle}
+    title={!waiting && idle ? 'A message sent now goes at once.' : undefined}
+    >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if idle}<Hourglass
+        size={13}
+        aria-hidden="true"
+      />Waiting for background work{:else}<LoaderCircle
+        size={13}
+        class="spinning"
+        aria-hidden="true"
+      />{message.compact || message.compactions?.at(-1)?.status === 'running'
+        ? 'Compacting context'
+        : 'Responding'}{/if}</span
+  >
+{/snippet}
+
+<!-- What a reply shows after its work: its answer and everything that came with it. -->
+{#snippet outcome()}
+  <!-- A /compact reply is its compaction; any other reply's are entries of its work above. -->
+  {#if message.compact && message.compactions?.length}
+    <div class="compaction-history" aria-label="Context compaction">
+      {#each message.compactions as item (item.id)}
+        {@const sizes = compactionTokens(item)}
+        <p role="status">
+          {compactionLabel(item, message.status)}{#if sizes}<span>{` · ${sizes}`}</span>{/if}
+        </p>
+      {/each}
+    </div>
+  {/if}
+  {#if structured && text}
+    <div class="prose" aria-label="Structured output">
+      <pre><code class="hljs language-json">{#if jsonHighlight}{@html jsonHighlight.html}{:else}{text}{/if}</code></pre>
+    </div>
+  {/if}
+  {#each content as part (part.key)}
+    {#if part.type === 'visual'}
+      <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
+    {:else if part.type === 'files'}
+      <SentFilesView groups={part.groups} connectionId={author.connectionId} />
+    {:else}
+      <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
+      <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+      <div class="prose" onclick={linkClick}>{@html part.html}</div>
+    {/if}
+  {/each}
+  {#each message.questions ?? [] as request (request.id)}
+    {#if request.planApproval}
+      <PlanApproval
+        {request}
+        runId={message.runId}
+        connectionId={author.connectionId}
+        running={message.status === 'running'}
+      />
+    {:else}
+      <QuestionForm
+        {request}
+        runId={message.runId}
+        connectionId={author.connectionId}
+        running={message.status === 'running'}
+      />
+    {/if}
+  {/each}
+  {#each drafts as draft (draft.id)}
+    <QuestionForm request={draftRequest(draft)} runId={message.runId} running writing />
+  {/each}
+  {#each message.proposedPlans ?? [] as proposal (proposal.id)}
+    <ProposedPlan
+      text={proposal.text}
+      complete={proposal.complete}
+      truncated={proposal.truncated}
+      running={message.status === 'running'}
+    />
+  {/each}
+  {#each message.elicitations ?? [] as receipt (receipt.id)}
+    <ElicitationForm
+      {receipt}
+      runId={message.runId}
+      connectionId={author.connectionId}
+      running={message.status === 'running'}
+    />
+  {/each}
+  {#if !content.length && !(structured && text) && message.status === 'running' && (!message.blocks.length || steered) && !drafts.length}<div
+      class="reply-waiting"
+    >
+      <span></span><span></span><span></span>
+    </div>{/if}
+  {#if limit}<div class="usage-limit" role="status">
+      <Hourglass size={15} aria-hidden="true" />
+      <div class="usage-limit-text">
+        <p>{limit.text}</p>
+      </div>
+      {#if switchAccount}<button type="button" class="secondary" onclick={switchAccount}
+          ><ArrowRightLeft size={14} aria-hidden="true" />Switch account</button
+        >{/if}
+    </div>
+  {:else if message.error}<div class="message-error" role="status">
+      <CircleAlert size={15} />{message.error}
+    </div>{/if}
+  {#if message.status === 'cancelled' && !message.error}<p class="muted small">
+      Response stopped.
+    </p>{/if}
+  {#if artifacts.length || message.screens?.length}<div class="response-extras">
+      {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
+          {#each message.screens as card (card.id)}<button
+              class="secondary screen-open"
+              disabled={!openScreen}
+              title={openScreen ? `Open ${card.title}` : undefined}
+              onclick={() => openScreen?.(card)}
+              ><LayoutDashboard size={16} aria-hidden="true" /><span>{card.title}</span><small
+                >Open screen</small
+              ></button
+            >{/each}
+        </div>{/if}
+      {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+          {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
+              <button
+                class="secondary artifact-open"
+                onclick={() => openArtifact(artifact, 'modal')}
+                ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
+                  >Open {artifact.language.toUpperCase()}</small
+                ></button
+              ><button
+                class="secondary artifact-side"
+                aria-label={`Open ${artifact.title} in side panel`}
+                title="Open in side panel"
+                onclick={() => openArtifact(artifact, 'panel')}><PanelRightOpen size={16} /></button
+              >
+            </div>{/each}
+        </div>{/if}
+    </div>{/if}
+  <!-- Elapsed time, then plan, workflow, sub-agent and background work toggles in the same row. -->
+  <ReplyFooter
+    {message}
+    {timeTotal}
+    responseChanges={responseChanges.files}
+    chatChanges={allChanges.files}
+    responseMemory={responseChanges.memory}
+    chatMemory={allChanges.memory}
+    {folder}
+    {background}
+    {subagents}
+    {openSubagent}
+    {openedSubagent}
+  />
+  {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError || undoEdits || message.filesUndone)}<div
+      class="message-actions"
+    >
+      {#if linkError}<span role="alert">{linkError}</span>{/if}
+      {#if message.filesUndone}<span class="muted">File edits undone</span>
+      {:else if undoEdits}<button class="text-button" disabled={historyDisabled} onclick={undoEdits}
+          ><Undo2 size={13} />Undo edits</button
+        >{/if}
+      {#if fork}<button
+          class="text-button"
+          onclick={fork}
+          disabled={forkDisabled}
+          title="Start a separate chat through this reply"
+          ><GitFork size={13} />Fork from here</button
+        >{/if}
+      {#if canRetry && !message.workflowDefinition}<button
+          class="text-button"
+          onclick={retry}
+          disabled={retryDisabled}><RotateCcw size={13} />Retry</button
+        >{/if}
+    </div>{/if}
+{/snippet}
+
 <article
   class="message"
   class:user={message.role === 'user'}
@@ -176,223 +369,62 @@
   {/if}
   {#if message.role === 'user'}
     <div class="message-avatar" style:--provider-color={providers[author.provider].color}>Y</div>
-  {:else}
-    <div class="message-avatar model"><ModelMark {mark} variant="tile" /></div>
-  {/if}
-  <div class="message-content">
-    <div class="message-heading">
-      <strong>{message.role === 'user' ? 'You' : replyModelName(message)}</strong><span
-        >{new Date(message.createdAt).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        })}</span
-      >{#if message.status === 'running'}<span
-          class="live-label"
-          class:waiting
-          class:idle={!waiting && idle}
-          title={!waiting && idle ? 'A message sent now goes at once.' : undefined}
-          >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if idle}<Hourglass
-              size={13}
-              aria-hidden="true"
-            />Waiting for background work{:else}<LoaderCircle
-              size={13}
-              class="spinning"
-              aria-hidden="true"
-            />{message.compact || message.compactions?.at(-1)?.status === 'running'
-              ? 'Compacting context'
-              : 'Responding'}{/if}</span
-        >{/if}
-    </div>
-    {#if mismatch}<p class="model-mismatch">
-        <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
-      </p>{/if}
-    {#if message.role === 'user'}
+    <div class="message-content">
+      <div class="message-heading">
+        <strong>You</strong>{#if sent}<span>{sent}</span>{/if}
+      </div>
       {#if message.images?.length}<ImageAttachments images={message.images} />{/if}
       {#if text}<div class="user-text">{text}</div>{/if}
-    {:else}
-      <ToolActivity
-        {tools}
-        replyStatus={message.status}
-        {blocks}
-        compactions={message.compact ? undefined : message.compactions}
-        limited={!!limit}
-        finalText={text}
-        runId={message.runId}
-        connectionId={author.connectionId}
-        {folder}
-        fileChanges={message.fileChanges}
-        {openSubagent}
-        {openedSubagent}
-        {writing}
-      />
-      <!-- A /compact reply is its compaction; any other reply's are entries of its work above. -->
-      {#if message.compact && message.compactions?.length}
-        <div class="compaction-history" aria-label="Context compaction">
-          {#each message.compactions as item (item.id)}
-            {@const sizes = compactionTokens(item)}
-            <p role="status">
-              {compactionLabel(item, message.status)}{#if sizes}<span>{` · ${sizes}`}</span>{/if}
-            </p>
-          {/each}
-        </div>
-      {/if}
-      {#if message.steering?.length}
-        <div class="steering-history" aria-label="Steering messages">
-          {#each message.steering as input (input.id)}
-            <div class="steering-message">
-              <small>You · Steered this reply</small>
-              <p>{input.text}</p>
-            </div>
-          {/each}
-        </div>
-      {/if}
-      {#if structured && text}
-        <div class="prose" aria-label="Structured output">
-          <pre><code class="hljs language-json">{#if jsonHighlight}{@html jsonHighlight.html}{:else}{text}{/if}</code></pre>
-        </div>
-      {/if}
-      {#each content as part (part.key)}
-        {#if part.type === 'visual'}
-          <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
-        {:else if part.type === 'files'}
-          <SentFilesView groups={part.groups} connectionId={author.connectionId} />
-        {:else}
-          <!-- Links are handled at this boundary; sanitized output is restricted to presentation tags. -->
-          <!-- Nested anchors provide keyboard behavior; their click events bubble here. -->
-          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-          <div class="prose" onclick={linkClick}>{@html part.html}</div>
-        {/if}
-      {/each}
-      {#each message.questions ?? [] as request (request.id)}
-        {#if request.planApproval}
-          <PlanApproval
-            {request}
-            runId={message.runId}
-            connectionId={author.connectionId}
-            running={message.status === 'running'}
-          />
-        {:else}
-          <QuestionForm
-            {request}
-            runId={message.runId}
-            connectionId={author.connectionId}
-            running={message.status === 'running'}
-          />
-        {/if}
-      {/each}
-      {#each drafts as draft (draft.id)}
-        <QuestionForm request={draftRequest(draft)} runId={message.runId} running writing />
-      {/each}
-      {#each message.proposedPlans ?? [] as proposal (proposal.id)}
-        <ProposedPlan
-          text={proposal.text}
-          complete={proposal.complete}
-          truncated={proposal.truncated}
-          running={message.status === 'running'}
-        />
-      {/each}
-      {#each message.elicitations ?? [] as receipt (receipt.id)}
-        <ElicitationForm
-          {receipt}
-          runId={message.runId}
-          connectionId={author.connectionId}
-          running={message.status === 'running'}
-        />
-      {/each}
-      {#if !content.length && !(structured && text) && message.status === 'running' && !message.blocks.length && !drafts.length}<div
-          class="reply-waiting"
+    </div>
+    {#if rewind}<div class="message-actions user-actions">
+        <button class="text-button" disabled={historyDisabled} onclick={rewind}
+          ><Rewind size={13} />Rewind here</button
         >
-          <span></span><span></span><span></span>
-        </div>{/if}
-      {#if limit}<div class="usage-limit" role="status">
-          <Hourglass size={15} aria-hidden="true" />
-          <div class="usage-limit-text">
-            <p>{limit.text}</p>
+      </div>{/if}
+  {:else}
+    <!-- The reply's work divides where the user steered it: each steer stands between two parts
+         as a message of the user's own, and the reply goes on below it under its own heading. -->
+    {#each parts as part, index (part.steer?.id ?? '')}
+      {@const last = index === parts.length - 1}
+      {#if part.steer}
+        {@const confirmed = clock(part.steer.at)}
+        <div class="steer-message" role="group" aria-label="Steering message">
+          <span class="steer-sender">You{confirmed ? ` ${confirmed}` : ''}</span>
+          <span class="steer-mark"><ShipWheel size={13} aria-hidden="true" />Steer</span>
+          <div class="user-text">{part.steer.text}</div>
+        </div>
+      {/if}
+      <!-- A part without work shows only as the steer that began it, unless the reply ends there. -->
+      {#if last || part.entries.length}
+        {@const began = part.steer ? clock(part.steer.at) : sent}
+        <div class="message-avatar model"><ModelMark {mark} variant="tile" /></div>
+        <div class="message-content">
+          <div class="message-heading">
+            <strong>{replyModelName(message)}</strong>{#if began}<span>{began}</span
+              >{/if}{#if last && message.status === 'running'}{@render liveLabel()}{/if}
           </div>
-          {#if switchAccount}<button type="button" class="secondary" onclick={switchAccount}
-              ><ArrowRightLeft size={14} aria-hidden="true" />Switch account</button
-            >{/if}
+          {#if mismatch && index === opening}<p class="model-mismatch">
+              <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
+            </p>{/if}
+          <ToolActivity
+            {tools}
+            replyStatus={message.status}
+            work={part.entries}
+            continued={!last}
+            limited={!!limit}
+            runId={message.runId}
+            connectionId={author.connectionId}
+            {folder}
+            fileChanges={message.fileChanges}
+            {openSubagent}
+            {openedSubagent}
+            {writing}
+          />
+          {#if last}{@render outcome()}{/if}
         </div>
-      {:else if message.error}<div class="message-error" role="status">
-          <CircleAlert size={15} />{message.error}
-        </div>{/if}
-      {#if message.status === 'cancelled' && !message.error}<p class="muted small">
-          Response stopped.
-        </p>{/if}
-      {#if artifacts.length || message.screens?.length}<div class="response-extras">
-          {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
-              {#each message.screens as card (card.id)}<button
-                  class="secondary screen-open"
-                  disabled={!openScreen}
-                  title={openScreen ? `Open ${card.title}` : undefined}
-                  onclick={() => openScreen?.(card)}
-                  ><LayoutDashboard size={16} aria-hidden="true" /><span>{card.title}</span><small
-                    >Open screen</small
-                  ></button
-                >{/each}
-            </div>{/if}
-          {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
-              {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
-                  <button
-                    class="secondary artifact-open"
-                    onclick={() => openArtifact(artifact, 'modal')}
-                    ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                      >Open {artifact.language.toUpperCase()}</small
-                    ></button
-                  ><button
-                    class="secondary artifact-side"
-                    aria-label={`Open ${artifact.title} in side panel`}
-                    title="Open in side panel"
-                    onclick={() => openArtifact(artifact, 'panel')}
-                    ><PanelRightOpen size={16} /></button
-                  >
-                </div>{/each}
-            </div>{/if}
-        </div>{/if}
-      <!-- Elapsed time, then plan, workflow, sub-agent and background work toggles in the same row. -->
-      <ReplyFooter
-        {message}
-        {timeTotal}
-        responseChanges={responseChanges.files}
-        chatChanges={allChanges.files}
-        responseMemory={responseChanges.memory}
-        chatMemory={allChanges.memory}
-        {folder}
-        {background}
-        {subagents}
-        {openSubagent}
-        {openedSubagent}
-      />
-      {#if message.status !== 'running' && (fork || (canRetry && !message.workflowDefinition) || linkError || undoEdits || message.filesUndone)}<div
-          class="message-actions"
-        >
-          {#if linkError}<span role="alert">{linkError}</span>{/if}
-          {#if message.filesUndone}<span class="muted">File edits undone</span>
-          {:else if undoEdits}<button
-              class="text-button"
-              disabled={historyDisabled}
-              onclick={undoEdits}><Undo2 size={13} />Undo edits</button
-            >{/if}
-          {#if fork}<button
-              class="text-button"
-              onclick={fork}
-              disabled={forkDisabled}
-              title="Start a separate chat through this reply"
-              ><GitFork size={13} />Fork from here</button
-            >{/if}
-          {#if canRetry && !message.workflowDefinition}<button
-              class="text-button"
-              onclick={retry}
-              disabled={retryDisabled}><RotateCcw size={13} />Retry</button
-            >{/if}
-        </div>{/if}
-    {/if}
-  </div>
-  {#if message.role === 'user' && rewind}<div class="message-actions user-actions">
-      <button class="text-button" disabled={historyDisabled} onclick={rewind}
-        ><Rewind size={13} />Rewind here</button
-      >
-    </div>{/if}
+      {/if}
+    {/each}
+  {/if}
 </article>
 
 <style>
@@ -429,20 +461,58 @@
     height: 1px;
     background: var(--border-strong);
   }
-  .steering-history {
-    margin-block: 10px;
+  /* A steer is a message of the user's own between two parts of the reply: their bubble at the
+     right edge of the conversation, marked as a steer above it. */
+  .steer-message {
+    position: relative;
+    grid-column: 1 / -1;
+    justify-self: end;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    max-width: min(86%, 680px);
+    /* The reply goes on as far below the bubble as a reply begins below any other message. */
+    margin: 14px 0 48px;
   }
-  .steering-message {
-    border-left: 2px solid var(--accent-border);
-    padding: 3px 12px;
-    margin-block: 8px;
+  /* Nothing of the reply shows above a steer that came before its work. */
+  .steer-message:first-child,
+  .reply-switch + .steer-message {
+    margin-top: 0;
   }
-  .steering-message p {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    margin: 2px 0;
-    font-size: var(--text-base);
-    color: var(--text);
+  /* Steers the reply took one after the other stay together. */
+  .steer-message + .steer-message {
+    margin-top: -24px;
+  }
+  .steer-message .user-text {
+    border-color: var(--accent-border);
+  }
+  .steer-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    line-height: 1;
+  }
+  .steer-mark > :global(svg) {
+    color: var(--accent-strong);
+  }
+  /* Who sent it and when stay for assistive technology, as on the user's other messages. */
+  .steer-sender {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  @media (max-width: 650px) {
+    .steer-message {
+      max-width: 92%;
+    }
   }
   /* The usage limit that stopped a reply follows its open Work history, in place of an error. */
   .usage-limit {

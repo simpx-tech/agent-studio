@@ -8,6 +8,7 @@ import type { Compaction } from './compaction';
 import type { ContentBlock, Message } from './domain';
 import { filePathKey, relativeFilePath } from './file-changes';
 import type { ReasoningBlock } from './reasoning';
+import type { PlacedSteering } from './steering';
 import {
   connectedTool,
   primaryCommand,
@@ -21,7 +22,12 @@ type CommentEntry = Omit<Extract<ContentBlock, { type: 'activity' }>, 'tool'> & 
 };
 /** A compaction of the reply's context, where it began among the reply's work. */
 type CompactionEntry = { type: 'compaction'; compaction: Compaction };
-type ActivityEntry = CommentEntry | ReasoningBlock | CompactionEntry;
+export type ActivityEntry = CommentEntry | ReasoningBlock | CompactionEntry;
+/**
+ * A reply's work from one steer to the next: the steer that began the part, none for the work
+ * before the first, then what the reply recorded until the next steer.
+ */
+export type ReplyPart = { steer?: PlacedSteering; entries: ActivityEntry[] };
 /** A reply's saved blocks, or activity arranged like them, such as a sub-agent's conversation. */
 export type ActivitySource = ContentBlock | CommentEntry;
 type ActivityGroup =
@@ -38,16 +44,55 @@ export const activityLimitNote =
   'Calls after the first 200 were not recorded: earlier versions kept only 200 per reply.';
 
 /**
- * Reasoning, progress comments and tool calls in their recorded order, with the reply's
- * compactions where each began among them (`after` counts the blocks recorded before it, the
- * hidden ones included). A compaction saved before its place was recorded follows them.
+ * Where each steer divides `length` recorded blocks, in the order the steers were sent. Copies
+ * of a reply can have counted differently, so a place lower than an earlier steer's moves up to
+ * it, and a steer saved without a place takes the next steer's, or follows the work.
  */
-export function activityEntries(
+function steerPlaces(steers: PlacedSteering[], length: number): number[] {
+  let floor = 0;
+  const counted = steers.map((steer) =>
+    steer.after == null ? undefined : (floor = Math.max(floor, Math.min(steer.after, length))),
+  );
+  const places = new Array<number>(steers.length);
+  let next = length;
+  for (let i = steers.length - 1; i >= 0; i--) places[i] = next = counted[i] ?? next;
+  return places;
+}
+
+/**
+ * The comment a reply that ended without an answer shows in its place: its last one, unless
+ * the user steered the reply after it, when it stays with the work before that steer.
+ */
+export function closingComment(blocks: ContentBlock[], steers: PlacedSteering[] = []): string {
+  let work = 0,
+    at = -1,
+    text = '';
+  for (const block of blocks) {
+    if (block.type === 'markdown') continue;
+    if (block.type === 'activity' && block.progress) {
+      at = work;
+      text = block.text;
+    }
+    work++;
+  }
+  return at >= (steerPlaces(steers, work).at(-1) ?? -1) ? text : '';
+}
+
+/**
+ * A reply's work in the parts its steers divide it into: reasoning, progress comments and tool
+ * calls in their recorded order, with the reply's compactions where each began among them and a
+ * new part where each steer arrived (`after` counts the blocks recorded before either, the
+ * hidden ones included). A compaction saved before its place was recorded follows the work, and
+ * so does a steer, which then leaves only the answer after it. A reply nobody steered is one
+ * part.
+ */
+export function replyParts(
   blocks: ActivitySource[],
   tools: ToolActivity[],
   finalText: string,
   compactions: Compaction[] = [],
-): ActivityEntry[] {
+  steers: PlacedSteering[] = [],
+): ReplyPart[] {
   const source: (CommentEntry | ReasoningBlock)[] = blocks.length
     ? blocks.filter((b) => b.type !== 'markdown')
     : tools.map((tool) => ({ type: 'activity' as const, text: tool.name, tool }));
@@ -65,18 +110,31 @@ export function activityEntries(
     if (b.tool || b.progress) return true;
     return !lifecycleNotes.includes(b.text.trim()) && (!tools.length || !toolNotes.test(b.text));
   };
-  const markers = compactions
-    .map((compaction, index) => ({
-      compaction,
-      at: Math.min(compaction.after ?? source.length, source.length),
-      index,
-    }))
-    .sort((a, b) => a.at - b.at || a.index - b.index);
-  const entries: ActivityEntry[] = [];
+  // A compaction and a steer recorded at the same place keep the compaction with the work
+  // before the steer.
+  const places = steerPlaces(steers, source.length);
+  const markers: { at: number; order: number; compaction?: Compaction; steer?: PlacedSteering }[] =
+    [
+      ...compactions.map((compaction, order) => ({
+        compaction,
+        at: Math.min(compaction.after ?? source.length, source.length),
+        order,
+      })),
+      ...steers.map((steer, index) => ({
+        steer,
+        at: places[index],
+        order: compactions.length + index,
+      })),
+    ].sort((a, b) => a.at - b.at || a.order - b.order);
+  const parts: ReplyPart[] = [{ entries: [] }];
+  let entries = parts[0].entries;
   let next = 0;
   const mark = (recorded: number) => {
-    while (next < markers.length && markers[next].at <= recorded)
-      entries.push({ type: 'compaction', compaction: markers[next++].compaction });
+    while (next < markers.length && markers[next].at <= recorded) {
+      const { compaction, steer } = markers[next++];
+      if (compaction) entries.push({ type: 'compaction', compaction });
+      else parts.push({ steer, entries: (entries = []) });
+    }
   };
   for (const [index, b] of source.entries()) {
     mark(index);
@@ -88,7 +146,20 @@ export function activityEntries(
     );
   }
   mark(source.length);
-  return entries;
+  return parts;
+}
+
+/**
+ * Reasoning, progress comments and tool calls in their recorded order, with the compactions
+ * where each began among them: the work of a reply nobody steered, or of a sub-agent.
+ */
+export function activityEntries(
+  blocks: ActivitySource[],
+  tools: ToolActivity[],
+  finalText: string,
+  compactions: Compaction[] = [],
+): ActivityEntry[] {
+  return replyParts(blocks, tools, finalText, compactions)[0].entries;
 }
 
 /**
