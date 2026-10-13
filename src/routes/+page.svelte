@@ -232,7 +232,7 @@
   } from '$lib/folder-icons';
   import FolderIcon from '$lib/components/FolderIcon.svelte';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
-  import { accountActivity, balancedAccount } from '$lib/account-balance';
+  import { accountActivity, balanceableAccounts, balancedAccount } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
@@ -1181,15 +1181,18 @@
   }
   // Balancing (Settings → New chats, `src/lib/account-balance.ts`): a new chat starts on the
   // account of its agent, on its computer, that has used the least, until an account is chosen
-  // for it. It is balanced between the accounts that can answer: every one that can be chosen
-  // while their checks run, then those reported ready.
+  // for it. It is balanced between the accounts that can answer and were not left out there:
+  // every one that can be chosen while their checks run, then those reported ready.
   const balanceCandidates = $derived.by(() => {
     if (!loaded || active || !draftBalanced || !workspace.preferences.balanceAccounts) return [];
+    const excluded = new Set(workspace.preferences.balanceExcluded);
     const choosable = locationConnections(
       workspace.fleet,
       selectedLocation,
       selectedSettings.provider,
-    ).filter((c) => canChooseConnection(c.id) && !needsSignIn(c.id));
+    ).filter(
+      (c) => !excluded.has(c.accountId) && canChooseConnection(c.id) && !needsSignIn(c.id),
+    );
     const ready = choosable.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     return ready.length && choosable.every((c) => connectionStatus(c.id)) ? ready : choosable;
   });
@@ -1318,6 +1321,50 @@
     }
     // The new chat that is open follows it at once, unless something was written in it.
     if (!activeId && scratchId && (!enabled || !draftFilled)) followBalance(enabled);
+  }
+  // The accounts balancing can choose between somewhere, for Settings, which leaves any of them
+  // out: agent by agent, as the Agent picker lists them. Two accounts of an agent under one name
+  // are told apart by their computers.
+  const balanceChoices = $derived.by(() => {
+    const excluded = new Set(workspace.preferences.balanceExcluded);
+    const accounts = balanceableAccounts(workspace.fleet)
+      .map((account) => ({
+        ...account,
+        label: `${providers[account.provider].name} · ${account.name}`,
+      }))
+      .sort((a, b) => providerIds.indexOf(a.provider) - providerIds.indexOf(b.provider));
+    const computerOf = (environmentId: string) =>
+      computers.find((c) => c.environments.some((e) => e.id === environmentId))?.name;
+    return accounts.map(({ id, label, environmentIds }) => ({
+      id,
+      name: label,
+      color: accountColorValue(colorsByAccount.get(id)?.color),
+      where: accounts.some((other) => other.id !== id && other.label === label)
+        ? environmentIds.map(computerOf).filter(Boolean).join(', ')
+        : '',
+      included: !excluded.has(id),
+    }));
+  });
+  /** Settings → New chats: whether balancing may start new chats on an account. */
+  async function setBalanceIncluded(accountId: string, included: boolean) {
+    if (!loaded) throw new Error('The workspace is still loading.');
+    const preferences = workspace.preferences;
+    const before = preferences.balanceExcluded;
+    // An account that is gone leaves the list with the next change.
+    const known = new Set(workspace.fleet.accounts.map((a) => a.id));
+    const excluded = (before ?? []).filter((id) => id !== accountId && known.has(id));
+    if (!included) excluded.push(accountId);
+    const set = (value: string[] | undefined) => {
+      if (value?.length) preferences.balanceExcluded = value;
+      else delete preferences.balanceExcluded;
+    };
+    set(excluded);
+    try {
+      await persistLocal();
+    } catch {
+      set(before);
+      throw new Error('The setting could not be saved.');
+    }
   }
   // A chat's account connection, whether another computer runs it, and its reported status.
   function replyConnection(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
@@ -6394,6 +6441,8 @@
             'This computer'}
           balanceAccounts={!!workspace.preferences.balanceAccounts}
           {setBalanceAccounts}
+          {balanceChoices}
+          {setBalanceIncluded}
           claudeInstructions={workspace.claudeInstructions}
           {saveClaudeInstructions}
           importChats={desktop() ? openImport : undefined}

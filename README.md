@@ -39,7 +39,7 @@ The built Windows executable is `src-tauri/target/release/agent-studio.exe`. The
 - Reusable [input templates](docs/CAPABILITIES.md#input-templates) with custom fields, a message preview, and insertion into the composer for review before sending.
 - Last model remembered per provider; last reasoning level remembered independently per provider and model. New chats start with the agent and account you last chose, even after replying in older chats on another account.
 - A color for each account, on the Agent control, in its list and in Connections, so accounts with similar names differ at a glance; **Manage account** changes it. See [account colors](docs/CAPABILITIES.md#account-colors).
-- Optionally, new chats that start on the least used account of their agent, so several accounts are used evenly: **Settings → New chats**, off unless you turn it on. See [balancing new chats between accounts](docs/USAGE.md#balancing-new-chats-between-accounts).
+- Optionally, new chats that start on the least used account of their agent, so several accounts are used evenly: **Settings → New chats**, off unless you turn it on, with a list of the accounts that take part. See [balancing new chats between accounts](docs/USAGE.md#balancing-new-chats-between-accounts).
 - Saved conversations with search, multi-turn context, retry, stop, and deletion.
 - Automatic conversation titles from the first message, generated once in the background with a small model.
 - An icon for each project folder in the sidebar, chosen once by the same small model from a catalog of 338 icons when the folder's first conversation starts. See [folder icons](docs/CAPABILITIES.md#folder-icons).

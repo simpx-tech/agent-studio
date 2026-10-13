@@ -23,6 +23,8 @@
     environmentName,
     balanceAccounts,
     setBalanceAccounts,
+    balanceChoices,
+    setBalanceIncluded,
     claudeInstructions,
     saveClaudeInstructions,
   }: {
@@ -38,6 +40,9 @@
     environmentName: (environmentId: string) => string;
     balanceAccounts: boolean;
     setBalanceAccounts: (enabled: boolean) => Promise<void>;
+    /** The accounts new chats are balanced between, each with whether it takes part. */
+    balanceChoices: { id: string; name: string; color: string; where: string; included: boolean }[];
+    setBalanceIncluded: (accountId: string, included: boolean) => Promise<void>;
     claudeInstructions?: string;
     saveClaudeInstructions: (
       value: string | undefined,
@@ -77,7 +82,12 @@
       {#if desktop()}<BackgroundSettings />
         <AppUpdates status={appUpdate} restart={restartToUpdate} />
         <CliUpdates updates={cliUpdates} apply={applyCliUpdates} {environmentName} />{/if}
-      <NewChatSettings {balanceAccounts} {setBalanceAccounts} />
+      <NewChatSettings
+        {balanceAccounts}
+        {setBalanceAccounts}
+        accounts={balanceChoices}
+        setIncluded={setBalanceIncluded}
+      />
       {#key workspaceSession}<ClaudeInstructions
           value={claudeInstructions}
           save={saveClaudeInstructions}

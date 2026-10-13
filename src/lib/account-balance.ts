@@ -1,4 +1,5 @@
 import type { Conversation, ProviderId } from './domain';
+import type { Fleet } from './fleet';
 import { resetTime, visibleLimits, type UsageSnapshot } from './usage';
 
 // Balancing new chats between accounts (Settings → New chats, off unless turned on): a new chat
@@ -123,6 +124,34 @@ export function balancedAccount(
           (s) => s.lastUsed,
         )
   ).connectionId;
+}
+
+/**
+ * The accounts new chats can be balanced between, which Settings lets the user leave out one by
+ * one: those connected beside another account of their agent on some computer, in the
+ * workspace's order, each with the environments where it has that company.
+ */
+export function balanceableAccounts(fleet: Pick<Fleet, 'accounts' | 'connections'>) {
+  const agent = new Map(fleet.accounts.map((account) => [account.id, account.provider]));
+  // The accounts each environment has of each agent.
+  const together = new Map<string, { environmentId: string; accounts: Set<string> }>();
+  for (const { environmentId, accountId } of fleet.connections) {
+    const provider = agent.get(accountId);
+    if (!provider) continue;
+    const key = `${environmentId} ${provider}`;
+    if (!together.has(key)) together.set(key, { environmentId, accounts: new Set() });
+    together.get(key)!.accounts.add(accountId);
+  }
+  const where = new Map<string, string[]>();
+  for (const { environmentId, accounts } of together.values()) {
+    if (accounts.size < 2) continue;
+    for (const account of accounts)
+      where.set(account, [...(where.get(account) ?? []), environmentId]);
+  }
+  return fleet.accounts.flatMap((account) => {
+    const environmentIds = where.get(account.id);
+    return environmentIds ? [{ ...account, environmentIds }] : [];
+  });
 }
 
 /**
