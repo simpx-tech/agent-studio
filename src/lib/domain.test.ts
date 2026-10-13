@@ -9,6 +9,7 @@ import {
   settingsFor,
   type Conversation,
 } from './domain';
+import { sharedWorkspace } from './sync';
 
 describe('portable conversation state', () => {
   it('restores interrupted runs without inventing completed responses', () => {
@@ -134,6 +135,19 @@ describe('portable conversation state', () => {
       model: 'sonnet',
     });
     expect(settingsFor(restored.preferences, 'codex').connectionId).toBe(other);
+  });
+  it('balances new chats between accounts only once that is turned on', () => {
+    const workspace = initialWorkspace();
+    expect(workspace.preferences.balanceAccounts).toBeUndefined();
+    expect(
+      restoreWorkspace(JSON.parse(JSON.stringify(workspace))).preferences.balanceAccounts,
+    ).toBeUndefined();
+    workspace.preferences.balanceAccounts = true;
+    expect(
+      restoreWorkspace(JSON.parse(JSON.stringify(workspace))).preferences.balanceAccounts,
+    ).toBe(true);
+    // It belongs to this device, like the agent and account new chats otherwise start with.
+    expect(Object.keys(sharedWorkspace(workspace))).not.toContain('preferences');
   });
   it('migrates saved agents and conversations without losing instructions, messages, or attribution', () => {
     const agent = {

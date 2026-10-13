@@ -7,6 +7,7 @@
   import ClaudeInstructions from './ClaudeInstructions.svelte';
   import CliUpdates from './CliUpdates.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
+  import NewChatSettings from './NewChatSettings.svelte';
   import PushNotifications from './PushNotifications.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
   import { desktop, type AppUpdateStatus, type CliUpdates as CliUpdateState } from '$lib/transport';
@@ -20,6 +21,8 @@
     cliUpdates,
     applyCliUpdates,
     environmentName,
+    balanceAccounts,
+    setBalanceAccounts,
     claudeInstructions,
     saveClaudeInstructions,
   }: {
@@ -33,6 +36,8 @@
     cliUpdates?: CliUpdateState;
     applyCliUpdates: (updates: CliUpdateState) => void;
     environmentName: (environmentId: string) => string;
+    balanceAccounts: boolean;
+    setBalanceAccounts: (enabled: boolean) => Promise<void>;
     claudeInstructions?: string;
     saveClaudeInstructions: (
       value: string | undefined,
@@ -72,6 +77,7 @@
       {#if desktop()}<BackgroundSettings />
         <AppUpdates status={appUpdate} restart={restartToUpdate} />
         <CliUpdates updates={cliUpdates} apply={applyCliUpdates} {environmentName} />{/if}
+      <NewChatSettings {balanceAccounts} {setBalanceAccounts} />
       {#key workspaceSession}<ClaudeInstructions
           value={claudeInstructions}
           save={saveClaudeInstructions}

@@ -232,6 +232,7 @@
   } from '$lib/folder-icons';
   import FolderIcon from '$lib/components/FolderIcon.svelte';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
+  import { accountActivity, balancedAccount } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
@@ -416,6 +417,9 @@
     untrack(() => (historyError = ''));
   });
   let draftSettings = $state<ChatSettings>(untrack(() => settingsFor(workspace.preferences)));
+  // Whether the open new chat starts on the least used account of its agent (Settings → New
+  // chats), which it does until an account is chosen for it.
+  let draftBalanced = $state(false);
   let draftLocation = $state<ChatLocation>();
   let draftComputerId = $state('');
   let folderBrowserOpen = $state(false);
@@ -459,8 +463,9 @@
   let draftSaves = Promise.resolve();
   let draftSaveFailed = false;
   // New conversations not sent yet. Every new chat opens its own scratch chat, and those with
-  // unsent content stay in the sidebar until they are sent or discarded.
-  type Scratch = ScratchChat & { title: string; filled: boolean };
+  // unsent content stay in the sidebar until they are sent or discarded. `balanced` lasts for
+  // the session: a saved scratch chat keeps the account it had.
+  type Scratch = ScratchChat & { title: string; filled: boolean; balanced?: boolean };
   let scratches = $state<Scratch[]>([]);
   let scratchId = $state('');
   $effect(() => {
@@ -1174,6 +1179,146 @@
       failed: !!usageErrors[key] || !ready,
     };
   }
+  // Balancing (Settings → New chats, `src/lib/account-balance.ts`): a new chat starts on the
+  // account of its agent, on its computer, that has used the least, until an account is chosen
+  // for it. It is balanced between the accounts that can answer: every one that can be chosen
+  // while their checks run, then those reported ready.
+  const balanceCandidates = $derived.by(() => {
+    if (!loaded || active || !draftBalanced || !workspace.preferences.balanceAccounts) return [];
+    const choosable = locationConnections(
+      workspace.fleet,
+      selectedLocation,
+      selectedSettings.provider,
+    ).filter((c) => canChooseConnection(c.id) && !needsSignIn(c.id));
+    const ready = choosable.filter((c) => connectionStatus(c.id)?.auth === 'ready');
+    return ready.length && choosable.every((c) => connectionStatus(c.id)) ? ready : choosable;
+  });
+  // Each of those accounts with its latest reading, and whether its check or first reading is
+  // still under way.
+  function balanceReadings() {
+    const provider = selectedSettings.provider;
+    return balanceCandidates.map((connection) => {
+      const settings = { provider, model: '', connectionId: connection.id };
+      const key = usageKey(settings);
+      const snapshot = snapshotFor(usageSnapshots, settings);
+      const readable = canQueryConnection(connection.id, provider);
+      return {
+        connection,
+        settings,
+        snapshot,
+        readable,
+        waiting:
+          !connectionStatus(connection.id) ||
+          (readable && (!!usageLoading[key] || (!snapshot && !usageErrors[key]))),
+      };
+    });
+  }
+  // Reads the usage of the accounts the open new chat is balanced between. Readings are kept for
+  // a minute, so new chats opened one after another read them once.
+  function refreshBalance() {
+    for (const { readable, settings } of balanceReadings())
+      if (readable) void refreshUsage(settings);
+  }
+  // New chats whose account was chosen with a reading of every account in hand. Such a choice
+  // stays while no other account is better by more than the tolerance, and while a draft waits
+  // under it.
+  const balanceSettled = new Set<string>();
+  // The new chat whose account was chosen from what was known as it opened, and the chat and
+  // accounts whose readings were last asked for.
+  let balanceChosen = '';
+  let balanceRead = '';
+  const draftFilled = $derived(prompt !== '' || attachedImages.length > 0);
+  $effect(() => {
+    if (!balanceCandidates.length) return;
+    const id = scratchId;
+    // Asked once as the chat opens, and again as its accounts' checks make them readable.
+    const read = `${id} ${balanceReadings()
+      .filter((reading) => reading.readable)
+      .map((reading) => reading.connection.id)
+      .join(' ')}`;
+    untrack(() => {
+      if (read === balanceRead) return;
+      balanceRead = read;
+      refreshBalance();
+    });
+    // Runs again as a check or a reading arrives, the draft empties or the picker closes.
+    const readings = balanceReadings();
+    const draft = { picking: agentPickerOpen, filled: draftFilled, mentions: hasComposerMentions };
+    untrack(() => chooseBalanced(id, readings, draft));
+  });
+  function chooseBalanced(
+    id: string,
+    readings: ReturnType<typeof balanceReadings>,
+    draft: { picking: boolean; filled: boolean; mentions: boolean },
+  ) {
+    const settled = balanceSettled.has(id);
+    const current = selectedSettings.connectionId;
+    // The picker's list stays as it is under the pointer. A settled choice moves only in an
+    // empty draft; the first one also applies to a draft carried into the chat, short of
+    // mentions chosen under its account.
+    if (draft.picking || (settled ? draft.filled : draft.mentions)) return;
+    const waiting = readings.some((reading) => reading.waiting);
+    // Chosen already, or nothing is known of the accounts yet, as when the app starts: the
+    // readings under way decide, all of them together.
+    if (
+      waiting &&
+      (settled || balanceChosen === id || !readings.some((reading) => reading.snapshot)) &&
+      readings.some((reading) => reading.connection.id === current)
+    )
+      return;
+    const accounts = new Map(workspace.fleet.connections.map((c) => [c.id, c.accountId]));
+    const activity = accountActivity(workspace.conversations, (connectionId) =>
+      accounts.get(connectionId),
+    );
+    const choice = balancedAccount(
+      readings.map(({ connection, snapshot }) => ({
+        connectionId: connection.id,
+        snapshot,
+        running: activity.get(connection.accountId)?.running ?? 0,
+        lastUsed: activity.get(connection.accountId)?.lastUsed ?? 0,
+      })),
+      { provider: selectedSettings.provider, model: selectedSettings.model },
+      Date.now(),
+      settled ? current : undefined,
+    );
+    if (waiting) balanceChosen = id;
+    else balanceSettled.add(id);
+    if (!choice || choice === current) return;
+    // Like any change of settings, it ends a folder's late check of this chat's old ones.
+    settingsRevision++;
+    draftSettings = { ...draftSettings, connectionId: choice };
+  }
+  // The open new chat compares its accounts from the start, as on another computer.
+  function balanceAfresh() {
+    balanceSettled.delete(scratchId);
+    if (balanceChosen === scratchId) balanceChosen = '';
+  }
+  // Whether the open new chat follows balancing, which its scratch chat keeps for its return.
+  function followBalance(follows: boolean) {
+    if (follows) balanceAfresh();
+    draftBalanced = follows;
+    const scratch = scratches.find((s) => s.id === scratchId);
+    if (scratch) scratch.balanced = follows;
+  }
+  /** Settings → New chats: whether new chats start on the least used account of their agent. */
+  async function setBalanceAccounts(enabled: boolean) {
+    if (!loaded) throw new Error('The workspace is still loading.');
+    const preferences = workspace.preferences;
+    const before = preferences.balanceAccounts;
+    const set = (value: boolean | undefined) => {
+      if (value) preferences.balanceAccounts = true;
+      else delete preferences.balanceAccounts;
+    };
+    set(enabled);
+    try {
+      await persistLocal();
+    } catch {
+      set(before);
+      throw new Error('The setting could not be saved.');
+    }
+    // The new chat that is open follows it at once, unless something was written in it.
+    if (!activeId && scratchId && (!enabled || !draftFilled)) followBalance(enabled);
+  }
   // A chat's account connection, whether another computer runs it, and its reported status.
   function replyConnection(settings: Pick<ChatSettings, 'provider' | 'connectionId'>) {
     const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
@@ -1787,6 +1932,9 @@
       if (!loaded || document.visibilityState === 'hidden') return;
       if (paired) void syncNow();
       else void restoreRelayConnection();
+      // The accounts were used meanwhile, here or elsewhere: a new chat still without a draft
+      // compares them again.
+      if (!draftFilled) refreshBalance();
       if (localRunning) {
         if (pendingSignIns.size) void checkSignIn();
         return;
@@ -3183,6 +3331,8 @@
     settingsRevision++;
     if (remember) rememberSettings(workspace.preferences, settings);
     if (chosen) rememberAgent(workspace.preferences, settings);
+    // An account chosen for a new chat stays, whatever the accounts' usage.
+    if (chosen && !active) followBalance(false);
     if (active) {
       active.settings = settings;
       active.updatedAt = new Date().toISOString();
@@ -3272,13 +3422,16 @@
     changeSettings({ ...selectedSettings, model, reasoning });
   }
   // A chat started on a computer or in a folder is revealed in the sidebar and focused, unless
-  // `reveal` is false, as when Move to history continues in the folder it left.
+  // `reveal` is false, as when Move to history continues in the folder it left. `connectionId`
+  // is an account the user named for the chat unless `named` is false, as for `/new`, which
+  // goes on from the chat it was typed in.
   function newChat(
     provider?: ProviderId,
     connectionId?: string,
     location?: ChatLocation,
     computerId?: string,
     reveal = true,
+    named = true,
   ) {
     if (!loaded || selectingLocation) return;
     // Opening a chat on a computer can register its CLI logins as connections.
@@ -3302,6 +3455,8 @@
         : recent.find((l) => locationConnections(workspace.fleet, l).length);
     if (computerId) draftComputerId = computerId;
     const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    // An account named for the chat is the user's choice; otherwise balancing may choose one.
+    draftBalanced = !!workspace.preferences.balanceAccounts && !(connection && named);
     if (connection) {
       const environment = workspace.fleet.environments.find(
         (e) => e.id === connection.environmentId,
@@ -3342,6 +3497,7 @@
       createdAt: Date.now(),
       title: '',
       filled: false,
+      balanced: draftBalanced,
     });
     switchDraft(currentDraftKey());
     editorOpen = false;
@@ -3354,10 +3510,14 @@
       if (location) collapsedGroups[`${computerKey}/${locationKey(location)}`] = false;
       void tick().then(() => composerInput?.focus());
     }
-    // Chat from Connections and `/new` name the agent and account to start with.
+    // Chat from Connections and `/new` name the agent and account to start with. An account
+    // balancing chooses is no choice of the user's to remember.
     if (provider) {
       rememberSettings(workspace.preferences, draftSettings);
-      rememberAgent(workspace.preferences, draftSettings);
+      rememberAgent(
+        workspace.preferences,
+        draftBalanced ? { provider: draftSettings.provider } : draftSettings,
+      );
       saveLocalSoon();
     }
   }
@@ -3434,6 +3594,8 @@
       const connections = workspace.fleet.connections.length;
       ensureLocationConnections(workspace.fleet, location, loginIdentities());
       const sameComputer = selectedComputerId === locationComputerId(location);
+      // Another computer has accounts of its own to balance the chat between.
+      if (!sameComputer) balanceAfresh();
       const settings = sameComputer
         ? { ...selectedSettings }
         : settingsAtLocation(selectedSettings, location);
@@ -3629,6 +3791,7 @@
       locationConnections(workspace.fleet, location).some((c) => c.id === settings.connectionId)
         ? settings
         : settingsAtLocation(settings, location);
+    draftBalanced = !!scratch.balanced;
     activeId = null;
     scratchId = scratch.id;
     switchDraft(draftKey.scratch(scratch.id));
@@ -4003,6 +4166,7 @@
     const id = scratchIdOf(key);
     if (id === undefined || (left && hasDraft(drafts.get(key)))) return;
     forgetDraft(key);
+    balanceSettled.delete(id);
     const index = scratches.findIndex((s) => s.id === id);
     if (index >= 0) scratches.splice(index, 1);
   }
@@ -4033,6 +4197,7 @@
     draftSaveFailed = false;
     scratches = [];
     scratchId = '';
+    balanceSettled.clear();
   }
   async function loadSavedDrafts() {
     const session = workspaceSession;
@@ -5694,7 +5859,9 @@
                       ? switchableConnections.length
                         ? 'Another account applies to the next message. '
                         : 'Fixed for this conversation. '
-                      : ''
+                      : balanceCandidates.length > 1
+                        ? 'Account chosen by usage. '
+                        : ''
                   }${selectedSettings.planMode ? 'Plan mode: proposes changes before making them.' : 'Full access: tools run without approval prompts.'}`}
                   bind:open={agentPickerOpen}
                   value={selectedAgentOption}
@@ -6075,6 +6242,8 @@
                       selectedSettings.connectionId,
                       selectedLocation,
                       selectedComputerId,
+                      true,
+                      false,
                     );
                     // The rest of the command moves into the new conversation's draft.
                     if (composerDraftKey !== from) carryDraft(from, remaining);
@@ -6223,6 +6392,8 @@
           environmentName={(id) =>
             workspace.fleet.environments.find((environment) => environment.id === id)?.name ??
             'This computer'}
+          balanceAccounts={!!workspace.preferences.balanceAccounts}
+          {setBalanceAccounts}
           claudeInstructions={workspace.claudeInstructions}
           {saveClaudeInstructions}
           importChats={desktop() ? openImport : undefined}

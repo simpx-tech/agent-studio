@@ -75,6 +75,27 @@ The reply keeps the line as optional `usageLimit` (`src/lib/usage-limits.ts`) th
 
 The message shapes were checked in Claude Code 2.1.285 (its limit wording and stream-json writer in the installed binary, and the user's saved replies from 2026-09-30) and in the Codex 0.159.2 app-server bindings from `codex app-server generate-ts`. No account was driven to a real limit for this.
 
+## Balancing new chats between accounts
+
+**Settings → New chats → Start on the least used account** is off unless you turn it on. It belongs to the device: the desktop app and each Viewer keep their own choice (`preferences.balanceAccounts`), and it is never synced.
+
+While it is on, a new chat starts on the account of its agent, on its computer, that has used the least, instead of the account last chosen. The agent is still the one last chosen. This covers every new chat that names no account: **Ctrl+N**, each **+** in the sidebar, the chat the app opens when it starts, the one **Move to history** leaves in a folder, `/new`, and **Chat** on an agent in Connections. **Chat** on an account's row in Connections names that account, which then stays.
+
+Accounts compare by the share used of their **5-hour** limit, or of their **Weekly** limit when they report no 5-hour one, as most Codex accounts do. The comparison reads the limits the bars below the composer show for the chat's model, so a Claude Fable chat also counts each account's **Fable weekly** limit as one that can be used up.
+
+- Accounts with room come first, then accounts without a reading, then accounts with a limit used up: one of those limits at 100%, or Claude refusing replies over the account's 5-hour or weekly limit, until the reset it named. When every account has a limit used up, the chat starts on the one that can answer again first.
+- A limit whose reset time passed since its reading counts as unused. The bars still mark such a reading as old; balancing only compares by it, and reads the accounts again anyway.
+- Accounts within 5 percentage points of the least used are level, as a limit within 5 points of its guide is on track. Level accounts take turns: first the one with the fewest replies running, whose usage its reading does not show yet, then the one with the lowest weekly usage, then the one that answered longest ago, then the order of the Agent picker. So chats started together spread over the accounts instead of all starting on the same one.
+- Only accounts that can answer take part: none that needs signing in, whose CLI is missing, or whose computer is offline.
+
+A new chat chooses at once from the readings the app already has, reads the usage of each of those accounts again, and chooses again once all of them answered. The readings are the Agent picker's: the same read-only query, kept for a minute by the native reader, so chats opened one after another read the accounts once. When the app starts it has no readings yet, so the chat keeps the account last chosen until they arrive. After that the choice stays while no other account is better by more than those 5 points, so it does not move with every reading, and returning to the window reads the accounts again.
+
+An account never changes under what you wrote. Once the composer holds text or an image, the account shown is the one the chat is sent with, however the accounts' usage changes; emptied again, the chat follows balancing again. The only choice made over text is the first one of a chat that opens with it, as `/new` does with the rest of its line, and never while mentions chosen under an account are in the draft. The choice does not move while the Agent picker is open either.
+
+Choosing any account in the Agent picker, the one shown included, is your choice for that chat and stays. It is still remembered as the account last chosen, for when the option is off; an account balancing chose is not. While balancing decides, the Agent control's hover begins **Account chosen by usage.** A draft saved in an earlier session keeps the account it had.
+
+Balancing only decides where a new chat starts. Existing conversations, their queued messages, retries, forks and imported chats keep their accounts, and nothing moves a chat to another account while it runs. The comparison uses usage readings and the saved chats alone (`src/lib/account-balance.ts`): it starts no model reply, and it reads the accounts' usage when a new chat opens and when you return to the window, at most once a minute each.
+
 ## Quota pace and context guidance
 
 Arrows use plain 16px icons at the app's standard stroke weight, with no borders or colored backgrounds.

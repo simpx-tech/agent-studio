@@ -135,6 +135,9 @@ export const preferencesSchema = z.object({
   // Every account each WSL distribution this computer manages has had, so adding its accounts
   // there never brings back one removed there (`addHostAccounts`). Kept on this device only.
   distributionAccounts: z.record(z.string().uuid(), z.array(z.string().uuid())).optional(),
+  // New chats start on the account of their agent that has used the least, instead of the one
+  // last chosen (`src/lib/account-balance.ts`). Off unless set, on this device only.
+  balanceAccounts: z.boolean().optional(),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 const blockSchema = z.discriminatedUnion('type', [
