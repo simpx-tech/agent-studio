@@ -71,6 +71,52 @@ fn waited(events: &[RunEvent]) -> bool {
     )
 }
 
+/// How often a turn's answer was emptied as the next turn began. Nothing a later turn writes
+/// may arrive while an earlier turn's answer still shows, or it would stand above that text.
+fn answers_started_again(events: &[RunEvent]) -> usize {
+    let (mut answered, mut emptied) = (false, 0);
+    for event in events {
+        match event {
+            RunEvent::Text { text } if text.is_empty() => {
+                assert!(answered, "An answer was emptied twice, or before any");
+                answered = false;
+                emptied += 1;
+            }
+            RunEvent::Text { .. } => answered = true,
+            RunEvent::Progress { text, .. } => {
+                assert!(!answered, "Written under an earlier turn's answer: {text}")
+            }
+            _ => {}
+        }
+    }
+    emptied
+}
+
+/// What the reply wrote, answered and was told, in the order its events arrived.
+fn outline(events: &[RunEvent]) -> Vec<String> {
+    let short = |text: &str| text.chars().take(60).collect::<String>();
+    let mut lines: Vec<String> = vec![];
+    for event in events {
+        let line = match event {
+            RunEvent::Progress { id, text, .. } => format!("comment {id}: {}", short(text)),
+            RunEvent::Text { text } => format!("answer: {}", short(text)),
+            RunEvent::Steering { steering, .. } => format!("steer: {}", short(&steering.text)),
+            RunEvent::BackgroundWait { wait } => format!("wait: {wait:?}"),
+            _ => continue,
+        };
+        // A comment streams in many events; its latest text stands for all of them.
+        let streamed = |last: &String| match (last.split_once(": "), line.split_once(": ")) {
+            (Some((a, _)), Some((b, _))) => a == b && a.starts_with("comment "),
+            _ => false,
+        };
+        if lines.last().is_some_and(streamed) {
+            lines.pop();
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
 async fn installed_claude_reply_waits_for_declared_tests_but_not_servers() {
@@ -82,6 +128,11 @@ async fn installed_claude_reply_waits_for_declared_tests_but_not_servers() {
     assert!(started.elapsed() >= Duration::from_secs(20));
     assert!(waited(&events));
     assert!(parkable);
+    // The turn that reports the tests starts the answer again before it writes anything, so
+    // its text follows the text the reply waited with.
+    let turns = outline(&events);
+    assert!(answers_started_again(&events) >= 1, "{turns:#?}");
+    eprintln!("{turns:#?}");
     // Activity shows commands by description only; keep the final state of each.
     let mut commands = std::collections::HashMap::new();
     for event in &events {
@@ -123,6 +174,123 @@ async fn installed_claude_stop_ends_a_waiting_reply_and_keeps_the_process() {
         "acknowledged stops keep the CLI for the next reply"
     );
     assert!(started.elapsed() < Duration::from_secs(200));
+}
+
+/// A steer taken while the reply only waits starts another turn. The text the reply waited
+/// with is emptied as its answer before the steer's receipt, so the steer stands below it and
+/// above what the reply then writes.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_steer_while_waiting_follows_the_answer_it_was_sent_after() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test in a disposable folder. Run the slow test suite in the background: sleep 90 && echo LATE_RESULT . I need its output before you are done, so wait for it, and say in one sentence that it is running.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-steer-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let hub = Questions::default();
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    let run_id = request.run_id.clone();
+    let task = tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            Duration::from_secs(300),
+            stream_turn(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                Some(&mut questions),
+                false,
+            ),
+        )
+        .await;
+        // Released before anything is asserted, with the command it may still run.
+        process.kill().await;
+        result
+    });
+    let mut events = vec![];
+    let waiting = tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(event) = received.recv().await {
+            let idle = matches!(event, RunEvent::BackgroundWait { wait: Some(_) });
+            events.push(event);
+            if idle {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    let sent = if waiting {
+        Some(
+            hub.1
+                .send(
+                    &run_id,
+                    None,
+                    crate::providers::steering::Input {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        text: "Stop that test run now instead of waiting for it, then reply with the single word STEERED.".into(),
+                    },
+                )
+                .await,
+        )
+    } else {
+        None
+    };
+    let result = task.await.unwrap();
+    while let Ok(event) = received.try_recv() {
+        events.push(event);
+    }
+    let turns = outline(&events);
+    assert!(
+        waiting,
+        "The model never ended its turn while the tests ran: {turns:#?}"
+    );
+    assert_eq!(sent, Some(Ok(())), "{turns:#?}");
+    let (status, text) = result
+        .expect("Installed CLI test timed out")
+        .expect("Installed CLI failed");
+    assert_eq!(status, "complete", "{turns:#?}");
+    let steer = turns
+        .iter()
+        .position(|line| line.starts_with("steer: "))
+        .expect("The steer left no receipt");
+    let before: Vec<_> = turns[..steer]
+        .iter()
+        .filter(|line| line.starts_with("answer: "))
+        .collect();
+    // The waiting turn's answer, then the same answer emptied, and only then the steer.
+    assert!(
+        matches!(before.as_slice(), [.., held, emptied] if held.len() > 8 && *emptied == "answer: "),
+        "{turns:#?}"
+    );
+    assert_eq!(turns[steer - 1], "answer: ", "{turns:#?}");
+    assert!(
+        turns[steer + 1..]
+            .iter()
+            .any(|line| line.starts_with("comment ")),
+        "{turns:#?}"
+    );
+    assert!(answers_started_again(&events) >= 1, "{turns:#?}");
+    eprintln!("Ended with {text:?}: {turns:#?}");
 }
 
 #[tokio::test]

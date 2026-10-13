@@ -915,6 +915,11 @@ async fn stream_turn(
                                 if waiting.take().is_some() {
                                     if let Some(channel) = channel { let _ = channel.send(RunEvent::BackgroundWait { wait: None }); }
                                 }
+                                // The answer of the turn before starts again ahead of what this
+                                // line brings, such as the steer that began the turn.
+                                if let Some(event) = decoder.turn_started() {
+                                    if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }
+                                }
                             }
                             if value["type"] == "user" && value["parent_tool_use_id"].is_null() {
                                 if let Some(delivery) = value["uuid"].as_str().and_then(|id| steering.remove(id)) {

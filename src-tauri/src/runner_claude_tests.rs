@@ -328,6 +328,20 @@ async fn declared_background_tests_hold_the_reply_until_the_model_reports_them()
             matches!(e, RunEvent::Activity { text } if text == "Waiting for background work to finish")
         });
         assert_eq!(waiting, mode != "Await replay", "{mode}");
+        // The turn that reports the tests starts the answer again, so what it writes follows
+        // the text the reply waited with instead of standing above it.
+        let answers: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if text == "Tests passed" {
+            assert_eq!(answers, ["Waiting for tests", "", text], "{mode}");
+        } else {
+            assert_eq!(answers, [text], "{mode}");
+        }
         let accepted = settings_input(root.path())
             .into_iter()
             .find(|v| v["response"]["request_id"] == "await-request")
@@ -420,6 +434,95 @@ async fn stop_while_waiting_stops_only_declared_work_and_keeps_the_process() {
         .collect();
     assert_eq!(stopped, ["tests"], "the dev server keeps running");
     process.kill().await;
+}
+
+#[tokio::test]
+async fn a_steer_while_the_reply_waits_follows_the_answer_it_was_sent_after() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("replay-prompts"), "on").unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Agents"}]),
+    );
+    let session = request.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let hub = Questions::default();
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |e| tx.send(e).map_err(|e| e.to_string()));
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    let run_id = request.run_id.clone();
+    let task = tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            stream_turn(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                Some(&mut questions),
+                false,
+            ),
+        )
+        .await;
+        process.kill().await;
+        result
+    });
+    // The turn ended with its answer while the agent works: the reply only waits.
+    let mut seen = vec![];
+    while let Some(event) = events.recv().await {
+        let idle = matches!(event, RunEvent::BackgroundWait { wait: Some(1) });
+        seen.push(event);
+        if idle {
+            break;
+        }
+    }
+    let sent = hub
+        .1
+        .send(
+            &run_id,
+            None,
+            crate::providers::steering::Input {
+                id: uuid::Uuid::new_v4().to_string(),
+                text: "Stop for now".into(),
+            },
+        )
+        .await;
+    assert_eq!(sent, Ok(()));
+    let result = task.await.unwrap().expect("the reply must end");
+    assert_eq!(
+        result.unwrap(),
+        ("complete".into(), "The plan is ready.".into())
+    );
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    // Each turn's answer is emptied as the next turn begins: ahead of the steer that began the
+    // second, and of what the third wrote once the agent reported.
+    let outline: Vec<_> = seen
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Progress { text, .. } => Some(format!("comment: {text}")),
+            RunEvent::Text { text } => Some(format!("answer: {text}")),
+            RunEvent::Steering { steering, .. } => Some(format!("steer: {}", steering.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outline,
+        [
+            "comment: I will write the plan once the agent reports back.",
+            "answer: I will write the plan once the agent reports back.",
+            "answer: ",
+            "steer: Stop for now",
+            "comment: Answering Stop for now",
+            "answer: Answering Stop for now",
+            "answer: ",
+            "comment: The plan is ready.",
+            "answer: The plan is ready.",
+        ]
+    );
 }
 
 #[tokio::test]

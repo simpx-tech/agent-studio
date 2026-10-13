@@ -374,6 +374,16 @@ describe('workspace replication', () => {
     // Copies at the same step whose answers differ take the relay's, which its computer published.
     const theirs = at(step(2, 'Round 4 is running.'));
     expect(mergeShared(base, earlier, theirs).conversations).toEqual(theirs.conversations);
+    // A reply that waited for background work goes on in another turn, which empties the answer
+    // the turn before left, before it records anything: that copy is the later one on either
+    // side, or a sync in that moment would bring the old answer back under the new turn's work.
+    const held = at(step(2, 'The agents are working.'));
+    const emptied = at(step(2, ''));
+    for (const [local, remote] of [
+      [held, emptied],
+      [emptied, held],
+    ])
+      expect(mergeShared(base, local, remote).conversations).toEqual(emptied.conversations);
   });
   it('keeps an account switched on one device with the reply another device saw end', () => {
     // A reply hit a usage limit; the desktop switched the chat to another account and went on,

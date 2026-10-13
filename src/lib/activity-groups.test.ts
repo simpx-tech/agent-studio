@@ -13,10 +13,10 @@ import {
   replyParts,
   type LiveGroupItem,
 } from './activity-groups';
-import type { ToolActivity } from './activity';
+import { applyRunEvent, type ToolActivity } from './activity';
 import type { Compaction } from './compaction';
-import type { ContentBlock } from './domain';
-import type { PlacedSteering } from './steering';
+import { messageText, type ContentBlock, type Message, type RunEvent } from './domain';
+import { placedSteering, type PlacedSteering } from './steering';
 
 const tool = (id: string, extra: Partial<ToolActivity> = {}): ToolActivity => ({
   id,
@@ -291,6 +291,73 @@ describe('activity groups', () => {
       ['start', 0],
       ['Steer 1', 0],
     ]);
+  });
+
+  it('keeps the text a turn ended with above the steer and the turn that followed it', () => {
+    // A Claude reply as the window records it: it started a background agent and ended its turn,
+    // was steered while it waited, and went on in another turn.
+    const runId = crypto.randomUUID();
+    const m: Message = {
+      id: crypto.randomUUID(),
+      runId,
+      role: 'assistant',
+      status: 'running',
+      createdAt: '',
+      blocks: [],
+    };
+    const run = (event: RunEvent) => applyRunEvent(m, event);
+    const comment = (id: string, text: string) => run({ kind: 'progress', id, revision: 1, text });
+    const shown = () => {
+      const steers = placedSteering(m.steering, m.steeringPlaces);
+      const text =
+        messageText(m) || (m.status === 'running' ? '' : closingComment(m.blocks, steers));
+      const tools = m.blocks.flatMap((b) => (b.type === 'activity' && b.tool ? [b.tool] : []));
+      return [
+        ...replyParts(m.blocks, tools, text, [], steers).map((part) => [
+          part.steer?.text ?? 'start',
+          ...groupActivityEntries(part.entries).map(described),
+        ]),
+        `answer: ${text}`,
+      ];
+    };
+    run({ kind: 'tool', tool: tool('launch', { name: 'Agent' }) });
+    comment('turn-1', 'The pine is building now.');
+    run({ kind: 'text', text: 'The pine is building now.' });
+    run({ kind: 'backgroundwait', wait: 1 });
+    // While the reply waits, the turn's text is its answer, and its work leaves it to the answer.
+    expect(shown()).toEqual([['start', 'launch'], 'answer: The pine is building now.']);
+    // The steer starts another turn: the computer running the reply empties the answer first.
+    run({ kind: 'backgroundwait', wait: null });
+    run({ kind: 'text', text: '' });
+    run({
+      kind: 'steering',
+      steering: { id: crypto.randomUUID(), runId, sequence: 1, text: 'Stop for now' },
+    });
+    expect(shown()).toEqual([
+      ['start', 'launch', 'The pine is building now.'],
+      ['Stop for now'],
+      'answer: ',
+    ]);
+    comment('turn-2', 'Stopping the agent.');
+    run({ kind: 'tool', tool: tool('stop', { name: 'TaskStop' }) });
+    const steered = [
+      ['start', 'launch', 'The pine is building now.'],
+      ['Stop for now', 'Stopping the agent.', 'stop'],
+    ];
+    expect(shown()).toEqual([...steered, 'answer: ']);
+    // Stopped here, the reply ends with the comment it wrote after the steer, never with the
+    // text from before it.
+    m.status = 'cancelled';
+    expect(shown()).toEqual([
+      ['start', 'launch', 'The pine is building now.'],
+      ['Stop for now', 'stop'],
+      'answer: Stopping the agent.',
+    ]);
+    m.status = 'running';
+    comment('turn-2-end', 'Stopped. The pine is unfinished.');
+    run({ kind: 'text', text: 'Stopped. The pine is unfinished.' });
+    m.status = 'complete';
+    expect(shown()).toEqual([...steered, 'answer: Stopped. The pine is unfinished.']);
   });
 
   it('lets a reply’s last comment stand for a missing answer only when no steer followed it', () => {

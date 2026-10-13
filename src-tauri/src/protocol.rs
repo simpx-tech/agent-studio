@@ -162,6 +162,9 @@ pub struct Decoder {
     reasoning: reasoning::ReasoningDecoder,
     current_message: String,
     message_number: u64,
+    /// A Claude turn of this reply ended with the answer the reply now shows, and no turn has
+    /// begun since.
+    answered: bool,
     /// The usage limit that stopped this reply, in the provider's words.
     pub usage_limit: Option<usage_limit::UsageLimit>,
 }
@@ -215,6 +218,16 @@ impl Decoder {
     }
     pub fn reported_model(&mut self, model: Option<&str>) {
         self.model = model.map(String::from);
+    }
+    /// Claude began another turn of this reply: background work it waited for reported, or the
+    /// user steered it while it waited. The turn before ended with its answer, which the
+    /// reply's work also holds as the comment it was written as. That answer starts again here,
+    /// so the comment shows in its place and what this turn does follows it instead of standing
+    /// above it.
+    pub fn turn_started(&mut self) -> Option<RunEvent> {
+        std::mem::take(&mut self.answered).then(|| RunEvent::Text {
+            text: String::new(),
+        })
     }
     /// The reply's usage with the context of its latest Claude request, as soon as that request
     /// reports it. A turn reports its result only when it ends, which can be hundreds of calls
@@ -407,6 +420,16 @@ impl Decoder {
         if provider == "claude" && !v["parent_tool_use_id"].is_null() {
             return events;
         }
+        // The first line of a turn after one that ended: the message that starts it, or what
+        // the model then writes.
+        if provider == "claude"
+            && (matches!(kind.as_str(), "assistant" | "stream_event" | "user")
+                || (kind == "system" && v["subtype"] == "init"))
+        {
+            if let Some(event) = self.turn_started() {
+                events.insert(0, event);
+            }
+        }
         if provider == "claude" {
             if let Some(compaction) = self.compactions.claude(v) {
                 if compaction.status == "complete" {
@@ -592,6 +615,7 @@ impl Decoder {
                         match crate::structured_output::result(&v["structured_output"]) {
                             Ok(text) => {
                                 self.text = text;
+                                self.answered = true;
                                 events.push(RunEvent::Text {
                                     text: self.text.clone(),
                                 });
@@ -605,6 +629,7 @@ impl Decoder {
                         let result = string(v, "/result");
                         if !result.is_empty() {
                             self.text = result;
+                            self.answered = true;
                             events.push(RunEvent::Text {
                                 text: self.text.clone(),
                             });
@@ -745,6 +770,79 @@ mod tests {
             .iter()
             .any(|e| matches!(e, RunEvent::Text { text } if text == "The answer.")));
         assert_eq!(d.text, "The answer.");
+    }
+    #[test]
+    fn a_turn_that_follows_another_starts_the_replys_answer_again() {
+        let mut d = Decoder::default();
+        let decode = |d: &mut Decoder, value: Value| d.decode("claude", &value.to_string());
+        let answers = |events: &[RunEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    RunEvent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let turn = |d: &mut Decoder, id: &str, text: &str| {
+            let mut events = decode(
+                d,
+                serde_json::json!({"type":"assistant","parent_tool_use_id":null,"message":{"id":id,"content":[{"type":"text","text":text}]}}),
+            );
+            events.extend(decode(
+                d,
+                serde_json::json!({"type":"result","is_error":false,"result":text}),
+            ));
+            events
+        };
+        // The reply's first turn ends while a background agent works on.
+        let first = turn(&mut d, "waiting", "The agent is building the pine.");
+        assert_eq!(answers(&first), ["The agent is building the pine."]);
+        // What the agent does, and the notices about it, are no turn of the reply.
+        for line in [
+            serde_json::json!({"type":"assistant","parent_tool_use_id":"agent-call","message":{"id":"child","content":[{"type":"text","text":"Fitting the tiers."}]}}),
+            serde_json::json!({"type":"user","parent_tool_use_id":"agent-call","message":{"content":[{"type":"tool_result","tool_use_id":"child-read","content":"ok"}]}}),
+            serde_json::json!({"type":"system","subtype":"task_progress","task_id":"agent-task","tool_use_id":"agent-call","description":"Fitting"}),
+            serde_json::json!({"type":"system","subtype":"status","status":null}),
+            serde_json::json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}),
+        ] {
+            assert!(answers(&decode(&mut d, line)).is_empty());
+        }
+        // The steer that starts the next turn empties that answer before anything else, once.
+        let steer = decode(
+            &mut d,
+            serde_json::json!({"type":"user","parent_tool_use_id":null,"isReplay":true,"uuid":"steer","message":{"role":"user","content":[{"type":"text","text":"Stop for now"}]}}),
+        );
+        assert!(matches!(steer.as_slice(), [RunEvent::Text { text }] if text.is_empty()));
+        let started = decode(
+            &mut d,
+            serde_json::json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"stopping"}}}),
+        );
+        assert!(answers(&started).is_empty());
+        let second = turn(&mut d, "stopping", "Stopped the agent.");
+        assert!(
+            matches!(second.first(), Some(RunEvent::Progress { text, .. }) if text == "Stopped the agent.")
+        );
+        assert_eq!(answers(&second), ["Stopped the agent."]);
+        // A turn Claude starts by itself, as when background work reports, begins with init.
+        let init = decode(
+            &mut d,
+            serde_json::json!({"type":"system","subtype":"init","session_id":"s","parent_tool_use_id":null}),
+        );
+        assert!(matches!(init.first(), Some(RunEvent::Text { text }) if text.is_empty()));
+        assert_eq!(answers(&init).len(), 1);
+        // A turn that ends without an answer leaves none to start again.
+        let failed = decode(
+            &mut d,
+            serde_json::json!({"type":"result","is_error":true,"errors":["overloaded"]}),
+        );
+        assert!(answers(&failed).is_empty());
+        assert!(d.turn_started().is_none());
+        // The runner asks first, so the answer is emptied ahead of the steer's receipt.
+        turn(&mut d, "third", "Done.");
+        assert!(matches!(d.turn_started(), Some(RunEvent::Text { text }) if text.is_empty()));
+        let line = serde_json::json!({"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":"<task-notification></task-notification>"}});
+        assert!(answers(&decode(&mut d, line)).is_empty());
     }
     #[test]
     fn app_server_subagent_stream_preserves_child_results_and_main_usage() {

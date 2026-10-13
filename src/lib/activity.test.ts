@@ -374,6 +374,32 @@ describe('structured tool activity', () => {
     expect(m.blocks[0].type === 'activity' && m.blocks[0].tool?.status).toBe('complete');
     expect(m.blocks[1].type === 'activity' && m.blocks[1].tool?.status).toBe('running');
   });
+  it('starts a reply’s answer again when an empty text arrives, and makes none of it', () => {
+    const m = message();
+    const answer = () => m.blocks.filter((b) => b.type === 'markdown');
+    // Only text makes an answer.
+    applyRunEvent(m, { kind: 'text', text: '' });
+    applyRunEvent(m, { kind: 'text' });
+    expect(m.blocks).toEqual([]);
+    applyRunEvent(m, { kind: 'progress', id: 'turn-1', revision: 1, text: 'The agent works on.' });
+    applyRunEvent(m, { kind: 'text', text: 'The agent works on.' });
+    expect(answer()).toEqual([{ type: 'markdown', text: 'The agent works on.' }]);
+    // Claude went on in another turn: the answer starts again, and its text stays a comment.
+    applyRunEvent(m, { kind: 'text', text: '' });
+    expect(answer()).toEqual([{ type: 'markdown', text: '' }]);
+    expect(m.blocks).toHaveLength(2);
+    applyRunEvent(m, { kind: 'progress', id: 'turn-2', revision: 1, text: 'It reported.' });
+    applyRunEvent(m, { kind: 'text', text: 'It reported.' });
+    expect(answer()).toEqual([{ type: 'markdown', text: 'It reported.' }]);
+    expect(m.blocks.flatMap((b) => (b.type === 'activity' ? [b.text] : []))).toEqual([
+      'The agent works on.',
+      'It reported.',
+    ]);
+    // A relay job keeps the latest, so a device that follows the reply empties its copy too.
+    const events: RunEvent[] = [];
+    for (const text of ['The agent works on.', '']) retainRunEvent(events, { kind: 'text', text });
+    expect(events).toEqual([{ kind: 'text', text: '' }]);
+  });
   it('keeps tool metadata through restore while excluding it from prompt history', () => {
     const w = initialWorkspace();
     const m = message();

@@ -209,9 +209,11 @@ const score = (message: Message) => (interrupted(message) ? -1 : rank[message.st
  * computer running a reply writes it, so its copies differ in time, never in content. Its answer
  * is not one growing text: the text written before a call becomes a progress comment and the
  * answer starts again. So the status decides first, then the blocks and the usage revision the
- * reply recorded, then an answer extending the other; otherwise the relay's copy, which the
- * running computer publishes, is the later one. Requiring one answer to extend the other made a
- * conflict copy of a chat whenever a phone held its reply from an earlier step.
+ * reply recorded, then an answer a new turn emptied (a reply that waited for background work goes
+ * on in another turn, which starts its answer again before it records anything), then an answer
+ * extending the other; otherwise the relay's copy, which the running computer publishes, is the
+ * later one. Requiring one answer to extend the other made a conflict copy of a chat whenever a
+ * phone held its reply from an earlier step.
  */
 function laterReply(left: Message, right: Message): Message {
   for (const difference of [
@@ -220,6 +222,9 @@ function laterReply(left: Message, right: Message): Message {
     (left.usage?.revision ?? -1) - (right.usage?.revision ?? -1),
   ])
     if (difference) return difference > 0 ? left : right;
+  const emptied = (message: Message) =>
+    !messageText(message) && message.blocks.some((block) => block.type === 'markdown');
+  if (emptied(left) !== emptied(right)) return emptied(left) ? left : right;
   return messageText(left).startsWith(messageText(right)) ? left : right;
 }
 

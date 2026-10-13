@@ -343,9 +343,14 @@ export function applyRunEvent(message: Message, event: RunEvent) {
       });
     }
   } else if (event.kind === 'text') {
+    // The reply's answer, which each event replaces. An empty one starts it again: Claude went
+    // on in another turn, so the text the turn before ended with shows as the comment the
+    // reply's work holds it as. Only text makes an answer, so an emptied one is always a later
+    // state of the reply than the answer it held (`laterReply`).
+    const text = event.text ?? '';
     const block = message.blocks.find((b) => b.type === 'markdown');
-    if (block) block.text = event.text ?? '';
-    else message.blocks.push({ type: 'markdown', text: event.text ?? '' });
+    if (block) block.text = text;
+    else if (text) message.blocks.push({ type: 'markdown', text });
   } else if (event.kind === 'activity') {
     if (
       !message.blocks.some(
