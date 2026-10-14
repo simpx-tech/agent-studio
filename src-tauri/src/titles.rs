@@ -76,6 +76,7 @@ pub(crate) fn background_request(
             skills: vec![],
             mentions: vec![],
             visualizations: vec![],
+            artifacts: vec![],
         }],
     })
 }

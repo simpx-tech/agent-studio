@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { Marked, type Token, type TokensList } from 'marked';
 import type { Visualization } from './visualizations';
+import type { ArtifactRecord } from './artifact-records';
 import { loneImage, type SentFiles } from './sent-files';
 import { siteLink } from './link-marks';
 import { consoleShell, fenceClosed, type ConsoleShell } from './code-blocks';
@@ -199,6 +200,7 @@ export function renderMarkdown(text: string, artifacts?: ArtifactCards): string 
 type ReplyPart = { key: string } & (
   | { type: 'text'; html: string }
   | { type: 'visual'; visual: Visualization }
+  | { type: 'artifact'; artifact: ArtifactRecord }
   | { type: 'files'; groups: SentFiles[] }
 );
 
@@ -206,25 +208,32 @@ type ReplyPart = { key: string } & (
 export type ReplyContent = { parts: ReplyPart[]; cards: Set<string> };
 
 /**
- * A reply's answer: its text, with each visual and group of files at its marker and each
- * artifact as a card in place of its code. While the reply runs (`writing`), an artifact still
- * being written shows as the card it becomes.
+ * A reply's answer: its text, with each visual, artifact page and group of files at its marker
+ * and each artifact fence as a card in place of its code. While the reply runs (`writing`), an
+ * artifact still being written shows as the card it becomes.
  */
 export function replyContent(
   text: string,
   visuals: Visualization[] = [],
   files: SentFiles[] = [],
   writing = false,
+  artifacts: ArtifactRecord[] = [],
 ): ReplyContent {
   return rendering(writing ? 'writing' : 'cards', () => ({
-    parts: answerParts(text, visuals, files),
+    parts: answerParts(text, visuals, files, artifacts),
     cards: new Set(shownCards),
   }));
 }
 
-// Only standalone, top-level markers can position a visual or a group of files already
-// accepted by the provider adapter. Code examples and quoted/nested markers remain inert.
-function answerParts(text: string, visuals: Visualization[], files: SentFiles[]): ReplyPart[] {
+// Only standalone, top-level markers can position a visual, an artifact page or a group of
+// files already accepted by the provider adapter. Code examples and quoted/nested markers
+// remain inert.
+function answerParts(
+  text: string,
+  visuals: Visualization[],
+  files: SentFiles[],
+  artifacts: ArtifactRecord[],
+): ReplyPart[] {
   const tokens = markdown.lexer(text);
   const result: ReplyPart[] = [];
   const placed = new Set<string>();
@@ -260,7 +269,7 @@ function answerParts(text: string, visuals: Visualization[], files: SentFiles[])
   for (const token of tokens) {
     const marker =
       token.type === 'html' &&
-      token.raw.trim().match(/^<!-- (visualize|files):([a-zA-Z0-9_-]{1,80}) -->$/);
+      token.raw.trim().match(/^<!-- (visualize|artifact|files):([a-zA-Z0-9_-]{1,80}) -->$/);
     if (!marker) {
       pending.push(token);
       continue;
@@ -268,6 +277,11 @@ function answerParts(text: string, visuals: Visualization[], files: SentFiles[])
     if (marker[1] === 'visualize') {
       const visual = visuals.find((v) => v.id === marker[2]);
       if (visual) place({ key: `visual:${visual.id}`, type: 'visual', visual });
+      continue;
+    }
+    if (marker[1] === 'artifact') {
+      const artifact = artifacts.find((a) => a.id === marker[2]);
+      if (artifact) place({ key: `artifact:${artifact.id}`, type: 'artifact', artifact });
       continue;
     }
     const group = files.find((f) => f.id === marker[2]);
@@ -278,6 +292,10 @@ function answerParts(text: string, visuals: Visualization[], files: SentFiles[])
   for (const visual of visuals) {
     if (!placed.has(`visual:${visual.id}`))
       result.push({ key: `visual:${visual.id}`, type: 'visual', visual });
+  }
+  for (const artifact of artifacts) {
+    if (!placed.has(`artifact:${artifact.id}`))
+      result.push({ key: `artifact:${artifact.id}`, type: 'artifact', artifact });
   }
   for (const group of files) placeFiles(group);
   return result;

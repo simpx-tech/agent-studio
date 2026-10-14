@@ -186,3 +186,68 @@ test('an artifact of an earlier turn stays in its comment and follows the answer
   await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
   expect(await viewer.locator('pre code').textContent()).toBe('<h1>KPIs</h1>');
 });
+
+// A page the agent wrote to a file and showed with its show_artifact tool: the reply keeps its
+// source, places its card at the marker, and an open viewer follows each revision it shows.
+test('a page shown with show_artifact sits at its marker and the viewer follows its revisions', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await ask(page, 'Make the quarterly page');
+  const reply = page.locator('.message').last();
+  const shown = (revision: number, heading: string) => ({
+    kind: 'artifact',
+    artifact: {
+      id: 'report',
+      revision,
+      title: 'Quarterly report',
+      language: 'html',
+      source: `<!doctype html><title>Q3</title><h1>${heading}</h1>`,
+    },
+  });
+  await emit(page, shown(1, 'First draft'));
+  const card = reply.getByRole('button', { name: 'Quarterly report Open HTML', exact: true });
+  await expect(card).toBeVisible();
+  await reply
+    .getByRole('button', { name: 'Open Quarterly report in side panel', exact: true })
+    .click();
+  const viewer = page.getByRole('dialog', { name: 'Quarterly report', exact: true });
+  await expect(viewer).toHaveClass(/docked/);
+  const frame = page.frameLocator('iframe[title="Quarterly report preview"]');
+  await expect(frame.getByRole('heading')).toHaveText('First draft');
+  // A page renders where it may load pinned CDN libraries.
+  expect(await viewer.locator('iframe').getAttribute('src')).toBe('/artifact-page');
+  // The agent fixed the page and showed it again under its id.
+  await emit(page, shown(2, 'Final'));
+  await expect(frame.getByRole('heading')).toHaveText('Final');
+  await expect(card).toHaveCount(1);
+  await emit(page, {
+    kind: 'text',
+    text: 'Here it is.\n\n<!-- artifact:report -->\n\nIt covers the third quarter.',
+  });
+  await finish(page, 'complete');
+  const order = () =>
+    page
+      .locator('.message')
+      .last()
+      .locator(':scope > .message-content')
+      .evaluate((content) =>
+        [...content.children]
+          .filter((child) => child.matches('.prose, .artifact-card'))
+          .map((child) => (child.matches('.artifact-card') ? 'card' : child.textContent?.trim())),
+      );
+  expect(await order()).toEqual(['Here it is.', 'card', 'It covers the third quarter.']);
+  await viewer.getByRole('button', { name: 'Close artifact', exact: true }).click();
+  // Saved history keeps the page's latest source.
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: /Make the quarterly page/ }).click();
+  expect(await order()).toEqual(['Here it is.', 'card', 'It covers the third quarter.']);
+  await page.getByRole('button', { name: 'Quarterly report Open HTML', exact: true }).click();
+  await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
+  expect(await viewer.locator('pre code').textContent()).toBe(
+    '<!doctype html><title>Q3</title><h1>Final</h1>',
+  );
+});

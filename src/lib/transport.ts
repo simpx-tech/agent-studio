@@ -452,10 +452,14 @@ function updatePendingBadge(count: number) {
   void badgeQueue.catch(() => {});
 }
 
-export async function artifactPreviewUrl(): Promise<string> {
-  if (!desktop()) return '/artifact-preview';
+/**
+ * The sandboxed renderer: offline (`frame`) for visualizations and screens, and with pinned
+ * CDNs and Google Fonts (`page`) for artifact pages.
+ */
+export async function artifactPreviewUrl(kind: 'frame' | 'page' = 'frame'): Promise<string> {
+  if (!desktop()) return kind === 'page' ? '/artifact-page' : '/artifact-preview';
   const { convertFileSrc } = await import('@tauri-apps/api/core');
-  return convertFileSrc('', 'studio-artifact');
+  return convertFileSrc(kind === 'page' ? 'page' : '', 'studio-artifact');
 }
 
 export async function downloadArtifact(source: string, filename: string, language: 'html' | 'svg') {

@@ -170,14 +170,16 @@ fn studio_tool(name: &str) -> bool {
                 | "studio_update_plan"
                 | "visualize"
                 | "send_files"
+                | "show_artifact"
                 | "save_screen"
                 | "list_screens"
                 | "read_screen"
         )
 }
-/// The title of the screen a save_screen call saves, which its row shows.
+/// The title of the screen a save_screen call saves, or of the page a show_artifact call shows,
+/// which its row shows.
 fn screen_title(name: &str, input: &Value) -> Option<String> {
-    name.ends_with("save_screen")
+    (name.ends_with("save_screen") || name.ends_with("show_artifact"))
         .then(|| field(input, "title"))
         .flatten()
 }
@@ -950,7 +952,9 @@ impl ToolDecoder {
                     fact(&mut tool, "Prompt", prompt);
                 }
             }
-            "mcp__agent_studio__save_screen" => tool.detail = screen_title(name, input),
+            "mcp__agent_studio__save_screen" | "mcp__agent_studio__show_artifact" => {
+                tool.detail = screen_title(name, input)
+            }
             // Connected (MCP) and unrecognized tools show the arguments they were sent.
             _ if !claude_builtin(name) && !studio_tool(name) => self.set_input(&mut tool, input),
             _ => {}

@@ -1,6 +1,7 @@
 import { marked } from 'marked';
 import { fenceClosed } from './code-blocks';
 import type { Message } from './domain';
+import type { ArtifactRecord } from './artifact-records';
 
 export type Artifact = {
   id: string;
@@ -42,6 +43,20 @@ export function artifactTitle(fence: ArtifactFence, source: string, index: numbe
   const htmlTitle = source.match(/<title[^>]*>([^<]{1,100})<\/title>/i)?.[1];
   const title = fence.name || htmlTitle || `${fence.language.toUpperCase()} artifact ${index + 1}`;
   return title.slice(0, 100);
+}
+
+/**
+ * A page a reply showed with its show_artifact tool, as the viewer opens it: the id follows the
+ * page through its revisions, so an open viewer shows the latest one.
+ */
+export function recordArtifact(messageId: string, record: ArtifactRecord): Artifact {
+  return {
+    id: `${messageId}:artifact:${record.id}`,
+    title: record.title,
+    language: record.language,
+    source: record.source,
+    revision: record.revision,
+  };
 }
 
 /** What tells two artifacts apart: the same source in the same language is one artifact. */

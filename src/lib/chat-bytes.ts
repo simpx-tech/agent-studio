@@ -81,7 +81,7 @@ export function jsonWith(
 }
 
 // The fields of a message kept apart from the rest of it, each written once.
-const apart = ['fileChanges', 'visualizations'] as const;
+const apart = ['fileChanges', 'visualizations', 'artifacts'] as const;
 
 function messageParts(message: Message): JsonPart[] {
   const fields: [string, JsonPart[]][] = [];

@@ -58,6 +58,7 @@
     Webhook,
     Workflow,
     Wrench,
+    PanelsTopLeft,
   } from '@lucide/svelte';
   import GitIcon from './GitIcon.svelte';
   import type { ToolIconKey } from '$lib/tool-presentation';
@@ -123,6 +124,7 @@
     workflow: Workflow,
     chart: ChartColumn,
     screen: LayoutDashboard,
+    artifact: PanelsTopLeft,
     hook: Webhook,
     background: Layers,
     tool: Wrench,

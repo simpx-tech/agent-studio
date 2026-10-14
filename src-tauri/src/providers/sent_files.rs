@@ -146,9 +146,13 @@ impl Staging {
             cancel,
         }
     }
+    /// The reply's Stop, which ends a check or a preview under way.
+    pub(super) fn cancel(&self) -> &CancellationToken {
+        &self.cancel
+    }
     /// A reported path on this computer. Linux paths reach Windows through the
     /// distribution's own translation; nothing else resolves a caller's path.
-    async fn host_path(&self, path: &str) -> Result<PathBuf, String> {
+    pub(super) async fn host_path(&self, path: &str) -> Result<PathBuf, String> {
         let Some(distribution) = &self.distribution else {
             let resolved = PathBuf::from(path);
             if !resolved.is_absolute() {

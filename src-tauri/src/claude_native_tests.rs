@@ -936,6 +936,44 @@ async fn installed_claude_saves_a_screen_whose_action_runs_once_allowed() {
     );
 }
 
+/// A chat shows a page it wrote through the CLI's own call of show_artifact, which reads the file
+/// where the chat runs and answers with the page as the viewer renders it: the agent reads the
+/// problems the preview found (a page too wide for a phone here) and places the card.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity, a model's tool choice and Edge or Chrome."]
+async fn installed_claude_shows_an_artifact_and_reads_its_preview() {
+    let folder = tempfile::tempdir().unwrap();
+    let page = folder.path().join("probe.html");
+    let text = format!("This is an Agent Studio integration test. Write this exact page to {}: <!doctype html><html><head><title>Probe page</title><style>body{{margin:0;background:#fff;color:#111;font:16px system-ui}}.wide{{width:700px;height:40px;background:#c4e88c}}</style></head><body><h1>Probe page</h1><div class=\"wide\"></div></body></html>. Then call mcp__agent_studio__show_artifact once with id probe, title Probe page and that path. Do not change the page or call the tool again. Reply with one sentence naming the problems the preview reported, followed by <!-- artifact:probe --> on its own line.", page.display());
+    let (result, events, _) = run(&text, false).await;
+    for line in outline(&events) {
+        eprintln!("{line}");
+    }
+    let (status, answer) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let artifact = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::Artifact { artifact } => Some(artifact.clone()),
+            _ => None,
+        })
+        .expect("Claude showed no artifact");
+    assert_eq!(artifact.id, "probe");
+    assert_eq!(artifact.language, "html");
+    assert!(
+        artifact.source.contains("<h1>Probe page</h1>"),
+        "{}",
+        artifact.source
+    );
+    assert!(answer.contains("<!-- artifact:probe -->"), "{answer}");
+    let told = answer.to_lowercase();
+    assert!(
+        told.contains("sideways") || told.contains("scroll") || told.contains("wide"),
+        "{answer}"
+    );
+    eprintln!("Answer: {answer}");
+}
+
 /// A session made outside Agent Studio, as the terminal makes one, continues in a chat imported
 /// from it: the first reply forks it with its context, and the original stays as it was.
 #[tokio::test]

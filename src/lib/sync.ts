@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
+import { mergeArtifactRecords } from './artifact-records.ts';
 import { mergeSentFiles } from './sent-files.ts';
 import { mergeScreenCards } from './screens.ts';
 import { mergeQuestions } from './questions.ts';
@@ -333,6 +334,9 @@ function sameRun(
       plan: (a.plan?.revision ?? -1) >= (b.plan?.revision ?? -1) ? a.plan : b.plan,
       ...(a.visualizations || b.visualizations
         ? { visualizations: mergeVisualizations(a.visualizations, b.visualizations) }
+        : {}),
+      ...(a.artifacts || b.artifacts
+        ? { artifacts: mergeArtifactRecords(a.artifacts, b.artifacts) }
         : {}),
       ...(a.sentFiles || b.sentFiles
         ? { sentFiles: mergeSentFiles(a.sentFiles, b.sentFiles) }

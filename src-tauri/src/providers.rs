@@ -7,6 +7,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
+pub mod artifact_tool;
 pub mod background;
 pub mod claude_settings;
 pub mod codex_chat;
@@ -658,6 +659,9 @@ pub struct ChatMessage {
     pub mentions: Vec<crate::mentions::Mention>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visualizations: Vec<visualize::Visualization>,
+    /// The pages an earlier reply showed with show_artifact, replayed as earlier context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<artifact_tool::ArtifactRecord>,
 }
 mod images;
 impl RunRequest {
@@ -794,6 +798,11 @@ impl RunRequest {
             {
                 return Err("Invalid visualization history".into());
             }
+            if !artifact_tool::valid_history(&message.artifacts)
+                || (!message.artifacts.is_empty() && message.role != "assistant")
+            {
+                return Err("Invalid artifact history".into());
+            }
             if !message.skills.is_empty()
                 && (!self.uses_codex_server()
                     || message.role != "user"
@@ -852,6 +861,10 @@ impl RunRequest {
                 if !message.visualizations.is_empty() && self.tools_enabled() {
                     value["visualizations"] = serde_json::json!(message.visualizations);
                 }
+                // A page shown earlier, whole, so a new session can change it.
+                if !message.artifacts.is_empty() && self.tools_enabled() {
+                    value["artifacts"] = serde_json::json!(message.artifacts);
+                }
                 if !message.images.is_empty() {
                     value["images"] = serde_json::json!(message
                         .images
@@ -880,7 +893,10 @@ impl RunRequest {
     }
     fn capabilities(&self, studio_tools: bool) -> String {
         let tools = if self.tools_enabled() {
-            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::GUIDANCE)
+            // Agent Studio's own tools show an artifact from a file; without them, a fence does.
+            let artifact_tool =
+                studio_tools && (self.uses_codex_server() || self.uses_claude_visualizer());
+            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::guidance(artifact_tool))
         } else {
             "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
@@ -1593,6 +1609,7 @@ mod tests {
                 skills: vec![],
                 mentions: vec![],
                 visualizations: vec![],
+                artifacts: vec![],
             }],
         }
     }
@@ -1901,11 +1918,14 @@ mod tests {
             r.agent.provider = provider.into();
             assert!(r.prompt().contains("Tools are enabled"));
             assert!(!r.prompt().contains("Do not use tools"));
-            // Every chat agent learns how to deliver an artifact; background work never does.
-            assert!(r.prompt().contains(crate::artifacts::GUIDANCE));
+            // Every chat agent learns how to deliver an artifact, with show_artifact where Agent
+            // Studio's tools are; background work never does.
+            let artifacts = crate::artifacts::guidance(provider != "gemini");
+            assert!(r.prompt().contains(&artifacts));
+            assert_eq!(r.prompt().contains("show_artifact"), provider != "gemini");
             r.conversation_only = true;
             assert!(r.prompt().contains("Do not use tools"));
-            assert!(!r.prompt().contains(crate::artifacts::GUIDANCE));
+            assert!(!r.prompt().contains("Make it a finished, polished page"));
             let exe = Executable {
                 provider: provider.into(),
                 program: "synthetic-cli".into(),
@@ -2435,6 +2455,7 @@ mod tests {
             skills: vec![],
             mentions: vec![],
             visualizations: vec![],
+            artifacts: vec![],
         });
         let lines: Vec<serde_json::Value> = r
             .stdin_payload()

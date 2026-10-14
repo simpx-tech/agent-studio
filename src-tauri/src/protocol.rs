@@ -78,6 +78,10 @@ pub enum RunEvent {
     Visualization {
         visualization: crate::providers::visualize::Visualization,
     },
+    /// A page this reply showed with its show_artifact tool, at its latest revision.
+    Artifact {
+        artifact: crate::providers::artifact_tool::ArtifactRecord,
+    },
     SentFiles {
         #[serde(rename = "sentFiles")]
         sent_files: crate::providers::sent_files::SentFiles,

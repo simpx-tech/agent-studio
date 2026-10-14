@@ -10,6 +10,7 @@ import { imageSchema, type ChatImage } from './images.ts';
 import { planSchema, type Plan } from './plans.ts';
 import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
+import { artifactRecordsSchema, type ArtifactRecord } from './artifact-records.ts';
 import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
@@ -218,6 +219,8 @@ export const messageSchema = z
     plan: planSchema.optional(),
     proposedPlans: proposedPlansSchema.optional(),
     visualizations: visualizationsSchema.optional(),
+    // The artifact pages the reply showed with its show_artifact tool, with their source.
+    artifacts: artifactRecordsSchema.optional(),
     sentFiles: sentFileGroupsSchema.optional(),
     // The screens the reply saved, which their cards open from the computer that keeps them.
     screens: screenCardsSchema.optional(),
@@ -338,6 +341,7 @@ export type RunEvent = TokenUsage & {
     | 'proposedplan'
     | 'filechanges'
     | 'visualization'
+    | 'artifact'
     | 'sentfiles'
     | 'screen'
     | 'question'
@@ -361,6 +365,7 @@ export type RunEvent = TokenUsage & {
   plan?: Plan;
   proposedPlan?: ProposedPlan;
   visualization?: Visualization;
+  artifact?: ArtifactRecord;
   sentFiles?: SentFiles;
   screen?: ScreenCard;
   question?: QuestionRequest;
@@ -402,6 +407,7 @@ export type RunRequest = {
     skills?: SkillReference[];
     mentions?: Mention[];
     visualizations?: Visualization[];
+    artifacts?: ArtifactRecord[];
   }[];
 };
 
@@ -446,8 +452,13 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
       ...(m.role === 'assistant' && m.status === 'complete' && m.visualizations?.length
         ? { visualizations: m.visualizations }
         : {}),
+      ...(m.role === 'assistant' && m.status === 'complete' && m.artifacts?.length
+        ? { artifacts: m.artifacts }
+        : {}),
     }))
-    .filter((m) => m.text.trim() || m.images?.length || m.visualizations?.length);
+    .filter(
+      (m) => m.text.trim() || m.images?.length || m.visualizations?.length || m.artifacts?.length,
+    );
 }
 // Loading a saved workspace cannot regain a run that was live when the app stopped.
 export const interruptedReplyError = 'This response was interrupted when the app closed.';

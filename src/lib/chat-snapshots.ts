@@ -34,7 +34,7 @@ import {
 import { jsonEqual } from './json-equal';
 
 /** Message fields that can hold megabytes and are replaced whole. */
-const heavy = ['fileChanges', 'visualizations'] as const;
+const heavy = ['fileChanges', 'visualizations', 'artifacts'] as const;
 const messageFields = Object.keys(messageSchema.shape);
 // The fields of each kind of block, by its `type`.
 const blockFields = new Map<unknown, string[]>(

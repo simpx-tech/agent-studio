@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { webViewerCsp } from '../../relay/web.ts';
+import { artifactPageCsp, artifactPreviewCsp } from '../../relay/artifact-preview.ts';
+
+// The desktop renderer (src-tauri/src/artifacts.rs) and the browsers' (relay/artifact-preview.ts)
+// sandbox artifacts under the same two policies.
+it('sandboxes artifacts under the same policies on desktop and in browsers', () => {
+  const rust = readFileSync('src-tauri/src/artifacts.rs', 'utf8');
+  const constant = (name: string) =>
+    rust.match(new RegExp(`pub const ${name}: &str = "([^"]*)";`))?.[1];
+  expect(constant('FRAME_CSP')).toBe(artifactPreviewCsp);
+  expect(constant('PAGE_CSP')).toBe(artifactPageCsp);
+});
 
 /**
  * The model viewer shows a sent .glb by parsing the bytes it was given and reaching for

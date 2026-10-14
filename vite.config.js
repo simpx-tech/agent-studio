@@ -3,8 +3,30 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { artifactPreviewHtml, artifactPreviewHeaders } from './relay/artifact-preview.ts';
+import {
+  artifactPageHeaders,
+  artifactPreviewHtml,
+  artifactPreviewHeaders,
+} from './relay/artifact-preview.ts';
 const host = process.env.TAURI_DEV_HOST;
+
+/**
+ * Serves the artifact renderer as the relay does: offline for visualizations and screens, and
+ * with pinned CDNs for artifact pages.
+ * @param {import('vite').ViteDevServer | import('vite').PreviewServer} server
+ */
+function renderers(server) {
+  /** @type {[string, Record<string, string>][]} */
+  const routes = [
+    ['/artifact-preview', artifactPreviewHeaders],
+    ['/artifact-page', artifactPageHeaders],
+  ];
+  for (const [path, headers] of routes)
+    server.middlewares.use(path, (_req, res) => {
+      res.writeHead(200, headers);
+      res.end(artifactPreviewHtml);
+    });
+}
 
 /**
  * Provides the root CHANGELOG.md as the text module `virtual:changelog` for Settings → About.
@@ -33,16 +55,10 @@ export default defineConfig(() => ({
     {
       name: 'artifact-preview',
       configureServer(server) {
-        server.middlewares.use('/artifact-preview', (_req, res) => {
-          res.writeHead(200, artifactPreviewHeaders);
-          res.end(artifactPreviewHtml);
-        });
+        renderers(server);
       },
       configurePreviewServer(server) {
-        server.middlewares.use('/artifact-preview', (_req, res) => {
-          res.writeHead(200, artifactPreviewHeaders);
-          res.end(artifactPreviewHtml);
-        });
+        renderers(server);
       },
     },
   ],

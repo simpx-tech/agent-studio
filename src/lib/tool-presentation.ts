@@ -63,6 +63,7 @@ export type ToolIconKey =
   | 'workflow'
   | 'chart'
   | 'screen'
+  | 'artifact'
   | 'hook'
   | 'background'
   | 'tool';
@@ -865,6 +866,9 @@ export function toolVisual(
   if (tool.name === 'Workflow') return { icon: 'workflow', title: tool.name, detail: tool.detail };
   if (['visualize', 'mcp__agent_studio__visualize'].includes(tool.name))
     return { icon: 'chart', title: 'Visualize' };
+  // The page a show_artifact call shows, by its title.
+  if (['show_artifact', 'mcp__agent_studio__show_artifact'].includes(tool.name))
+    return { icon: 'artifact', title: 'Show artifact', detail: tool.detail };
   // A saved screen's title is the one input its call shows.
   const screenTool = {
     save_screen: 'Save screen',

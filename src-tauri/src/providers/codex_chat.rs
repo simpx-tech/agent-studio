@@ -67,6 +67,7 @@ fn dynamic_tools() -> Vec<Value> {
         super::visualize::codex_tool(),
         super::questions::codex_tool(),
         super::sent_files::codex_tool(),
+        super::artifact_tool::codex_tool(),
     ];
     tools.extend(crate::screens::tools::codex_tools());
     tools
@@ -308,6 +309,7 @@ pub async fn run(
     };
     let mut visualizer = super::visualize::Visualizer::default();
     let mut sender = super::sent_files::FileSender::default();
+    let mut shower = super::artifact_tool::ArtifactShower::default();
     let mut screen_tools = crate::screens::tools::Agent::default();
     let screen_context = channel.and_then(EventSink::screens);
     // Files this reply shows are checked and kept where the conversation runs.
@@ -474,6 +476,11 @@ pub async fn run(
                         process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the files shown")?;
                         continue;
                     }
+                    if let Some((response, event)) = shower.codex(&value, &thread, &staging).await {
+                        if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
+                        process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the artifact shown")?;
+                        continue;
+                    }
                     if let Some((response, event)) = visualizer.codex_response(&value, &thread) {
                         if let (Some(channel), Some(event)) = (channel, event) { if channel.send(event).is_err() { cancel.cancel(); } }
                         process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not confirm the Codex visualization")?;
@@ -554,7 +561,7 @@ pub async fn run(
                         if let Some(channel) = channel { let _ = channel.send(crate::protocol::RunEvent::Text { text: "Context compacted.".into() }); }
                         return Ok(("complete".into(), "Context compacted.".into()));
                     }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !screen_tools.has_screens() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !shower.has_artifacts() && !screen_tools.has_screens() && !decoder.proposed_plans.completed() { process.healthy = false; return Err("The CLI finished without a text response. Check Connections or try another model.".into()); }
                     if request.agent.output_schema.is_some() {
                         let value = serde_json::from_str(&decoder.text).unwrap_or(Value::Null);
                         decoder.text = crate::structured_output::result(&value)?;

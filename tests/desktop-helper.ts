@@ -103,7 +103,9 @@ export async function mockDesktop(page: Page, mode = 'success') {
       };
       (window as any).__TAURI_INTERNALS__ = {
         convertFileSrc: (path: string, protocol?: string) => {
-          if (protocol !== 'studio-image') return '/artifact-preview';
+          // The artifact renderer, offline or, for artifact pages, with pinned CDNs.
+          if (protocol !== 'studio-image')
+            return path === 'page' ? '/artifact-page' : '/artifact-preview';
           const image = storedImages()[path];
           return image ? `data:${image.mediaType};base64,${image.data}` : 'data:,';
         },

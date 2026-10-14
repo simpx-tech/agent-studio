@@ -283,7 +283,7 @@
   import { findSubagent, replyTools } from '$lib/subagents';
   import { leaveChats, type ArtifactView, type SubagentView } from '$lib/side-panels';
   import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
-  import { artifactCardAction, type Artifact } from '$lib/artifacts';
+  import { artifactCardAction, recordArtifact, type Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
   import {
     readImage,
@@ -643,20 +643,20 @@
     const shown = panelChat;
     untrack(() => leaveChats(artifactViews, subagentViews, shown));
   });
-  // A visual updated under its id shows its latest revision.
+  // A visual or an artifact page shown again under its id shows its latest revision.
   $effect(() => {
     const opened = artifactView;
-    if (!opened?.artifact.visualization) return;
+    if (!opened) return;
     for (const message of active?.messages ?? []) {
-      const visual = message.visualizations?.find(
-        (v) => `${message.id}:visual:${v.id}` === opened.artifact.id,
-      );
-      if (visual && visual.revision > (opened.artifact.revision ?? 0))
+      const latest = opened.artifact.visualization
+        ? message.visualizations?.find((v) => `${message.id}:visual:${v.id}` === opened.artifact.id)
+        : message.artifacts?.find((a) => recordArtifact(message.id, a).id === opened.artifact.id);
+      if (latest && latest.revision > (opened.artifact.revision ?? 0))
         opened.artifact = {
           ...opened.artifact,
-          title: visual.title,
-          source: visual.source,
-          revision: visual.revision,
+          title: latest.title,
+          source: latest.source,
+          revision: latest.revision,
         };
     }
   });

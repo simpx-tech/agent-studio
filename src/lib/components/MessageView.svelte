@@ -41,7 +41,7 @@
   import PlanApproval from './PlanApproval.svelte';
   import ProposedPlan from './ProposedPlan.svelte';
   import ElicitationForm from './ElicitationForm.svelte';
-  import { artifactKey, messageArtifacts, type Artifact } from '$lib/artifacts';
+  import { artifactKey, messageArtifacts, recordArtifact, type Artifact } from '$lib/artifacts';
   import type { ScreenCard } from '$lib/screens';
   let {
     message,
@@ -166,6 +166,7 @@
       message.visualizations,
       message.sentFiles,
       message.status === 'running',
+      message.artifacts,
     ),
   );
   // The artifacts the answer does not show: html and svg blocks it shows as code, and those of
@@ -224,6 +225,19 @@
   {#each content.parts as part (part.key)}
     {#if part.type === 'visual'}
       <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
+    {:else if part.type === 'artifact'}
+      <!-- A page the reply showed with its show_artifact tool, as a card like a fence's. -->
+      {@const artifact = recordArtifact(message.id, part.artifact)}
+      <div class="artifact-card artifact-placed">
+        <button class="secondary artifact-open" onclick={() => openArtifact(artifact, 'modal')}
+          ><span>{artifact.title}</span><small>Open {artifact.language.toUpperCase()}</small></button
+        ><button
+          class="secondary artifact-side"
+          aria-label={`Open ${artifact.title} in side panel`}
+          title="Open in side panel"
+          onclick={() => openArtifact(artifact, 'panel')}
+        ></button>
+      </div>
     {:else if part.type === 'files'}
       <SentFilesView groups={part.groups} connectionId={author.connectionId} />
     {:else}
@@ -586,6 +600,10 @@
   }
   .response-artifacts .artifact-card {
     flex: 1 1 auto;
+  }
+  /* A page the reply showed sits between its paragraphs as a fence's card does. */
+  .artifact-placed {
+    margin: 14px 0;
   }
   .screen-open small {
     margin-left: auto;

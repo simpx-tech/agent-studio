@@ -134,6 +134,17 @@ it('serves an empty artifact bootstrap with an independent sandbox policy and no
   expect(response.headers.get('cache-control')).toBe('no-store');
   expect(await response.text()).toContain('event.source !== parent');
   expect((await fetch(f.url + '/artifact-preview?path=workspace.json')).status).toBe(404);
+  // Artifact pages render from the same bootstrap, with pinned CDNs and still no requests.
+  const page = await fetch(f.url + '/artifact-page');
+  expect(page.status).toBe(200);
+  const policy = page.headers.get('content-security-policy') ?? '';
+  expect(policy).toContain('https://cdn.jsdelivr.net/npm/');
+  expect(policy).toContain("connect-src 'none'");
+  expect(policy).toContain('sandbox allow-scripts');
+  expect(policy).not.toContain('allow-same-origin');
+  expect(await page.text()).toContain('event.source !== parent');
+  expect(response.headers.get('content-security-policy')).not.toContain('https:');
+  expect((await fetch(f.url + '/artifact-page?path=workspace.json')).status).toBe(404);
 });
 it('expires browser sessions and rate limits pairing attempts', async () => {
   const f = await fixture();

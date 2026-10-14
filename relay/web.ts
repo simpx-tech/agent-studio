@@ -4,7 +4,11 @@ import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import type { sessionStore } from './sessions.ts';
 import type { RelayWorkspace, workspaceRegistry } from './workspaces.ts';
-import { artifactPreviewHtml, artifactPreviewHeaders } from './artifact-preview.ts';
+import {
+  artifactPageHeaders,
+  artifactPreviewHtml,
+  artifactPreviewHeaders,
+} from './artifact-preview.ts';
 
 /**
  * The viewer's own policy. `blob:` and `data:` are load-bearing rather than decorative:
@@ -52,8 +56,15 @@ export function publicFiles(directory?: string) {
 }
 
 export function servePublic(req: IncomingMessage, res: ServerResponse, files: Map<string, string>) {
-  if (req.url === '/artifact-preview' && ['GET', 'HEAD'].includes(req.method ?? '')) {
-    res.writeHead(200, artifactPreviewHeaders);
+  // The renderer: offline for visualizations and screens, and with pinned CDNs for artifacts.
+  const renderer =
+    req.url === '/artifact-preview'
+      ? artifactPreviewHeaders
+      : req.url === '/artifact-page'
+        ? artifactPageHeaders
+        : undefined;
+  if (renderer && ['GET', 'HEAD'].includes(req.method ?? '')) {
+    res.writeHead(200, renderer);
     res.end(req.method === 'HEAD' ? undefined : artifactPreviewHtml);
     return true;
   }

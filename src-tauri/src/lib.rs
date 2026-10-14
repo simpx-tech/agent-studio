@@ -19,6 +19,7 @@ mod mentions;
 mod models;
 mod native_instructions;
 mod notifications;
+mod page_preview;
 mod plugins;
 mod pool;
 mod profiles;

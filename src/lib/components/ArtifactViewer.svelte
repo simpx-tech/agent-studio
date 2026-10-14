@@ -76,7 +76,8 @@
       observer.observe(workspace);
     }
     mounted = true;
-    void artifactPreviewUrl()
+    // A visual keeps its offline renderer; an artifact page may load pinned CDN libraries.
+    void artifactPreviewUrl(artifact.visualization ? 'frame' : 'page')
       .then((value) => (url = value))
       .catch(() => (error = 'Could not open the artifact preview. The source is still available.'));
     return () => {

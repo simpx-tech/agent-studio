@@ -53,7 +53,8 @@ test('the production PWA renders and downloads artifacts through the real relay 
       await frame.getByRole('button', { name: 'Add one' }).click();
       await expect(frame.locator('output')).toHaveText('1', { timeout: 500 });
     }).toPass();
-    expect(await page.locator('iframe').getAttribute('src')).toBe('/artifact-preview');
+    // An artifact page renders in the sandbox that may load pinned CDN libraries.
+    expect(await page.locator('iframe').getAttribute('src')).toBe('/artifact-page');
     await page.getByRole('tab', { name: 'Source', exact: true }).click();
     const sourceCode = page.getByRole('tabpanel', { name: 'Artifact source' }).locator('code');
     expect(await sourceCode.textContent()).toBe(source);

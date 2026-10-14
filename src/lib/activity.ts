@@ -6,6 +6,7 @@ import { fileChangesSchema, latestFileChanges } from './file-changes.ts';
 import { planSchema } from './plans.ts';
 import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
+import { artifactRecordSchema, mergeArtifactRecords } from './artifact-records.ts';
 import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
 import { screenCardSchema, mergeScreenCards } from './screens.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
@@ -180,6 +181,7 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
     'plan',
     'proposedplan',
     'visualization',
+    'artifact',
     'sentfiles',
     'screen',
     'filechanges',
@@ -305,6 +307,10 @@ export function applyRunEvent(message: Message, event: RunEvent): 'clock' | void
     const parsed = visualizationSchema.safeParse(event.visualization);
     if (message.role === 'assistant' && parsed.success)
       message.visualizations = mergeVisualizations(message.visualizations, [parsed.data]);
+  } else if (event.kind === 'artifact') {
+    const parsed = artifactRecordSchema.safeParse(event.artifact);
+    if (message.role === 'assistant' && parsed.success)
+      message.artifacts = mergeArtifactRecords(message.artifacts, [parsed.data]);
   } else if (event.kind === 'sentfiles') {
     const parsed = sentFilesSchema.safeParse(event.sentFiles);
     // Files belong to the reply's own run on the computer that kept them.
@@ -613,6 +619,18 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
         events[index] = event;
     } else if (events.filter((e) => e.kind === 'visualization').length < jobVisuals)
       events.push(event);
+    return;
+  }
+  // Each artifact the reply showed, at its latest revision.
+  if (event.kind === 'artifact') {
+    const parsed = artifactRecordSchema.safeParse(event.artifact);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'artifact' && e.artifact?.id === parsed.data.id,
+    );
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].artifact?.revision ?? -1)) events[index] = event;
+    } else events.push(event);
     return;
   }
   if (event.kind === 'screen') {
