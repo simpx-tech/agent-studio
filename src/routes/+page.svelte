@@ -86,6 +86,7 @@
     CalendarDays,
     LayoutDashboard,
     AlarmClock,
+    ArrowUpRight,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -5616,11 +5617,25 @@
                     ></span
                   >
                   <div class="snoozed-actions">
-                    <button class="snoozed-open" onclick={() => openSnoozed(c)}>Open</button>
-                    <button onclick={(event) => leaveSnoozed(event, c, true)}
-                      >Snooze again</button
+                    <button
+                      class="snoozed-open"
+                      title="Open"
+                      aria-label="Open"
+                      onclick={() => openSnoozed(c)}
+                      ><ArrowUpRight size={14} aria-hidden="true" /></button
                     >
-                    <button onclick={(event) => leaveSnoozed(event, c, false)}>Close</button>
+                    <button
+                      title="Snooze again"
+                      aria-label="Snooze again"
+                      onclick={(event) => leaveSnoozed(event, c, true)}
+                      ><AlarmClock size={14} aria-hidden="true" /></button
+                    >
+                    <button
+                      title="Close"
+                      aria-label="Close"
+                      onclick={(event) => leaveSnoozed(event, c, false)}
+                      ><X size={14} aria-hidden="true" /></button
+                    >
                   </div>
                 </div>
               {/each}

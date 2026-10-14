@@ -95,11 +95,24 @@ test('a snoozed chat waits in History until the app starts again, then atop Acti
   await startApp(page);
   await expect(snoozed(page)).toBeVisible();
   await expect(card(page, 'Plan the release')).toBeVisible();
-  await expect(card(page, 'Plan the release').getByRole('button')).toHaveText([
-    'Open',
-    'Snooze again',
-    'Close',
+  // Icon buttons on the title's line, named for assistive technology and on hover.
+  const choices = card(page, 'Plan the release').getByRole('button');
+  await expect(choices).toHaveText(['', '', '']);
+  expect(
+    await choices.evaluateAll((buttons) =>
+      buttons.map((b) => [b.getAttribute('aria-label'), b.getAttribute('title')]),
+    ),
+  ).toEqual([
+    ['Open', 'Open'],
+    ['Snooze again', 'Snooze again'],
+    ['Close', 'Close'],
   ]);
+  const line = await card(page, 'Plan the release').evaluate((item) =>
+    [item.querySelector('.snoozed-title')!, ...item.querySelectorAll('button')].map((part) =>
+      Math.round(part.getBoundingClientRect().top + part.getBoundingClientRect().height / 2),
+    ),
+  );
+  expect(Math.max(...line) - Math.min(...line)).toBeLessThanOrEqual(1);
   const panel = page.locator('#conversation-panel-active');
   await expect(panel.locator(':scope > :first-child')).toHaveClass(/snoozed-chats/);
   await expect(panel.locator('.sidebar-empty')).toHaveCount(0);

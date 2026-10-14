@@ -518,7 +518,7 @@ pre {
   letter-spacing: 0;
 }
 /* Once the app starts again, chats snoozed until then open the Active tab's list, above its
-   computers, each with Open, Snooze again and Close. */
+   computers, each a card with its title and the icon buttons Open, Snooze again and Close. */
 .snoozed-chats {
   display: flex;
   flex-direction: column;
@@ -542,15 +542,17 @@ pre {
 }
 .snoozed-chat {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 7px 6px 4px 10px;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 4px 4px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-1);
 }
 .snoozed-title {
   display: flex;
+  flex: 1;
   align-items: center;
   gap: 7px;
   min-width: 0;
@@ -570,20 +572,18 @@ pre {
 }
 .snoozed-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-shrink: 0;
   gap: 2px;
-  margin-left: -6px;
 }
 .snoozed-actions button {
-  min-height: 26px;
-  padding: 0 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-weight: 500;
 }
 .snoozed-actions button:not(:disabled):hover {
-  background: var(--hover);
+  background: var(--active);
   color: var(--text);
 }
 .snoozed-actions .snoozed-open {
@@ -2752,8 +2752,8 @@ pre {
     padding-right: 44px;
   }
   .snoozed-actions button {
-    min-height: 44px;
-    padding: 0 10px;
+    width: 44px;
+    height: 44px;
   }
   .browser-status {
     padding: 4px 14px;

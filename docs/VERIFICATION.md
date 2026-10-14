@@ -1,5 +1,14 @@
 # Verification — 2026-09-08
 
+## Snoozed chats offer icon buttons — 2026-10-14
+
+Requested 2026-10-14 about the Snoozed cards' row of text buttons: "I don't like how the buttons are laid out, make them icon buttons".
+
+- Each card is now one line: the folder's icon and the title, then three 24 px icon buttons (44 px on phones), each named on hover and for assistive technology: **Open** (`ArrowUpRight` in the accent), **Snooze again** (`AlarmClock`, the toolbar's Snooze icon) and **Close** (`X`). The title takes the room left and ends in an ellipsis, with the whole title on hover. Behavior and keyboard focus are unchanged.
+- Browser: `tests/snooze.spec.ts` checks that the buttons hold no text, their names and titles, and that the title and the buttons share one line; the phone scenario still requires 44 px buttons and no horizontal overflow, in Edge and WebKit. Dark, light and phone captures (`artifacts/snooze/icons-*.png`, `phone.png`) were reviewed.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,254 files), 733 Vitest tests in 90 files, the build, `cargo fmt --check` (no Rust change, so Clippy and the Rust tests were not rerun), all 377 Edge browser tests in three shards started with the local sockets drained, and the 7 WebKit tests.
+- Choices of mine, not confirmed: the arrow for Open and the same alarm as the toolbar for Snooze again; the folder icon kept, which leaves the title about 100 px at the default sidebar width.
+
 ## Snoozed chats wait in the Active tab — 2026-10-14
 
 Requested 2026-10-14, after the first version put the due chats above the search and tabs: "Show it under active not above".
