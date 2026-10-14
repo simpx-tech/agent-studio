@@ -1,5 +1,12 @@
 # Verification — 2026-09-08
 
+## A snoozed chat's Open is a chat bubble — 2026-10-14
+
+Requested 2026-10-14 about the icon buttons: "Looks good, I just didn't liked the open icon".
+
+- Open now draws `MessageSquare`, the chat bubble a screen's toolbar already uses to open the chat that made it (`ScreenView.svelte`), still in the accent; the diagonal arrow (`ArrowUpRight`) read as a link out of the app. Its name, title and behavior are unchanged, and it differs from the round bubble that marks Standalone chats in the same card. Hovered, it keeps the accent's text color over the hover background: the lighter `--accent-hover` it took before faded to pale green in the light theme.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,254 files), 733 Vitest tests in 90 files, the build, `cargo fmt --check` (no Rust change), all 377 Edge browser tests in three shards started with the local sockets drained, and the 7 WebKit tests. Dark and light captures, hovered included (`artifacts/snooze/open-*.png`), were reviewed.
+
 ## Snoozed chats offer icon buttons — 2026-10-14
 
 Requested 2026-10-14 about the Snoozed cards' row of text buttons: "I don't like how the buttons are laid out, make them icon buttons".

@@ -589,8 +589,9 @@ pre {
 .snoozed-actions .snoozed-open {
   color: var(--accent-text);
 }
+/* Hover keeps the accent's text color: the light theme's lighter accent fades on its hover. */
 .snoozed-actions .snoozed-open:not(:disabled):hover {
-  color: var(--accent-hover);
+  color: var(--accent-text);
 }
 .search {
   display: flex;

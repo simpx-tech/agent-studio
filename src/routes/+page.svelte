@@ -86,7 +86,7 @@
     CalendarDays,
     LayoutDashboard,
     AlarmClock,
-    ArrowUpRight,
+    MessageSquare,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -5622,7 +5622,7 @@
                       title="Open"
                       aria-label="Open"
                       onclick={() => openSnoozed(c)}
-                      ><ArrowUpRight size={14} aria-hidden="true" /></button
+                      ><MessageSquare size={14} aria-hidden="true" /></button
                     >
                     <button
                       title="Snooze again"
