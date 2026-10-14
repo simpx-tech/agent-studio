@@ -77,8 +77,9 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
     '<script>window.codeExecuted = true</script>\n<img src=x onerror="window.codeExecuted=true">\n<p>&lt;literal&gt; & text</p>';
   const plain = '<b>const plain = "keep this literal";</b> &amp;';
   const large = '// long code block\n' + 'const value = 1;\n'.repeat(4200);
+  // The last, a named fence, is an artifact the reply shows as a card; the rest stay code.
   const snippets = [
-    ['html Example', html],
+    ['html', html],
     ['ps1', '$greeting = "Hello"\nWrite-Output $greeting'],
     ['rs', 'fn main() { let count = 42; }'],
     ['unknown-language', plain],
@@ -120,9 +121,10 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
     await seedAndPairPwa(page, url, token, workspace);
     await page.getByRole('tab', { name: /History/ }).click();
     await page.getByRole('button', { name: /Syntax highlighting fixture/ }).click();
-    const codes = page.locator('.prose pre code');
-    await expect(codes).toHaveCount(snippets.length);
-    for (const [index, [, source]] of snippets.entries()) {
+    const codes = page.locator('.prose .code-block pre code');
+    await expect(codes).toHaveCount(snippets.length - 1);
+    await expect(page.locator('.prose .artifact-card')).toHaveCount(1);
+    for (const [index, [, source]] of snippets.slice(0, -1).entries()) {
       expect((await codes.nth(index).textContent())?.trimEnd()).toBe(source.trimEnd());
       if (index < 3) expect(await codes.nth(index).locator('span').count()).toBeGreaterThan(0);
       else await expect(codes.nth(index).locator('span')).toHaveCount(0);
@@ -142,8 +144,8 @@ test('production PWA keeps highlighted HTML inert and preserves plain code fallb
         .evaluate((el) => getComputedStyle(el).color),
     ).not.toBe(await firstCode.evaluate((el) => getComputedStyle(el).color));
     // The source viewer bypasses Markdown parsing, preserving entities and inert markup exactly.
-    await page.getByRole('button', { name: 'Example Open HTML', exact: true }).click();
-    const viewer = page.getByRole('dialog', { name: 'Example', exact: true });
+    await page.getByRole('button', { name: 'HTML artifact 1 Open HTML', exact: true }).click();
+    const viewer = page.getByRole('dialog', { name: 'HTML artifact 1', exact: true });
     await viewer.getByRole('tab', { name: 'Source', exact: true }).click();
     expect(await viewer.locator('pre code').textContent()).toBe(html);
     expect(await viewer.locator('pre code span').count()).toBeGreaterThan(0);

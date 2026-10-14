@@ -1,6 +1,11 @@
 use std::io::Write;
 use tauri::Manager;
 
+/// How a chat agent delivers an artifact: a named html or svg fence, which the window shows as a
+/// card that opens it (`src/lib/artifacts.ts`), and what makes the page good in the sandboxed
+/// viewer that renders it (the constant `artifact-preview.html` with its CSP below).
+pub const GUIDANCE: &str = "When a request calls for a page the user opens beside the chat, such as a document, report, explainer, diagram, dashboard, prototype or small tool, deliver it as an artifact: one fenced html block (svg for a standalone drawing) holding the complete page, its opening fence naming it after the language, as in ```html Release dashboard. Agent Studio shows that block as a card that opens the page in a sandboxed viewer, never as code, so introduce it in a sentence or two rather than repeating or summarizing its source. Do not create an artifact unless it serves the user's request. Make it a finished, polished page. Self-contained: inline CSS and JavaScript, inline SVG and data: images only; the viewer blocks every external script, stylesheet, font, image and request without showing an error, so draw charts and diagrams with inline SVG or canvas and use system font stacks (system-ui, ui-monospace). Theme-aware: define the palette as CSS custom properties on :root, redefine them under @media (prefers-color-scheme: dark), give body an explicit background and text color, and keep contrast readable in both themes. Responsive: it opens in a wide dialog or in a side panel about 360px wide, so let rows wrap or stack, never let the page scroll sideways, and give wide tables and code their own overflow-x: auto container. Designed: a clear title and hierarchy, a consistent spacing scale, a comfortable line length for prose, restrained color with one accent, and tabular figures; organize long material with a contents list, sections or tabs. Code: show it in pre blocks with line numbers where they help, color it with a small inline highlighter, and keep long lines scrollable rather than cut off. Give the page a <title> matching the fence's name.";
+
 #[tauri::command]
 pub async fn save_artifact(
     app: tauri::AppHandle,

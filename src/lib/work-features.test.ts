@@ -3,6 +3,10 @@ import {
   responseArtifacts,
   messageArtifacts,
   artifactFilename,
+  artifactFence,
+  artifactKey,
+  artifactTitle,
+  shownAsArtifact,
 } from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
 import { applyRunEvent, retainRunEvent } from './activity';
@@ -45,6 +49,38 @@ describe('artifacts and portable progress', () => {
       responseArtifacts('```html\n' + 'x'.repeat(600_000) + '\n```', 'reply'),
     ).toHaveLength(1);
     expect(artifactFilename({ ...a[0], title: '../unsafe:thing' })).not.toContain('/');
+  });
+  it('shows named fences and whole pages as artifacts, and other html and svg as code', () => {
+    expect(artifactFence('html Sales report')).toEqual({ language: 'html', name: 'Sales report' });
+    expect(artifactFence('SVG  title="Logo"')).toEqual({ language: 'svg', name: 'Logo' });
+    expect(artifactFence('html')).toEqual({ language: 'html', name: '' });
+    expect(artifactFence('htmlbars Page')).toBeUndefined();
+    expect(artifactFence('js Page')).toBeUndefined();
+    expect(artifactFence(undefined)).toBeUndefined();
+    const named = artifactFence('html Page')!;
+    const unnamed = artifactFence('html')!;
+    const svg = artifactFence('svg')!;
+    // The name a model gives its artifact makes one, whatever the source.
+    expect(shownAsArtifact(named, '<button>Go</button>')).toBe(true);
+    expect(shownAsArtifact(artifactFence('svg Logo')!, '<svg/>')).toBe(true);
+    // A whole page is an artifact by itself, also after comments and in any case.
+    for (const page of [
+      '<!doctype html><title>x</title>',
+      '\n  <!DOCTYPE HTML>\n<html>',
+      '<!-- generated -->\n<html lang="pt-BR">',
+      '<html>',
+    ])
+      expect(shownAsArtifact(unnamed, page)).toBe(true);
+    // Snippets stay code a reply explains, and open from below it.
+    for (const snippet of ['<div>Safe code</div>', '<htmlish/>', '<p>See <html></p>'])
+      expect(shownAsArtifact(unnamed, snippet)).toBe(false);
+    expect(shownAsArtifact(svg, '<svg viewBox="0 0 1 1"/>')).toBe(false);
+    expect(artifactTitle(named, '<title>Ignored</title>', 0)).toBe('Page');
+    expect(artifactTitle(unnamed, '<html><title>Quarterly</title>', 0)).toBe('Quarterly');
+    expect(artifactTitle(svg, '<svg/>', 2)).toBe('SVG artifact 3');
+    expect(artifactKey({ language: 'html', source: '<p>' })).not.toBe(
+      artifactKey({ language: 'svg', source: '<p>' }),
+    );
   });
   it('keeps the latest plans across replay, history, and conflicts without inventing completion', () => {
     const message: Message = {

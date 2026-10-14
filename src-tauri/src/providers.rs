@@ -880,9 +880,9 @@ impl RunRequest {
     }
     fn capabilities(&self, studio_tools: bool) -> String {
         let tools = if self.tools_enabled() {
-            "Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. When delivering an HTML or SVG artifact, include its complete self-contained source in a fenced html or svg code block, optionally followed by a short title on the opening fence. Artifact previews support inline CSS and JavaScript, SVG and data images; they cannot load external scripts, styles, or network resources. Do not generate an artifact unless it serves the user's request. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies."
+            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::GUIDANCE)
         } else {
-            "Do not use tools, inspect files, execute commands, or delegate."
+            "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
         let visuals = if self.uses_codex_server() || self.uses_claude_visualizer() {
             visualize::GUIDANCE
@@ -912,7 +912,7 @@ impl RunRequest {
         if studio_tools {
             format!("{tools} {visuals} {files} {questions} {screens}")
         } else {
-            tools.to_string()
+            tools
         }
     }
     pub fn native_context(&self) -> Option<String> {
@@ -1901,8 +1901,11 @@ mod tests {
             r.agent.provider = provider.into();
             assert!(r.prompt().contains("Tools are enabled"));
             assert!(!r.prompt().contains("Do not use tools"));
+            // Every chat agent learns how to deliver an artifact; background work never does.
+            assert!(r.prompt().contains(crate::artifacts::GUIDANCE));
             r.conversation_only = true;
             assert!(r.prompt().contains("Do not use tools"));
+            assert!(!r.prompt().contains(crate::artifacts::GUIDANCE));
             let exe = Executable {
                 provider: provider.into(),
                 program: "synthetic-cli".into(),

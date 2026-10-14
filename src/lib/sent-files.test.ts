@@ -140,15 +140,15 @@ it('rejects foreign runs, duplicates, unsupported types and user messages', () =
 // Prose parts need a DOM to sanitize; tests/sent-files.spec.ts covers a marker between
 // paragraphs in the real reply.
 it('places a group at its own marker, once, and keeps an unmarked group in the reply', () => {
-  const parts = replyContent('<!-- files:renders -->', [], [group]);
+  const { parts } = replyContent('<!-- files:renders -->', [], [group]);
   expect(parts.map((p) => p.type)).toEqual(['files']);
   expect(parts[0].type === 'files' && parts[0].groups.map((g) => g.id)).toEqual(['renders']);
   expect(
-    replyContent('<!-- files:renders -->\n\n<!-- files:renders -->', [], [group]),
+    replyContent('<!-- files:renders -->\n\n<!-- files:renders -->', [], [group]).parts,
   ).toHaveLength(1);
-  expect(replyContent('', [], [group]).map((p) => p.type)).toEqual(['files']);
-  expect(replyContent('<!-- files:missing -->', [], [])).toEqual([]);
-  expect(replyContent('<!-- visualize:renders -->', [], [group]).map((p) => p.type)).toEqual([
+  expect(replyContent('', [], [group]).parts.map((p) => p.type)).toEqual(['files']);
+  expect(replyContent('<!-- files:missing -->', [], []).parts).toEqual([]);
+  expect(replyContent('<!-- visualize:renders -->', [], [group]).parts.map((p) => p.type)).toEqual([
     'files',
   ]);
 });
@@ -238,7 +238,7 @@ it('joins single images placed side by side into one gallery, and nothing else',
   const a = shown('a', [image(0)]);
   const b = shown('b', [image(0)]);
   const c = shown('c', [image(0)]);
-  const ids = (parts: ReturnType<typeof replyContent>) =>
+  const ids = ({ parts }: ReturnType<typeof replyContent>) =>
     parts.map((part) => (part.type === 'files' ? part.groups.map((g) => g.id) : part.type));
   // Pictures sent one call at a time, their markers one after another.
   expect(ids(replyContent('<!-- files:a -->\n\n<!-- files:b -->', [], [a, b]))).toEqual([
@@ -257,5 +257,5 @@ it('joins single images placed side by side into one gallery, and nothing else',
     ['c'],
   ]);
   // The joined part keeps its first group's key, so the gallery stays as more arrive.
-  expect(replyContent('', [], [a, b])[0].key).toBe(replyContent('', [], [a])[0].key);
+  expect(replyContent('', [], [a, b]).parts[0].key).toBe(replyContent('', [], [a]).parts[0].key);
 });

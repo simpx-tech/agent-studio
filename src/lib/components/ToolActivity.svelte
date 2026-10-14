@@ -41,7 +41,7 @@
   import { compactionLabel, compactionTokens, type Compaction } from '$lib/compaction';
   import type { Message } from '$lib/domain';
   import { relativeFilePath, type FileChanges } from '$lib/file-changes';
-  import { renderMarkdown } from '$lib/markdown';
+  import { renderMarkdown, type ArtifactCards } from '$lib/markdown';
   import { toolVisual } from '$lib/tool-presentation';
   import { openLink } from '$lib/transport';
   import { revealedDisclosures } from '$lib/disclosures';
@@ -108,6 +108,10 @@
   };
   const kindLabels = { added: 'Added', modified: 'Edited', deleted: 'Deleted', renamed: 'Renamed' };
   const entries = $derived(work ?? activityEntries(blocks, tools, finalText, compactions));
+  // The reply's own comments show its artifacts as cards; a sub-agent's text keeps its code.
+  const artifactCards = $derived<ArtifactCards | undefined>(
+    owner ? undefined : replyStatus === 'running' ? 'writing' : 'cards',
+  );
   const groups = $derived(groupActivityEntries(entries));
   const disclosures = revealedDisclosures();
   // The sub-agents these calls hold, whose own calls show in their conversations.
@@ -600,7 +604,7 @@
           <!-- Sanitized markdown; nested links provide keyboard interaction. -->
           <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <div class="prose progress-message" onclick={progressLink}>
-            {@html renderMarkdown(entry.text)}
+            {@html renderMarkdown(entry.text, artifactCards)}
           </div>
         {:else}<p class="timeline-note">{entry.text}</p>{/if}
       {/if}

@@ -3,8 +3,6 @@
     RotateCcw,
     CircleAlert,
     ArrowRightLeft,
-    PanelsTopLeft,
-    PanelRightOpen,
     GitFork,
     Rewind,
     Undo2,
@@ -43,7 +41,7 @@
   import PlanApproval from './PlanApproval.svelte';
   import ProposedPlan from './ProposedPlan.svelte';
   import ElicitationForm from './ElicitationForm.svelte';
-  import { messageArtifacts, type Artifact } from '$lib/artifacts';
+  import { artifactKey, messageArtifacts, type Artifact } from '$lib/artifacts';
   import type { ScreenCard } from '$lib/screens';
   let {
     message,
@@ -158,11 +156,22 @@
   // or ends, not with each streamed word.
   const writingIds = $derived(drafts.map((draft) => `claude:${draft.id}`).join('\n'));
   const writing = $derived(new Set(writingIds ? writingIds.split('\n') : []));
-  const artifacts = $derived(messageArtifacts(message));
   const structured = $derived(!!message.settings?.outputSchema && !message.compact);
   // A structured reply's text is its JSON, shown whole above; its visuals and files follow it.
+  // The answer shows its artifacts as cards in place of their code, and one it is still writing
+  // as the card it becomes.
   const content = $derived(
-    replyContent(structured ? '' : text, message.visualizations, message.sentFiles),
+    replyContent(
+      structured ? '' : text,
+      message.visualizations,
+      message.sentFiles,
+      message.status === 'running',
+    ),
+  );
+  // The artifacts the answer does not show: html and svg blocks it shows as code, and those of
+  // the reply's earlier comments, which a short closing status can follow.
+  const artifacts = $derived(
+    messageArtifacts(message).filter((artifact) => !content.cards.has(artifactKey(artifact))),
   );
   const jsonHighlight = $derived(structured ? highlightCode(text, 'json') : null);
   const waiting = $derived(awaitingAnswer(message));
@@ -212,7 +221,7 @@
       <pre><code class="hljs language-json">{#if jsonHighlight}{@html jsonHighlight.html}{:else}{text}{/if}</code></pre>
     </div>
   {/if}
-  {#each content as part (part.key)}
+  {#each content.parts as part (part.key)}
     {#if part.type === 'visual'}
       <VisualizationView visual={part.visual} messageId={message.id} {openArtifact} />
     {:else if part.type === 'files'}
@@ -260,7 +269,7 @@
       running={message.status === 'running'}
     />
   {/each}
-  {#if !content.length && !(structured && text) && message.status === 'running' && (!message.blocks.length || steered) && !drafts.length}<div
+  {#if !content.parts.length && !(structured && text) && message.status === 'running' && (!message.blocks.length || steered) && !drafts.length}<div
       class="reply-waiting"
     >
       <span></span><span></span><span></span>
@@ -293,19 +302,17 @@
             >{/each}
         </div>{/if}
       {#if artifacts.length}<div class="response-artifacts" aria-label="Response artifacts">
+          <!-- The cards an answer shows in place of an artifact's code look the same (styles.css). -->
           {#each artifacts as artifact (artifact.id)}<div class="artifact-card">
-              <button
-                class="secondary artifact-open"
-                onclick={() => openArtifact(artifact, 'modal')}
-                ><PanelsTopLeft size={16} /><span>{artifact.title}</span><small
-                  >Open {artifact.language.toUpperCase()}</small
+              <button class="secondary artifact-open" onclick={() => openArtifact(artifact, 'modal')}
+                ><span>{artifact.title}</span><small>Open {artifact.language.toUpperCase()}</small
                 ></button
               ><button
                 class="secondary artifact-side"
                 aria-label={`Open ${artifact.title} in side panel`}
                 title="Open in side panel"
-                onclick={() => openArtifact(artifact, 'panel')}><PanelRightOpen size={16} /></button
-              >
+                onclick={() => openArtifact(artifact, 'panel')}
+              ></button>
             </div>{/each}
         </div>{/if}
     </div>{/if}
@@ -577,34 +584,10 @@
     overflow-wrap: anywhere;
     min-width: 0;
   }
-  .artifact-card {
-    display: flex;
+  .response-artifacts .artifact-card {
     flex: 1 1 auto;
-    min-width: 0;
-    max-width: 100%;
   }
-  .artifact-open {
-    flex: 1;
-    min-width: 0;
-    justify-content: flex-start;
-    text-align: left;
-    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
-  }
-  .artifact-open > :global(svg) {
-    color: var(--accent-strong);
-  }
-  .artifact-side {
-    flex-shrink: 0;
-    margin-left: -1px;
-    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
-    padding-inline: 10px;
-    color: var(--text-muted);
-  }
-  .response-artifacts span {
-    overflow-wrap: anywhere;
-    min-width: 0;
-  }
-  small {
+  .screen-open small {
     margin-left: auto;
     padding-left: 8px;
     color: var(--text-muted);

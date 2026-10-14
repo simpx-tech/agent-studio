@@ -283,7 +283,7 @@
   import { findSubagent, replyTools } from '$lib/subagents';
   import { leaveChats, type ArtifactView, type SubagentView } from '$lib/side-panels';
   import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
-  import type { Artifact } from '$lib/artifacts';
+  import { artifactCardAction, type Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
   import {
     readImage,
@@ -983,6 +983,16 @@
     desktop() ? consoleShells(workspace.fleet, installation, active).join(' ') : '',
   );
   function codeBlockClick(event: MouseEvent) {
+    // An artifact a reply shows in place of its code opens in the viewer or beside the chat.
+    const card = artifactCardAction(event.target);
+    if (card) {
+      if (card.button.closest('a')) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      openArtifact(card.artifact, card.mode);
+      return;
+    }
     const action = codeBlockAction(event.target);
     if (!action) return;
     // A block's controls never follow a link a reply wrapped around the block.
