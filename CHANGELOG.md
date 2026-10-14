@@ -5,6 +5,36 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.10.0 - 2026-10-14
+
+### Added
+
+- Snooze a chat until Agent Studio starts again: Snooze in the chat toolbar or in a chat's menu
+  moves it to History, and the next time the app starts it waits at the top of the Active tab,
+  where you can open it, snooze it again or close it
+- Start new chats on the least used account, an option in Settings → New chats: each new chat
+  starts on the account of its agent that has used the least of its 5-hour limit, or of its weekly
+  limit without one, and you can leave accounts out of it
+- Give each account a color of its own, which marks it in the Agent picker, in Connections and
+  where a reply switched accounts; choose another in Manage account
+- Show a steer as a message of your own, where the reply took it, dividing the reply there
+- Show a day division where a chat continues on another day
+- Show the agents' memory edits (Claude's memory, every CLAUDE.md and Codex's memories) in a
+  Memories card of their own, beside Files edited
+- Show each context compaction in Work history, where it happened among the reply's work
+- Set up another server like the production VPS with `scripts/vps/setup.sh`
+
+### Changed
+
+- Stop a reply running in a long chat from freezing the window for half a second every few seconds
+
+### Fixed
+
+- Show what a reply writes after waiting for background work below the text it waited with
+- Keep following the end of a chat when its window gets narrower on macOS, Linux and iPhone
+- Keep replies running and images attaching when WebView2 restarts its network service, which made
+  replies fail with "This conversation is already responding" until Agent Studio restarted
+
 ## 0.9.3 - 2026-10-11
 
 ### Added
