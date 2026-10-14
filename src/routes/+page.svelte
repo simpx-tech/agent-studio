@@ -85,6 +85,7 @@
     RotateCcwClock,
     CalendarDays,
     LayoutDashboard,
+    AlarmClock,
   } from '@lucide/svelte';
   import {
     initialWorkspace,
@@ -232,6 +233,14 @@
     withFolderIcon,
   } from '$lib/folder-icons';
   import FolderIcon from '$lib/components/FolderIcon.svelte';
+  import {
+    dueSnoozes,
+    latestStart,
+    snoozeIndex,
+    snoozeState,
+    withSnooze,
+    withoutSnooze,
+  } from '$lib/snoozes';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
   import { accountActivity, balanceableAccounts, balancedAccount } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
@@ -1501,6 +1510,21 @@
     ),
   );
   const iconsByFolder = $derived(folderIconIndex(workspace.folderIcons));
+  // Chats snoozed until the app starts again. From the next start they wait at the top of the
+  // sidebar until they are opened, snoozed again or closed.
+  const snoozesByChat = $derived(snoozeIndex(workspace.snoozes));
+  const lastStart = $derived(latestStart(workspace.appSessions));
+  const snoozedChats = $derived.by(() => {
+    const chats = new Map<string, Conversation>();
+    if (snoozesByChat.size)
+      for (const c of workspace.conversations) if (snoozesByChat.has(c.id)) chats.set(c.id, c);
+    return chats;
+  });
+  const dueChats = $derived(
+    dueSnoozes(workspace.snoozes, (id) => snoozedChats.get(id), lastStart).map((due) => due.chat),
+  );
+  const snoozeOf = (c: Conversation) => snoozeState(snoozesByChat.get(c.id), c, lastStart);
+  const heldChat = (id: string) => workspace.conversations.find((c) => c.id === id);
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
   // Chats whose reply finished while the reader was elsewhere keep a dot in the sidebar until
   // they are opened. Reading state belongs to this window: never saved, exported or synced.
@@ -1579,12 +1603,14 @@
     finished: boolean,
     monitors: number,
     plan?: { complete: number; total: number },
+    snoozed = false,
   ): string[] {
     return [
       ...(plan ? [`${plan.complete} of ${plan.total} plan steps complete`] : []),
       ...(finished ? ['New reply'] : []),
       ...(monitors === 1 ? ['Monitor still running'] : []),
       ...(monitors > 1 ? [`${monitors} monitors still running`] : []),
+      ...(snoozed ? ['Snoozed'] : []),
     ];
   }
   const switchNotices = $derived(
@@ -2208,6 +2234,7 @@
               workspace.appSessions = value.appSessions;
               workspace.folderIcons = value.folderIcons;
               workspace.accountColors = value.accountColors;
+              workspace.snoozes = value.snoozes;
               const kept = new Set(value.conversations.map((c) => c.id));
               const deleted = workspace.conversations.filter((c) => !kept.has(c.id));
               // Preserve active object identities while network responses arrive.
@@ -2252,6 +2279,7 @@
                 workspace.appSessions = meta.appSessions;
                 workspace.folderIcons = meta.folderIcons;
                 workspace.accountColors = meta.accountColors;
+                workspace.snoozes = meta.snoozes;
               }
               const gone = new Set(remove);
               if (gone.size)
@@ -3780,11 +3808,12 @@
       sidebarOpen = drawer;
     }
   }
-  // The toolbar's Move to history. Its button leaves with the chat, so focus continues in the
-  // next chat's composer, or at its actions menu on phones.
-  function archiveOpenChat() {
+  // The toolbar's Move to history, and its Snooze of an Active chat. The button leaves with the
+  // chat, so focus continues in the next chat's composer, or at its actions menu on phones.
+  function archiveOpenChat(snooze = false) {
     if (!active) return;
-    archiveConversation(active);
+    if (snooze) snoozeConversation(active);
+    else archiveConversation(active);
     void tick().then(() => {
       if (document.activeElement && document.activeElement !== document.body) return;
       if (mobile) document.querySelector<HTMLElement>('.mobile-actions-toggle')?.focus();
@@ -3817,6 +3846,75 @@
         listed[index - 1];
       (
         row || sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      )?.focus();
+    });
+  }
+  // Snoozes a chat until the app starts again: an Active one moves to History as Move to history
+  // moves it, and from the next start of the app it waits at the top of the sidebar.
+  function snoozeConversation(c: Conversation, fromSidebar = false) {
+    if (!loaded || conversationRunning(c)) return;
+    if (!c.archived) archiveConversation(c, fromSidebar);
+    if (!c.archived) return;
+    workspace.snoozes = withSnooze($state.snapshot(workspace.snoozes), c, heldChat);
+    saveSettingsSoon();
+  }
+  function endSnooze(c: Conversation) {
+    workspace.snoozes = withoutSnooze($state.snapshot(workspace.snoozes), c.id, heldChat);
+    saveSettingsSoon();
+  }
+  // The toolbar's Snooze. An Active chat leaves for History; a History chat stays open with the
+  // button pressed until its snooze ends.
+  function toggleOpenSnooze() {
+    if (!active) return;
+    if (snoozeOf(active)) endSnooze(active);
+    else if (active.archived) snoozeConversation(active);
+    else archiveOpenChat(true);
+  }
+  // The context menu's Snooze and Cancel snooze. A chat that leaves Active gives keyboard focus
+  // to the row now in its place.
+  function snoozeFromMenu() {
+    const c = menuConversation,
+      trigger = conversationMenu?.trigger;
+    if (!c || !trigger) return;
+    const rows = () => [
+      ...(sidebarElement?.querySelectorAll<HTMLElement>(
+        '#conversation-panel-active :is(.conversation-item, .scratch-item)',
+      ) ?? []),
+    ];
+    const index = rows().indexOf(trigger);
+    closeConversationMenu();
+    if (snoozeOf(c)) endSnooze(c);
+    else snoozeConversation(c, true);
+    void tick().then(() => {
+      const listed = rows();
+      (trigger.isConnected && trigger.getClientRects().length
+        ? trigger
+        : (listed[index] ??
+          listed[index - 1] ??
+          sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))
+      )?.focus({ preventScroll: true });
+    });
+  }
+  // The Snoozed list's Open shows the chat where it is, in History, where sending a message
+  // brings it back to Active as usual.
+  function openSnoozed(c: Conversation) {
+    endSnooze(c);
+    openConversation(c);
+    if (!mobile) void tick().then(() => composerInput?.focus({ preventScroll: true }));
+  }
+  // Snooze again and Close take the chat out of the list, so keyboard focus moves on to the chat
+  // now in its place, or to the search box once none is left.
+  function leaveSnoozed(event: MouseEvent, c: Conversation, again: boolean) {
+    const focused = document.activeElement === event.currentTarget;
+    const index = dueChats.findIndex((due) => due.id === c.id);
+    if (again) snoozeConversation(c, true);
+    else endSnooze(c);
+    if (!focused) return;
+    void tick().then(() => {
+      const items = [...(sidebarElement?.querySelectorAll<HTMLElement>('.snoozed-chat') ?? [])];
+      (
+        (items[index] ?? items[index - 1])?.querySelector<HTMLElement>('button') ??
+        sidebarElement?.querySelector<HTMLElement>('.search input')
       )?.focus();
     });
   }
@@ -4133,6 +4231,11 @@
       await cancelTitle(target.id).catch(() => {});
       if (session !== workspaceSession) return;
       workspace.conversations = workspace.conversations.filter((c) => c.id !== target.id);
+      // Its snooze goes with it.
+      if (snoozesByChat.has(target.id)) {
+        workspace.snoozes = withoutSnooze($state.snapshot(workspace.snoozes), target.id, heldChat);
+        marks.meta();
+      }
       // The saved order leaves it out, and a sync sees it gone from the baseline.
       await persistChat(target.id);
       if (session !== workspaceSession) return;
@@ -5435,6 +5538,31 @@
         disabled={!loaded}><Plus size={15} /></button
       >
     </div>
+    {#if dueChats.length}<section class="snoozed-chats" aria-labelledby="snoozed-heading">
+        <h2 id="snoozed-heading" class="snoozed-heading">
+          <AlarmClock size={13} aria-hidden="true" />Snoozed
+        </h2>
+        {#each dueChats as c (c.id)}{@const location = conversationLocation(
+            c,
+            workspace.fleet,
+            installation,
+          )}
+          <div class="snoozed-chat" role="group" aria-label={c.title}>
+            <span class="snoozed-title" title={c.title}
+              >{#if location?.path}<FolderIcon
+                  icon={folderIconOf(iconsByFolder, location)?.icon}
+                  size={13}
+                />{:else}<MessageCircle size={13} aria-hidden="true" />{/if}<span>{c.title}</span
+              ></span
+            >
+            <div class="snoozed-actions">
+              <button class="snoozed-open" onclick={() => openSnoozed(c)}>Open</button>
+              <button onclick={(event) => leaveSnoozed(event, c, true)}>Snooze again</button>
+              <button onclick={(event) => leaveSnoozed(event, c, false)}>Close</button>
+            </div>
+          </div>
+        {/each}
+      </section>{/if}
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
@@ -5609,10 +5737,12 @@
                             (m) => m.status === 'running',
                           )}{@const finished = !runningReply && !!finishedChats[c.id]}{@const monitors =
                             runningReply ? 0 : runningMonitors(c.id)}{@const plan =
-                            runningReply && runningPlanProgress(c.messages)}{@const notes = rowNotes(
+                            runningReply && runningPlanProgress(c.messages)}{@const snoozed =
+                            snoozesByChat.has(c.id) && !!snoozeOf(c)}{@const notes = rowNotes(
                             finished,
                             monitors,
                             plan,
+                            snoozed,
                           )}
                           <div class="conversation-row">
                             <button
@@ -5665,6 +5795,10 @@
                                   />{/if}{:else if monitors}<Activity
                                   size={14}
                                   class="conversation-monitoring"
+                                  aria-hidden="true"
+                                />{:else if snoozed}<AlarmClock
+                                  size={14}
+                                  class="conversation-snoozed"
                                   aria-hidden="true"
                                 />{/if}</button
                             >{#if !c.archived && !conversationRunning(c)}<button
@@ -6031,9 +6165,17 @@
               {#if active && !active.archived}<button
                   class="icon-button"
                   disabled={activeRunning}
-                  onclick={archiveOpenChat}
+                  onclick={() => archiveOpenChat()}
                   title="Move to history"
                   aria-label="Move to history"><Archive size={16} /></button
+                >{/if}
+              {#if active}{@const snoozed = !!snoozeOf(active)}<button
+                  class="icon-button snooze-toggle"
+                  disabled={activeRunning}
+                  aria-pressed={snoozed}
+                  onclick={toggleOpenSnooze}
+                  title={snoozed ? 'Cancel snooze' : 'Snooze until the app restarts'}
+                  aria-label="Snooze"><AlarmClock size={16} /></button
                 >{/if}
               {#if active}<button
                   class="icon-button"
@@ -6606,6 +6748,9 @@
       remove={requestConversationDeletion}
       fork={() => menuConversation && void forkChat(menuConversation.id)}
       forkDisabled={forking || imagesLoading || forkPoint(menuConversation) < 0}
+      snooze={snoozeFromMenu}
+      snoozed={!!snoozeOf(menuConversation)}
+      snoozeDisabled={conversationRunning(menuConversation)}
     />
   {/key}
 {:else if conversationMenu && menuScratch}

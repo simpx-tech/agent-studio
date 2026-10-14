@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { GitFork, Trash2 } from '@lucide/svelte';
+  import { AlarmClock, AlarmClockOff, GitFork, Trash2 } from '@lucide/svelte';
 
   let {
     x,
@@ -12,6 +12,9 @@
     removeLabel = 'Delete conversation',
     fork,
     forkDisabled = false,
+    snooze,
+    snoozed = false,
+    snoozeDisabled = false,
   }: {
     x: number;
     y: number;
@@ -23,6 +26,10 @@
     // Scratch chats have nothing to fork.
     fork?: () => void;
     forkDisabled?: boolean;
+    // Snoozes the chat until the app restarts, or ends its snooze when `snoozed`.
+    snooze?: () => void;
+    snoozed?: boolean;
+    snoozeDisabled?: boolean;
   } = $props();
   let menu: HTMLDivElement;
 
@@ -102,6 +109,18 @@
         ? 'A finished reply is needed to fork this conversation'
         : 'Start a separate chat from the finished replies'}
       ><GitFork size={15} aria-hidden="true" />Fork conversation</button
+    >{/if}
+  {#if snooze}<button
+      type="button"
+      role="menuitem"
+      tabindex="-1"
+      onclick={snooze}
+      disabled={snoozeDisabled}
+      title={snoozed ? undefined : 'Until the app restarts'}
+      >{#if snoozed}<AlarmClockOff size={15} aria-hidden="true" />Cancel snooze{:else}<AlarmClock
+          size={15}
+          aria-hidden="true"
+        />Snooze{/if}</button
     >{/if}
   <button class="danger" type="button" role="menuitem" tabindex="-1" onclick={remove}
     ><Trash2 size={15} aria-hidden="true" />{removeLabel}</button

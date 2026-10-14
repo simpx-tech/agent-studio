@@ -21,6 +21,7 @@ import {
 import { registerInstallation } from './fleet';
 import { sameFolderIcons } from './folder-icons';
 import { assignAccountColors, withAccountColor } from './account-colors';
+import { withSnooze, withoutSnooze } from './snoozes';
 import { snapshotFor, type UsageSnapshot } from './usage';
 
 const chat = (): Conversation => ({
@@ -182,6 +183,35 @@ describe('workspace replication', () => {
     });
     expect(saved.accountColors).toEqual(local.accountColors);
     expect(sharedWorkspace(saved).accountColors).toEqual(local.accountColors);
+  });
+  it('syncs snoozes and keeps them when the relay predates them', () => {
+    const [kept, ours, theirs] = [chat(), chat(), chat()];
+    const held = (id: string) => [kept, ours, theirs].find((c) => c.id === id);
+    const at = new Date(2026, 9, 14);
+    const base = { ...emptyShared(), snoozes: withSnooze(undefined, kept, held, at) };
+    const local = { ...base, snoozes: withSnooze(base.snoozes, ours, held, at) };
+    const remote = { ...base, snoozes: withSnooze(base.snoozes, theirs, held, at) };
+    const merged = mergeShared(base, local, remote);
+    expect(merged.snoozes?.map((s) => s.conversationId)).toEqual(
+      [kept.id, ours.id, theirs.id].sort(),
+    );
+    expect(sharedSchema.parse(merged).snoozes).toEqual(merged.snoozes);
+    // Closed on one device, the snooze ends on the other.
+    const closed = { ...local, snoozes: withoutSnooze(local.snoozes, kept.id, held) };
+    expect(mergeShared(local, closed, local).snoozes).toEqual(closed.snoozes);
+    // An older relay drops the list; this device keeps its own and sees no difference.
+    const older = emptyShared();
+    expect(mergeShared(base, local, older).snoozes).toEqual(local.snoozes);
+    expect(sameShared(older, local)).toBe(true);
+    expect(sameShared(local, older)).toBe(false);
+    expect(sameShared(local, { ...local, snoozes: [...local.snoozes].reverse() })).toBe(true);
+    expect(sameMeta(metaOf(older), metaOf(local))).toBe(false);
+    expect(sameMeta(metaOf(closed), metaOf(local))).toBe(false);
+    // No list stays absent, as older relays store it, and a saved workspace keeps its snoozes.
+    expect('snoozes' in mergeShared(emptyShared(), emptyShared(), older)).toBe(false);
+    const saved = restoreWorkspace({ ...initialWorkspace(), snoozes: local.snoozes });
+    expect(saved.snoozes).toEqual(local.snoozes);
+    expect(sharedWorkspace(saved).snoozes).toEqual(local.snoozes);
   });
   it('migrates v2 and registers only this installation without inventing remote machines or accounts', () => {
     const old = {

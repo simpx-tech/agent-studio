@@ -78,6 +78,7 @@ test('the toolbar moves the open chat to history first and opens the next Active
   await expect(actions.first()).toHaveAccessibleName('Move to history');
   expect(await actions.evaluateAll((buttons) => buttons.map((b) => b.ariaLabel))).toEqual([
     'Move to history',
+    'Snooze',
     'Fork conversation',
     'Model context',
     'Chat instructions',

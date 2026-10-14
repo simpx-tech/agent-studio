@@ -29,6 +29,7 @@ import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
 import { folderIconsSchema } from './folder-icons.ts';
 import { accountColorsSchema } from './account-colors.ts';
+import { snoozesSchema } from './snoozes.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -302,6 +303,8 @@ export const workspaceSchema = z.object({
   folderIcons: folderIconsSchema.optional(),
   // The color that marks each account wherever it is named.
   accountColors: accountColorsSchema.optional(),
+  // Chats snoozed until the desktop app starts again.
+  snoozes: snoozesSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

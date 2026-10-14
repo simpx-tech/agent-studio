@@ -24,6 +24,7 @@ import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
 import { mergeFolderIcons, sameFolderIcons } from './folder-icons.ts';
 import { mergeAccountColors, sameAccountColors } from './account-colors.ts';
+import { mergeSnoozes, sameSnoozes } from './snoozes.ts';
 import { jsonEqual } from './json-equal.ts';
 
 export type SharedWorkspace = Pick<
@@ -36,6 +37,7 @@ export type SharedWorkspace = Pick<
   | 'appSessions'
   | 'folderIcons'
   | 'accountColors'
+  | 'snoozes'
 >;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
@@ -46,6 +48,7 @@ export const sharedSchema = workspaceSchema.pick({
   appSessions: true,
   folderIcons: true,
   accountColors: true,
+  snoozes: true,
 });
 /** One conversation as replicated, so a sync can validate and compare it by itself. */
 export const sharedChatSchema = sharedSchema.shape.conversations.element;
@@ -86,8 +89,8 @@ const same = <T extends { id: string }>(x?: T[], y?: T[]) => equal(byId(x), byId
 /**
  * Whether two shared workspaces hold the same data. Lists compare by item id: this device
  * adds new chats at the front, while a merge keeps its base order and appends them. App sessions,
- * folder icons and account colors compare only when `a`, the relay's copy, holds them: an older
- * relay drops them, and this device keeps its own.
+ * folder icons, account colors and snoozes compare only when `a`, the relay's copy, holds them: an
+ * older relay drops them, and this device keeps its own.
  */
 export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
   return (
@@ -101,7 +104,8 @@ export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
     a.claudeInstructions === b.claudeInstructions &&
     (!a.appSessions || same(a.appSessions, b.appSessions)) &&
     (!a.folderIcons || sameFolderIcons(a.folderIcons, b.folderIcons)) &&
-    (!a.accountColors || sameAccountColors(a.accountColors, b.accountColors))
+    (!a.accountColors || sameAccountColors(a.accountColors, b.accountColors)) &&
+    (!a.snoozes || sameSnoozes(a.snoozes, b.snoozes))
   );
 }
 /**
@@ -122,7 +126,8 @@ export function sameMeta(a: SharedMeta, b: SharedMeta): boolean {
     a.claudeInstructions === b.claudeInstructions &&
     same(a.appSessions, b.appSessions) &&
     sameFolderIcons(a.folderIcons, b.folderIcons) &&
-    sameAccountColors(a.accountColors, b.accountColors)
+    sameAccountColors(a.accountColors, b.accountColors) &&
+    sameSnoozes(a.snoozes, b.snoozes)
   );
 }
 
@@ -581,6 +586,7 @@ export function mergeShared(
         connections,
       }),
     ),
+    ...snoozesField(mergeSnoozes(base.snoozes, local.snoozes, remote.snoozes)),
   };
 }
 // An absent value follows the default text, so it stays absent rather than undefined.
@@ -592,6 +598,8 @@ const folderIconsField = (value: SharedWorkspace['folderIcons']) =>
   value === undefined ? {} : { folderIcons: value };
 const accountColorsField = (value: SharedWorkspace['accountColors']) =>
   value === undefined ? {} : { accountColors: value };
+const snoozesField = (value: SharedWorkspace['snoozes']) =>
+  value === undefined ? {} : { snoozes: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
   /**

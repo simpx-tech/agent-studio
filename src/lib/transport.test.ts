@@ -1512,6 +1512,75 @@ it('keeps account colors that an older relay drops, and sends them to a relay th
   await transport.disconnectRelay();
 });
 
+it('keeps snoozes that an older relay drops, and sends them to a relay that keeps them', async () => {
+  const { transport, workspace, relay, local, apply, polls } = await settledRelay();
+  const keeps = native.invoke.getMockImplementation()!;
+  // An older relay's schema drops the list from every save.
+  let older = true;
+  native.invoke.mockImplementation(async (command, args) =>
+    keeps(
+      command,
+      older && command === 'relay_request' && args.path === 'v1/state' && args.method === 'PUT'
+        ? {
+            ...args,
+            body: { ...args.body, workspace: { ...args.body.workspace, snoozes: undefined } },
+          }
+        : args,
+    ),
+  );
+  const { withSnooze, withoutSnooze } = await import('./snoozes');
+  const held = (id: string) => workspace.conversations.find((c) => c.id === id);
+  const snoozed = withSnooze(undefined, workspace.conversations[0], held, new Date(2026, 9, 14));
+  workspace.snoozes = snoozed;
+  local.changes++;
+  // With only the list changed, there is nothing to send to a relay without one.
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  // The next change carries it, and the relay drops it again.
+  workspace.conversations[0].title = 'Renamed here';
+  local.changes++;
+  later();
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
+  expect(relay.workspace.snoozes).toBeUndefined();
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  // A change from another device leaves the snoozes here.
+  relay.workspace = structuredClone(relay.workspace);
+  relay.workspace.conversations[0].title = 'Renamed elsewhere';
+  relay.revision++;
+  later();
+  await polls(1);
+  expect(workspace.conversations[0].title).toBe('Renamed elsewhere');
+  expect(workspace.snoozes).toEqual(snoozed);
+  expect(apply).toHaveBeenCalledOnce();
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  // Once the relay keeps the list, the next change takes the snoozes there, and ending one goes
+  // by itself.
+  older = false;
+  workspace.conversations[0].title = 'Renamed again';
+  local.changes++;
+  later();
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
+  expect(relay.workspace.snoozes).toEqual(snoozed);
+  workspace.snoozes = withoutSnooze(snoozed, workspace.conversations[0].id, held);
+  local.changes++;
+  later();
+  expect((await polls(1)).state).toEqual([
+    'GET v1/state/revision',
+    'PUT v1/state',
+    'save_sync_state',
+  ]);
+  expect(relay.workspace.snoozes).toEqual([]);
+  expect((await polls(2)).state).toEqual(Array(2).fill('GET v1/state/revision'));
+  await transport.disconnectRelay();
+});
+
 it('routes requests and account updates with the fleet alone, never a workspace copy', async () => {
   const { transport, relay, local, polls, here, there, peer } = await settledRelay();
   const reads = local.reads;
