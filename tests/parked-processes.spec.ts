@@ -133,11 +133,12 @@ test('a chat deleted on another device releases its process here, but a History 
         invoke = native.invoke;
       let sync: unknown = null;
       native.invoke = async (command: string, args: any) => {
+        args = w.studioCallArguments(command, args);
         if (command === 'relay_resume') return url;
         if (command === 'relay_request') return w.relayBridge(args.method, args.path, args.body);
         if (command === 'load_sync_state') return sync;
         if (command === 'save_sync_state') {
-          sync = args.value;
+          sync = w.studioCheckpoint(sync, args);
           return;
         }
         return invoke(command, args);

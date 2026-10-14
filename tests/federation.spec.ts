@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createRelay } from '../relay/server';
 import { createHash } from 'node:crypto';
 import { triangleGlbBase64 } from './model-fixture';
+import { mockAppCalls } from './desktop-helper';
 
 test('shared account context is explicit, scoped, cancellable and saved across reloads', async ({
   page,
@@ -142,6 +143,7 @@ async function host(
         });
     return [];
   });
+  await mockAppCalls(page);
   await page.addInitScript(
     ({ identity }) => {
       const w = window as any;
@@ -172,6 +174,7 @@ async function host(
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          args = w.studioCallArguments(command, args);
           if (command === 'desktop_notification_settings') return { enabled: true, sound: true };
           if (command === 'desktop_notification' || command === 'set_pending_chat_badge') return;
           if (command === 'plugin:window|is_maximized') return false;
@@ -280,7 +283,8 @@ async function host(
           if (command === 'load_sync_state')
             return JSON.parse(localStorage.getItem('fixture-sync') ?? 'null');
           if (command === 'save_sync_state') {
-            localStorage.setItem('fixture-sync', JSON.stringify(args.value));
+            const before = JSON.parse(localStorage.getItem('fixture-sync') ?? 'null');
+            localStorage.setItem('fixture-sync', JSON.stringify(w.studioCheckpoint(before, args)));
             return;
           }
           if (command === 'relay_resume') return localStorage.getItem('fixture-relay-origin');

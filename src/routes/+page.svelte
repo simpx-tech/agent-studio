@@ -20,6 +20,7 @@
   } from '$lib/notifications';
   import { createFinishedChatTracker, type FinishedChats } from '$lib/finished-chats';
   import { createChangeMarks } from '$lib/change-marks';
+  import { createChatSnapshots } from '$lib/chat-snapshots';
   import {
     watchDesktopNotifications,
     watchNotificationView,
@@ -247,13 +248,7 @@
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
-  import {
-    replaceFields,
-    sharedChatSchema,
-    sharedMeta,
-    sharedWorkspace,
-    type Presence,
-  } from '$lib/sync';
+  import { replaceFields, sharedMeta, sharedWorkspace, type Presence } from '$lib/sync';
   import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
@@ -1554,19 +1549,24 @@
       .find((c) => c.id === event.conversationId)
       ?.messages.find((m) => m.role === 'assistant' && m.runId === event.runId);
     if (!reply) return;
-    if (event.kind === 'workflow')
-      applyRunEvent(reply, { kind: 'nativeworkflow', nativeWorkflows: event.nativeWorkflows });
-    else applyRunEvent(reply, { kind: 'tool', tool: event.tool });
-    // Outcomes are saved at once; sub-agents' progress goes out with the next sync and save.
-    if (
+    const clock =
+      event.kind === 'workflow'
+        ? applyRunEvent(reply, { kind: 'nativeworkflow', nativeWorkflows: event.nativeWorkflows })
+        : applyRunEvent(reply, { kind: 'tool', tool: event.tool });
+    // Outcomes are saved at once; sub-agents' progress goes out with the next sync and save, and
+    // a task's running time without hurry.
+    if (clock) {
+      localChanges++;
+      marks.quiet(event.conversationId, reply.id);
+    } else if (
       (event.kind === 'tool' && !event.tool.parentId && event.tool.status !== 'running') ||
       Date.now() - earlierSavedAt >= streamSaveInterval()
     ) {
       earlierSavedAt = Date.now();
-      saveSoon(event.conversationId);
+      saveSoon(event.conversationId, reply.id);
     } else {
       localChanges++;
-      marks.chat(event.conversationId);
+      marks.chat(event.conversationId, reply.id);
     }
   }
   let earlierSavedAt = 0;
@@ -2103,6 +2103,7 @@
               forking = false;
               const previousView = view;
               workspace = value;
+              snapshots.clear();
               chatsWithWork.clear();
               workShown.clear();
               shownWork.clear();
@@ -2166,13 +2167,14 @@
                 joinTakeOver(conversation, request);
               const message = conversation?.messages.find((m) => m.id === request.assistantId);
               if (!conversation || !message) return;
+              let clock = false;
               if (event) {
                 hearWait(request.runId, event);
                 if (hearDraft(request.runId, event)) {
                   if (activeId === conversation.id) void scrollToEnd(true);
                   return;
                 }
-                applyRunEvent(message, event);
+                clock = applyRunEvent(message, event) === 'clock';
                 if (event.kind === 'screen' && event.screen)
                   screenSaved(event.screen.environmentId);
               }
@@ -2190,10 +2192,12 @@
               }
               // This computer runs the reply for another device, so its progress goes out with
               // every poll. Like a reply started here, it saves at once only what a reader must
-              // not lose, and the rest with the next save instead of once per event.
+              // not lose, and the rest with the next save instead of once per event. Each event
+              // changes this one message, and a call's running time goes out without hurry.
               localChanges++;
-              marks.chat(conversation.id);
-              if (event && savesAtOnce(event)) saveSoon(conversation.id);
+              if (clock) marks.quiet(conversation.id, message.id);
+              else marks.chat(conversation.id, message.id);
+              if (event && savesAtOnce(event)) saveSoon(conversation.id, message.id);
               if (activeId === conversation.id) void scrollToEnd(true);
             },
             apply: async (value) => {
@@ -2225,9 +2229,14 @@
             },
             chat: (id) => {
               const conversation = workspace.conversations.find((c) => c.id === id);
-              return conversation && sharedChatSchema.parse(conversation);
+              return conversation && chatCopy(conversation);
             },
-            chatIds: () => workspace.conversations.map((c) => c.id),
+            chatIds: () => {
+              const ids = workspace.conversations.map((c) => c.id);
+              // Copies of conversations this device no longer holds have no further use.
+              snapshots.keep(ids);
+              return ids;
+            },
             meta: () => sharedMeta(workspace),
             takeUnsynced: () => marks.takeUnsynced(),
             restoreUnsynced: (changes) => marks.restoreUnsynced(changes),
@@ -2415,9 +2424,41 @@
   // Changes to be synchronized, so relay polls can skip the whole-workspace sync while nothing
   // changed. Streamed reply events count too, because they update messages before a save.
   let localChanges = 0;
+  // Copies of conversations for syncing and saving. Each shares with the one before it every
+  // message and call that did not change, so a reply running in a long chat costs a poll and a
+  // save what it changed, not the whole chat (src/lib/chat-snapshots.ts). Tests check each copy
+  // against a full parse.
+  const verifyingCopies = !!(globalThis as { studioVerifySnapshots?: boolean })
+    .studioVerifySnapshots;
+  const snapshots = createChatSnapshots({ verify: verifyingCopies });
   // What changed here since the last save and the last sync: named conversations, the replicated
-  // settings, or everything when a change names nothing (src/lib/change-marks.ts).
-  const marks = createChangeMarks();
+  // settings, or everything when a change names nothing (src/lib/change-marks.ts). A change that
+  // names its message, as each event of a running reply does, leaves the other messages' copies
+  // as they are.
+  const marks = createChangeMarks((chatId, messageId) => {
+    if (chatId === undefined) snapshots.touchAll();
+    else snapshots.touch(chatId, messageId);
+    // Tests read a copy after every change, so an edit the copies would miss shows at the next.
+    if (verifyingCopies && chatId !== undefined)
+      queueMicrotask(() => {
+        const conversation = workspace.conversations.find((c) => c.id === chatId);
+        if (!conversation) return;
+        try {
+          chatCopy(conversation);
+        } catch {
+          // Logged by `chatCopy`.
+        }
+      });
+  });
+  /** A detached, validated copy of a conversation this device holds, as it syncs and saves it. */
+  function chatCopy(conversation: Conversation): Conversation {
+    try {
+      return snapshots.read(conversation);
+    } catch (error) {
+      if (verifyingCopies) console.error('[chat-snapshots]', String(error));
+      throw error;
+    }
+  }
   /** Whether this window runs a reply on the given connection itself, rather than a relay job. */
   function runsHere(connectionId?: string) {
     if (!desktop()) return false;
@@ -2438,6 +2479,18 @@
     )
       void refreshConnections();
   }
+  /**
+   * Copies of these conversations for the desktop app to save as bytes. A save must never fail
+   * over a conversation the schema refuses, so without a copy of each they are saved as they are.
+   */
+  function savedCopies(conversations: Conversation[]): Conversation[] | undefined {
+    if (!desktop()) return;
+    try {
+      return conversations.map(chatCopy);
+    } catch {
+      return;
+    }
+  }
   async function flushWorkspace() {
     if (!loaded) return;
     const scope = workspaceStorageScope();
@@ -2450,11 +2503,8 @@
       const started = performance.now();
       try {
         // Resolve the named conversations when the save runs, so it sends their newest state.
-        await saveWorkspace(
-          saved,
-          scope,
-          pending && saved.conversations.filter((c) => pending.has(c.id)),
-        );
+        const changed = pending && saved.conversations.filter((c) => pending.has(c.id));
+        await saveWorkspace(saved, scope, changed, changed && savedCopies(changed));
       } finally {
         lastSaveMs = performance.now() - started;
       }
@@ -2529,9 +2579,12 @@
   // writes the newest state, so requests made while one runs only need one more save after it.
   let savingSoon = false;
   let saveAgain = false;
-  /** Saves and publishes a change to one conversation soon, or every one when none is named. */
-  function saveSoon(chatId?: string) {
-    marks.chat(chatId);
+  /**
+   * Saves and publishes a change to one conversation soon, or every one when none is named.
+   * `messageId` names the only message of it that changed.
+   */
+  function saveSoon(chatId?: string, messageId?: string) {
+    marks.chat(chatId, messageId);
     scheduleSave();
   }
   /** Saves and publishes a change to the replicated settings soon. */
@@ -4987,13 +5040,16 @@
       const questionTool =
         event.kind === 'tool' && !!event.tool && !event.tool.parentId && asksTheUser(event.tool.name);
       const hadQuestion = questionTool && requestsAttention(m);
-      applyRunEvent(m, event);
+      const clock = applyRunEvent(m, event) === 'clock';
       if (event.kind === 'screen' && event.screen) screenSaved(event.screen.environmentId);
       localChanges++;
       // Every event goes out with the next sync, so other devices follow the text and
-      // tool calls as they stream; saving to disk keeps its own, slower rate.
-      if (publishes) marks.chat(conversation.id);
-      else marks.received(conversation.id);
+      // tool calls as they stream; saving to disk keeps its own, slower rate. Each changes this
+      // one message, and a call's running time, which arrives every second, goes out without
+      // hurry: a reply waiting on a long call no longer publishes its chat with every poll.
+      if (!publishes) marks.received(conversation.id, m.id);
+      else if (clock) marks.quiet(conversation.id, m.id);
+      else marks.chat(conversation.id, m.id);
       const asks =
         event.kind === 'question' ||
         event.kind === 'elicitation' ||
@@ -5004,7 +5060,7 @@
         (event.kind === 'reasoning' && Date.now() - reasoningSavedAt >= streamSaveInterval())
       ) {
         if (event.kind === 'reasoning') reasoningSavedAt = Date.now();
-        if (publishes) saveSoon(conversation.id);
+        if (publishes) saveSoon(conversation.id, m.id);
         else saveLocalSoon();
       }
       // A question waits for the reader, so it reaches the relay, and the phone alert,

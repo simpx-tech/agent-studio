@@ -284,15 +284,23 @@ export function contextFor(
   model: ModelInfo,
   snapshot?: UsageSnapshot,
 ) {
-  const history = conversation ? historyFor(conversation) : [];
   const streaming = conversation?.messages.findLast(
     (m) => m.role === 'assistant' && m.status === 'running',
   );
-  if (streaming && messageText(streaming))
-    history.push({ role: 'assistant', text: messageText(streaming) });
-  const withoutDraft = estimatePromptTokens(settings, history);
-  if (draft.trim()) history.push({ role: 'user', text: draft.trim() });
-  const withDraft = estimatePromptTokens(settings, history);
+  // The estimate of the next request reads the text of every message, so it is worked out only
+  // when asked for. The usage panel shows measured counts alone, and with the estimate made on
+  // every reading, each streamed event of a reply read a long conversation whole: 8 ms an event
+  // in a 9.8 MB chat (docs/PERFORMANCE.md).
+  let forecast: { withoutDraft: number; withDraft: number } | undefined;
+  const estimates = () => {
+    if (forecast) return forecast;
+    const history = conversation ? historyFor(conversation) : [];
+    if (streaming && messageText(streaming))
+      history.push({ role: 'assistant', text: messageText(streaming) });
+    const withoutDraft = estimatePromptTokens(settings, history);
+    if (draft.trim()) history.push({ role: 'user', text: draft.trim() });
+    return (forecast = { withoutDraft, withDraft: estimatePromptTokens(settings, history) });
+  };
   const sameSettings = (other?: ChatSettings) =>
     other?.provider === settings.provider &&
     other.model === settings.model &&
@@ -328,7 +336,7 @@ export function contextFor(
   );
   const lastInput = previous?.usage?.contextInput ?? previous?.usage?.input ?? null;
   const overhead = lastInput != null ? Math.max(0, lastInput - previous!.promptTokensEstimate!) : 0;
-  const estimated = withDraft + overhead;
+  const estimated = () => estimates().withDraft + overhead;
   const nextCapacity =
     snapshot?.context?.tokens ?? model.contextWindow ?? previous?.usage?.contextWindow ?? null;
   const capacity = measuredCapacity ?? nextCapacity;
@@ -345,10 +353,16 @@ export function contextFor(
       : !compatible
         ? 'Send a message with these settings to measure its context.'
         : 'This reply did not include a request-level context reading.',
-    estimated,
+    get estimated() {
+      return estimated();
+    },
     nextCapacity,
-    estimatedPercent: nextCapacity && nextCapacity > 0 ? (estimated / nextCapacity) * 100 : null,
-    draftTokens: Math.max(0, withDraft - withoutDraft),
+    get estimatedPercent() {
+      return nextCapacity && nextCapacity > 0 ? (estimated() / nextCapacity) * 100 : null;
+    },
+    get draftTokens() {
+      return Math.max(0, estimates().withDraft - estimates().withoutDraft);
+    },
     capacity,
     source,
     percent: reported != null && capacity && capacity > 0 ? (reported / capacity) * 100 : null,

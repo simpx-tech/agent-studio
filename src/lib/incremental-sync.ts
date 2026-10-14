@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { chatSize } from './chat-bytes';
 import type { Conversation } from './domain';
+import { jsonEqual } from './json-equal';
 import {
   mergeShared,
   metaOf,
@@ -131,12 +133,13 @@ export function syncPlan({
   // The size of each conversation to send, as serialized, so uploads can be kept in bounds.
   const sizes = new Map<string, number>();
   for (const [id, conversation] of result) {
-    const json = JSON.stringify(conversation);
-    if (JSON.stringify(remoteChat(id)) !== json) {
+    // Compared and measured without writing the conversation as text: its copies share what did
+    // not change, and three texts of a 9.8 MB chat took a poll 130 ms (docs/PERFORMANCE.md).
+    if (!jsonEqual(remoteChat(id), conversation)) {
       send.push(conversation);
-      sizes.set(id, json.length);
+      sizes.set(id, chatSize(conversation));
     }
-    if (JSON.stringify(localChat(id)) !== json) apply.push(conversation);
+    if (!jsonEqual(localChat(id), conversation)) apply.push(conversation);
   }
   return {
     mergedMeta,

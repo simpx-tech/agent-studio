@@ -142,7 +142,8 @@ export const preferencesSchema = z.object({
   balanceExcluded: z.array(z.string().uuid()).optional(),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
-const blockSchema = z.discriminatedUnion('type', [
+// One part of a message: reasoning, text, or a call, comment or note of the work.
+export const blockSchema = z.discriminatedUnion('type', [
   reasoningBlockSchema,
   z.object({ type: z.literal('markdown'), text: z.string() }),
   z.object({

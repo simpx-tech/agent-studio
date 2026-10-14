@@ -7,29 +7,58 @@
  * tracked apart from the conversations, so changing one never makes a save or a sync visit every
  * conversation. Data received from the relay is saved but never marked for sync: publishing it
  * back would echo it, and a merge would take anything it lacks for a change made here.
+ *
+ * A change can also name the one message it touched, which a running reply's events do. Copies
+ * of a conversation then read that message alone again (`touched`, src/lib/chat-snapshots.ts);
+ * a change that names none makes them read every message.
  */
 export type ChangeSet = {
   /** The conversations to publish, or `undefined` for all of them. */
   chats: Set<string> | undefined;
   /** Whether the replicated settings changed here. */
   meta: boolean;
+  /**
+   * Conversations in which only a running call's elapsed time moved on. Nobody waits for that,
+   * so a sync publishes them now and then rather than with every poll.
+   */
+  quiet?: Set<string>;
 };
 
-export function createChangeMarks() {
+export function createChangeMarks(
+  /** Told each conversation, and message when one is named, that changed or arrived. */
+  touched: (chatId?: string, messageId?: string) => void = () => {},
+) {
   // Nothing is known about an unsaved or unsynced state at the start, so everything counts.
   let unsaved: Set<string> | undefined;
   let index = true;
-  let unsynced: ChangeSet = { chats: undefined, meta: true };
+  let unsynced: ChangeSet & { quiet: Set<string> } = {
+    chats: undefined,
+    meta: true,
+    quiet: new Set(),
+  };
   return {
-    /** A conversation changed here, or every conversation when none is named. */
-    chat(id?: string) {
+    /**
+     * A conversation changed here, or every conversation when none is named. `messageId` names
+     * the only message of it that changed.
+     */
+    chat(id?: string, messageId?: string) {
+      touched(id, messageId);
       if (id === undefined) {
         unsaved = undefined;
-        unsynced = { chats: undefined, meta: true };
+        unsynced = { chats: undefined, meta: true, quiet: new Set() };
         return;
       }
       unsaved?.add(id);
       unsynced.chats?.add(id);
+    },
+    /**
+     * Only the elapsed time of a call this message is running moved on: saved with the next save,
+     * and published once something else changes in the conversation or a while has passed.
+     */
+    quiet(id: string, messageId: string) {
+      touched(id, messageId);
+      unsaved?.add(id);
+      unsynced.quiet.add(id);
     },
     /** The replicated settings changed here: saved with the index and published. */
     meta() {
@@ -41,7 +70,8 @@ export function createChangeMarks() {
       index = true;
     },
     /** Arrived from the relay: saved here, never published back. */
-    received(id?: string) {
+    received(id?: string, messageId?: string) {
+      touched(id, messageId);
       index = true;
       if (id === undefined) unsaved = undefined;
       else unsaved?.add(id);
@@ -68,13 +98,18 @@ export function createChangeMarks() {
      */
     takeUnsynced(): ChangeSet {
       const pending = unsynced;
-      unsynced = { chats: new Set(), meta: false };
-      return pending;
+      unsynced = { chats: new Set(), meta: false, quiet: new Set() };
+      // A conversation that changed otherwise is published for that.
+      if (pending.chats === undefined) pending.quiet.clear();
+      else for (const id of pending.chats) pending.quiet.delete(id);
+      const { quiet, ...changes } = pending;
+      return quiet.size ? { ...changes, quiet } : changes;
     },
     restoreUnsynced(changes: ChangeSet) {
       if (changes.meta) unsynced.meta = true;
       if (changes.chats === undefined || unsynced.chats === undefined) unsynced.chats = undefined;
       else for (const id of changes.chats) unsynced.chats.add(id);
+      for (const id of changes.quiet ?? []) unsynced.quiet.add(id);
     },
   };
 }

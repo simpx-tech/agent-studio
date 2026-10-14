@@ -15,6 +15,7 @@ import { steeringReceiptSchema, mergeSteering, mergeSteeringPlaces } from './ste
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, mergeReasoningBlocks } from './reasoning.ts';
 import { usageLimitSchema, latestUsageLimit } from './usage-limits.ts';
+import { jsonEqual } from './json-equal.ts';
 
 export const activityStatusSchema = z.enum([
   'running',
@@ -194,7 +195,29 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
 const recordedWork = (message: Message) =>
   message.blocks.reduce((count, block) => count + (block.type === 'markdown' ? 0 : 1), 0);
 
-export function applyRunEvent(message: Message, event: RunEvent) {
+/**
+ * Whether two records of a running call differ only in how long it has run: the computer running
+ * it reports its elapsed time once a second, and Claude's own heartbeat when it sends one.
+ */
+function sameButClock(before: ToolActivity, after: ToolActivity): boolean {
+  if (before.status !== 'running' || after.status !== 'running') return false;
+  // Sub-agent groups and hooks are not timed, and a group's record can be large.
+  if (after.category === 'agent' || after.category === 'hook') return false;
+  const still = (tool: ToolActivity) => ({
+    ...tool,
+    revision: 0,
+    elapsedMs: 0,
+    progress: tool.progress && { ...tool.progress, atElapsedMs: 0 },
+  });
+  return jsonEqual(still(before), still(after));
+}
+
+/**
+ * Applies an event of a reply to its message. Returns `'clock'` when the event only moved a
+ * running call's elapsed time on, which nobody waits for the way they wait for a call's start or
+ * its outcome: the reply is then published without hurry (`marks.quiet`).
+ */
+export function applyRunEvent(message: Message, event: RunEvent): 'clock' | void {
   if (event.kind === 'backgroundwait') {
     if (message.role !== 'assistant') return;
     if (Number.isSafeInteger(event.wait) && event.wait! > 0) message.backgroundWait = event.wait!;
@@ -232,7 +255,9 @@ export function applyRunEvent(message: Message, event: RunEvent) {
         message.usage &&
         (message.usage.revision ?? 0) <= (parsed.data.usageRevision ?? 0)
       )
-        message.usage.contextInput = null;
+        // Replaced, never edited in place: copies of a message share the parts that did not
+        // change (src/lib/chat-snapshots.ts).
+        message.usage = { ...message.usage, contextInput: null };
     }
     return;
   }
@@ -308,8 +333,10 @@ export function applyRunEvent(message: Message, event: RunEvent) {
     const block = message.blocks.find((b) => b.type === 'activity' && b.tool?.id === tool.id);
     if (block?.type === 'activity') {
       if (tool.revision > (block.tool?.revision ?? -1)) {
+        const clock = !!block.tool && sameButClock(block.tool, tool);
         block.tool = tool;
         block.text = tool.name;
+        if (clock) return 'clock';
       }
     } else {
       message.blocks.push({

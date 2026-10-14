@@ -21,6 +21,7 @@ test('desktop keeps an unanswered question and its draft across older relay sync
     };
     w.questionSyncs = 0;
     w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      args = w.studioCallArguments(command, args);
       if (command === 'relay_resume') return 'https://old-relay.example.com';
       if (command === 'load_sync_state') return null;
       if (command === 'save_sync_state') return;

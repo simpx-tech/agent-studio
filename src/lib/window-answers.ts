@@ -65,6 +65,13 @@ export function waitingCalls(now = Date.now(), limit = 50): WaitingCall[] {
 /** The moment Tauri moved this page's calls to `postMessage`, as the app's diagnostics keep it. */
 export type IpcFallback = { noticedAt: number; error: string; calls: WaitingCall[] };
 
+let postMessageCalls = false;
+/**
+ * Whether Tauri moved this page's calls to `postMessage`, which carries bytes as a JSON array of
+ * numbers, four times their size: a call that carries megabytes then sends its plain arguments.
+ */
+export const callsUsePostMessage = () => postMessageCalls;
+
 /**
  * Tells `noticed` once when Tauri moves this page's calls from its IPC protocol to `postMessage`,
  * after a call's fetch failed on the way, with the failure and the calls waiting then, which
@@ -79,6 +86,7 @@ export function watchIpcFallback(
   const watching = (...args: unknown[]) => {
     if (!seen && typeof args[0] === 'string' && args[0].startsWith('IPC custom protocol failed')) {
       seen = true;
+      postMessageCalls = true;
       const fallback = {
         noticedAt: Date.now(),
         error: String(args[1] ?? ''),

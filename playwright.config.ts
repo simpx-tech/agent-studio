@@ -6,6 +6,9 @@ const baseURL = `http://127.0.0.1:${port}`;
 const ci = !!process.env.CI;
 export default defineConfig({
   testDir: './tests',
+  // Every desktop test checks the copies of conversations its page syncs and saves.
+  globalSetup: './tests/global-setup.ts',
+  globalTeardown: './tests/global-teardown.ts',
   fullyParallel: true,
   workers: ci ? 1 : 4,
   // Hosted Windows screenshots and browser actions can exceed the local budget.

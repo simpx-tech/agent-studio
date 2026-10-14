@@ -29,6 +29,7 @@ mod retention;
 mod runner;
 mod saved;
 mod screens;
+mod sent;
 mod server;
 mod shared_context;
 mod sign_in;
@@ -37,6 +38,7 @@ mod spend;
 mod standalone;
 mod startup;
 mod structured_output;
+mod sync_state;
 mod titles;
 mod tool_output;
 mod tray;
@@ -679,14 +681,18 @@ async fn relay_disconnect(
     )
     .await
 }
+/// A relay request from the window: `method`, `path` and an optional `body`. One that carries
+/// conversations sends those arguments as bytes (sent.rs), and its body goes on as it is.
 #[tauri::command]
 async fn relay_request(
     state: State<'_, relay::Relay>,
-    method: String,
-    path: String,
-    body: Option<serde_json::Value>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<serde_json::Value, String> {
-    relay::request(&state, &method, &path, body).await
+    let sent = sent::Sent::of(request.body());
+    let sent = tauri::async_runtime::spawn_blocking(move || relay::Sent::read(sent))
+        .await
+        .map_err(|_| "Invalid request")??;
+    relay::request(&state, &sent.method, &sent.path, sent.body).await
 }
 // File commands read and write megabytes. Keep them off the UI thread: it also handles window
 // input, so a blocked save made text selection and typing stall. performance-guards.test.ts
@@ -714,7 +720,7 @@ fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, 
                 .and_then(|base| base.get_mut("conversations"))
             {
                 if chat_images::store_inline(&root, conversations) {
-                    write_sync_state(app, &value)?;
+                    write_sync_state(app, |root| sync_state::write(root, &value))?;
                 }
             }
             Ok(Some(value))
@@ -723,29 +729,33 @@ fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, 
         Err(_) => Err("Cannot read sync checkpoint".into()),
     }
 }
+/// Saves the sync checkpoint: `value` whole, or `value` without its conversations beside the
+/// `upsert` of those that changed and the `order` of them all, which sync_state.rs completes
+/// from the file.
 #[tauri::command]
-async fn save_sync_state(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_sync_state(&app, &value))
-        .await
-        .map_err(|_| "Cannot save sync checkpoint")?
+async fn save_sync_state(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let sent = sent::Sent::of(request.body());
+    tauri::async_runtime::spawn_blocking(move || {
+        write_sync_state(&app, |root| sync_state::save(root, sent))
+    })
+    .await
+    .map_err(|_| "Cannot save sync checkpoint")?
 }
-fn write_sync_state(app: &tauri::AppHandle, value: &serde_json::Value) -> Result<(), String> {
+/// Writes the checkpoint under the storage lock, in this app's data folder.
+fn write_sync_state(
+    app: &tauri::AppHandle,
+    write: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
     let storage = app.state::<Storage>();
     let _lock = storage.0.lock().map_err(|_| "Storage lock failed")?;
     let root = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    let mut file =
-        tempfile::NamedTempFile::new_in(&root).map_err(|_| "Cannot prepare sync checkpoint")?;
-    file.write_all(&serde_json::to_vec(value).map_err(|_| "Cannot encode sync checkpoint")?)
-        .map_err(|_| "Cannot write sync checkpoint")?;
-    file.as_file()
-        .sync_all()
-        .map_err(|_| "Cannot flush sync checkpoint")?;
-    file.persist(root.join("sync-state.json"))
-        .map_err(|_| "Cannot save sync checkpoint")?;
-    Ok(())
+    write(&root)
 }
 
 #[tauri::command]
@@ -812,14 +822,26 @@ pub const NEEDS_WHOLE_WORKSPACE: &str = "The whole workspace is needed to save t
 /// Saves a workspace assembled from the conversations that changed and the last write. `order`
 /// names every conversation the workspace holds, so additions, removals and reordering all
 /// arrive; a conversation that is neither sent nor already saved fails instead of being dropped.
+/// The window sends `index`, `upsert` and `order` as bytes (sent.rs): a streamed reply saves its
+/// conversation every few seconds, and a long one is megabytes.
 #[tauri::command]
 async fn save_workspace_patch(
     app: tauri::AppHandle,
-    index: serde_json::Value,
-    upsert: Vec<serde_json::Value>,
-    order: Vec<String>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct Patch {
+        index: serde_json::Value,
+        upsert: Vec<serde_json::Value>,
+        order: Vec<String>,
+    }
+    let sent = sent::Sent::of(request.body());
     tauri::async_runtime::spawn_blocking(move || {
+        let Patch {
+            index,
+            upsert,
+            order,
+        } = sent.read().map_err(|_| "Invalid workspace")?;
         let storage = app.state::<Storage>();
         let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
         let workspace = patched_workspace(&mut state, index, upsert, order)?;

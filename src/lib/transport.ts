@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { Channel, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 // Tauri's invoke, naming each call and remembering the calls the app has not answered yet.
-import { answerBytes, invoke, type IpcFallback, type WindowStall } from './window-answers';
+import {
+  answerBytes,
+  callsUsePostMessage,
+  invoke,
+  type IpcFallback,
+  type WindowStall,
+} from './window-answers';
 import { mentionRequestSchema, mentionResultSchema, type MentionResult } from './mentions';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -135,6 +141,8 @@ import {
   type Manifest,
 } from './incremental-sync';
 import type { ChangeSet } from './change-marks';
+import { chatList, joinBytes, jsonWith } from './chat-bytes';
+import { jsonEqual } from './json-equal';
 import {
   holdsWork,
   lightChat,
@@ -612,12 +620,36 @@ const checkpointRevisions = (value: unknown): CheckpointRevisions | undefined =>
 let checkpointRevision: number | undefined;
 let checkpointSavedAt = 0;
 const CHECKPOINT_INTERVAL = 60_000;
+// The conversations of the baseline that changed since the checkpoint was last written. A write
+// sends those, with the order of them all, and this computer's app completes the file from the
+// one it replaces (src-tauri/src/sync_state.rs): the checkpoint holds every conversation, and
+// sending all 86 MB of it blocked the page for half a second or more once a minute while a
+// reply ran (docs/PERFORMANCE.md). `undefined` when the file is not known to hold the others,
+// so the next write sends everything.
+let checkpointStale: Set<string> | undefined;
+const needsWholeCheckpoint = 'The whole sync checkpoint is needed to save this change.';
 // Relays before v1/state/revision answer it with 404; they get the full state each poll.
 let revisionEndpoint = true;
-// How much one upload carries before the rest goes in the next, in serialized characters; a
+// How much one upload carries before the rest goes in the next, in bytes of JSON; a
 // conversation larger than that goes in one of its own. Relays before 2026-10-10 refuse uploads
 // over 64 MB, with 413.
 const uploadBudget = 48_000_000;
+// A conversation goes to the relay whole, and a long one takes seconds to upload and for the
+// relay to store. Published again with every poll while its reply ran, a 9.8 MB chat kept the
+// link and the relay busy with it alone, 118 MB in half a minute (docs/PERFORMANCE.md). So each
+// conversation waits its turn, by this page's clock: its uploads take at most a third of the
+// time (the next comes `publishShare` times as long after one as that one took) and average at
+// most `publishRate` bytes a second, and a poll within `turnSlack` of a turn takes it. A chat
+// under a megabyte or so still goes out with every poll, and a change the reader waits for (a
+// reply's end, a question) goes out at once (`urgent`). Nothing is left out: what waits is
+// published with the conversation's next turn.
+const publishTurns = new Map<string, number>();
+const publishedAt = new Map<string, number>();
+const publishShare = 2;
+const publishRate = 512_000;
+const turnSlack = 1_000;
+// How often a conversation is published when only a running call's elapsed time moved on.
+const quietInterval = 15_000;
 const tooLarge = 'This workspace change is too large to sync.';
 // A problem the last sync met that did not stop it, such as images the relay does not have yet.
 let syncNotice = '';
@@ -667,13 +699,21 @@ export function configureRuntime(context: RuntimeContext) {
  * checkpoint was written at, the first poll is already incremental; without them it syncs the
  * whole workspace once and learns them from the answer.
  */
-function resetBaseline(next: SharedWorkspace, revisions?: CheckpointRevisions) {
+function resetBaseline(
+  next: SharedWorkspace,
+  revisions?: CheckpointRevisions,
+  // Whether `next` is what this computer's checkpoint file holds.
+  saved = false,
+) {
   baseline = next;
   noteBaseline();
   baselineRevision = revisions?.revision;
   settledRevision = undefined;
   checkpointRevision = revisions?.revision;
   checkpointSavedAt = 0;
+  checkpointStale = saved ? new Set() : undefined;
+  publishTurns.clear();
+  publishedAt.clear();
   revisionEndpoint = true;
   baselineChats = revisions?.chats ?? {};
   baselineMetaRevision = revisions?.metaRevision ?? 0;
@@ -1144,6 +1184,27 @@ export const disableManagedWorkspace = (id: string) =>
     `v1/workspace-admin/workspaces/${encodeURIComponent(id)}/disable`,
   );
 
+type StatePatch = {
+  revision: number;
+  meta?: SharedMeta;
+  upsert?: Conversation[];
+  remove?: string[];
+};
+/**
+ * Sends the relay conversations and settings that changed here. The desktop app takes the
+ * request as bytes, in which the parts of each conversation that did not change since the last
+ * upload are copied rather than written again (src/lib/chat-bytes.ts).
+ */
+function relayPatch(patch: StatePatch): Promise<{ status: number; body: any }> {
+  const { upsert, ...rest } = patch;
+  if (!desktop() || !upsert?.length || callsUsePostMessage())
+    return relayRaw('POST', 'v1/state/patch', patch);
+  const body = jsonWith(rest, [['upsert', chatList(upsert)]]);
+  return invoke(
+    'relay_request',
+    joinBytes(jsonWith({ method: 'POST', path: 'v1/state/patch' }, [['body', body]])),
+  );
+}
 async function relayApi<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await relayRaw(method, path, body);
   if (response.body?.code === 'host_offline') throw new OfflineHostError(response.body.error);
@@ -1326,7 +1387,11 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
   const resumed = checkpoint?.url === url && checkpoint.instanceId === instanceId;
   const nextBaseline = resumed ? sharedSchema.parse(checkpoint.base) : emptyShared();
   if (generation !== relayGeneration) return false;
-  resetBaseline(nextBaseline, resumed ? checkpointRevisions(checkpoint.revisions) : undefined);
+  resetBaseline(
+    nextBaseline,
+    resumed ? checkpointRevisions(checkpoint.revisions) : undefined,
+    resumed,
+  );
   relayInstance = instanceId;
   relayUrl = url;
   relayConnected = true;
@@ -1385,6 +1450,7 @@ export async function disconnectRelay() {
 async function syncIncremental(
   generation: number,
   options: MergeOptions | undefined,
+  urgent = false,
 ): Promise<boolean | null> {
   if (!runtime || baselineRevision === undefined || !manifestEndpoint) return false;
   // Most polls find the relay still where this device's baseline came from. Its small revision
@@ -1427,7 +1493,32 @@ async function syncIncremental(
   }
   if (manifest.instanceId !== relayInstance) throw new Error(relayReplaced);
   const relayed = manifest;
-  const changes = runtime.takeUnsynced();
+  // What this poll publishes of what changed here. A conversation uploaded a moment ago waits
+  // its turn, and one in which only a call's elapsed time moved on goes out now and then; a
+  // conversation the relay changed too is merged at once. What waits goes straight back.
+  const taken = runtime.takeUnsynced();
+  // Handed back when this poll publishes nothing.
+  const unpublished: ChangeSet = { chats: taken.chats, meta: taken.meta, quiet: new Set() };
+  const changes: ChangeSet = { chats: taken.chats, meta: taken.meta };
+  if (taken.chats) {
+    const now = performance.now();
+    const moved = (id: string) => relayed.chats[id] !== baselineChats[id];
+    const waits = (id: string) => !urgent && !moved(id) && now < (publishTurns.get(id) ?? 0);
+    const chats = new Set<string>();
+    const later: ChangeSet = { chats: new Set(), meta: false, quiet: new Set() };
+    for (const id of taken.chats) (waits(id) ? later.chats! : chats).add(id);
+    unpublished.chats = new Set(chats);
+    for (const id of taken.quiet ?? []) {
+      const recent = now - (publishedAt.get(id) ?? -quietInterval) < quietInterval;
+      if (!moved(id) && (recent || waits(id))) later.quiet!.add(id);
+      else {
+        unpublished.quiet!.add(id);
+        chats.add(id);
+      }
+    }
+    changes.chats = chats;
+    if (later.chats!.size || later.quiet!.size) runtime.restoreUnsynced(later);
+  }
   // Whatever this poll does not get onto the relay waits for the next one.
   let published = false;
   try {
@@ -1453,10 +1544,14 @@ async function syncIncremental(
       baselineRevision = relayed.revision;
       published = true;
       if (behind)
-        await saveCheckpoint(generation, baseline, relayed.revision, {
-          chats: baselineChats,
-          metaRevision: baselineMetaRevision,
-        });
+        await saveCheckpoint(
+          generation,
+          baseline,
+          relayed.revision,
+          { chats: baselineChats, metaRevision: baselineMetaRevision },
+          false,
+          [],
+        );
       return true;
     }
     const baselineMeta = metaOf(baseline);
@@ -1560,7 +1655,8 @@ async function syncIncremental(
     for (let round = 0; round < rounds; round++) {
       const upsert = batches[round] ?? [];
       const remove = removals[round] ?? [];
-      const response = await relayRaw('POST', 'v1/state/patch', {
+      const started = performance.now();
+      const response = await relayPatch({
         revision: current.revision,
         ...(round === 0 && plan.sendMeta ? { meta: plan.sendMeta } : {}),
         ...(upsert.length ? { upsert } : {}),
@@ -1579,6 +1675,22 @@ async function syncIncremental(
         throw new Error(response.body?.error ?? 'Workspace sync failed.');
       current = manifestSchema.parse(response.body);
       if (current.instanceId !== relayInstance) throw new Error(relayReplaced);
+      // When each conversation's next turn comes. Its share of this upload's time is by size.
+      const ended = performance.now();
+      const sent = upsert.reduce((sum, c) => sum + (plan.sizes.get(c.id) ?? 0), 0);
+      for (const { id } of upsert) {
+        const size = plan.sizes.get(id) ?? 0;
+        const share = ((ended - started) * size) / (sent || 1);
+        publishedAt.set(id, ended);
+        publishTurns.set(
+          id,
+          Math.max(ended + publishShare * share, started + (size / publishRate) * 1000) - turnSlack,
+        );
+      }
+      for (const id of remove) {
+        publishedAt.delete(id);
+        publishTurns.delete(id);
+      }
     }
     published = true;
     syncNotice = heldNotice(held);
@@ -1601,7 +1713,7 @@ async function syncIncremental(
     const changedSince = (id: string) => {
       const live = runtime!.chat(id);
       const now = live && syncedChat(live);
-      return now && JSON.stringify(read.get(id)) !== JSON.stringify(now) ? now : undefined;
+      return now && !jsonEqual(read.get(id), now) ? now : undefined;
     };
     const again = (id: string, now: Conversation, remote: Conversation | undefined) => {
       const before = read.get(id);
@@ -1671,6 +1783,7 @@ async function syncIncremental(
       current.revision,
       { chats: current.chats, metaRevision: current.metaRevision },
       structural,
+      involved,
     );
     if (generation !== relayGeneration) return null;
     baseline = next;
@@ -1682,7 +1795,7 @@ async function syncIncremental(
     settledRevision = undefined;
     return true;
   } finally {
-    if (!published) runtime.restoreUnsynced(changes);
+    if (!published) runtime.restoreUnsynced(unpublished);
   }
 }
 /**
@@ -1765,7 +1878,8 @@ export async function browserExport(copy: Workspace): Promise<{ blob: Blob; miss
  * most once per interval unless `now`, for a change other than replies moving on. Call before
  * advancing the baseline in memory, so a failed write leaves the next poll to try again.
  * `manifest` is left out when the relay reported no per-conversation revisions, so the next start
- * asks for them instead of trusting an empty list.
+ * asks for them instead of trusting an empty list. `changed` names the conversations `base` holds
+ * otherwise than the baseline before it, or is left out when any may differ.
  */
 async function saveCheckpoint(
   generation: number,
@@ -1773,7 +1887,11 @@ async function saveCheckpoint(
   revision: number,
   manifest?: { chats: Record<string, number>; metaRevision: number },
   now = false,
+  changed?: Iterable<string>,
 ): Promise<void> {
+  // Noted whether or not this call writes, so the write that comes carries them.
+  if (changed === undefined) checkpointStale = undefined;
+  else if (checkpointStale) for (const id of changed) checkpointStale.add(id);
   if (!runtime || revision === checkpointRevision) return;
   if (!now && checkpointSavedAt && Date.now() - checkpointSavedAt < CHECKPOINT_INTERVAL) return;
   // Everything the checkpoint holds must already be in the saved workspace: after a crash, an
@@ -1786,7 +1904,7 @@ async function saveCheckpoint(
     base,
     ...(manifest ? { revisions: { revision, ...manifest } } : {}),
   };
-  if (desktop()) await invoke('save_sync_state', { value: checkpoint });
+  if (desktop()) await writeCheckpoint(checkpoint);
   else if (browserScope) {
     const key = `${browserScopeKey(browserScope)}:sync`;
     const store = await workspaceStore();
@@ -1795,6 +1913,42 @@ async function saveCheckpoint(
   }
   checkpointRevision = revision;
   checkpointSavedAt = Date.now();
+}
+/** Writes the checkpoint through this computer's app: what changed, or everything. */
+async function writeCheckpoint(checkpoint: {
+  url: string;
+  instanceId: string;
+  base: SharedWorkspace;
+  revisions?: CheckpointRevisions;
+}): Promise<void> {
+  const stale = checkpointStale;
+  // Changes that arrive while this write runs belong to the next one.
+  checkpointStale = new Set();
+  try {
+    if (stale && !callsUsePostMessage()) {
+      const { conversations, ...meta } = checkpoint.base;
+      const order = conversations.map((c) => c.id);
+      const upsert = conversations.filter((c) => stale.has(c.id));
+      try {
+        await invoke(
+          'save_sync_state',
+          joinBytes(
+            jsonWith({ value: { ...checkpoint, base: meta }, order }, [
+              ['upsert', chatList(upsert)],
+            ]),
+          ),
+        );
+        return;
+      } catch (error) {
+        if (!String(error).includes(needsWholeCheckpoint)) throw error;
+      }
+    }
+    await invoke('save_sync_state', { value: checkpoint });
+  } catch (error) {
+    // Nothing is known about the file after a write that failed.
+    checkpointStale = undefined;
+    throw error;
+  }
 }
 // Settles when the poll under way ends, so a change that must go out at once can follow it.
 let pollDone: Promise<void> = Promise.resolve();
@@ -1806,9 +1960,10 @@ let heartbeating: Promise<unknown> | undefined;
  */
 export async function pollRelayNow(): Promise<Presence[] | null> {
   if (relayBusy) await pollDone;
-  return pollRelay();
+  return pollRelay(true);
 }
-export async function pollRelay(): Promise<Presence[] | null> {
+/** `urgent` publishes what changed here without waiting for a conversation's turn. */
+export async function pollRelay(urgent = false): Promise<Presence[] | null> {
   if (!relayConnected || !runtime) return null;
   // A sync longer than a poll still tells the relay this computer is here: the relay counts a
   // computer whose heartbeat is 15 seconds old as offline and refuses work for it, which made
@@ -1839,7 +1994,7 @@ export async function pollRelay(): Promise<Presence[] | null> {
     const options = desktop()
       ? { deadRun: (c: Conversation, m: Message) => deadRunHere(runtime!.fleet(), c, m) }
       : undefined;
-    const incremental = await syncIncremental(generation, options);
+    const incremental = await syncIncremental(generation, options, urgent);
     if (incremental === null) return null;
     if (incremental) return await tail();
     // The whole-state path compares whole chats, which a light connection does not hold.
@@ -3008,13 +3163,23 @@ export async function saveWorkspace(
   // The conversations that changed. Given them, the desktop host fills the rest in from its last
   // write, so one streamed reply does not serialize every conversation. Omit them to send all.
   changed?: Conversation[],
+  // Detached copies of `changed` that share what did not change with the copies before them
+  // (src/lib/chat-snapshots.ts). The desktop host then takes the save as bytes, in which only
+  // what changed is written anew: a streamed reply saves its conversation every few seconds, and
+  // writing a 9.8 MB one as text each time held the page for 70 ms or more.
+  copies?: Conversation[],
 ): Promise<void> {
   if (desktop()) {
     if (changed) {
       const { conversations, ...index } = workspace;
       const order = conversations.map((c) => c.id);
       try {
-        await invoke('save_workspace_patch', { index, upsert: changed, order });
+        if (copies && !callsUsePostMessage())
+          await invoke(
+            'save_workspace_patch',
+            joinBytes(jsonWith({ index, order }, [['upsert', chatList(copies)]])),
+          );
+        else await invoke('save_workspace_patch', { index, upsert: changed, order });
       } catch (e) {
         if (String(e).includes(needsWholeWorkspace)) await invoke('save_workspace', { workspace });
         else throw e;

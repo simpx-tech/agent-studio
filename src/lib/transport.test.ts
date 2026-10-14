@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import { createChangeMarks, type ChangeSet } from './change-marks';
 import {
   initialWorkspace,
@@ -52,10 +52,20 @@ function chatRuntime(get: () => Workspace, marks = chatMarks()) {
 }
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
+// A call that carries conversations sends its arguments as the bytes of their JSON
+// (src/lib/chat-bytes.ts), which the app reads as it reads plain arguments.
+const sent = vi.hoisted(() => (args: unknown) => {
+  if (!(args instanceof Uint8Array)) return args;
+  try {
+    return JSON.parse(new TextDecoder().decode(args));
+  } catch {
+    return args;
+  }
+});
 vi.mock('@tauri-apps/api/core', () => ({
   // The page names each call in its options (window-answers.ts); these tests compare the rest.
   invoke: (command: string, args?: unknown) =>
-    args === undefined ? native.invoke(command) : native.invoke(command, args),
+    args === undefined ? native.invoke(command) : native.invoke(command, sent(args)),
   isTauri: () => true,
   Channel: class {},
 }));
@@ -73,6 +83,28 @@ afterEach(() => {
 });
 // Moves the clock past the interval between checkpoint writes, so the next sync writes one.
 const later = () => vi.setSystemTime(Date.now() + 61_000);
+/**
+ * The checkpoint the host holds after a save: the value it was sent whole, or that value with
+ * the conversations `order` names, each as sent in `upsert` or else as the checkpoint before
+ * held it (src-tauri/src/sync_state.rs).
+ */
+function writtenCheckpoint(
+  before: unknown,
+  args: { value: any; order?: string[]; upsert?: Conversation[] },
+) {
+  if (!args.order) return args.value;
+  const held = (before as { base?: SharedWorkspace } | null)?.base?.conversations ?? [];
+  const kept = new Map<string, Conversation>(held.map((c) => [c.id, c]));
+  const sent = new Map((args.upsert ?? []).map((c) => [c.id, c]));
+  if ([...sent.keys()].some((id) => !args.order!.includes(id)))
+    throw new Error('The whole sync checkpoint is needed to save this change.');
+  const conversations = args.order.map((id) => {
+    const conversation = sent.get(id) ?? kept.get(id);
+    if (!conversation) throw new Error('The whole sync checkpoint is needed to save this change.');
+    return conversation;
+  });
+  return { ...args.value, base: { ...args.value.base, conversations } };
+}
 
 it('invalidates host skill inventories after Viewer plugin mutations, including uncertain failures', async () => {
   const transport = await fixture();
@@ -1650,6 +1682,8 @@ async function incrementalRelay(
     chats: Object.fromEntries(workspace.conversations.map((c) => [c.id, 5])),
   };
   const requests: string[] = [];
+  // What each checkpoint write sent, as the host received it.
+  const checkpointWrites: { value: any; order?: string[]; upsert?: Conversation[] }[] = [];
   // What the host has on disk, which a restart reads back.
   let saved: unknown = options.saved?.(relay.workspace) ?? {
     url: 'https://relay.example.com',
@@ -1666,7 +1700,8 @@ async function incrementalRelay(
     if (command === 'relay_resume') return 'https://relay.example.com/';
     if (command === 'load_sync_state') return saved;
     if (command === 'save_sync_state') {
-      saved = args.value;
+      checkpointWrites.push(args);
+      saved = writtenCheckpoint(saved, args);
       requests.push('save_sync_state');
       options.onCheckpoint?.({
         workspace,
@@ -1749,7 +1784,17 @@ async function incrementalRelay(
     for (let i = 0; i < count; i++) expect(await transport.pollRelay()).not.toBeNull();
     return { state: requests.filter((r) => r.includes('state')), reads: local.reads - reads };
   };
-  return { transport, workspace, relay, local, requests, polls, marks, checkpoint: () => saved };
+  return {
+    transport,
+    workspace,
+    relay,
+    local,
+    requests,
+    polls,
+    marks,
+    checkpoint: () => saved,
+    checkpointWrites,
+  };
 }
 
 /** A message naming one image in the image store. */
@@ -2265,6 +2310,177 @@ it('publishes a change at once after the poll under way', async () => {
   expect(await underWay).not.toBeNull();
   expect(await now).not.toBeNull();
   expect(relay.workspace.conversations.find((c) => c.id === first.id)?.title).toBe('Reply ended');
+  await transport.disconnectRelay();
+});
+
+// This page's clock, which decides when a conversation's next upload may go.
+function pageClock() {
+  const clock = { now: 1_000_000 };
+  const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.now);
+  onTestFinished(() => spy.mockRestore());
+  return clock;
+}
+
+it('publishes a long conversation again when its turn comes, and at once when a reader waits', async () => {
+  // A long chat went to the relay whole with every poll while its reply ran: 9.8 MB each time.
+  const clock = pageClock();
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  first.messages.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    createdAt: '2026-10-13',
+    status: 'complete',
+    blocks: [{ type: 'markdown', text: 'x'.repeat(4_000_000) }],
+  });
+  const change = (conversation: Conversation, title: string) => {
+    conversation.title = title;
+    local.changes++;
+    marks.mark(conversation.id);
+  };
+  const remote = (conversation: Conversation) =>
+    relay.workspace.conversations.find((c) => c.id === conversation.id)!.title;
+  change(first, 'Long, first publish');
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(remote(first)).toBe('Long, first publish');
+  // Four megabytes take their turn about eight seconds later, at half a megabyte a second.
+  clock.now += 2_000;
+  change(first, 'Long, too soon');
+  change(second, 'Short, any time');
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(remote(second)).toBe('Short, any time');
+  expect(remote(first)).toBe('Long, first publish');
+  clock.now += 7_000;
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(remote(first)).toBe('Long, too soon');
+  // A change someone waits for, such as a reply's end, goes out at once.
+  change(first, 'Long, reply ended');
+  expect(await transport.pollRelayNow()).not.toBeNull();
+  expect(remote(first)).toBe('Long, reply ended');
+  // A conversation another device edited too is merged with the next poll, without waiting its
+  // turn: here two edits of it with no reply between them, which leave a conflict copy.
+  change(first, 'Long, edited here');
+  relay.revision++;
+  relay.workspace = {
+    ...relay.workspace,
+    conversations: relay.workspace.conversations.map((c) =>
+      c.id === first.id ? { ...c, archived: true } : c,
+    ),
+  };
+  relay.chats[first.id] = relay.revision;
+  const { state } = await polls(1);
+  expect(state).toContain('POST v1/state/chats');
+  expect(state).toContain('POST v1/state/patch');
+  expect(workspace.conversations.find((c) => c.id === first.id)?.archived).toBe(true);
+  expect(workspace.conversations.map((c) => c.title)).toContain(
+    'Long, edited here (conflict copy)',
+  );
+  await transport.disconnectRelay();
+});
+
+it('publishes a running call’s elapsed time now and then, and with any other change at once', async () => {
+  const clock = pageClock();
+  const { transport, workspace, relay, local, polls, marks } = await incrementalRelay();
+  const [first] = workspace.conversations;
+  const reply = {
+    id: crypto.randomUUID(),
+    runId: crypto.randomUUID(),
+    role: 'assistant' as const,
+    createdAt: '2026-10-13',
+    status: 'running' as const,
+    blocks: [] as Conversation['messages'][number]['blocks'],
+  };
+  first.messages.push(reply);
+  local.changes++;
+  marks.mark(first.id);
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  const tool = (elapsedMs: number, revision: number) => ({
+    type: 'activity' as const,
+    text: 'Run command',
+    tool: {
+      id: 'claude:call',
+      revision,
+      category: 'tool' as const,
+      name: 'Run command',
+      status: 'running' as const,
+      facts: [],
+      sources: [],
+      agents: [],
+      elapsedMs,
+    },
+  });
+  const tick = (second: number) => {
+    reply.blocks = [tool(second * 1000, second)];
+    local.changes++;
+    marks.changes.quiet(first.id, reply.id);
+  };
+  const remoteElapsed = () => {
+    const sent = relay.workspace.conversations.find((c) => c.id === first.id)!;
+    const block = sent.messages[0].blocks[0];
+    return block?.type === 'activity' ? block.tool?.elapsedMs : undefined;
+  };
+  // The call ticks every second; the polls in between send nothing.
+  for (let second = 1; second <= 6; second++) {
+    clock.now += 1_000;
+    tick(second);
+    if (second % 2 === 0) expect((await polls(1)).state).not.toContain('POST v1/state/patch');
+  }
+  expect(remoteElapsed()).toBeUndefined();
+  // A while later the running time goes out.
+  clock.now += 10_000;
+  tick(16);
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(remoteElapsed()).toBe(16_000);
+  // Any other change goes out with the next poll, taking the running time along.
+  clock.now += 1_000;
+  tick(17);
+  first.title = 'Call finished';
+  marks.mark(first.id);
+  expect((await polls(1)).state).toContain('POST v1/state/patch');
+  expect(remoteElapsed()).toBe(17_000);
+  await transport.disconnectRelay();
+});
+
+it('writes the checkpoint with only the conversations that changed, and whole when asked', async () => {
+  const { transport, workspace, local, polls, marks, checkpoint, checkpointWrites } =
+    await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  // The first whole sync wrote everything.
+  expect(checkpointWrites.at(-1)).toEqual({ value: expect.anything() });
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  const write = checkpointWrites.at(-1)!;
+  expect(write.order).toEqual([first.id, second.id]);
+  expect(write.upsert?.map((c) => c.id)).toEqual([first.id]);
+  expect(write.value.base.conversations).toBeUndefined();
+  const held = (checkpoint() as { base: SharedWorkspace }).base.conversations;
+  expect(held.map((c) => [c.id, c.title])).toEqual([
+    [first.id, 'Renamed here'],
+    [second.id, 'Second'],
+  ]);
+  // A host that cannot complete it from its file asks for everything, which follows at once.
+  const original = native.invoke.getMockImplementation()!;
+  let refused = 0;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'save_sync_state' && args.order) {
+      refused++;
+      throw 'The whole sync checkpoint is needed to save this change.';
+    }
+    return original(command, args);
+  });
+  second.title = 'Renamed too';
+  local.changes++;
+  marks.mark(second.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  expect(refused).toBe(1);
+  expect(checkpointWrites.at(-1)).toEqual({ value: expect.anything() });
+  expect(
+    (checkpoint() as { base: SharedWorkspace }).base.conversations.map((c) => c.title),
+  ).toEqual(['Renamed here', 'Renamed too']);
   await transport.disconnectRelay();
 });
 

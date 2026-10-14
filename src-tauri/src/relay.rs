@@ -253,11 +253,64 @@ async fn validate(
     let remote = remote.ok_or("Relay returned an invalid response")?;
     Ok((client, url, remote))
 }
+/// A relay request as a window sends it.
+pub struct Sent {
+    pub method: String,
+    pub path: String,
+    /// The body's JSON, as bytes.
+    pub body: Option<Vec<u8>>,
+}
+
+impl Sent {
+    /// Reads a request out of what the window sent (sent.rs). A request that carries
+    /// conversations arrives as bytes, and its body goes on to the relay as those bytes: it is
+    /// checked to be JSON, never parsed into values here.
+    pub fn read(sent: crate::sent::Sent) -> Result<Self, String> {
+        #[derive(serde::Deserialize)]
+        struct Plain {
+            method: String,
+            path: String,
+            body: Option<Value>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Written<'a> {
+            method: String,
+            path: String,
+            #[serde(borrow)]
+            body: Option<&'a serde_json::value::RawValue>,
+        }
+        match sent {
+            crate::sent::Sent::Plain(_) => {
+                let Plain { method, path, body } = sent.read()?;
+                let body = body
+                    .filter(|body| !body.is_null())
+                    .map(|body| serde_json::to_vec(&body))
+                    .transpose()
+                    .map_err(|_| "Cannot encode the relay request")?;
+                Ok(Self { method, path, body })
+            }
+            crate::sent::Sent::Bytes(bytes) => {
+                let written: Written =
+                    serde_json::from_slice(&bytes).map_err(|_| "Invalid request")?;
+                Ok(Self {
+                    method: written.method,
+                    path: written.path,
+                    body: written
+                        .body
+                        .filter(|body| body.get() != "null")
+                        .map(|body| body.get().as_bytes().to_vec()),
+                })
+            }
+        }
+    }
+}
+
+/// A relay request whose body, when it has one, is JSON already written.
 pub async fn request(
     state: &Relay,
     method: &str,
     path: &str,
-    body: Option<Value>,
+    body: Option<Vec<u8>>,
 ) -> Result<Value, String> {
     if !["GET", "POST", "PUT"].contains(&method)
         || !path.starts_with("v1/")
@@ -275,8 +328,7 @@ pub async fn request(
         .bearer_auth(token)
         .header("x-environment-id", environment)
         .header(IMAGES.0, IMAGES.1);
-    if let Some(body) = body {
-        let bytes = serde_json::to_vec(&body).map_err(|_| "Cannot encode the relay request")?;
+    if let Some(bytes) = body {
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(bytes);
@@ -471,5 +523,47 @@ mod tests {
         ] {
             assert!(endpoint(url).is_err());
         }
+    }
+
+    #[test]
+    fn a_request_sent_as_bytes_keeps_its_body_as_written() {
+        // Text a parser and a writer could change between them: escapes, a long number.
+        let body = r#"{"revision":7,"upsert":[{"id":"a","title":"\u00e9\/","n":1.0000000000000000000001}]}"#;
+        let bytes =
+            format!(r#"{{"method":"POST","path":"v1/state/patch","body":{body}}}"#).into_bytes();
+        let sent = Sent::read(crate::sent::Sent::Bytes(bytes)).unwrap();
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.path, "v1/state/patch");
+        assert_eq!(sent.body.as_deref(), Some(body.as_bytes()));
+        // The body may come first, and a request may have none.
+        let first = br#"{"body":{"ids":["a"]},"path":"v1/state/chats","method":"POST"}"#.to_vec();
+        let sent = Sent::read(crate::sent::Sent::Bytes(first)).unwrap();
+        assert_eq!(sent.body.as_deref(), Some(&br#"{"ids":["a"]}"#[..]));
+        for none in [
+            &br#"{"method":"GET","path":"v1/jobs","body":null}"#[..],
+            &br#"{"method":"GET","path":"v1/jobs"}"#[..],
+        ] {
+            let sent = Sent::read(crate::sent::Sent::Bytes(none.to_vec())).unwrap();
+            assert!(sent.body.is_none());
+        }
+        for invalid in [
+            &br#"{"method":"POST","path":"v1/state/patch","body":{"#[..],
+            &br#"{"path":"v1/state/patch"}"#[..],
+            &b"[]"[..],
+        ] {
+            assert!(Sent::read(crate::sent::Sent::Bytes(invalid.to_vec())).is_err());
+        }
+    }
+
+    #[test]
+    fn a_plain_request_is_written_for_the_relay() {
+        let plain = |value| Sent::read(crate::sent::Sent::Plain(value));
+        let sent =
+            plain(json!({"method": "POST", "path": "v1/heartbeat", "body": {"a": [1]}})).unwrap();
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.body.as_deref(), Some(&br#"{"a":[1]}"#[..]));
+        let sent = plain(json!({"method": "GET", "path": "v1/jobs", "body": null})).unwrap();
+        assert!(sent.body.is_none());
+        assert!(plain(json!({"method": "GET"})).is_err());
     }
 }

@@ -142,6 +142,7 @@ test('save failure keeps the original and draft and allows retry without a dupli
     const bridge = (window as any).__TAURI_INTERNALS__;
     const original = bridge.invoke.bind(bridge);
     bridge.invoke = (command: string, args: any) => {
+      args = (window as any).studioCallArguments(command, args);
       const conversations =
         command === 'save_workspace'
           ? args.workspace.conversations

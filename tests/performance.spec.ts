@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
 import { installation, largeWorkspace } from './large-workspace';
+import { mockAppCalls } from './desktop-helper';
 
 // A desktop with a heavy saved workspace, paired with a real relay. See docs/PERFORMANCE.md.
 const token = 'synthetic-performance-relay-key-for-browser-checks';
@@ -40,12 +41,17 @@ async function desktop(page: Page) {
   });
   const workspace = largeWorkspace();
   await page.exposeFunction('savedWorkspace', () => workspace);
+  // These tests time the page, so its copies of conversations are not checked here.
+  await mockAppCalls(page, { verify: false });
   await page.addInitScript(
     ({ installation, origin }) => {
       if (window.top !== window) return;
       const w = window as any;
       w.isTauri = true;
       w.saves = { workspace: 0, sync: 0 };
+      // What each checkpoint write sent, and how each call carrying conversations was sent.
+      w.checkpoints = [];
+      w.carried = [];
       w.longTasks = [];
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries())
@@ -70,6 +76,15 @@ async function desktop(page: Page) {
         },
         unregisterCallback() {},
         async invoke(command: string, args: any) {
+          // Whether each call that carries conversations came as bytes, as the app takes them.
+          const bytes = args instanceof Uint8Array;
+          args = w.studioCallArguments(command, args);
+          if (
+            command === 'save_workspace_patch' ||
+            command === 'save_sync_state' ||
+            (command === 'relay_request' && args.path === 'v1/state/patch')
+          )
+            w.carried.push({ command, bytes });
           switch (command) {
             case 'get_installation':
               return installation;
@@ -104,7 +119,8 @@ async function desktop(page: Page) {
             case 'load_sync_state':
               return sync;
             case 'save_sync_state':
-              sync = args.value;
+              w.checkpoints.push(args);
+              sync = w.studioCheckpoint(sync, args);
               w.saves.sync++;
               return;
             case 'relay_resume':
@@ -236,6 +252,24 @@ async function desktop(page: Page) {
     async relayHas(text: string) {
       return JSON.stringify((await read()).workspace).includes(text);
     },
+    /** Another computer renames the named chat. */
+    async renameElsewhere(title: string, name: string) {
+      const other = '00000000-0000-4000-8000-00000000abcd';
+      const state = await read(other);
+      const chat = state.workspace.conversations.find((c) => c.title === title)!;
+      chat.title = name;
+      const response = await fetch(`${origin}/v1/state/patch`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-environment-id': other,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ revision: state.revision, upsert: [chat] }),
+      });
+      if (response.status !== 200)
+        throw new Error(`The other computer's patch got ${response.status}`);
+    },
     /** Another computer publishes more of the reply in the named chat, as while streaming. */
     async streamElsewhere(title: string, text: string) {
       const other = '00000000-0000-4000-8000-00000000abcd';
@@ -338,15 +372,36 @@ test('a reply waiting on a tool call neither downloads nor rewrites the whole wo
     await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
     await page.getByLabel('Message', { exact: true }).fill('Run the slow suite');
     await page.getByLabel('Message', { exact: true }).press('Enter');
-    // The reply's first progress goes out, then it waits without changing anything here.
+    // The reply's first progress goes out, then it runs a long call, which the app reports the
+    // running time of every second.
     await expect
       .poll(() => host.requests.filter((r) => r === 'PUT v1/state').length, { timeout: 20_000 })
       .toBeGreaterThan(0);
-    // Let the send's own changes, including its failed title, finish going out.
+    await page.evaluate(() => {
+      const w = window as any;
+      const call = (revision: number, elapsedMs: number) => ({
+        id: 'claude:slow-suite',
+        revision,
+        category: 'tool',
+        name: 'Run command',
+        commandRun: true,
+        command: 'npm run test:slow',
+        status: 'running',
+        elapsedMs,
+      });
+      w.emitEvent({ kind: 'tool', tool: call(1, 0) });
+      let second = 0;
+      w.ticking = setInterval(() => {
+        second++;
+        w.emitEvent({ kind: 'tool', tool: call(second + 1, second * 1000) });
+      }, 1000);
+    });
+    // Let the send's own changes, its failed title and the call's start finish going out.
     for (let attempt = 0; attempt < 8; attempt++) {
       host.requests.length = 0;
       await page.waitForTimeout(3_000);
-      if (!host.requests.some((r) => r.endsWith(' v1/state'))) break;
+      if (!host.requests.some((r) => r.endsWith(' v1/state') || r.startsWith('POST v1/state')))
+        break;
     }
     const saves = await page.evaluate(() => (window as any).saves);
     host.requests.length = 0;
@@ -354,6 +409,8 @@ test('a reply waiting on a tool call neither downloads nor rewrites the whole wo
     const count = (request: string) => host.requests.filter((r) => r === request).length;
     expect(count('POST v1/heartbeat')).toBeGreaterThanOrEqual(2);
     expect(count('GET v1/state/revision')).toBeGreaterThanOrEqual(2);
+    // The call's running time moved on eight times meanwhile; nobody waits for it, so it went
+    // nowhere yet.
     expect(
       host.requests.filter(
         (r) => r.endsWith(' v1/state') || r.startsWith('POST v1/state'),
@@ -601,7 +658,12 @@ test('sending a message saves and syncs only its conversation', async ({ page })
     await settle(page, host.requests);
     await page.getByRole('tab', { name: /^History/ }).click();
     await page.locator('.conversation-item', { hasText: 'Long performance chat' }).click();
-    const before = await page.evaluate(() => ({ ...(window as any).saves }));
+    // The connection's first checkpoint went whole, as the first one does.
+    const before = await page.evaluate(() => {
+      const w = window as any;
+      w.carried = [];
+      return { ...w.saves };
+    });
     host.uploaded.length = 0;
     const tasks = await longTasks(page, async () => {
       await page.getByLabel('Message', { exact: true }).fill('Run the slow suite');
@@ -619,6 +681,13 @@ test('sending a message saves and syncs only its conversation', async ({ page })
     expect(host.uploaded, 'Conversations per upload after sending').toEqual(
       host.uploaded.map(() => 1),
     );
+    // Each save and upload went to the app as bytes, without writing the conversation as text.
+    const carried = await page.evaluate(() => (window as any).carried as { bytes: boolean }[]);
+    expect(carried.length, 'Saves and uploads after sending').toBeGreaterThan(0);
+    expect(
+      carried.filter((call) => !call.bytes),
+      'Sent as text instead of bytes',
+    ).toEqual([]);
     if (timed)
       expect(
         tasks[0] ?? 0,
@@ -665,6 +734,27 @@ test('following another computer’s reply rewrites the sync checkpoint at most 
       after.workspace - before.workspace,
     );
     expect(after.sync - before.sync, 'Checkpoint rewrites while following').toBe(0);
+    // A rename there goes into the checkpoint at once: the app is sent that chat alone and the
+    // order of all 24, and completes the rest from the checkpoint it replaces.
+    await host.renameElsewhere('Saved chat 5', 'Renamed elsewhere');
+    await expect
+      .poll(() => page.evaluate(() => (window as any).saves.sync), { timeout: 15_000 })
+      .toBeGreaterThan(after.sync);
+    const written = await page.evaluate(() => {
+      const write = (window as any).checkpoints.at(-1);
+      return {
+        bytes: (window as any).carried.at(-1),
+        order: write.order?.length,
+        upsert: write.upsert?.map((c: { title: string }) => c.title),
+        whole: !!write.value.base.conversations,
+      };
+    });
+    expect(written).toEqual({
+      bytes: { command: 'save_sync_state', bytes: true },
+      order: 24,
+      upsert: ['Renamed elsewhere'],
+      whole: false,
+    });
   } finally {
     await host.close();
   }

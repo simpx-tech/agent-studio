@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
-import { mockDesktop } from './desktop-helper';
+import { mockAppCalls, mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
 // How far the open conversation is scrolled above its end.
@@ -536,6 +536,7 @@ async function pairedDesktop(page: Page) {
   });
   // The chat reaches this computer through the relay only.
   await page.exposeFunction('savedWorkspace', () => ({ ...remoteWorkspace(), conversations: [] }));
+  await mockAppCalls(page);
   await page.addInitScript(
     ({ here, origin }) => {
       if (window.top !== window) return;
@@ -555,6 +556,7 @@ async function pairedDesktop(page: Page) {
         transformCallback: () => 0,
         unregisterCallback() {},
         async invoke(command: string, args: any) {
+          args = w.studioCallArguments(command, args);
           switch (command) {
             case 'get_installation':
               return here;
@@ -575,7 +577,7 @@ async function pairedDesktop(page: Page) {
             case 'load_sync_state':
               return sync;
             case 'save_sync_state':
-              sync = args.value;
+              sync = w.studioCheckpoint(sync, args);
               w.synced = true;
               return;
             case 'relay_resume':

@@ -1,5 +1,68 @@
-import type { Page } from '@playwright/test';
+import { test, type Page } from '@playwright/test';
+import { appendFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * What the desktop app does with a call's arguments, for the mocks of it in these tests. Calls
+ * that carry conversations send their arguments as the bytes of their JSON (src/lib/chat-bytes.ts,
+ * src-tauri/src/sent.rs): `studioCallArguments` reads them back. A checkpoint write may carry only
+ * the conversations that changed beside the order of them all, which the app completes from the
+ * checkpoint it replaces (src-tauri/src/sync_state.rs): `studioCheckpoint` does the same.
+ *
+ * With `verify`, each copy of a conversation the page syncs and saves is checked against a full
+ * parse of it (src/lib/chat-snapshots.ts), and a copy that differs fails the run
+ * (tests/global-teardown.ts): something edited a message or a block in place, or changed a
+ * message without saying so. Tests that measure time leave it off.
+ */
+export async function mockAppCalls(page: Page, { verify = true } = {}) {
+  await page.addInitScript(
+    ({ verify }) => {
+      const w = window as any;
+      if (verify) w.studioVerifySnapshots = true;
+      w.studioCallArguments = (command: string, args: unknown) =>
+        args instanceof Uint8Array &&
+        ['relay_request', 'save_workspace_patch', 'save_sync_state'].includes(command)
+          ? JSON.parse(new TextDecoder().decode(args))
+          : args;
+      const needsWhole = 'The whole sync checkpoint is needed to save this change.';
+      w.studioCheckpoint = (before: any, args: any) => {
+        if (!args.order) return args.value;
+        const kept = new Map<string, unknown>(
+          (before?.base?.conversations ?? []).map((c: { id: string }) => [c.id, c]),
+        );
+        const sent = new Map<string, unknown>(
+          (args.upsert ?? []).map((c: { id: string }) => [c.id, c]),
+        );
+        if ([...sent.keys()].some((id) => !args.order.includes(id))) throw new Error(needsWhole);
+        const conversations = args.order.map((id: string) => {
+          const conversation = sent.get(id) ?? kept.get(id);
+          if (!conversation) throw new Error(needsWhole);
+          return conversation;
+        });
+        return { ...args.value, base: { ...args.value.base, conversations } };
+      };
+    },
+    { verify },
+  );
+  if (!verify) return;
+  page.on('console', (message) => {
+    if (message.type() !== 'error' || !message.text().startsWith('[chat-snapshots]')) return;
+    let title = 'a test';
+    try {
+      title = test.info().titlePath.join(' › ');
+    } catch {
+      // Outside a test's own steps.
+    }
+    appendFileSync(
+      process.env.STUDIO_SNAPSHOT_LOG ?? join(tmpdir(), 'agent-studio-chat-snapshots.log'),
+      `${title}: ${message.text()}\n`,
+    );
+  });
+}
+
 export async function mockDesktop(page: Page, mode = 'success') {
+  await mockAppCalls(page);
   await page.addInitScript(
     ({ mode }) => {
       if (window.top !== window) return;
@@ -54,6 +117,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
           callbacks.delete(id);
         },
         async invoke(command: string, args: any) {
+          args = (window as any).studioCallArguments(command, args);
           // Commands a test leaves unanswered, as an app that stopped answering the window
           // would, until it calls `releaseCommands()`.
           const held = window as any;

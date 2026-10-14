@@ -79,3 +79,50 @@ it('hands unpublished changes back to the next sync', () => {
   marks.restoreUnsynced({ chats: undefined, meta: false });
   expect(marks.takeUnsynced()).toEqual({ chats: undefined, meta: false });
 });
+
+it("keeps a running call's elapsed time apart from changes someone waits for", () => {
+  const marks = createChangeMarks();
+  marks.takeUnsaved();
+  marks.takeUnsynced();
+  marks.quiet('a', 'reply');
+  marks.quiet('b', 'reply');
+  // Saved like any change.
+  expect(marks.takeUnsaved()).toEqual(new Set(['a', 'b']));
+  // A conversation that changed otherwise too is published for that.
+  marks.chat('b');
+  const taken = marks.takeUnsynced();
+  expect(taken).toEqual({ chats: new Set(['b']), meta: false, quiet: new Set(['a']) });
+  // Handed back, it stays what it was.
+  marks.restoreUnsynced(taken);
+  expect(marks.takeUnsynced()).toEqual({
+    chats: new Set(['b']),
+    meta: false,
+    quiet: new Set(['a']),
+  });
+  // A change that names nothing publishes everything anyway.
+  marks.quiet('a', 'reply');
+  marks.chat();
+  expect(marks.takeUnsynced()).toEqual({ chats: undefined, meta: true });
+});
+
+it('tells which conversation and message each change touched', () => {
+  const touched: [string | undefined, string | undefined][] = [];
+  const marks = createChangeMarks((chat, message) => touched.push([chat, message]));
+  marks.chat('a', 'reply');
+  marks.quiet('a', 'reply');
+  marks.received('b');
+  marks.received();
+  marks.chat('c');
+  marks.chat();
+  // Settings and this device's own choices touch no conversation.
+  marks.meta();
+  marks.local();
+  expect(touched).toEqual([
+    ['a', 'reply'],
+    ['a', 'reply'],
+    ['b', undefined],
+    [undefined, undefined],
+    ['c', undefined],
+    [undefined, undefined],
+  ]);
+});

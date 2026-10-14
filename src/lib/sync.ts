@@ -24,6 +24,7 @@ import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
 import { mergeFolderIcons, sameFolderIcons } from './folder-icons.ts';
 import { mergeAccountColors, sameAccountColors } from './account-colors.ts';
+import { jsonEqual } from './json-equal.ts';
 
 export type SharedWorkspace = Pick<
   Workspace,
@@ -76,7 +77,9 @@ export function replaceFields<T extends object>(target: T, source: T): T {
     if (!(key in source)) delete (target as Record<string, unknown>)[key];
   return Object.assign(target, source);
 }
-const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+// As comparing their JSON texts tells, without writing them: copies of a conversation share what
+// did not change, and a merge compared megabytes of text several times a poll.
+const equal = jsonEqual;
 const byId = <T extends { id: string }>(items: T[] = []) =>
   [...items].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
 const same = <T extends { id: string }>(x?: T[], y?: T[]) => equal(byId(x), byId(y));
@@ -133,71 +136,82 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
     !equal(selected.location, other.location)
   )
     return selected;
-  return {
-    ...selected,
-    messages: selected.messages.map((message) => {
-      const previous = other.messages.find((m) => m.id === message.id);
-      if (
-        message.role !== 'assistant' ||
-        previous?.role !== 'assistant' ||
-        !message.runId ||
-        message.runId !== previous.runId ||
-        !equal(message.settings, previous.settings) ||
-        (!previous.blocks.some((b) => b.type === 'reasoning') &&
-          !previous.questions?.length &&
-          !previous.elicitations?.length &&
-          !previous.steering?.length &&
-          !previous.compactions?.length &&
-          !previous.proposedPlans?.length &&
-          !previous.fileChanges &&
-          !previous.filesUndone &&
-          !previous.accountUsage &&
-          !previous.usageLimit &&
-          previous.usage?.revision == null)
-      )
-        return message;
-      return {
-        ...message,
-        ...(message.proposedPlans || previous.proposedPlans
-          ? { proposedPlans: mergeProposedPlans(message.proposedPlans, previous.proposedPlans) }
-          : {}),
-        ...(message.compactions || previous.compactions
-          ? { compactions: mergeCompactions(message.compactions, previous.compactions) }
-          : {}),
-        ...(message.filesUndone || previous.filesUndone ? { filesUndone: true } : {}),
-        blocks: mergeActivityBlocks(
-          message.blocks,
-          previous.blocks.filter((b) => b.type === 'reasoning'),
-        ),
-        ...(message.usage || previous.usage
-          ? { usage: latestTokenUsage(message.usage, previous.usage) }
-          : {}),
-        ...(message.accountUsage || previous.accountUsage
-          ? { accountUsage: latestAccountUsage(message.accountUsage, previous.accountUsage) }
-          : {}),
-        ...(message.questions || previous.questions
-          ? { questions: mergeQuestions(message.questions, previous.questions) }
-          : {}),
-        ...(message.elicitations || previous.elicitations
-          ? { elicitations: mergeElicitations(message.elicitations, previous.elicitations) }
-          : {}),
-        ...(message.steering || previous.steering
-          ? { steering: mergeSteering(message.steering, previous.steering) }
-          : {}),
-        ...(message.steeringPlaces || previous.steeringPlaces
-          ? {
-              steeringPlaces: mergeSteeringPlaces(message.steeringPlaces, previous.steeringPlaces),
-            }
-          : {}),
-        ...(message.fileChanges || previous.fileChanges
-          ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
-          : {}),
-        ...(message.usageLimit || previous.usageLimit
-          ? { usageLimit: latestUsageLimit(message.usageLimit, previous.usageLimit) }
-          : {}),
-      };
-    }),
-  };
+  // The other copy's messages by id, the first of each, so a long conversation is passed over once.
+  const others = new Map<string, Message>();
+  for (const message of other.messages)
+    if (!others.has(message.id)) others.set(message.id, message);
+  const messages = selected.messages.map((message) => {
+    const previous = others.get(message.id);
+    // A message both copies share has nothing to retain. Copies of a conversation share every
+    // message that did not change, so only a reply that moved is merged here.
+    if (message === previous) return message;
+    if (
+      message.role !== 'assistant' ||
+      previous?.role !== 'assistant' ||
+      !message.runId ||
+      message.runId !== previous.runId ||
+      !equal(message.settings, previous.settings) ||
+      (!previous.blocks.some((b) => b.type === 'reasoning') &&
+        !previous.questions?.length &&
+        !previous.elicitations?.length &&
+        !previous.steering?.length &&
+        !previous.compactions?.length &&
+        !previous.proposedPlans?.length &&
+        !previous.fileChanges &&
+        !previous.filesUndone &&
+        !previous.accountUsage &&
+        !previous.usageLimit &&
+        previous.usage?.revision == null)
+    )
+      return message;
+    const merged = {
+      ...message,
+      ...(message.proposedPlans || previous.proposedPlans
+        ? { proposedPlans: mergeProposedPlans(message.proposedPlans, previous.proposedPlans) }
+        : {}),
+      ...(message.compactions || previous.compactions
+        ? { compactions: mergeCompactions(message.compactions, previous.compactions) }
+        : {}),
+      ...(message.filesUndone || previous.filesUndone ? { filesUndone: true } : {}),
+      blocks: mergeActivityBlocks(
+        message.blocks,
+        previous.blocks.filter((b) => b.type === 'reasoning'),
+      ),
+      ...(message.usage || previous.usage
+        ? { usage: latestTokenUsage(message.usage, previous.usage) }
+        : {}),
+      ...(message.accountUsage || previous.accountUsage
+        ? { accountUsage: latestAccountUsage(message.accountUsage, previous.accountUsage) }
+        : {}),
+      ...(message.questions || previous.questions
+        ? { questions: mergeQuestions(message.questions, previous.questions) }
+        : {}),
+      ...(message.elicitations || previous.elicitations
+        ? { elicitations: mergeElicitations(message.elicitations, previous.elicitations) }
+        : {}),
+      ...(message.steering || previous.steering
+        ? { steering: mergeSteering(message.steering, previous.steering) }
+        : {}),
+      ...(message.steeringPlaces || previous.steeringPlaces
+        ? {
+            steeringPlaces: mergeSteeringPlaces(message.steeringPlaces, previous.steeringPlaces),
+          }
+        : {}),
+      ...(message.fileChanges || previous.fileChanges
+        ? { fileChanges: latestFileChanges(message.fileChanges, previous.fileChanges) }
+        : {}),
+      ...(message.usageLimit || previous.usageLimit
+        ? { usageLimit: latestUsageLimit(message.usageLimit, previous.usageLimit) }
+        : {}),
+    };
+    // A message that gained nothing stays the object it is, so the copies made after this one
+    // go on sharing it: its bytes are written already, and comparing it costs nothing.
+    return equal(merged, message) ? message : merged;
+  });
+  // With nothing retained, the selected copy stays the object it is.
+  return messages.every((message, index) => message === selected.messages[index])
+    ? selected
+    : { ...selected, messages };
 }
 
 const rank = { running: 0, cancelled: 1, error: 2, complete: 3 };
