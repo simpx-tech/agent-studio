@@ -1511,7 +1511,7 @@
   );
   const iconsByFolder = $derived(folderIconIndex(workspace.folderIcons));
   // Chats snoozed until the app starts again. From the next start they wait at the top of the
-  // sidebar until they are opened, snoozed again or closed.
+  // Active tab until they are opened, snoozed again or closed.
   const snoozesByChat = $derived(snoozeIndex(workspace.snoozes));
   const lastStart = $derived(latestStart(workspace.appSessions));
   const snoozedChats = $derived.by(() => {
@@ -1523,6 +1523,12 @@
   const dueChats = $derived(
     dueSnoozes(workspace.snoozes, (id) => snoozedChats.get(id), lastStart).map((due) => due.chat),
   );
+  // While searching, the Active tab lists the snoozed chats the search matches.
+  const listedSnoozes = $derived.by(() => {
+    if (!query || !dueChats.length) return dueChats;
+    const matched = new Set(recent.map((c) => c.id));
+    return dueChats.filter((c) => matched.has(c.id));
+  });
   const snoozeOf = (c: Conversation) => snoozeState(snoozesByChat.get(c.id), c, lastStart);
   const heldChat = (id: string) => workspace.conversations.find((c) => c.id === id);
   const pendingChats = $derived(pendingChatCount(workspace.conversations));
@@ -3903,10 +3909,10 @@
     if (!mobile) void tick().then(() => composerInput?.focus({ preventScroll: true }));
   }
   // Snooze again and Close take the chat out of the list, so keyboard focus moves on to the chat
-  // now in its place, or to the search box once none is left.
+  // now in its place, or once none is left to the first Active chat, else the Active tab.
   function leaveSnoozed(event: MouseEvent, c: Conversation, again: boolean) {
     const focused = document.activeElement === event.currentTarget;
-    const index = dueChats.findIndex((due) => due.id === c.id);
+    const index = listedSnoozes.findIndex((due) => due.id === c.id);
     if (again) snoozeConversation(c, true);
     else endSnooze(c);
     if (!focused) return;
@@ -3914,7 +3920,10 @@
       const items = [...(sidebarElement?.querySelectorAll<HTMLElement>('.snoozed-chat') ?? [])];
       (
         (items[index] ?? items[index - 1])?.querySelector<HTMLElement>('button') ??
-        sidebarElement?.querySelector<HTMLElement>('.search input')
+        sidebarElement?.querySelector<HTMLElement>(
+          '#conversation-panel-active :is(.conversation-item, .scratch-item)',
+        ) ??
+        sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
       )?.focus();
     });
   }
@@ -5538,31 +5547,6 @@
         disabled={!loaded}><Plus size={15} /></button
       >
     </div>
-    {#if dueChats.length}<section class="snoozed-chats" aria-labelledby="snoozed-heading">
-        <h2 id="snoozed-heading" class="snoozed-heading">
-          <AlarmClock size={13} aria-hidden="true" />Snoozed
-        </h2>
-        {#each dueChats as c (c.id)}{@const location = conversationLocation(
-            c,
-            workspace.fleet,
-            installation,
-          )}
-          <div class="snoozed-chat" role="group" aria-label={c.title}>
-            <span class="snoozed-title" title={c.title}
-              >{#if location?.path}<FolderIcon
-                  icon={folderIconOf(iconsByFolder, location)?.icon}
-                  size={13}
-                />{:else}<MessageCircle size={13} aria-hidden="true" />{/if}<span>{c.title}</span
-              ></span
-            >
-            <div class="snoozed-actions">
-              <button class="snoozed-open" onclick={() => openSnoozed(c)}>Open</button>
-              <button onclick={(event) => leaveSnoozed(event, c, true)}>Snooze again</button>
-              <button onclick={(event) => leaveSnoozed(event, c, false)}>Close</button>
-            </div>
-          </div>
-        {/each}
-      </section>{/if}
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
@@ -5610,6 +5594,37 @@
           aria-labelledby={`conversation-tab-${group.id}`}
           hidden={conversationScope !== group.id}
         >
+          {#if group.id === 'active' && listedSnoozes.length}<section
+              class="snoozed-chats"
+              aria-labelledby="snoozed-heading"
+            >
+              <h2 id="snoozed-heading" class="snoozed-heading">
+                <AlarmClock size={13} aria-hidden="true" />Snoozed
+              </h2>
+              {#each listedSnoozes as c (c.id)}{@const location = conversationLocation(
+                  c,
+                  workspace.fleet,
+                  installation,
+                )}
+                <div class="snoozed-chat" role="group" aria-label={c.title}>
+                  <span class="snoozed-title" title={c.title}
+                    >{#if location?.path}<FolderIcon
+                        icon={folderIconOf(iconsByFolder, location)?.icon}
+                        size={13}
+                      />{:else}<MessageCircle size={13} aria-hidden="true" />{/if}<span
+                      >{c.title}</span
+                    ></span
+                  >
+                  <div class="snoozed-actions">
+                    <button class="snoozed-open" onclick={() => openSnoozed(c)}>Open</button>
+                    <button onclick={(event) => leaveSnoozed(event, c, true)}
+                      >Snooze again</button
+                    >
+                    <button onclick={(event) => leaveSnoozed(event, c, false)}>Close</button>
+                  </div>
+                </div>
+              {/each}
+            </section>{/if}
           {#each group.sections as section}
             {@const sectionKey = `${group.id}/${section.id}`}
             <div
@@ -5813,13 +5828,13 @@
                   </div>
                 {/each}{/if}
             </div>
-          {:else}<p class="sidebar-empty">
-              {query
-                ? `No matches in ${group.name.toLowerCase()}.`
-                : group.id === 'active'
-                  ? 'No active conversations yet.'
-                  : 'No conversations in history.'}
-            </p>{/each}
+          {:else}{#if group.id !== 'active' || !listedSnoozes.length}<p class="sidebar-empty">
+                {query
+                  ? `No matches in ${group.name.toLowerCase()}.`
+                  : group.id === 'active'
+                    ? 'No active conversations yet.'
+                    : 'No conversations in history.'}
+              </p>{/if}{/each}
         </div>
       {/each}
       <div

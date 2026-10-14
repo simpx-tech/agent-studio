@@ -51,11 +51,15 @@ async function chats(page: Page, ...names: string[]) {
   }
 }
 const snoozes = async (page: Page) =>
-  ((await saved(page)).snoozes ?? []) as { conversationId: string; at: string }[];
+  ((await saved(page)).snoozes ?? []) as {
+    conversationId: string;
+    lastMessageId?: string;
+    at: string;
+  }[];
 const chatId = async (page: Page, name: string) =>
   (await saved(page)).conversations.find((c: { title: string }) => c.title === name).id as string;
 
-test('a snoozed chat waits in History until the app starts again, then on top', async ({
+test('a snoozed chat waits in History until the app starts again, then atop Active', async ({
   page,
 }) => {
   await start(page);
@@ -87,7 +91,7 @@ test('a snoozed chat waits in History until the app starts again, then on top', 
   await page.reload();
   await expect(loaded(page)).toBeEnabled();
   await expect(snoozed(page)).toHaveCount(0);
-  // The next start of the app shows it on top, with its three choices.
+  // The next start of the app shows it at the top of the Active tab, with its three choices.
   await startApp(page);
   await expect(snoozed(page)).toBeVisible();
   await expect(card(page, 'Plan the release')).toBeVisible();
@@ -96,7 +100,22 @@ test('a snoozed chat waits in History until the app starts again, then on top', 
     'Snooze again',
     'Close',
   ]);
+  const panel = page.locator('#conversation-panel-active');
+  await expect(panel.locator(':scope > :first-child')).toHaveClass(/snoozed-chats/);
+  await expect(panel.locator('.sidebar-empty')).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/snooze/due.png', animations: 'disabled' });
+  // History and Screens do not show it; search keeps it only while it matches.
+  await tab(page, 'History').click();
+  await expect(snoozed(page)).toBeHidden();
+  await tab(page, 'Active').click();
+  await expect(snoozed(page)).toBeVisible();
+  await page.getByLabel('Search conversations').fill('working');
+  await expect(snoozed(page)).toHaveCount(0);
+  await expect(panel.locator('.sidebar-empty')).toHaveText('No matches in active.');
+  await page.getByLabel('Search conversations').fill('release');
+  await expect(card(page, 'Plan the release')).toBeVisible();
+  await expect(panel.locator('.sidebar-empty')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   // Snooze again: gone until the next start, and still snoozed in History.
   await card(page, 'Plan the release').getByRole('button', { name: 'Snooze again' }).click();
   await expect(snoozed(page)).toHaveCount(0);
@@ -259,7 +278,7 @@ test('several due chats keep keyboard focus in the list as each is handled', asy
   await card(page, 'Third snoozed').getByRole('button', { name: 'Close' }).focus();
   await page.keyboard.press('Enter');
   await expect(snoozed(page)).toHaveCount(0);
-  await expect(page.getByLabel('Search conversations')).toBeFocused();
+  await expect(tab(page, 'Active')).toBeFocused();
   // Second was snoozed again and waits for the next start.
   await startApp(page);
   await expect(snoozed(page).getByRole('group')).toHaveText([/Second snoozed/]);

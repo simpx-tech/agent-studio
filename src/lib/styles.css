@@ -517,23 +517,28 @@ pre {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
 }
-/* Once the app starts again, chats snoozed until then wait above the search, each with Open,
-   Snooze again and Close. */
+/* Once the app starts again, chats snoozed until then open the Active tab's list, above its
+   computers, each with Open, Snooze again and Close. */
 .snoozed-chats {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-top: 2px;
+}
+.snoozed-chats + .conversation-computer {
+  margin-top: 14px;
 }
 .snoozed-heading {
   display: flex;
   align-items: center;
   gap: 7px;
+  min-height: 28px;
   margin: 0;
-  padding: 4px 8px 2px;
+  padding: 4px 8px;
   color: var(--text-faint);
   font-size: var(--text-xs);
   font-weight: 500;
+  line-height: inherit;
+  letter-spacing: inherit;
 }
 .snoozed-chat {
   display: flex;

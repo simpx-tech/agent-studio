@@ -1,5 +1,14 @@
 # Verification — 2026-09-08
 
+## Snoozed chats wait in the Active tab — 2026-10-14
+
+Requested 2026-10-14, after the first version put the due chats above the search and tabs: "Show it under active not above".
+
+- The Snoozed group now opens the Active tab's list (`#conversation-panel-active`), above its computers, with the computer headings' height, padding and type and their 14 px gap to the first computer. History and Screens do not show it. While searching it lists only the due chats the search matches (`listedSnoozes`, from the same filtered list the sidebar groups), and Active shows no "No active conversations yet." or "No matches in active." while cards are listed. Once Snooze again or Close takes the last card, keyboard focus moves to the first Active chat, else the Active tab, where it went to the search before. Tab counts are unchanged: due chats stay History chats.
+- a94bf13's new `tests/snooze.spec.ts` read `lastMessageId` from a helper typed without it, which `npm run check` reports; its check had run before the file existed. The helper is typed now.
+- Browser: `tests/snooze.spec.ts` checks that the group is the Active panel's first child with no empty message, hidden on History and back on Active, gone for a search that does not match it (with "No matches in active.") and shown for one that does, and that focus reaches the Active tab after the last card. Dark and light captures with active chats below the group were reviewed (`artifacts/snooze/active-*.png`).
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,254 files), 733 Vitest tests in 90 files, the build, `cargo fmt --check` (no Rust change, so Clippy and the Rust tests were not rerun), all 377 Edge browser tests in three shards started with the local sockets drained, and the 7 WebKit tests, all passing on the first run.
+
 ## Chats can be snoozed until the app starts again — 2026-10-14
 
 Requested 2026-10-14: "Can you allow to snooze a chat, it archives a chat, but it shows on top as an option to either, close, open or snooze again when opening the app again (next app session)".
