@@ -64,6 +64,37 @@ test('a draft edited while its images are kept waits for the next send', async (
   expect(request.messages[0].images).toHaveLength(1);
 });
 
+test('an image preview closes on a click on its backdrop, never on its own frame @webkit', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'error');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Image files').setInputFiles(await imageFixture(page));
+  const thumbnail = page.getByRole('button', { name: 'Preview diagram.png' });
+  // Opened from the keyboard, since WebKit never focuses a clicked button.
+  await thumbnail.focus();
+  await page.keyboard.press('Enter');
+  const preview = page.getByRole('dialog', { name: 'Image preview' });
+  await expect(preview.getByRole('img')).toBeVisible();
+  const box = (await preview.boundingBox())!;
+  expect(box.x).toBeGreaterThan(8);
+
+  // The padding around the image belongs to the preview, and selecting its name past its edge
+  // keeps it open.
+  await page.mouse.click(box.x + 6, box.y + box.height / 2);
+  const name = (await preview.getByText('diagram.png').boundingBox())!;
+  await page.mouse.move(name.x + name.width / 2, name.y + name.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x / 2, name.y + name.height / 2, { steps: 6 });
+  await page.mouse.up();
+  await expect(preview).toBeVisible();
+  await page.mouse.click(box.x / 2, box.y + box.height / 2);
+  await expect(preview).toBeHidden();
+  await expect(thumbnail).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Remove diagram.png' })).toBeVisible();
+});
+
 test('images can be previewed, sent without text, reopened and retried with the original bytes', async ({
   page,
 }) => {

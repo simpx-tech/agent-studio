@@ -1,6 +1,7 @@
 <script lang="ts">
   import { X } from '@lucide/svelte';
   import { tick } from 'svelte';
+  import { closeOnBackdrop } from '$lib/dialog-backdrop';
   import { imageUrl, isInline, type ChatImage, type DraftImage } from '$lib/images';
   import { chatImageUrl, readChatImage } from '$lib/transport';
   type Shown = ChatImage | DraftImage;
@@ -101,6 +102,7 @@
   class="image-preview"
   aria-label="Image preview"
   onclose={() => (preview = undefined)}
+  {@attach closeOnBackdrop}
 >
   {#if preview}
     <div class="image-preview-heading">

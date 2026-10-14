@@ -324,3 +324,62 @@ test('single images sent one call at a time join one gallery, each keeping its c
   await expect(viewer).toContainText('2 of 4');
   await expect(viewer.locator('.file-viewer-caption')).toHaveText('Settings');
 });
+
+test('a click on the backdrop closes the viewer, and a drag across its edge never does @webkit', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await keepFiles(page, {
+    toolu_pair: {
+      images: [
+        [1440, 900],
+        [1440, 900],
+      ],
+    },
+  });
+  await chooseTestFolder(page);
+  await reply(
+    page,
+    'Show me both',
+    [{ id: 'pair', toolId: 'toolu_pair', files: screens(2) }],
+    'Both screens:\n\n<!-- files:pair -->',
+    1,
+  );
+  const answer = page.getByTestId('message').filter({ hasText: 'Both screens' });
+  const tile = answer.getByRole('button', { name: /^Open image 1/ });
+  // Opened from the keyboard, since WebKit never focuses a clicked button, which leaves focus
+  // nothing to return to.
+  await tile.focus();
+  await page.keyboard.press('Enter');
+  const viewer = page.getByRole('dialog', { name: 'Image preview' });
+  await expect(viewer.getByAltText('Full size screen-0.png')).toBeVisible();
+  const box = (await viewer.boundingBox())!;
+  const stage = (await viewer.locator('.zoom-stage').boundingBox())!;
+  const image = { x: stage.x + stage.width / 2, y: stage.y + stage.height / 2 };
+  const backdrop = { x: box.x / 2, y: box.y + box.height / 2 };
+  expect(backdrop.x).toBeGreaterThan(4);
+
+  // A drag from the image or across the file's name out onto the backdrop keeps the viewer
+  // open, and so does a press on the backdrop released over the image.
+  await page.mouse.move(image.x, image.y);
+  await page.mouse.down();
+  await page.mouse.move(image.x, box.y / 2, { steps: 6 });
+  await page.mouse.up();
+  const name = (await viewer.locator('.file-viewer-name').boundingBox())!;
+  await page.mouse.move(name.x + name.width / 2, name.y + name.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(backdrop.x, name.y + name.height / 2, { steps: 6 });
+  await page.mouse.up();
+  await expect(viewer).toBeVisible();
+  await page.mouse.move(backdrop.x, backdrop.y);
+  await page.mouse.down();
+  await page.mouse.move(image.x, image.y, { steps: 6 });
+  await page.mouse.up();
+  await expect(viewer).toContainText('1 of 2');
+
+  // A click on the backdrop closes it, returning focus to the image that opened it.
+  await page.mouse.click(backdrop.x, backdrop.y);
+  await expect(viewer).toBeHidden();
+  await expect(tile).toBeFocused();
+});

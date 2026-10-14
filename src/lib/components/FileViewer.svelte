@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { ChevronLeft, ChevronRight, X } from '@lucide/svelte';
+  import { closeOnBackdrop } from '$lib/dialog-backdrop';
   import type { FileViewer } from '$lib/file-viewer.svelte';
   import { readKeptImage } from '$lib/tool-output-images.svelte';
   import ViewedImage from './ViewedImage.svelte';
@@ -71,6 +72,7 @@
     aria-label={kind === 'model' ? 'Model preview' : 'Image preview'}
     tabindex="-1"
     onclose={() => viewer.close()}
+    {@attach closeOnBackdrop}
   >
     <header class="file-viewer-heading">
       <span class="file-viewer-title" aria-live="polite">
