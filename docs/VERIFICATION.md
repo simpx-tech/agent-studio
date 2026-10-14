@@ -1,5 +1,16 @@
 # Verification — 2026-09-08
 
+## A side panel stays with its chat — 2026-10-14
+
+Requested 2026-10-14: "When opening a right sidebar, keep it open per chat (so switching between chats, don't close it, and the right sidebar open state is per chat)".
+
+- The artifact side panel and the sub-agent panel belong to their chat (`artifactViews` and `subagentViews` in `+page.svelte`, `src/lib/side-panels.ts`): another chat, Connections or Settings hides the panel, and returning to its chat shows it again. Each chat keeps its own, closing one closes it for its chat alone, and the one-panel-at-a-time rule holds within each chat. An artifact in the modal still closes once its chat is left, as when a desktop notification opens another chat under it. Deleting a chat, here or through sync, and a workspace change drop its panels; a rewind still closes that chat's artifact.
+- Shown again, the panel mounts afresh: an artifact's preview restarts, as after a reload, and a sub-agent's conversation opens at its latest update while it runs and at its task once finished. Panel widths are remembered as before.
+- Focus: Edge and WebKit both move focus into a dialog on `show()`, not only `showModal()` (checked with a probe page), so a docked panel shown again with its chat puts focus back where it was (`showPanel`), while a drawer takes it as any modal does. A panel hidden with its chat used to send focus back to what it was opened from when it unmounted, taking focus off the sidebar row just chosen; now only its own Close or Escape returns focus.
+- Tests: `tests/side-panels.spec.ts` covers two chats, each with its own docked panel, in Edge and WebKit (focus stays on the row chosen with the keyboard, closing one keeps the other, a Settings round trip returns beside the docked panel at the same paragraph and scroll position, the modal closes on a notification click), and a phone drawer that returns with its chat and takes focus. The ends of `subagent-panel.spec.ts` and `work-features.spec.ts` now return to the chat and find its panel, and `src/lib/side-panels.test.ts` covers leaving chats. With the focus handling taken out, the main scenario fails on the focused row in both engines.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,257 files), 736 Vitest tests in 91 files, the build, `cargo fmt --check` (no Rust change), and all 379 Edge and 8 WebKit browser tests in three shards started with the local sockets drained. The first run of shard 1 failed both variants of `chat-virtual-space.spec.ts:56` at its second hold (space 0, not above 150) while a Java process used about two cores; the test touches no panel, passed 30 times in a row on this change, and the rerun shard passed whole.
+- Not exercised: the Viewer, which holds chats light and should show a sub-agent panel again only once it has read the chat whole, since a light reply holds no calls; and the real desktop app, as the change is page state alone.
+
 ## A snoozed chat's Open is a chat bubble — 2026-10-14
 
 Requested 2026-10-14 about the icon buttons: "Looks good, I just didn't liked the open icon".

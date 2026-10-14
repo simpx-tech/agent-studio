@@ -4,6 +4,7 @@
   import { activityDisplayStatus, type ActivityDisplayStatus } from '$lib/activity';
   import type { Message } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
+  import { showPanel } from '$lib/side-panels';
   import { openLink } from '$lib/transport';
   import {
     delegatingSubagent,
@@ -21,6 +22,7 @@
   let {
     message,
     agentId,
+    takeFocus = true,
     folder,
     connectionId,
     open,
@@ -29,6 +31,8 @@
     /** The reply that started the sub-agent. */
     message: Message;
     agentId: string;
+    /** False for a panel shown again with its chat. */
+    takeFocus?: boolean;
     folder?: string;
     connectionId?: string;
     /** Shows another sub-agent of the same reply, such as one this one started. */
@@ -73,16 +77,21 @@
   let content = $state<HTMLDivElement>();
   let linkError = $state('');
   // Beside the chat on wide windows, and a drawer over it otherwise.
+  let shown = false;
   $effect(() => {
     if (!mounted || !dialog) return;
     const dock = docked;
-    dialog.close();
-    if (dock) dialog.show();
-    else dialog.showModal();
-    untrack(() =>
-      dialog?.querySelector<HTMLButtonElement>('[aria-label="Close sub-agent"]')?.focus(),
-    );
+    const box = dialog;
+    untrack(() => showPanel(box, dock, '[aria-label="Close sub-agent"]', !shown && !takeFocus));
+    shown = true;
   });
+  // Closing returns focus to what had it when the panel opened; hidden with its chat, the panel
+  // leaves focus where the reader moved it.
+  let dismissed = false;
+  function dismiss() {
+    dismissed = true;
+    close();
+  }
   onMount(() => {
     const focused = document.activeElement as HTMLElement | null;
     const workspace = dialog?.parentElement;
@@ -96,7 +105,7 @@
     mounted = true;
     return () => {
       observer.disconnect();
-      if (focused?.isConnected) focused.focus();
+      if (dismissed && focused?.isConnected) focused.focus();
     };
   });
   // A running sub-agent opens at its latest update and follows new ones while the reader stays
@@ -147,12 +156,12 @@
     if (docked && event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      close();
+      dismiss();
     }
   }}
   oncancel={(event) => {
     event.preventDefault();
-    close();
+    dismiss();
   }}
 >
   {#if docked}<PanelResize
@@ -177,7 +186,7 @@
         <span>{calls.length === 1 ? '1 call' : `${calls.length} calls`}</span>
       </p>
     </div>
-    <button class="icon-button" onclick={close} aria-label="Close sub-agent" title="Close"
+    <button class="icon-button" onclick={dismiss} aria-label="Close sub-agent" title="Close"
       ><X size={19} /></button
     >
   </header>

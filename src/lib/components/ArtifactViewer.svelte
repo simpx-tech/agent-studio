@@ -1,21 +1,25 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { X, Download, RotateCcw, Code, Eye, PanelRightOpen, Maximize2 } from '@lucide/svelte';
   import type { Artifact } from '$lib/artifacts';
   import { artifactFilename } from '$lib/artifacts';
   import { visualizationPreview } from '$lib/visualization-preview';
   import { appearance } from '$lib/appearance.svelte';
   import { highlightCode } from '$lib/markdown';
+  import { showPanel } from '$lib/side-panels';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import PanelResize from './PanelResize.svelte';
   let {
     artifact,
     mode = 'modal',
+    takeFocus = true,
     changeMode,
     close,
   }: {
     artifact: Artifact;
     mode?: 'modal' | 'panel';
+    /** False for a side panel shown again with its chat. */
+    takeFocus?: boolean;
     changeMode: (mode: 'modal' | 'panel') => void;
     close: () => void;
   } = $props();
@@ -45,14 +49,22 @@
   let revision = $state(0);
   let dialog = $state<HTMLDialogElement>();
   let mounted = $state(false);
+  let shown = false;
   $effect(() => {
     if (!mounted || !dialog) return;
+    const dock = docked;
+    const box = dialog;
     // Keep the same sandboxed iframe when changing presentation.
-    dialog.close();
-    if (docked) dialog.show();
-    else dialog.showModal();
-    dialog.querySelector<HTMLButtonElement>('[aria-label="Close artifact"]')?.focus();
+    untrack(() => showPanel(box, dock, '[aria-label="Close artifact"]', !shown && !takeFocus));
+    shown = true;
   });
+  // Closing returns focus to what had it when the viewer opened; hidden with its chat, the
+  // viewer leaves focus where the reader moved it.
+  let dismissed = false;
+  function dismiss() {
+    dismissed = true;
+    close();
+  }
   onMount(() => {
     const focused = document.activeElement as HTMLElement | null;
     const workspace = dialog?.parentElement;
@@ -69,7 +81,7 @@
       .catch(() => (error = 'Could not open the artifact preview. The source is still available.'));
     return () => {
       observer.disconnect();
-      if (focused?.isConnected) focused.focus();
+      if (dismissed && focused?.isConnected) focused.focus();
     };
   });
   function initialize(event: Event) {
@@ -103,12 +115,12 @@
     if (docked && event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      close();
+      dismiss();
     }
   }}
   oncancel={(event) => {
     event.preventDefault();
-    close();
+    dismiss();
   }}
 >
   {#if docked}<PanelResize
@@ -133,7 +145,7 @@
             size={17}
           />{/if}</button
       >
-      <button class="icon-button" onclick={close} aria-label="Close artifact"
+      <button class="icon-button" onclick={dismiss} aria-label="Close artifact"
         ><X size={19} /></button
       >
     </div>

@@ -266,6 +266,13 @@ test('artifacts dock beside chat and switch to a modal without resetting the pre
   await openPanel.click();
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(viewer).toHaveCount(0);
+  // The panel stays with its chat, beside the draft it kept.
+  await page.locator('.conversation-item', { hasText: 'Create a panel counter' }).click();
+  await expect(viewer).toHaveClass(/docked/);
+  await expect(resizer).toHaveAttribute('aria-valuenow', String(savedWidth));
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
+    'Draft stays usable beside the preview',
+  );
 });
 
 test('native workflow commands in chat retain reported phases and agents through stop and history', async ({

@@ -281,6 +281,7 @@
   import FileViewer from '$lib/components/FileViewer.svelte';
   import { provideFileViewer } from '$lib/file-viewer.svelte';
   import { findSubagent, replyTools } from '$lib/subagents';
+  import { leaveChats, type ArtifactView, type SubagentView } from '$lib/side-panels';
   import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
   import type { Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -630,46 +631,55 @@
   let steeringAttempt: { runId: string; text: string; id: string } | undefined;
   // Every file the open chat's replies show, connected in one viewer that steps through them.
   const shownFiles = provideFileViewer();
-  let selectedArtifact = $state<Artifact | null>(null);
-  let artifactMode = $state<'modal' | 'panel'>('modal');
-  let artifactConversationId = $state<string | null>(null);
+  // The artifact and the sub-agent each chat shows, by conversation. A side panel stays with its
+  // chat while another chat, Connections or Settings is shown (`src/lib/side-panels.ts`).
+  let artifactViews = $state<Record<string, ArtifactView>>({});
+  let subagentViews = $state<Record<string, SubagentView>>({});
+  // The chat on screen, whose panel shows.
+  const panelChat = $derived(view === 'chat' ? activeId : null);
+  const artifactView = $derived(panelChat ? artifactViews[panelChat] : undefined);
+  const subagentView = $derived(panelChat ? subagentViews[panelChat] : undefined);
   $effect(() => {
-    if (view !== 'chat' || activeId !== artifactConversationId) selectedArtifact = null;
-    else if (selectedArtifact?.visualization) {
-      for (const message of active?.messages ?? []) {
-        const visual = message.visualizations?.find(
-          (v) => `${message.id}:visual:${v.id}` === selectedArtifact?.id,
-        );
-        if (visual && visual.revision > (selectedArtifact.revision ?? 0))
-          selectedArtifact = {
-            ...selectedArtifact,
-            title: visual.title,
-            source: visual.source,
-            revision: visual.revision,
-          };
-      }
+    const shown = panelChat;
+    untrack(() => leaveChats(artifactViews, subagentViews, shown));
+  });
+  // A visual updated under its id shows its latest revision.
+  $effect(() => {
+    const opened = artifactView;
+    if (!opened?.artifact.visualization) return;
+    for (const message of active?.messages ?? []) {
+      const visual = message.visualizations?.find(
+        (v) => `${message.id}:visual:${v.id}` === opened.artifact.id,
+      );
+      if (visual && visual.revision > (opened.artifact.revision ?? 0))
+        opened.artifact = {
+          ...opened.artifact,
+          title: visual.title,
+          source: visual.source,
+          revision: visual.revision,
+        };
     }
   });
   function openArtifact(artifact: Artifact, mode: 'modal' | 'panel' = 'modal') {
-    artifactMode = mode;
-    artifactConversationId = activeId;
-    selectedArtifact = artifact;
+    if (!activeId) return;
+    artifactViews[activeId] = { artifact, mode, focus: true };
     // One panel at a time sits beside the chat.
-    if (mode === 'panel') subagentView = null;
+    if (mode === 'panel') delete subagentViews[activeId];
   }
-  // The sub-agent whose conversation the side panel shows, by the reply that started it.
-  let subagentView = $state<{
-    conversationId: string;
-    messageId: string;
-    agentId: string;
-  } | null>(null);
-  $effect(() => {
-    if (view !== 'chat' || activeId !== subagentView?.conversationId) subagentView = null;
-  });
+  function showArtifactAs(chat: string, mode: 'modal' | 'panel') {
+    const opened = artifactViews[chat];
+    if (!opened) return;
+    opened.mode = mode;
+    if (mode === 'panel') delete subagentViews[chat];
+  }
   function openSubagent(messageId: string, agentId: string) {
     if (!activeId) return;
-    if (selectedArtifact && artifactMode === 'panel') selectedArtifact = null;
-    subagentView = { conversationId: activeId, messageId, agentId };
+    if (artifactViews[activeId]?.mode === 'panel') delete artifactViews[activeId];
+    subagentViews[activeId] = { messageId, agentId, focus: true };
+  }
+  function closePanels(chat: string) {
+    delete artifactViews[chat];
+    delete subagentViews[chat];
   }
   // Conversations whose reply this window is stopping.
   let stopping = $state<Record<string, boolean>>({});
@@ -959,9 +969,7 @@
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
   const subagentReply = $derived(
-    subagentView && active?.id === subagentView.conversationId
-      ? active.messages.find((m) => m.id === subagentView?.messageId)
-      : undefined,
+    subagentView ? active?.messages.find((m) => m.id === subagentView.messageId) : undefined,
   );
   // The side panel closes when its reply no longer holds the sub-agent, as after a rewind.
   const subagentShown = $derived(
@@ -2161,7 +2169,8 @@
               runs = {};
               stopping = {};
               steeringPending = {};
-              selectedArtifact = null;
+              artifactViews = {};
+              subagentViews = {};
               sidebarOpen = false;
               folderBrowserOpen = false;
               contextOpen = false;
@@ -2816,7 +2825,7 @@
       await persistChat(next.id);
       if (session !== workspaceSession) return;
       await releaseConversation(next.id, next.settings.connectionId).catch(() => {});
-      selectedArtifact = null;
+      delete artifactViews[next.id];
       historyError = '';
       // The conversation now ends elsewhere: drop held space and show the new end.
       virtualSpace?.clear();
@@ -3772,7 +3781,10 @@
   // Chats deleted on another device leave no CLI process parked here. Deletion closes a chat
   // wherever it happens; History moves arriving by sync may be another computer's startup.
   function releaseDeleted(ids: Iterable<string>) {
-    for (const id of ids) void releaseConversation(id).catch(() => {});
+    for (const id of ids) {
+      closePanels(id);
+      void releaseConversation(id).catch(() => {});
+    }
   }
   // Moves a conversation to History. The open chat gives way to the Active conversation listed
   // below it in its folder, else above it there (a search match first), or to a new chat in that
@@ -4249,9 +4261,10 @@
       // The saved order leaves it out, and a sync sees it gone from the baseline.
       await persistChat(target.id);
       if (session !== workspaceSession) return;
-      // Its unsent draft is deleted with the conversation.
+      // Its unsent draft and its panels are deleted with the conversation.
       forgetDraft(draftKey.chat(target.id));
       rewoundDrafts.delete(target.id);
+      closePanels(target.id);
       if (activeId === target.id) {
         composerDraftKey = '';
         newChat();
@@ -5990,7 +6003,7 @@
     {#if view === 'chat'}
       <div
         class="chat-workspace"
-        class:has-side-panel={(selectedArtifact && artifactMode === 'panel') || subagentShown}
+        class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
       >
         <section
           class="chat-layout"
@@ -6596,23 +6609,22 @@
             />
           </div>
         </section>
-        {#if selectedArtifact}{#key selectedArtifact.id}<ArtifactViewer
-              artifact={selectedArtifact}
-              mode={artifactMode}
-              changeMode={(mode) => {
-                artifactMode = mode;
-                if (mode === 'panel') subagentView = null;
-              }}
-              close={() => (selectedArtifact = null)}
+        {#if artifactView && panelChat}{@const chat = panelChat}{#key `${chat}:${artifactView.artifact.id}`}<ArtifactViewer
+              artifact={artifactView.artifact}
+              mode={artifactView.mode}
+              takeFocus={artifactView.focus}
+              changeMode={(mode) => showArtifactAs(chat, mode)}
+              close={() => delete artifactViews[chat]}
             />{/key}{/if}
-        {#if subagentShown && subagentReply && subagentView}<SubagentPanel
-            message={subagentReply}
-            agentId={subagentView.agentId}
-            folder={active?.location?.path}
-            connectionId={(subagentReply.settings ?? active?.settings)?.connectionId}
-            open={(agentId) => subagentReply && openSubagent(subagentReply.id, agentId)}
-            close={() => (subagentView = null)}
-          />{/if}
+        {#if subagentShown && subagentReply && subagentView && panelChat}{@const chat = panelChat}{#key chat}<SubagentPanel
+              message={subagentReply}
+              agentId={subagentView.agentId}
+              takeFocus={subagentView.focus}
+              folder={active?.location?.path}
+              connectionId={(subagentReply.settings ?? active?.settings)?.connectionId}
+              open={(agentId) => subagentReply && openSubagent(subagentReply.id, agentId)}
+              close={() => delete subagentViews[chat]}
+            />{/key}{/if}
         <FileViewer viewer={shownFiles} />
       </div>
     {:else if view === 'connections'}

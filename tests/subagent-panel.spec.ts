@@ -329,7 +329,11 @@ test('sub-agents in Work history open their saved conversation', async ({ page }
   await expect(writer).toContainText('No result was reported for this sub-agent.');
   await expect(rows.first()).not.toHaveAttribute('aria-current', 'true');
 
-  // Only one panel sits beside the chat, and it closes with its conversation.
+  // Only one panel sits beside the chat, and it stays with its conversation.
   await page.getByRole('button', { name: 'New conversation', exact: true }).first().click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('tab', { name: /^History/ }).click();
+  await page.locator('.conversation-item').first().click();
+  await expect(writer).toContainText('Summarize the flow.');
+  await expect(page.getByRole('dialog')).toHaveCount(1);
 });
