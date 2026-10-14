@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createScenePlaces, type Place } from './model-viewer';
+import { createScenePlaces, sceneKey, type Place } from './model-viewer';
+import type { ModelScene } from './model-scene';
 
 /** A stage that is on or off screen since a given moment, releasing its scene when asked. */
 function stage(onScreen: boolean, seenAt: number) {
@@ -64,5 +65,50 @@ describe('createScenePlaces', () => {
     places.give(one.place);
     places.give(one.place);
     expect(places.held).toBe(0);
+  });
+});
+
+/** What each key did to a scene, as the calls it made. */
+function pressed(key: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean } = {}) {
+  const calls: unknown[][] = [];
+  const record =
+    (name: string) =>
+    (...args: unknown[]) =>
+      calls.push([name, ...args]);
+  const scene = {
+    orbit: record('orbit'),
+    pan: record('pan'),
+    zoom: record('zoom'),
+    reset: record('reset'),
+  } as unknown as ModelScene;
+  const action = sceneKey({
+    key,
+    shiftKey: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    ...modifiers,
+  });
+  action?.(scene);
+  return action ? calls : undefined;
+}
+
+describe('sceneKey', () => {
+  it('turns with the arrows and moves the view with Shift and the arrows', () => {
+    expect(pressed('ArrowRight')).toEqual([['orbit', 0.12, 0]]);
+    expect(pressed('ArrowUp')).toEqual([['orbit', 0, 0.12]]);
+    // The view moves the way the arrows move a zoomed image: right shows more of the right.
+    expect(pressed('ArrowRight', { shiftKey: true })).toEqual([['pan', 0.1, 0]]);
+    expect(pressed('ArrowLeft', { shiftKey: true })).toEqual([['pan', -0.1, 0]]);
+    expect(pressed('ArrowUp', { shiftKey: true })).toEqual([['pan', 0, 0.1]]);
+    expect(pressed('ArrowDown', { shiftKey: true })).toEqual([['pan', 0, -0.1]]);
+  });
+
+  it('zooms with + and -, resets with Home, and leaves other keys and shortcuts alone', () => {
+    expect(pressed('+', { shiftKey: true })).toEqual([['zoom', 0.8]]);
+    expect(pressed('-')).toEqual([['zoom', 1.25]]);
+    expect(pressed('Home')).toEqual([['reset']]);
+    expect(pressed('ArrowRight', { ctrlKey: true })).toBeUndefined();
+    expect(pressed('a')).toBeUndefined();
   });
 });

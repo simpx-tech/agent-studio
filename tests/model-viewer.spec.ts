@@ -218,6 +218,46 @@ test('the inline model leaves vertical swipes and the wheel to the chat', async 
   await expect(answer.getByRole('button', { name: 'Expand touch-0.glb' })).toBeFocused();
 });
 
+test('Shift with the arrow keys moves a focused model, and Home brings it back', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript((data) => {
+    (window as any).toolOutputs = { toolu_keys: { models: [{ format: 'glb', data, bytes: 1 }] } };
+  }, still);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await reply(
+    page,
+    [{ id: 'keys', toolId: 'toolu_keys', count: 1 }],
+    'Here.\n\n<!-- files:keys -->',
+  );
+  const model = page.locator('.message:not(.user)').getByLabel('3D model keys-0.glb');
+  await expect(model).toBeVisible();
+  await expect(model).toHaveAttribute('aria-keyshortcuts', /Shift\+ArrowRight/);
+  // The stage's gradient is dithered differently from one frame to the next.
+  await page.addStyleTag({ content: '.model-stage { background: none !important; }' });
+  await model.focus();
+  /** The model as drawn, two frames on, so the frame the scene asked for before has drawn. */
+  async function drawn() {
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+    );
+    return model.screenshot();
+  }
+  const start = await drawn();
+  await page.keyboard.press('Shift+ArrowRight');
+  const moved = await drawn();
+  expect(moved.equals(start)).toBe(false);
+  await page.keyboard.press('Home');
+  expect((await drawn()).equals(start)).toBe(true);
+  // Without Shift the same key turns it instead.
+  await page.keyboard.press('ArrowRight');
+  const turned = await drawn();
+  expect(turned.equals(start)).toBe(false);
+  expect(turned.equals(moved)).toBe(false);
+});
+
 test('pausing holds the pose the animation reached, and playing continues from it', async ({
   page,
 }) => {
@@ -255,6 +295,130 @@ test('pausing holds the pose the animation reached, and playing continues from i
   expect(times.hidden).not.toBe(times.paused);
   expect(times.stillHidden).toBe(times.hidden);
   expect(times.resumed).not.toBe(times.hidden);
+});
+
+test('the right button, Shift and two fingers move a model within its reach', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(async (data) => {
+    const modulePath = '/src/lib/model-scene.ts';
+    const { createModelScene } = await import(/* @vite-ignore */ modulePath);
+    const canvas = document.createElement('canvas');
+    // Above the page, where the pointer reaches it, in the inline view's shape and touch rule.
+    canvas.style.cssText =
+      'position: fixed; left: 0; top: 0; width: 400px; height: 250px; z-index: 2147483647';
+    document.body.append(canvas);
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb');
+  }, still);
+  type State = { position: number[]; target: number[] };
+  /**
+   * Where the camera is once the view stops gliding. The controls stop a glide with up to 2% of
+   * the view still to go, which the next move carries.
+   */
+  const settled = () =>
+    page.evaluate(async () => {
+      const scene = (window as any).scene;
+      let last = '';
+      while (JSON.stringify(scene.state()) !== last) {
+        last = JSON.stringify(scene.state());
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      return JSON.parse(last) as State;
+    });
+  const sub = (a: number[], b: number[]) => a.map((value, i) => value - b[i]);
+  const dot = (a: number[], b: number[]) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+  const length = (a: number[]) => Math.hypot(...a);
+  const unit = (a: number[]) => a.map((value) => value / length(a));
+  const cross = (a: number[], b: number[]) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+  const offset = (state: State) => sub(state.position, state.target);
+  const start = await settled();
+  expect(length(start.target)).toBe(0);
+  // The camera's right and up, and how tall its 45° view is where it looks.
+  const forward = unit(sub(start.target, start.position));
+  const right = unit(cross(forward, [0, 1, 0]));
+  const up = cross(right, forward);
+  const height = 2 * length(offset(start)) * Math.tan(Math.PI / 8);
+  /** How far the view moved right and up, as shares of its height, turning and zooming none. */
+  const moved = (from: State, to: State) => {
+    expect(length(sub(offset(to), offset(from)))).toBeLessThan(1e-6);
+    const by = sub(to.target, from.target);
+    return [dot(by, right) / height, dot(by, up) / height];
+  };
+  async function drag(from: [number, number], to: [number, number], button?: 'right') {
+    await page.mouse.move(...from);
+    await page.mouse.down({ button });
+    await page.mouse.move(...to, { steps: 8 });
+    await page.mouse.up({ button });
+  }
+
+  // The model follows the pointer, so the view moves the other way by the share dragged.
+  await drag([200, 125], [280, 125], 'right');
+  const dragged = await settled();
+  let [x, y] = moved(start, dragged);
+  expect(Math.abs(x + 80 / 250)).toBeLessThan(0.03);
+  expect(Math.abs(y)).toBeLessThan(0.02);
+  await page.keyboard.down('Shift');
+  await drag([200, 100], [200, 150]);
+  await page.keyboard.up('Shift');
+  const shifted = await settled();
+  [x, y] = moved(dragged, shifted);
+  expect(Math.abs(x)).toBeLessThan(0.02);
+  expect(Math.abs(y - 50 / 250)).toBeLessThan(0.03);
+  // Two fingers moving sideways move it too, where one finger turns it and the chat keeps
+  // vertical swipes.
+  const touch = await page.context().newCDPSession(page);
+  const fingers = (at: number) => [
+    { x: at, y: 110, id: 1 },
+    { x: at, y: 140, id: 2 },
+  ];
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: fingers(240) });
+  for (let at = 230; at >= 160; at -= 10)
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: fingers(at) });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  const swiped = await settled();
+  [x, y] = moved(shifted, swiped);
+  expect(x).toBeGreaterThan(0.2);
+  expect(x).toBeLessThan(80 / 250 + 0.03);
+  expect(Math.abs(y)).toBeLessThan(0.02);
+
+  // Reset returns to the start even while the view still glides from a drag.
+  await drag([200, 125], [120, 160], 'right');
+  await page.evaluate(() => (window as any).scene.reset());
+  const reset = await settled();
+  expect(length(reset.target)).toBeLessThan(1e-9);
+  expect(length(sub(reset.position, start.position))).toBeLessThan(1e-9);
+
+  // The point the view turns around stops at the model's reach, half its diagonal here, and a
+  // drag back moves the view at once.
+  await drag([20, 125], [380, 125], 'right');
+  const edge = await settled();
+  expect(length(edge.target)).toBeLessThan(Math.SQRT1_2 + 1e-9);
+  expect(length(edge.target)).toBeGreaterThan(Math.SQRT1_2 - 0.03);
+  await drag([300, 125], [260, 125], 'right');
+  [x] = moved(edge, await settled());
+  expect(x).toBeGreaterThan(40 / 250 - 0.03);
+
+  // Keys move by a share of the view, a tenth of its width here, and zoom keeps that point.
+  const keyed = await page.evaluate(() => {
+    const scene = (window as any).scene;
+    scene.reset();
+    scene.pan(0.1, 0);
+    const moved = scene.state();
+    scene.zoom(0.8);
+    const zoomed = scene.state();
+    scene.pan(10, 0);
+    return { moved, zoomed, far: scene.state() };
+  });
+  [x, y] = moved(start, keyed.moved);
+  expect(x).toBeCloseTo(0.16, 9);
+  expect(y).toBeCloseTo(0, 9);
+  expect(length(sub(keyed.zoomed.target, keyed.moved.target))).toBeLessThan(1e-9);
+  expect(length(offset(keyed.zoomed)) / length(offset(keyed.moved))).toBeCloseTo(0.8, 9);
+  expect(length(keyed.far.target)).toBeCloseTo(Math.SQRT1_2, 9);
 });
 
 test('a structured-output reply shows the files it sent after its JSON', async ({ page }) => {

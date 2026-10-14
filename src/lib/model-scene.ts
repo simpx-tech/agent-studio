@@ -14,6 +14,7 @@ import type {
   PerspectiveCamera,
   Scene,
   Texture,
+  Vector3,
   WebGLRenderer,
 } from 'three';
 import { blobBase64 } from './images';
@@ -71,6 +72,8 @@ export type ModelScene = {
   zoom(factor: number): void;
   /** Turns the camera around the model by these angles, in radians. */
   orbit(left: number, up: number): void;
+  /** Moves the view by these shares of its width and height, right and up positive. */
+  pan(right: number, up: number): void;
   reset(): void;
   resize(): void;
   state(): SceneState;
@@ -169,18 +172,35 @@ export async function createModelScene(
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
-  controls.enablePan = false;
+  // The right button, Shift (or Ctrl or Cmd) with the left one, and two fingers move the view.
+  // The point it turns around stays within the model's reach, so the model is never lost.
+  controls.maxTargetRadius = radius;
+  // So does the move the controls still owe as the view glides: a drag past the reach would
+  // otherwise hold the view at the edge through the start of the drag back.
+  const owed = (controls as unknown as { _panOffset?: Vector3 })._panOffset;
+  const update = controls.update.bind(controls);
+  controls.update = (time) => {
+    const moved = update(time);
+    owed?.add(controls.target).clampLength(0, radius).sub(controls.target);
+    return moved;
+  };
   controls.enableZoom = !!options.wheelZoom;
   if (!options.wheelZoom) {
     // The controls listen to the wheel without passive scrolling even with zoom off, and ask
     // for every touch. The inline view gives both back to the chat: the wheel scrolls past the
-    // model, and a vertical swipe scrolls while a horizontal one turns it.
+    // model, and a vertical swipe scrolls while a horizontal one turns it, or with two fingers
+    // moves it.
     const wheel = (controls as unknown as { _onMouseWheel?: EventListener })._onMouseWheel;
     if (wheel) canvas.removeEventListener('wheel', wheel);
     canvas.style.touchAction = 'pan-y';
   }
   const direction = new THREE.Vector3(...START).normalize();
   const start = () => {
+    // A turn or move still gliding would carry on from the start: without damping, one update
+    // spends what is left of it.
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = true;
     camera.position.copy(direction).multiplyScalar(fitDistance(THREE, camera, radius));
     controls.target.set(0, 0, 0);
     camera.lookAt(0, 0, 0);
@@ -283,7 +303,9 @@ export async function createModelScene(
       request();
     },
     zoom(factor) {
-      camera.position.multiplyScalar(factor).clampLength(0.35, 12);
+      const offset = camera.position.clone().sub(controls.target);
+      offset.multiplyScalar(factor).clampLength(0.35, 12);
+      camera.position.copy(controls.target).add(offset);
       request();
     },
     orbit(left, up) {
@@ -294,6 +316,15 @@ export async function createModelScene(
       offset.setFromSpherical(spherical);
       camera.position.copy(controls.target).add(offset);
       camera.lookAt(controls.target);
+      request();
+    },
+    pan(right, up) {
+      const offset = camera.position.clone().sub(controls.target);
+      // How tall the view is where the camera looks, as dragging measures it.
+      const height = 2 * offset.length() * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+      const move = new THREE.Vector3(right * height * camera.aspect, up * height, 0);
+      controls.target.add(move.applyQuaternion(camera.quaternion)).clampLength(0, radius);
+      camera.position.copy(controls.target).add(offset);
       request();
     },
     reset() {

@@ -101,6 +101,29 @@ export function whenNear(stage: HTMLElement, near: () => void): () => void {
   return () => observer.disconnect();
 }
 
+/**
+ * What a key does to a focused scene: the arrows turn it, and with Shift move the view the way
+ * they move a zoomed image; + and - zoom, and Home goes back to the starting view.
+ */
+export function sceneKey(
+  event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'altKey' | 'ctrlKey' | 'metaKey'>,
+): ((scene: ModelScene) => void) | undefined {
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  const arrow = (x: number, y: number) => (scene: ModelScene) =>
+    event.shiftKey ? scene.pan(x * 0.1, y * 0.1) : scene.orbit(x * 0.12, y * 0.12);
+  const actions: Record<string, (scene: ModelScene) => void> = {
+    ArrowLeft: arrow(-1, 0),
+    ArrowRight: arrow(1, 0),
+    ArrowUp: arrow(0, 1),
+    ArrowDown: arrow(0, -1),
+    '+': (scene) => scene.zoom(0.8),
+    '=': (scene) => scene.zoom(0.8),
+    '-': (scene) => scene.zoom(1.25),
+    Home: (scene) => scene.reset(),
+  };
+  return actions[event.key];
+}
+
 export type ViewerStatus = {
   phase: 'loading' | 'ready' | 'failed';
   message: string;
@@ -185,7 +208,10 @@ export function createModelViewer(
     element.tabIndex = 0;
     element.setAttribute('role', 'img');
     element.setAttribute('aria-label', options.label);
-    element.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight ArrowUp ArrowDown + - Home');
+    element.setAttribute(
+      'aria-keyshortcuts',
+      'ArrowLeft ArrowRight ArrowUp ArrowDown Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown + - Home',
+    );
     // Laid out so the scene can size itself, but shown only once it draws, with its controls'
     // touch and wheel rules in place.
     element.style.visibility = 'hidden';
@@ -252,23 +278,10 @@ export function createModelViewer(
     idle = setTimeout(() => release(true), RELEASE_AFTER);
   }
   function keys(event: KeyboardEvent) {
-    if (!scene || event.altKey || event.ctrlKey || event.metaKey) return;
-    const step = event.shiftKey ? 0.35 : 0.12;
-    const current = scene;
-    const actions: Record<string, () => void> = {
-      ArrowLeft: () => current.orbit(-step, 0),
-      ArrowRight: () => current.orbit(step, 0),
-      ArrowUp: () => current.orbit(0, step),
-      ArrowDown: () => current.orbit(0, -step),
-      '+': () => current.zoom(0.8),
-      '=': () => current.zoom(0.8),
-      '-': () => current.zoom(1.25),
-      Home: () => current.reset(),
-    };
-    const action = actions[event.key];
-    if (!action) return;
+    const action = sceneKey(event);
+    if (!scene || !action) return;
     event.preventDefault();
-    action();
+    action(scene);
   }
 
   const visible = new IntersectionObserver((entries) => {
