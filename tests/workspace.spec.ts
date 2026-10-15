@@ -2,12 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { chooseTestFolder } from './folder-helper';
 import { expectVisibleQuotaComparison } from './quota-helper';
 import { mockDesktop } from './desktop-helper';
-import {
-  chooseReasoning,
-  expectReasoning,
-  reasoningLevels,
-  reasoningSlider,
-} from './reasoning-helper';
+import { chooseReasoning, reasoningLevels } from './reasoning-helper';
 import { createHash } from 'node:crypto';
 
 async function imageFixture(page: Page, name = 'diagram.png') {
@@ -389,7 +384,9 @@ test('desktop keeps per-chat choices without an agent library', async ({ page })
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toContainText('Claude');
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText('Sonnet');
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning', exact: true })).toContainText(
+    'High',
+  );
   await page.getByLabel('Message', { exact: true }).fill('Hello');
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
 });
@@ -1266,7 +1263,7 @@ test('models and reasoning are remembered independently and each chat retains it
   await pick(page, 'Model', 'Opus');
   await chooseReasoning(page, 'Max');
   await pick(page, 'Model', 'Sonnet');
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('High');
   await pick(page, 'Agent', 'Codex');
   await pick(page, 'Model', 'GPT-6 Astra');
   await chooseReasoning(page, 'Low');
@@ -1287,7 +1284,7 @@ test('models and reasoning are remembered independently and each chat retains it
   );
   await pick(page, 'Model', 'GPT-5.6 Sol');
   await chooseReasoning(page, 'High');
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('High');
   await page.getByLabel('Message', { exact: true }).fill('Continue with a different model');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(4);
@@ -1311,16 +1308,16 @@ test('models and reasoning are remembered independently and each chat retains it
     await expect(page.getByRole('combobox', { name, exact: true })).toBeEnabled();
   await pick(page, 'Agent', 'Claude');
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText('Sonnet');
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('High');
   await pick(page, 'Model', 'Opus');
-  await expectReasoning(page, 'Max');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('Max');
   await page.getByLabel('Message', { exact: true }).fill('Second configured chat');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
   await page.reload();
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText('Opus');
-  await expectReasoning(page, 'Max');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('Max');
   await page.getByRole('tab', { name: /^History/ }).click();
   await page.getByRole('button', { name: 'First configured chat', exact: true }).click();
   for (const name of ['Computer', 'Folder', 'Agent'])
@@ -1328,7 +1325,7 @@ test('models and reasoning are remembered independently and each chat retains it
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText(
     'GPT-5.6 Sol',
   );
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('High');
   await expect(page.locator('.message-heading strong')).toHaveText([
     'You',
     'GPT-6 Astra',
@@ -1360,14 +1357,16 @@ test('unsupported reasoning levels are absent and only location and agent stay l
   await chooseTestFolder(page);
   await pick(page, 'Agent', 'Gemini');
   await pick(page, 'Model', 'Gemini 3.1 Pro');
+  await page.getByRole('combobox', { name: 'Reasoning' }).click();
   await expect(reasoningLevels(page)).toHaveText(['Default', 'Low', 'High']);
+  await page.keyboard.press('Escape');
   await page.getByLabel('Message', { exact: true }).fill('A slow reply');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
   for (const name of ['Computer', 'Folder', 'Agent'])
     await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
-  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeEnabled();
-  await expect(reasoningSlider(page)).toBeEnabled();
+  for (const name of ['Model', 'Reasoning'])
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Stop response' }).click();
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeEnabled();
   for (const name of ['Computer', 'Folder', 'Agent'])
@@ -2121,7 +2120,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   await page.screenshot({ path: 'artifacts/folder-groups-browser.png', animations: 'disabled' });
   const controlRows = () =>
     page
-      .locator('.chat-configuration :is([role="combobox"], .choice-slider)')
+      .locator('.chat-configuration [role="combobox"]')
       .evaluateAll((controls) => controls.map((control) => control.getBoundingClientRect().top));
   expect(new Set(await controlRows()).size).toBe(1);
   await page.setViewportSize({ width: 880, height: 720 });
@@ -2208,7 +2207,7 @@ test('reselecting the computer preserves the draft and folders reuse ready CLI a
   await page.getByRole('option', { name: 'Desktop', exact: true }).click();
   await expect(picker('Folder')).toHaveAttribute('title', 'C:\\Projects\\studio');
   await expect(picker('Model').locator('.selected-name')).toHaveText('GPT-6 Astra');
-  await expectReasoning(page, 'High');
+  await expect(picker('Reasoning')).toHaveText('High');
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue(
     'Keep this draft and its settings',
   );
@@ -2227,7 +2226,7 @@ test('reselecting the computer preserves the draft and folders reuse ready CLI a
   await expect(picker('Agent')).toBeEnabled();
   await picker('Model').click();
   await page.getByRole('option', { name: 'GPT-5.6 Sol', exact: true }).click();
-  await expectReasoning(page, 'Low');
+  await expect(picker('Reasoning')).toHaveText('Low');
   expect(
     await page.evaluate(() =>
       (window as any).cliCalls.filter((c: any) => c.command !== 'list_folders'),
@@ -2291,7 +2290,7 @@ test('cold CLI checks and model requests do not block folder selection or overwr
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled();
   await expect(picker('Agent')).toHaveText('Claude');
   await expect(picker('Model')).toHaveText('Sonnet');
-  await expectReasoning(page, 'High');
+  await expect(picker('Reasoning')).toHaveText('High');
   await picker('Model').click();
   await expect(page.getByRole('option', { name: 'GPT-6 Astra', exact: true })).toHaveCount(0);
   await picker('Model').press('Escape');

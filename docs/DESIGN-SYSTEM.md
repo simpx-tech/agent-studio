@@ -110,12 +110,14 @@ mark in the script and `BrandMark.svelte` together.
   The toolbar caps each picker, which its trigger fills, at 220px and the Agent's at 280px (170px
   and 220px in windows up to 1100px wide): a cap on the trigger alone leaves the room a longer
   name asked for empty beside it.
-- **Sliders:** `ChoiceSlider.svelte` chooses among ordered choices, as Reasoning does: a native
-  range input over a 2px `--border-strong` line with a 4px `--text-faint` dot at each stop, the
-  line behind the thumb in `--text-muted`, a 12px `--text-secondary` thumb (`--text` on hover and
-  while held, with the focus ring around it from the keyboard), and the choice's name after the
-  track in the width of the longest, so the control never changes width. A page fits it to its
-  room with `--slider-track`, `--slider-gap` and `--slider-padding`.
+- **Sliders:** for ordered choices, such as Reasoning, a `ChoicePicker` with `slider` opens
+  `ChoiceSlider.svelte` instead of a list: a 4px `--border-strong` track with a 6px
+  `--border-hover` dot at each stop, filled in `--accent-strong` up to a 16px `--accent-strong`
+  thumb ringed in `--surface-overlay` (the dots it passes turn `--accent-strong`, a
+  `--focus-glow` halo shows while it is dragged and the focus ring from the keyboard), and each
+  stop's name under it at `--text-xs` in `--text-muted`, the chosen one in `--text`. The thumb and
+  fill glide over `--duration-slow` with `--ease-out`, through transforms only, and follow a drag
+  at once. The popover widens with the stops (`sliderWidth`).
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
   accent bar at its left edge.
 - **Day divisions:** where a chat continues on another day, the day's name in `--text-muted` at

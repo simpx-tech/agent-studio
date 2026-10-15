@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
-import { chooseReasoning, reasoningSlider } from './reasoning-helper';
+import { chooseReasoning } from './reasoning-helper';
 
 const runCount = (page: Page) => page.evaluate(() => localStorage.getItem('test-run-count'));
 const lastRequest = (page: Page) =>
@@ -123,9 +123,10 @@ test('a message waits for a reply that is working, or whose next reply needs a n
 }) => {
   const { input } = await waitingReply(page);
   // Other launch settings need a new process, which would end the background work.
-  const other =
-    (await reasoningSlider(page).getAttribute('aria-valuetext')) === 'Low' ? 'High' : 'Low';
+  const reasoning = page.getByRole('combobox', { name: 'Reasoning', exact: true });
+  const other = (await reasoning.textContent())?.includes('Low') ? 'High' : 'Low';
   await chooseReasoning(page, other);
+  await expect(reasoning).toContainText(other);
   await expect(page.getByRole('button', { name: 'Queue message' })).toBeVisible();
   await input.fill('After the agents');
   await input.press('Enter');

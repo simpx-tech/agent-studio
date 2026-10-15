@@ -69,10 +69,6 @@ const click = (selector) =>
   }, selector);
 const text = (selector) =>
   evaluate((selector) => document.querySelector(selector)?.innerText, selector);
-const reasoning = () =>
-  evaluate(() =>
-    document.querySelector('input[aria-label="Reasoning"]')?.getAttribute('aria-valuetext'),
-  );
 const button = (name) =>
   evaluate((name) => {
     const control = [...document.querySelectorAll('button')].find(
@@ -187,13 +183,15 @@ try {
       );
       assert(win32.isAbsolute(folder), 'A native Windows folder is required.');
       const computer = await text(picker('Computer'));
-      const settings = () =>
-        Promise.all([text(picker('Agent')), text(picker('Model')), reasoning()]);
-      const selected = await settings();
-      assert(selected[2], 'The Reasoning slider is required.');
+      const selected = await Promise.all(
+        ['Agent', 'Model', 'Reasoning'].map((name) => text(picker(name))),
+      );
       await click(picker('Computer'));
       const sameComputerMs = await measure(option(computer), folder);
-      assert.deepEqual(await settings(), selected);
+      assert.deepEqual(
+        await Promise.all(['Agent', 'Model', 'Reasoning'].map((name) => text(picker(name)))),
+        selected,
+      );
       await click(picker('Folder'));
       await click(option('Browse folders…'));
       await waitFor(() =>

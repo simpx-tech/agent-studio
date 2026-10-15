@@ -3,6 +3,7 @@
   import { Check, ChevronDown, CircleAlert } from '@lucide/svelte';
   import { anchorPopover } from '$lib/anchorPopover';
   import AccountMark from './AccountMark.svelte';
+  import ChoiceSlider, { sliderWidth } from './ChoiceSlider.svelte';
   type Option = {
     id: string;
     name: string;
@@ -30,6 +31,7 @@
     disabled = false,
     field = false,
     fallbackToFirst = true,
+    slider = false,
     anchor,
     open = $bindable(false),
     heading,
@@ -54,6 +56,9 @@
     disabled?: boolean;
     field?: boolean;
     fallbackToFirst?: boolean;
+    /** Opens a slider over the options, in their order, instead of a list. Each step is a
+     * choice, and the slider stays open until it is closed. */
+    slider?: boolean;
     anchor?: HTMLTextAreaElement;
     open?: boolean;
     heading?: string;
@@ -63,6 +68,7 @@
   const id = $props.id();
   let root: HTMLDivElement;
   let trigger = $state<HTMLButtonElement>();
+  let panel = $state<ChoiceSlider>();
   let highlighted = $state(0);
   let search = '';
   let searchedAt = 0;
@@ -90,14 +96,28 @@
   function show() {
     if (disabled) return;
     open = true;
+    search = '';
+    // The slider takes focus, so its keys work at once.
+    if (slider) {
+      void tick().then(() => panel?.focus());
+      return;
+    }
     // Safari does not focus buttons on a pointer click. Keep combobox keyboard
     // navigation and focus ownership consistent after opening with touch/mouse.
     trigger?.focus({ preventScroll: true });
-    search = '';
     void highlight(options.findIndex((option) => option.id === value));
   }
   export function showPicker() {
     show();
+  }
+  // Closing the slider from its trigger or its keys gives focus back to the trigger.
+  function closeSlider() {
+    trigger?.focus({ preventScroll: true });
+    open = false;
+  }
+  // The slider closes once focus leaves the picker.
+  function left(event: FocusEvent) {
+    if (!root.contains(event.relatedTarget as Node | null)) open = false;
   }
 
   function choose(index: number) {
@@ -160,6 +180,22 @@
   });
 
   function keyboard(event: KeyboardEvent) {
+    // The slider has keys of its own; the trigger opens it, or moves focus back into it.
+    if (slider) {
+      if (event.key === 'Escape' && open) {
+        event.preventDefault();
+        event.stopPropagation();
+        open = false;
+      } else if (event.key === 'Tab') {
+        open = false;
+      } else if (['Enter', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        if (!open) show();
+        else if (event.key === 'Enter' || event.key === ' ') open = false;
+        else panel?.focus();
+      }
+      return;
+    }
     if (event.key === 'Escape' && open) {
       event.preventDefault();
       event.stopPropagation();
@@ -206,16 +242,20 @@
       aria-label={label}
       title={title ?? (field ? undefined : label)}
       {disabled}
-      aria-haspopup="listbox"
+      aria-haspopup={slider ? 'dialog' : 'listbox'}
       aria-expanded={open}
       aria-controls={`${id}-list`}
-      aria-activedescendant={open && options[highlighted]
+      aria-activedescendant={!slider && open && options[highlighted]
         ? `${id}-option-${highlighted}`
         : undefined}
       bind:this={trigger}
-      onclick={() => (open ? (open = false) : show())}
+      onpointerdown={(event) => {
+        // Focus stays in the open slider until the click closes it.
+        if (slider && open) event.preventDefault();
+      }}
+      onclick={() => (open ? (slider ? closeSlider() : (open = false)) : show())}
       onkeydown={keyboard}
-      onblur={() => (open = false)}
+      onblur={(event) => (slider ? left(event) : (open = false))}
     >
       {#if icon}<span class="picker-icon" aria-hidden="true">{@render icon()}</span>{/if}
       <span class="selected-name" class:placeholder={!selected && !!placeholder}>
@@ -228,68 +268,82 @@
   {#if open}
     <div
       class="picker-popover"
+      id={slider ? `${id}-list` : undefined}
+      role={slider ? 'dialog' : undefined}
+      aria-labelledby={slider ? `${id}-label` : undefined}
       popover="manual"
-      use:anchorPopover={{ trigger: anchor ?? trigger!, width }}
+      use:anchorPopover={{
+        trigger: anchor ?? trigger!,
+        width: slider ? sliderWidth(options.length) : width,
+      }}
     >
       <div class="picker-heading" id={`${id}-label`}>
         {heading ?? `Choose ${label.toLowerCase()}`}
       </div>
-      <div
-        id={`${id}-list`}
-        role="listbox"
-        aria-labelledby={`${id}-label`}
-        class="picker-options"
-        class:with-aside={!!optionAside}
-      >
-        {#if !options.length}<p class="picker-empty" role="status">{emptyMessage}</p>{/if}
-        {#each options as option, index (option.id)}
-          <button
-            id={`${id}-option-${index}`}
-            class="picker-option"
-            class:highlighted={index === highlighted}
-            type="button"
-            role="option"
-            aria-selected={option.id === value}
-            aria-label={option.attention && option.detail
-              ? `${option.name}, ${option.detail}`
-              : option.name}
-            aria-describedby={optionAside ? `${id}-option-${index}-aside` : undefined}
-            title={option.title}
-            tabindex="-1"
-            onpointermove={() => (highlighted = index)}
-            onpointerdown={(event) => event.preventDefault()}
-            onclick={() => choose(index)}
-          >
-            {#if optionIcon}<span class="option-icon" aria-hidden="true"
-                >{@render optionIcon(option)}</span
-              >{:else if optionMark}{@render optionMark(
-                option,
-              )}{:else if option.mark && option.fill}<AccountMark
-                glyph={option.mark}
-                color={option.fill}
-              />{:else if option.mark}<span
-                class="option-mark"
-                style:--provider-color={option.color}
-                aria-hidden="true">{option.mark}</span
-              >{/if}
-            <span class="option-copy">
-              <span class="option-name">{option.name}</span>
-              {#if option.detail}<span class="option-detail" class:attention={option.attention}
-                  >{#if option.attention}<CircleAlert
-                      size={12}
-                      aria-hidden="true"
-                    />{/if}{option.detail}</span
+      {#if slider}<ChoiceSlider
+          bind:this={panel}
+          {options}
+          {value}
+          {label}
+          {onchange}
+          onclose={closeSlider}
+          onblur={left}
+        />{:else}<div
+          id={`${id}-list`}
+          role="listbox"
+          aria-labelledby={`${id}-label`}
+          class="picker-options"
+          class:with-aside={!!optionAside}
+        >
+          {#if !options.length}<p class="picker-empty" role="status">{emptyMessage}</p>{/if}
+          {#each options as option, index (option.id)}
+            <button
+              id={`${id}-option-${index}`}
+              class="picker-option"
+              class:highlighted={index === highlighted}
+              type="button"
+              role="option"
+              aria-selected={option.id === value}
+              aria-label={option.attention && option.detail
+                ? `${option.name}, ${option.detail}`
+                : option.name}
+              aria-describedby={optionAside ? `${id}-option-${index}-aside` : undefined}
+              title={option.title}
+              tabindex="-1"
+              onpointermove={() => (highlighted = index)}
+              onpointerdown={(event) => event.preventDefault()}
+              onclick={() => choose(index)}
+            >
+              {#if optionIcon}<span class="option-icon" aria-hidden="true"
+                  >{@render optionIcon(option)}</span
+                >{:else if optionMark}{@render optionMark(
+                  option,
+                )}{:else if option.mark && option.fill}<AccountMark
+                  glyph={option.mark}
+                  color={option.fill}
+                />{:else if option.mark}<span
+                  class="option-mark"
+                  style:--provider-color={option.color}
+                  aria-hidden="true">{option.mark}</span
                 >{/if}
-            </span>
-            {#if optionAside}<span class="option-aside" id={`${id}-option-${index}-aside`}
-                >{@render optionAside(option)}</span
-              >{/if}
-            <span class="option-check" aria-hidden="true">
-              {#if option.id === value}<Check size={15} strokeWidth={2} />{/if}
-            </span>
-          </button>
-        {/each}
-      </div>
+              <span class="option-copy">
+                <span class="option-name">{option.name}</span>
+                {#if option.detail}<span class="option-detail" class:attention={option.attention}
+                    >{#if option.attention}<CircleAlert
+                        size={12}
+                        aria-hidden="true"
+                      />{/if}{option.detail}</span
+                  >{/if}
+              </span>
+              {#if optionAside}<span class="option-aside" id={`${id}-option-${index}-aside`}
+                  >{@render optionAside(option)}</span
+                >{/if}
+              <span class="option-check" aria-hidden="true">
+                {#if option.id === value}<Check size={15} strokeWidth={2} />{/if}
+              </span>
+            </button>
+          {/each}
+        </div>{/if}
     </div>
   {/if}
 </div>

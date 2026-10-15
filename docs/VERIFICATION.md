@@ -1,5 +1,17 @@
 # Verification — 2026-09-08
 
+## The Reasoning dropdown opens an animated slider — 2026-10-15
+
+Requested 2026-10-15, after trying the inline slider below in a preview build: "Can you make still a dropdown, where the slider only shows when opened? Also can you make the slider animated?"
+
+- `ChoicePicker.svelte` has a `slider` mode. Its trigger is the dropdown's (brain icon, level, chevron) with `aria-haspopup="dialog"`, and opening it shows `ChoiceSlider.svelte` instead of a list, with focus on the slider. The keys step through the levels, each step applying at once and showing on the trigger; Escape and Enter close it and return focus to the trigger, as does the trigger itself (its press keeps focus in the slider until its click closes it), and a click elsewhere or focus leaving the picker closes it. The popover widens with the stops (`sliderWidth`: 288px up to five, 358px for seven). The toolbar's Reasoning is the dropdown again, `/reasoning` opens it, and the inline slider's narrow-window rules are gone.
+- `ChoiceSlider.svelte` draws the slider itself above a native range input left invisible over the track, which keeps the keys and what assistive technology reads: a track with a dot at each stop, a fill and a thumb in `--accent-strong`, and each stop's name under it, the chosen one brighter. The thumb and fill move by transforms that glide over `--duration-slow` with `--ease-out`. A pointer pressed on a stop or a name chooses it, and a drag holds the thumb under the pointer, without a transition, and lets it glide to the nearest stop on release. The page handles every pointer itself, so on iOS a finger works anywhere on the track.
+- Tests: `tests/reasoning-slider.spec.ts`, in Edge and WebKit, opens the slider from the mouse and the keyboard, steps it, closes it with Escape, Enter, the trigger and a click elsewhere, clicks a name and a point on the track, drags with the thumb held under the pointer until it settles on the nearest stop, and checks the request; the runner and the fill run a transform transition after a key, none while dragged, one after release and none under reduced motion; `/reasoning`; seven levels whose names stay inside the popover and apart, in light; and on a phone, taps on a stop and a name and a finger dragged through untrusted pointer events. The specs and native smoke scripts converted for the inline slider are back to their dropdown steps, with `chooseReasoning` (`tests/reasoning-helper.ts`) where they picked a level from the list. Reviewed the glide frame by frame (transitions paused at 0 to 400 ms) and screenshots in both themes and on a phone.
+- Native: an isolated release build (`com.vinicius.agentstudio.slider-preview`, own data, no relay, automatic CLI updates off) opened the slider with GPT-6.1-Sol's seven levels, focused, ran both glides on a real key press, closed on Escape and drew as the browser builds do.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,269 files), 763 Vitest tests in 94 files, the build, and all 415 browser tests in three shards, the local sockets drained to about 400 while another program's local server held the rest. No Rust change.
+- Not exercised: an iPhone.
+- Choices of mine, not confirmed: the slider stays open after each choice; the names under the stops; the lime accent for the fill and thumb, where the inline slider stayed neutral; the 260 ms glide.
+
 ## Reasoning is a slider — 2026-10-15
 
 Requested 2026-10-15: "Can you make reasoning a slider?"

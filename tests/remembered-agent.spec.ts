@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
-import { chooseReasoning, expectReasoning } from './reasoning-helper';
+import { chooseReasoning } from './reasoning-helper';
 
 async function pick(page: Page, label: string, name: string) {
   await page.getByRole('combobox', { name: label, exact: true }).click();
@@ -47,7 +47,7 @@ test('new chats start with the agent and account last chosen, not the last one r
   await send(page, 'A follow-up on the CLI login', 2);
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(agent).toHaveText(/Claude · Second Claude/);
-  await expectReasoning(page, 'High');
+  await expect(page.getByRole('combobox', { name: 'Reasoning' })).toContainText('High');
 
   // Reopening the app starts the new chat with it too.
   await page.reload();

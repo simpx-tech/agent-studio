@@ -1,77 +1,119 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
-import { reasoningLevels as stops, reasoningSlider as slider } from './reasoning-helper';
+import {
+  reasoningLevels as names,
+  reasoningPicker as picker,
+  reasoningSlider as slider,
+} from './reasoning-helper';
 
 async function pick(page: Page, label: string, name: string) {
   await page.getByRole('combobox', { name: label, exact: true }).click();
   await page.getByRole('option', { name, exact: true }).click();
 }
-const control = (page: Page) => page.locator('.reasoning-setting .choice-slider');
-// The name shown beside the track.
-const shown = (page: Page) => control(page).locator('.slider-value > .shown');
-// Where a stop lies on the track: the thumb's center rests on it.
-async function stopPoint(page: Page, stop: number) {
-  const box = (await slider(page).boundingBox())!;
-  const count = await stops(page).count();
-  const thumb = await control(page).evaluate((element) =>
-    parseFloat(getComputedStyle(element).getPropertyValue('--thumb')),
-  );
-  return {
-    x: box.x + thumb / 2 + ((box.width - thumb) * stop) / (count - 1),
-    y: box.y + box.height / 2,
-  };
-}
+const popover = (page: Page) => page.locator('.picker-popover:popover-open');
+const chosen = (page: Page) => page.locator('.slider-names > .chosen');
 async function expectReasoning(page: Page, name: string) {
   await expect(slider(page)).toHaveAttribute('aria-valuetext', name);
-  await expect(shown(page)).toHaveText(name);
+  await expect(chosen(page)).toHaveText(name);
+  await expect(picker(page)).toHaveText(name);
 }
-async function claudeOpus(page: Page) {
+// Where a stop lies on the track: the thumb's center rests on it.
+async function stopPoint(page: Page, stop: number) {
+  const box = (await page.locator('.slider-track').boundingBox())!;
+  const count = await names(page).count();
+  return { x: box.x + 8 + ((box.width - 16) * stop) / (count - 1), y: box.y + box.height / 2 };
+}
+async function thumbCenter(page: Page) {
+  const box = (await page.locator('.slider-thumb').boundingBox())!;
+  return box.x + box.width / 2;
+}
+const settled = (page: Page) =>
+  page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
+async function claude(page: Page, model = 'Opus', levels?: string[]) {
   await mockDesktop(page);
+  if (levels)
+    await page.addInitScript((levels) => {
+      localStorage.setItem(
+        'test-claude-models',
+        JSON.stringify([
+          { id: '', name: 'CLI default', reasoningLevels: [], defaultReasoning: '' },
+          { id: 'opus', name: 'Opus', reasoningLevels: levels, defaultReasoning: '' },
+        ]),
+      );
+    }, levels);
   await page.goto('/');
   await chooseTestFolder(page);
   await pick(page, 'Agent', 'Claude');
-  await pick(page, 'Model', 'Opus');
+  await pick(page, 'Model', model);
 }
 
-test('reasoning is a slider over the model levels, by keyboard and pointer @webkit', async ({
-  page,
-}) => {
-  await claudeOpus(page);
-  await expect(stops(page)).toHaveText(['Default', 'Low', 'Medium', 'High', 'Max']);
-  await expect(slider(page)).toBeEnabled();
-  await expect(slider(page)).toHaveAttribute('max', '4');
-  await page.screenshot({ path: 'artifacts/reasoning-slider-toolbar.png' });
+test('the Reasoning picker opens a slider over the model levels @webkit', async ({ page }) => {
+  await claude(page);
+  await expect(picker(page)).toHaveText('Medium');
+  await expect(slider(page)).toHaveCount(0);
 
-  // The keyboard steps through the levels.
-  await slider(page).press('Home');
+  // The slider opens with focus, and each step is chosen at once.
+  await picker(page).click();
+  await expect(slider(page)).toBeFocused();
+  await expect(names(page)).toHaveText(['Default', 'Low', 'Medium', 'High', 'Max']);
+  await expectReasoning(page, 'Medium');
+  await page.keyboard.press('ArrowRight');
+  await expectReasoning(page, 'High');
+  await page.keyboard.press('Home');
   await expectReasoning(page, 'Default');
-  const width = (await control(page).boundingBox())!.width;
-  await slider(page).press('End');
+  await page.keyboard.press('End');
   await expectReasoning(page, 'Max');
-  await slider(page).press('ArrowLeft');
-  await expectReasoning(page, 'High');
-  // The control keeps its width whichever name it shows.
-  expect((await control(page).boundingBox())!.width).toBe(width);
+  await page
+    .locator('.chat-toolbar')
+    .screenshot({ path: 'artifacts/reasoning-slider-toolbar.png' });
+  await page.keyboard.press('Escape');
+  await expect(slider(page)).toHaveCount(0);
+  await expect(picker(page)).toBeFocused();
+  await expect(picker(page)).toHaveText('Max');
 
-  // A click on a stop chooses it, and a drag follows the pointer to the stop it ends on.
-  let point = await stopPoint(page, 1);
-  await page.mouse.click(point.x, point.y);
+  // From the keyboard, Enter opens it and closes it again.
+  await page.keyboard.press('Enter');
+  await expect(slider(page)).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expectReasoning(page, 'High');
+  await page.keyboard.press('Enter');
+  await expect(slider(page)).toHaveCount(0);
+  await expect(picker(page)).toBeFocused();
+
+  // A click on a name or along the track chooses that stop and keeps the slider open.
+  await picker(page).click();
+  await names(page).filter({ hasText: /^Low$/ }).click();
   await expectReasoning(page, 'Low');
-  await page.mouse.down();
-  point = await stopPoint(page, 4);
-  await page.mouse.move(point.x + 30, point.y, { steps: 6 });
-  await page.mouse.up();
-  await expectReasoning(page, 'Max');
-  await page.locator('.chat-toolbar').screenshot({ path: 'artifacts/reasoning-slider-max.png' });
-
-  // Another model has its own levels, and each model keeps the level chosen for it.
-  await pick(page, 'Model', 'Sonnet');
-  await expect(stops(page)).toHaveText(['Default', 'Low', 'Medium', 'High']);
-  await slider(page).press('End');
+  let point = await stopPoint(page, 3);
+  await page.mouse.click(point.x, point.y + 2);
   await expectReasoning(page, 'High');
-  await pick(page, 'Model', 'Opus');
+  await expect(slider(page)).toBeFocused();
+
+  // A drag holds the thumb under the pointer, then settles on the nearest stop.
+  point = await stopPoint(page, 3);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  const end = await stopPoint(page, 4);
+  const between = point.x + (end.x - point.x) * 0.4;
+  await page.mouse.move(between, point.y, { steps: 4 });
+  expect(Math.abs((await thumbCenter(page)) - between)).toBeLessThan(1.5);
+  await expectReasoning(page, 'High');
+  await page.mouse.move(end.x + 40, point.y, { steps: 4 });
   await expectReasoning(page, 'Max');
+  await page.mouse.up();
+  await settled(page);
+  expect(Math.abs((await thumbCenter(page)) - end.x)).toBeLessThan(1);
+  await popover(page).screenshot({ path: 'artifacts/reasoning-slider-open.png' });
+
+  // The trigger closes it, and so does a click elsewhere.
+  await picker(page).click();
+  await expect(slider(page)).toHaveCount(0);
+  await expect(picker(page)).toBeFocused();
+  await picker(page).click();
+  await expect(slider(page)).toBeVisible();
+  await page.getByLabel('Message', { exact: true }).click();
+  await expect(slider(page)).toHaveCount(0);
 
   await page.getByLabel('Message', { exact: true }).fill('Think hard');
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -79,21 +121,46 @@ test('reasoning is a slider over the model levels, by keyboard and pointer @webk
   expect(
     await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!).agent),
   ).toMatchObject({ provider: 'claude', model: 'opus', reasoning: 'max' });
-  // An existing chat keeps it, and it still changes for the next message.
-  await expectReasoning(page, 'Max');
-  await slider(page).press('ArrowLeft');
-  await expectReasoning(page, 'High');
-  await page.getByLabel('Message', { exact: true }).fill('A little less');
-  await page.getByRole('button', { name: 'Send message' }).click();
-  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(4);
-  await expect(page.locator('.reply-switch')).toHaveText('Switched to High reasoning');
-  expect(
-    await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!).agent),
-  ).toMatchObject({ model: 'opus', reasoning: 'high' });
 });
 
-test('/reasoning moves focus to the slider and keeps the draft', async ({ page }) => {
-  await claudeOpus(page);
+test('the thumb and fill glide between stops and follow a drag at once', async ({ page }) => {
+  await claude(page);
+  await picker(page).click();
+  await expect(slider(page)).toBeFocused();
+  const runner = page.locator('.slider-runner');
+  const fill = page.locator('.slider-fill');
+  const glides = (locator: typeof runner) =>
+    locator.evaluate((element) =>
+      element
+        .getAnimations()
+        .filter((a) => (a as CSSTransition).transitionProperty === 'transform')
+        .map((a) => a.playState),
+    );
+  await page.keyboard.press('End');
+  expect(await glides(runner)).toEqual(['running']);
+  expect(await glides(fill)).toEqual(['running']);
+  await settled(page);
+  expect(await glides(runner)).toEqual([]);
+
+  // A dragged thumb moves with the pointer, without a glide behind it.
+  const start = await stopPoint(page, 4);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x - 30, start.y, { steps: 3 });
+  expect(await glides(runner)).toEqual([]);
+  await page.mouse.up();
+  expect(await glides(runner)).toEqual(['running']);
+  await settled(page);
+
+  // Reduced motion moves it at once.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.keyboard.press('Home');
+  await expectReasoning(page, 'Default');
+  expect(await glides(runner)).toEqual([]);
+});
+
+test('/reasoning opens the slider and keeps the draft', async ({ page }) => {
+  await claude(page);
   const input = page.getByLabel('Message', { exact: true });
   await input.fill('/reasoning keep this draft');
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -104,64 +171,66 @@ test('/reasoning moves focus to the slider and keeps the draft', async ({ page }
   await expect(page.locator('.message')).toHaveCount(0);
 });
 
-test('the slider fits the toolbar in narrow windows and in light @webkit', async ({ page }) => {
-  await claudeOpus(page);
-  await slider(page).press('End');
-  const row = () =>
-    page
-      .locator('.chat-configuration')
-      .locator('[role="combobox"], .choice-slider')
-      .evaluateAll((controls) => controls.map((control) => control.getBoundingClientRect().top));
-  for (const width of [1380, 1100, 880]) {
-    await page.setViewportSize({ width, height: 720 });
-    expect(new Set(await row()).size).toBe(1);
-    // The whole slider shows, its name included.
-    const configuration = (await page.locator('.chat-configuration').boundingBox())!;
-    const box = (await control(page).boundingBox())!;
-    expect(box.x + box.width).toBeLessThanOrEqual(configuration.x + configuration.width + 0.5);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-      true,
-    );
-    await page
-      .locator('.chat-toolbar')
-      .screenshot({ path: `artifacts/reasoning-slider-${width}.png` });
-  }
-  await page.evaluate(() => localStorage.setItem('agent-studio.theme', 'light'));
-  await page.reload();
-  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-  await page.setViewportSize({ width: 1380, height: 720 });
-  await expectReasoning(page, 'Max');
-  await page.locator('.chat-toolbar').screenshot({ path: 'artifacts/reasoning-slider-light.png' });
+test('seven levels keep their names apart in light @webkit', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('agent-studio.theme', 'light'));
+  await claude(page, 'Opus', ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  await picker(page).click();
+  await expect(names(page)).toHaveText([
+    'Default',
+    'Low',
+    'Medium',
+    'High',
+    'Extra high',
+    'Max',
+    'Ultra',
+  ]);
+  await expectApart(page);
+  await popover(page).screenshot({ path: 'artifacts/reasoning-slider-light.png' });
 });
+
+// Every name sits inside the popover without touching its neighbors.
+async function expectApart(page: Page) {
+  const panel = (await popover(page).boundingBox())!;
+  const boxes = await names(page).evaluateAll((spans) =>
+    spans.map((span) => {
+      const { left, right } = span.getBoundingClientRect();
+      return { left, right };
+    }),
+  );
+  expect(boxes[0].left).toBeGreaterThanOrEqual(panel.x);
+  expect(boxes.at(-1)!.right).toBeLessThanOrEqual(panel.x + panel.width);
+  for (let i = 1; i < boxes.length; i++)
+    expect(boxes[i].left - boxes[i - 1].right).toBeGreaterThanOrEqual(4);
+}
 
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  test('a tap anywhere on the track chooses that stop @webkit', async ({ page }) => {
-    await claudeOpus(page);
-    await slider(page).scrollIntoViewIfNeeded();
-    const box = (await control(page).boundingBox())!;
-    expect(box.height).toBeGreaterThanOrEqual(44);
-    await slider(page).press('Home');
-    await expectReasoning(page, 'Default');
+  test('a tap or a finger along the track chooses a stop @webkit', async ({ page }) => {
+    await claude(page, 'Opus', ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+    await picker(page).scrollIntoViewIfNeeded();
+    await picker(page).tap();
+    await expect(slider(page)).toBeVisible();
+    await expectApart(page);
     let point = await stopPoint(page, 3);
     await page.touchscreen.tap(point.x, point.y);
     await expectReasoning(page, 'High');
-    point = await stopPoint(page, 1);
-    await page.touchscreen.tap(point.x, point.y);
+    const name = (await names(page).nth(1).boundingBox())!;
+    await page.touchscreen.tap(name.x + name.width / 2, name.y + name.height / 2);
     await expectReasoning(page, 'Low');
     await page.screenshot({ path: 'artifacts/reasoning-slider-phone.png' });
 
-    // iOS moves a range input only from its thumb, so the page follows a finger itself. These
-    // events reach only the page: the input does nothing with untrusted ones.
-    const finger = async (type: string, stop: number, buttons = 1) => {
-      const at = await stopPoint(page, stop);
-      await slider(page).dispatchEvent(type, {
+    // A finger dragged along the track takes the stops it passes.
+    const finger = async (type: string, stop: number) => {
+      point = await stopPoint(page, stop);
+      await page.locator('.slider-area').dispatchEvent(type, {
+        pointerId: 7,
         pointerType: 'touch',
         isPrimary: true,
-        buttons,
-        clientX: at.x,
-        clientY: at.y,
+        button: type === 'pointerdown' ? 0 : -1,
+        buttons: type === 'pointerup' ? 0 : 1,
+        clientX: point.x,
+        clientY: point.y,
         bubbles: true,
       });
     };
@@ -169,10 +238,9 @@ test.describe('on a phone', () => {
     await expectReasoning(page, 'Default');
     await finger('pointermove', 2);
     await expectReasoning(page, 'Medium');
-    await finger('pointermove', 4);
-    await expectReasoning(page, 'Max');
-    // A pen held above the screen moves nothing.
-    await finger('pointermove', 1, 0);
-    await expectReasoning(page, 'Max');
+    await finger('pointermove', 6);
+    await expectReasoning(page, 'Ultra');
+    await finger('pointerup', 6);
+    await expect(slider(page)).toBeVisible();
   });
 });

@@ -270,7 +270,6 @@
     type ModelCatalog,
   } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
-  import ChoiceSlider from '$lib/components/ChoiceSlider.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
@@ -280,7 +279,7 @@
   let mentionSelection = $state('');
   const hasComposerMentions = $derived(!!draftMentions.length || !!staleMentionTokens.length);
   let modelPicker = $state<ChoicePicker>();
-  let reasoningSlider = $state<ChoiceSlider>();
+  let reasoningPicker = $state<ChoicePicker>();
   let agentPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
   let preparingCommand = false;
@@ -6277,9 +6276,10 @@
                 </ChoicePicker>
               </div>
               <div class="chat-setting reasoning-setting">
-                <ChoiceSlider
-                  bind:this={reasoningSlider}
+                <ChoicePicker
+                  bind:this={reasoningPicker}
                   label="Reasoning"
+                  slider
                   value={selectedSettings.reasoning}
                   options={reasoningOptions}
                   disabled={!loaded ||
@@ -6289,7 +6289,7 @@
                     changeSettings({ ...selectedSettings, reasoning: value as Reasoning })}
                 >
                   {#snippet icon()}<Brain size={16} />{/snippet}
-                </ChoiceSlider>
+                </ChoicePicker>
               </div>
             </div>
             {#key activeId}<ToolbarActions>
@@ -6582,7 +6582,8 @@
                 scope={activeId ?? draftKey.scratch(scratchId)}
                 oncommand={(name) => {
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
-                  else if (name === 'reasoning') void tick().then(() => reasoningSlider?.focus());
+                  else if (name === 'reasoning')
+                    void tick().then(() => reasoningPicker?.showPicker());
                   else if (name === 'instructions' || name === 'fast') {
                     focusFast = name === 'fast';
                     editorOpen = true;

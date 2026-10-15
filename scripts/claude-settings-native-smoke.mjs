@@ -63,15 +63,17 @@ async function choose(label, prefix) {
   }, prefix);
 }
 async function reasoning(level) {
+  await page.click('[role="combobox"][aria-label="Reasoning"]');
+  await page.waitFor(() => !!document.querySelector('input[aria-label="Reasoning"]'));
   await page.evaluate((level) => {
     const input = document.querySelector('input[aria-label="Reasoning"]');
-    const levels = [...document.querySelectorAll('.reasoning-setting .slider-value > span')].map(
+    const levels = [...document.querySelectorAll('.choice-slider .slider-names > span')].map(
       (span) => span.textContent,
     );
-    if (!input || input.disabled || !levels.includes(level))
-      throw Error(`Reasoning level not available: ${level}`);
+    if (!levels.includes(level)) throw Error(`Reasoning level not available: ${level}`);
     input.value = String(levels.indexOf(level));
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }, level);
 }
 async function budget(value) {

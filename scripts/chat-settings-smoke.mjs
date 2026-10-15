@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { restoreWorkspace } from '../src/lib/domain.ts';
-import { chooseReasoning, expectReasoning } from '../tests/reasoning-helper.ts';
+import { chooseReasoning } from '../tests/reasoning-helper.ts';
 
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9428');
 const page = browser
@@ -113,7 +113,7 @@ try {
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText(
     'GPT-5.6-Sol',
   );
-  await expectReasoning(page, 'Low');
+  await expect(page.getByRole('combobox', { name: 'Reasoning', exact: true })).toContainText('Low');
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText(
     'GPT-5.6-Sol',
@@ -124,7 +124,7 @@ try {
   await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText(
     'GPT-5.6-Sol',
   );
-  await expectReasoning(page, 'Low');
+  await expect(page.getByRole('combobox', { name: 'Reasoning', exact: true })).toContainText('Low');
   if (oldBytes)
     expect(digest(await readFile(join(appData, 'workspace-v1-backup.json')))).toBe(
       digest(oldBytes),
