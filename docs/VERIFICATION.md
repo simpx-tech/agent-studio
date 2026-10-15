@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## A bolder Reasoning slider — 2026-10-15
+
+Requested 2026-10-15: "Can you make the slider slightly bolder?"
+
+- `ChoiceSlider.svelte`: the track is 6px instead of 4px, the stop dots 8px instead of 6px and the thumb 20px instead of 16px, in a 28px row; the popover grows by the thumb's extra 4px (`sliderWidth`). At that size the translucent `--border-hover` dots read as two shapes where they overlap the translucent track, so they are opaque `--text-faint`. The names under the stops are unchanged.
+- Tests: `tests/reasoning-slider.spec.ts` reads the thumb's width from the slider instead of assuming it. Screenshots reviewed in dark and light.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,269 files), 763 Vitest tests in 94 files, the build, and all 415 browser tests in three shards. Shard 2 first failed two timing tests, `notifications.spec.ts:376` and `performance.spec.ts:540`, while another project's release build kept about 20 cores busy, and passed whole once that build had ended. No Rust change.
+
 ## The Reasoning dropdown opens an animated slider — 2026-10-15
 
 Requested 2026-10-15, after trying the inline slider below in a preview build: "Can you make still a dropdown, where the slider only shows when opened? Also can you make the slider animated?"

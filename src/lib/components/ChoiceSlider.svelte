@@ -1,8 +1,10 @@
 <script module lang="ts">
+  // The thumb's width: a stop lies where the thumb's center rests on it.
+  const thumb = 20;
   // Each stop gets room for its name, and the slider adds the popover's padding and border, its
   // own side padding and the thumb.
   const spacing = 48;
-  const frame = 70;
+  const frame = 54 + thumb;
   /** How wide a popover gives `count` stops room for their names. */
   export const sliderWidth = (count: number) =>
     Math.max(288, frame + Math.max(0, count - 1) * spacing);
@@ -28,8 +30,6 @@
     onclose?: () => void;
     onblur?: (event: FocusEvent) => void;
   } = $props();
-  // The thumb's width: a stop lies where the thumb's center rests on it.
-  const thumb = 16;
   let input = $state<HTMLInputElement>();
   let track = $state<HTMLElement>();
   // While a pointer drags the thumb, it follows the pointer between stops.
@@ -156,7 +156,7 @@
 
 <style>
   .choice-slider {
-    --track-height: 24px;
+    --track-height: 28px;
     padding: 6px 20px 10px;
     user-select: none;
     -webkit-user-select: none;
@@ -175,10 +175,10 @@
     top: 50%;
     left: calc(var(--thumb) / 2);
     right: calc(var(--thumb) / 2);
-    height: 4px;
-    margin-top: -2px;
+    height: 6px;
+    margin-top: -3px;
     overflow: hidden;
-    border-radius: 2px;
+    border-radius: 3px;
     background: var(--border-strong);
   }
   /* The fill and the thumb glide to the chosen stop and follow a drag at once. */
@@ -194,11 +194,12 @@
     position: absolute;
     top: 50%;
     left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--stop) / var(--stops));
-    width: 6px;
-    height: 6px;
-    margin: -3px 0 0 -3px;
+    width: 8px;
+    height: 8px;
+    margin: -4px 0 0 -4px;
     border-radius: 50%;
-    background: var(--border-hover);
+    /* Opaque, so a dot reads as one shape over the track. */
+    background: var(--text-faint);
     transition: background-color var(--duration-slow) ease;
   }
   .slider-stop.reached {

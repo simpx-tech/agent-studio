@@ -22,7 +22,13 @@ async function expectReasoning(page: Page, name: string) {
 async function stopPoint(page: Page, stop: number) {
   const box = (await page.locator('.slider-track').boundingBox())!;
   const count = await names(page).count();
-  return { x: box.x + 8 + ((box.width - 16) * stop) / (count - 1), y: box.y + box.height / 2 };
+  const thumb = await page
+    .locator('.choice-slider')
+    .evaluate((element) => parseFloat(getComputedStyle(element).getPropertyValue('--thumb')));
+  return {
+    x: box.x + thumb / 2 + ((box.width - thumb) * stop) / (count - 1),
+    y: box.y + box.height / 2,
+  };
 }
 async function thumbCenter(page: Page) {
   const box = (await page.locator('.slider-thumb').boundingBox())!;
