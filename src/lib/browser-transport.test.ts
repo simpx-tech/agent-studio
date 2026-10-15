@@ -241,9 +241,11 @@ it('preserves an initial notification target only while restoring an authenticat
   const { transport, session, replace } = await fixture();
   session('alice');
   expect(await transport.resumeBrowserRelay()).toBe(true);
-  expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, true);
+  // A copy downloaded now holds nothing this device changed.
+  const fresh = { chats: [], meta: false };
+  expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, true, fresh);
   await transport.connectRelay(window.location.origin, 'bob');
-  expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, false);
+  expect(replace).toHaveBeenLastCalledWith(expect.anything(), undefined, false, fresh);
 });
 
 it('turns images a Viewer copy saved inline into the references the relay keeps', async () => {

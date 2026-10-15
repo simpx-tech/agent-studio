@@ -104,6 +104,7 @@ import {
   readBrowserWorkspace,
   saveBrowserWorkspace,
   type BrowserWorkspaceScope,
+  type Unpublished,
 } from './browser-workspace';
 import { browserWorkspaceStore } from './browser-store';
 import {
@@ -529,6 +530,16 @@ type RuntimeContext = {
   /** Returns them unpublished, so the next sync tries again. */
   restoreUnsynced: (changes: ChangeSet) => void;
   /**
+   * The sync that took changes ended, having published them or handed them back. Called after
+   * each one, so what counts as changed here (`pendingChanges`) leaves out what it published.
+   */
+  settleUnsynced?: () => void;
+  /**
+   * What changed here that the relay may not hold yet: the conversations, `undefined` while that
+   * is not known, and whether the replicated settings changed.
+   */
+  pendingChanges?: () => { chats: Set<string> | undefined; meta: boolean };
+  /**
    * Writes every unsaved change to this device's storage. A sync checkpoint must never hold data
    * the saved workspace lacks: after a crash, the older saved copy would win the next merge.
    */
@@ -555,10 +566,15 @@ type RuntimeContext = {
   statuses: () => Record<string, ProviderStatus>;
   localRuns: () => string[];
   apply: (value: SharedWorkspace) => Promise<void>;
+  /**
+   * Replaces the Viewer's workspace. `unpublished` names what it changed and had not published,
+   * saved with its copy; without it, every conversation counts as changed.
+   */
   replaceBrowserWorkspace?: (
     value: Workspace,
     reason?: string,
     preserveInitialNotification?: boolean,
+    unpublished?: Unpublished,
   ) => Promise<void>;
   checkpointRun: (
     request: RunRequest,
@@ -602,6 +618,11 @@ const noteBaseline = () => {
 /** A conversation as this device syncs and stores it. */
 function syncedChat(conversation: Conversation): Conversation {
   return lightSession ? lightChat(conversation, (m) => !relayHeld.has(m.id)) : conversation;
+}
+/** What this device changed and has not published, as the Viewer saves it, while that is known. */
+function unpublishedHere(): Unpublished | undefined {
+  const pending = runtime?.pendingChanges?.();
+  return pending?.chats ? { chats: [...pending.chats], meta: pending.meta } : undefined;
 }
 /** Whether this Viewer holds chats light, and reads a chat whole to show it. */
 export const holdsLightChats = () => lightSession;
@@ -1437,7 +1458,13 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     relayUrl = url;
     relayConnected = true;
     const restored = saved?.workspace ?? browserWorkspaceFromServer(remote!);
-    await runtime?.replaceBrowserWorkspace?.(restored, undefined, preserveInitialNotification);
+    // A copy downloaded now holds nothing of this device's own; a saved one names its changes.
+    await runtime?.replaceBrowserWorkspace?.(
+      restored,
+      undefined,
+      preserveInitialNotification,
+      saved ? saved.unpublished : { chats: [], meta: false },
+    );
     if (generation === relayGeneration) notifyRelayConnection(true);
     return generation === relayGeneration;
   }
@@ -1598,6 +1625,13 @@ async function syncIncremental(
       localIds,
       changedHere: changes.chats,
     });
+    // A conversation the Viewer holds that neither the relay nor its baseline has, and that it did
+    // not make (`received` below), was deleted elsewhere after a baseline the Viewer never saved,
+    // and follows the relay out instead of lingering here.
+    if (!desktop() && runtime.pendingChanges?.().chats) {
+      const listed = new Set([...involved, ...baselineIds]);
+      for (const id of localIds) if (!listed.has(id) && !(id in relayed.chats)) involved.push(id);
+    }
     // Verify what the relay holds before publishing the viewed chat, as the whole path does.
     await publishNotificationView();
     if (generation !== relayGeneration) return null;
@@ -1690,15 +1724,23 @@ async function syncIncremental(
     const remoteChat = (id: string) =>
       fetched.get(id) ?? (id in relayed.chats ? baseChats.get(id) : undefined);
     const localMeta = runtime.meta();
+    // The Viewer marks each change of its own as it makes it and saves those it has not published
+    // with its copy, so the rest of its copy, and its settings when it changed none, hold only what
+    // it received: they follow the relay whatever its baseline holds, and never become a conflict
+    // copy. A phone closed between saving what a sync took in and saving the baseline that came
+    // with it took such chats for its own edits (2026-10-15). Read now, after the requests above,
+    // so a change made meanwhile counts as its own.
+    const pending = desktop() ? undefined : runtime.pendingChanges?.();
+    const own = pending?.chats;
     const merged = mergeInvolved({
       involved,
       baseline: baseChats,
       baselineMeta,
       localChat,
-      localMeta,
+      localMeta: own && !pending!.meta ? baselineMeta : localMeta,
       remoteChat,
       remoteMeta,
-      options,
+      options: own ? { ...options, received: (id: string) => !own.has(id) } : options,
     });
     const plan = syncPlan({
       involved,
@@ -1862,6 +1904,7 @@ async function syncIncremental(
     return true;
   } finally {
     if (!published) runtime.restoreUnsynced(unpublished);
+    runtime.settleUnsynced?.();
   }
 }
 /**
@@ -2226,6 +2269,7 @@ export async function pollRelay(urgent = false): Promise<Presence[] | null> {
           sent && !waiting.length && runtime.revision?.() === before ? before : undefined;
       } finally {
         if (!coveredPublished) runtime.restoreUnsynced(covered);
+        runtime.settleUnsynced?.();
       }
     }
     return await tail();
@@ -3270,6 +3314,7 @@ export async function saveWorkspace(
       changed,
       () => scope === workspaceStorageScope(),
       syncedChat,
+      unpublishedHere(),
     );
   }
   updatePendingBadge(pendingChatCount(workspace.conversations));

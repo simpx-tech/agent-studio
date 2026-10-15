@@ -70,6 +70,14 @@ export type MergeOptions = {
    * a running checkpoint from the relay; any other device's restart keeps following the run.
    */
   deadRun?: (conversation: Conversation, message: Message) => boolean;
+  /**
+   * Whether this device's copy of the conversation holds only what it received, every change it
+   * made, its creation included, having reached the relay. Its copy then never counts as edited,
+   * whatever the baseline holds: the relay's stands, with any later step of a reply this copy
+   * holds, and a conversation the relay no longer has goes. Only the Viewer knows this
+   * (src/lib/change-marks.ts).
+   */
+  received?: (id: string) => boolean;
 };
 export const emptyShared = (): SharedWorkspace => ({ fleet: emptyFleet(), conversations: [] });
 /**
@@ -433,6 +441,20 @@ export function onlyRepliesMoved(before: Conversation | undefined, after: Conver
 }
 
 /**
+ * The relay's copy of a conversation this device only received, with the later step of any reply
+ * this device's copy holds: a device following a reply it started hears its steps from the
+ * reply's request before the relay has them.
+ */
+function receivedChat(
+  local: Conversation,
+  relay: Conversation,
+  options?: MergeOptions,
+): Conversation {
+  const merged = sameRun(local, relay, local, options);
+  return merged ? { ...relay, messages: merged.messages } : retainQuestions(relay, local);
+}
+
+/**
  * A conversation kept beside its original as a copy, under an id of its own. A reply it holds as
  * running goes on in the original, which keeps the id its computer reports to, so the copy's ends
  * here: left running, it waited for an end that never came, and its chat could neither be steered
@@ -503,6 +525,19 @@ export function mergeShared(
       const before = b.get(id),
         left = l.get(id),
         right = r.get(id);
+      // A conversation this device only received follows the relay, whatever the baseline holds,
+      // and goes once the relay no longer has it.
+      if (chats === true && left && !equal(left, right) && options?.received?.(id)) {
+        if (right)
+          result.push(
+            receivedChat(
+              left as unknown as Conversation,
+              right as unknown as Conversation,
+              options,
+            ) as unknown as T,
+          );
+        continue;
+      }
       if (equal(left, right) || equal(before, right)) {
         if (left)
           result.push(

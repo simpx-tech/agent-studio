@@ -126,3 +126,41 @@ it('tells which conversation and message each change touched', () => {
     [undefined, undefined],
   ]);
 });
+
+it('counts what a sync took as changed until it settles, and resumes from what was saved', () => {
+  const marks = createChangeMarks();
+  // Nothing is known at the start, nor while a sync publishes everything.
+  expect(marks.pending().chats).toBeUndefined();
+  expect(marks.takeUnsynced().chats).toBeUndefined();
+  expect(marks.pending().chats).toBeUndefined();
+  expect(marks.settleUnsynced()).toBe(true);
+  expect(marks.pending()).toEqual({ chats: new Set(), meta: false });
+  // Received data never counts.
+  marks.chat('a');
+  marks.received('b');
+  marks.quiet('q', 'running');
+  marks.takeUnsynced();
+  // Taken but not yet published, it still counts, beside a change made meanwhile.
+  marks.chat('c');
+  expect(marks.pending()).toEqual({ chats: new Set(['a', 'q', 'c']), meta: false });
+  expect(marks.settleUnsynced()).toBe(true);
+  expect(marks.pending()).toEqual({ chats: new Set(['c']), meta: false });
+  // Handed back unpublished, it counts again.
+  marks.meta();
+  marks.restoreUnsynced(marks.takeUnsynced());
+  expect(marks.settleUnsynced()).toBe(true);
+  expect(marks.pending()).toEqual({ chats: new Set(['c']), meta: true });
+  // A sync that took nothing leaves nothing new to save.
+  marks.takeUnsynced();
+  expect(marks.settleUnsynced()).toBe(true);
+  marks.takeUnsynced();
+  expect(marks.settleUnsynced()).toBe(false);
+  expect(marks.settleUnsynced()).toBe(false);
+  // A change naming no conversation makes it unknown again.
+  marks.chat();
+  expect(marks.pending().chats).toBeUndefined();
+  // A reload resumes from what its copy saved instead.
+  marks.resume({ chats: ['x'], meta: true });
+  expect(marks.pending()).toEqual({ chats: new Set(['x']), meta: true });
+  expect(marks.takeUnsynced()).toEqual({ chats: new Set(['x']), meta: true });
+});

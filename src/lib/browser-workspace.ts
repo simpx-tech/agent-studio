@@ -5,6 +5,7 @@ import {
   type Message,
   type Workspace,
 } from './domain';
+import { z } from 'zod';
 import { sharedSchema, type SharedWorkspace } from './sync';
 import { lightChat, messageIds } from './light-chats';
 
@@ -159,8 +160,18 @@ export const browserChatOrder = (index: unknown): string[] => {
 };
 
 /**
+ * What this device changed and has not published yet: the conversations, and whether the
+ * replicated settings changed. Saved in the index, written in the same transaction as the
+ * conversations, so the two never disagree however the page ends: the rest of the copy is what
+ * the relay sent, which a sync never takes for this device's own change (src/lib/sync.ts).
+ */
+export type Unpublished = { chats: string[]; meta: boolean };
+const unpublishedSchema = z.object({ chats: z.array(z.string()), meta: z.boolean() });
+
+/**
  * Writes the index and the conversations given, or all of them when none are named, each as
- * `stored` gives it: a light connection leaves out the work the relay keeps.
+ * `stored` gives it: a light connection leaves out the work the relay keeps. `unpublished` is
+ * left out while it is not known, and the next start then counts every conversation as changed.
  */
 export async function saveBrowserWorkspace(
   store: BrowserWorkspaceStore,
@@ -169,11 +180,15 @@ export async function saveBrowserWorkspace(
   changed: Conversation[] | undefined,
   current: () => boolean,
   stored: (conversation: Conversation) => Conversation = (conversation) => conversation,
+  unpublished?: Unpublished,
 ) {
   const { conversations, ...rest } = workspace;
   const order = conversations.map((c) => c.id);
   const entries: [string, string][] = [
-    [indexKey(key), JSON.stringify({ ...rest, chats: order })],
+    [
+      indexKey(key),
+      JSON.stringify({ ...rest, chats: order, ...(unpublished ? { unpublished } : {}) }),
+    ],
   ];
   for (const conversation of changed ?? conversations)
     entries.push([chatKey(key, conversation.id), JSON.stringify(stored(conversation))]);
@@ -252,6 +267,11 @@ export async function readBrowserWorkspace(
         parsed.conversations = parsed.conversations.map(kept);
       return { workspace: restoreWorkspace(parsed, viewer), base, revisions, lightened };
     }
+    // An index an earlier release wrote names none, and every conversation then counts as changed.
+    const unpublished: Unpublished | undefined = unpublishedSchema.safeParse(
+      parsed.unpublished,
+    ).data;
+    delete parsed.unpublished;
     const order = browserChatOrder(parsed);
     const stored = new Map(entries.map(([entry, value]) => [entry, value]));
     entries.length = 0;
@@ -272,6 +292,7 @@ export async function readBrowserWorkspace(
       base,
       revisions,
       lightened,
+      unpublished,
     };
   } catch {
     throw new BrowserWorkspaceStorageError();

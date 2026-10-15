@@ -665,6 +665,86 @@ describe('workspace replication', () => {
       'Original (conflict copy)',
     ]);
   });
+  it('lets a conversation the Viewer only received follow the relay, never into a copy', () => {
+    // The phone holds chats it received but whose baseline it never saved. Meanwhile the
+    // computer rewound one and deleted another, and a reply the phone follows moved on.
+    const conversation = chat();
+    const message = (role: Message['role'], text: string, status: Message['status'] = 'complete') =>
+      ({
+        id: crypto.randomUUID(),
+        role,
+        status,
+        createdAt: '2026-10-15T16:00:00.000Z',
+        blocks: [{ type: 'markdown', text }],
+        ...(role === 'assistant'
+          ? { runId: crypto.randomUUID(), settings: conversation.settings }
+          : {}),
+      }) as Message;
+    conversation.messages.push(
+      message('user', 'Plan the continent'),
+      message('assistant', 'Planned.'),
+    );
+    const following = { ...chat(), title: 'Following' };
+    const reply = message('assistant', 'Step 1', 'running');
+    following.messages.push(message('user', 'Generate it'), reply);
+    const deleted = { ...chat(), title: 'Deleted elsewhere' };
+    const unbased = { ...chat(), title: 'Deleted before the baseline' };
+    const ownChat = { ...chat(), title: 'Started on the phone' };
+    const phone = {
+      ...emptyShared(),
+      conversations: [conversation, following, deleted, unbased, ownChat],
+    };
+    const relay = structuredClone(phone);
+    relay.conversations = relay.conversations.filter(
+      (c) => c.id !== deleted.id && c.id !== unbased.id && c.id !== ownChat.id,
+    );
+    const rewound = relay.conversations[0];
+    rewound.historyRevision = 1;
+    rewound.messages = [message('user', 'Plan the island')];
+    rewound.archived = true;
+    // The relay's copy of the followed reply is a step behind what the phone heard, and the chat
+    // moved to History.
+    const followed = relay.conversations[1];
+    followed.archived = true;
+    const ahead = structuredClone(phone.conversations[1]);
+    ahead.messages[1] = {
+      ...ahead.messages[1],
+      blocks: [{ type: 'markdown', text: 'Step 2' }],
+      usage: { revision: 2 } as Message['usage'],
+    };
+    phone.conversations[1] = ahead;
+    // The baseline lacks all of them.
+    const base = { ...emptyShared(), conversations: [deleted] };
+    // Merged as edits, the rewound chat split into a copy and the deleted one came back.
+    expect(mergeShared(emptyShared(), phone, relay).conversations.map((c) => c.title)).toEqual([
+      'Original',
+      'Original (conflict copy)',
+      'Following',
+      'Deleted elsewhere',
+      'Deleted before the baseline',
+      'Started on the phone',
+    ]);
+    const own = new Set([ownChat.id]);
+    const merged = mergeShared(base, phone, relay, { received: (id) => !own.has(id) });
+    expect(merged.conversations.map((c) => c.title)).toEqual([
+      'Original',
+      'Following',
+      'Started on the phone',
+    ]);
+    expect(merged.conversations[0]).toEqual(rewound);
+    expect(merged.conversations[1]).toMatchObject({ archived: true });
+    expect(merged.conversations[1].messages[1].blocks).toEqual([
+      { type: 'markdown', text: 'Step 2' },
+    ]);
+    // A chat the phone changed itself merges as before: its next-reply settings, changed while
+    // the computer rewound the chat, stay in a copy.
+    const edited = structuredClone(phone);
+    edited.conversations[0].settings = { ...conversation.settings, instructions: 'Phone' };
+    const kept = mergeShared(emptyShared(), edited, relay, {
+      received: (id) => id !== conversation.id && !own.has(id),
+    });
+    expect(kept.conversations.map((c) => c.title)).toContain('Original (conflict copy)');
+  });
   it('never leaves a reply running in a conflict copy, whose run goes on in the original', () => {
     const base = emptyShared();
     const conversation = chat();

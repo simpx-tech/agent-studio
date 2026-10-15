@@ -192,6 +192,30 @@ it('writes one conversation per save and reads the workspace back whole', async 
   expect(read?.workspace).not.toHaveProperty('chats');
 });
 
+it('saves what this device has not published with its copy, and reads it back', async () => {
+  const { store, data } = memoryStore();
+  const workspace = initialWorkspace();
+  workspace.conversations.push(chat('Edited here'), chat('Received'));
+  const [edited] = workspace.conversations;
+  data.set(`${key}:sync`, checkpoint());
+  // Not known, it is left out, and the next start counts every conversation as changed.
+  await saveBrowserWorkspace(store, key, workspace, undefined, () => true);
+  expect((await readBrowserWorkspace(store, scope))?.unpublished).toBeUndefined();
+  // Written with the conversation it names, in one transaction.
+  await saveBrowserWorkspace(store, key, workspace, [edited], () => true, undefined, {
+    chats: [edited.id],
+    meta: false,
+  });
+  const read = await readBrowserWorkspace(store, scope);
+  expect(read?.unpublished).toEqual({ chats: [edited.id], meta: false });
+  expect(read?.workspace).not.toHaveProperty('unpublished');
+  expect(read?.workspace.conversations.map((c) => c.title)).toEqual(['Edited here', 'Received']);
+  // A damaged record counts as not known, never as nothing changed.
+  const index = JSON.parse(data.get(`${key}:index`)!);
+  data.set(`${key}:index`, JSON.stringify({ ...index, unpublished: { chats: 'all' } }));
+  expect((await readBrowserWorkspace(store, scope))?.unpublished).toBeUndefined();
+});
+
 it('removes a deleted conversation and never writes past a changed session', async () => {
   const { store, data } = memoryStore();
   const workspace = initialWorkspace();

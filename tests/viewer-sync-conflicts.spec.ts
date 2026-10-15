@@ -1,5 +1,5 @@
 import { signInPwa, viewerCache } from './pwa-helper';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -203,16 +203,10 @@ test('a reopened Viewer merges what the computer did meanwhile without a conflic
   }
 });
 
-// The Viewer saves what a sync took in, then the baseline that came with it. A phone that closed
-// it between the two held chats its baseline lacked; reopened after the computer had finished such
-// a chat's reply and moved it to History, it kept its copy as a "(conflict copy)" whose reply ran
-// for good, beside the original (2026-10-15).
-test('a reopened Viewer takes in a chat its baseline lacks without a conflict copy', async ({
-  page,
-}) => {
-  test.setTimeout(120_000);
-  const directory = mkdtempSync(join(tmpdir(), 'studio-sync-unbased-'));
-  const token = 'synthetic-viewer-sync-unbased-owner-key';
+/** A relay serving the production Viewer, and the computer's side of it, which writes whole. */
+async function viewerRelay(page: Page, name: string) {
+  const directory = mkdtempSync(join(tmpdir(), `studio-sync-${name}-`));
+  const token = `synthetic-viewer-sync-${name}-owner-key`;
   const server = createRelay({ token, directory, webDirectory: resolve('build') });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -226,42 +220,109 @@ test('a reopened Viewer takes in a chat its baseline lacks without a conflict co
     expect(response.status).toBe(200);
     return (await response.json()) as { revision: number; workspace: SharedWorkspace };
   };
-  const elsewhere = async (change: (shared: SharedWorkspace) => void) => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const { revision, workspace: current } = await read();
-      change(current);
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  return {
+    url,
+    read,
+    errors,
+    /** The computer's write, retried over the Viewer's own. */
+    async elsewhere(change: (shared: SharedWorkspace) => void) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { revision, workspace: current } = await read();
+        change(current);
+        const response = await fetch(`${url}/v1/state`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ revision, workspace: current }),
+        });
+        if (response.status === 200) return;
+        expect(response.status).toBe(409);
+      }
+      throw new Error('The relay kept refusing the computer’s write.');
+    },
+    /** Signs the Viewer in to a relay seeded with `shared`. */
+    async open(shared: SharedWorkspace) {
       const response = await fetch(`${url}/v1/state`, {
         method: 'PUT',
         headers,
-        body: JSON.stringify({ revision, workspace: current }),
+        body: JSON.stringify({ revision: 0, workspace: shared }),
       });
-      if (response.status === 200) return;
-      expect(response.status).toBe(409);
-    }
-    throw new Error('The relay kept refusing the computer’s write.');
+      expect(response.status).toBe(200);
+      await page.goto(url);
+      await signInPwa(page, token);
+    },
+    cached: (text: string) =>
+      expect.poll(async () => JSON.stringify(await viewerCache(page))).toContain(text),
+    /** The Viewer's saved checkpoint and copy index, as stored. */
+    async saved() {
+      const entries = await viewerCache(page);
+      const entry = (suffix: string) => {
+        const key = Object.keys(entries).find((k) => k.endsWith(suffix));
+        return key ? JSON.parse(entries[key]) : undefined;
+      };
+      return { checkpoint: entry(':sync'), index: entry(':index') };
+    },
+    /**
+     * Closes the Viewer as a phone would between saving what a sync took in and saving the
+     * baseline that came with it: its saved copy holds these chats, its saved baseline does not.
+     */
+    async closeBeforeBaseline(ids: string[]) {
+      await page.goto(`${url}/manifest.webmanifest`);
+      await page.evaluate(
+        (ids) =>
+          new Promise<void>((done, fail) => {
+            const opening = indexedDB.open('agent-studio');
+            opening.onerror = () => fail(opening.error);
+            opening.onsuccess = () => {
+              const database = opening.result;
+              const store = database
+                .transaction('private-workspaces', 'readwrite')
+                .objectStore('private-workspaces');
+              const keys = store.getAllKeys();
+              keys.onsuccess = () => {
+                const key = keys.result.find((k) => String(k).endsWith(':sync'))!;
+                const reading = store.get(key);
+                reading.onsuccess = () => {
+                  const checkpoint = JSON.parse(reading.result);
+                  checkpoint.base.conversations = checkpoint.base.conversations.filter(
+                    (c: { id: string }) => !ids.includes(c.id),
+                  );
+                  for (const id of ids) delete checkpoint.revisions?.chats[id];
+                  store.put(JSON.stringify(checkpoint), key);
+                };
+              };
+              store.transaction.oncomplete = () => {
+                database.close();
+                done();
+              };
+              store.transaction.onerror = () => fail(store.transaction.error);
+            };
+          }),
+        ids,
+      );
+    },
+    async close() {
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+      rmSync(directory, { recursive: true, force: true });
+    },
   };
-  const cached = async (text: string) =>
-    expect.poll(async () => JSON.stringify(await viewerCache(page))).toContain(text);
-  // Whether the Viewer's saved baseline holds the chat.
-  const checkpointed = async (id: string) => {
-    const entries = await viewerCache(page);
-    const key = Object.keys(entries).find((k) => k.endsWith(':sync'));
-    const checkpoint = key ? JSON.parse(entries[key]) : undefined;
-    return !!checkpoint?.base.conversations.some((c: Conversation) => c.id === id);
-  };
-  const errors: string[] = [];
-  page.on('pageerror', (error) => errors.push(error.message));
+}
+
+// The Viewer saves what a sync took in, then the baseline that came with it. A phone that closed
+// it between the two held chats its baseline lacked; reopened after the computer had finished such
+// a chat's reply and moved it to History, it kept its copy as a "(conflict copy)" whose reply ran
+// for good, beside the original (2026-10-15).
+test('a reopened Viewer takes in a chat its baseline lacks without a conflict copy', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const relay = await viewerRelay(page, 'unbased');
   try {
     const { shared, user, reply } = workspace();
-    const response = await fetch(`${url}/v1/state`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ revision: 0, workspace: shared }),
-    });
-    expect(response.status).toBe(200);
-    await page.goto(url);
-    await signInPwa(page, token);
-    await cached('The fourth round');
+    await relay.open(shared);
+    await relay.cached('The fourth round');
 
     // The computer starts a chat, which the phone takes in with its reply running.
     const chunky: Conversation = {
@@ -270,50 +331,21 @@ test('a reopened Viewer takes in a chat its baseline lacks without a conflict co
       title: 'Install Chunky',
       messages: [user('Install Chunky'), reply('running', 'Configuring Chunky')],
     };
-    await elsewhere((s) => s.conversations.push(chunky));
-    await cached('Configuring Chunky');
-    await expect.poll(() => checkpointed(chunky.id)).toBe(true);
-
-    // The phone closes the Viewer with the chat saved but not the baseline that came with it.
-    await page.goto(`${url}/manifest.webmanifest`);
-    await page.evaluate(
-      (id) =>
-        new Promise<void>((done, fail) => {
-          const opening = indexedDB.open('agent-studio');
-          opening.onerror = () => fail(opening.error);
-          opening.onsuccess = () => {
-            const database = opening.result;
-            const store = database
-              .transaction('private-workspaces', 'readwrite')
-              .objectStore('private-workspaces');
-            const keys = store.getAllKeys();
-            keys.onsuccess = () => {
-              const key = keys.result.find((k) => String(k).endsWith(':sync'))!;
-              const reading = store.get(key);
-              reading.onsuccess = () => {
-                const checkpoint = JSON.parse(reading.result);
-                checkpoint.base.conversations = checkpoint.base.conversations.filter(
-                  (c: { id: string }) => c.id !== id,
-                );
-                delete checkpoint.revisions?.chats[id];
-                store.put(JSON.stringify(checkpoint), key);
-              };
-            };
-            store.transaction.oncomplete = () => {
-              database.close();
-              done();
-            };
-            store.transaction.onerror = () => fail(store.transaction.error);
-          };
-        }),
-      chunky.id,
-    );
-    expect(await checkpointed(chunky.id)).toBe(false);
+    await relay.elsewhere((s) => s.conversations.push(chunky));
+    await relay.cached('Configuring Chunky');
+    await expect
+      .poll(async () =>
+        (await relay.saved()).checkpoint?.base.conversations.some(
+          (c: Conversation) => c.id === chunky.id,
+        ),
+      )
+      .toBe(true);
+    await relay.closeBeforeBaseline([chunky.id]);
     expect(JSON.stringify(await viewerCache(page))).toContain('Configuring Chunky');
 
     // Meanwhile the computer finishes the reply, answers another message and moves the chat to
     // History.
-    await elsewhere((s) => {
+    await relay.elsewhere((s) => {
       const chat = s.conversations.find((c) => c.id === chunky.id)!;
       chat.messages[1].status = 'complete';
       chat.messages[1].blocks = [{ type: 'markdown', text: 'Chunky is generating the continent.' }];
@@ -322,11 +354,11 @@ test('a reopened Viewer takes in a chat its baseline lacks without a conflict co
     });
 
     // Opened again, it takes the finished chat in, in History, and makes no copy of it.
-    await page.goto(url);
+    await page.goto(relay.url);
     await expect(page.locator('.app-shell')).toBeVisible();
-    await cached('Yes, at 20 chunks a second.');
+    await relay.cached('Yes, at 20 chunks a second.');
     await page.waitForTimeout(6_000);
-    const { workspace: after } = await read();
+    const { workspace: after } = await relay.read();
     expect(after.conversations.map((c) => c.title)).toEqual([
       'Rewound on the computer',
       'Answer started over',
@@ -341,10 +373,120 @@ test('a reopened Viewer takes in a chat its baseline lacks without a conflict co
       'complete',
     ]);
     await expect(page.getByText(/conflict copy/)).toHaveCount(0);
-    expect(errors).toEqual([]);
+    expect(relay.errors).toEqual([]);
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((done) => server.close(() => done()));
-    rmSync(directory, { recursive: true, force: true });
+    await relay.close();
+  }
+});
+
+// The phone's copy is a cache of the relay: only the chats it changed itself, which it saves with
+// its copy, count as its edits. A chat rewound on the computer split into a copy, and one deleted
+// there came back, when the phone held them without their baseline (requested 2026-10-15).
+test('a reopened Viewer follows the relay for chats it only received, rewound or deleted elsewhere', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const relay = await viewerRelay(page, 'received');
+  try {
+    const { shared, user, reply } = workspace();
+    await relay.open(shared);
+    await relay.cached('The fourth round');
+    const chat = (title: string, text: string): Conversation => ({
+      ...structuredClone(shared.conversations[0]),
+      id: crypto.randomUUID(),
+      title,
+      messages: [user(text), reply('complete', `${text}, done.`)],
+    });
+    const rewound = chat('Rewound elsewhere', 'Carve the canyon');
+    const deleted = chat('Deleted elsewhere', 'Raise the mountains');
+    await relay.elsewhere((s) => s.conversations.push(rewound, deleted));
+    await relay.cached('Raise the mountains, done.');
+    await expect
+      .poll(async () => (await relay.saved()).checkpoint?.base.conversations.length)
+      .toBe(4);
+    await relay.closeBeforeBaseline([rewound.id, deleted.id]);
+
+    // The computer rewinds one chat and sends its turn again, and deletes the other.
+    await relay.elsewhere((s) => {
+      const chat = s.conversations.find((c) => c.id === rewound.id)!;
+      chat.messages = [user('Carve the river instead'), reply('running', 'Carving the river')];
+      chat.historyRevision = 1;
+      s.conversations = s.conversations.filter((c) => c.id !== deleted.id);
+    });
+
+    await page.goto(relay.url);
+    await expect(page.locator('.app-shell')).toBeVisible();
+    await relay.cached('Carving the river');
+    await expect
+      .poll(async () => JSON.stringify(await viewerCache(page)))
+      .not.toContain('Raise the mountains');
+    await page.waitForTimeout(6_000);
+    const { workspace: after } = await relay.read();
+    expect(after.conversations.map((c) => c.title)).toEqual([
+      'Rewound on the computer',
+      'Answer started over',
+      'Rewound elsewhere',
+    ]);
+    expect(after.conversations[2].messages.map((m) => m.blocks[0])).toEqual([
+      { type: 'markdown', text: 'Carve the river instead' },
+      { type: 'markdown', text: 'Carving the river' },
+    ]);
+    await expect(page.getByText(/conflict copy/)).toHaveCount(0);
+    await expect(page.getByText('Deleted elsewhere')).toHaveCount(0);
+    expect(relay.errors).toEqual([]);
+  } finally {
+    await relay.close();
+  }
+});
+
+// What the phone changed and could not publish yet is saved with its copy, so it still goes out
+// after the phone closes, and counts as its own edit in that merge.
+test('a change the Viewer could not publish before it closed goes out when it opens again', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const relay = await viewerRelay(page, 'unpublished');
+  try {
+    const { shared } = workspace();
+    const [moved] = shared.conversations;
+    await relay.open(shared);
+    await relay.cached('The fourth round');
+    // The relay takes no write from the phone for now.
+    await page.route('**/v1/state/patch', (route) => route.abort());
+    await page.locator('.conversation-item').filter({ hasText: 'Rewound on the computer' }).click();
+    await page.getByRole('button', { name: 'Move to history', exact: true }).click();
+    await expect
+      .poll(async () => (await relay.saved()).index?.unpublished)
+      .toEqual({ chats: [moved.id], meta: false });
+    await page.goto(`${relay.url}/manifest.webmanifest`);
+    await page.unroute('**/v1/state/patch');
+    // Meanwhile the computer answers in that chat again.
+    await relay.elsewhere((s) => {
+      const chat = s.conversations.find((c) => c.id === moved.id)!;
+      chat.messages[1].blocks = [{ type: 'markdown', text: 'The palm, and its shadow.' }];
+    });
+    expect((await relay.read()).workspace.conversations[0].archived).toBeUndefined();
+
+    await page.goto(relay.url);
+    await expect(page.locator('.app-shell')).toBeVisible();
+    await expect
+      .poll(async () => (await relay.read()).workspace.conversations[0].archived, {
+        timeout: 15_000,
+      })
+      .toBe(true);
+    const { workspace: after } = await relay.read();
+    expect(after.conversations.map((c) => c.title)).toEqual([
+      'Rewound on the computer',
+      'Answer started over',
+    ]);
+    expect(after.conversations[0].messages[1].blocks).toEqual([
+      { type: 'markdown', text: 'The palm, and its shadow.' },
+    ]);
+    await expect
+      .poll(async () => (await relay.saved()).index?.unpublished)
+      .toEqual({ chats: [], meta: false });
+    expect(relay.errors).toEqual([]);
+  } finally {
+    await relay.close();
   }
 });

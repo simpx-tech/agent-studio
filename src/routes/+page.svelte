@@ -2168,7 +2168,12 @@
             revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),
             localRuns: () => Object.values(runs),
-            replaceBrowserWorkspace: async (value, reason, preserveInitialNotification = false) => {
+            replaceBrowserWorkspace: async (
+              value,
+              reason,
+              preserveInitialNotification = false,
+              unpublished,
+            ) => {
               workspaceSession++;
               queued = {};
               resetDrafts();
@@ -2228,7 +2233,12 @@
                 syncStatus = '';
               }
               await loadSavedDrafts();
-              await persist();
+              // What this device changed and had not published, saved with its copy, is all it
+              // has to publish: the rest is what it received, which follows the relay.
+              if (unpublished) {
+                marks.resume(unpublished);
+                await persist(false);
+              } else await persist();
             },
             checkpointRun: async (request, event, status, error) => {
               const conversation = workspace.conversations.find(
@@ -2314,6 +2324,11 @@
             meta: () => sharedMeta(workspace),
             takeUnsynced: () => marks.takeUnsynced(),
             restoreUnsynced: (changes) => marks.restoreUnsynced(changes),
+            // The Viewer saves which of its changes the relay does not hold yet with its copy.
+            settleUnsynced: () => {
+              if (marks.settleUnsynced() && !desktop()) saveLocalSoon();
+            },
+            pendingChanges: () => marks.pending(),
             flush: flushPending,
             // Only the conversations a sync merged, so an unrelated chat is never rewritten.
             openChat: () => activeId ?? undefined,

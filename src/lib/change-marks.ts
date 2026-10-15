@@ -36,6 +36,9 @@ export function createChangeMarks(
     meta: true,
     quiet: new Set(),
   };
+  // What the sync under way took and has neither published nor handed back yet, which still
+  // counts as changed here (`pending`).
+  let publishing: ChangeSet | undefined;
   return {
     /**
      * A conversation changed here, or every conversation when none is named. `messageId` names
@@ -103,6 +106,10 @@ export function createChangeMarks(
       if (pending.chats === undefined) pending.quiet.clear();
       else for (const id of pending.chats) pending.quiet.delete(id);
       const { quiet, ...changes } = pending;
+      publishing = {
+        chats: changes.chats && new Set([...changes.chats, ...quiet]),
+        meta: changes.meta,
+      };
       return quiet.size ? { ...changes, quiet } : changes;
     },
     restoreUnsynced(changes: ChangeSet) {
@@ -110,6 +117,36 @@ export function createChangeMarks(
       if (changes.chats === undefined || unsynced.chats === undefined) unsynced.chats = undefined;
       else for (const id of changes.chats) unsynced.chats.add(id);
       for (const id of changes.quiet ?? []) unsynced.quiet.add(id);
+    },
+    /**
+     * The sync that took the last changes ended: the relay holds what it published, and what it
+     * did not went back with `restoreUnsynced`. Returns whether it had taken anything, which leaves
+     * fewer conversations pending.
+     */
+    settleUnsynced(): boolean {
+      const taken = publishing;
+      publishing = undefined;
+      return !!taken && (taken.meta || taken.chats === undefined || taken.chats.size > 0);
+    },
+    /**
+     * The conversations changed here that the relay may not hold yet, and whether the replicated
+     * settings did: what waits for a sync and what a sync under way has not published. `chats` is
+     * `undefined` while that is not known, as at the start, when every conversation counts.
+     */
+    pending(): { chats: Set<string> | undefined; meta: boolean } {
+      const chats =
+        unsynced.chats === undefined || (publishing && publishing.chats === undefined)
+          ? undefined
+          : new Set([...unsynced.chats, ...unsynced.quiet, ...(publishing?.chats ?? [])]);
+      return { chats, meta: unsynced.meta || !!publishing?.meta };
+    },
+    /**
+     * Starts from what an earlier session of this device left changed and unpublished, saved
+     * with its copy (the Viewer), instead of counting every conversation as changed.
+     */
+    resume(saved: { chats: string[]; meta: boolean }) {
+      unsynced = { chats: new Set(saved.chats), meta: saved.meta, quiet: new Set() };
+      publishing = undefined;
     },
   };
 }
