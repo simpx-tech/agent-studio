@@ -1,5 +1,16 @@
 # Verification — 2026-09-08
 
+## The Folder list shows each folder's icon — 2026-10-15
+
+Requested 2026-10-15: "Can you show the projects/folders icon on the picker as well (on the dropdown items)?"
+
+- `ChoicePicker.svelte` takes `optionIcon`, the list's counterpart of the trigger's `icon`: a 16px icon before each choice's name, in `--text-muted`, and `--text-secondary` on the highlighted or selected choice, as the trigger's icon brightens on hover.
+- The Folder picker draws each folder's chosen icon there through `FolderIcon.svelte` (the folder mark when it has none), the chat bubble before Standalone and `FolderSearch` before Browse folders…, so every name lines up. The icons are looked up by choice id in `folderChoiceIcons`, a derived map read only while the list is open.
+- Tests: the folder icon scenario in `tests/workspace.spec.ts` opens the list after the icon is chosen and finds the gamepad on the folder, the chat bubble on Standalone and the magnifier folder on Browse folders…. Checked by eye at twice the pixel density in the dark and light themes.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,262 files), 749 Vitest tests in 93 files, the build, `cargo fmt --check` (no Rust change, so Clippy and the Rust tests were not rerun), and all 387 Edge and 11 WebKit browser tests in three shards started with the local sockets drained.
+- Not exercised: the native desktop app and the Viewer, which draw the same component.
+- Choices of mine, not confirmed: plain icons rather than tiles like the Agent list's, `FolderSearch` for Browse folders…, and the icon centred beside a folder's name and environment.
+
 ## A 3D model can be panned — 2026-10-14
 
 Requested 2026-10-14: "Allow to pan a 3d model not just rotate".

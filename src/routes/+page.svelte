@@ -75,6 +75,7 @@
     Laptop,
     CircleAlert,
     MessageCircle,
+    FolderSearch,
     Archive,
     BookOpen,
     Paperclip,
@@ -1529,6 +1530,15 @@
     ),
   );
   const iconsByFolder = $derived(folderIconIndex(workspace.folderIcons));
+  // The icon of each folder the Folder picker lists, by its choice's id; read only while it is open.
+  const folderChoiceIcons = $derived(
+    new Map(
+      [...savedLocations, ...(selectedLocation ? [selectedLocation] : [])].map((location) => [
+        locationKey(location),
+        folderIconOf(iconsByFolder, location)?.icon,
+      ]),
+    ),
+  );
   // Chats snoozed until the app starts again. From the next start they wait at the top of the
   // Active tab until they are opened, snoozed again or closed.
   const snoozesByChat = $derived(snoozeIndex(workspace.snoozes));
@@ -6135,6 +6145,16 @@
                         size={16}
                       />{:else}<FolderIcon
                         icon={folderIconOf(iconsByFolder, selectedLocation)?.icon}
+                        size={16}
+                      />{/if}
+                  {/snippet}
+                  {#snippet optionIcon(option)}
+                    {#if option.id === 'standalone'}<MessageCircle
+                        size={16}
+                      />{:else if option.id === 'browse'}<FolderSearch
+                        size={16}
+                      />{:else}<FolderIcon
+                        icon={folderChoiceIcons.get(option.id)}
                         size={16}
                       />{/if}
                   {/snippet}

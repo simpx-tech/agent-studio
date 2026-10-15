@@ -23,6 +23,7 @@
     title,
     placeholder,
     icon,
+    optionIcon,
     optionMark,
     optionAside,
     width,
@@ -41,6 +42,8 @@
     title?: string;
     placeholder?: string;
     icon?: Snippet;
+    /** Draws a quiet icon before each option's name, as `icon` does on the trigger. */
+    optionIcon?: Snippet<[Option]>;
     /** Draws each option's mark in place of its text `mark`. */
     optionMark?: Snippet<[Option]>;
     /** Draws more about each option beside its name, or below it in a narrow list, and
@@ -257,7 +260,9 @@
             onpointerdown={(event) => event.preventDefault()}
             onclick={() => choose(index)}
           >
-            {#if optionMark}{@render optionMark(
+            {#if optionIcon}<span class="option-icon" aria-hidden="true"
+                >{@render optionIcon(option)}</span
+              >{:else if optionMark}{@render optionMark(
                 option,
               )}{:else if option.mark && option.fill}<AccountMark
                 glyph={option.mark}
@@ -431,6 +436,15 @@
     border: 1px solid color-mix(in srgb, var(--provider-color) 20%, transparent);
     font-size: 16px;
     line-height: 1;
+  }
+  .option-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+  .picker-option.highlighted .option-icon,
+  .picker-option[aria-selected='true'] .option-icon {
+    color: var(--text-secondary);
   }
   .option-copy {
     display: grid;

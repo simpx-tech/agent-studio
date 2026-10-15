@@ -105,6 +105,8 @@ mark in the script and `BrandMark.svelte` together.
 - **Fields:** text inputs, textareas and `ChoicePicker` in its `field` variant share one outline,
   hover and focus treatment. Checkboxes use `.checkbox`.
 - **Dropdowns:** always `ChoicePicker.svelte`; toolbar triggers are borderless pills with an icon.
+  Choices with icons of their own draw them through `optionIcon` at 16px, muted until the choice
+  is highlighted or selected, as the Folder list does.
   The toolbar caps each picker, which its trigger fills, at 220px and the Agent's at 280px (170px
   and 220px in windows up to 1100px wide): a cap on the trigger alone leaves the room a longer
   name asked for empty beside it.

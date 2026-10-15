@@ -1562,6 +1562,15 @@ test('the first chat in a folder has a model choose its icon, which every chat t
   ]);
   // Later chats in the folder keep its icon without asking again, after a restart too.
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  // The Folder picker's list shows it too.
+  await page.getByRole('combobox', { name: 'Folder', exact: true }).click();
+  const choice = (name: string) => page.getByRole('option', { name, exact: true });
+  await expect(choice('studio').locator('svg.lucide-gamepad-2')).toBeVisible();
+  await expect(choice('Standalone').locator('svg.lucide-message-circle')).toBeVisible();
+  await expect(choice('Browse folders…').locator('svg.lucide-folder-search')).toBeVisible();
+  await page.screenshot({ path: 'artifacts/folder-icons-picker-browser.png' });
+  await page.keyboard.press('Escape');
+  await expect(choice('studio')).toHaveCount(0);
   await page.getByLabel('Message', { exact: true }).fill('Now tune the lighting');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
