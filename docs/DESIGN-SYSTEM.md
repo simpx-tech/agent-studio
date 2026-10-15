@@ -111,7 +111,7 @@ mark in the script and `BrandMark.svelte` together.
   and 220px in windows up to 1100px wide): a cap on the trigger alone leaves the room a longer
   name asked for empty beside it.
 - **Sliders:** for ordered choices, such as Reasoning, a `ChoicePicker` with `slider` opens
-  `ChoiceSlider.svelte` instead of a list: a 6px `--border-strong` track with an 8px
+  `ChoiceSlider.svelte` instead of a list: a 6px `--border-strong` track with a 10px
   `--text-faint` dot at each stop, filled in `--accent-strong` up to a 20px `--accent-strong`
   thumb ringed in `--surface-overlay` (the dots it passes turn `--accent-strong`, a
   `--focus-glow` halo shows while it is dragged and the focus ring from the keyboard), and each

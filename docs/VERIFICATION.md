@@ -1,5 +1,12 @@
 # Verification — 2026-09-08
 
+## Larger stops on the Reasoning slider — 2026-10-15
+
+Requested 2026-10-15, after the bolder slider below: "Also make the dots slightly bigger".
+
+- `ChoiceSlider.svelte`: the stop dots are 10px instead of 8px, half the thumb, standing 2px above and below the 6px track. Screenshots reviewed in dark and light.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,269 files), 763 Vitest tests in 94 files, the build, and all 415 browser tests in three shards. Shard 2 first failed `performance.spec.ts:540` (25.2 ms against 25) beside a running game and another project's Rust build; five runs alone averaged 18 to 19 ms with this change and 18 to 22 ms with it stashed, and the shard then passed whole. No Rust change.
+
 ## A bolder Reasoning slider — 2026-10-15
 
 Requested 2026-10-15: "Can you make the slider slightly bolder?"

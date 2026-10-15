@@ -194,9 +194,9 @@
     position: absolute;
     top: 50%;
     left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--stop) / var(--stops));
-    width: 8px;
-    height: 8px;
-    margin: -4px 0 0 -4px;
+    width: 10px;
+    height: 10px;
+    margin: -5px 0 0 -5px;
     border-radius: 50%;
     /* Opaque, so a dot reads as one shape over the track. */
     background: var(--text-faint);
