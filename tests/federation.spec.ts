@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../relay/server';
+import { modelViewsRenderer } from '../src/lib/tool-output';
 import { createHash } from 'node:crypto';
 import { triangleGlbBase64 } from './model-fixture';
 import { mockAppCalls } from './desktop-helper';
@@ -1946,7 +1947,7 @@ test('another computer shows a model the relay cannot carry whole as eight views
     const kept = await mac.evaluate(() =>
       JSON.parse(localStorage.getItem('fixture-model-views') ?? 'null'),
     );
-    expect(kept.renderer).toBe(1);
+    expect(kept.renderer).toBe(modelViewsRenderer);
     expect(kept.views).toHaveLength(8);
     expect(new Set(kept.views.map((view: { data: string }) => view.data)).size).toBeGreaterThan(1);
   });

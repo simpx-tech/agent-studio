@@ -550,6 +550,20 @@ async function parse(
     for (const material of materialsOf(object))
       (material as Material & { color: import('three').Color }).color.set(color);
   }
+  if (format === 'fbx') {
+    // A texture on an FBX material's diffuse colour replaces that colour, as Blender and the
+    // FBX SDK read it. three.js multiplies the two, and Blender writes 0.8 grey there, which
+    // drew a textured export a fifth darker than painted.
+    object.traverse((node) => {
+      for (const material of materialsOf(node)) {
+        const painted = material as Material & {
+          color?: import('three').Color;
+          map?: Texture | null;
+        };
+        if (painted.color && painted.map) painted.color.setRGB(1, 1, 1);
+      }
+    });
+  }
   return object;
 }
 

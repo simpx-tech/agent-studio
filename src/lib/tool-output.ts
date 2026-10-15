@@ -83,8 +83,11 @@ export type ToolOutputModel = z.infer<typeof toolOutputModelSchema>;
  * shows when it cannot read the model itself whole through the relay.
  */
 export const modelViewCount = 8;
-/** The version of the views a window renders; views kept by an earlier one are drawn again. */
-export const modelViewsRenderer = 1;
+/**
+ * The version of the views a window renders; views kept by an earlier one are drawn again. 2 draws
+ * a textured FBX in its painted colours.
+ */
+export const modelViewsRenderer = 2;
 /** A model's views as another device receives them. */
 export const modelViewsSchema = z.object({
   views: z.array(toolOutputImageSchema).length(modelViewCount),

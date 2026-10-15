@@ -16,6 +16,7 @@ import {
   type SharedMeta,
   type SharedWorkspace,
 } from './sync';
+import { modelViewsRenderer } from './tool-output';
 
 // What changed on this device since the last sync, tracked as the page tracks it. Like a
 // window that has just synced, it starts with nothing waiting.
@@ -303,7 +304,7 @@ it('draws the views of a model it keeps once for other devices, and answers late
       return {
         format: 'glb',
         bytes: 40 * 1024 ** 2,
-        ...(kept.length ? { renderer: 1 } : {}),
+        ...(kept.length ? { renderer: modelViewsRenderer } : {}),
         views: kept,
       };
     if (command === 'read_tool_output_model_file') return new ArrayBuffer(16);
@@ -329,7 +330,9 @@ it('draws the views of a model it keeps once for other devices, and answers late
   expect(updates.at(-1).result.views).toEqual(Array(8).fill(view));
   expect((await same).views).toHaveLength(8);
   expect(scene.renderModelViews).toHaveBeenCalledOnce();
-  expect(stored).toEqual([{ ...request, renderer: 1, views: Array(8).fill('UklGRg==') }]);
+  expect(stored).toEqual([
+    { ...request, renderer: modelViewsRenderer, views: Array(8).fill('UklGRg==') },
+  ]);
   // Kept views answer the next request without reading the model again.
   const reads = () =>
     native.invoke.mock.calls.filter(([command]) => command === 'read_tool_output_model_file')
