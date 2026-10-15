@@ -13,6 +13,7 @@
 import {
   createModelScene,
   describeModelFault,
+  type Lighting,
   type ModelFormat,
   type ModelScene,
   type SceneState,
@@ -132,6 +133,7 @@ export type ViewerStatus = {
 export type ModelViewer = {
   setClip(clip: number): void;
   setPlaying(playing: boolean): void;
+  setLighting(lighting: Lighting): void;
   zoom(factor: number): void;
   reset(): void;
   retry(): void;
@@ -155,6 +157,7 @@ export function createModelViewer(
     wheelZoom: boolean;
     clip(): number;
     playing(): boolean;
+    lighting(): Lighting;
     onStatus(status: ViewerStatus): void;
   },
 ): ModelViewer {
@@ -222,6 +225,7 @@ export function createModelViewer(
         wheelZoom: options.wheelZoom,
         clip: options.clip(),
         playing: options.playing(),
+        lighting: options.lighting(),
         state: saved,
       });
     } catch (cause) {
@@ -240,6 +244,8 @@ export function createModelViewer(
     }
     scene = created;
     canvas = element;
+    // The light the reader chose while the scene was being built.
+    created.setLighting(options.lighting());
     element.style.visibility = '';
     clips = created.clips;
     element.addEventListener('webglcontextlost', lost);
@@ -307,6 +313,7 @@ export function createModelViewer(
   return {
     setClip: (clip) => scene?.setClip(clip),
     setPlaying: (playing) => scene?.setPlaying(playing),
+    setLighting: (lighting) => scene?.setLighting(lighting),
     zoom: (factor) => scene?.zoom(factor),
     reset: () => scene?.reset(),
     retry() {

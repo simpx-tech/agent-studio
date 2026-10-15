@@ -27,6 +27,7 @@
     Pause,
     Play,
     RotateCcw,
+    Sun,
     ZoomIn,
     ZoomOut,
   } from '@lucide/svelte';
@@ -49,6 +50,8 @@
     type ModelViewer,
     type ViewerStatus,
   } from '$lib/model-viewer';
+  import { lightings, type Lighting } from '$lib/model-scene';
+  import { modelLighting, setModelLighting } from '$lib/model-lighting.svelte';
   import type { FileViewer, ViewedModel } from '$lib/file-viewer.svelte';
   import ChoicePicker from './ChoicePicker.svelte';
 
@@ -195,6 +198,7 @@
       wheelZoom: view === 'expanded',
       clip: () => clip,
       playing: () => playing,
+      lighting: () => modelLighting.value,
       onStatus(status) {
         if (viewers[view] !== created) return;
         statuses[view] = status;
@@ -225,6 +229,11 @@
     playing = !playing;
     each((v) => v.setPlaying(playing));
   }
+  // Every model in the window takes the light chosen last, from any of them.
+  $effect(() => {
+    const lighting = modelLighting.value;
+    each((v) => v.setLighting(lighting));
+  });
   // The inline view keeps its place in the chat while the file viewer shows the model, so the
   // reading position holds and focus returns to Expand on close; it only gives up its scene.
   function shown(showing: boolean) {
@@ -288,6 +297,14 @@
       {/if}
     {/if}
     <span class="model-spacer"></span>
+    <ChoicePicker
+      options={lightings}
+      value={modelLighting.value}
+      label="Lighting"
+      onchange={(value) => setModelLighting(value as Lighting)}
+    >
+      {#snippet icon()}<Sun size={13} />{/snippet}
+    </ChoicePicker>
     <button
       type="button"
       class="model-action"
@@ -535,6 +552,15 @@
   .model-action:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  /* The bar's pickers, Lighting and Animation, stay the size of its buttons. */
+  .model-bar :global(.picker-trigger) {
+    min-height: 22px;
+    padding: 0 4px 0 6px;
+    gap: 4px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
   }
   /* In the file viewer the stage takes the room its controls leave. */
   .model-expanded {

@@ -1,5 +1,6 @@
+import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { describeModelFault } from './model-scene.ts';
+import { describeModelFault, isLighting, lightings, unlitMaterial } from './model-scene.ts';
 
 /**
  * The viewer parses the bytes it was given and fetches nothing, so it carries no Draco,
@@ -55,5 +56,74 @@ describe('describeModelFault', () => {
     );
     expect(describeModelFault(undefined)).toBe('This model could not be opened.');
     expect(describeModelFault('some string')).toBe('This model could not be opened.');
+  });
+});
+
+/**
+ * Flat light draws each surface in its own colours. Every shaded material gets an unlit copy
+ * that keeps what decides those colours and the surface's shape on screen, and shares its
+ * textures; materials that take no light already are drawn as they are.
+ */
+describe('unlitMaterial', () => {
+  it('keeps the colours, textures, transparency and sides of a shaded surface', () => {
+    const map = new THREE.Texture();
+    const alphaMap = new THREE.Texture();
+    const shaded = new THREE.MeshStandardMaterial({
+      name: 'Painted',
+      color: 0x336699,
+      map,
+      alphaMap,
+      alphaTest: 0.5,
+      transparent: true,
+      opacity: 0.8,
+      side: THREE.DoubleSide,
+      vertexColors: true,
+      depthWrite: false,
+      metalness: 1,
+      roughness: 0.2,
+    });
+    const flat = unlitMaterial(THREE, shaded) as THREE.MeshBasicMaterial;
+    expect(flat).toBeInstanceOf(THREE.MeshBasicMaterial);
+    expect(flat.color.getHex()).toBe(0x336699);
+    // A colour of its own: the shaded material is drawn again when the light changes back.
+    expect(flat.color).not.toBe(shaded.color);
+    expect([flat.map, flat.alphaMap]).toEqual([map, alphaMap]);
+    expect(flat).toMatchObject({
+      name: 'Painted',
+      alphaTest: 0.5,
+      transparent: true,
+      opacity: 0.8,
+      side: THREE.DoubleSide,
+      vertexColors: true,
+      depthWrite: false,
+      // Colours as painted: no tone mapping either.
+      toneMapped: false,
+    });
+  });
+
+  it('turns every shaded type flat and leaves unlit ones as they are', () => {
+    for (const shaded of [
+      new THREE.MeshPhongMaterial(),
+      new THREE.MeshLambertMaterial(),
+      new THREE.MeshToonMaterial(),
+      new THREE.MeshPhysicalMaterial(),
+    ])
+      expect(unlitMaterial(THREE, shaded)).toBeInstanceOf(THREE.MeshBasicMaterial);
+    for (const unlit of [
+      new THREE.MeshBasicMaterial(),
+      new THREE.LineBasicMaterial(),
+      new THREE.PointsMaterial(),
+      new THREE.MeshNormalMaterial(),
+    ])
+      expect(unlitMaterial(THREE, unlit)).toBe(unlit);
+  });
+});
+
+describe('lightings', () => {
+  it('offers Studio first, the light the viewer always had, and knows only its own', () => {
+    expect(lightings.map((lighting) => lighting.name)).toEqual(['Studio', 'Flat', 'Realistic']);
+    for (const { id } of lightings) expect(isLighting(id)).toBe(true);
+    for (const other of ['', 'Flat', 'unlit', null, undefined, 1])
+      expect(isLighting(other)).toBe(false);
   });
 });

@@ -1,7 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
-import { triangleGlb, triangleGlbBase64 } from './model-fixture';
+import {
+  texturedGlbBase64,
+  texturedGlbTexels,
+  triangleGlb,
+  triangleGlbBase64,
+} from './model-fixture';
 
 /**
  * The shown-model viewer keeps a bounded number of WebGL scenes, builds each once its stage is
@@ -419,6 +424,133 @@ test('the right button, Shift and two fingers move a model within its reach', as
   expect(length(sub(keyed.zoomed.target, keyed.moved.target))).toBeLessThan(1e-9);
   expect(length(offset(keyed.zoomed)) / length(offset(keyed.moved))).toBeCloseTo(0.8, 9);
   expect(length(keyed.far.target)).toBeCloseTo(Math.SQRT1_2, 9);
+});
+
+test('the light chosen on one model lights every model, and stays chosen after a reload', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript((data) => {
+    const model = { format: 'glb', data, bytes: 1 };
+    (window as any).toolOutputs = { toolu_lit: { models: [model, model] } };
+  }, still);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await reply(page, [{ id: 'lit', toolId: 'toolu_lit', count: 2 }], 'Two.\n\n<!-- files:lit -->');
+  const answer = page.locator('.message:not(.user)');
+  await expect(answer.getByLabel('3D model lit-1.glb')).toBeVisible();
+  const pickers = answer.getByRole('combobox', { name: 'Lighting' });
+  await expect(pickers).toHaveText(['Studio', 'Studio']);
+  await pickers.first().click();
+  await expect(page.getByRole('option')).toHaveText(['Studio', 'Flat', 'Realistic']);
+  await page.getByRole('option', { name: 'Flat' }).click();
+  await expect(pickers).toHaveText(['Flat', 'Flat']);
+  // The expanded view takes it too, and a choice there lights the models in the chat.
+  await answer.getByRole('button', { name: 'Expand lit-1.glb' }).click();
+  const preview = page.getByLabel('Model preview');
+  await expect(preview.getByLabel('3D model lit-1.glb')).toBeVisible();
+  const expanded = preview.getByRole('combobox', { name: 'Lighting' });
+  await expect(expanded).toHaveText('Flat');
+  await expanded.click();
+  await page.getByRole('option', { name: 'Realistic' }).click();
+  await expect(expanded).toHaveText('Realistic');
+  await page.getByRole('button', { name: 'Close model preview' }).click();
+  await expect(pickers).toHaveText(['Realistic', 'Realistic']);
+  await expect(answer.locator('.model-note.failed')).toHaveCount(0);
+  // The choice belongs to this device and outlives the page.
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: /Show me the models/ }).click();
+  // The chat opens at its end, where the second model is.
+  await expect(answer.getByLabel('3D model lit-1.glb')).toBeVisible();
+  await expect(pickers).toHaveText(['Realistic', 'Realistic']);
+  await expect(answer.locator('.model-note.failed')).toHaveCount(0);
+});
+
+test('flat light draws the painted colours, and the realistic sun shadows the floor @webkit', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.evaluate(async (data) => {
+    const modulePath = '/src/lib/model-scene.ts';
+    const { createModelScene } = await import(/* @vite-ignore */ modulePath);
+    const canvas = document.createElement('canvas');
+    canvas.id = 'lit';
+    // Over white, the shadow the floor catches reads as grey.
+    canvas.style.cssText =
+      'position: fixed; left: 0; top: 0; width: 400px; height: 300px; z-index: 2147483647; background: #fff';
+    document.body.append(canvas);
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb', {
+      lighting: 'flat',
+    });
+  }, texturedGlbBase64());
+  /**
+   * What the canvas shows, two frames on: how many pixels are each of the texture's four colours,
+   * and how many are grey.
+   */
+  async function drawn() {
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+    );
+    const png = (await page.locator('#lit').screenshot()).toString('base64');
+    return page.evaluate(
+      async ({ png, texels }) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${png}`;
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext('2d')!;
+        context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const painted = texels.map(() => 0);
+        let grey = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+          // Drawing a texel through the GPU and back may move a channel by one.
+          const texel = texels.findIndex(
+            ([tr, tg, tb]) =>
+              Math.abs(r - tr) <= 2 && Math.abs(g - tg) <= 2 && Math.abs(b - tb) <= 2,
+          );
+          if (texel >= 0) painted[texel]++;
+          if (Math.max(r, g, b) - Math.min(r, g, b) <= 3 && r >= 90 && r <= 235) grey++;
+        }
+        return { painted, grey };
+      },
+      { png, texels: texturedGlbTexels },
+    );
+  }
+  const exact = (counts: { painted: number[] }) => counts.painted.reduce((a, b) => a + b, 0);
+  const flat = await drawn();
+  // The texels the triangle shows keep their colours exactly, and nothing casts a shadow.
+  expect(flat.painted.filter((count) => count > 500).length).toBeGreaterThanOrEqual(2);
+  expect(flat.grey).toBe(0);
+  // Studio light shades them, so few if any pixels keep a painted colour.
+  await page.evaluate(() => (window as any).scene.setLighting('studio'));
+  await expect.poll(async () => exact(await drawn())).toBeLessThan(exact(flat) / 20);
+  expect((await drawn()).grey).toBe(0);
+  // The realistic sun, high to the left in front, casts the triangle's shadow on the floor behind
+  // it, where the view from above sees it. Both sides of a surface cast it: three.js would cast
+  // a one-sided triangle's shadow only from its back.
+  await page.evaluate(() => {
+    const scene = (window as any).scene;
+    scene.orbit(0, 1);
+    scene.setLighting('realistic');
+  });
+  await expect.poll(async () => (await drawn()).grey).toBeGreaterThan(500);
+  // A scene out of view takes the light chosen meanwhile when it returns.
+  await page.evaluate(() => {
+    const scene = (window as any).scene;
+    scene.reset();
+    scene.setVisible(false);
+    scene.setLighting('flat');
+    scene.setVisible(true);
+  });
+  await expect.poll(async () => exact(await drawn())).toBeGreaterThan(exact(flat) * 0.9);
+  expect((await drawn()).grey).toBe(0);
+  await page.evaluate(() => (window as any).scene.dispose());
 });
 
 test('a structured-output reply shows the files it sent after its JSON', async ({ page }) => {

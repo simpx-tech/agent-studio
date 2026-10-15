@@ -9,17 +9,36 @@ import type {
   AnimationAction,
   AnimationClip,
   AnimationMixer,
+  Group,
   Material,
+  Mesh,
+  MeshStandardMaterial,
   Object3D,
+  OrthographicCamera,
   PerspectiveCamera,
   Scene,
   Texture,
+  ToneMapping,
   Vector3,
   WebGLRenderer,
 } from 'three';
 import { blobBase64 } from './images';
 
 export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'stl' | 'fbx';
+
+/**
+ * How a model is lit. Studio is the even set of lights the viewer always had; Flat draws every
+ * surface in its own colours, unlit, exactly as painted; Realistic sets the model in a room whose
+ * light it takes and reflects, under a sun casting soft shadows on it and on the floor below.
+ */
+export type Lighting = 'studio' | 'flat' | 'realistic';
+export const lightings: { id: Lighting; name: string }[] = [
+  { id: 'studio', name: 'Studio' },
+  { id: 'flat', name: 'Flat' },
+  { id: 'realistic', name: 'Realistic' },
+];
+export const isLighting = (value: unknown): value is Lighting =>
+  lightings.some((lighting) => lighting.id === value);
 
 /**
  * Why a model would not open, as a sentence the reader can act on. The loaders that decode
@@ -58,6 +77,7 @@ export type SceneOptions = {
   wheelZoom?: boolean;
   clip?: number;
   playing?: boolean;
+  lighting?: Lighting;
   /** The camera and animation time of an earlier scene of the same model. */
   state?: SceneState;
 };
@@ -67,6 +87,8 @@ export type ModelScene = {
   setClip(clip: number): void;
   /** Pausing holds the pose it reached; playing again continues from there. */
   setPlaying(playing: boolean): void;
+  /** Lights the model anew; a scene out of view does so when it comes back. */
+  setLighting(lighting: Lighting): void;
   /** Out of view the scene draws nothing, keeping its pose and animation time. */
   setVisible(visible: boolean): void;
   zoom(factor: number): void;
@@ -112,21 +134,30 @@ function createRenderer(
 }
 
 /**
- * Puts a model in a small studio of lights, centred on the origin at a size the camera can
- * frame, so it looks the same on every computer and in every view and needs no environment
- * file. Physically based materials still read as rounded volumes. Returns how far the scaled
- * model reaches from its centre, which the camera frames whole.
+ * A small studio of lights, so a model looks the same on every computer and in every view and
+ * needs no environment file. Physically based materials still read as rounded volumes.
  */
-function studio(THREE: typeof import('three'), scene: Scene, object: Object3D): number {
-  scene.add(new THREE.HemisphereLight(0xf2f4ff, 0x30302f, 2.2));
+function studioLights(THREE: typeof import('three')): Group {
+  const lights = new THREE.Group();
+  lights.add(new THREE.HemisphereLight(0xf2f4ff, 0x30302f, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.4);
   key.position.set(3, 5, 4);
-  scene.add(key);
+  lights.add(key);
   const fill = new THREE.DirectionalLight(0xffffff, 0.9);
   fill.position.set(-4, 1, -3);
-  scene.add(fill);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  lights.add(fill);
+  lights.add(new THREE.AmbientLight(0xffffff, 0.35));
+  return lights;
+}
 
+/** Where a model stands once placed: how far it reaches from its centre, and its lowest height. */
+type Placed = { radius: number; floor: number };
+
+/**
+ * Centres a model on the origin at a size the camera can frame. The camera frames its reach
+ * whole, and the realistic light's floor lies under its lowest point.
+ */
+function place(THREE: typeof import('three'), scene: Scene, object: Object3D): Placed {
   const root = new THREE.Group();
   root.add(object);
   scene.add(root);
@@ -137,7 +168,244 @@ function studio(THREE: typeof import('three'), scene: Scene, object: Object3D): 
   object.position.sub(center);
   root.scale.setScalar(1 / extent);
   const reach = size.length() / 2 / extent;
-  return Number.isFinite(reach) && reach > 0.05 ? reach : 0.5;
+  const radius = Number.isFinite(reach) && reach > 0.05 ? reach : 0.5;
+  const floor = -size.y / 2 / extent;
+  return { radius, floor: Number.isFinite(floor) ? floor : -radius };
+}
+
+/** Each light's tone: Flat shows colours as painted, so it maps none. */
+const TONES = (THREE: typeof import('three')): Record<Lighting, ToneMapping> => ({
+  studio: THREE.ACESFilmicToneMapping,
+  flat: THREE.NoToneMapping,
+  realistic: THREE.NeutralToneMapping,
+});
+/** Where the realistic light's sun stands: high, to the left of the starting view. */
+const SUN: [number, number, number] = [-1.3, 3.2, 1.6];
+/** How strongly the room lights a model under the realistic light, and its sun. */
+const ROOM_INTENSITY = 0.7;
+const SUN_INTENSITY = 1.8;
+
+/** The realistic light's room, sun and the floor its shadow falls on. */
+type Rig = { lights: Group; environment: Texture; dispose(): void };
+type RoomModule = typeof import('three/examples/jsm/environments/RoomEnvironment.js');
+
+/** What the generator keeps between its steps, read to compile its filters ahead. */
+type GeneratorParts = {
+  _setSize?(cubeSize: number): void;
+  _allocateTargets?(): import('three').WebGLRenderTarget;
+  _ggxMaterial?: Material | null;
+  _blurMaterial?: Material | null;
+};
+
+/**
+ * The light of a generated room, as physically based materials take and reflect it. The
+ * generator's filters are the slowest shaders three.js compiles, and the generator compiles them
+ * the moment it runs, which held the window for half a second the first time. They and the
+ * room's own shaders compile in the background first, as the generator draws them: into its
+ * targets, where no tone mapping applies.
+ */
+async function roomLight(
+  THREE: typeof import('three'),
+  { RoomEnvironment }: RoomModule,
+  renderer: WebGLRenderer,
+): Promise<Texture> {
+  const generator = new THREE.PMREMGenerator(renderer);
+  const room = new RoomEnvironment();
+  try {
+    const parts = generator as unknown as GeneratorParts;
+    if (parts._setSize && parts._allocateTargets) {
+      // The size fromScene uses, so it keeps the filters compiled here.
+      parts._setSize(256);
+      const target = parts._allocateTargets();
+      // A program is compiled for the geometry it draws: the filters draw planes with positions.
+      const plane = new THREE.BufferGeometry();
+      plane.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
+      const filters = new THREE.Scene();
+      for (const material of [parts._ggxMaterial, parts._blurMaterial])
+        if (material) filters.add(new THREE.Mesh(plane, material));
+      renderer.setRenderTarget(target);
+      const compiled = Promise.all([
+        renderer.compileAsync(room, new THREE.PerspectiveCamera(90, 1, 0.1, 100)),
+        renderer.compileAsync(filters, new THREE.OrthographicCamera()),
+      ]);
+      renderer.setRenderTarget(null);
+      await compiled.catch(() => {});
+      target.dispose();
+      plane.dispose();
+    }
+    return generator.fromScene(room, 0.04).texture;
+  } finally {
+    room.dispose();
+    generator.dispose();
+  }
+}
+
+/**
+ * Builds the realistic light around a placed model: the light of a room, which physically based
+ * materials take and reflect, and a sun whose soft shadow falls on the model and on an unseen
+ * floor under its lowest point. The room is generated, so nothing is fetched.
+ */
+async function realisticRig(
+  THREE: typeof import('three'),
+  room: RoomModule,
+  renderer: WebGLRenderer,
+  { radius, floor }: Placed,
+): Promise<Rig> {
+  const environment = await roomLight(THREE, room, renderer);
+
+  const lights = new THREE.Group();
+  const sun = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY);
+  sun.position.set(...SUN).setLength(radius * 4);
+  sun.castShadow = true;
+  const shadow = sun.shadow;
+  // About a texel of shadow for each pixel the model spans, since a window holds up to eight
+  // scenes: the model fits the narrower side of the canvas.
+  const drawn = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const texels = THREE.MathUtils.ceilPowerOfTwo(Math.max(1, Math.min(drawn.x, drawn.y)));
+  shadow.mapSize.setScalar(THREE.MathUtils.clamp(texels, 512, 2048));
+  shadow.radius = 3;
+  shadow.bias = -0.0004;
+  shadow.normalBias = radius * 0.008;
+  // The shadow camera looks along the sun, so the model's own reach is all its shadow covers.
+  const view = shadow.camera as OrthographicCamera;
+  view.left = view.bottom = -radius * 1.05;
+  view.right = view.top = radius * 1.05;
+  view.near = radius;
+  view.far = radius * 9;
+  view.updateProjectionMatrix();
+  lights.add(sun);
+
+  // The floor shows only the shadow on it, and hides nothing behind it.
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 10, radius * 10),
+    new THREE.ShadowMaterial({ opacity: 0.3, depthWrite: false }),
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = floor;
+  ground.receiveShadow = true;
+  lights.add(ground);
+  return {
+    lights,
+    environment,
+    dispose() {
+      environment.dispose();
+      sun.dispose();
+      ground.geometry.dispose();
+      ground.material.dispose();
+    },
+  };
+}
+
+/** Material types lights shade, which flat light draws in their own colours instead. */
+const shaded = (material: Material) => {
+  const kind = material as unknown as Record<string, unknown>;
+  return !!(
+    kind.isMeshStandardMaterial ||
+    kind.isMeshPhongMaterial ||
+    kind.isMeshLambertMaterial ||
+    kind.isMeshToonMaterial
+  );
+};
+
+/**
+ * The same surface unlit: its colour, texture, vertex colours, transparency and sides, drawn
+ * as they are, without light or tone mapping. Textures stay shared with the shaded material.
+ */
+export function unlitMaterial(THREE: typeof import('three'), material: Material): Material {
+  if (!shaded(material)) return material;
+  // The fields read here exist on every shaded type.
+  const from = material as MeshStandardMaterial;
+  return new THREE.MeshBasicMaterial({
+    name: from.name,
+    color: from.color,
+    map: from.map,
+    alphaMap: from.alphaMap,
+    alphaTest: from.alphaTest,
+    alphaHash: from.alphaHash,
+    alphaToCoverage: from.alphaToCoverage,
+    transparent: from.transparent,
+    opacity: from.opacity,
+    side: from.side,
+    vertexColors: from.vertexColors,
+    blending: from.blending,
+    depthTest: from.depthTest,
+    depthWrite: from.depthWrite,
+    wireframe: from.wireframe,
+    visible: from.visible,
+    toneMapped: false,
+  });
+}
+
+/**
+ * Lights a placed model the chosen way, keeping its own materials for Studio and Realistic and
+ * unlit copies of them for Flat. The realistic room and sun are built, in the background, the
+ * first time they are prepared. `dispose` frees what it built and gives each surface its own
+ * material back.
+ */
+function createLights(
+  THREE: typeof import('three'),
+  room: RoomModule,
+  renderer: WebGLRenderer,
+  scene: Scene,
+  object: Object3D,
+  placed: Placed,
+) {
+  const studio = studioLights(THREE);
+  scene.add(studio);
+  scene.environmentIntensity = ROOM_INTENSITY;
+  const tones = TONES(THREE);
+  const surfaces: { mesh: Mesh; material: Material | Material[] }[] = [];
+  object.traverse((node) => {
+    const mesh = node as Mesh;
+    if (!mesh.isMesh) return;
+    surfaces.push({ mesh, material: mesh.material });
+    // Both sides of a surface cast the sun's shadow. three.js draws only a one-sided surface's
+    // back into the shadow, so a plane, a card or an open mesh facing the sun cast none.
+    for (const material of [mesh.material].flat()) material.shadowSide = THREE.DoubleSide;
+  });
+  const unlit = new Map<Material, Material>();
+  const flat = (material: Material) => {
+    let copy = unlit.get(material);
+    if (!copy) unlit.set(material, (copy = unlitMaterial(THREE, material)));
+    return copy;
+  };
+  let rig: Rig | undefined;
+  let building: Promise<void> | undefined;
+  let disposed = false;
+  return {
+    /** Builds what a light needs before it is applied; only the realistic one needs anything. */
+    prepare(lighting: Lighting): Promise<void> {
+      if (lighting !== 'realistic') return Promise.resolve();
+      return (building ??= realisticRig(THREE, room, renderer, placed).then(
+        (built) => {
+          if (disposed) return built.dispose();
+          rig = built;
+          built.lights.visible = false;
+          scene.add(built.lights);
+        },
+        // Without its room the realistic light keeps the studio one, as before it was chosen.
+        () => {},
+      ));
+    },
+    apply(chosen: Lighting) {
+      const lighting = chosen === 'realistic' && !rig ? 'studio' : chosen;
+      studio.visible = lighting === 'studio';
+      if (rig) rig.lights.visible = lighting === 'realistic';
+      scene.environment = lighting === 'realistic' && rig ? rig.environment : null;
+      renderer.toneMapping = tones[lighting];
+      for (const { mesh, material } of surfaces) {
+        if (lighting !== 'flat') mesh.material = material;
+        else mesh.material = Array.isArray(material) ? material.map(flat) : flat(material);
+        mesh.castShadow = mesh.receiveShadow = lighting === 'realistic';
+      }
+    },
+    dispose() {
+      disposed = true;
+      for (const { mesh, material } of surfaces) mesh.material = material;
+      for (const [material, copy] of unlit) if (copy !== material) copy.dispose();
+      rig?.dispose();
+    },
+  };
 }
 
 /**
@@ -157,7 +425,10 @@ export async function createModelScene(
   options: SceneOptions = {},
 ): Promise<ModelScene> {
   const THREE = await modules();
-  const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js');
+  const [{ OrbitControls }, room] = await Promise.all([
+    import('three/examples/jsm/controls/OrbitControls.js'),
+    import('three/examples/jsm/environments/RoomEnvironment.js'),
+  ]);
   const object = await parse(THREE, bytes, format, surface(canvas));
   let renderer: WebGLRenderer;
   try {
@@ -166,9 +437,17 @@ export async function createModelScene(
     release(object);
     throw cause;
   }
+  // Only the realistic sun casts a shadow; without it the shadow map draws nothing. The shadow
+  // changes only with the model's pose or light, never as the view turns, so it is drawn again
+  // only then.
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = true;
   const scene: Scene = new THREE.Scene();
   const camera: PerspectiveCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
-  const radius = studio(THREE, scene, object);
+  const placed = place(THREE, scene, object);
+  const { radius } = placed;
+  const lights = createLights(THREE, room, renderer, scene, object, placed);
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
@@ -217,10 +496,36 @@ export async function createModelScene(
   let drawnAt = 0;
   // Animations advance by real elapsed time; three.Clock is deprecated.
   let previous = 0;
+  // The light asked for, and the one the scene is lit with; they differ while it is out of view.
+  let lighting: Lighting = options.lighting ?? 'studio';
+  let lit = lighting;
+  // While a light is built and its shaders compile, the canvas keeps its last frame: drawing
+  // then would wait for the compile instead. The first frame waits for the first light.
+  let compiling = true;
+  let compiles = 0;
+
+  /** Lights the scene as last asked, once it is in view. */
+  async function relight() {
+    if (disposed || !visible || lit === lighting) return;
+    const next = (lit = lighting);
+    const turn = ++compiles;
+    const current = () => turn === compiles && !disposed;
+    compiling = true;
+    await lights.prepare(next);
+    if (!current()) return;
+    lights.apply(next);
+    renderer.shadowMap.needsUpdate = true;
+    // Compiled in the background where the browser can, rather than in the next frame.
+    await renderer.compileAsync(scene, camera).catch(() => {});
+    if (!current()) return;
+    compiling = false;
+    previous = 0;
+    request();
+  }
 
   function render(now: number) {
     frame = 0;
-    if (disposed || !visible) return;
+    if (disposed || !visible || compiling) return;
     const moving = controls.update();
     if (!moving && playing && drawnAt && now - drawnAt < FRAME_MS) {
       request();
@@ -230,6 +535,7 @@ export async function createModelScene(
     previous = now;
     // A paused action still poses the model at its time.
     mixer?.update(playing ? seconds : 0);
+    if (playing) renderer.shadowMap.needsUpdate = true;
     renderer.render(scene, camera);
     drawnAt = now;
     // Keep drawing only while something moves: damping, or a playing animation.
@@ -259,6 +565,7 @@ export async function createModelScene(
     action = mixer.clipAction(clip);
     action.play();
     action.paused = !playing;
+    renderer.shadowMap.needsUpdate = true;
     previous = 0;
     request();
   }
@@ -278,20 +585,28 @@ export async function createModelScene(
   }
   function resume(time: number) {
     if (action) action.time = time;
+    renderer.shadowMap.needsUpdate = true;
   }
   if (mixer) {
     setClip(Math.min(Math.max(options.clip ?? 0, 0), clips.length - 1));
     if (options.state) resume(options.state.time);
     setPlaying(!!options.playing);
   }
+  await lights.prepare(lit);
+  lights.apply(lit);
   // Shaders compile in the background where the browser can, rather than in the first frame.
   await renderer.compileAsync(scene, camera).catch(() => {});
+  compiling = false;
   request();
 
   return {
     clips: clips.map((clip, i) => clip.name?.trim() || `Clip ${i + 1}`),
     setClip,
     setPlaying,
+    setLighting(next) {
+      lighting = next;
+      void relight();
+    },
     setVisible(next) {
       visible = next;
       if (!next) {
@@ -300,6 +615,7 @@ export async function createModelScene(
         return;
       }
       previous = 0;
+      void relight();
       request();
     },
     zoom(factor) {
@@ -344,6 +660,7 @@ export async function createModelScene(
       controls.dispose();
       mixer?.stopAllAction();
       mixer?.uncacheRoot(object);
+      lights.dispose();
       release(scene);
       renderer.dispose();
       renderer.forceContextLoss();
@@ -394,7 +711,9 @@ export async function renderModelViews(
   }
   const scene: Scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, options.width / options.height, 0.01, 1000);
-  const radius = studio(THREE, scene, object);
+  // Views keep the studio light, whatever light the reader chose.
+  scene.add(studioLights(THREE));
+  const { radius } = place(THREE, scene, object);
   const clips = object.animations ?? [];
   const mixer = clips.length ? new THREE.AnimationMixer(object) : null;
   if (mixer) {
