@@ -155,5 +155,9 @@ describe('taking over a reply that waits for background work', () => {
     const moved = conversation();
     moved.settings.reasoning = 'low';
     expect(takeOverTarget(moved)).toBeUndefined();
+    // An account chosen while the reply waits takes the next message only once it ends.
+    const switched = conversation();
+    switched.settings.connectionId = crypto.randomUUID();
+    expect(takeOverTarget(switched)).toBeUndefined();
   });
 });

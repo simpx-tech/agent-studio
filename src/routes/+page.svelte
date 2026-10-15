@@ -1669,9 +1669,10 @@
     active?.messages.findLast((m) => m.role === 'assistant' && !!m.settings?.connectionId)
       ?.settings?.connectionId,
   );
+  // Another account takes the next message, also when chosen while a reply runs: that reply
+  // finishes on its own account.
   const accountSwitchPending = $derived(
     !!active &&
-      !activeRunning &&
       !!lastReplyConnection &&
       !!selectedSettings.connectionId &&
       lastReplyConnection !== selectedSettings.connectionId,
@@ -1682,8 +1683,14 @@
   const chatChanges = $derived(
     separateMemory(summarizeFileChanges((active?.messages ?? []).filter((m) => !m.filesUndone))),
   );
+  // The model and reasoning the next message changes from the running reply's; another account
+  // is named apart (`accountSwitchPending`).
   const nextReplyChanged = $derived(
-    !!observedReply?.settings && replySettingsChanged(observedReply.settings, selectedSettings),
+    !!observedReply?.settings &&
+      replySettingsChanged(observedReply.settings, {
+        ...selectedSettings,
+        connectionId: observedReply.settings.connectionId,
+      }),
   );
   const canSend = $derived(
     loaded &&
@@ -3471,11 +3478,10 @@
   // `chosen` marks an agent or account the user picked, which new chats then start with.
   function changeSettings(settings: ChatSettings, remember = true, chosen = false) {
     if (!loaded) return;
-    // Only the next request's model/reasoning may change while a reply is running.
+    // Only the next request's account, model and reasoning may change while a reply is running.
     if (
       activeRunning &&
       (settings.provider !== selectedSettings.provider ||
-        settings.connectionId !== selectedSettings.connectionId ||
         !!settings.planMode !== !!selectedSettings.planMode ||
         settings.outputSchema !== selectedSettings.outputSchema ||
         settings.maxThinkingTokens !== selectedSettings.maxThinkingTokens ||
@@ -3539,12 +3545,9 @@
   }
   function selectAgent(option: (typeof agentOptions)[number]) {
     if (active) {
-      // Only another account of the same agent may take over an existing conversation.
-      if (
-        activeRunning ||
-        !option.connectionId ||
-        !switchableConnections.some((c) => c.id === option.connectionId)
-      )
+      // Only another account of the same agent may take over an existing conversation, from its
+      // next message on, also while a reply runs.
+      if (!option.connectionId || !switchableConnections.some((c) => c.id === option.connectionId))
         return;
       changeSettings({ ...selectedSettings, connectionId: option.connectionId }, true, true);
       return;
@@ -6182,7 +6185,6 @@
                   fallbackToFirst={false}
                   placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                   disabled={!loaded ||
-                    activeRunning ||
                     selectingLocation ||
                     (desktop() && !selectedLocation && !active) ||
                     (!!active && !switchableConnections.length)}
@@ -6276,19 +6278,16 @@
               >
             </ToolbarActions>{/key}
           </div>
-          {#if nextReplyChanged}
+          {#if accountSwitchPending || nextReplyChanged}
             <p class="next-reply-settings" role="status">
-              Next message: {selectedModelName(selectedSettings.model, availableModels)} · {reasoningName(
-                selectedSettings.reasoning,
-              )} reasoning
-            </p>
-          {:else if accountSwitchPending}
-            <p class="next-reply-settings" role="status">
-              Next message: <span
-                class="account-dot"
-                style:--account-color={connectionColor(selectedSettings.connectionId)}
-                aria-hidden="true"
-              ></span>{accountName(workspace.fleet, selectedSettings.connectionId) ?? 'Another'} account
+              Next message: {#if accountSwitchPending}<span
+                  class="account-dot"
+                  style:--account-color={connectionColor(selectedSettings.connectionId)}
+                  aria-hidden="true"
+                ></span>{accountName(workspace.fleet, selectedSettings.connectionId) ?? 'Another'} account{#if nextReplyChanged}{' · '}{/if}{/if}{#if nextReplyChanged}{selectedModelName(
+                  selectedSettings.model,
+                  availableModels,
+                )} · {reasoningName(selectedSettings.reasoning)} reasoning{/if}
             </p>
           {/if}
           <div

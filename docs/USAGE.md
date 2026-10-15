@@ -96,7 +96,7 @@ An account never changes under what you wrote. Once the composer holds text or a
 
 Choosing any account in the Agent picker, the one shown included, is your choice for that chat and stays. It is still remembered as the account last chosen, for when the option is off; an account balancing chose is not. While balancing decides, the Agent control's hover begins **Account chosen by usage.** A draft saved in an earlier session keeps the account it had.
 
-Balancing only decides where a new chat starts. Existing conversations, their queued messages, retries, forks and imported chats keep their accounts, and nothing moves a chat to another account while it runs. The comparison uses usage readings and the saved chats alone (`src/lib/account-balance.ts`): it starts no model reply, and it reads the accounts' usage when a new chat opens and when you return to the window, at most once a minute each.
+Balancing only decides where a new chat starts. Existing conversations, their queued messages, retries, forks and imported chats keep their accounts, and balancing never moves a chat to another account while it runs; only an account you choose in the Agent picker does, from the next message on. The comparison uses usage readings and the saved chats alone (`src/lib/account-balance.ts`): it starts no model reply, and it reads the accounts' usage when a new chat opens and when you return to the window, at most once a minute each.
 
 ## Quota pace and context guidance
 

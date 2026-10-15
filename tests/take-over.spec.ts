@@ -144,3 +144,62 @@ test('a message waits for a reply that is working, or whose next reply needs a n
   expect((await lastRequest(page)).takeOver).toBeUndefined();
   await expect(queue).toHaveCount(0);
 });
+
+test('a message for an account chosen meanwhile waits for the reply instead of taking it over', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Add account', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+  await page.getByRole('option', { name: 'Claude', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill('Second Claude');
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await agent.click();
+  await page.getByRole('option', { name: 'Claude · Claude CLI login', exact: true }).click();
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Plan the overhaul');
+  await input.press('Enter');
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+  const first = await lastRequest(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.emitCapability({ kind: 'text', text: 'I will write the plan once the agents report back.' });
+    w.emitCapability({ kind: 'backgroundwait', wait: 1 });
+  });
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeVisible();
+  // Another account needs a process of its own, which would end the background work.
+  await agent.click();
+  await page.getByRole('option', { name: 'Claude · Second Claude', exact: true }).click();
+  await expect(agent).toContainText('Second Claude');
+  await expect(page.getByRole('button', { name: 'Queue message' })).toBeVisible();
+  await input.fill('After the agents, on the second account');
+  await input.press('Enter');
+  const queue = page.getByRole('list', { name: 'Queued messages' });
+  await expect(queue.getByText('After the agents, on the second account')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(await runCount(page)).toBe('1');
+  // It goes to the second account once the reply ends.
+  await page.evaluate(() => {
+    const w = window as any;
+    w.emitCapability({ kind: 'backgroundwait', wait: null });
+    w.emitCapability({ kind: 'text', text: 'The plan is ready.' });
+    w.finishCapabilities('complete');
+  });
+  await expect.poll(() => runCount(page)).toBe('2');
+  const next = await lastRequest(page);
+  expect(next.takeOver).toBeUndefined();
+  expect(next.accountSwitch).toBe(true);
+  expect(next.agent.connectionId).not.toBe(first.agent.connectionId);
+  expect(next.messages.at(-1)).toMatchObject({
+    role: 'user',
+    text: 'After the agents, on the second account',
+  });
+  await expect(queue).toHaveCount(0);
+});

@@ -3378,6 +3378,98 @@ test('an existing chat can switch to another account of the same agent between r
   expect(saved.settings.connectionId).toBe(first.agent.connectionId);
 });
 
+test('an account chosen while a reply runs takes the next message, queued meanwhile', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'settings-deferred');
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Add account', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Add account', exact: true });
+  await dialog.getByRole('combobox', { name: 'Account provider' }).click();
+  await page.getByRole('option', { name: 'Claude', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'Account name', exact: true }).fill('Second Claude');
+  await dialog.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const secondId = await page.evaluate(() => {
+    const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
+    const account = fleet.accounts.find((a: { name: string }) => a.name === 'Second Claude');
+    return fleet.connections.find((c: { accountId: string }) => c.accountId === account.id)
+      .id as string;
+  });
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude · Claude CLI login');
+  await pick(page, 'Model', 'Sonnet');
+  await pick(page, 'Reasoning', 'Low');
+  await page.getByLabel('Message', { exact: true }).fill('Started on the first account');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
+  const first = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  // Like the model and reasoning, the account may change for the next message.
+  for (const name of ['Computer', 'Folder'])
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeDisabled();
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await expect(agent).toBeEnabled();
+  await expect(agent).toHaveAttribute('title', /Another account applies/);
+  await pick(page, 'Agent', 'Claude · Second Claude');
+  await expect(agent).toContainText('Second Claude');
+  const next = page.locator('.next-reply-settings');
+  await expect(next).toHaveText('Next message: Second Claude account');
+  await pick(page, 'Model', 'Opus');
+  await pick(page, 'Reasoning', 'High');
+  await expect(next).toHaveText('Next message: Second Claude account · Opus · High reasoning');
+  // Back on the running reply's account, only the model and reasoning change.
+  await pick(page, 'Agent', 'Claude · Claude CLI login');
+  await expect(next).toHaveText('Next message: Opus · High reasoning');
+  await pick(page, 'Agent', 'Claude · Second Claude');
+  await expect(next).toHaveText('Next message: Second Claude account · Opus · High reasoning');
+  await page.screenshot({ path: 'artifacts/account-switch-while-running.png' });
+  // The running reply keeps the account it started with.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const chat = JSON.parse(localStorage.getItem('test-workspace')!).conversations[0];
+        return [chat.messages[1].settings.connectionId, chat.settings.connectionId];
+      }),
+    )
+    .toEqual([first.agent.connectionId, secondId]);
+  await expect(page.getByTestId('message').last()).toHaveAttribute('data-status', 'running');
+  // A message written meanwhile waits for the reply, then goes to the account chosen.
+  await page.getByLabel('Message', { exact: true }).fill('Queued for the second account');
+  await page.getByRole('button', { name: 'Queue message' }).click();
+  const queue = page.getByRole('list', { name: 'Queued messages' });
+  await expect(queue.getByText('Queued for the second account')).toBeVisible();
+  await page.evaluate(() => (window as any).finishReply());
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('test-run-count'))).toBe('2');
+  const second = await page.evaluate(() => JSON.parse(localStorage.getItem('test-last-request')!));
+  expect(second.agent).toMatchObject({
+    provider: 'claude',
+    connectionId: secondId,
+    model: 'opus',
+    reasoning: 'high',
+  });
+  expect(second.accountSwitch).toBe(true);
+  expect(second.messages).toHaveLength(3);
+  expect(second.messages[2]).toMatchObject({ role: 'user', text: 'Queued for the second account' });
+  await expect(queue).toHaveCount(0);
+  await expect(page.locator('.reply-switch')).toHaveText([
+    'Switched to Second Claude account · Opus · High reasoning',
+  ]);
+  await expect(next).toHaveCount(0);
+  await page.evaluate(() => (window as any).finishReply());
+  await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(4);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].messages.map(
+          (m: { settings?: { connectionId?: string } }) => m.settings?.connectionId ?? null,
+        ),
+      ),
+    )
+    .toEqual([null, first.agent.connectionId, null, secondId]);
+});
+
 test('a removed terminal login is not added again while another account of its agent stays connected', async ({
   page,
 }) => {

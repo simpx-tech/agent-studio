@@ -647,6 +647,38 @@ describe('workspace replication', () => {
     completed.conversations[0].messages[0].settings!.model = 'a-different-in-flight-model';
     expect(mergeShared(base, edited, completed).conversations).toHaveLength(2);
   });
+  it('keeps an account chosen on one device while another device runs the reply', () => {
+    const first = crypto.randomUUID(),
+      second = crypto.randomUUID();
+    const conversation = chat();
+    conversation.settings.connectionId = first;
+    conversation.messages.push({
+      id: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+      role: 'assistant',
+      createdAt: '',
+      status: 'running',
+      blocks: [{ type: 'markdown', text: 'Working' }],
+      settings: { ...conversation.settings },
+    });
+    const base = { ...emptyShared(), conversations: [conversation] };
+    const phone = structuredClone(base),
+      host = structuredClone(base);
+    phone.conversations[0].settings.connectionId = second;
+    host.conversations[0].messages[0].status = 'complete';
+    host.conversations[0].messages[0].blocks = [{ type: 'markdown', text: 'Done.' }];
+    for (const [local, remote] of [
+      [phone, host],
+      [host, phone],
+    ]) {
+      const merged = mergeShared(base, local, remote);
+      expect(merged.conversations).toHaveLength(1);
+      // The next message goes to the account chosen; the reply stays with its own.
+      expect(merged.conversations[0].settings.connectionId).toBe(second);
+      expect(merged.conversations[0].messages).toEqual(host.conversations[0].messages);
+      expect(merged.conversations[0].messages[0].settings?.connectionId).toBe(first);
+    }
+  });
   it('exports shared content without local preferences or injected secrets', () => {
     const workspace = {
       ...initialWorkspace(),

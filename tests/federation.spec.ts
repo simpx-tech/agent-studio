@@ -1633,11 +1633,27 @@ test('two app environments pair, share accounts, route chats, retain progress an
     await expect(desktop.getByTestId('message').last()).toContainText('Response from MacBook', {
       timeout: 20_000,
     });
+    // While the MacBook runs the reply, the device that started it chooses another account of
+    // the agent for the next message.
+    await desktop.getByRole('combobox', { name: 'Agent', exact: true }).click();
+    await desktop
+      .getByRole('option', { name: /^Claude · / })
+      .filter({ hasNotText: 'Claude personal 1' })
+      .first()
+      .click();
+    await expect(desktop.locator('.next-reply-settings')).toContainText(/Next message: .+ account/);
     await mac
       .getByRole('button', { name: 'Hello from another computer', exact: true })
       .first()
       .click();
-    await expect(mac.getByRole('combobox', { name: 'Agent', exact: true })).toBeDisabled();
+    // The host's window follows the reply as running: its settings wait for it, while the
+    // account chosen on the other device already shows for the next message.
+    await expect(
+      mac.getByRole('button', { name: 'Chat instructions', exact: true }),
+    ).toBeDisabled();
+    const macAgent = mac.getByRole('combobox', { name: 'Agent', exact: true });
+    await expect(macAgent).toBeEnabled();
+    await expect(macAgent).not.toContainText('Claude personal 1', { timeout: 15_000 });
     await mac.getByRole('button', { name: 'Stop response', exact: true }).click();
     await expect(desktop.getByTestId('message').last()).toHaveAttribute(
       'data-status',
@@ -1651,6 +1667,16 @@ test('two app environments pair, share accounts, route chats, retain progress an
         ),
       )
       .toBe(1);
+    // Both keep the account chosen for the next message, and the stopped reply its own.
+    for (const page of [desktop, mac])
+      await expect
+        .poll(() =>
+          page.evaluate((connection) => {
+            const chat = JSON.parse(localStorage.getItem('fixture-workspace')!).conversations[0];
+            return [chat.settings.connectionId === connection, chat.messages.at(-1).settings];
+          }, connection),
+        )
+        .toEqual([false, expect.objectContaining({ connectionId: connection })]);
     expect(await desktop.evaluate(() => JSON.stringify(localStorage))).not.toContain(token);
   } finally {
     await a.close();
