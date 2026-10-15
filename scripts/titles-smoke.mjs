@@ -1,6 +1,7 @@
 // Opt-in packaged-app check; uses a few small requests on the signed-in CLI accounts.
 import { chromium, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
+import { chooseReasoning } from '../tests/reasoning-helper.ts';
 
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9428');
 const page = browser
@@ -28,7 +29,7 @@ try {
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await pick('Agent', 'Codex');
   await pick('Model', 'GPT-5.6-Sol');
-  await pick('Reasoning', 'Low');
+  await chooseReasoning(page, 'Low');
   await page
     .getByLabel('Message', { exact: true })
     .fill(

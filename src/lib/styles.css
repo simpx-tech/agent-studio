@@ -1255,6 +1255,10 @@ pre {
 .chat-configuration .picker-trigger {
   max-width: 100%;
 }
+/* The Reasoning slider keeps its length; the pickers beside it shorten their names instead. */
+.chat-setting.reasoning-setting {
+  flex-shrink: 0;
+}
 .setting-badge {
   flex-shrink: 0;
   margin-left: 2px;
@@ -1301,6 +1305,20 @@ pre {
   }
   .chat-configuration .agent-setting .agent-picker {
     max-width: 220px;
+  }
+  .chat-configuration {
+    --slider-track: 60px;
+    --slider-gap: 6px;
+    --slider-padding: 7px;
+  }
+}
+/* Down to phones, which scroll the toolbar, the slider leaves out its icon for the names. */
+@media (min-width: 651px) and (max-width: 900px) {
+  .chat-configuration {
+    --slider-track: 56px;
+  }
+  .chat-configuration .choice-slider .slider-icon {
+    display: none;
   }
 }
 .chat-scroll {

@@ -62,6 +62,18 @@ async function choose(label, prefix) {
     el.click();
   }, prefix);
 }
+async function reasoning(level) {
+  await page.evaluate((level) => {
+    const input = document.querySelector('input[aria-label="Reasoning"]');
+    const levels = [...document.querySelectorAll('.reasoning-setting .slider-value > span')].map(
+      (span) => span.textContent,
+    );
+    if (!input || input.disabled || !levels.includes(level))
+      throw Error(`Reasoning level not available: ${level}`);
+    input.value = String(levels.indexOf(level));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, level);
+}
 async function budget(value) {
   await page.waitFor(
     () => document.querySelector('[aria-label="Chat instructions"]')?.disabled === false,
@@ -164,7 +176,7 @@ try {
       const disabled = await page.evaluate(
         () => document.querySelector('[aria-label="Reasoning"]')?.disabled,
       );
-      if (!disabled) await choose('Reasoning', 'Default');
+      if (!disabled) await reasoning('Default');
     }
     await budget(step.budget);
     const previous = (await page.invoke('load_workspace')).conversations

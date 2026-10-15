@@ -49,6 +49,23 @@ export function modelChoices(
         { id: current, name: current || 'CLI default', reasoningLevels: [], defaultReasoning: '' },
       ];
 }
+// Reasoning levels from the least to the most.
+const reasoningOrder: Reasoning[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+];
+// A model's levels as the Reasoning slider's stops: Default, then each level from the least to
+// the most, a chat's level the model no longer lists among them in its place.
+export function reasoningScale(levels: string[], current: Reasoning): Reasoning[] {
+  const listed = new Set<string>([...levels, current]);
+  return ['', ...reasoningOrder.filter((level) => listed.has(level))];
+}
 export const reasoningName = (level: Reasoning) =>
   ({
     '': 'Default',

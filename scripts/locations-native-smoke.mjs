@@ -3,6 +3,7 @@ import { chromium, expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { chooseReasoning } from '../tests/reasoning-helper.ts';
 
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9432');
 try {
@@ -58,8 +59,7 @@ try {
   });
   await page.getByRole('combobox', { name: 'Model', exact: true }).click();
   await page.getByRole('option', { name: 'GPT-5.6-Sol', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Reasoning', exact: true }).click();
-  await page.getByRole('option', { name: 'Low', exact: true }).click();
+  await chooseReasoning(page, 'Low');
   await page
     .getByLabel('Message', { exact: true })
     .fill('Folder QA: Reply with exactly: folder routing verified');

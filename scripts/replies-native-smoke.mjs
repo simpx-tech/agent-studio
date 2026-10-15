@@ -14,6 +14,18 @@ const pick = async (label, name) => {
   );
   await page.click(`[role="option"][aria-label="${name}"]`);
 };
+async function reasoning(level) {
+  await page.evaluate((level) => {
+    const input = document.querySelector('input[aria-label="Reasoning"]');
+    const levels = [...document.querySelectorAll('.reasoning-setting .slider-value > span')].map(
+      (span) => span.textContent,
+    );
+    if (!input || input.disabled || !levels.includes(level))
+      throw Error(`Reasoning level not available: ${level}`);
+    input.value = String(levels.indexOf(level));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, level);
+}
 const fill = (label, value) =>
   page.evaluate(
     (label, value) => {
@@ -111,7 +123,7 @@ try {
       !document.querySelector('[role="combobox"][aria-label="Model"]').disabled,
   );
   await pick('Model', 'GPT-6-Astra');
-  await pick('Reasoning', 'Low');
+  await reasoning('Low');
   await fill('Message', 'Reply with exactly FIRST_MODEL_OK. Do not use tools.');
   await page.waitFor(
     () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
@@ -119,7 +131,7 @@ try {
   await page.button('Send message');
   await page.waitFor(() => !!document.querySelector('.message[data-status="running"]'));
   await pick('Model', 'GPT-5.6-Sol');
-  await pick('Reasoning', 'High');
+  await reasoning('High');
   assert.equal(
     await page.evaluate(() => document.querySelector('.next-reply-settings')?.textContent.trim()),
     'Next message: GPT-5.6-Sol · High reasoning',

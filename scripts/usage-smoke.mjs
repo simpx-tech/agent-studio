@@ -1,6 +1,7 @@
 // Opt-in native check: read subscription limits, then send small synthetic chats.
 import { chromium, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
+import { chooseReasoning } from '../tests/reasoning-helper.ts';
 
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9428');
 const page = browser
@@ -71,7 +72,7 @@ try {
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await pick('Agent', item.name);
     await pick('Model', item.label);
-    if (item.provider !== 'claude') await pick('Reasoning', 'Low');
+    if (item.provider !== 'claude') await chooseReasoning(page, 'Low');
     await page
       .getByLabel('Message', { exact: true })
       .fill(`${marker} ${item.provider}. Reply only: The garden is ready.`);

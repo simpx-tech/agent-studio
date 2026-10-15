@@ -2,6 +2,7 @@
 import { chromium, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
+import { chooseReasoning } from '../tests/reasoning-helper.ts';
 
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9433');
 const page = browser
@@ -40,8 +41,7 @@ try {
   await page.getByRole('option', { name: 'Codex', exact: true }).click();
   await page.getByRole('combobox', { name: 'Model', exact: true }).click();
   await page.getByRole('option', { name: 'GPT-5.6-Sol', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Reasoning', exact: true }).click();
-  await page.getByRole('option', { name: 'Low', exact: true }).click();
+  await chooseReasoning(page, 'Low');
   const prompt =
     'Working folder QA: Without running tools, reply with only the absolute working directory reported by your session environment. Do not infer it from earlier messages.';
   await page.getByLabel('Message', { exact: true }).fill(prompt);

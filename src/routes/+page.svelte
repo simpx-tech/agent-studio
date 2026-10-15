@@ -262,8 +262,15 @@
     type WslDiscovery,
   } from '$lib/fleet';
   import { replaceFields, sharedMeta, sharedWorkspace, type Presence } from '$lib/sync';
-  import { fallbackModels, modelChoices, reasoningName, type ModelCatalog } from '$lib/models';
+  import {
+    fallbackModels,
+    modelChoices,
+    reasoningName,
+    reasoningScale,
+    type ModelCatalog,
+  } from '$lib/models';
   import ChoicePicker from '$lib/components/ChoicePicker.svelte';
+  import ChoiceSlider from '$lib/components/ChoiceSlider.svelte';
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
@@ -273,7 +280,7 @@
   let mentionSelection = $state('');
   const hasComposerMentions = $derived(!!draftMentions.length || !!staleMentionTokens.length);
   let modelPicker = $state<ChoicePicker>();
-  let reasoningPicker = $state<ChoicePicker>();
+  let reasoningSlider = $state<ChoiceSlider>();
   let agentPicker = $state<ChoicePicker>();
   let usageExpanded = $state(false);
   let preparingCommand = false;
@@ -1488,13 +1495,10 @@
     availableModels.find((model) => model.id === selectedSettings.model)!,
   );
   const reasoningOptions = $derived(
-    [
-      ...new Set([
-        '',
-        ...currentModel.reasoningLevels,
-        ...(selectedSettings.reasoning ? [selectedSettings.reasoning] : []),
-      ]),
-    ].map((id) => ({ id, name: reasoningName(id as Reasoning) })),
+    reasoningScale(currentModel.reasoningLevels, selectedSettings.reasoning).map((id) => ({
+      id,
+      name: reasoningName(id),
+    })),
   );
   const recent = $derived(
     [...workspace.conversations]
@@ -6273,8 +6277,8 @@
                 </ChoicePicker>
               </div>
               <div class="chat-setting reasoning-setting">
-                <ChoicePicker
-                  bind:this={reasoningPicker}
+                <ChoiceSlider
+                  bind:this={reasoningSlider}
                   label="Reasoning"
                   value={selectedSettings.reasoning}
                   options={reasoningOptions}
@@ -6285,7 +6289,7 @@
                     changeSettings({ ...selectedSettings, reasoning: value as Reasoning })}
                 >
                   {#snippet icon()}<Brain size={16} />{/snippet}
-                </ChoicePicker>
+                </ChoiceSlider>
               </div>
             </div>
             {#key activeId}<ToolbarActions>
@@ -6578,8 +6582,7 @@
                 scope={activeId ?? draftKey.scratch(scratchId)}
                 oncommand={(name) => {
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
-                  else if (name === 'reasoning')
-                    void tick().then(() => reasoningPicker?.showPicker());
+                  else if (name === 'reasoning') void tick().then(() => reasoningSlider?.focus());
                   else if (name === 'instructions' || name === 'fast') {
                     focusFast = name === 'fast';
                     editorOpen = true;
