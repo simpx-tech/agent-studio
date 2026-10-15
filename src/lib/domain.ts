@@ -462,6 +462,16 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
 }
 // Loading a saved workspace cannot regain a run that was live when the app stopped.
 export const interruptedReplyError = 'This response was interrupted when the app closed.';
+/** A conflict copy's reply, whose run went on in the chat it was copied from. */
+export const copiedReplyError = 'This response went on in the original chat.';
+/** A reply saved as running that its computer holds no run for, which nothing else would end. */
+export const abandonedReplyError = 'This response is no longer running.';
+/**
+ * Whether a reply ended without an end of its own: a conflict copy's, or one its computer found it
+ * no longer runs. Each is the record catching up, never news, so neither alerts anyone.
+ */
+export const endedWithoutRun = (message: Pick<Message, 'error'>) =>
+  message.error === copiedReplyError || message.error === abandonedReplyError;
 /**
  * A saved workspace, migrated and validated. Replies saved as running were interrupted with the
  * app, unless `followsRuns`: the Viewer runs none, so its reload stops nothing, and it keeps

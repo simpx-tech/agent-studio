@@ -608,6 +608,142 @@ it('publishes the restarted execution host’s interrupted reply over a newer ru
   });
 });
 
+it('ends a reply this computer runs without its run once the relay holds no request for it', async () => {
+  // A conflict copy an earlier release made kept its reply running, while the run went on in the
+  // original chat: Stop changed nothing and the chat waited for good (2026-10-15).
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const ids = () => ({
+    environment: crypto.randomUUID(),
+    computer: crypto.randomUUID(),
+    account: crypto.randomUUID(),
+    connection: crypto.randomUUID(),
+  });
+  const here = ids(),
+    there = ids();
+  for (const [computer, name] of [
+    [here, 'Desktop'],
+    [there, 'VPS'],
+  ] as const) {
+    workspace.fleet.computers.push({ id: computer.computer, name });
+    workspace.fleet.environments.push({
+      id: computer.environment,
+      computerId: computer.computer,
+      name,
+      platform: 'windows',
+    });
+    workspace.fleet.accounts.push({
+      id: computer.account,
+      provider: 'claude',
+      name,
+      purpose: 'personal',
+    });
+    workspace.fleet.connections.push({
+      id: computer.connection,
+      accountId: computer.account,
+      environmentId: computer.environment,
+      profile: 'existing',
+    });
+  }
+  const chat = (title: string, on: typeof here, status: 'running' | 'complete' = 'running') => {
+    const settings = {
+      ...settingsFor(workspace.preferences, 'claude'),
+      connectionId: on.connection,
+    };
+    const conversation: Conversation = {
+      id: crypto.randomUUID(),
+      settings,
+      title,
+      createdAt: '2026-10-15',
+      updatedAt: '2026-10-15',
+      location: { computerId: on.computer, environmentId: on.environment, path: '' },
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          role: 'user',
+          createdAt: '2026-10-15',
+          status: 'complete',
+          blocks: [{ type: 'markdown', text: 'Install Chunky' }],
+        },
+        {
+          id: crypto.randomUUID(),
+          runId: crypto.randomUUID(),
+          role: 'assistant',
+          createdAt: '2026-10-15',
+          status,
+          settings,
+          blocks: [{ type: 'markdown', text: 'Configuring Chunky' }],
+        },
+      ],
+    };
+    workspace.conversations.push(conversation);
+    return { conversationId: conversation.id, messageId: conversation.messages[1].id };
+  };
+  const copied = chat('Copied', here);
+  // Another device's request, which this computer takes with its next poll.
+  const requested = chat('Requested', here);
+  const live = chat('Live', here);
+  chat('Elsewhere', there);
+  chat('Finished', here, 'complete');
+  const run = (reply: { messageId: string }) =>
+    workspace.conversations.flatMap((c) => c.messages).find((m) => m.id === reply.messageId)!
+      .runId!;
+  transport.configureRuntime({
+    installation: {
+      id: here.environment,
+      computerId: here.computer,
+      name: 'Desktop',
+      platform: 'windows',
+    },
+    workspace: () => workspace,
+    shared: () => sharedWorkspace(workspace),
+    ...chatRuntime(() => workspace),
+    fleet: () => workspace.fleet,
+    statuses: () => ({}),
+    localRuns: () => [run(live)],
+    apply: async () => {},
+    checkpointRun: async () => {},
+  });
+  const asked: string[] = [];
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'relay_resume') return 'https://relay.example.com/';
+    if (command === 'load_sync_state') return null;
+    if (command !== 'relay_request') return null;
+    if (args.path === 'v1/state/revision')
+      return { status: 200, body: { instanceId: 'same-relay', revision: 1 } };
+    if (args.path.startsWith('v1/jobs/')) {
+      asked.push(args.path.slice('v1/jobs/'.length));
+      return args.path.endsWith(run(requested))
+        ? { status: 200, body: { id: run(requested), status: 'queued' } }
+        : { status: 404, body: { error: 'Request is no longer available.' } };
+    }
+    return { status: 200, body: [] };
+  });
+  // Without the relay this computer cannot tell another device's request from an abandoned reply.
+  expect(await transport.abandonedReplies(workspace.conversations)).toEqual([]);
+  expect(asked).toEqual([]);
+  expect(await transport.resumeRelay()).toBe(true);
+  // Found, then ended by a check 20 seconds on.
+  vi.setSystemTime(new Date('2026-10-15T16:00:00Z'));
+  expect(await transport.abandonedReplies(workspace.conversations)).toEqual([]);
+  expect(asked.sort()).toEqual([run(copied), run(requested)].sort());
+  vi.setSystemTime(new Date('2026-10-15T16:00:19Z'));
+  expect(await transport.abandonedReplies(workspace.conversations)).toEqual([]);
+  vi.setSystemTime(new Date('2026-10-15T16:00:21Z'));
+  expect(await transport.abandonedReplies(workspace.conversations)).toEqual([copied]);
+  expect(asked.every((runId) => [run(copied), run(requested)].includes(runId))).toBe(true);
+  // A reply the user stops ends at the first check; one with a request waiting never does.
+  const stopped = chat('Stopped', here);
+  expect(await transport.abandonedReplies(workspace.conversations, stopped.conversationId)).toEqual(
+    [copied, stopped],
+  );
+  expect(
+    await transport.abandonedReplies(workspace.conversations, requested.conversationId),
+  ).toEqual([copied]);
+  // The other computer's reply, the live run and the finished reply are never asked about.
+  expect(new Set(asked)).toEqual(new Set([run(copied), run(requested), run(stopped)]));
+});
+
 it('keeps following a run another computer still executes after this device restarts', async () => {
   const { puts, applied } = await restartedDevice(false);
   expect(puts).toHaveLength(0);

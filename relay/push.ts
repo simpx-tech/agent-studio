@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import webpush from 'web-push';
 import { z } from 'zod';
 import type { SharedWorkspace, RelayJob } from '../src/lib/sync.ts';
-import type { Message } from '../src/lib/domain.ts';
+import { endedWithoutRun, type Message } from '../src/lib/domain.ts';
 import { toolActivitySchema } from '../src/lib/activity.ts';
 import {
   attentionKeys,
@@ -515,6 +515,9 @@ export function pushService({
         const previous = earlier.get(conversation.id);
         const message = conversation.messages.at(-1);
         if (!message || message.role !== 'assistant' || !message.runId) continue;
+        // A conflict copy's reply, or one its computer found abandoned, ended without its run.
+        // Its run's own end alerts once, under the receipt a copy's would have taken.
+        if (endedWithoutRun(message)) continue;
         const old = previous?.messages.find((m) => m.id === message.id);
         // Ignore imported history and old checkpoint replays, but include fast
         // replies that finish between two relay syncs.

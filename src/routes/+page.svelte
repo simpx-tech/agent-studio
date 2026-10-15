@@ -90,6 +90,7 @@
     MessageSquare,
   } from '@lucide/svelte';
   import {
+    abandonedReplyError,
     initialWorkspace,
     providerIds,
     providers,
@@ -128,6 +129,7 @@
     detectProviders,
     runAgent,
     cancelRun,
+    abandonedReplies,
     releaseConversation,
     closeConversation,
     signIn,
@@ -2109,6 +2111,8 @@
     const serverPoll = setInterval(() => {
       if (loaded && installation?.server && !localRunning && !workingForOthers()) void refresh();
     }, 5 * 60_000);
+    // Nothing reports a reply this computer runs without its run, so it is looked for.
+    const abandonPoll = setInterval(() => void endAbandonedReplies(), 10_000);
     void (async () => {
       try {
         const local = await getInstallation();
@@ -2389,6 +2393,7 @@
       clearInterval(relayPoll);
       clearInterval(wslPoll);
       clearInterval(serverPoll);
+      clearInterval(abandonPoll);
       window.removeEventListener('focus', onReturn);
       window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
@@ -5319,6 +5324,37 @@
       // The folder keeps the folder mark until a chat there after a reload tries again.
     }
   }
+  /**
+   * Ends the replies saved as running that this computer runs without holding their run, here and
+   * on every device: nothing else would end one. Stop never changed one, steering found it ended and
+   * a queued message waited for it for good (2026-10-15). `now` names a chat whose replies end at
+   * the first check, as Stop asks.
+   */
+  async function endAbandonedReplies(now?: string) {
+    if (!loaded || !paired) return;
+    const session = workspaceSession;
+    let ended: Awaited<ReturnType<typeof abandonedReplies>>;
+    try {
+      ended = await abandonedReplies(workspace.conversations, now);
+    } catch {
+      // The next check looks again.
+      return;
+    }
+    if (session !== workspaceSession || !ended.length) return;
+    for (const { conversationId, messageId } of ended) {
+      const conversation = workspace.conversations.find((c) => c.id === conversationId);
+      const message = conversation?.messages.find((m) => m.id === messageId);
+      if (!conversation || message?.status !== 'running') continue;
+      message.status = 'cancelled';
+      message.error = abandonedReplyError;
+      delete message.backgroundWait;
+      delete heardWaits[message.runId!];
+      delete questionDrafts[message.runId!];
+      saveSoon(conversation.id, message.id);
+    }
+    noteFinishedChats();
+    void syncNow(true);
+  }
   async function stop() {
     const conversationId = activeId;
     const ownedRun = conversationId ? runs[conversationId] : undefined;
@@ -5327,6 +5363,7 @@
     if (!ownedRun) {
       try {
         await cancelRun(id, observedReply?.settings?.connectionId);
+        await endAbandonedReplies(conversationId);
       } catch (e) {
         notice = String(e);
       }

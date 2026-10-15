@@ -1,4 +1,4 @@
-import { interruptedReplyError, type Workspace } from './domain';
+import { endedWithoutRun, interruptedReplyError, type Workspace } from './domain';
 import {
   attentionKeys,
   chatNotification,
@@ -31,8 +31,12 @@ export function createDesktopNotificationTracker(now = Date.now, wake?: (delay: 
       if (!message?.runId) continue;
       const old = runs.get(message.runId);
       // A reply restored as interrupted may still be running on another computer, whose copy
-      // replaces it on the next sync, so it has not finished until a reply says so.
-      const terminal = message.status !== 'running' && message.error !== interruptedReplyError;
+      // replaces it on the next sync, so it has not finished until a reply says so. One that
+      // ended without its run, in a conflict copy or found abandoned, is no news either.
+      const terminal =
+        message.status !== 'running' &&
+        message.error !== interruptedReplyError &&
+        !endedWithoutRun(message);
       const attention = new Set(old?.attention);
       let asked = old?.asked;
       const created = Date.parse(message.createdAt);

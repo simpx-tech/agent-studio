@@ -671,6 +671,9 @@ let browserSessionBlocked = false;
 const relayConnectionListeners = new Set<(ready: boolean) => void>();
 const remoteRuns = new Map<string, boolean>();
 const workerRuns = new Map<string, RelayJob>();
+// The runs this computer's CLIs are answering for this window, those of replies a queued message
+// took over included, until each ends.
+const ownRuns = new Set<string>();
 /** Whether this computer is running work another device asked of it. */
 export const workingForOthers = () => workerRuns.size > 0;
 // Optional reads never keep this device from disconnecting; late results are discarded.
@@ -1004,7 +1007,66 @@ function runsOn(fleet: Fleet, conversation: Conversation, message: Message, host
 function deadRunHere(fleet: Fleet, conversation: Conversation, message: Message): boolean {
   if (!runtime || !message.runId) return false;
   if (!runsOn(fleet, conversation, message, runtime.installation.id)) return false;
-  return !runtime.localRuns().includes(message.runId) && !workerRuns.has(message.runId);
+  return (
+    !runtime.localRuns().includes(message.runId) &&
+    !workerRuns.has(message.runId) &&
+    !ownRuns.has(message.runId)
+  );
+}
+// Replies this computer runs without holding a run for them, by run, from when a check first found
+// them so (`abandonedReplies`).
+const unownedRuns = new Map<string, number>();
+// How long a reply stays so before it counts as abandoned. Another device publishes its chat before
+// it sends this computer the request for it, which then waits on the relay for a poll to take it.
+const abandonGrace = 20_000;
+/**
+ * Replies saved as running that this computer runs but holds no run for, which nothing would ever
+ * end: a conflict copy's from a release that left it running (its run went on in the original), or
+ * one whose end never reached this window. A reply counts once two checks at least `abandonGrace`
+ * apart, or one check when `now` names its conversation, found it so, each with the relay holding
+ * no request for it that a computer still has to take or finish.
+ */
+export async function abandonedReplies(
+  conversations: Conversation[],
+  now?: string,
+): Promise<{ conversationId: string; messageId: string }[]> {
+  if (!desktop() || !runtime || !relayConnected) return [];
+  const generation = relayGeneration;
+  let fleet: Fleet | undefined;
+  const found: { conversation: Conversation; message: Message }[] = [];
+  for (const conversation of conversations)
+    // Running replies end a conversation: messages queued for them come after.
+    for (let index = conversation.messages.length - 1; index >= 0; index--) {
+      const message = conversation.messages[index];
+      if (message.role !== 'assistant') continue;
+      if (message.status !== 'running') break;
+      if (deadRunHere((fleet ??= runtime.fleet()), conversation, message))
+        found.push({ conversation, message });
+    }
+  const checked = new Set<string>();
+  const abandoned: { conversationId: string; messageId: string }[] = [];
+  for (const { conversation, message } of found) {
+    const runId = message.runId!;
+    checked.add(runId);
+    const job = await relayRaw('GET', `v1/jobs/${runId}`);
+    if (generation !== relayGeneration) return [];
+    if (
+      job.status === 200
+        ? !['complete', 'cancelled', 'error'].includes(job.body?.status)
+        : job.status !== 404
+    ) {
+      unownedRuns.delete(runId);
+      continue;
+    }
+    const since = unownedRuns.get(runId) ?? Date.now();
+    unownedRuns.set(runId, since);
+    if (conversation.id !== now && Date.now() - since < abandonGrace) continue;
+    // A run may have started here while the relay answered.
+    if (!deadRunHere(runtime.fleet(), conversation, message)) continue;
+    abandoned.push({ conversationId: conversation.id, messageId: message.id });
+  }
+  for (const runId of unownedRuns.keys()) if (!checked.has(runId)) unownedRuns.delete(runId);
+  return abandoned;
 }
 async function relayRaw(
   method: string,
@@ -2266,7 +2328,13 @@ async function localCall(
   if (method === 'run') {
     const channel = new Channel<RunEvent>();
     channel.onmessage = onEvent ?? (() => {});
-    return invoke('run_agent', { ...args, onEvent: channel });
+    const { runId } = args.request as RunRequest;
+    ownRuns.add(runId);
+    try {
+      return await invoke('run_agent', { ...args, onEvent: channel });
+    } finally {
+      ownRuns.delete(runId);
+    }
   }
   if (method === 'undoFiles') {
     const owner = runtime;

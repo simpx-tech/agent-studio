@@ -1,4 +1,4 @@
-import { interruptedReplyError, type Conversation, type Message } from './domain';
+import { endedWithoutRun, interruptedReplyError, type Conversation, type Message } from './domain';
 
 type Reply = Pick<Message, 'role' | 'status' | 'runId' | 'createdAt' | 'error'>;
 type Chat = Pick<Conversation, 'id'> & { messages: readonly Reply[] };
@@ -34,8 +34,12 @@ export function createFinishedChatTracker(now = Date.now) {
       let unread = runId && marked[chat.id] === runId ? runId : undefined;
       if (reply && runId) {
         // A reply restored as interrupted may still be running on another computer, whose
-        // copy replaces it on the next sync, so it has not finished until a reply says so.
-        const finished = reply.status !== 'running' && reply.error !== interruptedReplyError;
+        // copy replaces it on the next sync, so it has not finished until a reply says so. One
+        // that ended without its run, in a conflict copy or found abandoned, is no news either.
+        const finished =
+          reply.status !== 'running' &&
+          reply.error !== interruptedReplyError &&
+          !endedWithoutRun(reply);
         const seen = runs.get(runId);
         const created = Date.parse(reply.createdAt);
         const fresh = created >= started - skew && created <= now();

@@ -2,6 +2,7 @@ import {
   workspaceSchema,
   messageText,
   interruptedReplyError,
+  copiedReplyError,
   type Conversation,
   type Message,
   type Workspace,
@@ -248,6 +249,29 @@ function laterReply(left: Message, right: Message): Message {
   return messageText(left).startsWith(messageText(right)) ? left : right;
 }
 
+/**
+ * Whether `copy` holds nothing `other` lacks: its messages begin `other`'s, each the same or an
+ * earlier step of the same reply.
+ */
+function earlierCopy(copy: Conversation, other: Conversation): boolean {
+  return (
+    copy.messages.length <= other.messages.length &&
+    copy.messages.every((message, index) => {
+      const later = other.messages[index];
+      if (message.id !== later.id) return false;
+      return (
+        equal(message, later) ||
+        (message.role === 'assistant' &&
+          later.role === 'assistant' &&
+          !!message.runId &&
+          message.runId === later.runId &&
+          equal(message.settings, later.settings) &&
+          laterReply(later, message) === later)
+      );
+    })
+  );
+}
+
 function sameRun(
   left: Conversation,
   right: Conversation,
@@ -263,18 +287,34 @@ function sameRun(
     !equal(left.location, right.location)
   )
     return;
-  if (!!left.archived !== !!right.archived) {
+  const archiveDiffers = !!left.archived !== !!right.archived;
+  const settingsDiffer = !equal(left.settings, right.settings);
+  // The base tells which side made a one-sided change. A device can hold a chat its baseline
+  // lacks, as when a phone closed the Viewer after saving what a sync took in but before saving
+  // the baseline that came with it (2026-10-15). A copy that holds nothing the other lacks is then
+  // the earlier one, and the other's archive and settings are changes made since, such as a move
+  // to History on another device, which made a conflict copy of the chat.
+  const before =
+    base ??
+    (!archiveDiffers && !settingsDiffer
+      ? undefined
+      : earlierCopy(left, right)
+        ? left
+        : earlierCopy(right, left)
+          ? right
+          : undefined);
+  if (archiveDiffers) {
     // Opening an app session can archive a chat while its owning host publishes a reply.
     // Keep the one-sided archive/restore change together with that response checkpoint.
-    if (base && !!left.archived === !!base.archived) archived = right.archived;
-    else if (!base || !!right.archived !== !!base.archived) return;
+    if (before && !!left.archived === !!before.archived) archived = right.archived;
+    else if (!before || !!right.archived !== !!before.archived) return;
   }
-  if (!equal(left.settings, right.settings)) {
+  if (settingsDiffer) {
     // A response checkpoint and a one-sided edit for the next request, such as the account
     // switched to after a usage limit, are independent. Conflicting settings edits still
     // produce the existing conflict copy.
-    if (base && equal(left.settings, base.settings)) settings = right.settings;
-    else if (!base || !equal(right.settings, base.settings)) return;
+    if (before && equal(left.settings, before.settings)) settings = right.settings;
+    else if (!before || !equal(right.settings, before.settings)) return;
   }
   const messages = [];
   let sharedRun = false;
@@ -392,6 +432,27 @@ export function onlyRepliesMoved(before: Conversation | undefined, after: Conver
   );
 }
 
+/**
+ * A conversation kept beside its original as a copy, under an id of its own. A reply it holds as
+ * running goes on in the original, which keeps the id its computer reports to, so the copy's ends
+ * here: left running, it waited for an end that never came, and its chat could neither be steered
+ * nor sent another message (2026-10-15).
+ */
+function conflictCopy(conversation: Conversation): Conversation {
+  return {
+    ...conversation,
+    id: crypto.randomUUID(),
+    title: `${conversation.title} (conflict copy)`,
+    titleStatus: 'fallback',
+    messages: conversation.messages.map((message) => {
+      if (message.status !== 'running') return message;
+      const copy: Message = { ...message, status: 'cancelled', error: copiedReplyError };
+      delete copy.backgroundWait;
+      return copy;
+    }),
+  };
+}
+
 // A stopped host can publish its last checkpoint after another device deletes
 // the chat. Only background reply/title updates yield to that deletion; retain
 // conflict copies for new messages or deliberate settings/location/title edits.
@@ -498,17 +559,8 @@ export function mergeShared(
             result.push(
               (archivedOlder ? { ...newer, archived: older.archived } : newer) as unknown as T,
             );
-            if (
-              !original ||
-              !backgroundUpdate(original, { ...older, archived: original.archived })
-            ) {
-              result.push({
-                ...older,
-                id: crypto.randomUUID(),
-                title: `${older.title} (conflict copy)`,
-                titleStatus: 'fallback',
-              } as unknown as T);
-            }
+            if (!original || !backgroundUpdate(original, { ...older, archived: original.archived }))
+              result.push(conflictCopy(older) as unknown as T);
             continue;
           }
           const response = sameRun(
@@ -523,13 +575,7 @@ export function mergeShared(
           }
         }
         if (right) result.push(right);
-        if (left)
-          result.push({
-            ...left,
-            id: crypto.randomUUID(),
-            title: `${(left as T & { title: string }).title} (conflict copy)`,
-            titleStatus: 'fallback',
-          });
+        if (left) result.push(conflictCopy(left as unknown as Conversation) as unknown as T);
       } else
         throw new Error(
           'Computer or account settings changed on both devices. Export this workspace before resolving the conflicting settings.',

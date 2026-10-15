@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  copiedReplyError,
   initialWorkspace,
   interruptedReplyError,
   restoreWorkspace,
@@ -591,9 +592,114 @@ describe('workspace replication', () => {
         expect(merged.conversations[0].archived).toBe(archived);
         expect(merged.conversations[0].messages).toEqual(checkpoint.conversations[0].messages);
       }
-      // Without a shared baseline, keep the two distinct edits for review.
-      expect(mergeShared(emptyShared(), edited, checkpoint).conversations).toHaveLength(2);
+      // Without a baseline, the copy holding an earlier step of the reply is the earlier one, so
+      // the archive state of the copy further along stands, whichever device merges.
+      for (const [local, remote] of [
+        [edited, checkpoint],
+        [checkpoint, edited],
+      ]) {
+        const merged = mergeShared(emptyShared(), local, remote);
+        expect(merged.conversations).toHaveLength(1);
+        expect(merged.conversations[0].archived).toBe(!archived);
+        expect(merged.conversations[0].messages).toEqual(checkpoint.conversations[0].messages);
+      }
     }
+  });
+  it('takes in a chat this device holds without its baseline when the other copy is further along', () => {
+    // A phone saved what a sync took in, then closed before it saved the baseline that came with
+    // it. Meanwhile the computer finished the reply, answered another message and moved the chat
+    // to History. Merging without a baseline made a conflict copy of the chat, its reply left
+    // running for good (2026-10-15).
+    const conversation = chat();
+    const user = (text: string): Message => ({
+      id: crypto.randomUUID(),
+      role: 'user',
+      status: 'complete',
+      createdAt: '2026-10-15T14:15:42.204Z',
+      blocks: [{ type: 'markdown', text }],
+    });
+    const reply = (status: Message['status'], text: string): Message => ({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      status,
+      createdAt: '2026-10-15T14:15:42.204Z',
+      runId: crypto.randomUUID(),
+      settings: conversation.settings,
+      blocks: text ? [{ type: 'markdown', text }] : [],
+      plan: { revision: 9, steps: [] },
+    });
+    const first = reply('running', '');
+    conversation.messages.push(user('Increase the memory and install Chunky'), first);
+    const phone = { ...emptyShared(), conversations: [conversation] };
+    const computer = structuredClone(phone);
+    const done = computer.conversations[0];
+    Object.assign(done.messages[1], {
+      status: 'complete',
+      blocks: [{ type: 'markdown', text: 'The server now has more memory.' }],
+      plan: { revision: 11, steps: [] },
+    });
+    done.messages.push(user('Is it running?'), reply('complete', 'Yes.'));
+    done.archived = true;
+    done.updatedAt = '2026-10-15T15:02:03.116Z';
+    for (const [local, remote] of [
+      [phone, computer],
+      [computer, phone],
+    ]) {
+      const merged = mergeShared(emptyShared(), local, remote);
+      expect(merged.conversations).toHaveLength(1);
+      expect(merged.conversations[0]).toMatchObject({
+        id: conversation.id,
+        title: 'Original',
+        archived: true,
+        updatedAt: '2026-10-15T15:02:03.116Z',
+      });
+      expect(merged.conversations[0].messages).toEqual(done.messages);
+    }
+    // A copy that holds something the other lacks, such as a message of its own, still keeps
+    // both, as nothing tells which device moved the chat.
+    const sent = structuredClone(phone);
+    sent.conversations[0].messages.push(user('Written on the phone'));
+    const merged = mergeShared(emptyShared(), sent, computer);
+    expect(merged.conversations.map((c) => c.title)).toEqual([
+      'Original',
+      'Original (conflict copy)',
+    ]);
+  });
+  it('never leaves a reply running in a conflict copy, whose run goes on in the original', () => {
+    const base = emptyShared();
+    const conversation = chat();
+    const running: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      status: 'running',
+      createdAt: '2026-10-15T14:39:32.398Z',
+      runId: crypto.randomUUID(),
+      settings: conversation.settings,
+      blocks: [{ type: 'markdown', text: 'Working' }],
+      backgroundWait: 1,
+    };
+    conversation.messages.push(running);
+    base.conversations.push(conversation);
+    // The next reply's settings changed on both devices, which keeps both copies.
+    const local = structuredClone(base);
+    local.conversations[0].settings = { ...conversation.settings, instructions: 'Here' };
+    const remote = structuredClone(base);
+    remote.conversations[0].settings = { ...conversation.settings, instructions: 'There' };
+    const [original, copy] = mergeShared(base, local, remote).conversations;
+    expect(original).toEqual(remote.conversations[0]);
+    expect(original.messages[0].status).toBe('running');
+    expect(copy.id).not.toBe(conversation.id);
+    expect(copy.title).toBe('Original (conflict copy)');
+    const { backgroundWait, ...stopped } = running;
+    expect(backgroundWait).toBe(1);
+    expect(copy.messages).toEqual([{ ...stopped, status: 'cancelled', error: copiedReplyError }]);
+    // So does a copy a rewind elsewhere leaves.
+    const rewound = structuredClone(remote);
+    rewound.conversations[0].historyRevision = 1;
+    rewound.conversations[0].settings = conversation.settings;
+    const kept = mergeShared(base, local, rewound).conversations;
+    expect(kept.map((c) => c.messages[0].status)).toEqual(['running', 'cancelled']);
+    expect(kept[1].messages[0].error).toBe(copiedReplyError);
   });
   it('surfaces conflicting connection routing instead of silently choosing an account', () => {
     const base = emptyShared();
