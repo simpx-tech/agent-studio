@@ -416,6 +416,30 @@ describe('workspace replication', () => {
     ])
       expect(mergeShared(base, local, remote).conversations).toEqual(emptied.conversations);
   });
+  it('keeps the reply a reply took over when an older relay drops it', () => {
+    const tookOver = crypto.randomUUID();
+    const reply = (blocks: number, named: boolean): Message => ({
+      id: 'b3f0c7f1-8a0e-4c47-9f64-7a2f9b1d0c11',
+      runId: 'f0e5a9d2-3b1c-4c8e-a7d4-2e6b8f9c0a13',
+      role: 'assistant',
+      createdAt: '',
+      status: 'running',
+      ...(named ? { tookOver } : {}),
+      blocks: Array.from({ length: blocks }, (_, i) => ({ type: 'activity', text: `Step ${i}` })),
+    });
+    const at = (message: Message) => {
+      const shared = emptyShared();
+      shared.conversations.push({ ...chat(), id: 'chat', messages: [message] });
+      return shared;
+    };
+    const base = at(reply(1, true));
+    // Its own copy moved on too, or only the relay's did.
+    for (const local of [at(reply(2, true)), base]) {
+      const merged = mergeShared(base, local, at(reply(3, false)));
+      expect(merged.conversations[0].messages[0]).toMatchObject({ tookOver });
+      expect(merged.conversations[0].messages[0].blocks).toHaveLength(3);
+    }
+  });
   it('keeps an account switched on one device with the reply another device saw end', () => {
     // A reply hit a usage limit; the desktop switched the chat to another account and went on,
     // while a phone still held the first account and the reply as it was before.

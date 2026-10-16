@@ -297,6 +297,9 @@ pub struct ToolDecoder {
     /// group last went out.
     held: std::collections::HashSet<String>,
     group_sent: HashMap<String, std::time::Instant>,
+    /// Sub-agents of earlier replies that a SendMessage call of this one resumed, by task, until
+    /// their first line names the call that started them.
+    resumed: HashMap<String, subagents::Resumed>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -1068,6 +1071,7 @@ impl ToolDecoder {
         if !v["parent_tool_use_id"].is_null() && parent.is_none() {
             return;
         }
+        self.claude_resumed_child(v, out);
         self.claude_child_text(v, out);
         if kind == "stream_event" {
             let event = &v["event"];
@@ -1290,11 +1294,21 @@ impl ToolDecoder {
                     self.tasks.insert(task, id);
                     return;
                 }
-                self.tasks.insert(task, id.clone());
+                self.tasks.insert(task.clone(), id.clone());
                 // CLI shell tasks use the same task lifecycle as delegated work.
                 // They belong to the existing tool, never a sub-agent result: their
                 // summary can contain raw stdout/stderr and must not cross the boundary.
                 if let Some(mut tool) = self.existing(&key) {
+                    // A sub-agent an earlier reply started, which this reply's SendMessage call
+                    // resumed: its first line gives it a record here (`claude_resumed_child`).
+                    if v["subtype"] == "task_started"
+                        && v["task_type"] == "local_agent"
+                        && tool.operation.as_deref() == Some("sendMessage")
+                        && !task.is_empty()
+                    {
+                        self.claude_resume(task, &tool, v);
+                        return;
+                    }
                     if v["subtype"] == "task_notification" {
                         tool.status = status(v["status"].as_str().unwrap_or_default()).into();
                         tool.elapsed_ms = None;

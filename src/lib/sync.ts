@@ -176,11 +176,15 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !previous.filesUndone &&
         !previous.accountUsage &&
         !previous.usageLimit &&
+        !previous.tookOver &&
         previous.usage?.revision == null)
     )
       return message;
     const merged = {
       ...message,
+      ...(message.tookOver || previous.tookOver
+        ? { tookOver: message.tookOver ?? previous.tookOver }
+        : {}),
       ...(message.proposedPlans || previous.proposedPlans
         ? { proposedPlans: mergeProposedPlans(message.proposedPlans, previous.proposedPlans) }
         : {}),
@@ -351,6 +355,7 @@ function sameRun(
         : chosen;
     messages.push({
       ...selected,
+      ...(a.tookOver || b.tookOver ? { tookOver: a.tookOver ?? b.tookOver } : {}),
       ...(a.filesUndone || b.filesUndone ? { filesUndone: true } : {}),
       ...(a.proposedPlans || b.proposedPlans
         ? { proposedPlans: mergeProposedPlans(a.proposedPlans, b.proposedPlans) }

@@ -34,7 +34,7 @@
   import ReplyFooter from './ReplyFooter.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import type { BackgroundRun } from '$lib/background-work';
-  import { replyTools, runningSubagents } from '$lib/subagents';
+  import { replyTools, runningSubagents, type RunningSubagent } from '$lib/subagents';
   import VisualizationView from './VisualizationView.svelte';
   import SentFilesView from './SentFilesView.svelte';
   import QuestionForm from './QuestionForm.svelte';
@@ -62,6 +62,8 @@
     fork,
     forkDisabled = false,
     background = [],
+    inherited,
+    carried = false,
     openSubagent,
     openedSubagent,
     idle = false,
@@ -89,10 +91,14 @@
     forkDisabled?: boolean;
     /** Background work this reply started that still runs. */
     background?: BackgroundRun[];
-    /** Opens one of this reply's sub-agents in the side panel. */
-    openSubagent?: (agentId: string) => void;
-    /** This reply's sub-agent whose conversation the side panel shows. */
-    openedSubagent?: string;
+    /** Sub-agents of replies this one took over, which it waits for while they run. */
+    inherited?: RunningSubagent[];
+    /** A later reply that took this one over runs, and waits for its sub-agents. */
+    carried?: boolean;
+    /** Opens a sub-agent in the side panel: one of this reply's, or of the reply named. */
+    openSubagent?: (agentId: string, messageId?: string) => void;
+    /** The sub-agent whose conversation the side panel shows, and the reply that holds it. */
+    openedSubagent?: { messageId: string; agentId: string };
     /** It runs, but its turn ended and it only waits for background work. */
     idle?: boolean;
     /** Opens the Agent picker to choose another account for the next message. */
@@ -145,7 +151,15 @@
       : '';
   };
   const sent = $derived(clock(message.createdAt));
-  const subagents = $derived(runningSubagents(tools, message.status));
+  // Its own sub-agents still running, then those of the replies it took over that it waits for.
+  const subagents = $derived.by(() => {
+    const own = runningSubagents(tools, message.status);
+    return inherited?.length ? [...own, ...inherited] : own;
+  });
+  // This reply's sub-agent the side panel shows, which its rows mark.
+  const opened = $derived(
+    openedSubagent?.messageId === message.id ? openedSubagent.agentId : undefined,
+  );
   // Shown where the question will be, so it appears as Claude writes it.
   const drafts = $derived(
     message.status === 'running' && questionDrafts?.length
@@ -437,8 +451,9 @@
             connectionId={author.connectionId}
             {folder}
             fileChanges={message.fileChanges}
+            {carried}
             {openSubagent}
-            {openedSubagent}
+            openedSubagent={opened}
             {writing}
           />
           {#if last}{@render outcome()}{/if}

@@ -289,7 +289,7 @@
   import SubagentPanel from '$lib/components/SubagentPanel.svelte';
   import FileViewer from '$lib/components/FileViewer.svelte';
   import { provideFileViewer } from '$lib/file-viewer.svelte';
-  import { findSubagent, replyTools } from '$lib/subagents';
+  import { carriedSubagents, findSubagent, replyTools } from '$lib/subagents';
   import { leaveChats, type ArtifactView, type SubagentView } from '$lib/side-panels';
   import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
   import { artifactCardAction, recordArtifact, type Artifact } from '$lib/artifacts';
@@ -986,6 +986,8 @@
       !!subagentReply &&
       !!findSubagent(replyTools(subagentReply), subagentView.agentId),
   );
+  // The sub-agents of replies a running reply took over, which it waits for while they run.
+  const carriedWork = $derived(active ? carriedSubagents(active.messages) : undefined);
   // The shells a console on this computer runs for the open chat, which is where its code
   // blocks offer Run in console. A chat another computer runs, and the Viewer, only copy them.
   const consoles = $derived(
@@ -5041,6 +5043,7 @@
         : `${statusFor(responseSettings.provider)?.location ?? 'This computer'} · CLI login`,
       runId,
       ...(compact ? { compact: true } : {}),
+      ...(takeOver ? { tookOver: takeOver.reply.id } : {}),
       promptTokensEstimate: estimatePromptTokens(responseSettings, history),
       blocks: [],
       status: 'running',
@@ -6394,10 +6397,10 @@
                       : undefined}
                     forkDisabled={forking || imagesLoading}
                     {openArtifact}
-                    openSubagent={(agentId) => openSubagent(m.id, agentId)}
-                    openedSubagent={subagentShown && subagentView?.messageId === m.id
-                      ? subagentView.agentId
-                      : undefined}
+                    inherited={carriedWork?.inherited.get(m.id)}
+                    carried={!!carriedWork?.carried.has(m.id)}
+                    openSubagent={(agentId, messageId = m.id) => openSubagent(messageId, agentId)}
+                    openedSubagent={subagentShown ? subagentView : undefined}
                     openScreen={(card) => openScreen(card.environmentId, card.id)}
                   />{/each}
                 {#if jumpShown}<div class="jump-to-end-rail">
@@ -6707,6 +6710,7 @@
               takeFocus={subagentView.focus}
               folder={active?.location?.path}
               connectionId={(subagentReply.settings ?? active?.settings)?.connectionId}
+              carried={!!carriedWork?.carried.has(subagentReply.id)}
               open={(agentId) => subagentReply && openSubagent(subagentReply.id, agentId)}
               close={() => delete subagentViews[chat]}
             />{/key}{/if}

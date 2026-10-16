@@ -22,6 +22,16 @@ fn identity(value: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
 }
 
+/// A sub-agent an earlier reply started, which a SendMessage call of this reply resumed. Claude
+/// Code starts its task under that call, while the sub-agent's own lines answer the call that
+/// started it, which this reply never saw: the first of them names that call.
+pub(super) struct Resumed {
+    /// The description it was started with, which Claude Code reports again.
+    name: Option<String>,
+    /// The summary of the message that resumed it; the message itself stays private.
+    task: Option<String>,
+}
+
 impl AgentActivity {
     /// Every message a child writes is kept whole, however many it writes. A streamed one
     /// grows by its new text alone.
@@ -94,6 +104,57 @@ impl ToolDecoder {
         } else {
             return;
         }
+        self.publish_group(group, out);
+    }
+
+    /// Notes a sub-agent this reply does not hold, whose task a SendMessage call started again.
+    pub(super) fn claude_resume(&mut self, task: String, call: &ToolActivity, v: &Value) {
+        // Claude Code names a sub-agent started without a description "(resumed)".
+        let name = field(v, "description")
+            .filter(|name| name != "(resumed)")
+            .or_else(|| call.detail.clone());
+        self.resumed.insert(
+            task,
+            Resumed {
+                name,
+                task: call.detail.clone(),
+            },
+        );
+    }
+
+    /// Gives a sub-agent this reply resumed a record of its own once its first line arrives,
+    /// under the call that started it, which its lines answer, so that its calls, messages and
+    /// outcome show with this reply. Its lines name it; a CLI that leaves them unnamed can only
+    /// mean the one sub-agent resumed.
+    pub(super) fn claude_resumed_child(&mut self, v: &Value, out: &mut Vec<ToolActivity>) {
+        if self.resumed.is_empty() {
+            return;
+        }
+        let Some(parent) = identity(&v["parent_tool_use_id"]) else {
+            return;
+        };
+        let mut group = self.group("claude");
+        if group.agents.iter().any(|a| a.id == parent) {
+            return;
+        }
+        let task = match identity(&v["agent_id"]) {
+            Some(agent) => self.resumed.contains_key(agent).then(|| agent.to_owned()),
+            None if self.resumed.len() == 1 => self.resumed.keys().next().cloned(),
+            None => None,
+        };
+        let Some((task, resumed)) = task.and_then(|task| self.resumed.remove_entry(&task)) else {
+            return;
+        };
+        if let Some(agent) = Self::agent(&mut group, parent) {
+            agent.agent_id = Some(task.clone());
+            if let Some(name) = resumed.name {
+                agent.name = name;
+            }
+            agent.task = resumed.task;
+            // Its call returned while it works on, as a launch in the background does.
+            agent.background = true;
+        }
+        self.tasks.insert(task, clean(parent));
         self.publish_group(group, out);
     }
 
@@ -331,6 +392,94 @@ mod tests {
             "message":{"content":[{"type":"tool_result","tool_use_id":"child","content":"PRIVATE_RESULT"}]}}));
         assert_eq!(d.group("claude").agents[0].status, "running");
         assert!(!serde_json::to_string(&d.tools).unwrap().contains("PRIVATE"));
+    }
+
+    /// The SendMessage call of a reply that resumes a sub-agent an earlier reply started, and the
+    /// start of its task, as Claude Code 2.1.301 reports them.
+    fn resume(d: &mut ToolDecoder, description: &str) {
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"resume","name":"SendMessage",
+            "input":{"to":"a1","summary":"Second pass","message":"PRIVATE_MESSAGE","type":"message"}}]}}));
+        d.decode(
+            "claude",
+            &json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"resume",
+            "task_type":"local_agent","description":description,"prompt":"PRIVATE_MESSAGE"}),
+        );
+        d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"resume","content":"Resuming agent a1"}]},
+            "tool_use_result":{"success":true,"message":"Resuming agent a1","resumedAgentId":"a1","revivedAgentId":"a1"}}));
+    }
+
+    #[test]
+    fn a_sub_agent_a_later_reply_resumes_runs_again_with_that_reply() {
+        // Its task starts and ends under the SendMessage call, while its lines, which name it,
+        // answer the Agent call of the earlier reply, which this one never saw.
+        let mut d = ToolDecoder::default();
+        resume(&mut d, "Builder");
+        assert!(d.group("claude").agents.is_empty());
+        // The lines of a sub-agent nobody resumed here find no record.
+        let foreign = json!({"type":"assistant","uuid":"foreign","parent_tool_use_id":"elsewhere","agent_id":"a9",
+            "message":{"content":[{"type":"text","text":"PRIVATE_FOREIGN"}]}});
+        assert!(d.decode("claude", &foreign).is_empty());
+        let started = d.decode(
+            "claude",
+            &json!({"type":"assistant","uuid":"m1","parent_tool_use_id":"launch","agent_id":"a1",
+            "message":{"content":[{"type":"text","text":"Starting the second pass"},
+            {"type":"tool_use","id":"read","name":"Read","input":{"file_path":"notes.txt"}}]}}),
+        );
+        assert!(started
+            .iter()
+            .any(|tool| tool.id == "claude:read" && tool.parent_id.as_deref() == Some("launch")));
+        let group = d.group("claude");
+        let agent = &group.agents[0];
+        assert_eq!(group.agents.len(), 1);
+        assert_eq!(
+            (
+                agent.id.as_str(),
+                agent.agent_id.as_deref(),
+                agent.name.as_str()
+            ),
+            ("launch", Some("a1"), "Builder")
+        );
+        assert_eq!(agent.task.as_deref(), Some("Second pass"));
+        assert_eq!(agent.status, "running");
+        assert!(agent.background);
+        assert_eq!(agent.messages[0].text, "Starting the second pass");
+        // A reply that hands its process over keeps the sub-agent's lines.
+        assert!(d.owns_claude_line(
+            &json!({"type":"user","parent_tool_use_id":"launch","agent_id":"a1"})
+        ));
+        assert!(d.owns_claude_line(
+            &json!({"type":"system","subtype":"task_notification","task_id":"a1"})
+        ));
+        d.decode("claude", &json!({"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"resume",
+            "status":"completed","summary":"Second pass done"}));
+        let group = d.group("claude");
+        assert_eq!(group.agents[0].status, "complete");
+        assert_eq!(group.agents[0].result.as_deref(), Some("Second pass done"));
+        assert_eq!(group.status, "complete");
+        assert!(!serde_json::to_string(&d.tools).unwrap().contains("PRIVATE"));
+        // Sent again, it runs again in the same record.
+        d.decode(
+            "claude",
+            &json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"again",
+            "task_type":"local_agent","description":"Builder"}),
+        );
+        assert_eq!(d.group("claude").agents.len(), 1);
+        assert_eq!(d.group("claude").agents[0].status, "running");
+    }
+
+    #[test]
+    fn a_resumed_sub_agent_whose_lines_name_nobody_is_the_one_resumed() {
+        let mut d = ToolDecoder::default();
+        resume(&mut d, "(resumed)");
+        d.decode(
+            "claude",
+            &json!({"type":"assistant","uuid":"m1","parent_tool_use_id":"launch",
+            "message":{"content":[{"type":"text","text":"Working"}]}}),
+        );
+        let group = d.group("claude");
+        assert_eq!(group.agents[0].id, "launch");
+        // Without a description of its own, the summary of the message that resumed it names it.
+        assert_eq!(group.agents[0].name, "Second pass");
     }
 
     #[test]

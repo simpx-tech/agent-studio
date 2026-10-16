@@ -25,12 +25,15 @@
     takeFocus = true,
     folder,
     connectionId,
+    carried = false,
     open,
     close,
   }: {
     /** The reply that started the sub-agent. */
     message: Message;
     agentId: string;
+    /** A later reply that took that reply over runs, and waits for its sub-agents. */
+    carried?: boolean;
     /** False for a panel shown again with its chat. */
     takeFocus?: boolean;
     folder?: string;
@@ -52,9 +55,11 @@
   const tools = $derived(replyTools(message));
   const found = $derived(findSubagent(tools, agentId));
   const agent = $derived(found?.agent);
+  // The reply's sub-agents work on while it runs, or while a reply that took it over runs.
+  const replyStatus = $derived(carried ? 'running' : message.status);
   // Its conversation is live while it runs, in the background too.
-  const live = $derived(agent?.status === 'running' && message.status === 'running');
-  const status = $derived(agent ? activityDisplayStatus(agent, message.status) : 'unknown');
+  const live = $derived(agent?.status === 'running' && replyStatus === 'running');
+  const status = $derived(agent ? activityDisplayStatus(agent, replyStatus) : 'unknown');
   const parent = $derived(found && delegatingSubagent(found.holder, found.agent));
   const calls = $derived(tools.filter((tool) => tool.parentId === agentId));
   const nested = $derived(found && nestedSubagents(found.holder, found.agent));
@@ -200,7 +205,7 @@
           </section>{/if}
         <ToolActivity
           tools={shownTools}
-          replyStatus={subagentReplyStatus(agent, message.status)}
+          replyStatus={subagentReplyStatus(agent, replyStatus)}
           {blocks}
           runId={message.runId}
           {connectionId}

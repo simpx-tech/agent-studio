@@ -82,6 +82,16 @@ describe('conversation forks', () => {
     expect(long.title).toBe(`${'😀'.repeat(500)} (fork)`);
     expect(conversationSchema.parse(long).title).toBe(long.title);
   });
+  it('names the copy of the reply a copied reply took over', () => {
+    const original = source();
+    original.messages[3].tookOver = original.messages[1].id;
+    const fork = forkConversation(original);
+    expect(fork.messages[3].tookOver).toBe(fork.messages[1].id);
+    expect(conversationSchema.safeParse(fork).success).toBe(true);
+    // A reply the fork leaves out is named by no copy.
+    original.messages[1].tookOver = crypto.randomUUID();
+    expect(forkConversation(original).messages[1]).not.toHaveProperty('tookOver');
+  });
   it('branches at the chosen finished reply and retains that reply settings', () => {
     const original = source();
     const fork = forkConversation(original, original.messages[1].id);

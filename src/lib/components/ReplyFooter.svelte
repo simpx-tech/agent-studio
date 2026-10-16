@@ -40,12 +40,12 @@
     folder?: string;
     /** Background work this reply started that still runs. */
     background?: BackgroundRun[];
-    /** Sub-agents this reply still runs. */
+    /** Sub-agents this reply still runs or waits for. */
     subagents?: RunningSubagent[];
-    /** Opens a sub-agent's conversation in the side panel. */
-    openSubagent?: (agentId: string) => void;
-    /** The sub-agent whose conversation the side panel shows. */
-    openedSubagent?: string;
+    /** Opens a sub-agent's conversation in the side panel: this reply's, or the reply's named. */
+    openSubagent?: (agentId: string, messageId?: string) => void;
+    /** The sub-agent whose conversation the side panel shows, and the reply that holds it. */
+    openedSubagent?: { messageId: string; agentId: string };
   } = $props();
   // A running reply's row starts with its live elapsed time; a finished reply's with its
   // timing, files and, when it edited them, memories. Plans, workflows, sub-agents and
@@ -197,9 +197,10 @@
     >
       {#if opened.has('subagents')}<RunningSubagents
           agents={subagents}
+          replyId={message.id}
           {folder}
           opened={openedSubagent}
-          open={(id) => openSubagent?.(id)}
+          open={(agent) => openSubagent?.(agent.id, agent.messageId)}
         />{/if}
     </div>{/if}
   {#if background.length}<div

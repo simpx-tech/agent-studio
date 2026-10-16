@@ -63,6 +63,7 @@
     history = true,
     limited = false,
     owner,
+    carried = false,
     openSubagent,
     openedSubagent,
     writing,
@@ -88,6 +89,8 @@
     limited?: boolean;
     /** The sub-agent whose conversation this is; its own calls need no attribution. */
     owner?: string;
+    /** A later reply that took this one over runs, so the sub-agents still running work on. */
+    carried?: boolean;
     /** Opens a sub-agent's conversation in the side panel. */
     openSubagent?: (agentId: string) => void;
     /** The sub-agent whose conversation the side panel shows. */
@@ -429,7 +432,7 @@
             {#if parent}<span class="subagent-detail">Delegated by {parent.name}</span>
             {:else if agent.task}<span class="subagent-detail">{agent.task}</span>{/if}
           </span>
-          {@render statusMark(activityDisplayStatus(agent, replyStatus))}
+          {@render statusMark(activityDisplayStatus(agent, carried ? 'running' : replyStatus))}
           <PanelRightOpen size={14} class="subagent-open" aria-hidden="true" />
         </button>
       </li>

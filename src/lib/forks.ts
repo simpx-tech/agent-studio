@@ -18,8 +18,17 @@ export function forkConversation(source: Conversation, messageId?: string): Conv
   const end = forkPoint(source, messageId);
   if (end < 0) throw new Error('A finished reply is needed to fork this conversation.');
   const messages = structuredClone(source.messages.slice(0, end + 1));
+  const ids = new Map<string, string>();
   for (const message of messages) {
-    message.id = crypto.randomUUID();
+    const id = crypto.randomUUID();
+    ids.set(message.id, id);
+    message.id = id;
+    // The reply a reply took over is one of the messages copied before it.
+    if (message.tookOver) {
+      const earlier = ids.get(message.tookOver);
+      if (earlier) message.tookOver = earlier;
+      else delete message.tookOver;
+    }
     for (const receipt of message.elicitations ?? [])
       if (receipt.status === 'pending') {
         receipt.status = 'cancelled';

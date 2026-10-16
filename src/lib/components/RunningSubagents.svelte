@@ -3,24 +3,27 @@
   import { toolDisplayStatus } from '$lib/activity';
   import { liveAction } from '$lib/activity-groups';
   import type { RunningSubagent } from '$lib/subagents';
-  // A running reply's sub-agents, opened from the Sub-agents toggle in its footer. Each one
-  // opens its conversation in the side panel.
+  // A running reply's sub-agents, opened from the Sub-agents toggle in its footer, then those of
+  // the replies it took over that it waits for. Each one opens its conversation in the side panel.
   let {
     agents,
+    replyId,
     folder,
     opened,
     open,
   }: {
     agents: RunningSubagent[];
+    /** The reply whose footer lists them, which holds those without a reply of their own. */
+    replyId: string;
     folder?: string;
-    /** The sub-agent whose conversation the side panel shows. */
-    opened?: string;
-    open: (agentId: string) => void;
+    /** The sub-agent whose conversation the side panel shows, and the reply that holds it. */
+    opened?: { messageId: string; agentId: string };
+    open: (agent: RunningSubagent) => void;
   } = $props();
 </script>
 
 <ul class="running-subagents" aria-label="Running sub-agents">
-  {#each agents as agent (agent.id)}
+  {#each agents as agent (`${agent.messageId ?? replyId}:${agent.id}`)}
     <!-- What it is doing now: its latest call, from reported metadata only. -->
     {@const doing = agent.latest
       ? liveAction(agent.latest, toolDisplayStatus(agent.latest, 'running'), { folder })
@@ -28,9 +31,12 @@
     <li>
       <button
         type="button"
-        aria-current={opened === agent.id ? 'true' : undefined}
+        aria-current={opened?.agentId === agent.id &&
+        opened.messageId === (agent.messageId ?? replyId)
+          ? 'true'
+          : undefined}
         title="Open this sub-agent’s conversation beside the chat"
-        onclick={() => open(agent.id)}
+        onclick={() => open(agent)}
       >
         <LoaderCircle size={14} class="spinning" aria-hidden="true" />
         <span class="agent-line">

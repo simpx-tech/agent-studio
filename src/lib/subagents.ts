@@ -54,6 +54,8 @@ export type RunningSubagent = {
   /** Its latest call, which says what it is doing now. */
   latest?: ToolActivity;
   calls: number;
+  /** The earlier reply that holds it, for one a reply inherited from a reply it took over. */
+  messageId?: string;
 };
 
 const none: RunningSubagent[] = [];
@@ -84,6 +86,46 @@ export function runningSubagents(
       agent.calls++;
     }
   return running;
+}
+
+export type CarriedSubagents = {
+  /** The sub-agents that earlier replies started and still run, by the reply that waits for them. */
+  inherited: ReadonlyMap<string, RunningSubagent[]>;
+  /** The replies whose sub-agents run on for a later reply that took them over. */
+  carried: ReadonlySet<string>;
+};
+
+const nothingCarried: CarriedSubagents = { inherited: new Map(), carried: new Set() };
+
+/**
+ * What the running replies of a conversation wait for that earlier replies started. A message
+ * that takes over a reply waiting for background work goes on waiting for that reply's
+ * sub-agents, whose records stay with that reply: each running reply names the reply it took
+ * over (`tookOver`), which may have taken over another in turn. A running reply in that chain
+ * lists its own.
+ */
+export function carriedSubagents(messages: Message[]): CarriedSubagents {
+  let byId: Map<string, Message> | undefined;
+  let found: { inherited: Map<string, RunningSubagent[]>; carried: Set<string> } | undefined;
+  for (const reply of messages) {
+    if (reply.status !== 'running' || !reply.tookOver) continue;
+    byId ??= new Map(messages.map((message) => [message.id, message]));
+    found ??= { inherited: new Map(), carried: new Set() };
+    const agents: RunningSubagent[] = [];
+    const seen = new Set([reply.id]);
+    for (
+      let earlier = byId.get(reply.tookOver);
+      earlier?.role === 'assistant' && earlier.status !== 'running' && !seen.has(earlier.id);
+      earlier = earlier.tookOver ? byId.get(earlier.tookOver) : undefined
+    ) {
+      seen.add(earlier.id);
+      found.carried.add(earlier.id);
+      for (const agent of runningSubagents(replyTools(earlier), 'running'))
+        agents.push({ ...agent, messageId: earlier.id });
+    }
+    if (agents.length) found.inherited.set(reply.id, agents);
+  }
+  return found ?? nothingCarried;
 }
 
 /**

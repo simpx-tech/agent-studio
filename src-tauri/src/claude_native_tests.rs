@@ -648,6 +648,144 @@ async fn reply_cost(
     (result, cost)
 }
 
+/// One reply over `process` and what it reported.
+async fn reply_events(
+    process: &mut crate::pool::Process,
+    request: &RunRequest,
+    reused: bool,
+) -> (Result<(String, String), String>, Vec<RunEvent>) {
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            process,
+            request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            reused,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    drop(channel);
+    let mut events = vec![];
+    while let Ok(event) = received.try_recv() {
+        events.push(event);
+    }
+    (result, events)
+}
+
+/// The latest record of each call a reply reported, as saved.
+fn reported_tools(events: &[RunEvent]) -> Vec<serde_json::Value> {
+    let mut tools: Vec<serde_json::Value> = vec![];
+    for event in events {
+        if let RunEvent::Tool { tool } = event {
+            let tool = serde_json::to_value(tool).unwrap();
+            match tools.iter_mut().find(|t| t["id"] == tool["id"]) {
+                Some(saved) => *saved = tool,
+                None => tools.push(tool),
+            }
+        }
+    }
+    tools
+}
+
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_a_later_reply_records_the_sub_agent_it_resumes() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut messages = vec![
+        json!({"role":"user","text":"This is an Agent Studio integration test in a disposable folder. Start exactly one sub-agent with the Agent tool, in the background (run_in_background: true), with the description Echo helper, whose task is: run the shell command echo FIRST_PASS and report its output. Wait for it to report back, then reply with its output only."}),
+    ];
+    let mut process: Option<crate::pool::Process> = None;
+    let mut launch: Option<(String, String)> = None;
+    // The first reply starts the agent; the next resumes it in the same parked process, and the
+    // last in a fresh process that resumes the session, as after a restart.
+    for (index, word) in ["FIRST_PASS", "SECOND_PASS", "THIRD_PASS"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":conversation,"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":messages})).unwrap();
+        request.native_session =
+            crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+        let reused = index == 1;
+        if reused {
+            let parked = process.as_mut().unwrap();
+            parked.turns += 1;
+            parked.park();
+            parked.claim();
+        } else {
+            if let Some(mut previous) = process.take() {
+                previous.kill().await;
+            }
+            let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+                .await
+                .unwrap();
+            process = Some(
+                crate::pool::Process::new(
+                    exe.clone(),
+                    command.spawn().unwrap(),
+                    crate::pool::fingerprint(&request, &exe).unwrap(),
+                    request.native_session.as_ref().unwrap().id().to_string(),
+                )
+                .unwrap(),
+            );
+        }
+        let (result, events) = reply_events(process.as_mut().unwrap(), &request, reused).await;
+        let tools = reported_tools(&events);
+        let (status, text) = result.unwrap_or_else(|error| {
+            panic!("Reply {index} failed: {error}\n{tools:#?}");
+        });
+        assert_eq!(status, "complete");
+        assert!(text.contains(word), "Reply {index}: {text}\n{tools:#?}");
+        let group = tools
+            .iter()
+            .find(|tool| tool["id"] == "claude:agents")
+            .unwrap_or_else(|| panic!("Reply {index} recorded no sub-agent: {tools:#?}"));
+        let agent = &group["agents"][0];
+        assert_eq!(group["agents"].as_array().unwrap().len(), 1, "{group:#}");
+        assert_eq!(agent["status"], "complete", "{group:#}");
+        assert_eq!(agent["background"], true, "{group:#}");
+        let (id, agent_id) = (
+            agent["id"].as_str().unwrap().to_string(),
+            agent["agentId"].as_str().unwrap().to_string(),
+        );
+        match &launch {
+            None => launch = Some((id.clone(), agent_id)),
+            // The resumed agent keeps the record's identity: the call that started it, which
+            // its lines answer, and its agent.
+            Some(started) => {
+                assert_eq!(&(id.clone(), agent_id), started, "{group:#}");
+                assert!(
+                    tools.iter().any(|tool| tool["name"] == "Message agent"),
+                    "Reply {index} resumed the agent without SendMessage: {tools:#?}"
+                );
+            }
+        }
+        assert!(
+            tools.iter().any(|tool| tool["parentId"] == id.as_str()),
+            "Reply {index} recorded none of its agent's calls: {tools:#?}"
+        );
+        eprintln!("Reply {index}: {text:?}, agent {group}");
+        let agent_id = &launch.as_ref().unwrap().1;
+        messages.push(json!({"role":"assistant","text":text}));
+        messages.push(json!({"role":"user","text":format!("Use the SendMessage tool to send your Echo helper sub-agent (agent ID {agent_id}) this message: run the shell command echo {} and report its output. Do not start a new agent. Wait for it to report back, then reply with its output only.", ["SECOND_PASS", "THIRD_PASS", ""][index])}));
+    }
+    process.unwrap().kill().await;
+}
+
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity."]
 async fn installed_claude_reply_costs_follow_each_process_running_total() {

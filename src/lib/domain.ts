@@ -239,6 +239,9 @@ export const messageSchema = z
     // A running Claude reply whose turn ended while background work it waits for continues:
     // the number of that idle stretch, in which the next message takes the reply over.
     backgroundWait: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    // The reply this one took over, by id: it goes on waiting for that reply's sub-agents, whose
+    // records stay with that reply.
+    tookOver: z.string().uuid().optional(),
     // The usage limit that stopped the reply, in the provider's words; never replayed.
     usageLimit: usageLimitSchema.optional(),
   })

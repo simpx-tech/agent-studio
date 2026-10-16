@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { toolActivitySchema, type ToolActivity } from './activity';
 import type { Message } from './domain';
 import {
+  carriedSubagents,
   delegatingSubagent,
   findSubagent,
   interruptedMessage,
@@ -96,6 +97,57 @@ describe('sub-agents', () => {
     // A finished reply runs nothing, whatever its saved records still say.
     expect(runningSubagents(tools, 'complete')).toEqual([]);
     expect(runningSubagents([tool('plain')], 'running')).toEqual([]);
+  });
+
+  it('lists the sub-agents a running reply inherited from the replies it took over', () => {
+    const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+    const reply = (n: number, status: Message['status'], extra: Partial<Message> = {}) =>
+      ({
+        id: id(n),
+        role: 'assistant',
+        status,
+        createdAt: '2026-10-16T00:00:00.000Z',
+        blocks: [],
+        ...extra,
+      }) as Message;
+    const user = (n: number) =>
+      ({ id: id(n), role: 'user', status: 'complete', blocks: [] }) as unknown as Message;
+    const work = (agents: Subagent[], ...calls: ToolActivity[]) =>
+      [holder(agents), ...calls].map((t) => ({
+        type: 'activity',
+        text: t.name,
+        tool: t,
+      })) as unknown as Message['blocks'];
+    // The first reply's skill update still runs; the second, which took it over, finished its
+    // own reviewer and was taken over in turn by the third, which now waits for the update.
+    const first = reply(1, 'complete', {
+      blocks: work(
+        [
+          { id: 'skill', name: 'Update the skill', status: 'running', background: true },
+          { id: 'old', name: 'Done earlier', status: 'complete', background: true },
+        ],
+        tool('s1', { parentId: 'skill', status: 'running', path: '/skill/SKILL.md' }),
+      ),
+    });
+    const second = reply(3, 'complete', {
+      tookOver: id(1),
+      blocks: work([{ id: 'reviewer', name: 'Reviewer', status: 'complete', background: true }]),
+    });
+    const third = reply(5, 'running', { tookOver: id(3) });
+    const carried = carriedSubagents([user(0), first, user(2), second, user(4), third]);
+    expect(
+      carried.inherited.get(id(5))?.map(({ id, messageId, calls }) => ({ id, messageId, calls })),
+    ).toEqual([{ id: 'skill', messageId: id(1), calls: 1 }]);
+    expect(carried.inherited.get(id(5))?.[0].latest?.id).toBe('s1');
+    expect([...carried.carried]).toEqual([id(3), id(1)]);
+    // Once the reply that waits for them ends, nothing is carried, whatever the records say.
+    const ended = { ...third, status: 'complete' as const };
+    expect(carriedSubagents([first, second, ended]).carried.size).toBe(0);
+    // A reply that took nothing over inherits nothing, and a running reply in the chain lists
+    // its own.
+    expect(carriedSubagents([first, reply(6, 'running')]).inherited.size).toBe(0);
+    const lagging = { ...second, status: 'running' as const };
+    expect(carriedSubagents([first, lagging, third]).inherited.get(id(5))).toBeUndefined();
   });
 
   it('places messages among the calls they came between', () => {

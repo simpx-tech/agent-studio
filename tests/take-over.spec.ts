@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
+import { mockHostBackground } from './background-helper';
 import { chooseTestFolder } from './folder-helper';
 import { chooseReasoning } from './reasoning-helper';
 
@@ -10,6 +11,7 @@ const lastRequest = (page: Page) =>
 /** A Claude reply whose turn ended while its background agents work on. */
 async function waitingReply(page: Page) {
   await mockDesktop(page, 'capabilities');
+  await mockHostBackground(page);
   await page.goto('/');
   await chooseTestFolder(page);
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
@@ -78,6 +80,90 @@ test('a message sent while Claude only waits for background work goes at once', 
   await expect(messages.nth(3)).toHaveAttribute('data-status', 'complete');
   await expect(messages.nth(3)).toContainText('The plan is ready.');
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeVisible();
+});
+
+test('the reply that took over lists the sub-agents it waits for, which their reply keeps', async ({
+  page,
+}) => {
+  const { input, first } = await waitingReply(page);
+  const agents = (revision: number, agent: Record<string, unknown>) => ({
+    id: 'claude:agents',
+    name: 'Sub-agents',
+    category: 'agent',
+    revision,
+    status: agent.status,
+    sources: [],
+    agents: [agent],
+  });
+  const skill = {
+    id: 'toolu_skill',
+    name: 'Update the skill',
+    status: 'running',
+    background: true,
+    task: 'Bring the skill up to date',
+  };
+  const read = {
+    id: 'claude:read',
+    name: 'Read',
+    category: 'tool',
+    operation: 'read',
+    path: '/fixture/notes.md',
+    parentId: skill.id,
+    revision: 1,
+    status: 'running',
+    sources: [],
+    agents: [],
+  };
+  await page.evaluate(
+    (tools) => tools.forEach((tool) => (window as any).emitCapability({ kind: 'tool', tool })),
+    [agents(1, skill), read],
+  );
+  await input.fill('Only for the art work');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => runCount(page)).toBe('2');
+  // The new reply names the reply it took over, on every device that adds it.
+  const next = await lastRequest(page);
+  expect(next.takeOver.messages[1]).toMatchObject({ tookOver: first.assistantId });
+  const messages = page.getByTestId('message');
+  await expect(messages.nth(3)).toHaveAttribute('data-status', 'running');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.emitCapability({ kind: 'text', text: 'Understood. I told the agent.' });
+    w.emitCapability({ kind: 'backgroundwait', wait: 1 });
+  });
+  // The earlier reply ended, so its footer no longer lists the agent; the reply that waits for
+  // it does, and opens the conversation the earlier reply keeps.
+  const toggle = (index: number) =>
+    messages.nth(index).locator('.reply-footer .progress-toggle', { hasText: 'Sub-agents' });
+  await expect(toggle(1)).toHaveCount(0);
+  await expect(toggle(3)).toHaveText(/Sub-agents\s*1/);
+  await toggle(3).click();
+  const item = messages.nth(3).getByRole('region', { name: 'Sub-agents' }).getByRole('button');
+  await expect(item).toHaveText(/Update the skill[\s\S]*In background\s*1 call/);
+  await item.click();
+  const panel = page.getByRole('dialog', { name: 'Update the skill' });
+  await expect(panel.locator('.status')).toHaveText('Running in the background');
+  await expect(panel).toContainText('Bring the skill up to date');
+  await expect(panel).not.toContainText('No result was reported');
+  await expect(item).toHaveAttribute('aria-current', 'true');
+  await page.screenshot({ path: 'artifacts/take-over/inherited.png' });
+  // The earlier reply's history says it works on in the background, not that it was left.
+  await messages.nth(1).getByLabel('Work history', { exact: true }).click();
+  await messages.nth(1).locator('.activity-group > summary').first().click();
+  const row = messages.nth(1).locator('.subagent-row', { hasText: 'Update the skill' });
+  await expect(row).toContainText('In background');
+  await expect(row).toHaveAttribute('aria-current', 'true');
+  // Its outcome reaches the earlier reply, and the waiting reply lists nothing more.
+  await page.evaluate((payload) => (window as any).hostBackground(payload), {
+    kind: 'tool',
+    conversationId: first.conversationId,
+    runId: first.runId,
+    tool: agents(2, { ...skill, status: 'complete', result: 'The skill now scopes sub-agents.' }),
+  });
+  await expect(toggle(3)).toHaveCount(0);
+  await expect(panel.locator('.status')).toHaveText('Completed');
+  await expect(panel).toContainText('The skill now scopes sub-agents.');
+  await expect(row).toContainText('Completed');
 });
 
 test('a refused take-over keeps the message queued for the reply', async ({ page }) => {
