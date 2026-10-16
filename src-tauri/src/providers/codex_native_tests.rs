@@ -178,3 +178,88 @@ async fn installed_codex_shows_an_artifact_and_reads_its_preview() {
     );
     eprintln!("Answer: {answer}");
 }
+
+/// A chat compares two files through its call of the compare_files dynamic tool, which checks
+/// both where the chat runs and records them as one comparison, each file with its label.
+#[tokio::test]
+#[ignore = "Opt-in installed Codex CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_codex_compares_two_files_side_by_side() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let [before, after] = [("before.png", 4, 3), ("after.png", 8, 6)].map(|(name, w, h)| {
+        let path = root.path().join(name);
+        crate::providers::sent_files::test_png(&path, w, h);
+        path.display().to_string()
+    });
+    let text = format!("This is an Agent Studio integration test. Call the compare_files tool once with id pair, the two files {before} and {after} in that order, and the labels Before and After. Run no command and change no file. Reply with one short sentence followed by <!-- files:pair --> on its own line.");
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("codex").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-compare-test".into(),
+        String::new(),
+    )
+    .unwrap();
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    })
+    .with_outputs(crate::tool_output::Recorder::detached(&request.run_id));
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        run(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    process.kill().await;
+    drop(channel);
+    let mut events = vec![];
+    while let Ok(event) = received.try_recv() {
+        events.push(event);
+    }
+    let (status, answer) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let shown = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::SentFiles { sent_files } => Some(sent_files.clone()),
+            _ => None,
+        })
+        .expect("Codex compared no files");
+    assert_eq!(shown.id, "pair");
+    assert!(shown.compare);
+    let files: Vec<_> = shown
+        .files
+        .iter()
+        .map(|file| (file.name.as_str(), file.label.as_deref(), file.width))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("before.png", Some("Before"), Some(4)),
+            ("after.png", Some("After"), Some(8))
+        ]
+    );
+    assert!(answer.contains("<!-- files:pair -->"), "{answer}");
+    eprintln!("Answer: {answer}");
+}

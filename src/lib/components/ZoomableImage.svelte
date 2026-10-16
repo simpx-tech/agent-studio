@@ -2,17 +2,10 @@
   import { untrack } from 'svelte';
   import { Shrink, ZoomIn, ZoomOut } from '@lucide/svelte';
   import {
-    clampView,
-    fitScale,
-    fitView,
-    isZoomed,
-    panBy,
-    scaleLimits,
-    toggleZoom,
+    imageZoom,
     wheelFactor,
-    zoomAt,
-    zoomTo,
     type Point,
+    type SharedView,
     type Size,
     type ZoomView,
   } from '$lib/image-zoom';
@@ -23,6 +16,9 @@
     width,
     height,
     onswipe,
+    pane,
+    onmoved,
+    initial,
   }: {
     src: string;
     alt: string;
@@ -31,8 +27,19 @@
     height?: number;
     /** A horizontal swipe across the whole image: 1 towards the next file, -1 the previous. */
     onswipe?: (by: -1 | 1) => void;
+    /**
+     * A pane of a comparison, in the chat or in the file viewer: the image fills it however
+     * small, the comparison holds the controls, and keys act on the pane that has focus. In the
+     * chat the wheel and vertical swipes scroll past it until it is zoomed in.
+     */
+    pane?: 'inline' | 'expanded';
+    /** The reader moved the image, which shows what `view` shows on any image beside it. */
+    onmoved?: (view: SharedView) => void;
+    /** Asked once the pane is first drawn: what the images beside it show, which it shows too. */
+    initial?: () => SharedView | undefined;
   } = $props();
 
+  const zoom = $derived(imageZoom(!!pane));
   let stage = $state<HTMLDivElement>();
   let stageWidth = $state(0);
   let stageHeight = $state(0);
@@ -43,23 +50,63 @@
   let view = $state<ZoomView>({ scale: 1, x: 0, y: 0 });
   // Until the reader zooms, the image stays whole however the stage changes size.
   let fitted = $state(true);
-  const zoomed = $derived(ready && isZoomed(view, image, room));
-  const limits = $derived(scaleLimits(image, room));
+  // A pane keeps what it shows as shares of the image, so a new size of its stage, or a view
+  // another pane passed before this image was drawn, shows the same region.
+  let shared: SharedView | undefined;
+  const zoomed = $derived(ready && zoom.isZoomed(view, image, room));
+  const limits = $derived(zoom.scaleLimits(image, room));
   // A swipe at the whole image follows the finger, and eases back when it falls short.
   let swipe = $state(0);
   let settling = $state(false);
   let grabbing = $state(false);
 
-  function apply(next: ZoomView) {
+  function show(next: ZoomView) {
     view = next;
-    fitted = Math.abs(next.scale / fitScale(image, room) - 1) < 1e-3;
+    fitted = Math.abs(next.scale / zoom.fitScale(image, room) - 1) < 1e-3;
+  }
+  /** The reader moved the image. */
+  function apply(next: ZoomView) {
+    show(next);
+    if (!pane) return;
+    shared = zoom.shareView(next, image, room);
+    onmoved?.(shared);
   }
   const center = (): Point => ({ x: room.width / 2, y: room.height / 2 });
+  let drawn = false;
   $effect(() => {
     if (!ready) return;
     const [shown, size] = [image, room];
-    untrack(() => (view = fitted ? fitView(shown, size) : clampView(view, shown, size)));
+    untrack(() => {
+      // A pane that loads after the reader moved the others joins them.
+      const joined = pane && !drawn ? initial?.() : undefined;
+      drawn = true;
+      if (joined) {
+        shared = joined;
+        fitted = Math.abs(joined.zoom - 1) < 1e-3;
+      }
+      if (pane && shared && !fitted) show(zoom.takeView(shared, shown, size));
+      else view = fitted ? zoom.fitView(shown, size) : zoom.clampView(view, shown, size);
+    });
   });
+
+  /** Zooms around the stage's centre, as the comparison's zoom buttons do. */
+  export function zoomBy(factor: number) {
+    if (ready) apply(zoom.zoomAt(view, factor, center(), image, room));
+  }
+  /** Shows the whole image again. */
+  export function fit() {
+    if (ready) apply(zoom.fitView(image, room));
+  }
+  /** What the image shows, for another image to take; unknown until it is drawn. */
+  export function current(): SharedView | undefined {
+    return ready ? zoom.shareView(view, image, room) : undefined;
+  }
+  /** Shows what another image of a comparison shows, without reporting it. */
+  export function take(next: SharedView) {
+    shared = next;
+    if (ready) show(zoom.takeView(next, image, room));
+    else fitted = Math.abs(next.zoom - 1) < 1e-3;
+  }
 
   type Gesture =
     | { kind: 'pan'; from: Point; start: ZoomView }
@@ -116,17 +163,25 @@
     if (gesture.kind === 'pinch') {
       const [a, b] = [...pointers.values()];
       const now = middle(a, b);
-      const scaled = zoomAt(
+      const scaled = zoom.zoomAt(
         gesture.start,
         distance(a, b) / gesture.distance,
         gesture.middle,
         image,
         room,
       );
-      apply(panBy(scaled, now.x - gesture.middle.x, now.y - gesture.middle.y, image, room));
-    } else if (gesture.kind === 'pan')
-      apply(panBy(gesture.start, point.x - gesture.from.x, point.y - gesture.from.y, image, room));
-    else swipe = point.x - gesture.from.x;
+      apply(zoom.panBy(scaled, now.x - gesture.middle.x, now.y - gesture.middle.y, image, room));
+    } else if (gesture.kind === 'pan') {
+      // A drag that moves nothing, as on an image seen whole, reports nothing either.
+      const next = zoom.panBy(
+        gesture.start,
+        point.x - gesture.from.x,
+        point.y - gesture.from.y,
+        image,
+        room,
+      );
+      if (next.x !== view.x || next.y !== view.y || next.scale !== view.scale) apply(next);
+    } else swipe = point.x - gesture.from.x;
   }
   function up(event: PointerEvent) {
     const last = pointers.get(event.pointerId);
@@ -154,75 +209,146 @@
     const now = performance.now();
     if (lastTap && now - lastTap.at < 350 && distance(point, lastTap.point) < 30) {
       lastTap = undefined;
-      apply(toggleZoom(view, point, image, room));
+      apply(zoom.toggleZoom(view, point, image, room));
     } else lastTap = { at: now, point };
   }
 
-  // The wheel zooms where the pointer is; a sideways scroll pans a zoomed image.
+  // The wheel zooms where the pointer is; a sideways scroll pans a zoomed image. In the chat a
+  // pane leaves the wheel to the conversation, zooming only with a touchpad pinch, which the
+  // browser reports as a wheel with Ctrl held.
   $effect(() => {
     const element = stage;
     if (!element) return;
     const wheel = (event: WheelEvent) => {
-      if (!ready) return;
+      if (!ready || (pane === 'inline' && !event.ctrlKey)) return;
       event.preventDefault();
       const box = element.getBoundingClientRect();
       origin = { left: box.left, top: box.top };
       if (!event.ctrlKey && Math.abs(event.deltaX) > Math.abs(event.deltaY))
-        apply(panBy(view, -event.deltaX, 0, image, room));
-      else apply(zoomAt(view, wheelFactor(event, room.height), local(event), image, room));
+        apply(zoom.panBy(view, -event.deltaX, 0, image, room));
+      else apply(zoom.zoomAt(view, wheelFactor(event, room.height), local(event), image, room));
     };
     element.addEventListener('wheel', wheel, { passive: false });
     return () => element.removeEventListener('wheel', wheel);
   });
   // Keys zoom wherever focus is in the viewer, and the arrows pan an image zoomed in, before
-  // the viewer would step to another file with them.
-  $effect(() => {
-    const keys = (event: KeyboardEvent) => {
-      if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey)
-        return;
-      const step = event.shiftKey ? 0.3 : 0.1;
-      const pan = (dx: number, dy: number) =>
-        zoomed
-          ? panBy(view, dx * room.width * step, dy * room.height * step, image, room)
-          : undefined;
-      const actions: Record<string, () => ZoomView | undefined> = {
-        '+': () => zoomAt(view, 1.25, center(), image, room),
-        '=': () => zoomAt(view, 1.25, center(), image, room),
-        '-': () => zoomAt(view, 0.8, center(), image, room),
-        '0': () => fitView(image, room),
-        '1': () => zoomTo(view, 1, center(), image, room),
-        ArrowLeft: () => pan(1, 0),
-        ArrowRight: () => pan(-1, 0),
-        ArrowUp: () => pan(0, 1),
-        ArrowDown: () => pan(0, -1),
-      };
-      const next = actions[event.key]?.();
-      if (!next) return;
-      event.preventDefault();
-      apply(next);
+  // the viewer would step to another file with them. A comparison's pane takes them only while
+  // it has focus, so each of its images keeps its own.
+  function keys(event: KeyboardEvent) {
+    if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const step = event.shiftKey ? 0.3 : 0.1;
+    const pan = (dx: number, dy: number) =>
+      zoomed
+        ? zoom.panBy(view, dx * room.width * step, dy * room.height * step, image, room)
+        : undefined;
+    const actions: Record<string, () => ZoomView | undefined> = {
+      '+': () => zoom.zoomAt(view, 1.25, center(), image, room),
+      '=': () => zoom.zoomAt(view, 1.25, center(), image, room),
+      '-': () => zoom.zoomAt(view, 0.8, center(), image, room),
+      '0': () => zoom.fitView(image, room),
+      '1': () => zoom.zoomTo(view, 1, center(), image, room),
+      ArrowLeft: () => pan(1, 0),
+      ArrowRight: () => pan(-1, 0),
+      ArrowUp: () => pan(0, 1),
+      ArrowDown: () => pan(0, -1),
     };
+    const next = actions[event.key]?.();
+    if (!next) return;
+    event.preventDefault();
+    apply(next);
+  }
+  $effect(() => {
+    if (pane) return;
     window.addEventListener('keydown', keys, true);
     return () => window.removeEventListener('keydown', keys, true);
   });
 </script>
 
 <!-- Pointers, the wheel and keys zoom and pan the image; the buttons below do the same. -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="zoom-stage"
-  class:zoomed
-  class:grabbing
-  bind:this={stage}
-  bind:clientWidth={stageWidth}
-  bind:clientHeight={stageHeight}
-  onpointerdown={down}
-  onpointermove={move}
-  onpointerup={up}
-  onpointercancel={up}
->
+{#if pane}
+  <!-- The pane is the image, which takes focus for its zoom and pan keys like a 3D model's. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div
+    class="zoom-stage pane"
+    class:inline={pane === 'inline'}
+    class:zoomed
+    class:grabbing
+    role="img"
+    aria-label={alt}
+    aria-keyshortcuts="+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown"
+    tabindex="0"
+    bind:this={stage}
+    bind:clientWidth={stageWidth}
+    bind:clientHeight={stageHeight}
+    onpointerdown={down}
+    onpointermove={move}
+    onpointerup={up}
+    onpointercancel={up}
+    onkeydown={keys}
+  >
+    {@render picture()}
+  </div>
+{:else}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="zoom-stage"
+    class:zoomed
+    class:grabbing
+    bind:this={stage}
+    bind:clientWidth={stageWidth}
+    bind:clientHeight={stageHeight}
+    onpointerdown={down}
+    onpointermove={move}
+    onpointerup={up}
+    onpointercancel={up}
+  >
+    {@render picture()}
+  </div>
+  <div class="zoom-bar">
+    <button
+      type="button"
+      class="zoom-action"
+      aria-label="Zoom out"
+      disabled={!ready || view.scale <= limits.min * 1.001}
+      onclick={() => apply(zoom.zoomAt(view, 0.8, center(), image, room))}
+      ><ZoomOut size={13} aria-hidden="true" /></button
+    >
+    <span class="zoom-level" title="Zoom, as a share of the image's own pixels"
+      >{Math.round(view.scale * 100)}%</span
+    >
+    <button
+      type="button"
+      class="zoom-action"
+      aria-label="Zoom in"
+      disabled={!ready || view.scale >= limits.max / 1.001}
+      onclick={() => apply(zoom.zoomAt(view, 1.25, center(), image, room))}
+      ><ZoomIn size={13} aria-hidden="true" /></button
+    >
+    <button
+      type="button"
+      class="zoom-action"
+      aria-label="Fit to window"
+      title="Fit to window"
+      disabled={!ready || fitted}
+      onclick={() => apply(zoom.fitView(image, room))}
+      ><Shrink size={13} aria-hidden="true" /></button
+    >
+    <button
+      type="button"
+      class="zoom-action"
+      aria-label="Actual size"
+      title="Actual size"
+      disabled={!ready || Math.abs(view.scale - 1) < 1e-3}
+      onclick={() => apply(zoom.zoomTo(view, 1, center(), image, room))}>1:1</button
+    >
+  </div>
+{/if}
+
+{#snippet picture()}
+  <!-- A pane is the image itself to assistive technology, named for it. -->
   <img
     {src}
-    {alt}
+    alt={pane ? '' : alt}
     draggable="false"
     class:pixelated={view.scale >= 2}
     class:settling
@@ -236,44 +362,7 @@
     }}
     ontransitionend={() => (settling = false)}
   />
-</div>
-<div class="zoom-bar">
-  <button
-    type="button"
-    class="zoom-action"
-    aria-label="Zoom out"
-    disabled={!ready || view.scale <= limits.min * 1.001}
-    onclick={() => apply(zoomAt(view, 0.8, center(), image, room))}
-    ><ZoomOut size={13} aria-hidden="true" /></button
-  >
-  <span class="zoom-level" title="Zoom, as a share of the image's own pixels"
-    >{Math.round(view.scale * 100)}%</span
-  >
-  <button
-    type="button"
-    class="zoom-action"
-    aria-label="Zoom in"
-    disabled={!ready || view.scale >= limits.max / 1.001}
-    onclick={() => apply(zoomAt(view, 1.25, center(), image, room))}
-    ><ZoomIn size={13} aria-hidden="true" /></button
-  >
-  <button
-    type="button"
-    class="zoom-action"
-    aria-label="Fit to window"
-    title="Fit to window"
-    disabled={!ready || fitted}
-    onclick={() => apply(fitView(image, room))}><Shrink size={13} aria-hidden="true" /></button
-  >
-  <button
-    type="button"
-    class="zoom-action"
-    aria-label="Actual size"
-    title="Actual size"
-    disabled={!ready || Math.abs(view.scale - 1) < 1e-3}
-    onclick={() => apply(zoomTo(view, 1, center(), image, room))}>1:1</button
-  >
-</div>
+{/snippet}
 
 <style>
   .zoom-stage {
@@ -284,6 +373,15 @@
     touch-action: none;
     user-select: none;
     cursor: zoom-in;
+  }
+  /* In the chat, vertical swipes over a pane seen whole scroll the conversation; once it is
+     zoomed in, every drag pans it. */
+  .zoom-stage.pane.inline:not(.zoomed) {
+    touch-action: pan-y;
+  }
+  .zoom-stage.pane:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
   }
   .zoom-stage.zoomed {
     cursor: grab;

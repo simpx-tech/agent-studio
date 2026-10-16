@@ -5,6 +5,12 @@ import {
   type ToolOutputImageInfo,
 } from './tool-output.ts';
 
+/** A caption or a label: one line of text, as the host keeps it. */
+const oneLine = z
+  .string()
+  .min(1)
+  .refine((s) => !!s.trim() && !/[\u0000-\u001f\u007f]/.test(s));
+
 /** Files one call showed, kept as metadata; their bytes live on the computer that ran it. */
 export const sentFileSchema = z.object({
   /** This file's place among the call's images, or among its models. */
@@ -14,6 +20,8 @@ export const sentFileSchema = z.object({
   bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
+  /** What a comparison calls this file, such as Before. */
+  label: oneLine.optional(),
 });
 export type SentFile = z.infer<typeof sentFileSchema>;
 /** A 3D model opens in the reply's viewer; every other shown file is an image. */
@@ -89,11 +97,7 @@ export const sentFilesSchema = z.object({
   revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   runId: z.string().uuid(),
   toolId: z.string().min(1),
-  caption: z
-    .string()
-    .min(1)
-    .refine((s) => !!s.trim() && !/[\u0000-\u001f\u007f]/.test(s))
-    .optional(),
+  caption: oneLine.optional(),
   files: z
     .array(sentFileSchema)
     .min(1)
@@ -103,8 +107,19 @@ export const sentFilesSchema = z.object({
         new Set(files.map((file) => `${isModel(file) ? 'model' : 'image'}:${file.index}`)).size ===
         files.length,
     ),
+  /**
+   * Shown side by side for comparison (compare_files), each pane turned, panned and zoomed on
+   * its own or with the others. A release that does not know it shows the files as a group.
+   */
+  compare: z.boolean().optional(),
 });
 export type SentFiles = z.infer<typeof sentFilesSchema>;
+
+/** A comparison shows its files side by side, which needs two of them. */
+export const isComparison = (group: SentFiles) => !!group.compare && group.files.length > 1;
+
+/** The name a comparison shows for one of its files: its label, else its file name. */
+export const paneLabel = (file: SentFile) => file.label ?? file.name;
 
 export const sentFileGroupsSchema = z
   .array(sentFilesSchema)

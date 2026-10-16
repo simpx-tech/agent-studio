@@ -12,10 +12,15 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 pub const NAME: &str = "send_files";
+/// The comparison variant: two or more files side by side, which the reader turns, pans and
+/// zooms one at a time or all together.
+pub const COMPARE_NAME: &str = "compare_files";
 /// The longest file name a reply shows.
 const MAX_NAME: usize = 120;
 
 pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images and glTF, GLB, OBJ, STL and FBX models are shown whatever their size, in as many files and groups as the reply needs. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+
+pub const COMPARE_GUIDANCE: &str = "To compare images or 3D models side by side, call compare_files (Claude: mcp__agent_studio__compare_files) with a stable id, two or more absolute paths in files in the order to show them, optional labels (one short single-line label per file, in the same order, such as Before and After) and an optional one-line caption; those four field names are exact. Use it for before and after, variants, or a reference beside a result: the reader sees the files as panes side by side, in Free mode, where each pane turns, pans and zooms on its own, or Synced, where the models keep one rotation, position and zoom and the images one zoom and position. Files are checked and shown as send_files shows them, and <!-- files:ID --> places the comparison in your final answer the same way; a comparison and a send_files group share their ids.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +35,9 @@ pub struct SentFile {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The label a comparison gave this file, such as Before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// One call's files, placed in the reply by its marker.
@@ -44,6 +52,9 @@ pub struct SentFiles {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
     pub files: Vec<SentFile>,
+    /// Shown side by side for comparison, as compare_files shows them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compare: bool,
 }
 
 pub fn tool() -> Value {
@@ -55,27 +66,94 @@ pub fn tool() -> Value {
         },"required":["id","files"],"additionalProperties":false}})
 }
 pub fn codex_tool() -> Value {
-    let mut tool = tool();
+    codex(tool())
+}
+pub fn compare_tool() -> Value {
+    json!({"name":COMPARE_NAME,"description":COMPARE_GUIDANCE,"inputSchema":{
+        "type":"object","properties":{
+            "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this comparison within the current reply."},
+            "files":{"type":"array","minItems":2,"items":{"type":"string","minLength":1},"description":"Two or more absolute paths on the computer running this conversation, in the order to show them side by side: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
+            "labels":{"type":"array","items":{"type":"string","minLength":1},"description":"Optional single-line label for each file, in the order of files, such as Before and After."},
+            "caption":{"type":"string","minLength":1,"description":"Optional single line shown below the comparison."}
+        },"required":["id","files"],"additionalProperties":false}})
+}
+pub fn codex_compare_tool() -> Value {
+    codex(compare_tool())
+}
+fn codex(mut tool: Value) -> Value {
     tool["type"] = json!("function");
     tool["deferLoading"] = json!(false);
     tool
 }
 
+/// Which of the two tools a call used: send_files shows a group, compare_files a comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    Send,
+    Compare,
+}
+impl Tool {
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            NAME => Some(Self::Send),
+            COMPARE_NAME => Some(Self::Compare),
+            _ => None,
+        }
+    }
+    /// A Claude call's tool, by the name the SDK reports for our server's tools.
+    fn claude(name: &Value) -> Option<Self> {
+        Self::named(name.as_str()?.strip_prefix("mcp__agent_studio__")?)
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Send => NAME,
+            Self::Compare => COMPARE_NAME,
+        }
+    }
+    fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Send => &["id", "files", "caption"],
+            Self::Compare => &["id", "files", "labels", "caption"],
+        }
+    }
+    fn invalid(self) -> &'static str {
+        match self {
+            Self::Send => INVALID,
+            Self::Compare => COMPARE_INVALID,
+        }
+    }
+}
+
 const INVALID: &str = "Provide id (letters, digits, _ or -), files (one or more absolute paths) and an optional single-line caption. No other fields are accepted.";
+const COMPARE_INVALID: &str = "Provide id (letters, digits, _ or -), files (two or more absolute paths), optional labels (one single-line label per file, in the order of files) and an optional single-line caption. No other fields are accepted.";
 
 struct Submission {
     id: String,
     files: Vec<String>,
+    /// One per file, for a comparison that names its files.
+    labels: Option<Vec<String>>,
     caption: Option<String>,
+    compare: bool,
 }
-fn parse(args: &Value) -> Result<Submission, String> {
+/// One line, as the reply shows it: tabs, line breaks and every other control character become
+/// spaces. Nothing but spaces is no text.
+fn one_line(text: &str) -> Option<String> {
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.into())
+}
+fn parse(args: &Value, tool: Tool) -> Result<Submission, String> {
+    let invalid = tool.invalid();
     if !args.is_object() {
-        return Err(INVALID.into());
+        return Err(invalid.into());
     }
-    // Keys are unique, so rejecting every unaccepted name leaves only these three.
-    let unexpected = super::unexpected_fields(args, &["id", "files", "caption"]);
+    // Keys are unique, so rejecting every unaccepted name leaves only the tool's own fields.
+    let unexpected = super::unexpected_fields(args, tool.fields());
     if !unexpected.is_empty() {
-        return Err(super::unexpected_message(&unexpected, INVALID));
+        return Err(super::unexpected_message(&unexpected, invalid));
     }
     let id = args["id"]
         .as_str()
@@ -84,11 +162,34 @@ fn parse(args: &Value) -> Result<Submission, String> {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
-        .ok_or(INVALID)?;
-    let files = args["files"].as_array().ok_or(INVALID)?;
+        .ok_or(invalid)?;
+    let files = args["files"].as_array().ok_or(invalid)?;
     if files.is_empty() {
-        return Err(INVALID.into());
+        return Err(invalid.into());
     }
+    if tool == Tool::Compare && files.len() < 2 {
+        return Err(format!(
+            "A comparison needs two or more files; send_files shows one. {invalid}"
+        ));
+    }
+    let labels = match &args["labels"] {
+        Value::Null => None,
+        Value::Array(labels) if labels.len() == files.len() => Some(
+            labels
+                .iter()
+                .map(|label| label.as_str().and_then(one_line))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(invalid)?,
+        ),
+        Value::Array(labels) => {
+            return Err(format!(
+                "This call sent {} labels for {} files: give one label per file, in the order of files. {invalid}",
+                labels.len(),
+                files.len()
+            ))
+        }
+        _ => return Err(invalid.into()),
+    };
     let files: Option<Vec<String>> = files
         .iter()
         .map(|file| {
@@ -100,25 +201,15 @@ fn parse(args: &Value) -> Result<Submission, String> {
         .collect();
     let caption = match &args["caption"] {
         Value::Null => None,
-        Value::String(text) => {
-            // One line, as the reply shows it: tabs, line breaks and every other control
-            // character become spaces.
-            let text: String = text
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
-            let text = text.trim();
-            if text.is_empty() {
-                return Err(INVALID.into());
-            }
-            Some(text.into())
-        }
-        _ => return Err(INVALID.into()),
+        Value::String(text) => Some(one_line(text).ok_or(invalid)?),
+        _ => return Err(invalid.into()),
     };
     Ok(Submission {
         id: id.into(),
-        files: files.ok_or(INVALID)?,
+        files: files.ok_or(invalid)?,
+        labels,
         caption,
+        compare: tool == Tool::Compare,
     })
 }
 
@@ -242,18 +333,20 @@ fn file_name(path: &str) -> String {
 pub struct FileSender {
     groups: Vec<SentFiles>,
     published: bool,
-    /// Only the parent assistant's actual tool calls can show files (Claude).
-    pending: HashMap<String, Value>,
+    /// Only the parent assistant's actual tool calls can show files (Claude), each with the
+    /// tool it called.
+    pending: HashMap<String, (Tool, Value)>,
     accepted: HashMap<String, SentFiles>,
 }
 impl FileSender {
     async fn submit(
         &mut self,
         args: &Value,
+        tool: Tool,
         tool_id: &str,
         staging: &Staging,
     ) -> Result<String, String> {
-        let submission = parse(args)?;
+        let submission = parse(args, tool)?;
         let index = self.groups.iter().position(|g| g.id == submission.id);
         let Some(recorder) = &staging.recorder else {
             return Err(
@@ -264,7 +357,7 @@ impl FileSender {
         let mut images = vec![];
         let mut models = vec![];
         let mut rejected = vec![];
-        for path in &submission.files {
+        for (position, path) in submission.files.iter().enumerate() {
             let check = async {
                 match staging.host_path(path).await {
                     Ok(host) => inspect(host, path).await,
@@ -275,6 +368,12 @@ impl FileSender {
                 checked = check => checked,
                 _ = staging.cancel.cancelled() => Err("was not checked: the reply stopped".into()),
             };
+            // A label stays with its own file, whichever files before it could not be shown.
+            let label = submission
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(position))
+                .cloned();
             match checked {
                 Ok(Checked::Image(image)) => {
                     files.push(SentFile {
@@ -284,6 +383,7 @@ impl FileSender {
                         bytes: image.bytes,
                         width: image.width,
                         height: image.height,
+                        label,
                     });
                     images.push(path.clone());
                 }
@@ -295,6 +395,7 @@ impl FileSender {
                         bytes: model.bytes,
                         width: None,
                         height: None,
+                        label,
                     });
                     models.push(path.clone());
                 }
@@ -304,6 +405,12 @@ impl FileSender {
         if files.is_empty() {
             return Err(format!(
                 "No file could be shown:\n{}\nTell the user, and do not claim the files are visible.",
+                rejected.join("\n")
+            ));
+        }
+        if submission.compare && files.len() < 2 {
+            return Err(format!(
+                "Only one file could be shown, and a comparison needs two:\n{}\nTell the user, and do not claim the comparison is visible.",
                 rejected.join("\n")
             ));
         }
@@ -322,6 +429,7 @@ impl FileSender {
             tool_id: tool_id.into(),
             caption: submission.caption,
             files,
+            compare: submission.compare,
         };
         let outcome = outcome(&record, &rejected);
         match index {
@@ -345,12 +453,13 @@ impl FileSender {
         staging: &Staging,
     ) -> Option<(Value, Option<RunEvent>)> {
         let p = &value["params"];
-        if value["method"] != "item/tool/call" || p["tool"] != NAME {
+        if value["method"] != "item/tool/call" {
             return None;
         }
-        let call = format!("{}-{}", NAME, value["id"]);
+        let tool = Tool::named(p["tool"].as_str()?)?;
+        let call = format!("{}-{}", tool.name(), value["id"]);
         let result = if !root.is_empty() && p["threadId"] == root && p["namespace"].is_null() {
-            self.submit(&p["arguments"], &call, staging).await
+            self.submit(&p["arguments"], tool, &call, staging).await
         } else {
             Err("Files must be sent by the parent conversation.".into())
         };
@@ -382,13 +491,12 @@ impl FileSender {
             return events;
         };
         for block in blocks {
-            if value["type"] == "assistant"
-                && block["type"] == "tool_use"
-                && block["name"] == format!("mcp__agent_studio__{NAME}")
-            {
-                if let Some(id) = block["id"].as_str() {
-                    if parse(&block["input"]).is_ok() {
-                        self.pending.insert(id.into(), block["input"].clone());
+            if value["type"] == "assistant" && block["type"] == "tool_use" {
+                if let (Some(tool), Some(id)) = (Tool::claude(&block["name"]), block["id"].as_str())
+                {
+                    if parse(&block["input"], tool).is_ok() {
+                        self.pending
+                            .insert(id.into(), (tool, block["input"].clone()));
                     }
                 }
             }
@@ -410,11 +518,14 @@ impl FileSender {
     /// only when its arguments parse, so name the fault the caller can act on: reporting
     /// malformed arguments as an unregistered caller reads as a capability this conversation
     /// lacks, and a model that believes that stops retrying.
-    fn unmatched(&self, args: &Value) -> String {
-        if let Err(invalid) = parse(args) {
+    fn unmatched(&self, args: &Value, tool: Tool) -> String {
+        if let Err(invalid) = parse(args, tool) {
             return invalid;
         }
-        "Only a registered parent-conversation send_files call can show files.".into()
+        format!(
+            "Only a registered parent-conversation {} call can show files.",
+            tool.name()
+        )
     }
     /// A Claude SDK tool call for this conversation's files. Other requests of the
     /// agent_studio server are left to their own handlers.
@@ -424,19 +535,21 @@ impl FileSender {
         if r["subtype"] != "mcp_message"
             || r["server_name"] != "agent_studio"
             || m["method"] != "tools/call"
-            || m["params"]["name"] != NAME
         {
             return None;
         }
+        let tool = Tool::named(m["params"]["name"].as_str()?)?;
         let args = &m["params"]["arguments"];
         let parent = self
             .pending
             .iter()
-            .find(|(id, input)| *input == args && !self.accepted.contains_key(*id))
+            .find(|(id, (called, input))| {
+                *called == tool && input == args && !self.accepted.contains_key(*id)
+            })
             .map(|(id, _)| id.clone());
         let result = match parent {
             Some(id) => {
-                let result = self.submit(args, &id, staging).await;
+                let result = self.submit(args, tool, &id, staging).await;
                 if result.is_ok() {
                     if let Some(record) = self.latest(args["id"].as_str().unwrap_or_default()) {
                         self.accepted.insert(id, record);
@@ -444,7 +557,7 @@ impl FileSender {
                 }
                 result
             }
-            None => Err(self.unmatched(args)),
+            None => Err(self.unmatched(args, tool)),
         };
         let text = match &result {
             Ok(text) => text.clone(),
@@ -460,12 +573,19 @@ impl FileSender {
 fn outcome(record: &SentFiles, rejected: &[String]) -> String {
     let count = record.files.len();
     let noun = if count == 1 { "file is" } else { "files are" };
-    let mut text = format!(
-        "{count} {noun} shown to the user. Place <!-- files:{} --> on its own line between blank lines in your final answer, where the {} belong{} in the explanation. Do not repeat the paths as Markdown image links.",
-        record.id,
-        if count == 1 { "file" } else { "files" },
-        if count == 1 { "s" } else { "" }
-    );
+    let mut text = if record.compare {
+        format!(
+            "{count} files are shown side by side for comparison. Place <!-- files:{} --> on its own line between blank lines in your final answer, where the comparison belongs in the explanation. Do not repeat the paths as Markdown image links.",
+            record.id
+        )
+    } else {
+        format!(
+            "{count} {noun} shown to the user. Place <!-- files:{} --> on its own line between blank lines in your final answer, where the {} belong{} in the explanation. Do not repeat the paths as Markdown image links.",
+            record.id,
+            if count == 1 { "file" } else { "files" },
+            if count == 1 { "s" } else { "" }
+        )
+    };
     if !rejected.is_empty() {
         text.push_str(&format!(
             "\n\nNot shown:\n{}\nTell the user which files could not be shown and why.",
@@ -475,6 +595,19 @@ fn outcome(record: &SentFiles, rejected: &[String]) -> String {
     text
 }
 
+/// A PNG header, which the image check reads a picture's size from, for tests that show files.
+#[cfg(test)]
+pub(crate) fn test_png(path: &std::path::Path, width: u8, height: u8) {
+    std::fs::write(
+        path,
+        [
+            0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            0, 0, 0, width, 0, 0, 0, height, 8, 2, 0, 0, 0,
+        ],
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,12 +615,23 @@ mod tests {
     fn stage(distribution: Option<String>) -> Staging {
         Staging::new("run", distribution, None, CancellationToken::new())
     }
+    /// A run that keeps its files, as a conversation's run does.
+    fn kept() -> Staging {
+        Staging {
+            recorder: Some(crate::tool_output::Recorder::detached("run")),
+            ..stage(None)
+        }
+    }
     fn args(files: Value) -> Value {
         json!({"id":"shots","files":files,"caption":"Before and after"})
+    }
+    fn parse_send(args: &Value) -> Result<Submission, String> {
+        parse(args, Tool::Send)
     }
 
     #[test]
     fn rejects_unknown_fields_and_malformed_input() {
+        let parse = parse_send;
         assert!(parse(&args(json!(["/tmp/a.png"]))).is_ok());
         assert!(parse(&json!({"id":"shots","files":["/tmp/a.png"],"display":"render"})).is_err());
         assert!(parse(&json!({"id":"shots"})).is_err());
@@ -502,10 +646,13 @@ mod tests {
         assert!(parse(&json!({"id":"shots and more","files":["/tmp/a.png"]})).is_err());
         assert!(parse(&json!({"id":"shots","files":["/tmp/a.png"],"caption":["x"]})).is_err());
         assert!(parse(&json!({"id":"shots","files":["/tmp/a.png"],"caption":"  "})).is_err());
+        // Labels belong to comparisons.
+        assert!(parse(&json!({"id":"shots","files":["/tmp/a.png"],"labels":["A"]})).is_err());
     }
 
     #[test]
     fn keeps_captions_on_one_line_and_names_from_paths() {
+        let parse = parse_send;
         let parsed = parse(&json!({"id":"a","files":["/tmp/a.png"],"caption":"one\ntwo"})).unwrap();
         assert_eq!(parsed.caption.as_deref(), Some("one two"));
         let parsed =
@@ -516,15 +663,125 @@ mod tests {
         assert_eq!(file_name("/home/me/"), "me");
     }
 
+    #[test]
+    fn a_comparison_names_two_or_more_files_and_one_label_for_each() {
+        let parse = |args: Value| parse(&args, Tool::Compare);
+        let pair = json!(["/tmp/before.png", "/tmp/after.png"]);
+        let parsed = parse(
+            json!({"id":"ab","files":pair,"labels":["Before\n","  After\t"],"caption":"Upscaled"}),
+        )
+        .unwrap();
+        assert!(parsed.compare);
+        assert_eq!(
+            parsed.labels,
+            Some(vec!["Before".to_string(), "After".to_string()])
+        );
+        assert!(parse(json!({"id":"ab","files":pair}))
+            .unwrap()
+            .labels
+            .is_none());
+        // One file is a group for send_files, which the refusal names.
+        let one = parse(json!({"id":"ab","files":["/tmp/a.png"]}))
+            .err()
+            .unwrap();
+        assert!(one.contains("two or more files"), "{one}");
+        assert!(one.contains("send_files shows one"), "{one}");
+        // Any number of files, past two.
+        let many = vec!["/tmp/a.png"; 12];
+        assert_eq!(
+            parse(json!({"id":"ab","files":many})).unwrap().files.len(),
+            12
+        );
+        // Labels follow the files one for one.
+        let short = parse(json!({"id":"ab","files":pair,"labels":["Before"]}))
+            .err()
+            .unwrap();
+        assert!(short.contains("1 labels for 2 files"), "{short}");
+        assert!(parse(json!({"id":"ab","files":pair,"labels":["Before","  "]})).is_err());
+        assert!(parse(json!({"id":"ab","files":pair,"labels":["Before",3]})).is_err());
+        assert!(parse(json!({"id":"ab","files":pair,"labels":"Before, After"})).is_err());
+        // The send_files fields alone are not enough to rename one.
+        let renamed = parse(json!({"id":"ab","paths":pair})).err().unwrap();
+        assert!(renamed.contains("sent paths"), "{renamed}");
+        assert!(
+            renamed.contains("labels (one single-line label per file"),
+            "{renamed}"
+        );
+    }
+
     #[tokio::test]
     async fn a_run_without_a_store_cannot_show_files() {
         let staging = stage(None);
         let mut sender = FileSender::default();
         let error = sender
-            .submit(&args(json!(["/tmp/a.png"])), "call", &staging)
+            .submit(&args(json!(["/tmp/a.png"])), Tool::Send, "call", &staging)
             .await
             .unwrap_err();
         assert!(error.contains("does not keep files"));
+    }
+
+    fn png(path: &std::path::Path) {
+        test_png(path, 4, 3);
+    }
+
+    #[tokio::test]
+    async fn a_comparison_keeps_each_label_with_its_file_and_needs_two_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let [before, after] = ["before.png", "after.png"].map(|name| dir.path().join(name));
+        png(&before);
+        png(&after);
+        let missing = dir.path().join("missing.png");
+        let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let staging = kept();
+        let mut sender = FileSender::default();
+        let input = json!({"id":"ab","files":[path(&before), path(&missing), path(&after)],"labels":["Before","Gone","After"]});
+        let text = sender
+            .submit(&input, Tool::Compare, "call", &staging)
+            .await
+            .unwrap();
+        assert!(text.contains("2 files are shown side by side"), "{text}");
+        assert!(text.contains("<!-- files:ab -->"), "{text}");
+        assert!(text.contains("missing.png"), "{text}");
+        let record = sender.latest("ab").unwrap();
+        assert!(record.compare);
+        let labels: Vec<_> = record.files.iter().map(|f| f.label.as_deref()).collect();
+        assert_eq!(labels, [Some("Before"), Some("After")]);
+        // The images keep their places in the stored result.
+        assert_eq!(
+            record.files.iter().map(|f| f.index).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        // A saved comparison says so; a plain group's record carries no flag.
+        let saved = serde_json::to_value(&record).unwrap();
+        assert_eq!(saved["compare"], true);
+        assert_eq!(saved["files"][0]["label"], "Before");
+
+        // One file left is no comparison, and nothing is shown or replaced.
+        let input = json!({"id":"ab","files":[path(&before), path(&missing)]});
+        let error = sender
+            .submit(&input, Tool::Compare, "call2", &staging)
+            .await
+            .unwrap_err();
+        assert!(error.contains("a comparison needs two"), "{error}");
+        assert_eq!(sender.latest("ab").unwrap().revision, 1);
+
+        // The same id sent by send_files replaces the comparison with a plain group.
+        sender
+            .submit(
+                &json!({"id":"ab","files":[path(&after)]}),
+                Tool::Send,
+                "call3",
+                &staging,
+            )
+            .await
+            .unwrap();
+        let replaced = sender.latest("ab").unwrap();
+        assert_eq!(replaced.revision, 2);
+        assert!(!replaced.compare);
+        assert!(replaced.files[0].label.is_none());
+        let saved = serde_json::to_value(&replaced).unwrap();
+        assert!(saved.get("compare").is_none());
+        assert!(saved["files"][0].get("label").is_none());
     }
 
     #[tokio::test]
@@ -655,6 +912,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_comparison_comes_from_its_own_registered_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let [before, after] = ["before.png", "after.png"].map(|name| {
+            let path = dir.path().join(name);
+            png(&path);
+            path.to_string_lossy().into_owned()
+        });
+        let staging = kept();
+        let control = |tool: &str, arguments: &Value| json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":tool,"arguments":arguments}}}});
+        let observed = |id: &str, tool: &str, input: &Value| json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":id,"name":format!("mcp__agent_studio__{tool}"),"input":input}]}});
+        let answer =
+            |value: &Value| value["response"]["response"]["mcp_response"]["result"].clone();
+        // Arguments both tools accept: a send_files call never lets compare_files through.
+        let input = json!({"id":"ab","files":[before, after]});
+        let mut sender = FileSender::default();
+        sender.observe_claude(&observed("t1", NAME, &input));
+        let refused = answer(
+            &sender
+                .claude(&control(COMPARE_NAME, &input), &staging)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(refused["isError"], true);
+        assert!(refused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("registered parent-conversation compare_files call"));
+        sender.observe_claude(&observed("t2", COMPARE_NAME, &input));
+        let answered = answer(
+            &sender
+                .claude(&control(COMPARE_NAME, &input), &staging)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(answered["isError"], false, "{answered}");
+        assert!(answered["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("side by side"));
+        // It is published with the call's result, as a comparison.
+        let events = sender.observe_claude(&json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"shown"}]}}));
+        let [RunEvent::SentFiles { sent_files }] = events.as_slice() else {
+            panic!("one comparison is published: {events:?}");
+        };
+        assert!(sent_files.compare);
+        assert_eq!(sent_files.tool_id, "t2");
+
+        // Codex: the parent thread's call, under its own call id.
+        let mut sender = FileSender::default();
+        let call = json!({"id":9,"method":"item/tool/call","params":{"threadId":"root","tool":COMPARE_NAME,"namespace":null,"arguments":{"id":"ab","files":[before, after],"labels":["Before","After"]}}});
+        let (response, event) = sender.codex(&call, "root", &staging).await.unwrap();
+        assert_eq!(response["result"]["success"], true, "{response}");
+        let Some(RunEvent::SentFiles { sent_files }) = event else {
+            panic!("the comparison is published at once");
+        };
+        assert!(sent_files.compare);
+        assert_eq!(sent_files.tool_id, "compare_files-9");
+        assert_eq!(sent_files.files[1].label.as_deref(), Some("After"));
+        assert!(sender.has_files());
+    }
+
+    #[test]
+    fn both_tools_are_offered_with_their_own_schema() {
+        assert_eq!(compare_tool()["name"], COMPARE_NAME);
+        assert_eq!(
+            compare_tool()["inputSchema"]["properties"]["files"]["minItems"],
+            2
+        );
+        assert!(compare_tool()["inputSchema"]["properties"]["labels"].is_object());
+        assert!(tool()["inputSchema"]["properties"]["labels"].is_null());
+        assert_eq!(codex_compare_tool()["type"], "function");
+        assert_eq!(codex_compare_tool()["deferLoading"], false);
+        assert!(COMPARE_GUIDANCE.contains("mcp__agent_studio__compare_files"));
+        assert!(COMPARE_GUIDANCE.contains("<!-- files:ID -->"));
+    }
+
+    #[tokio::test]
     async fn each_path_is_recognized_as_an_image_or_a_model_where_it_runs() {
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("shot.png");
@@ -719,7 +1053,9 @@ mod tests {
                 bytes: 12,
                 width: Some(4),
                 height: Some(3),
+                label: None,
             }],
+            compare: false,
         };
         let text = outcome(&record, &["  /tmp/b.txt: not an image".into()]);
         assert!(text.contains("<!-- files:shots -->"));

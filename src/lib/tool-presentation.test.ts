@@ -166,6 +166,11 @@ describe('tool presentation', () => {
     expect(toolVisual(tool({ category: 'agent', name: 'Sub-agents' })).icon).toBe('agent');
     expect(toolVisual(tool({ category: 'hook', name: 'PreToolUse hook' })).icon).toBe('hook');
     expect(toolVisual(tool({ name: 'Wait for background tasks' })).icon).toBe('waitTasks');
+    // Agent Studio's own file tools, from Claude's server or as Codex dynamic tools.
+    for (const name of ['mcp__agent_studio__send_files', 'send_files'])
+      expect(toolVisual(tool({ name }))).toEqual({ icon: 'image', title: 'Send files' });
+    for (const name of ['mcp__agent_studio__compare_files', 'compare_files'])
+      expect(toolVisual(tool({ name }))).toEqual({ icon: 'compare', title: 'Compare files' });
     expect(toolVisual(tool({ name: 'Legacy tool' })).icon).toBe('tool');
     expect(connectedTool(tool({ name: 'Bash' }))).toBeUndefined();
   });

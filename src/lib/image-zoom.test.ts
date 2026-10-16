@@ -5,11 +5,15 @@ import {
   fitView,
   isZoomed,
   panBy,
+  imageZoom,
   scaleLimits,
   toggleZoom,
   wheelFactor,
   zoomAt,
   zoomTo,
+  type Point,
+  type Size,
+  type ZoomView,
 } from './image-zoom';
 
 const stage = { width: 1000, height: 600 };
@@ -81,4 +85,45 @@ it('zooms a notch at a time from a wheel and follows a touchpad pinch', () => {
     wheelFactor({ deltaY: 48, deltaMode: 0, ctrlKey: false }, 600),
   );
   expect(wheelFactor({ deltaY: -10, deltaMode: 0, ctrlKey: true }, 600)).toBeCloseTo(Math.exp(0.1));
+});
+
+it('fills a comparison pane with every image, and shares a view whatever its size', () => {
+  const panes = imageZoom(true);
+  // Alone, a small image keeps its own size; in a pane it fills the stage like a large one.
+  const texture = { width: 256, height: 256 };
+  const pane = { width: 400, height: 400 };
+  expect(fitScale(texture, pane)).toBe(1);
+  expect(panes.fitScale(texture, pane)).toBeCloseTo(400 / 256, 9);
+  expect(panes.isZoomed(panes.fitView(texture, pane), texture, pane)).toBe(false);
+  expect(panes.fitScale(screenshot, stage)).toBe(fitScale(screenshot, stage));
+  // The whole image, seen from its centre.
+  const fit = panes.fitView(screenshot, stage);
+  const whole = panes.shareView(fit, screenshot, stage);
+  expect(whole.zoom).toBeCloseTo(1, 9);
+  expect(whole.x).toBeCloseTo(0.5, 9);
+  expect(whole.y).toBeCloseTo(0.5, 9);
+  // Zoomed in on the upper left, the half-size render beside it shows the same region.
+  const closer = panes.zoomAt(fit, 3, { x: 200, y: 150 }, screenshot, stage);
+  const shared = panes.shareView(closer, screenshot, stage);
+  const half = { width: 960, height: 540 };
+  const taken = panes.takeView(shared, half, stage);
+  const seen = (view: ZoomView, image: Size, at: Point) => ({
+    x: (at.x - view.x) / view.scale / image.width,
+    y: (at.y - view.y) / view.scale / image.height,
+  });
+  for (const corner of [
+    { x: 0, y: 0 },
+    { x: stage.width, y: stage.height },
+  ]) {
+    expect(seen(taken, half, corner).x).toBeCloseTo(seen(closer, screenshot, corner).x, 9);
+    expect(seen(taken, half, corner).y).toBeCloseTo(seen(closer, screenshot, corner).y, 9);
+  }
+  // Taken back by the image it came from, it is the same view.
+  const back = panes.takeView(shared, screenshot, stage);
+  expect(back.scale).toBeCloseTo(closer.scale, 9);
+  expect(back.x).toBeCloseTo(closer.x, 9);
+  expect(back.y).toBeCloseTo(closer.y, 9);
+  // Each image stays within its own limits: whole at least, never far past its pixels.
+  expect(panes.takeView({ zoom: 0.01, x: 0, y: 0 }, screenshot, stage)).toEqual(fit);
+  expect(panes.takeView({ zoom: 1000, x: 0.5, y: 0.5 }, screenshot, stage).scale).toBe(8);
 });

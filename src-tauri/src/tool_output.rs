@@ -745,6 +745,16 @@ impl Recorder {
             jobs,
         })
     }
+    /// A test's recorder, whose results go nowhere.
+    #[cfg(test)]
+    pub fn detached(run_id: &str) -> Self {
+        let (jobs, _) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            run_id: run_id.into(),
+            pending: Arc::default(),
+            jobs,
+        }
+    }
     /// The WSL distribution whose Linux paths the run's image files use, if any.
     pub fn distribution(&self, distribution: Option<String>) {
         let _ = self.jobs.send(Job::Distribution(distribution));

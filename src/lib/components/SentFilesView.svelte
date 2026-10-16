@@ -4,6 +4,7 @@
     galleryRows,
     imageAspect,
     imageInfo,
+    isComparison,
     type FileRun,
     type SentFiles,
     type ShownFile,
@@ -12,6 +13,7 @@
   import { FileViewer as Viewer, fileViewer, type ViewedImage } from '$lib/file-viewer.svelte';
   import ToolResultImage from './ToolResultImage.svelte';
   import ModelView from './ModelView.svelte';
+  import CompareView from './CompareView.svelte';
   import FileViewer from './FileViewer.svelte';
 
   let {
@@ -30,6 +32,10 @@
   const shared = fileViewer();
   const viewer = shared ?? new Viewer();
   const runs = $derived(fileRuns(groups));
+  // A comparison shows its files side by side, never joined with other groups.
+  const comparison = $derived(
+    groups.length === 1 && isComparison(groups[0]) ? groups[0] : undefined,
+  );
   // Single images from several calls keep each call's caption under its own tile.
   const joined = $derived(groups.length > 1);
   const tileCaptions = $derived(joined && groups.some((group) => group.caption));
@@ -70,6 +76,16 @@
 </script>
 
 <figure class="sent-files">
+  {#if comparison}
+    <CompareView group={comparison} {connectionId} {viewer} />
+  {:else}
+    {@render shownRuns()}
+  {/if}
+  {#if !joined && groups[0]?.caption}<figcaption>{groups[0].caption}</figcaption>{/if}
+</figure>
+{#if !shared}<FileViewer {viewer} />{/if}
+
+{#snippet shownRuns()}
   {#each runs as run (runKey(run))}
     {#if run.kind === 'model'}
       <ModelView
@@ -129,9 +145,7 @@
       </div>
     {/if}
   {/each}
-  {#if !joined && groups[0]?.caption}<figcaption>{groups[0].caption}</figcaption>{/if}
-</figure>
-{#if !shared}<FileViewer {viewer} />{/if}
+{/snippet}
 
 <style>
   .sent-files {

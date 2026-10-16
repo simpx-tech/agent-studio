@@ -13,6 +13,7 @@
 import {
   createModelScene,
   describeModelFault,
+  type CameraView,
   type Lighting,
   type ModelFormat,
   type ModelScene,
@@ -136,6 +137,10 @@ export type ModelViewer = {
   setLighting(lighting: Lighting): void;
   zoom(factor: number): void;
   reset(): void;
+  /** Where the camera is, or was when the scene was last kept; unknown before it is built. */
+  view(): CameraView | undefined;
+  /** Takes another scene's view now, or when this stage builds its scene. */
+  setView(view: CameraView): void;
   retry(): void;
   /** A suspended stage keeps no scene, as the inline one while the expanded view is open. */
   suspend(suspended: boolean): void;
@@ -159,6 +164,8 @@ export function createModelViewer(
     playing(): boolean;
     lighting(): Lighting;
     onStatus(status: ViewerStatus): void;
+    /** Where the reader moved the camera, as the scene reports it. */
+    onView?(view: CameraView): void;
   },
 ): ModelViewer {
   let scene: ModelScene | undefined;
@@ -169,6 +176,8 @@ export function createModelViewer(
   let onScreen = false;
   let seenAt = 0;
   let saved: SceneState | undefined;
+  // A view taken while no scene could take it, which the next scene built takes.
+  let waiting: CameraView | undefined;
   let losses = 0;
   let clips: string[] = [];
   let settle: ReturnType<typeof setTimeout> | undefined;
@@ -227,6 +236,7 @@ export function createModelViewer(
         playing: options.playing(),
         lighting: options.lighting(),
         state: saved,
+        onView: (view) => options.onView?.(view),
       });
     } catch (cause) {
       building = false;
@@ -244,8 +254,10 @@ export function createModelViewer(
     }
     scene = created;
     canvas = element;
-    // The light the reader chose while the scene was being built.
+    // The light the reader chose while the scene was being built, and the view it was to take.
     created.setLighting(options.lighting());
+    if (waiting) created.setView(waiting);
+    waiting = undefined;
     element.style.visibility = '';
     clips = created.clips;
     element.addEventListener('webglcontextlost', lost);
@@ -316,6 +328,14 @@ export function createModelViewer(
     setLighting: (lighting) => scene?.setLighting(lighting),
     zoom: (factor) => scene?.zoom(factor),
     reset: () => scene?.reset(),
+    view: () =>
+      scene?.view() ?? (saved ? { position: saved.position, target: saved.target } : undefined),
+    setView(view) {
+      if (scene) return scene.setView(view);
+      // Kept with the animation time it had, for a scene built from it later.
+      saved = { ...view, time: saved?.time ?? 0 };
+      waiting = view;
+    },
     retry() {
       losses = 0;
       report('loading');

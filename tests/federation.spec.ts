@@ -512,7 +512,7 @@ async function host(
                 },
               });
             emit({ kind: 'text', text: `Response from ${identity.name}, completed.` });
-            // A model kept at full detail, 40 MB by its record.
+            // A model kept at full detail, 40 MB by its record, or two compared side by side.
             if (localStorage.getItem('fixture-model'))
               emit({
                 kind: 'sentfiles',
@@ -521,14 +521,26 @@ async function host(
                   revision: 1,
                   runId: args.request.runId,
                   toolId: 'toolu_figure',
-                  files: [
-                    {
-                      index: 0,
-                      name: 'figure.glb',
-                      mediaType: 'model/gltf-binary',
-                      bytes: 40 * 1024 * 1024,
-                    },
-                  ],
+                  ...(localStorage.getItem('fixture-model-compare')
+                    ? {
+                        compare: true,
+                        files: ['before', 'after'].map((name, index) => ({
+                          index,
+                          name: `${name}.glb`,
+                          mediaType: 'model/gltf-binary',
+                          bytes: 40 * 1024 * 1024,
+                        })),
+                      }
+                    : {
+                        files: [
+                          {
+                            index: 0,
+                            name: 'figure.glb',
+                            mediaType: 'model/gltf-binary',
+                            bytes: 40 * 1024 * 1024,
+                          },
+                        ],
+                      }),
                 },
               });
             emit({ kind: 'usage', input: 2400, output: 50, costUsd: 0.012345 });
@@ -1846,13 +1858,15 @@ test('a server’s accounts are added and signed in from another computer throug
 
 /**
  * Runs `check` on a reply the MacBook runs for the desktop through a real relay, which sends a
- * model the MacBook keeps, 40 MB by its record. With `refused`, the way to the relay cannot carry
- * the whole model, as relays before 2026-10-10 refused a result past 24 MB.
+ * model the MacBook keeps, 40 MB by its record, or with `compare` two of them side by side. With
+ * `refused`, the way to the relay cannot carry the whole model, as relays before 2026-10-10
+ * refused a result past 24 MB.
  */
 async function modelReply(
   browser: Browser,
   refused: boolean,
   check: (reply: { desktop: Page; mac: Page; answer: Locator }) => Promise<void>,
+  compare = false,
 ) {
   const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
   const token = 'synthetic-relay-key-for-browser-checks-123456';
@@ -1867,11 +1881,12 @@ async function modelReply(
     await host(desktop, url, token, 'Desktop', 'windows');
     await host(mac, url, token, 'MacBook', 'macos');
     await mac.evaluate(
-      ({ data, refused }) => {
+      ({ data, refused, compare }) => {
         localStorage.setItem('fixture-model', data);
         if (refused) localStorage.setItem('fixture-relay-refuses-models', '1');
+        if (compare) localStorage.setItem('fixture-model-compare', '1');
       },
-      { data: triangleGlbBase64({ animated: false }), refused },
+      { data: triangleGlbBase64({ animated: false }), refused, compare },
     );
     await mac.getByRole('button', { name: 'Add account', exact: true }).click();
     await mac.getByLabel('Account name', { exact: true }).fill('Claude personal 1');
@@ -1977,4 +1992,38 @@ test('another computer shows a model the relay cannot carry whole as eight views
     expect(kept.views).toHaveLength(8);
     expect(new Set(kept.views.map((view: { data: string }) => view.data)).size).toBeGreaterThan(1);
   });
+});
+
+test('compared models another computer could only draw as views turn together while synced', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  await modelReply(
+    browser,
+    true,
+    async ({ desktop, answer }) => {
+      const before = answer.getByRole('slider', { name: 'Turn before.glb' });
+      const after = answer.getByRole('slider', { name: 'Turn after.glb' });
+      await expect(before).toHaveAttribute('aria-valuetext', 'View 1 of 8', { timeout: 30_000 });
+      await expect(after).toHaveAttribute('aria-valuetext', 'View 1 of 8', { timeout: 30_000 });
+      await expect(answer.getByText('GLB · 40 MB · 8 views')).toHaveCount(2);
+      // Synced: turning one turns the other, by keys or by Reset.
+      await before.focus();
+      await desktop.keyboard.press('ArrowRight');
+      await expect(before).toHaveAttribute('aria-valuetext', 'View 2 of 8');
+      await expect(after).toHaveAttribute('aria-valuetext', 'View 2 of 8');
+      await answer.getByRole('button', { name: 'Reset views' }).click();
+      await expect(after).toHaveAttribute('aria-valuetext', 'View 1 of 8');
+      await expect(before).toHaveAttribute('aria-valuetext', 'View 1 of 8');
+      // Free: each turns on its own, and synced again they take the one turned last.
+      await answer.getByRole('radio', { name: 'Free' }).click();
+      await after.focus();
+      await desktop.keyboard.press('End');
+      await expect(after).toHaveAttribute('aria-valuetext', 'View 8 of 8');
+      await expect(before).toHaveAttribute('aria-valuetext', 'View 1 of 8');
+      await answer.getByRole('radio', { name: 'Synced' }).click();
+      await expect(before).toHaveAttribute('aria-valuetext', 'View 8 of 8');
+    },
+    true,
+  );
 });

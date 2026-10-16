@@ -136,6 +136,12 @@ impl EventSink {
         self.screens = Some(Arc::new(screens));
         self
     }
+    /// A test's run, which keeps the files it shows as a conversation's run does.
+    #[cfg(test)]
+    pub fn with_outputs(mut self, outputs: crate::tool_output::Recorder) -> Self {
+        self.outputs = Some(outputs);
+        self
+    }
     /// Stores tool results the decoder captured, when this run keeps them.
     pub fn outputs(&self, outputs: Vec<crate::protocol::activity::CapturedOutput>) {
         if let Some(recorder) = &self.outputs {

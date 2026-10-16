@@ -6,83 +6,141 @@
 export type Size = { width: number; height: number };
 export type Point = { x: number; y: number };
 export type ZoomView = { scale: number; x: number; y: number };
+/**
+ * A view as another image takes it, whatever its size or its stage's: how many times the whole
+ * image it is zoomed, and the point of the image at the stage's centre, as shares of the image's
+ * width and height. Two pictures of one scene at different resolutions show the same region.
+ */
+export type SharedView = { zoom: number; x: number; y: number };
 
 /** Tiny images open enlarged to at least this many pixels on their shorter side. */
 const SMALLEST = 64;
 /** A scale this close to another is the same one, as the fitted view after a round trip. */
 const SAME = 1.001;
 
-/** The scale that shows the whole image, enlarging only a tiny one. */
-export function fitScale(image: Size, stage: Size): number {
-  if (!(image.width > 0 && image.height > 0 && stage.width > 0 && stage.height > 0)) return 1;
-  const enlarged = Math.max(1, SMALLEST / Math.min(image.width, image.height));
-  return Math.min(stage.width / image.width, stage.height / image.height, enlarged);
-}
+/**
+ * How images zoom and pan. An image shown alone opens at its own size when it fits, enlarging
+ * only a tiny one; with `fill`, as in a comparison's panes, every image fills its stage however
+ * small, so images of one scene at different resolutions show at one size and zoom together.
+ */
+export function imageZoom(fill = false) {
+  /** The scale that shows the whole image. */
+  function fitScale(image: Size, stage: Size): number {
+    if (!(image.width > 0 && image.height > 0 && stage.width > 0 && stage.height > 0)) return 1;
+    const enlarged = fill ? Infinity : Math.max(1, SMALLEST / Math.min(image.width, image.height));
+    return Math.min(stage.width / image.width, stage.height / image.height, enlarged);
+  }
 
-/** From the whole image, or its natural size for a tiny one, to well past its pixels. */
-export function scaleLimits(image: Size, stage: Size) {
-  const fit = fitScale(image, stage);
-  return { min: Math.min(fit, 1), max: Math.max(8, fit * 4) };
-}
+  /** From the whole image, or its natural size for a tiny one, to well past its pixels. */
+  function scaleLimits(image: Size, stage: Size) {
+    const fit = fitScale(image, stage);
+    return { min: Math.min(fit, 1), max: Math.max(8, fit * 4) };
+  }
 
-/** Whether the reader zoomed in past the whole image, so dragging pans instead of swiping. */
-export function isZoomed(view: ZoomView, image: Size, stage: Size): boolean {
-  return view.scale > fitScale(image, stage) * SAME;
-}
+  /** Whether the reader zoomed in past the whole image, so dragging pans instead of swiping. */
+  function isZoomed(view: ZoomView, image: Size, stage: Size): boolean {
+    return view.scale > fitScale(image, stage) * SAME;
+  }
 
-/** Keeps the scale within its limits and the image over the stage: centered on an axis it
- * does not fill, and otherwise covering that axis from edge to edge. */
-export function clampView(view: ZoomView, image: Size, stage: Size): ZoomView {
-  const { min, max } = scaleLimits(image, stage);
-  const scale = Math.min(max, Math.max(min, view.scale));
-  const axis = (offset: number, length: number, room: number) => {
-    const drawn = length * scale;
-    return drawn <= room ? (room - drawn) / 2 : Math.min(0, Math.max(room - drawn, offset));
-  };
+  /** Keeps the scale within its limits and the image over the stage: centered on an axis it
+   * does not fill, and otherwise covering that axis from edge to edge. */
+  function clampView(view: ZoomView, image: Size, stage: Size): ZoomView {
+    const { min, max } = scaleLimits(image, stage);
+    const scale = Math.min(max, Math.max(min, view.scale));
+    const axis = (offset: number, length: number, room: number) => {
+      const drawn = length * scale;
+      return drawn <= room ? (room - drawn) / 2 : Math.min(0, Math.max(room - drawn, offset));
+    };
+    return {
+      scale,
+      x: axis(view.x, image.width, stage.width),
+      y: axis(view.y, image.height, stage.height),
+    };
+  }
+
+  /** The whole image, centered. */
+  function fitView(image: Size, stage: Size): ZoomView {
+    return clampView({ scale: fitScale(image, stage), x: 0, y: 0 }, image, stage);
+  }
+
+  /** Scales by `factor`, keeping the point of the image under `at` where it is. */
+  function zoomAt(view: ZoomView, factor: number, at: Point, image: Size, stage: Size): ZoomView {
+    const { min, max } = scaleLimits(image, stage);
+    const scale = Math.min(max, Math.max(min, view.scale * factor));
+    const ratio = scale / view.scale;
+    return clampView(
+      { scale, x: at.x - (at.x - view.x) * ratio, y: at.y - (at.y - view.y) * ratio },
+      image,
+      stage,
+    );
+  }
+
+  function zoomTo(view: ZoomView, scale: number, at: Point, image: Size, stage: Size) {
+    return zoomAt(view, scale / view.scale, at, image, stage);
+  }
+
+  function panBy(view: ZoomView, dx: number, dy: number, image: Size, stage: Size) {
+    return clampView({ ...view, x: view.x + dx, y: view.y + dy }, image, stage);
+  }
+
+  /** A double click or tap zooms in where it lands, and back out to the whole image. */
+  function toggleZoom(view: ZoomView, at: Point, image: Size, stage: Size): ZoomView {
+    if (isZoomed(view, image, stage)) return fitView(image, stage);
+    const fit = fitScale(image, stage);
+    return zoomTo(view, fit < 1 ? Math.max(1, fit * 2) : fit * 2, at, image, stage);
+  }
+
+  /** The view as another image takes it. */
+  function shareView(view: ZoomView, image: Size, stage: Size): SharedView {
+    return {
+      zoom: view.scale / fitScale(image, stage),
+      x: (stage.width / 2 - view.x) / view.scale / (image.width || 1),
+      y: (stage.height / 2 - view.y) / view.scale / (image.height || 1),
+    };
+  }
+
+  /** The view of this image that shows what `shared` shows, within this image's limits. */
+  function takeView(shared: SharedView, image: Size, stage: Size): ZoomView {
+    const scale = shared.zoom * fitScale(image, stage);
+    return clampView(
+      {
+        scale,
+        x: stage.width / 2 - shared.x * image.width * scale,
+        y: stage.height / 2 - shared.y * image.height * scale,
+      },
+      image,
+      stage,
+    );
+  }
+
   return {
-    scale,
-    x: axis(view.x, image.width, stage.width),
-    y: axis(view.y, image.height, stage.height),
+    fitScale,
+    scaleLimits,
+    isZoomed,
+    clampView,
+    fitView,
+    zoomAt,
+    zoomTo,
+    panBy,
+    toggleZoom,
+    shareView,
+    takeView,
   };
 }
 
-/** The whole image, centered. */
-export function fitView(image: Size, stage: Size): ZoomView {
-  return clampView({ scale: fitScale(image, stage), x: 0, y: 0 }, image, stage);
-}
-
-/** Scales by `factor`, keeping the point of the image under `at` where it is. */
-export function zoomAt(
-  view: ZoomView,
-  factor: number,
-  at: Point,
-  image: Size,
-  stage: Size,
-): ZoomView {
-  const { min, max } = scaleLimits(image, stage);
-  const scale = Math.min(max, Math.max(min, view.scale * factor));
-  const ratio = scale / view.scale;
-  return clampView(
-    { scale, x: at.x - (at.x - view.x) * ratio, y: at.y - (at.y - view.y) * ratio },
-    image,
-    stage,
-  );
-}
-
-export function zoomTo(view: ZoomView, scale: number, at: Point, image: Size, stage: Size) {
-  return zoomAt(view, scale / view.scale, at, image, stage);
-}
-
-export function panBy(view: ZoomView, dx: number, dy: number, image: Size, stage: Size) {
-  return clampView({ ...view, x: view.x + dx, y: view.y + dy }, image, stage);
-}
-
-/** A double click or tap zooms in where it lands, and back out to the whole image. */
-export function toggleZoom(view: ZoomView, at: Point, image: Size, stage: Size): ZoomView {
-  if (isZoomed(view, image, stage)) return fitView(image, stage);
-  const fit = fitScale(image, stage);
-  return zoomTo(view, fit < 1 ? Math.max(1, fit * 2) : fit * 2, at, image, stage);
-}
+export const {
+  fitScale,
+  scaleLimits,
+  isZoomed,
+  clampView,
+  fitView,
+  zoomAt,
+  zoomTo,
+  panBy,
+  toggleZoom,
+  shareView,
+  takeView,
+} = imageZoom();
 
 /**
  * How far one wheel event zooms: a mouse notch is a step, and a touchpad pinch, which the

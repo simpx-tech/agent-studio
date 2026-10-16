@@ -170,6 +170,7 @@ fn studio_tool(name: &str) -> bool {
                 | "studio_update_plan"
                 | "visualize"
                 | "send_files"
+                | "compare_files"
                 | "show_artifact"
                 | "save_screen"
                 | "list_screens"

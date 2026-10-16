@@ -14,15 +14,20 @@
   // Read again whenever the shown file or the set of files changes, as when a reply adds one.
   const order = $derived(file ? viewer.ordered() : []);
   const index = $derived(viewer.current ? order.indexOf(viewer.current) : -1);
-  const kind = $derived(file?.kind === 'model' ? 'model' : 'image');
+  const kind = $derived(file?.kind ?? 'image');
+  const previews = {
+    image: 'Image preview',
+    model: 'Model preview',
+    comparison: 'Comparison preview',
+  };
 
   // The dialog exists only while it shows a file, and goes with the file's reply.
   $effect(() => {
     if (dialog && open && !dialog.open) dialog.showModal();
   });
   $effect(() => () => viewer.close());
-  // A model gives its inline view's scene up while the viewer shows it.
-  const shown = $derived(file?.kind === 'model' ? file.shown : undefined);
+  // A model, or a comparison's models, give their inline scenes up while the viewer shows them.
+  const shown = $derived(file && file.kind !== 'image' ? file.shown : undefined);
   $effect(() => {
     const show = shown;
     if (!show) return;
@@ -69,7 +74,7 @@
   <dialog
     bind:this={dialog}
     class="file-viewer"
-    aria-label={kind === 'model' ? 'Model preview' : 'Image preview'}
+    aria-label={previews[kind]}
     tabindex="-1"
     onclose={() => viewer.close()}
     {@attach closeOnBackdrop}

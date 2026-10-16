@@ -9,6 +9,15 @@ async fn run(
     text: &str,
     stop_while_waiting: bool,
 ) -> (Result<(String, String), String>, Vec<RunEvent>, bool) {
+    run_with(text, stop_while_waiting, false).await
+}
+
+/// `run`, keeping the files the reply shows as a conversation's run does when `kept` is set.
+async fn run_with(
+    text: &str,
+    stop_while_waiting: bool,
+    kept: bool,
+) -> (Result<(String, String), String>, Vec<RunEvent>, bool) {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
     std::fs::create_dir_all(&runtime).unwrap();
@@ -30,7 +39,7 @@ async fn run(
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
-    let channel = EventSink::new(move |event| {
+    let mut channel = EventSink::new(move |event| {
         if stop_while_waiting
             && matches!(&event, RunEvent::Activity { text } if text == "Waiting for background work to finish")
         {
@@ -39,6 +48,9 @@ async fn run(
         let _ = tx.send(event);
         Ok(())
     });
+    if kept {
+        channel = channel.with_outputs(crate::tool_output::Recorder::detached(&request.run_id));
+    }
     let mut questions = Questions::default()
         .open(&request.run_id, None, channel.clone())
         .unwrap();
@@ -1109,6 +1121,49 @@ async fn installed_claude_shows_an_artifact_and_reads_its_preview() {
         told.contains("sideways") || told.contains("scroll") || told.contains("wide"),
         "{answer}"
     );
+    eprintln!("Answer: {answer}");
+}
+
+/// A chat compares two files through the CLI's own call of compare_files, which checks both where
+/// the chat runs and records them as one comparison, each file with its label.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_compares_two_files_side_by_side() {
+    let folder = tempfile::tempdir().unwrap();
+    let [before, after] = [("before.png", 4, 3), ("after.png", 8, 6)].map(|(name, w, h)| {
+        let path = folder.path().join(name);
+        crate::providers::sent_files::test_png(&path, w, h);
+        path.display().to_string()
+    });
+    let text = format!("This is an Agent Studio integration test. Call mcp__agent_studio__compare_files once with id pair, the two files {before} and {after} in that order, and the labels Before and After. Call no other tool. Reply with one short sentence followed by <!-- files:pair --> on its own line.");
+    let (result, events, _) = run_with(&text, false, true).await;
+    for line in outline(&events) {
+        eprintln!("{line}");
+    }
+    let (status, answer) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let shown = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::SentFiles { sent_files } => Some(sent_files.clone()),
+            _ => None,
+        })
+        .expect("Claude compared no files");
+    assert_eq!(shown.id, "pair");
+    assert!(shown.compare);
+    let files: Vec<_> = shown
+        .files
+        .iter()
+        .map(|file| (file.name.as_str(), file.label.as_deref(), file.width))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("before.png", Some("Before"), Some(4)),
+            ("after.png", Some("After"), Some(8))
+        ]
+    );
+    assert!(answer.contains("<!-- files:pair -->"), "{answer}");
     eprintln!("Answer: {answer}");
 }
 

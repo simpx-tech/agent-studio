@@ -4,8 +4,10 @@ import {
   galleryRows,
   imageAspect,
   imageInfo,
+  isComparison,
   isModel,
   mergeSentFiles,
+  paneLabel,
   sentFileGroupsSchema,
   sentFilesSchema,
   type SentFiles,
@@ -258,4 +260,76 @@ it('joins single images placed side by side into one gallery, and nothing else',
   ]);
   // The joined part keeps its first group's key, so the gallery stays as more arrive.
   expect(replyContent('', [], [a, b]).parts[0].key).toBe(replyContent('', [], [a]).parts[0].key);
+});
+
+const comparison: SentFiles = {
+  ...group,
+  id: 'before-after',
+  compare: true,
+  caption: 'Upscaled twice',
+  files: [
+    { ...image(0, 512, 512), label: 'Before' },
+    { ...image(1, 1024, 1024), label: 'After' },
+  ],
+};
+
+it('keeps a comparison and its labels through storage, sync and later revisions', () => {
+  expect(sentFilesSchema.parse(comparison)).toEqual(comparison);
+  expect(isComparison(comparison)).toBe(true);
+  // A single file, or a group sent by send_files, is not compared.
+  expect(isComparison({ ...comparison, files: [comparison.files[0]] })).toBe(false);
+  expect(isComparison(group)).toBe(false);
+  expect(paneLabel(comparison.files[0])).toBe('Before');
+  expect(paneLabel(image(0))).toBe('shot-0.png');
+  // Labels are one line, as the host keeps them.
+  const labelled = (label: string) => ({
+    ...comparison,
+    files: [{ ...image(0), label }, image(1)],
+  });
+  expect(sentFilesSchema.safeParse(labelled('Before\nafter')).success).toBe(false);
+  expect(sentFilesSchema.safeParse(labelled('  ')).success).toBe(false);
+  expect(sentFilesSchema.safeParse(labelled('L'.repeat(500))).success).toBe(true);
+
+  const message = reply();
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: comparison });
+  expect(message.sentFiles).toEqual([comparison]);
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Upscale',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    createdAt: message.createdAt,
+    updatedAt: message.createdAt,
+    messages: [message],
+  });
+  const restored = restoreWorkspace(JSON.parse(JSON.stringify(workspace)));
+  expect(restored.conversations[0].messages[0].sentFiles).toEqual([comparison]);
+  // A later revision under the same id replaces it, comparison or not, on either side.
+  const base = sharedWorkspace(workspace),
+    local = structuredClone(base),
+    remote = structuredClone(base);
+  const plain = { ...group, id: comparison.id, revision: 2 };
+  remote.conversations[0].messages[0].sentFiles = [plain];
+  const merged = mergeShared(base, local, remote).conversations[0].messages[0].sentFiles!;
+  expect(merged).toEqual([plain]);
+  expect(mergeSentFiles([plain], [{ ...comparison, revision: 3 }])[0].compare).toBe(true);
+});
+
+it('places a comparison at its marker on its own, never in a gallery', () => {
+  const a = shown('a', [image(0)]);
+  const b = shown('b', [image(0)]);
+  const ids = ({ parts }: ReturnType<typeof replyContent>) =>
+    parts.map((part) => (part.type === 'files' ? part.groups.map((g) => g.id) : part.type));
+  expect(
+    ids(
+      replyContent(
+        '<!-- files:a -->\n\n<!-- files:before-after -->\n\n<!-- files:b -->',
+        [],
+        [a, comparison, b],
+      ),
+    ),
+  ).toEqual([['a'], ['before-after'], ['b']]);
+  // A comparison of single images placed one after another still stands alone.
+  const pair = { ...comparison, files: [image(0), image(1)] };
+  expect(ids(replyContent('', [], [a, pair]))).toEqual([['a'], ['before-after']]);
 });

@@ -913,9 +913,9 @@ impl RunRequest {
         let files = if self.tools_enabled()
             && (self.uses_codex_server() || self.uses_claude_visualizer())
         {
-            sent_files::GUIDANCE
+            format!("{} {}", sent_files::GUIDANCE, sent_files::COMPARE_GUIDANCE)
         } else {
-            ""
+            String::new()
         };
         // Screens belong to a saved conversation, whose computer keeps them.
         let screens = if self.conversation_id.is_some()
@@ -1923,7 +1923,12 @@ mod tests {
             let artifacts = crate::artifacts::guidance(provider != "gemini");
             assert!(r.prompt().contains(&artifacts));
             assert_eq!(r.prompt().contains("show_artifact"), provider != "gemini");
+            // So do the tools that show files, singly and side by side.
+            for guidance in [sent_files::GUIDANCE, sent_files::COMPARE_GUIDANCE] {
+                assert_eq!(r.prompt().contains(guidance), provider != "gemini");
+            }
             r.conversation_only = true;
+            assert!(!r.prompt().contains(sent_files::COMPARE_GUIDANCE));
             assert!(r.prompt().contains("Do not use tools"));
             assert!(!r.prompt().contains("Make it a finished, polished page"));
             let exe = Executable {

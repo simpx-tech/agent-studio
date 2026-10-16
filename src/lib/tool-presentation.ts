@@ -64,6 +64,7 @@ export type ToolIconKey =
   | 'chart'
   | 'screen'
   | 'artifact'
+  | 'compare'
   | 'hook'
   | 'background'
   | 'tool';
@@ -866,6 +867,11 @@ export function toolVisual(
   if (tool.name === 'Workflow') return { icon: 'workflow', title: tool.name, detail: tool.detail };
   if (['visualize', 'mcp__agent_studio__visualize'].includes(tool.name))
     return { icon: 'chart', title: 'Visualize' };
+  // The files a reply shows, alone or side by side.
+  if (['send_files', 'mcp__agent_studio__send_files'].includes(tool.name))
+    return { icon: 'image', title: 'Send files' };
+  if (['compare_files', 'mcp__agent_studio__compare_files'].includes(tool.name))
+    return { icon: 'compare', title: 'Compare files' };
   // The page a show_artifact call shows, by its title.
   if (['show_artifact', 'mcp__agent_studio__show_artifact'].includes(tool.name))
     return { icon: 'artifact', title: 'Show artifact', detail: tool.detail };

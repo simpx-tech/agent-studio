@@ -32,7 +32,15 @@ export type ViewedModel = Described & {
   /** Tells the inline view the viewer shows its model, so it gives up its scene meanwhile. */
   shown(showing: boolean): void;
 };
-export type ViewedFile = ViewedImage | ViewedModel;
+/** Files compared side by side, which the viewer shows together as one of the chat's files. */
+export type ViewedComparison = Described & {
+  kind: 'comparison';
+  /** Every pane at full size, drawn by the comparison in the chat. */
+  view: Snippet;
+  /** Tells the comparison the viewer shows it, so its models give up their scenes meanwhile. */
+  shown(showing: boolean): void;
+};
+export type ViewedFile = ViewedImage | ViewedModel | ViewedComparison;
 
 export class FileViewer {
   readonly #files = new SvelteMap<Element, ViewedFile>();

@@ -758,7 +758,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
           ) {
             const state = window as any;
             (state.toolOutputCalls ??= []).push({ command, ...args });
-            if (state.holdToolOutput)
+            // Every read, or only those `holdToolOutputWhen` picks, waits for releaseToolOutput.
+            if (state.holdToolOutput || state.holdToolOutputWhen?.(command, args))
               await new Promise<void>((resolve) => (state.releaseToolOutput = resolve));
             if (state.failToolOutput) throw state.failToolOutput;
             // Fixtures: stdout/stderr text, a shorter previewStdout for long results, images.

@@ -67,6 +67,7 @@ fn dynamic_tools() -> Vec<Value> {
         super::visualize::codex_tool(),
         super::questions::codex_tool(),
         super::sent_files::codex_tool(),
+        super::sent_files::codex_compare_tool(),
         super::artifact_tool::codex_tool(),
     ];
     tools.extend(crate::screens::tools::codex_tools());

@@ -66,12 +66,17 @@ export function describeModelFault(cause: unknown): string {
   return 'This model could not be opened.';
 }
 
-/** Where the camera was and how far the animation had run, to build the scene again as it was. */
-export type SceneState = {
+/**
+ * Where the camera stands and the point it looks at and turns around, in the frame every model is
+ * placed in: centred, its longest side one unit. Two scenes with the same view show their models
+ * from the same direction, distance and offset, whatever the models' own sizes.
+ */
+export type CameraView = {
   position: [number, number, number];
   target: [number, number, number];
-  time: number;
 };
+/** Where the camera was and how far the animation had run, to build the scene again as it was. */
+export type SceneState = CameraView & { time: number };
 export type SceneOptions = {
   /** Wheel zoom, for the expanded view; the inline view leaves the wheel and swipes to the chat. */
   wheelZoom?: boolean;
@@ -80,6 +85,11 @@ export type SceneOptions = {
   lighting?: Lighting;
   /** The camera and animation time of an earlier scene of the same model. */
   state?: SceneState;
+  /**
+   * Called as the reader turns, moves or zooms the view, and as it glides after a drag, with
+   * where the camera now is; never for a view taken with `setView` or when the scene is built.
+   */
+  onView?: (view: CameraView) => void;
 };
 export type ModelScene = {
   /** Named animations inside the file, in their own order. */
@@ -99,6 +109,10 @@ export type ModelScene = {
   reset(): void;
   resize(): void;
   state(): SceneState;
+  /** Where the camera is now. */
+  view(): CameraView;
+  /** Moves the camera where another scene's is, at once, ending any glide of its own. */
+  setView(view: CameraView): void;
   dispose(): void;
 };
 
@@ -527,6 +541,12 @@ export async function createModelScene(
     frame = 0;
     if (disposed || !visible || compiling) return;
     const moving = controls.update();
+    // The controls report no move smaller than their threshold, so a glide ends a little past the
+    // view it last reported: the view it came to rest at is reported once more.
+    if (!moving && leading) {
+      leading = false;
+      options.onView?.(view());
+    }
     if (!moving && playing && drawnAt && now - drawnAt < FRAME_MS) {
       request();
       return;
@@ -544,7 +564,22 @@ export async function createModelScene(
   function request() {
     if (!frame && !disposed && visible) frame = requestAnimationFrame(render);
   }
-  controls.addEventListener('change', request);
+  const view = (): CameraView => ({
+    position: camera.position.toArray() as [number, number, number],
+    target: controls.target.toArray() as [number, number, number],
+  });
+  // While the scene is built, and while it takes another scene's view, its camera moves without
+  // the reader: those moves are not reported.
+  let following = true;
+  // Whether the reader moved the view since it last came to rest.
+  let leading = false;
+  function changed() {
+    request();
+    if (following) return;
+    leading = true;
+    options.onView?.(view());
+  }
+  controls.addEventListener('change', changed);
 
   function resize() {
     const width = Math.max(1, Math.round(canvas.clientWidth));
@@ -597,6 +632,7 @@ export async function createModelScene(
   // Shaders compile in the background where the browser can, rather than in the first frame.
   await renderer.compileAsync(scene, camera).catch(() => {});
   compiling = false;
+  following = false;
   request();
 
   return {
@@ -648,15 +684,27 @@ export async function createModelScene(
       request();
     },
     resize,
-    state: () => ({
-      position: camera.position.toArray() as [number, number, number],
-      target: controls.target.toArray() as [number, number, number],
-      time: action?.time ?? 0,
-    }),
+    state: () => ({ ...view(), time: action?.time ?? 0 }),
+    view,
+    setView(next) {
+      following = true;
+      // Without damping, one update spends what is left of a glide, which would otherwise carry
+      // this view away from the one it follows.
+      controls.enableDamping = false;
+      controls.update();
+      controls.enableDamping = true;
+      camera.position.fromArray(next.position);
+      controls.target.fromArray(next.target);
+      // The controls take the new view as their own, so the next frame reports no move.
+      controls.update();
+      following = false;
+      leading = false;
+      request();
+    },
     dispose() {
       disposed = true;
       if (frame) cancelAnimationFrame(frame);
-      controls.removeEventListener('change', request);
+      controls.removeEventListener('change', changed);
       controls.dispose();
       mixer?.stopAllAction();
       mixer?.uncacheRoot(object);
