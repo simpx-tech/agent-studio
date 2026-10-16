@@ -7,6 +7,11 @@ export type ModelInfo = {
   defaultReasoning: Reasoning;
   contextWindow?: number | null;
   contextSource?: string | null;
+  // The model offers Fast mode (Claude's `supportsFastMode`, a Codex Fast service tier), what
+  // the CLI says it gives, and why Claude says the account cannot use it (`fastModeBlock`).
+  fastMode?: boolean;
+  fastModeDetail?: string;
+  fastModeBlocked?: string;
 };
 export type ModelCatalog = Record<ProviderId, ModelInfo[]>;
 export const automaticModel: ModelInfo = {
@@ -66,6 +71,18 @@ export function reasoningScale(levels: string[], current: Reasoning): Reasoning[
   const listed = new Set<string>([...levels, current]);
   return ['', ...reasoningOrder.filter((level) => listed.has(level))];
 }
+// Claude's own words for the reasons it gives that last until the account changes.
+const fastModeBlocks: Record<string, string> = {
+  extra_usage_disabled: 'Fast mode requires usage credits',
+  free: 'Fast mode requires a paid subscription',
+  preference: 'Fast mode has been disabled by your organization',
+};
+export const fastModeBlock = (model: ModelInfo) =>
+  model.fastModeBlocked ? fastModeBlocks[model.fastModeBlocked] : undefined;
+// The Fast toggle's hover: why the account cannot use it, else what it gives at what cost.
+export const fastModeTitle = (model: ModelInfo) =>
+  fastModeBlock(model) ??
+  `Fast mode · ${model.fastModeDetail ?? 'Faster replies at a higher cost'}`;
 export const reasoningName = (level: Reasoning) =>
   ({
     '': 'Default',

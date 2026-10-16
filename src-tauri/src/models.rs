@@ -16,7 +16,7 @@ const CLAUDE_ALIASES: [(&str, &str); 4] = [
     ("haiku", "Haiku"),
 ];
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     id: String,
@@ -25,15 +25,20 @@ pub struct ModelInfo {
     default_reasoning: String,
     context_window: Option<u64>,
     context_source: Option<String>,
+    /// The model offers Fast mode: Claude's `supportsFastMode`, or a Fast service tier of Codex.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    fast_mode: bool,
+    /// What the CLI says Fast mode gives this model, such as Codex's "2x speed, increased usage".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_mode_detail: Option<String>,
+    /// Why Claude says Fast mode cannot serve this account (`FAST_MODE_BLOCKS`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_mode_blocked: Option<String>,
 }
 fn automatic() -> ModelInfo {
     ModelInfo {
-        id: String::new(),
         name: "CLI default".into(),
-        reasoning_levels: vec![],
-        default_reasoning: String::new(),
-        context_window: None,
-        context_source: None,
+        ..ModelInfo::default()
     }
 }
 /// `runtime` is the neutral folder Claude's alias query runs in; without it the aliases keep
@@ -53,7 +58,7 @@ pub async fn catalog(provider: &str, runtime: Option<&Path>) -> BTreeMap<String,
     };
     let aliases = match runtime.filter(|_| provider == "claude") {
         Some(runtime) => claude_aliases(runtime).await.unwrap_or_default(),
-        None => BTreeMap::new(),
+        None => ClaudeCatalog::default(),
     };
     BTreeMap::from([
         ("codex".into(), codex.unwrap_or_else(|| vec![automatic()])),
@@ -69,12 +74,24 @@ pub async fn catalog(provider: &str, runtime: Option<&Path>) -> BTreeMap<String,
 /// Each alias is named for the model the selected CLI resolves it to. An older CLI maps
 /// `opus` to an older Opus, so no name may promise the newest one; an alias the CLI did not
 /// resolve keeps its family name. Availability is still enforced by the CLI.
-fn claude_models(resolved: &BTreeMap<String, String>) -> Vec<ModelInfo> {
-    let mut models = vec![automatic()];
+fn claude_models(catalog: &ClaudeCatalog) -> Vec<ModelInfo> {
+    let fast = |alias: &str| ModelInfo {
+        fast_mode: catalog.fast_mode(alias),
+        fast_mode_blocked: catalog
+            .fast_mode(alias)
+            .then(|| catalog.fast.blocked.clone())
+            .flatten(),
+        ..ModelInfo::default()
+    };
+    let mut models = vec![ModelInfo {
+        name: "CLI default".into(),
+        ..fast("")
+    }];
     for (id, family) in CLAUDE_ALIASES {
         models.push(ModelInfo {
             id: id.into(),
-            name: resolved
+            name: catalog
+                .resolved
                 .get(id)
                 .map_or_else(|| family.into(), |model| claude_name(model)),
             reasoning_levels: if id == "haiku" {
@@ -84,12 +101,71 @@ fn claude_models(resolved: &BTreeMap<String, String>) -> Vec<ModelInfo> {
                     .map(String::from)
                     .to_vec()
             },
-            default_reasoning: String::new(),
-            context_window: None,
-            context_source: None,
+            ..fast(id)
         });
     }
     models
+}
+/// The reasons Claude Code gives for Fast mode that last until the account changes: no paid
+/// plan, an organization that turned it off, no usage credits. A network failure or a check
+/// still under way says nothing about the account.
+const FAST_MODE_BLOCKS: [&str; 3] = ["free", "preference", "extra_usage_disabled"];
+/// What the selected Claude CLI reports about its aliases: the model each one means, and which
+/// models have Fast mode.
+#[derive(Default)]
+struct ClaudeCatalog {
+    resolved: BTreeMap<String, String>,
+    fast: FastModes,
+}
+impl ClaudeCatalog {
+    /// Whether the alias (`""` for the CLI default) means a model with Fast mode.
+    fn fast_mode(&self, alias: &str) -> bool {
+        if alias.is_empty() {
+            return self.fast.values.contains("default");
+        }
+        self.fast.values.contains(alias)
+            || self
+                .resolved
+                .get(alias)
+                .is_some_and(|model| self.fast.models.contains(without_context(model)))
+    }
+}
+/// The models Claude Code's `initialize` answer lists with `supportsFastMode`, by choice
+/// (`value`: an alias, `default` or an ID) and by the model it means (`resolvedModel`), and why
+/// Fast mode cannot serve the account (`fast_mode_disabled_reason`), which the query asks about
+/// by opting in as a chat does.
+#[derive(Default)]
+struct FastModes {
+    values: HashSet<String>,
+    models: HashSet<String>,
+    blocked: Option<String>,
+}
+impl FastModes {
+    fn read(answer: &Value) -> Self {
+        let mut fast = FastModes::default();
+        for model in answer["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|model| model["supportsFastMode"] == true)
+        {
+            if let Some(value) = model["value"].as_str() {
+                fast.values.insert(without_context(value).to_string());
+            }
+            if let Some(resolved) = model["resolvedModel"].as_str() {
+                fast.models.insert(without_context(resolved).to_string());
+            }
+        }
+        fast.blocked = answer["fast_mode_disabled_reason"]
+            .as_str()
+            .filter(|reason| FAST_MODE_BLOCKS.contains(reason))
+            .map(String::from);
+        fast
+    }
+}
+/// `claude-fable-5-1[1m]` is the same model as `claude-fable-5-1`.
+fn without_context(model: &str) -> &str {
+    model.strip_suffix("[1m]").unwrap_or(model)
 }
 /// `claude-opus-5-5` reads as Opus 5.5 and `claude-haiku-4-5-20251001` as Haiku 4.5, without
 /// a provider prefix (`us.anthropic.`), snapshot date or context suffix (`[1m]`). Any other
@@ -126,8 +202,9 @@ fn claude_name(model: &str) -> String {
 }
 /// Asks the selected Claude CLI which model each alias means, the way a chat selects one.
 /// One process answers every alias without a prompt, tools or customizations, in the same
-/// neutral folder as usage readings; alias resolution needs no sign-in.
-async fn claude_aliases(directory: &Path) -> Option<BTreeMap<String, String>> {
+/// neutral folder as usage readings; alias resolution needs no sign-in. It opts in to Fast
+/// mode as a chat with Fast mode on does, so the CLI says whether the account can use it.
+async fn claude_aliases(directory: &Path) -> Option<ClaudeCatalog> {
     std::fs::create_dir_all(directory).ok()?;
     let exe = resolve("claude").await.ok()?;
     let mut child = exe
@@ -148,7 +225,7 @@ async fn claude_aliases(directory: &Path) -> Option<BTreeMap<String, String>> {
             "dontAsk",
             "--no-session-persistence",
             "--settings",
-            &crate::retention::settings(),
+            &json!({crate::retention::KEY: crate::retention::DAYS, "fastMode": true}).to_string(),
         ])
         .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())
@@ -172,16 +249,17 @@ enum Ask {
     Select,
     Read,
 }
-/// One control request at a time, each answered before the next: `set_model`, then a context
-/// summary that reports the selected model. An alias the CLI refuses stays unresolved; a
-/// refused `initialize` ends the query.
+/// One control request at a time, each answered before the next: `initialize`, whose answer
+/// lists the models with Fast mode, then for each alias `set_model` and a context summary that
+/// reports the selected model. An alias the CLI refuses stays unresolved; a refused
+/// `initialize` ends the query.
 async fn resolve_aliases(
     input: &mut (impl AsyncWrite + Unpin),
     output: impl AsyncBufRead + Unpin,
-) -> Option<BTreeMap<String, String>> {
+) -> Option<ClaudeCatalog> {
     let mut lines = output.lines();
     let mut aliases = CLAUDE_ALIASES.iter().map(|(alias, _)| *alias);
-    let mut resolved = BTreeMap::new();
+    let mut catalog = ClaudeCatalog::default();
     let (mut ask, mut alias) = (Ask::Initialize, "");
     loop {
         let (id, request) = match ask {
@@ -209,6 +287,7 @@ async fn resolve_aliases(
         let answered = response["subtype"] == "success";
         match ask {
             Ask::Initialize if !answered => return None,
+            Ask::Initialize => catalog.fast = FastModes::read(&response["response"]),
             Ask::Select if answered => {
                 ask = Ask::Read;
                 continue;
@@ -218,13 +297,15 @@ async fn resolve_aliases(
                     .as_str()
                     .filter(|m| !m.is_empty() && !m.contains(char::is_control))
                 {
-                    resolved.insert(alias.to_string(), model.to_string());
+                    catalog
+                        .resolved
+                        .insert(alias.to_string(), model.to_string());
                 }
             }
             _ => {}
         }
         let Some(next) = aliases.next() else {
-            return Some(resolved);
+            return Some(catalog);
         };
         (ask, alias) = (Ask::Select, next);
     }
@@ -249,6 +330,27 @@ fn parse_codex(data: &[Value], local: bool) -> Vec<ModelInfo> {
         let context_window = capacities.get(id).copied();
         let context_source =
             context_window.map(|_| "Codex CLI model metadata (effective window)".to_string());
+        // Fast mode is the model's Fast service tier (`priority`, which the CLI also takes as
+        // `fast`), or `fast` among the extra speeds older CLIs list.
+        let tier = model["serviceTiers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|tier| {
+                matches!(tier["id"].as_str(), Some("priority" | "fast"))
+                    || tier["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("fast"))
+            });
+        let fast_mode = tier.is_some()
+            || model["additionalSpeedTiers"]
+                .as_array()
+                .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"));
+        let fast_mode_detail = tier
+            .and_then(|tier| tier["description"].as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && !text.contains(char::is_control))
+            .map(String::from);
         if model["isDefault"] == true {
             models[0].name = format!(
                 "CLI default · {}",
@@ -257,6 +359,8 @@ fn parse_codex(data: &[Value], local: bool) -> Vec<ModelInfo> {
             models[0].reasoning_levels = levels.clone();
             models[0].context_window = context_window;
             models[0].context_source = context_source.clone();
+            models[0].fast_mode = fast_mode;
+            models[0].fast_mode_detail = fast_mode_detail.clone();
         }
         models.push(ModelInfo {
             id: id.into(),
@@ -268,6 +372,9 @@ fn parse_codex(data: &[Value], local: bool) -> Vec<ModelInfo> {
                 .into(),
             context_window,
             context_source,
+            fast_mode,
+            fast_mode_detail,
+            fast_mode_blocked: None,
         });
     }
     models
@@ -427,6 +534,7 @@ fn parse_gemini(text: &str) -> Vec<ModelInfo> {
                     } else {
                         None
                     },
+                    ..ModelInfo::default()
                 });
                 models.len() - 1
             });
@@ -494,6 +602,45 @@ mod tests {
         assert_eq!(models[1].reasoning_levels, ["low", "high"]);
         assert_eq!(models[0].reasoning_levels, models[1].reasoning_levels);
         assert_eq!(models[1].default_reasoning, "low");
+        assert!(!models[1].fast_mode);
+    }
+    #[test]
+    fn codex_models_with_a_fast_tier_offer_fast_mode() {
+        // Codex 0.163.0 lists each model's tiers; older CLIs list `fast` among extra speeds.
+        let models = parse_codex(
+            &[
+                json!({"model":"sol","isDefault":true,"serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"}],"additionalSpeedTiers":["fast"]}),
+                json!({"model":"luna","serviceTiers":[{"id":"ultrafast","name":"Ultrafast","description":"Fastest"},{"id":"fast","name":"Speedy","description":" 1.5x speed "}]}),
+                json!({"model":"noisy","serviceTiers":[{"id":"other","name":"FAST","description":"1.5x\u{7}speed"}]}),
+                json!({"model":"older","additionalSpeedTiers":["fast"]}),
+                json!({"model":"plain","serviceTiers":[{"id":"ultrafast","name":"Ultrafast"}],"additionalSpeedTiers":["flex"]}),
+            ],
+            false,
+        );
+        let fast: Vec<_> = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.fast_mode, m.fast_mode_detail.as_deref()))
+            .collect();
+        assert_eq!(
+            fast,
+            [
+                ("", true, Some("2x speed, increased usage")),
+                ("sol", true, Some("2x speed, increased usage")),
+                ("luna", true, Some("1.5x speed")),
+                ("noisy", true, None),
+                ("older", true, None),
+                ("plain", false, None),
+            ]
+        );
+        let json = serde_json::to_value(&models).unwrap();
+        assert_eq!(json[1]["fastMode"], true);
+        assert_eq!(json[1]["fastModeDetail"], "2x speed, increased usage");
+        assert!(json[5].get("fastMode").is_none() && json[5].get("fastModeDetail").is_none());
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("fastModeBlocked").is_none()));
     }
     #[test]
     fn claude_aliases_name_the_resolved_model_and_never_promise_the_latest() {
@@ -502,10 +649,13 @@ mod tests {
                 .iter()
                 .map(|(alias, model)| (alias.to_string(), model.to_string()))
                 .collect();
-            claude_models(&resolved)
-                .into_iter()
-                .map(|model| (model.id, model.name))
-                .collect::<Vec<_>>()
+            claude_models(&ClaudeCatalog {
+                resolved,
+                ..ClaudeCatalog::default()
+            })
+            .into_iter()
+            .map(|model| (model.id, model.name))
+            .collect::<Vec<_>>()
         };
         let unresolved = names(&[]);
         assert_eq!(
@@ -550,6 +700,25 @@ mod tests {
             assert_eq!(claude_name(id), name, "{id}");
         }
     }
+    #[test]
+    fn only_lasting_reasons_block_claude_fast_mode() {
+        for (reason, blocked) in [
+            ("extra_usage_disabled", true),
+            ("free", true),
+            ("preference", true),
+            ("network_error", false),
+            ("pending", false),
+            ("unknown", false),
+            ("sdk_opt_in_required", false),
+            ("model_not_allowed", false),
+        ] {
+            let fast = FastModes::read(&json!({"fast_mode_disabled_reason":reason}));
+            assert_eq!(fast.blocked.is_some(), blocked, "{reason}");
+        }
+        // An older CLI lists no models and gives no reason.
+        let fast = FastModes::read(&json!({"commands":[]}));
+        assert!(fast.values.is_empty() && fast.models.is_empty() && fast.blocked.is_none());
+    }
     #[tokio::test]
     async fn claude_aliases_resolve_one_answered_request_at_a_time() {
         // A scripted CLI: every answer follows unrelated output and a foreign response,
@@ -567,8 +736,17 @@ mod tests {
                 if request["subtype"] == "set_model" && !refused {
                     model = format!("claude-{}-5", request["model"].as_str().unwrap());
                 }
+                // Claude Code 2.1.301 lists `fable` by its ID, with the 1M context suffix.
                 let response = if refused {
                     json!({"subtype":"error","request_id":id,"error":"refused"})
+                } else if request["subtype"] == "initialize" {
+                    json!({"subtype":"success","request_id":id,"response":{"models":[
+                        {"value":"default","resolvedModel":"claude-opus-5","supportsFastMode":true},
+                        {"value":"opus","resolvedModel":"claude-opus-5","supportsFastMode":true},
+                        {"value":"claude-sonnet-5[1m]","resolvedModel":"claude-sonnet-5","supportsFastMode":true},
+                        {"value":"haiku","resolvedModel":"claude-haiku-5"},
+                        {"value":"fable","resolvedModel":"claude-fable-5","supportsFastMode":false}
+                    ],"fast_mode_state":"off","fast_mode_disabled_reason":"extra_usage_disabled"}})
                 } else {
                     json!({"subtype":"success","request_id":id,"response":{"model":model}})
                 };
@@ -585,18 +763,35 @@ mod tests {
         let (app, peer) = tokio::io::duplex(64 * 1024);
         let script = tokio::spawn(cli(peer, false));
         let (read, mut write) = tokio::io::split(app);
-        let resolved = resolve_aliases(&mut write, BufReader::new(read))
+        let catalog = resolve_aliases(&mut write, BufReader::new(read))
             .await
             .unwrap();
         write.shutdown().await.unwrap();
         assert_eq!(
-            resolved.into_iter().collect::<Vec<_>>(),
+            catalog.resolved.clone().into_iter().collect::<Vec<_>>(),
             [
                 ("haiku", "claude-haiku-5"),
                 ("opus", "claude-opus-5"),
                 ("sonnet", "claude-sonnet-5")
             ]
             .map(|(alias, model)| (alias.to_string(), model.to_string()))
+        );
+        // Fast mode follows the model an alias means, and the account's lasting block goes
+        // with every model that has it.
+        let fast: Vec<_> = claude_models(&catalog)
+            .into_iter()
+            .map(|m| (m.id, m.fast_mode, m.fast_mode_blocked))
+            .collect();
+        let blocked = || Some("extra_usage_disabled".to_string());
+        assert_eq!(
+            fast,
+            [
+                (String::new(), true, blocked()),
+                ("opus".into(), true, blocked()),
+                ("sonnet".into(), true, blocked()),
+                ("fable".into(), false, None),
+                ("haiku".into(), false, None),
+            ]
         );
         assert_eq!(
             script.await.unwrap(),
@@ -635,6 +830,12 @@ mod tests {
         let catalog = catalog("claude", Some(runtime.path())).await;
         let names: Vec<_> = catalog["claude"].iter().map(|m| m.name.as_str()).collect();
         println!("{names:?}");
+        for model in &catalog["claude"] {
+            println!(
+                "{:?}: fast mode {} {:?}",
+                model.id, model.fast_mode, model.fast_mode_blocked
+            );
+        }
         assert_eq!(names[0], "CLI default");
         for (name, (_, family)) in names[1..].iter().zip(CLAUDE_ALIASES) {
             let version = name.strip_prefix(family).and_then(|v| v.strip_prefix(' '));

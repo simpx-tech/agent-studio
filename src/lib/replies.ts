@@ -101,9 +101,15 @@ export function replySettingsChanged(previous: ChatSettings, next: ChatSettings)
     previous.model !== next.model ||
     previous.reasoning !== next.reasoning ||
     !!previous.planMode !== !!next.planMode ||
+    !!previous.fastMode !== !!next.fastMode ||
     replyAccountChanged(previous, next)
   );
 }
+
+// A change of Fast mode, as notices and the next message's hint name it: on, or the speed the
+// reply goes back to.
+export const fastModeName = (settings: ChatSettings) =>
+  settings.fastMode ? 'Fast mode' : 'Standard speed';
 
 // The account label recorded with the reply keeps history readable if the account is
 // later renamed or removed; a resolver supplies the current name when available.
@@ -139,6 +145,7 @@ export function replySwitches(
         changes.push(`${reasoningName(after.reasoning)} reasoning`);
       if (!!before.planMode !== !!after.planMode)
         changes.push(after.planMode ? 'Plan mode' : 'Build mode');
+      if (!!before.fastMode !== !!after.fastMode) changes.push(fastModeName(after));
       notices.set(message.id, `${switchedTo}${changes.join(' · ')}`);
     }
     previous = message;

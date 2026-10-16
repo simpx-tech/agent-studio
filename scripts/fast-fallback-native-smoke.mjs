@@ -20,16 +20,25 @@ const fill = (selector, value) =>
     selector,
     value,
   );
-async function choose(label, name) {
-  await page.click(`[role="combobox"][aria-label="${label}"]`);
-  await page.waitFor(() => !!document.querySelector('[role="option"]'));
-  await page.evaluate((name) => {
-    const el = [...document.querySelectorAll('[role="option"]')].find(
-      (e) => e.getAttribute('aria-label') === name,
-    );
-    if (!el) throw Error(`Missing choice ${name}`);
-    el.click();
-  }, name);
+// The Fast toggle beside the composer, pressed or not; it appears once the model catalog says
+// the selected model has Fast mode.
+async function fastPressed() {
+  await page.waitFor(() => !!document.querySelector('button[aria-label="Fast mode"]'));
+  return page.evaluate(
+    () =>
+      document.querySelector('button[aria-label="Fast mode"]').getAttribute('aria-pressed') ===
+      'true',
+  );
+}
+async function toggleFast() {
+  const pressed = await fastPressed();
+  await page.evaluate(() => document.querySelector('button[aria-label="Fast mode"]').click());
+  await page.waitFor(
+    (pressed) =>
+      document.querySelector('button[aria-label="Fast mode"]')?.getAttribute('aria-pressed') ===
+      String(!pressed),
+    pressed,
+  );
 }
 function processSettings() {
   const raw = execFileSync(
@@ -144,10 +153,12 @@ try {
   );
   const report = { checkedAt: now, replies: [] };
   const oldPids = new Set(processSettings().map((p) => p.pid));
+  // On and off again: the chat now asks for standard speed rather than the CLI default.
+  await toggleFast();
+  await toggleFast();
   for (const [index, fast] of ['off', 'on', 'off', 'off'].entries()) {
+    if ((await fastPressed()) !== (fast === 'on')) await toggleFast();
     await page.button('Chat instructions');
-    await page.waitFor(() => !!document.querySelector('[aria-label="Fast mode"]'));
-    await choose('Fast mode', fast === 'on' ? 'On' : 'Off');
     await fill('input[aria-describedby="fallback-model-hint"]', 'haiku');
     await page.button('Save instructions');
     const previous = (await page.invoke('load_workspace')).conversations
@@ -208,9 +219,8 @@ try {
     await writeFile(`${output}/native-report.json`, JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report.replies.at(-1)));
   }
-  await page.button('Chat instructions');
   await page.evaluate(() =>
-    document.querySelector('[aria-label="Fast mode"]').scrollIntoView({ block: 'center' }),
+    document.querySelector('button[aria-label="Fast mode"]').scrollIntoView({ block: 'center' }),
   );
   const screenshot = await page.cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(`${output}/native.png`, Buffer.from(screenshot.data, 'base64'));

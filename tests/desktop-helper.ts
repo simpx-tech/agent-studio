@@ -543,18 +543,27 @@ export async function mockDesktop(page: Page, mode = 'success') {
               contextWindow: 20000,
               contextSource: 'Fixture metadata',
             });
+            // Fast mode as the CLIs report it; a spec can say why Claude blocks it.
+            const fast = (info: ReturnType<typeof model>, detail?: string) => ({
+              ...info,
+              fastMode: true,
+              ...(detail ? { fastModeDetail: detail } : {}),
+              ...(localStorage.getItem('test-fast-blocked') && !detail
+                ? { fastModeBlocked: localStorage.getItem('test-fast-blocked') }
+                : {}),
+            });
             return {
               codex: [
-                model('', 'CLI default'),
-                model('gpt-6-astra', 'GPT-6 Astra'),
+                fast(model('', 'CLI default'), '2x speed, increased usage'),
+                fast(model('gpt-6-astra', 'GPT-6 Astra'), '2x speed, increased usage'),
                 model('gpt-5.6-sol', 'GPT-5.6 Sol', ['low', 'high'], 'low'),
               ],
               // A spec can name the aliases the way a CLI resolved them.
               claude: JSON.parse(localStorage.getItem('test-claude-models') ?? 'null') ?? [
-                model('', 'CLI default'),
+                fast(model('', 'CLI default')),
                 model('sonnet', 'Sonnet'),
                 model('fable', 'Fable'),
-                model('opus', 'Opus', ['low', 'medium', 'high', 'max']),
+                fast(model('opus', 'Opus', ['low', 'medium', 'high', 'max'])),
               ],
               gemini: [
                 model('gemini-3.8-flash', 'Gemini 3.8 Flash'),

@@ -235,7 +235,8 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "model": if request.agent.provider == "claude" { "" } else { &request.agent.model },
         "reasoning": request.agent.reasoning,
         "autoCompactTokens": request.agent.auto_compact_tokens,
-        "fastMode": request.agent.fast_mode,
+        // Claude reads Fast mode at launch; Codex takes it with each turn.
+        "fastMode": if request.agent.provider == "claude" { request.agent.fast_mode } else { None },
         "fallbackModel": request.agent.fallback_model,
         "outputSchema": if request.agent.provider == "claude" && !request.compact { request.agent.output_schema.as_deref() } else { None },
         "planMode": request.agent.plan_mode,
@@ -591,6 +592,14 @@ mod tests {
             fingerprint(&changed, &exe()).unwrap(),
             "instructions travel in-band and do not restart the process"
         );
+        for fast in [Some(true), Some(false)] {
+            changed.agent.fast_mode = fast;
+            assert_eq!(
+                base,
+                fingerprint(&changed, &exe()).unwrap(),
+                "Codex takes Fast mode with each turn"
+            );
+        }
     }
 
     #[test]
@@ -638,6 +647,9 @@ mod tests {
         assert_ne!(base, fingerprint(&request, &exe()).unwrap());
         request.agent.auto_compact_tokens = None;
         request.agent.output_schema = Some("{\"type\":\"object\"}".into());
+        assert_ne!(base, fingerprint(&request, &exe()).unwrap());
+        request.agent.output_schema = None;
+        request.agent.fast_mode = Some(true);
         assert_ne!(base, fingerprint(&request, &exe()).unwrap());
     }
 }

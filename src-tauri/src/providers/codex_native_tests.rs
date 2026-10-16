@@ -4,6 +4,60 @@ use super::*;
 use crate::{protocol::RunEvent, providers::questions::Questions};
 use std::sync::Arc;
 
+/// The installed CLI takes Fast mode as each turn's service tier, on and off.
+#[tokio::test]
+#[ignore = "Opt-in installed Codex CLI test; uses subscription capacity, at the Fast tier's rate once."]
+async fn installed_codex_answers_with_fast_mode_on_and_off() {
+    for fast in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("chat-runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":"","fastMode":fast},"messages":[{"role":"user","text":"This is an Agent Studio integration test. Run no tool. Reply with just the word OK."}]})).unwrap();
+        request.validate().unwrap();
+        request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        request.native_session =
+            crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+        let exe = crate::providers::resolve("codex").await.unwrap();
+        let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+            .await
+            .unwrap();
+        let mut process = Process::new(
+            exe,
+            command.spawn().unwrap(),
+            "real-fast-test".into(),
+            String::new(),
+        )
+        .unwrap();
+        let (tx, _received) = tokio::sync::mpsc::unbounded_channel();
+        let channel = EventSink::new(move |event| {
+            let _ = tx.send(event);
+            Ok(())
+        });
+        let mut questions = Questions::default()
+            .open(&request.run_id, None, channel.clone())
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(300),
+            run(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                &mut questions,
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("Installed CLI test timed out");
+        process.kill().await;
+        let (status, answer) = result.expect("Installed CLI failed");
+        assert_eq!(status, "complete", "Fast mode {fast}");
+        assert!(answer.contains("OK"), "Fast mode {fast}: {answer}");
+        eprintln!("Fast mode {fast}: {answer}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "Opt-in installed Codex CLI test; uses subscription capacity and a model's tool choice."]
 async fn installed_codex_saves_a_screen_whose_action_runs_once_allowed() {

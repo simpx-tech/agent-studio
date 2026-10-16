@@ -185,4 +185,17 @@ describe('reply identities and model switches', () => {
     expect(replyAccountChanged(third.settings!, legacy.settings!)).toBe(false);
     expect(replySettingsChanged(third.settings!, legacy.settings!)).toBe(false);
   });
+  it('announces Fast mode turning on and off, never a change between off and the CLI default', () => {
+    const [first, second, third, fourth, fifth] = [0, 1, 2, 3, 4].map(() => reply('opus'));
+    second.settings!.fastMode = true;
+    third.settings!.fastMode = true;
+    third.settings!.reasoning = 'high';
+    fourth.settings!.fastMode = false;
+    expect([...replySwitches([first, second, third, fourth, fifth])]).toEqual([
+      [second.id, 'Switched to Fast mode'],
+      [third.id, 'Switched to High reasoning'],
+      [fourth.id, 'Switched to Low reasoning · Standard speed'],
+    ]);
+    expect(replySettingsChanged(fourth.settings!, fifth.settings!)).toBe(false);
+  });
 });

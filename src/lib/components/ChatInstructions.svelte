@@ -3,14 +3,11 @@
   import { X } from '@lucide/svelte';
   import { outputSchemaError } from '$lib/structured-output';
   import { fallbackModelSetting, normalizeFallbackModel } from '$lib/claude-options';
-  import ChoicePicker from './ChoicePicker.svelte';
   let {
     instructions,
     outputSchema,
     maxThinkingTokens,
-    fastMode,
     fallbackModel,
-    focusFast = false,
     provider,
     close,
     save,
@@ -18,23 +15,14 @@
     instructions: string;
     outputSchema?: string;
     maxThinkingTokens?: number;
-    fastMode?: boolean;
     fallbackModel?: string;
-    focusFast?: boolean;
     provider: string;
     close: () => void;
-    save: (
-      value: string,
-      schema?: string,
-      tokens?: number,
-      fast?: boolean,
-      fallback?: string,
-    ) => void;
+    save: (value: string, schema?: string, tokens?: number, fallback?: string) => void;
   } = $props();
   let draft = $state(untrack(() => instructions));
   let schema = $state(untrack(() => outputSchema ?? ''));
   let tokens = $state<number | null | undefined>(untrack(() => maxThinkingTokens));
-  let fast = $state(untrack(() => (fastMode === undefined ? 'default' : fastMode ? 'on' : 'off')));
   let fallback = $state(untrack(() => fallbackModel ?? ''));
   const normalizedFallback = $derived(normalizeFallbackModel(fallback));
   const fallbackError = $derived(
@@ -45,13 +33,7 @@
   );
   const schemaError = $derived(schema.trim() ? outputSchemaError(schema) : undefined);
   let input: HTMLTextAreaElement;
-  onMount(() => {
-    if (focusFast)
-      document
-        .querySelector<HTMLButtonElement>('[role="combobox"][aria-label="Fast mode"]')
-        ?.focus();
-    else input.focus();
-  });
+  onMount(() => input.focus());
 </script>
 
 <div class="modal-backdrop" role="presentation">
@@ -78,7 +60,6 @@
             draft,
             schema.trim() || undefined,
             provider === 'claude' ? (tokens ?? undefined) : undefined,
-            provider === 'claude' && fast !== 'default' ? fast === 'on' : undefined,
             provider === 'claude' ? normalizedFallback : undefined,
           );
       }}
@@ -99,21 +80,6 @@
         {#if schemaError}<p role="alert">{schemaError}</p>{/if}
       {/if}
       {#if provider === 'claude'}
-        <div class="fast-mode-field">
-          <span>Fast mode</span>
-          <ChoicePicker
-            label="Fast mode"
-            field
-            value={fast}
-            options={[
-              { id: 'default', name: 'CLI default' },
-              { id: 'on', name: 'On' },
-              { id: 'off', name: 'Off' },
-            ]}
-            onchange={(value) => (fast = value)}
-          />
-        </div>
-        <p class="field-hint">Faster Opus replies at a higher usage cost.</p>
         <label
           >Fallback models<input
             bind:value={fallback}
@@ -166,13 +132,6 @@
   }
   textarea {
     font-family: inherit;
-  }
-  .fast-mode-field {
-    display: grid;
-    gap: 7px;
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--text-secondary);
   }
   textarea[spellcheck='false'] {
     font-family: var(--font-mono);

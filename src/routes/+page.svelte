@@ -88,6 +88,7 @@
     LayoutDashboard,
     AlarmClock,
     MessageSquare,
+    Zap,
   } from '@lucide/svelte';
   import {
     abandonedReplyError,
@@ -264,6 +265,8 @@
   import { replaceFields, sharedMeta, sharedWorkspace, type Presence } from '$lib/sync';
   import {
     fallbackModels,
+    fastModeBlock,
+    fastModeTitle,
     modelChoices,
     reasoningName,
     reasoningScale,
@@ -273,7 +276,6 @@
   import PlanModePicker from '$lib/components/PlanModePicker.svelte';
   import ComposerCommands from '$lib/components/ComposerCommands.svelte';
   let composerCommands = $state<ComposerCommands>();
-  let focusFast = $state(false);
   let draftMentions = $state<import('$lib/mentions').Mention[]>([]);
   let staleMentionTokens = $state<string[]>([]);
   let mentionSelection = $state('');
@@ -328,6 +330,7 @@
     type ScratchChat,
   } from '$lib/drafts';
   import {
+    fastModeName,
     replyAccountSwitches,
     replySettingsChanged,
     replySwitches,
@@ -1494,6 +1497,12 @@
   );
   const currentModel = $derived(
     availableModels.find((model) => model.id === selectedSettings.model)!,
+  );
+  // Fast mode belongs to the models that offer it; a chat keeps its choice while another model
+  // is selected, as the CLIs do.
+  const fastOffered = $derived(
+    (selectedSettings.provider === 'claude' || selectedSettings.provider === 'codex') &&
+      !!currentModel.fastMode,
   );
   const reasoningOptions = $derived(
     reasoningScale(currentModel.reasoningLevels, selectedSettings.reasoning).map((id) => ({
@@ -3500,17 +3509,40 @@
   async function refreshAccountUsage(force = false) {
     await Promise.all(accountUsageTargets.map((settings) => refreshUsage(settings, force)));
   }
+  // `/fast` turns Fast mode on or off for the next reply, and `/fast on`, `/fast off` and
+  // `/fast default` set it; only a model that offers it turns it on.
+  function commandFastMode(command: string) {
+    const fastMode =
+      command === 'fast'
+        ? !selectedSettings.fastMode
+        : command === 'fast:default'
+          ? undefined
+          : command === 'fast:on';
+    if (fastMode && !fastOffered) {
+      notice = 'This model has no Fast mode.';
+      return;
+    }
+    changeSettings({ ...selectedSettings, fastMode });
+    notice = fastMode
+      ? (fastModeBlock(currentModel) ??
+        (currentModel.fastModeDetail
+          ? `Fast mode on for the next reply · ${currentModel.fastModeDetail}`
+          : 'Fast mode on for the next reply; it costs more usage.'))
+      : fastMode === false
+        ? 'Fast mode off for the next reply.'
+        : 'Fast mode follows the CLI default.';
+  }
   // `chosen` marks an agent or account the user picked, which new chats then start with.
   function changeSettings(settings: ChatSettings, remember = true, chosen = false) {
     if (!loaded) return;
-    // Only the next request's account, model and reasoning may change while a reply is running.
+    // Only the next request's account, model, reasoning and Fast mode may change while a reply
+    // is running.
     if (
       activeRunning &&
       (settings.provider !== selectedSettings.provider ||
         !!settings.planMode !== !!selectedSettings.planMode ||
         settings.outputSchema !== selectedSettings.outputSchema ||
         settings.maxThinkingTokens !== selectedSettings.maxThinkingTokens ||
-        settings.fastMode !== selectedSettings.fastMode ||
         settings.fallbackModel !== selectedSettings.fallbackModel ||
         settings.instructions !== selectedSettings.instructions)
     )
@@ -6346,7 +6378,9 @@
                 ></span>{accountName(workspace.fleet, selectedSettings.connectionId) ?? 'Another'} account{#if nextReplyChanged}{' · '}{/if}{/if}{#if nextReplyChanged}{selectedModelName(
                   selectedSettings.model,
                   availableModels,
-                )} · {reasoningName(selectedSettings.reasoning)} reasoning{/if}
+                )} · {reasoningName(selectedSettings.reasoning)} reasoning{#if !!observedReply?.settings?.fastMode !== !!selectedSettings.fastMode}{' · '}{fastModeName(
+                    selectedSettings,
+                  )}{/if}{/if}
             </p>
           {/if}
           <div
@@ -6587,20 +6621,9 @@
                   if (name === 'model') void tick().then(() => modelPicker?.showPicker());
                   else if (name === 'reasoning')
                     void tick().then(() => reasoningPicker?.showPicker());
-                  else if (name === 'instructions' || name === 'fast') {
-                    focusFast = name === 'fast';
-                    editorOpen = true;
-                  } else if (name.startsWith('fast:') && selectedSettings.provider === 'claude') {
-                    changeSettings({
-                      ...selectedSettings,
-                      fastMode: name === 'fast:default' ? undefined : name === 'fast:on',
-                    });
-                    notice = name === 'fast:on'
-                      ? 'Fast mode on for the next reply; it costs more usage.'
-                      : name === 'fast:off'
-                        ? 'Fast mode off for the next reply.'
-                        : 'Fast mode follows the CLI default.';
-                  } else if (name === 'context') contextOpen = true;
+                  else if (name === 'instructions') editorOpen = true;
+                  else if (name === 'fast' || name.startsWith('fast:')) commandFastMode(name);
+                  else if (name === 'context') contextOpen = true;
                   else if (name === 'usage') usageExpanded = true;
                   else if (name === 'rewind') openRewind();
                   else if (name === 'undo') openUndoFiles();
@@ -6638,6 +6661,18 @@
               <div class="composer-bottom">
                 <div class="composer-tools">
                   <PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning} change={changeSettings} />
+                  {#if fastOffered}<button
+                      type="button"
+                      class="fast-toggle"
+                      class:blocked={!!fastModeBlock(currentModel)}
+                      aria-label="Fast mode"
+                      aria-pressed={!!selectedSettings.fastMode}
+                      title={fastModeTitle(currentModel)}
+                      disabled={!loaded}
+                      onclick={() =>
+                        changeSettings({ ...selectedSettings, fastMode: !selectedSettings.fastMode })}
+                      ><Zap size={16} aria-hidden="true" />Fast</button
+                    >{/if}
                   <button
                     type="button"
                     class="attach-button"
@@ -6838,20 +6873,14 @@
     instructions={selectedSettings.instructions}
     outputSchema={selectedSettings.outputSchema}
     maxThinkingTokens={selectedSettings.maxThinkingTokens}
-    fastMode={selectedSettings.fastMode}
     fallbackModel={selectedSettings.fallbackModel}
-    {focusFast}
     provider={selectedSettings.provider}
-    close={() => {
-      editorOpen = false;
-      focusFast = false;
-    }}
-    save={(instructions, outputSchema, maxThinkingTokens, fastMode, fallbackModel) => {
+    close={() => (editorOpen = false)}
+    save={(instructions, outputSchema, maxThinkingTokens, fallbackModel) => {
       changeSettings({
-        ...selectedSettings, instructions, outputSchema, maxThinkingTokens, fastMode, fallbackModel,
+        ...selectedSettings, instructions, outputSchema, maxThinkingTokens, fallbackModel,
       });
       editorOpen = false;
-      focusFast = false;
     }}
   />{/if}
 {#if templatesOpen && view === 'chat'}

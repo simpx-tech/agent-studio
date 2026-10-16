@@ -2041,6 +2041,34 @@ pre {
   color: var(--text);
   background: var(--hover);
 }
+/* Fast mode for the next message: quiet while off, the accent while on, and the warning colour
+   while on for an account Claude says cannot use it. */
+.fast-toggle {
+  height: var(--control-md);
+  padding: 0 9px;
+  gap: 6px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.fast-toggle:not(:disabled):hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.fast-toggle[aria-pressed='true'] {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+.fast-toggle[aria-pressed='true']:not(:disabled):hover {
+  color: var(--accent-hover);
+  background: var(--accent-soft-hover);
+}
+.fast-toggle.blocked[aria-pressed='true'],
+.fast-toggle.blocked[aria-pressed='true']:not(:disabled):hover {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
 .attach-button {
   width: var(--control-md);
   height: var(--control-md);

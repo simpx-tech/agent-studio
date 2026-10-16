@@ -149,6 +149,12 @@ fn turn_params(request: &RunRequest, thread: &str) -> Value {
     if !request.agent.reasoning.is_empty() {
         params["effort"] = json!(request.agent.reasoning);
     }
+    // Fast mode is this turn's service tier, never the thread's, so a turn without the
+    // setting runs at the speed the CLI profile configures. Codex takes `fast` for its Fast
+    // tier (`priority`) and omits a tier the model does not offer.
+    if let Some(fast) = request.agent.fast_mode {
+        params["serviceTierForTurn"] = json!(if fast { "fast" } else { "default" });
+    }
     if !request.compact {
         if let Some(schema) = &request.agent.output_schema {
             // RunRequest::validate checked syntax and bounds before process launch.
@@ -624,6 +630,21 @@ mod tests {
         request.compact = false;
         request.agent.output_schema = None;
         assert!(turn_params(&request, "root").get("outputSchema").is_none());
+    }
+    #[test]
+    fn fast_mode_is_each_turns_service_tier_and_never_the_threads() {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"Go"}]})).unwrap();
+        assert!(turn_params(&request, "thread")
+            .get("serviceTierForTurn")
+            .is_none());
+        for (fast, tier) in [(true, "fast"), (false, "default")] {
+            request.agent.fast_mode = Some(fast);
+            request.validate().unwrap();
+            let turn = turn_params(&request, "thread");
+            assert_eq!(turn["serviceTierForTurn"], tier);
+            assert!(turn.get("serviceTier").is_none());
+            assert!(start_params(&request).get("serviceTier").is_none());
+        }
     }
     #[test]
     fn proposed_plan_mode_uses_native_collaboration_and_build_resets_it() {

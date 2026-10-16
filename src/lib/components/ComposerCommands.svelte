@@ -191,7 +191,7 @@
   const query = $derived(commandQuery(prompt, caret));
   const choices = $derived(
     commandChoices(settings.provider, available ? snapshot : undefined).filter(
-      (c) => !busy || !['/instructions', '/fast'].includes(c.name),
+      (c) => !busy || c.name !== '/instructions',
     ),
   );
   const filtered = $derived(filterCommands(choices, query ?? ''));
@@ -336,14 +336,10 @@
     const match = commandToken(prompt);
     if (!match) return { handled: false, ...(mentions.length ? { mentions } : {}) };
     const name = `/${match[1]}`;
-    if (name === '/fast' && settings.provider === 'claude') {
-      if (busy) {
-        error = 'Wait for the reply to finish before changing Fast mode.';
-        return;
-      }
+    if (name === '/fast' && (settings.provider === 'claude' || settings.provider === 'codex')) {
       const argument = prompt.slice(match[0].length).trim();
       if (argument && !['on', 'off', 'default'].includes(argument)) {
-        error = 'Use /fast to open its settings, or /fast on, /fast off, or /fast default.';
+        error = 'Use /fast, /fast on, /fast off or /fast default.';
         return;
       }
       prompt = '';

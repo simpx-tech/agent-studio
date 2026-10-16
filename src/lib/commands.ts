@@ -67,20 +67,21 @@ export function commandChoices(
   snapshot?: ContextSnapshot,
 ): ComposerCommand[] {
   const choices = [...appCommands];
-  if (provider === 'claude')
-    choices.push({
-      id: 'app:fast',
-      name: '/fast',
-      kind: 'app',
-      detail: 'Fast mode · on, off or default',
-    });
   if (provider === 'claude' || provider === 'codex')
-    choices.push({
-      id: 'compact',
-      name: '/compact',
-      kind: 'compact',
-      detail: 'Compact context',
-    });
+    choices.push(
+      {
+        id: 'app:fast',
+        name: '/fast',
+        kind: 'app',
+        detail: 'Fast mode · on, off or default',
+      },
+      {
+        id: 'compact',
+        name: '/compact',
+        kind: 'compact',
+        detail: 'Compact context',
+      },
+    );
   // The command catalog was introduced with native skill-input support. Older
   // hosts omit it and must not silently accept then discard a skill reference.
   if (!snapshot || snapshot.provider !== provider || !Array.isArray(snapshot.commands))

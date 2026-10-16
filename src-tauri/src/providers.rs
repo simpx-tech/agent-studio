@@ -666,22 +666,23 @@ pub struct ChatMessage {
 mod images;
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.agent.fast_mode.is_some() || self.agent.fallback_model.is_some() {
+        if self.agent.fast_mode.is_some()
+            && (self.conversation_only
+                || !matches!(self.agent.provider.as_str(), "claude" | "codex"))
+        {
+            return Err("Fast mode is available only for Claude and Codex chats.".into());
+        }
+        if let Some(value) = &self.agent.fallback_model {
             if self.conversation_only || self.agent.provider != "claude" {
-                return Err(
-                    "Fast mode and fallback models are available only for Claude chats.".into(),
-                );
+                return Err("Fallback models are available only for Claude chats.".into());
             }
-            if let Some(value) = &self.agent.fallback_model {
-                let models: Vec<_> = value.split(',').collect();
-                let pattern =
-                    regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*(?:\[1m\])?$").unwrap();
-                let unique: std::collections::HashSet<_> = models.iter().collect();
-                if unique.len() != models.len() || models.iter().any(|m| !pattern.is_match(m)) {
-                    return Err(
-                        "Enter distinct fallback model aliases or IDs, separated by commas.".into(),
-                    );
-                }
+            let models: Vec<_> = value.split(',').collect();
+            let pattern = regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*(?:\[1m\])?$").unwrap();
+            let unique: std::collections::HashSet<_> = models.iter().collect();
+            if unique.len() != models.len() || models.iter().any(|m| !pattern.is_match(m)) {
+                return Err(
+                    "Enter distinct fallback model aliases or IDs, separated by commas.".into(),
+                );
             }
         }
         // Any budget goes to the CLI, which reports the range its model accepts.
@@ -1689,9 +1690,18 @@ mod tests {
             crate::retention::settings()
         );
         r.conversation_only = false;
+        // Codex chats take Fast mode for each turn; fallback models stay Claude's.
         r.agent.provider = "codex".into();
         assert!(r.validate().is_err());
+        r.agent.fallback_model = None;
+        r.validate().unwrap();
+        r.conversation_only = true;
+        assert!(r.validate().is_err());
+        r.conversation_only = false;
         r.agent.provider = "gemini".into();
+        assert!(r.validate().is_err());
+        r.agent.fast_mode = None;
+        r.agent.fallback_model = Some("sonnet".into());
         assert!(r.validate().is_err());
     }
     #[tokio::test]
