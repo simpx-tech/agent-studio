@@ -5,6 +5,33 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 0.11.0 - 2026-10-16
+
+### Added
+
+- Turn Fast mode on or off with Fast beside the message box, for the Claude and Codex models that
+  offer it, or with `/fast`; when Claude says an account cannot use it, such as one without
+  usage credits, the button turns orange and its hover says why
+- Compare images and 3D models side by side, Free or Synced, so the panes move together; four
+  files take two rows of two
+- Pick the reasoning level on a slider, which the Reasoning dropdown opens
+- Choose another account for a chat while its reply runs; the next message uses it
+- Light 3D models flat or realistically as well as in the studio light, and pan them with the
+  right button, Shift or two fingers
+- Show HTML artifacts as cards instead of their code; agents preview a page before showing it,
+  and pages can load pinned libraries and fonts from public CDNs
+- Show each folder's icon in the Folder picker's list
+- Close the image viewer and image previews with a click on the backdrop
+- Keep each chat's artifact or sub-agent side panel open while other chats are shown
+
+### Fixed
+
+- Show the running sub-agents of a reply that took over or resumed them
+- End replies that nothing runs any more, which kept their chats stuck as running
+- Stop the phone Viewer from copying chats it only received, such as a chat moved to History on
+  another computer
+- Show textured FBX models in their painted colours
+
 ## 0.10.0 - 2026-10-14
 
 ### Added
