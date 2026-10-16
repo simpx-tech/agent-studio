@@ -130,6 +130,18 @@ export function paneAspect(files: SentFile[]): number {
 }
 
 /**
+ * How the panes stand in the chat: side by side up to three, two rows of two for four, and rows
+ * of three past that, so four keep panes twice as wide as in one row. A comparison narrower than
+ * a phone's chat holds two to a row (`narrow`). `rows` is the wide layout's, which shares the
+ * window's height between them.
+ */
+export function chatColumns(count: number): { wide: number; narrow: number; rows: number } {
+  const panes = Math.max(count, 1);
+  const wide = panes === 4 ? 2 : Math.min(panes, 3);
+  return { wide, narrow: Math.min(panes, 2), rows: Math.ceil(panes / wide) };
+}
+
+/**
  * How many columns the panes take in the file viewer: side by side up to three, in a square
  * grid past that; on a screen taller than wide, one above another up to three.
  */

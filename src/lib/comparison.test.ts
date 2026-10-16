@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  chatColumns,
   comparisonDetail,
   comparisonName,
   paneAspect,
@@ -166,6 +167,16 @@ it('shapes the panes after the widest image, square with a model', () => {
   expect(paneAspect([image(100, 4000), image(100, 4000)])).toBe(0.75);
   expect(paneAspect([image(), image()])).toBeCloseTo(4 / 3);
   expect(paneAspect([image(1920, 1080), model])).toBe(1);
+});
+
+it('lays up to three panes side by side in the chat, and four in two rows of two', () => {
+  expect(chatColumns(2)).toEqual({ wide: 2, narrow: 2, rows: 1 });
+  expect(chatColumns(3)).toEqual({ wide: 3, narrow: 2, rows: 1 });
+  expect(chatColumns(4)).toEqual({ wide: 2, narrow: 2, rows: 2 });
+  // Past four, rows of three, with no limit on how many.
+  expect(chatColumns(5)).toEqual({ wide: 3, narrow: 2, rows: 2 });
+  expect(chatColumns(7)).toEqual({ wide: 3, narrow: 2, rows: 3 });
+  expect(chatColumns(12)).toEqual({ wide: 3, narrow: 2, rows: 4 });
 });
 
 it('lays the panes side by side in the file viewer, one above another on a tall screen', () => {

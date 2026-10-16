@@ -267,6 +267,88 @@ test('an image that arrives after the other was zoomed shows what the other show
   expectSameRegion(await region(after), zoomed);
 });
 
+test('four compared images take two rows of two, and all four stay synced @webkit', async ({
+  page,
+}) => {
+  const sizes = [
+    [64, 48],
+    [128, 96],
+    [96, 72],
+    [32, 24],
+  ];
+  const labels = ['Original', 'Upscaled', 'Sharpened', 'Denoised'];
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript(
+    (images) => {
+      (window as any).toolOutputs = { toolu_pair: { images } };
+    },
+    sizes.map(([width, height]) => ({
+      mediaType: 'image/png',
+      data: quadrants(width, height),
+      bytes: 1000,
+      width,
+      height,
+    })),
+  );
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await compare(
+    page,
+    sizes.map(([width, height], index) => ({
+      index,
+      name: `texture-${index}.png`,
+      mediaType: 'image/png',
+      bytes: 1000,
+      width,
+      height,
+      label: labels[index],
+    })),
+  );
+  const reply = page.locator('.message:not(.user)');
+  const panes = labels.map((label, index) =>
+    reply.getByRole('img', { name: `Image ${index + 1}, ${label}` }),
+  );
+  await expect(panes[3]).toBeVisible();
+  /** Each pane's place: two rows of two, every pane the same size. */
+  async function grid() {
+    const boxes = await Promise.all(panes.map(async (pane) => (await pane.boundingBox())!));
+    expect(Math.abs(boxes[0].y - boxes[1].y)).toBeLessThan(1);
+    expect(Math.abs(boxes[2].y - boxes[3].y)).toBeLessThan(1);
+    expect(boxes[2].y).toBeGreaterThan(boxes[0].y + boxes[0].height - 1);
+    expect(Math.abs(boxes[0].x - boxes[2].x)).toBeLessThan(1);
+    for (const box of boxes) expect(Math.abs(box.width - boxes[0].width)).toBeLessThan(1);
+    return boxes;
+  }
+  const [first] = await grid();
+  // Half the comparison's width each, where four in one row left a quarter.
+  const width = (await reply.locator('.compare-view').boundingBox())!.width;
+  expect(first.width).toBeGreaterThan(width * 0.45);
+  // A double click on one zooms all four to the same region, whatever their sizes.
+  const third = (await panes[2].boundingBox())!;
+  await panes[2].dblclick({ position: { x: third.width * 0.3, y: third.height * 0.7 } });
+  const zoomed = await region(panes[2]);
+  expect(zoomed.zoom).toBeGreaterThan(1.5);
+  for (const pane of [panes[0], panes[1], panes[3]]) expectSameRegion(await region(pane), zoomed);
+  // The file viewer shows them two by two at full size.
+  await reply.getByRole('button', { name: 'Expand comparison' }).click();
+  const preview = page.getByRole('dialog', { name: 'Comparison preview' });
+  await expect(preview.getByText('4 images')).toBeVisible();
+  const expanded = await Promise.all(
+    labels.map(
+      async (label, index) =>
+        (await preview.getByRole('img', { name: `Image ${index + 1}, ${label}` }).boundingBox())!,
+    ),
+  );
+  expect(Math.abs(expanded[0].y - expanded[1].y)).toBeLessThan(1);
+  expect(expanded[2].y).toBeGreaterThan(expanded[0].y + expanded[0].height - 1);
+  await page.keyboard.press('Escape');
+  await expect(preview).toBeHidden();
+  // On a phone too.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await panes[0].scrollIntoViewIfNeeded();
+  await grid();
+});
+
 const still = triangleGlbBase64({ animated: false });
 const animated = triangleGlbBase64();
 async function showModels(page: Page, data: [string, string]) {

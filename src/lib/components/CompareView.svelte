@@ -13,6 +13,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { isModel, type SentFile, type SentFiles } from '$lib/sent-files';
   import {
+    chatColumns,
     comparisonDetail,
     comparisonName,
     paneAspect,
@@ -63,6 +64,7 @@
   // Synced means something only when two panes show the same kind of file.
   const syncable = $derived(models > 1 || group.files.length - models > 1);
   const aspect = $derived(paneAspect(group.files));
+  const layout = $derived(chatColumns(group.files.length));
   const columns = $derived(viewerColumns(group.files.length));
   const animated = $derived([...panes.values()].filter((pane) => pane.animated));
   const playing = $derived(animated.some((pane) => pane.playing));
@@ -229,6 +231,9 @@
   role="group"
   aria-label={`Comparison of ${comparisonName(group.files)}`}
   style:--pane-aspect={aspect}
+  style:--columns={layout.wide}
+  style:--narrow-columns={layout.narrow}
+  style:--rows={layout.rows}
   {@attach viewer.attach(viewed)}
 >
   <div class="compare-grid">{@render panesOf('inline')}</div>
@@ -246,16 +251,23 @@
     background: var(--surface-1);
     color: var(--text-muted);
     font-size: var(--text-2xs);
+    container-type: inline-size;
   }
   .compare-view:hover {
     border-color: var(--border-hover);
   }
-  /* Side by side at any width a pane stays usable at, wrapping only on the narrowest screens. */
+  /* Side by side up to three, two rows of two for four (`chatColumns`), and two to a row in a
+     comparison as narrow as a phone's chat. */
   .compare-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+    grid-template-columns: repeat(var(--columns, 2), minmax(0, 1fr));
     gap: 4px;
     min-width: 0;
+  }
+  @container (max-width: 520px) {
+    .compare-grid:not(.expanded) {
+      grid-template-columns: repeat(var(--narrow-columns, 2), minmax(0, 1fr));
+    }
   }
   /* In the file viewer the panes share its room, in columns, or in rows on a tall screen. */
   .compare-expanded {

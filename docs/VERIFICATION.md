@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Four compared files take two rows of two — 2026-10-16
+
+Requested 2026-10-16, after the comparison below: "Can you allow up to 4 files comparison?" A comparison already took any number of files, but four stood in one row of panes a quarter of the reply's width, about 190 pixels each.
+
+- `chatColumns` in `src/lib/comparison.ts`: up to three panes in one row, four in two rows of two, rows of three past that, and two to a row where the comparison is narrower than 520 pixels (a container query on `.compare-view`). No maximum was added, following the rule against limits; a fifth file starts another row.
+- The rows share the window's height (`ComparePane.svelte`: each pane at most `(100dvh - 380px) / rows`, between 140 pixels and a single row's `min(520px, 65vh)`), so a two-by-two grid of square model panes fits between the toolbar and the composer of a 900-pixel window. WebKit narrowed a pane whose height was capped to keep its shape (347 of 386 pixels); the pane now keeps its column's width in both engines.
+- Tests: `comparison.test.ts` covers the columns and rows. `tests/compare-files.spec.ts` (Edge and WebKit) checks four images of four sizes in two rows of two at half the comparison's width, all four zoomed to one region by a double click on one, two by two in the file viewer, and two by two on a phone. Screenshots of three, four and five images and models, inline, expanded and on a phone, reviewed by eye.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,279 files), 778 Vitest tests in 95 files, the build, `cargo fmt --check` (no Rust change, so Clippy and the Rust tests were not rerun), and all 427 browser tests in three shards with the local sockets drained, each passing whole; the comparison spec then passed 60 times in a row under four workers.
+- Choices of mine, not confirmed: two rows of two rather than four in a row; rows of three past four; the height shared between rows.
+
 ## Files compared side by side — 2026-10-16
 
 Requested 2026-10-16: "Can you implement a variation of the show image/3d model that have a side by side comparison? It has two modes: free and synced (where both have the same rotation and position)".

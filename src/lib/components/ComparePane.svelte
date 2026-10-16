@@ -40,13 +40,18 @@
     gap: 2px;
     min-width: 0;
   }
-  /* Every pane of a comparison takes one shape, which the comparison sets. */
+  /* Every pane of a comparison takes one shape, which the comparison sets. Its rows share the
+     window's height left by the chat's toolbar and composer and the comparison's own bars, so a
+     grid of four fits on screen whole. */
   .pane-stage {
     position: relative;
     display: flex;
     flex-direction: column;
+    /* The pane keeps its column's width when its height is capped; WebKit would otherwise
+       narrow it to keep the shape. */
+    width: 100%;
     aspect-ratio: var(--pane-aspect, 1);
-    max-height: min(520px, 65vh);
+    max-height: clamp(140px, calc((100dvh - 380px) / var(--rows, 1)), min(520px, 65vh));
     min-height: 0;
     border-radius: var(--radius-xs);
     background: var(--code-bg);
