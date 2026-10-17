@@ -3758,6 +3758,16 @@ export function watchRelayWorkflows(listener: (revision: number | undefined) => 
   workflowRevisionListeners.add(listener);
   return () => void workflowRevisionListeners.delete(listener);
 }
+/**
+ * The address of a webhook trigger: the relay starts a run of the workflow from each POST to it.
+ * Only a relay with the workflow store has webhooks.
+ */
+export function workflowHookUrl(workflowId: string, nodeId: string, secret: string) {
+  if (relayWorkflowRevision() === undefined) return undefined;
+  const base = desktop() ? relayUrl : window.location.origin;
+  if (!base) return undefined;
+  return `${base.replace(/\/+$/, '')}/v1/hooks/${workflowId}/${encodeURIComponent(nodeId)}/${secret}`;
+}
 /** A request of the relay's workflow store. */
 export function workflowRelay(
   method: 'POST' | 'PUT',

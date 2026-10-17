@@ -7,6 +7,7 @@ import {
   nodeConfig,
   nodePorts,
   portLabels,
+  triggerOf,
   type Activation,
   type GraphIssue,
   type NodeType,
@@ -16,6 +17,14 @@ import {
   type WorkflowRun,
 } from './workflow-model';
 import { scheduleLabel } from './workflow-schedule';
+
+/** What in a chat starts a chat trigger, in its words. */
+export const chatEventLabels = {
+  completed: 'A reply ends',
+  failed: 'A reply fails',
+  stopped: 'A reply stops',
+  question: 'A question',
+} as const;
 
 /**
  * What the workflow graph shows (docs/WORKFLOWS.md): a card per step, plan task, agent or
@@ -43,6 +52,8 @@ export type CardData = {
   kind: 'step' | 'orchestrator' | 'task' | 'agent' | 'question' | 'workflow';
   /** The step type, or the kind for mission cards. */
   type: string;
+  /** The icon it shows, when not its type's: a trigger's kind. */
+  icon?: string;
   title: string;
   subtitle: string;
   status: CardStatus;
@@ -110,14 +121,31 @@ export function stepSummary(
   switch (type) {
     case 'start': {
       const config = nodeConfig(node, 'start');
-      const parts = [
-        config.inputs.length
-          ? `${config.inputs.length} input${config.inputs.length === 1 ? '' : 's'}`
-          : '',
-        ...config.schedules.filter((s) => s.enabled).map(scheduleLabel),
-      ].filter(Boolean);
-      return parts.join(' · ') || 'Manual';
+      switch (triggerOf(node)) {
+        case 'schedule':
+          return config.schedules.filter((s) => s.enabled).map(scheduleLabel).join(' · ') || 'No schedule';
+        case 'chat': {
+          const c = config.chat;
+          const events = c.events.map((e) => chatEventLabels[e]).join(', ');
+          const where = c.environmentId ? ` on ${names.computer?.(c.environmentId) ?? 'a computer'}` : '';
+          return `${events || 'Nothing'} in ${c.title.trim() ? `“${c.title.trim()}”` : 'any chat'}${where}`;
+        }
+        case 'workflow':
+          return `A run ${config.workflow.statuses.join(', ') || 'ends'}`;
+        case 'webhook':
+          return 'A request to its URL';
+        case 'computer':
+          return `${config.computer.environmentId ? (names.computer?.(config.computer.environmentId) ?? 'A computer') : 'A computer'} goes ${config.computer.event}`;
+        case 'usage':
+          return 'A usage limit resets';
+        default:
+          return config.inputs.length
+            ? `Run by hand · ${config.inputs.length} input${config.inputs.length === 1 ? '' : 's'}`
+            : 'Run by hand';
+      }
     }
+    case 'confirm':
+      return nodeConfig(node, 'confirm').question || 'An approval';
     case 'agent':
     case 'screen': {
       const config = nodeConfig(node, 'agent');
@@ -187,7 +215,6 @@ const links = (
     source: edge.source,
     sourceHandle: edge.sourcePort,
     target: edge.target,
-    ...(portLabels[edge.sourcePort] ? { label: portLabels[edge.sourcePort] } : {}),
     ...(active(edge) ? { active: true } : {}),
   }));
 
@@ -204,6 +231,7 @@ export function definitionCards(
       data: {
         kind: 'step',
         type: node.type,
+        icon: node.type === 'start' ? `trigger:${triggerOf(node)}` : node.type,
         title: node.title || node.key,
         subtitle: stepSummary(node, names),
         status: 'idle',
@@ -274,6 +302,7 @@ export function staticRunCards(
       data: {
         kind: 'step',
         type: node.type,
+        icon: node.type === 'start' ? `trigger:${triggerOf(node)}` : node.type,
         title: node.title || node.key,
         subtitle: current?.wait ?? current?.error ?? stepSummary(node, names),
         status,

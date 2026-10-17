@@ -5,12 +5,15 @@ import {
   freshKey,
   graphIssues,
   keyFrom,
+  mayContinue,
   newDefinition,
   newNode,
   nodeConfig,
   questionRequest,
   readRun,
   summarize,
+  triggerOf,
+  webhookSecret,
   type RunQuestion,
   type WorkflowGraph,
 } from './workflow-model';
@@ -19,7 +22,7 @@ import { questionRequestSchema } from './questions';
 const user = { kind: 'user' as const };
 
 describe('workflow model', () => {
-  it('starts a definition with one Start step that a run can begin from', () => {
+  it('starts a definition with one manual trigger that a run can begin from', () => {
     const definition = newDefinition('Report', user, '2026-10-16T00:00:00.000Z');
     expect(definitionSchema.parse(definition)).toEqual(definition);
     expect(definition.graph.nodes.map((n) => [n.type, n.key])).toEqual([['start', 'start']]);
@@ -62,7 +65,7 @@ describe('workflow model', () => {
     const messages = graphIssues(graph).map((i) => `${i.blocking ? '!' : '?'} ${i.message}`);
     expect(messages).toContain(`! The key ${agent.key} is used twice.`);
     expect(messages).toContain('! Agent has no true output.');
-    expect(messages).toContain('! Start takes no input.');
+    expect(messages).toContain('! Trigger takes no input.');
     expect(messages).toContain('! Agent: write a prompt.');
     expect(messages.some((m) => m.startsWith('? End is not connected'))).toBe(true);
   });
@@ -99,6 +102,7 @@ describe('workflow model', () => {
   it('summarizes definitions with their schedules', () => {
     const definition = newDefinition('Daily', user);
     definition.graph.nodes[0].config = {
+      trigger: 'schedule',
       schedules: [
         { id: 's1', every: 'days', at: '08:30', timezone: 'America/Sao_Paulo' },
         { id: 's2', enabled: false },
@@ -115,6 +119,7 @@ describe('workflow model', () => {
     expect(summary.schedules).toEqual([
       {
         id: 's1',
+        nodeId: definition.graph.nodes[0].id,
         every: 'days',
         interval: 1,
         at: '08:30',
@@ -122,6 +127,54 @@ describe('workflow model', () => {
         timezone: 'America/Sao_Paulo',
       },
     ]);
+  });
+
+  it('lets a workflow have many triggers and lists what computers watch, without secrets', () => {
+    const definition = newDefinition('Watcher', user);
+    const taken = () => definition.graph.nodes.map((n) => n.key);
+    const chat = newNode('start', { x: 0, y: 200 }, taken());
+    chat.config = { ...chat.config, trigger: 'chat', chat: { events: ['completed'], title: 'Build' } };
+    definition.graph.nodes.push(chat);
+    const hook = newNode('start', { x: 0, y: 400 }, taken());
+    hook.config = { ...hook.config, trigger: 'webhook', webhook: { secret: webhookSecret() } };
+    definition.graph.nodes.push(hook);
+    const confirm = newNode('confirm', { x: 300, y: 0 }, taken());
+    definition.graph.nodes.push(confirm);
+    definition.graph.edges.push(
+      { id: 'a', source: chat.id, sourcePort: 'out', target: confirm.id },
+      { id: 'b', source: confirm.id, sourcePort: 'rejected', target: definition.graph.nodes[0].id },
+    );
+    definition.continueOn = [crypto.randomUUID()];
+    definition.assistant = { conversationId: crypto.randomUUID() };
+    const issues = graphIssues(definition.graph).map((i) => i.message);
+    expect(issues).not.toContain('Keep one Start step.');
+    expect(issues).toContain('Confirm: write what to confirm.');
+    expect(issues).toContain('Manual takes no input.');
+    expect(nodeConfig(chat, 'start').chat).toMatchObject({ events: ['completed'], path: '', provider: '' });
+    expect(nodeConfig(definition.graph.nodes[0], 'start').webhook).toEqual({ secret: '' });
+    const summary = summarize({
+      id: crypto.randomUUID(),
+      kind: 'definition',
+      revision: 1,
+      updatedAt: 'now',
+      body: definition,
+    });
+    expect(summary.triggers).toEqual([
+      { nodeId: chat.id, kind: 'chat', config: { events: ['completed'], title: 'Build' } },
+      { nodeId: hook.id, kind: 'webhook', config: {} },
+    ]);
+    expect(JSON.stringify(summary)).not.toContain(nodeConfig(hook, 'start').webhook.secret);
+    expect(summary).toMatchObject({
+      continueOn: definition.continueOn,
+      chat: definition.assistant.conversationId,
+      conversations: [definition.assistant.conversationId],
+    });
+    expect(triggerOf({ config: { schedules: [{ id: 's' }] } })).toBe('schedule');
+    expect(triggerOf({ config: {} })).toBe('manual');
+    expect(mayContinue({ elsewhere: true }, 'x')).toBe(true);
+    expect(mayContinue({ elsewhere: false }, 'x')).toBe(false);
+    expect(mayContinue({ elsewhere: true, continueOn: ['y'] }, 'x')).toBe(false);
+    expect(mayContinue({ elsewhere: true, continueOn: ['x'] }, 'x')).toBe(true);
   });
 
   it('reads runs with defaults for parts older writers left out', () => {

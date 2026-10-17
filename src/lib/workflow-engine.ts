@@ -16,6 +16,7 @@ import {
   answerText,
   nodeConfig,
   readRun,
+  triggerOf,
   type Activation,
   type EventInput,
   type NodeType,
@@ -287,6 +288,16 @@ export class RunDriver {
         case 'stop':
           if (run.status === 'running' || run.status === 'paused') void this.stop('Stopped');
           break;
+        case 'driver':
+          // Where the run continues: the computer it prefers and those that may take over.
+          if (command.driver) {
+            run.driver = structuredClone(command.driver);
+            const name = this.host
+              .computers()
+              .find((c) => c.environmentId === command.driver!.preferred)?.name;
+            this.event('command', `Runs on ${name ?? 'another computer'}`);
+          }
+          break;
         case 'retry':
         case 'skip': {
           const activation = run.activations.find((a) => a.id === command.activationId);
@@ -547,11 +558,19 @@ export class RunDriver {
     const type = node.type as NodeType;
     const render = (text: string) => this.render(text, activation);
     switch (type) {
-      case 'start':
+      case 'start': {
+        // The trigger that started the run hands over what fired it; a manual one, its inputs.
+        const trigger = this.run.trigger;
+        if (trigger?.nodeId === node.id && trigger.payload !== undefined)
+          return this.finish(activation, {
+            json: trigger.payload,
+            text: trigger.text || JSON.stringify(trigger.payload, null, 2),
+          });
         return this.finish(activation, {
           json: this.run.inputs,
           text: JSON.stringify(this.run.inputs, null, 2),
         });
+      }
       case 'agent':
       case 'screen':
         return this.startAgentStep(activation, node);
@@ -630,6 +649,39 @@ export class RunDriver {
         this.event('question', question, { nodeId: node.id, activationId: activation.id });
         this.update(activation, { questionId: id });
         return this.wait(activation, 'question', 'Waiting for your answer');
+      }
+      case 'confirm': {
+        const config = nodeConfig(node, 'confirm');
+        const id = crypto.randomUUID();
+        const question = render(config.question);
+        const approve = render(config.approve).trim() || 'Approve';
+        let reject = render(config.reject).trim() || 'Reject';
+        if (reject === approve) reject = `${reject} (no)`;
+        this.run.questions.push({
+          id,
+          revision: 1,
+          status: 'pending',
+          source: 'step',
+          activationId: activation.id,
+          confirm: { approve, reject },
+          createdAt: iso(this.now),
+          questions: [
+            {
+              id: 'answer',
+              header: render(config.header),
+              question,
+              options: [
+                { label: approve, description: '' },
+                { label: reject, description: '' },
+              ],
+              multiSelect: false,
+            },
+          ],
+        });
+        this.alert('question', question);
+        this.event('question', question, { nodeId: node.id, activationId: activation.id });
+        this.update(activation, { questionId: id });
+        return this.wait(activation, 'question', 'Waiting for your approval');
       }
       case 'notify': {
         const config = nodeConfig(node, 'notify');
@@ -859,6 +911,18 @@ export class RunDriver {
       case 'question': {
         const question = this.run.questions.find((q) => q.id === activation.questionId);
         if (!question || question.status === 'pending') return;
+        if (question.confirm) {
+          // Approved only by its button; a skipped or withdrawn question is not approval.
+          const approved =
+            question.status === 'answered' &&
+            !question.skipped &&
+            question.answers?.[0]?.values[0] === question.confirm.approve;
+          return this.finish(
+            activation,
+            { text: answerText(question), json: approved },
+            approved ? 'approved' : 'rejected',
+          );
+        }
         return this.finish(activation, {
           text: answerText(question),
           json:
@@ -1248,6 +1312,14 @@ export class RunDriver {
       }
       case 'previous':
         return this.field(activation.input, rest);
+      case 'trigger': {
+        // Whichever trigger started the run: what fired it and its kind.
+        const trigger = this.run.trigger;
+        if (!trigger) return undefined;
+        if (rest[0] === 'kind') return trigger.kind;
+        const fired = this.run.activations.find((a) => a.nodeId === trigger.nodeId && !a.scope);
+        return this.field(fired?.output, rest);
+      }
     }
     const node = this.run.graph.nodes.find((n) => n.key === head);
     if (!node) return undefined;
@@ -1273,7 +1345,7 @@ export class RunDriver {
     const running = run.activations.filter((a) => a.status === 'running' && !a.loop);
     const question = waiting.find((a) => a.waitFor === 'question');
     const detail = question
-      ? 'Waiting for your answer'
+      ? (question.wait ?? 'Waiting for your answer')
       : waiting.length && !running.length
         ? `${this.label(waiting[0])}: ${waiting[0].wait ?? 'waiting'}`
         : running.length
@@ -1345,12 +1417,21 @@ export function staticRun(
   driver: WorkflowRun['driver'],
   actor: WorkflowRun['createdBy'],
   now: number,
+  // The trigger that fired and what it hands over; a manual run starts at the first manual one.
+  trigger?: { nodeId: string; kind?: string; text?: string; payload?: unknown },
 ): WorkflowRun {
-  const start = definition.graph.nodes.find((n) => n.type === 'start');
+  const starts = definition.graph.nodes.filter((n) => n.type === 'start');
+  const start =
+    (trigger && starts.find((n) => n.id === trigger.nodeId)) ??
+    starts.find((n) => triggerOf(n) === 'manual') ??
+    starts[0];
   const at = iso(now);
-  const defaults = start ? nodeConfig(start, 'start').inputs : [];
+  // Inputs of manual triggers keep their defaults whichever trigger started the run, so
+  // {{input.NAME}} reads the same in every run; the trigger that fired comes first.
   const values: Record<string, string> = {};
-  for (const input of defaults) values[input.name] = inputs[input.name] ?? input.default;
+  for (const node of [...(start ? [start] : []), ...starts.filter((n) => n !== start)])
+    for (const input of nodeConfig(node, 'start').inputs)
+      values[input.name] ??= inputs[input.name] ?? input.default;
   for (const [name, value] of Object.entries(inputs)) values[name] ??= value;
   return readRun({
     mode: 'static',
@@ -1362,6 +1443,16 @@ export function staticRun(
     createdBy: actor,
     driver,
     definition: { id: definitionId, revision, name: definition.name },
+    ...(start
+      ? {
+          trigger: {
+            nodeId: start.id,
+            kind: trigger?.kind ?? triggerOf(start),
+            text: trigger?.text ?? '',
+            ...(trigger?.payload !== undefined ? { payload: trigger.payload } : {}),
+          },
+        }
+      : {}),
     inputs: values,
     graph: structuredClone(definition.graph),
     activations: start

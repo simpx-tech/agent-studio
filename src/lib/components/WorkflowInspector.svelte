@@ -1,15 +1,22 @@
 <script lang="ts">
-  import { Plus, Trash2, X } from '@lucide/svelte';
+  import { Copy, Plus, RefreshCw, Trash2, X } from '@lucide/svelte';
   import ChoicePicker from './ChoicePicker.svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
   import {
+    chatEvents,
     conditionOps,
+    runEndings,
     scheduleSchema,
     isNodeType,
     nodeCatalog,
     nodeConfig,
     nodeKeySchema,
+    triggerKinds,
+    triggerLabels,
+    triggerOf,
+    webhookSecret,
     type NodeConfig,
+    type TriggerKind,
     type NodeType,
     type Schedule,
     type WorkflowGraph,
@@ -17,12 +24,14 @@
   } from '$lib/workflow-model';
   import { reasoningName } from '$lib/models';
   import { scheduleLabel } from '$lib/workflow-schedule';
-  import type { WorkflowPickers } from '$lib/workflow-view';
-  import type { Reasoning } from '$lib/domain';
+  import { chatEventLabels, type WorkflowPickers } from '$lib/workflow-view';
+  import type { ProviderId, Reasoning } from '$lib/domain';
+  import { highestReasoning, rememberWorkflowAgent, workflowAgent } from '$lib/workflow-preferences';
   let {
     node,
     graph,
     pickers,
+    webhookUrl,
     change,
     remove,
     close,
@@ -30,6 +39,8 @@
     node: WorkflowNode;
     graph: WorkflowGraph;
     pickers: WorkflowPickers;
+    /** A webhook trigger's address, when the relay runs webhooks. */
+    webhookUrl?: (nodeId: string, secret: string) => string | undefined;
     change: (node: WorkflowNode) => void;
     remove: () => void;
     close: () => void;
@@ -52,10 +63,13 @@
   );
   // The values this step's text can name.
   const values = $derived([
-    ...nodeConfig(
-      graph.nodes.find((n) => n.type === 'start') ?? { type: 'start' },
-      'start',
-    ).inputs.map((input) => `input.${input.name}`),
+    ...new Set(
+      graph.nodes
+        .filter((n) => n.type === 'start')
+        .flatMap((n) => nodeConfig(n, 'start').inputs.map((input) => `input.${input.name}`)),
+    ),
+    'trigger.output',
+    'trigger.json',
     'previous.output',
     ...graph.nodes
       .filter((n) => n.id !== node.id && n.type !== 'start' && n.type !== 'end')
@@ -101,7 +115,7 @@
   const environment = $derived(
     location ? (location.executionEnvironmentId ?? location.environmentId) : pickers.here,
   );
-  const provider = $derived((config.provider as 'claude' | 'codex' | 'gemini') ?? 'claude');
+  const provider = $derived((config.provider as ProviderId) ?? 'claude');
   const accounts = $derived(pickers.accounts(provider, environment));
   const models = $derived(pickers.models(provider, (config.connectionId as string) ?? ''));
   const levels = $derived(
@@ -129,6 +143,56 @@
     if (target) set('location', { ...target, path });
   }
   const schedules = $derived((config.schedules as Schedule[] | undefined) ?? []);
+  const trigger = $derived(type === 'start' ? triggerOf(node) : 'manual');
+  const startConfig = $derived(type === 'start' ? nodeConfig(node, 'start') : undefined);
+  const generic = new Set<string>(['', 'Start', 'Trigger', ...Object.values(triggerLabels)]);
+  function chooseTrigger(kind: TriggerKind) {
+    const next: Record<string, unknown> = { ...config, trigger: kind };
+    if (kind === 'webhook' && !startConfig?.webhook.secret)
+      next.webhook = { secret: webhookSecret() };
+    if (kind === 'schedule' && !schedules.length)
+      next.schedules = [
+        scheduleSchema.parse({
+          id: crypto.randomUUID().slice(0, 8),
+          timezone,
+          since: new Date().toISOString(),
+        }),
+      ];
+    // A title still naming the kind follows the new one.
+    change({
+      ...node,
+      title: generic.has(node.title) ? triggerLabels[kind] : node.title,
+      config: next,
+    });
+  }
+  /** Changes one setting of the kind this trigger is. */
+  const setPart = (
+    part: 'chat' | 'workflow' | 'computer' | 'usage' | 'webhook',
+    patch: Record<string, unknown>,
+  ) => set(part, { ...(startConfig?.[part] as Record<string, unknown>), ...patch });
+  const toggleIn = <T extends string>(list: T[], item: T, on: boolean) =>
+    on ? [...new Set([...list, item])] : list.filter((x) => x !== item);
+  let copied = $state(false);
+  async function copyUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      copied = false;
+    }
+  }
+  // The agent chosen here is the one new steps start with.
+  function chooseAgent(patch: Record<string, unknown>) {
+    const next = { ...config, ...patch };
+    change({ ...node, config: next });
+    rememberWorkflowAgent({
+      provider: next.provider as ProviderId,
+      connectionId: (next.connectionId as string) ?? '',
+      model: (next.model as string) ?? '',
+      reasoning: (next.reasoning as Reasoning) ?? '',
+    });
+  }
   const inputs = $derived((config.inputs as NodeConfig<'start'>['inputs'] | undefined) ?? []);
   const entries = $derived((config.values as NodeConfig<'set'>['values'] | undefined) ?? []);
   const pairs = (field: string) => Object.entries((config[field] as Record<string, string>) ?? {});
@@ -214,11 +278,15 @@
         label="Agent"
         options={providerChoices}
         value={provider}
-        onchange={(value) =>
-          change({
-            ...node,
-            config: { ...config, provider: value, connectionId: '', model: '', reasoning: '' },
-          })}
+        onchange={(value) => {
+          const remembered = workflowAgent(value as ProviderId);
+          chooseAgent({
+            provider: value,
+            connectionId: '',
+            model: remembered.model,
+            reasoning: remembered.reasoning,
+          });
+        }}
       />
     </div>
     <div class="field">
@@ -228,7 +296,7 @@
         label="Account"
         options={[{ id: '', name: 'Least used' }, ...accounts]}
         value={(config.connectionId as string) ?? ''}
-        onchange={(value) => set('connectionId', value)}
+        onchange={(value) => chooseAgent({ connectionId: value })}
       />
     </div>
   </div>
@@ -240,8 +308,13 @@
         label="Model"
         options={models.length ? models : [{ id: '', name: 'CLI default' }]}
         value={(config.model as string) ?? ''}
-        onchange={(value) =>
-          change({ ...node, config: { ...config, model: value, reasoning: '' } })}
+        onchange={(value) => {
+          const listed = models.find((m) => m.id === value)?.levels ?? [];
+          const reasoning = listed.includes(String(config.reasoning))
+            ? config.reasoning
+            : highestReasoning(listed);
+          chooseAgent({ model: value, reasoning });
+        }}
       />
     </div>
     <div class="field">
@@ -254,7 +327,7 @@
           name: reasoningName(level as Reasoning) ?? level,
         }))}
         value={(config.reasoning as string) ?? ''}
-        onchange={(value) => set('reasoning', value)}
+        onchange={(value) => chooseAgent({ reasoning: value })}
       />
     </div>
   </div>
@@ -379,9 +452,17 @@
 
 <aside class="workflow-inspector" aria-label="Step settings">
   <header>
-    <span class="inspector-icon"><WorkflowIcon type={node.type} size={15} /></span>
-    <h2>{known ? nodeCatalog[type].label : node.type}</h2>
-    {#if node.type !== 'start'}<button
+    <span class="inspector-icon"
+      ><WorkflowIcon type={node.type === 'start' ? `trigger:${trigger}` : node.type} size={15} /></span
+    >
+    <h2>
+      {known
+        ? type === 'start'
+          ? `${triggerLabels[trigger]} trigger`
+          : nodeCatalog[type].label
+        : node.type}
+    </h2>
+    {#if node.type !== 'start' || graph.nodes.filter((n) => n.type === 'start').length > 1}<button
         class="icon-button"
         title="Delete step"
         aria-label="Delete this step"
@@ -412,6 +493,184 @@
     {#if !known}
       <p class="inspector-note">This release cannot edit {node.type} steps.</p>
     {:else if type === 'start'}
+      <div class="field">
+        <span>Starts when</span>
+        <ChoicePicker
+          field
+          label="Trigger"
+          options={triggerKinds.map((kind) => ({ id: kind, name: triggerLabels[kind] }))}
+          value={trigger}
+          onchange={(value) => chooseTrigger(value as TriggerKind)}
+        />
+      </div>
+      {#if trigger === 'chat' && startConfig}
+        {@const chat = startConfig.chat}
+        <fieldset class="list">
+          <legend>In a chat</legend>
+          {#each chatEvents as event (event)}<label class="checkbox"
+              ><input
+                type="checkbox"
+                checked={chat.events.includes(event)}
+                onchange={(e) =>
+                  setPart('chat', { events: toggleIn(chat.events, event, e.currentTarget.checked) })}
+              />{chatEventLabels[event]}</label
+            >{/each}
+        </fieldset>
+        <div class="field-row">
+          <div class="field">
+            <span>Computer</span>
+            <ChoicePicker
+              field
+              label="Computer"
+              options={[{ id: '', name: 'Any computer' }, ...pickers.computers]}
+              value={chat.environmentId}
+              onchange={(value) => setPart('chat', { environmentId: value })}
+            />
+          </div>
+          <div class="field">
+            <span>Agent</span>
+            <ChoicePicker
+              field
+              label="Agent"
+              options={[{ id: '', name: 'Any agent' }, ...providerChoices]}
+              value={chat.provider}
+              onchange={(value) => setPart('chat', { provider: value })}
+            />
+          </div>
+        </div>
+        <label class="field"
+          ><span>Folder</span><input
+            list={`trigger-folders-${node.id}`}
+            placeholder="Any folder"
+            value={chat.path}
+            oninput={(event) => setPart('chat', { path: event.currentTarget.value })}
+          /><datalist id={`trigger-folders-${node.id}`}
+            >{#each pickers.folders(chat.environmentId || pickers.here) as folder}<option
+                value={folder}
+              ></option>{/each}</datalist
+          ></label
+        >
+        <label class="field"
+          ><span>Title contains</span><input
+            placeholder="Any title"
+            value={chat.title}
+            oninput={(event) => setPart('chat', { title: event.currentTarget.value })}
+          /></label
+        >
+        <label class="checkbox"
+          ><input
+            type="checkbox"
+            checked={chat.workflowChats}
+            onchange={(event) => setPart('chat', { workflowChats: event.currentTarget.checked })}
+          />Include chats workflows start</label
+        >
+      {:else if trigger === 'workflow' && startConfig}
+        {@const watched = startConfig.workflow}
+        <div class="field">
+          <span>Workflow</span>
+          <ChoicePicker
+            field
+            label="Workflow"
+            options={[{ id: '', name: 'Any other workflow or mission' }, ...pickers.workflows()]}
+            value={watched.workflowId}
+            onchange={(value) => setPart('workflow', { workflowId: value })}
+          />
+        </div>
+        <fieldset class="list">
+          <legend>When its run</legend>
+          {#each runEndings as ending (ending)}<label class="checkbox"
+              ><input
+                type="checkbox"
+                checked={watched.statuses.includes(ending)}
+                onchange={(e) =>
+                  setPart('workflow', {
+                    statuses: toggleIn(watched.statuses, ending, e.currentTarget.checked),
+                  })}
+              />{ending === 'completed'
+                ? 'Completes'
+                : ending === 'failed'
+                  ? 'Fails'
+                  : 'Is stopped'}</label
+            >{/each}
+        </fieldset>
+      {:else if trigger === 'webhook' && startConfig}
+        {@const url = webhookUrl?.(node.id, startConfig.webhook.secret)}
+        <div class="field">
+          <span>URL</span>
+          {#if url}
+            <div class="webhook">
+              <code title={url}>{url}</code>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Copy the webhook URL"
+                title={copied ? 'Copied' : 'Copy'}
+                onclick={() => void copyUrl(url)}><Copy size={14} /></button
+              >
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Make a new URL"
+                title="New URL"
+                onclick={() => setPart('webhook', { secret: webhookSecret() })}
+                ><RefreshCw size={14} /></button
+              >
+            </div>
+            <p class="inspector-note">A POST starts a run with its body as {'{{trigger.json}}'}.</p>
+          {:else}<p class="inspector-note">Webhooks need the relay to be updated.</p>{/if}
+        </div>
+      {:else if trigger === 'computer' && startConfig}
+        {@const watched = startConfig.computer}
+        <div class="field-row">
+          <div class="field">
+            <span>Computer</span>
+            <ChoicePicker
+              field
+              label="Computer"
+              options={[{ id: '', name: 'Any computer' }, ...pickers.computers]}
+              value={watched.environmentId}
+              onchange={(value) => setPart('computer', { environmentId: value })}
+            />
+          </div>
+          <div class="field">
+            <span>Goes</span>
+            <ChoicePicker
+              field
+              label="Goes"
+              options={[
+                { id: 'online', name: 'Online' },
+                { id: 'offline', name: 'Offline' },
+              ]}
+              value={watched.event}
+              onchange={(value) => setPart('computer', { event: value })}
+            />
+          </div>
+        </div>
+      {:else if trigger === 'usage' && startConfig}
+        {@const watched = startConfig.usage}
+        <div class="field">
+          <span>Account</span>
+          <ChoicePicker
+            field
+            label="Account"
+            options={[
+              { id: '', name: 'Any account' },
+              ...pickers.computers.flatMap((computer) =>
+                providerChoices.flatMap((p) =>
+                  pickers.accounts(p.id as ProviderId, computer.id).map((a) => ({
+                    id: a.id,
+                    name: a.name,
+                    detail: `${p.name} · ${computer.name}`,
+                  })),
+                ),
+              ),
+            ]}
+            value={watched.connectionId}
+            onchange={(value) => setPart('usage', { connectionId: value })}
+          />
+        </div>
+      {/if}
+      {#if trigger === 'manual'}
       <fieldset class="list">
         <legend>Inputs</legend>
         {#each inputs as input, index (index)}
@@ -461,6 +720,8 @@
             ])}><Plus size={14} />Add input</button
         >
       </fieldset>
+      {/if}
+      {#if trigger === 'schedule'}
       <fieldset class="list">
         <legend>Schedules</legend>
         {#each schedules as schedule, index (schedule.id)}
@@ -543,6 +804,7 @@
             ])}><Plus size={14} />Add schedule</button
         >
       </fieldset>
+      {/if}
     {:else if type === 'agent'}
       {@render agentFields()}
       {@render text('Prompt', 'prompt', 6, 'What the agent should do')}
@@ -649,6 +911,13 @@
         ></textarea></label
       >
       {@render toggle('Allow several', 'multiple')}
+    {:else if type === 'confirm'}
+      {@render text('Heading', 'header')}
+      {@render text('What to confirm', 'question', 3)}
+      <div class="field-row">
+        {@render text('Approve button', 'approve')}
+        {@render text('Reject button', 'reject')}
+      </div>
     {:else if type === 'notify'}
       {@render text('Title', 'title')}
       {@render text('Text', 'text', 3)}
@@ -746,7 +1015,7 @@
     {#if failing}
       <fieldset class="list">
         <legend>If it fails</legend>
-        <div class="field-row">
+        <div class="failure-row">
           <ChoicePicker
             field
             label="If it fails"
@@ -770,7 +1039,7 @@
             /></label
           >
           <label class="field compact"
-            ><span>Seconds between</span><input
+            ><span>Wait (s)</span><input
               type="number"
               min="0"
               value={node.retryDelay}
@@ -829,6 +1098,7 @@
     flex-direction: column;
     gap: 12px;
     padding: 14px;
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     min-height: 0;
@@ -846,8 +1116,14 @@
     color: var(--text-muted);
     font-size: var(--text-xs);
   }
-  .field.compact {
-    flex: 0 0 96px;
+  .failure-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 76px 76px;
+    align-items: end;
+    gap: 8px;
+  }
+  .failure-row input {
+    width: 100%;
   }
   .field-row {
     display: flex;
@@ -865,6 +1141,8 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    /* A fieldset is as wide as its content by default, which scrolled the panel sideways. */
+    min-width: 0;
     margin: 0;
     padding: 10px 12px 12px;
     border: 1px solid var(--border);
@@ -913,6 +1191,31 @@
   .text-button {
     align-self: flex-start;
     font-size: var(--text-sm);
+  }
+  .webhook {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .webhook code {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    font-size: var(--text-xs);
+  }
+  .checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
   .inspector-note {
     margin: 0;

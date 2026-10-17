@@ -15,9 +15,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { workflowStore, type StoreFiles, type WorkflowStore } from '../src/lib/workflow-store.ts';
+import { nodeConfig, readDefinition, triggerOf } from '../src/lib/workflow-model.ts';
 
 export function directoryFiles(root: string): StoreFiles {
   const path = (name: string) => {
@@ -187,4 +188,84 @@ export async function handleWorkflows({
     return true;
   }
   return false;
+}
+
+/** A webhook's address: the workflow, its trigger step and the trigger's secret. */
+export const hookPath =
+  /^\/v1\/hooks\/([0-9a-f-]{36})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_-]{16,128})$/;
+
+/**
+ * Starts a run of the workflow whose webhook trigger a request names (docs/WORKFLOWS.md): the
+ * stores of the workspaces are searched for it, the secret must match, and the run is recorded as
+ * pending, for a computer that runs the workflow to build from the workflow and drive. `read`
+ * reads the request's body only once it is known to be the webhook's.
+ */
+export async function startFromHook({
+  stores,
+  workflowId,
+  nodeId,
+  secret,
+  read,
+  now,
+}: {
+  stores: WorkflowStore[];
+  workflowId: string;
+  nodeId: string;
+  secret: string;
+  read: () => Promise<string>;
+  now: () => number;
+}): Promise<{ ok: true; runId: string } | { ok: false; code: number; error: string }> {
+  const missing = { ok: false as const, code: 404, error: 'No webhook has this address.' };
+  for (const store of stores) {
+    const doc = (await store.read([workflowId])).docs[0];
+    if (!doc || doc.kind !== 'definition') continue;
+    const definition = readDefinition(doc.body);
+    const node = definition?.graph.nodes.find(
+      (n) => n.id === nodeId && n.type === 'start' && triggerOf(n) === 'webhook',
+    );
+    const expected = node ? nodeConfig(node, 'start').webhook.secret : '';
+    if (!definition || !node || !sameSecret(expected, secret)) return missing;
+    if (!definition.runsOn)
+      return { ok: false, code: 409, error: 'This workflow has no computer to run on.' };
+    const text = await read();
+    let payload: unknown = { body: text };
+    try {
+      if (text.trim()) payload = JSON.parse(text);
+    } catch {
+      /* A body that is not JSON goes on as text. */
+    }
+    const at = new Date(now()).toISOString();
+    const runId = randomUUID();
+    const result = await store.put({
+      id: runId,
+      kind: 'run',
+      expected: null,
+      body: {
+        mode: 'static',
+        title: definition.name,
+        status: 'running',
+        createdAt: at,
+        updatedAt: at,
+        startedAt: at,
+        createdBy: { kind: 'trigger', nodeId, trigger: 'webhook' },
+        driver: {
+          preferred: definition.runsOn,
+          elsewhere: definition.elsewhere,
+          ...(definition.continueOn ? { continueOn: definition.continueOn } : {}),
+        },
+        definition: { id: workflowId, revision: doc.revision, name: definition.name },
+        trigger: { nodeId, kind: 'webhook', text, payload },
+        pending: true,
+      },
+      events: [{ kind: 'started', text: 'Started by its webhook' }],
+    });
+    if (!result.ok) return { ok: false, code: 409, error: 'The run could not be recorded.' };
+    return { ok: true, runId };
+  }
+  return missing;
+}
+function sameSecret(expected: string, given: string) {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(given);
+  return expected.length >= 16 && a.length === b.length && timingSafeEqual(a, b);
 }

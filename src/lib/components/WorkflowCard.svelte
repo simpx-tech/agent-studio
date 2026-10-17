@@ -42,7 +42,7 @@
 >
   {#if data.input}<Handle type="target" position={Position.Left} class="workflow-handle" />{/if}
   <header>
-    <span class="card-icon type-{data.type}"><WorkflowIcon type={data.type} size={14} /></span>
+    <span class="card-icon type-{data.type}"><WorkflowIcon type={data.icon ?? data.type} size={14} /></span>
     <span class="card-title">{data.title}</span>
     {#if data.count}<span class="card-count">{data.count}</span>{/if}
     <span class="card-status" aria-label={data.statusText || undefined}

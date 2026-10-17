@@ -11,6 +11,7 @@
     MessageCircleQuestionMark,
     LayoutDashboard,
     ShipWheel,
+    Workflow,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
   import { awaitingAnswer } from '$lib/questions';
@@ -151,6 +152,25 @@
       : '';
   };
   const sent = $derived(clock(message.createdAt));
+  // A message a workflow wrote: a mission update's first event, without the chat ids written for
+  // the orchestrator, and how many more it lists (one a line, before the agents' replies), or
+  // else its first line of substance.
+  const update = $derived.by(() => {
+    if (message.sentBy !== 'workflow') return '';
+    const lines = text.split('\n');
+    const start = lines.findIndex((line) => line.trim() === '[Mission update]');
+    const events: string[] = [];
+    for (const line of start < 0 ? [] : lines.slice(start + 1)) {
+      if (!line.startsWith('- ')) break;
+      events.push(line);
+    }
+    const first =
+      (events[0] ?? lines.find((line) => line.trim() && line.trim() !== '[Mission update]') ?? '')
+        .replace(/^[-#\s]+/, '')
+        .replace(/\s*\([0-9a-f]{8}-[0-9a-f-]{27}\)/gi, '')
+        .trim();
+    return events.length > 1 ? `${first} · ${events.length - 1} more` : first;
+  });
   // Its own sub-agents still running, then those of the replies it took over that it waits for.
   const subagents = $derived.by(() => {
     const own = runningSubagents(tools, message.status);
@@ -402,7 +422,18 @@
         >{:else}{switchNotice}{/if}
     </p>
   {/if}
-  {#if message.role === 'user'}
+  {#if message.role === 'user' && message.sentBy === 'workflow'}
+    <div class="message-avatar workflow-avatar"><Workflow size={15} aria-hidden="true" /></div>
+    <div class="message-content">
+      <div class="message-heading">
+        <strong>Workflow</strong>{#if sent}<span>{sent}</span>{/if}
+      </div>
+      <details class="workflow-update">
+        <summary title={update}>{update || 'Update'}</summary>
+        <div class="user-text">{text}</div>
+      </details>
+    </div>
+  {:else if message.role === 'user'}
     <div class="message-avatar" style:--provider-color={providers[author.provider].color}>Y</div>
     <div class="message-content">
       <div class="message-heading">
@@ -627,5 +658,26 @@
     font-size: var(--text-2xs);
     font-weight: 500;
     white-space: nowrap;
+  }
+  .workflow-avatar {
+    display: grid;
+    place-items: center;
+    color: var(--accent-text);
+    background: var(--surface-2);
+  }
+  .workflow-update {
+    max-width: 100%;
+    color: var(--text-secondary);
+  }
+  .workflow-update summary {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+  .workflow-update[open] summary {
+    margin-bottom: 6px;
   }
 </style>

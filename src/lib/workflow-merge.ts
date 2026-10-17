@@ -1,5 +1,109 @@
 import { jsonEqual } from './json-equal.ts';
-import { KEPT_ALERTS, type WorkflowRun } from './workflow-model.ts';
+import {
+  KEPT_ALERTS,
+  freshKey,
+  type WorkflowDefinition,
+  type WorkflowNode,
+  type WorkflowRun,
+} from './workflow-model.ts';
+
+/**
+ * You and an agent edit one workflow at the same time: your editor saves what you changed, the
+ * agent saves through workflow_save. A save that lost to a newer revision is merged over it:
+ * each field, step and connection takes the side that changed it since `base`, the copy the
+ * losing save started from; a step both changed takes each of its fields the same way, and yours
+ * wins where both changed the same one. A step either side deleted stays deleted, and a step you
+ * added under a key the other side took meanwhile gets a key of its own.
+ */
+export function mergeDefinition(
+  base: WorkflowDefinition,
+  mine: WorkflowDefinition,
+  theirs: WorkflowDefinition,
+): WorkflowDefinition {
+  const merged: Record<string, unknown> = { ...theirs };
+  const keys = new Set([...Object.keys(mine), ...Object.keys(theirs)]) as Set<
+    keyof WorkflowDefinition
+  >;
+  for (const key of keys) {
+    if (key === 'graph') continue;
+    merged[key] = pick(base[key], mine[key], theirs[key]);
+  }
+  const nodes = mergeItems(base.graph.nodes, mine.graph.nodes, theirs.graph.nodes, (n) => n.id, mergeNode);
+  // A step you added keeps its own key when the other side gave that key to another step.
+  const used = new Set<string>();
+  const theirIds = new Set(theirs.graph.nodes.map((n) => n.id));
+  for (const node of nodes.filter((n) => theirIds.has(n.id))) used.add(node.key);
+  for (const node of nodes.filter((n) => !theirIds.has(n.id))) {
+    if (used.has(node.key)) node.key = freshKey(node.type, used);
+    used.add(node.key);
+  }
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = mergeItems(
+    base.graph.edges,
+    mine.graph.edges,
+    theirs.graph.edges,
+    (e) => e.id,
+    (b, m, t) => pickObject(b, m, t),
+  ).filter((e) => ids.has(e.source) && ids.has(e.target));
+  merged.graph = { nodes, edges };
+  return merged as WorkflowDefinition;
+}
+
+/** The side that changed a value since `base`; yours when both did. */
+function pick<T>(base: T, mine: T, theirs: T): T {
+  if (jsonEqual(mine, base)) return theirs;
+  return mine;
+}
+function pickObject<T extends object>(base: T | undefined, mine: T, theirs: T): T {
+  if (!base) return mine;
+  const result: Record<string, unknown> = { ...(theirs as Record<string, unknown>) };
+  const keys = new Set([...Object.keys(mine), ...Object.keys(theirs)]);
+  for (const key of keys)
+    result[key] = pick(
+      (base as Record<string, unknown>)[key],
+      (mine as Record<string, unknown>)[key],
+      (theirs as Record<string, unknown>)[key],
+    );
+  return result as T;
+}
+function mergeNode(base: WorkflowNode | undefined, mine: WorkflowNode, theirs: WorkflowNode) {
+  const node = pickObject(base, mine, theirs);
+  // Settings merge key by key too, so an agent's prompt and your retries both stay.
+  if (base)
+    node.config = pickObject(
+      base.config as Record<string, unknown>,
+      mine.config as Record<string, unknown>,
+      theirs.config as Record<string, unknown>,
+    );
+  return node;
+}
+function mergeItems<T>(
+  base: T[],
+  mine: T[],
+  theirs: T[],
+  id: (item: T) => string,
+  merge: (base: T | undefined, mine: T, theirs: T) => T,
+): T[] {
+  const before = new Map(base.map((item) => [id(item), item]));
+  const ours = new Map(mine.map((item) => [id(item), item]));
+  const result: T[] = [];
+  for (const item of theirs) {
+    const key = id(item);
+    const old = before.get(key);
+    const own = ours.get(key);
+    // Deleted on our side: gone, whatever the other side did.
+    if (old && !own) continue;
+    result.push(own ? merge(old, own, item) : item);
+  }
+  const theirIds = new Set(theirs.map(id));
+  for (const item of mine) {
+    const key = id(item);
+    // Kept above, or deleted on their side.
+    if (theirIds.has(key) || before.has(key)) continue;
+    result.push(item);
+  }
+  return result;
+}
 
 /**
  * Two writers of one run, the computer driving it and anyone answering, commanding or writing a

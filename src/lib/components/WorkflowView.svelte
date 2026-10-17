@@ -1,30 +1,33 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import {
     CircleAlert,
     CirclePause,
     CirclePlay,
     CircleStop,
-    Copy,
-    LayoutGrid,
+    ListTree,
+    Maximize2,
     MessageSquare,
     Play,
     Plus,
-    Save,
     Settings2,
     Target,
     Trash2,
+    WandSparkles,
     Workflow,
+    X,
   } from '@lucide/svelte';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import WorkflowInspector from './WorkflowInspector.svelte';
   import WorkflowRunPanel from './WorkflowRunPanel.svelte';
   import WorkflowStart from './WorkflowStart.svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
+  import DriverPicker from './DriverPicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
-  import ChoicePicker from './ChoicePicker.svelte';
   import type { Conversation } from '$lib/domain';
+  import { jsonEqual } from '$lib/json-equal';
   import type { WorkflowClient } from '$lib/workflow-client.svelte';
+  import { mergeDefinition } from '$lib/workflow-merge';
   import {
     graphIssues,
     newNode,
@@ -32,10 +35,12 @@
     nodeTypeIds,
     readDefinition,
     readRun,
+    triggerOf,
     type NodeType,
     type WorkflowDefinition,
   } from '$lib/workflow-model';
   import { layeredLayout } from '$lib/workflow-layout';
+  import { workflowAgent } from '$lib/workflow-preferences';
   import {
     CARD_WIDTH,
     definitionCards,
@@ -43,6 +48,8 @@
     staticRunCards,
     type WorkflowPickers,
   } from '$lib/workflow-view';
+  // A workflow, run or mission (docs/WORKFLOWS.md): as a page of its own, or as the panel beside
+  // the chat that changes it (a workflow's assistant) or drives it (a mission's orchestrator).
   let {
     client,
     id,
@@ -52,6 +59,11 @@
     openDoc,
     deleteChats,
     closed,
+    variant = 'page',
+    expand,
+    chat,
+    close,
+    webhookUrl,
   }: {
     client: WorkflowClient;
     id: string;
@@ -62,7 +74,16 @@
     openDoc: (id: string) => void;
     /** Deletes chats a deleted run started. */
     deleteChats: (ids: string[]) => Promise<void>;
+    /** It was deleted. */
     closed: () => void;
+    variant?: 'page' | 'panel';
+    /** Shows it as a page of its own, from the panel. */
+    expand?: () => void;
+    /** Returns to the chat that changes or drives it, from its page. */
+    chat?: () => void;
+    /** Closes the panel. */
+    close?: () => void;
+    webhookUrl?: (workflowId: string, nodeId: string, secret: string) => string | undefined;
   } = $props();
   // Follows the document while it is shown; reading the cache here must not restart it.
   $effect(() => {
@@ -75,30 +96,41 @@
   const message = (e: unknown) => String(e).replace(/^Error: /, '');
   let error = $state('');
   let selected = $state<string>();
+  // Narrow, the side details lie over the graph instead of beside it.
+  let width = $state(0);
+  const narrow = $derived(variant === 'panel' || (width > 0 && width < 820));
 
-  // ---- A definition being edited ---------------------------------------------------------------
+  // ---- A definition being edited: saved as you go, merged with what the agent saves ----------
   let draft = $state<WorkflowDefinition>();
+  let base: WorkflowDefinition | undefined;
   let draftRevision = $state<number | null>(null);
   let dirty = $state(false);
-  let conflict = $state(false);
   let saving = $state(false);
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsOpen = $state(false);
   let adding = $state(false);
   let starting = $state(false);
   let fit = $state(0);
+  // A connection dropped on empty space: the step menu opens where it was dropped.
+  let dropMenu = $state<{
+    from: { node: string; port: string };
+    at: { x: number; y: number };
+    screen: { x: number; y: number };
+  }>();
   $effect(() => {
     const doc = open?.doc;
     if (!doc || doc.kind !== 'definition') return;
     untrack(() => {
-      // A save in flight takes its own revision when it returns.
-      if (saving || draftRevision === doc.revision) return;
-      if (dirty && draftRevision !== null) {
-        conflict = true;
-        return;
-      }
-      draft = readDefinition(doc.body);
+      // Your edits are saved over what arrived; until then they stay as they are.
+      if (draftRevision === doc.revision || dirty || saving) return;
+      const body = readDefinition(doc.body);
+      if (!body) return;
+      // A newer version saved elsewhere, as by the agent, fits the graph into view again.
+      const changed = draftRevision !== null;
+      draft = body;
+      base = structuredClone(body);
       draftRevision = doc.revision;
-      conflict = false;
+      if (changed) fit++;
     });
   });
   const issues = $derived(draft ? graphIssues(draft.graph) : []);
@@ -115,32 +147,101 @@
     update(next);
     draft = next;
     dirty = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => void save(), 600);
   }
-  function addStep(type: NodeType) {
+  async function save() {
+    clearTimeout(saveTimer);
+    if (!draft || !dirty || !base || draftRevision === null) return;
+    if (saving) {
+      saveTimer = setTimeout(() => void save(), 300);
+      return;
+    }
+    saving = true;
+    error = '';
+    const sent = structuredClone($state.snapshot(draft)) as WorkflowDefinition;
+    const body: WorkflowDefinition = {
+      ...sent,
+      updatedAt: new Date().toISOString(),
+      updatedBy: { kind: 'user' },
+    };
+    // Triggers other than Run need a computer that watches them.
+    if (
+      !body.runsOn &&
+      body.graph.nodes.some((n) => n.type === 'start' && triggerOf(n) !== 'manual')
+    )
+      body.runsOn = pickers.defaultDriver;
+    try {
+      const result = await client.saveDraft(id, draftRevision, base, body);
+      base = structuredClone(result.body);
+      draftRevision = result.revision;
+      const now = $state.snapshot(draft) as WorkflowDefinition;
+      if (jsonEqual(now, sent)) {
+        draft = result.body;
+        dirty = false;
+      } else {
+        // Edited while it saved: those edits go over what was saved, in the next save.
+        draft = mergeDefinition(sent, now, result.body);
+        saveTimer = setTimeout(() => void save(), 300);
+      }
+    } catch (e) {
+      error = message(e);
+    } finally {
+      saving = false;
+    }
+  }
+  onDestroy(() => {
+    if (dirty) void save();
+  });
+  function addStep(
+    type: NodeType,
+    at?: { x: number; y: number },
+    from?: { node: string; port: string },
+  ) {
     adding = false;
+    dropMenu = undefined;
     edit((definition) => {
-      const from = definition.graph.nodes.find((n) => n.id === selected);
+      const source = definition.graph.nodes.find((n) => n.id === (from?.node ?? selected));
       const right = Math.max(0, ...definition.graph.nodes.map((n) => n.position.x));
-      const position = from
-        ? { x: from.position.x + CARD_WIDTH + 80, y: from.position.y }
-        : { x: right + CARD_WIDTH + 80, y: 0 };
+      const position =
+        at ??
+        (source
+          ? { x: source.position.x + CARD_WIDTH + 80, y: source.position.y }
+          : { x: right + CARD_WIDTH + 80, y: 0 });
       const node = newNode(
         type,
         position,
         definition.graph.nodes.map((n) => n.key),
       );
+      if (type === 'start') node.title = 'Manual';
+      // New agents start with the agent chosen last: Claude at its maximum reasoning at first.
+      if (type === 'agent' || type === 'screen') {
+        const agent = workflowAgent();
+        const known = pickers
+          .accounts(agent.provider, pickers.here)
+          .some((a) => a.id === agent.connectionId);
+        node.config = {
+          ...node.config,
+          provider: agent.provider,
+          connectionId: known ? agent.connectionId : '',
+          model: agent.model,
+          reasoning: agent.reasoning,
+        };
+      }
       definition.graph.nodes.push(node);
-      const port = from ? nodeCatalog[from.type as NodeType]?.ports[0] : undefined;
-      if (from && port)
+      const port =
+        from?.port ?? (source ? nodeCatalog[source.type as NodeType]?.ports[0] : undefined);
+      if (source && port && nodeCatalog[type].input)
         definition.graph.edges.push({
           id: `e${crypto.randomUUID().slice(0, 8)}`,
-          source: from.id,
+          source: source.id,
           sourcePort: port,
           target: node.id,
         });
       selected = node.id;
+      settingsOpen = false;
     });
-    fit++;
+    if (!at) fit++;
   }
   function arrange() {
     edit((definition) => {
@@ -154,60 +255,20 @@
     });
     fit++;
   }
-  async function save(asCopy = false) {
-    if (!draft || saving) return;
-    saving = true;
-    error = '';
-    try {
-      const now = new Date().toISOString();
-      const body: WorkflowDefinition = {
-        ...structuredClone($state.snapshot(draft)),
-        ...(asCopy
-          ? { name: `${draft.name} (copy)`, createdAt: now, createdBy: { kind: 'user' } }
-          : {}),
-        updatedAt: now,
-        updatedBy: { kind: 'user' },
-      } as WorkflowDefinition;
-      if (
-        body.graph.nodes.some(
-          (n) =>
-            n.type === 'start' && Array.isArray(n.config.schedules) && n.config.schedules.length,
-        ) &&
-        !body.runsOn
-      )
-        body.runsOn = pickers.defaultDriver;
-      const target = asCopy ? crypto.randomUUID() : id;
-      const result = await client.saveDefinition(target, asCopy ? null : draftRevision, body);
-      if (!result.ok) {
-        conflict = true;
-        return;
-      }
-      if (asCopy) {
-        openDoc(target);
-        return;
-      }
-      draftRevision = result.doc.revision;
-      dirty = false;
-      conflict = false;
-    } catch (e) {
-      error = message(e);
-    } finally {
-      saving = false;
-    }
+  async function run() {
+    if (dirty) await save();
+    starting = true;
   }
-  function reload() {
-    dirty = false;
-    draftRevision = null;
-    conflict = false;
-    const doc = open?.doc;
-    if (doc?.kind === 'definition') {
-      draft = readDefinition(doc.body);
-      draftRevision = doc.revision;
-    }
-  }
+  // The step menu where a connection was dropped stays within the window.
+  const dropPlace = $derived.by(() => {
+    if (!dropMenu) return undefined;
+    const x = Math.min(dropMenu.screen.x, window.innerWidth - 340);
+    const y = Math.min(dropMenu.screen.y, window.innerHeight - 320);
+    return { x: Math.max(8, x), y: Math.max(8, y) };
+  });
 
   // ---- A run being followed --------------------------------------------------------------------
-  const run = $derived(open?.doc.kind === 'run' ? readRun(open.doc.body) : undefined);
+  const runDoc = $derived(open?.doc.kind === 'run' ? readRun(open.doc.body) : undefined);
   let now = $state(Date.now());
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 1000);
@@ -216,7 +277,7 @@
   // Cards read their chats' live state each second, not on every streamed event.
   const runGraph = $derived.by(() => {
     void now;
-    const current = run;
+    const current = runDoc;
     if (!current) return undefined;
     return untrack(() => {
       const chats = new Map<string, Conversation | undefined>();
@@ -233,7 +294,13 @@
   const driverName = $derived(
     lease && lease.expiresAt > client.now ? pickers.computerName(lease.holder) : '',
   );
-  const active = $derived(run?.status === 'running' || run?.status === 'paused');
+  const active = $derived(runDoc?.status === 'running' || runDoc?.status === 'paused');
+  // Narrow, the run's details open on demand, and by themselves when it asks you something.
+  let detailsOpen = $state(false);
+  const asking = $derived(!!runDoc?.questions.some((q) => q.status === 'pending'));
+  $effect(() => {
+    if (asking) untrack(() => (detailsOpen = true));
+  });
   let confirming = $state<'stop' | 'delete' | 'deleteDefinition'>();
   let alsoChats = $state(true);
   let busy = $state(false);
@@ -257,19 +324,26 @@
     stopped: 'Stopped',
   };
   const orchestrator = $derived(
-    run?.sessions.filter((s) => !s.endedAt).at(-1) ?? run?.sessions.at(-1),
+    runDoc?.sessions.filter((s) => !s.endedAt).at(-1) ?? runDoc?.sessions.at(-1),
   );
   const title = $derived(
     kind === 'definition'
       ? (draft?.name ?? summary?.title ?? 'Workflow')
-      : (run?.title ?? summary?.title ?? 'Run'),
+      : (runDoc?.title ?? summary?.title ?? 'Run'),
   );
+  const steps = $derived(draft?.graph.nodes.length ?? 0);
 </script>
 
-<section class="workflow-page" aria-label={title}>
+<section
+  class="workflow-page"
+  class:panel={variant === 'panel'}
+  class:narrow
+  aria-label={title}
+  bind:clientWidth={width}
+>
   <header class="workflow-toolbar">
     <div class="workflow-heading">
-      {#if kind === 'run' && run?.mode === 'dynamic'}<Target
+      {#if kind === 'run' && runDoc?.mode === 'dynamic'}<Target
           size={17}
           aria-hidden="true"
         />{:else}<Workflow size={17} aria-hidden="true" />{/if}
@@ -284,12 +358,12 @@
         {:else}<h1>{title}</h1>{/if}
         <p>
           {#if kind === 'definition'}
-            {draft?.graph.nodes.length ?? 0}
-            {draft?.graph.nodes.length === 1 ? 'step' : 'steps'}{#if dirty}
-              · Not saved{/if}
-          {:else if run}
-            <span class="run-status status-{run.status}">{statusNames[run.status]}</span
-            >{#each [run.detail, driverName && active ? `on ${driverName}` : ''].filter(Boolean) as part}<span
+            {steps}
+            {steps === 1 ? 'step' : 'steps'}{#if saving || dirty}
+              · Saving…{/if}
+          {:else if runDoc}
+            <span class="run-status status-{runDoc.status}">{statusNames[runDoc.status]}</span
+            >{#each [runDoc.detail, driverName && active ? `on ${driverName}` : ''].filter(Boolean) as part}<span
                 >{` · ${part}`}</span
               >{/each}
           {/if}
@@ -302,12 +376,17 @@
             ><CircleAlert size={14} aria-hidden="true" />{blocking.length}</span
           >{/if}
         <div class="add-menu">
-          <button class="secondary" aria-expanded={adding} onclick={() => (adding = !adding)}
-            ><Plus size={15} />Add step</button
+          <button
+            class="secondary"
+            aria-expanded={adding}
+            aria-label="Add step"
+            title="Add step"
+            onclick={() => (adding = !adding)}
+            ><Plus size={15} /><span class="label">Add step</span></button
           >
           {#if adding}
             <div class="menu" role="menu">
-              {#each nodeTypeIds.filter((t) => t !== 'start') as type (type)}
+              {#each ['start', ...nodeTypeIds.filter((t) => t !== 'start')] as NodeType[] as type (type)}
                 <button role="menuitem" onclick={() => addStep(type)}
                   ><WorkflowIcon {type} /><span>{nodeCatalog[type].label}</span></button
                 >
@@ -315,8 +394,11 @@
             </div>
           {/if}
         </div>
-        <button class="icon-button" title="Arrange" aria-label="Arrange the steps" onclick={arrange}
-          ><LayoutGrid size={16} /></button
+        <button
+          class="secondary"
+          title="Arrange the steps neatly"
+          aria-label="Arrange the steps"
+          onclick={arrange}><WandSparkles size={15} /><span class="label">Arrange</span></button
         >
         <button
           class="icon-button"
@@ -334,46 +416,53 @@
           aria-label="Delete this workflow"
           onclick={() => (confirming = 'deleteDefinition')}><Trash2 size={16} /></button
         >
-        <button class="secondary" disabled={!dirty || saving} onclick={() => void save()}
-          ><Save size={15} />{saving ? 'Saving…' : 'Save'}</button
-        >
         <button
           class="primary"
-          disabled={!!blocking.length || dirty}
-          title={dirty
-            ? 'Save first'
-            : blocking.length
-              ? 'Fix what the steps show first'
-              : undefined}
-          onclick={() => (starting = true)}><Play size={15} />Run</button
+          disabled={!!blocking.length}
+          aria-label="Run"
+          title={blocking.length ? 'Fix what the steps show first' : undefined}
+          onclick={() => void run()}><Play size={15} /><span class="label">Run</span></button
         >
-      {:else if run}
-        {#if run.definition}<button
+      {:else if runDoc}
+        {#if runDoc.definition}<button
             class="icon-button"
             title="Open the workflow"
             aria-label="Open the workflow"
-            onclick={() => openDoc(run.definition!.id)}><Workflow size={16} /></button
+            onclick={() => openDoc(runDoc.definition!.id)}><Workflow size={16} /></button
           >{/if}
-        {#if orchestrator && conversation(orchestrator.conversationId)}<button
+        {#if variant === 'page' && orchestrator && conversation(orchestrator.conversationId)}<button
             class="icon-button"
             title="Orchestrator chat"
             aria-label="Open the orchestrator's chat"
             onclick={() => openChat(orchestrator.conversationId)}
             ><MessageSquare size={16} /></button
           >{/if}
-        {#if run.status === 'running'}<button
-            class="secondary"
-            disabled={busy}
-            onclick={() => void act(() => client.command(id, 'pause'))}
-            ><CirclePause size={15} />Pause</button
-          >{:else if run.status === 'paused'}<button
-            class="secondary"
-            disabled={busy}
-            onclick={() => void act(() => client.command(id, 'resume'))}
-            ><CirclePlay size={15} />Resume</button
+        {#if narrow}<button
+            class="icon-button"
+            title="Details"
+            aria-label="Run details"
+            aria-pressed={detailsOpen}
+            onclick={() => (detailsOpen = !detailsOpen)}><ListTree size={16} /></button
           >{/if}
-        {#if active}<button class="secondary" disabled={busy} onclick={() => (confirming = 'stop')}
-            ><CircleStop size={15} />Stop</button
+        {#if runDoc.status === 'running'}<button
+            class="secondary"
+            disabled={busy}
+            aria-label="Pause"
+            onclick={() => void act(() => client.command(id, 'pause'))}
+            ><CirclePause size={15} /><span class="label">Pause</span></button
+          >{:else if runDoc.status === 'paused'}<button
+            class="secondary"
+            disabled={busy}
+            aria-label="Resume"
+            onclick={() => void act(() => client.command(id, 'resume'))}
+            ><CirclePlay size={15} /><span class="label">Resume</span></button
+          >{/if}
+        {#if active}<button
+            class="secondary"
+            disabled={busy}
+            aria-label="Stop"
+            onclick={() => (confirming = 'stop')}
+            ><CircleStop size={15} /><span class="label">Stop</span></button
           >{:else}<button
             class="icon-button"
             title="Delete run"
@@ -381,15 +470,28 @@
             onclick={() => (confirming = 'delete')}><Trash2 size={16} /></button
           >{/if}
       {/if}
+      {#if variant === 'page' && chat}<button
+          class="icon-button"
+          title="Chat"
+          aria-label="Show its chat"
+          onclick={chat}><MessageSquare size={16} /></button
+        >{/if}
+      {#if variant === 'panel'}
+        {#if expand}<button
+            class="icon-button"
+            title="Expand"
+            aria-label="Show the workflow as a page"
+            onclick={expand}><Maximize2 size={15} /></button
+          >{/if}
+        {#if close}<button
+            class="icon-button"
+            title="Close"
+            aria-label="Close the workflow panel"
+            onclick={close}><X size={16} /></button
+          >{/if}
+      {/if}
     </div>
   </header>
-  {#if conflict}<div class="setup-hint" role="status">
-      <CircleAlert size={15} aria-hidden="true" /><span>This workflow changed elsewhere.</span>
-      <button class="text-button" onclick={reload}>Reload</button>
-      <button class="text-button" onclick={() => void save(true)}
-        ><Copy size={13} />Save as a copy</button
-      >
-    </div>{/if}
   {#if error || client.error}<div class="error-banner" role="alert">
       <CircleAlert size={15} aria-hidden="true" />{error || client.error}
     </div>{/if}
@@ -404,6 +506,7 @@
         {selected}
         select={(next) => {
           selected = next;
+          dropMenu = undefined;
           if (next) settingsOpen = false;
         }}
         connect={(source, port, target) =>
@@ -421,6 +524,10 @@
               target,
             });
           })}
+        dropped={(from, at, screen) => {
+          adding = false;
+          dropMenu = { from, at, screen };
+        }}
         remove={(nodes, edges) =>
           edit((d) => {
             d.graph.nodes = d.graph.nodes.filter((n) => !nodes.includes(n.id));
@@ -441,6 +548,7 @@
           node={selectedNode}
           graph={draft.graph}
           {pickers}
+          webhookUrl={webhookUrl ? (nodeId, secret) => webhookUrl(id, nodeId, secret) : undefined}
           change={(node) =>
             edit((d) => {
               d.graph.nodes = d.graph.nodes.map((n) => (n.id === node.id ? node : n));
@@ -456,7 +564,14 @@
         />
       {:else if settingsOpen}
         <aside class="workflow-settings" aria-label="Workflow settings">
-          <h2>Workflow</h2>
+          <header>
+            <h2>Workflow</h2>
+            <button
+              class="icon-button"
+              aria-label="Close workflow settings"
+              onclick={() => (settingsOpen = false)}><X size={16} /></button
+            >
+          </header>
           <label class="field"
             ><span>Description</span><textarea
               rows="4"
@@ -464,23 +579,20 @@
               oninput={(event) => edit((d) => (d.description = event.currentTarget.value))}
             ></textarea></label
           >
-          <div class="field">
-            <span>Scheduled runs run on</span>
-            <ChoicePicker
-              field
-              label="Scheduled runs run on"
-              options={pickers.drivers}
-              value={draft.runsOn || pickers.defaultDriver}
-              onchange={(value) => edit((d) => (d.runsOn = value))}
-            />
-          </div>
-          <label class="checkbox"
-            ><input
-              type="checkbox"
-              checked={draft.elsewhere}
-              onchange={(event) => edit((d) => (d.elsewhere = event.currentTarget.checked))}
-            />Continue on another computer while it is offline</label
-          >
+          <DriverPicker
+            drivers={pickers.drivers}
+            value={{
+              preferred: draft.runsOn || pickers.defaultDriver,
+              elsewhere: draft.elsewhere,
+              ...(draft.continueOn ? { continueOn: draft.continueOn } : {}),
+            }}
+            onchange={(next) =>
+              edit((d) => {
+                d.runsOn = next.preferred;
+                d.elsewhere = next.elsewhere;
+                d.continueOn = next.continueOn;
+              })}
+          />
           {#if issues.length}
             <ul class="issue-list">
               {#each issues as issue, index (index)}<li class:blocking={issue.blocking}>
@@ -490,28 +602,51 @@
           {/if}
         </aside>
       {/if}
-    {:else if run && runGraph}
+      {#if dropMenu && dropPlace}
+        <div
+          class="menu drop-menu"
+          role="menu"
+          aria-label="Add a step here"
+          style:left={`${dropPlace.x}px`}
+          style:top={`${dropPlace.y}px`}
+        >
+          {#each nodeTypeIds.filter((t) => t !== 'start') as type (type)}
+            <button role="menuitem" onclick={() => addStep(type, dropMenu!.at, dropMenu!.from)}
+              ><WorkflowIcon {type} /><span>{nodeCatalog[type].label}</span></button
+            >
+          {/each}
+        </div>
+      {/if}
+    {:else if runDoc && runGraph}
       <WorkflowCanvas
-        label={run.mode === 'dynamic' ? 'Mission graph' : 'Run steps'}
+        label={runDoc.mode === 'dynamic' ? 'Mission graph' : 'Run steps'}
         cards={runGraph.cards}
         links={runGraph.links}
         {selected}
-        select={(next) => (selected = next)}
+        select={(next) => {
+          selected = next;
+          if (next) detailsOpen = true;
+        }}
         {openChat}
       />
-      <WorkflowRunPanel
-        {run}
-        events={open?.events ?? []}
-        {selected}
-        {conversation}
-        computerName={pickers.computerName}
-        accountName={pickers.accountName}
-        {openChat}
-        openRun={openDoc}
-        command={(kind, activationId) => void act(() => client.command(id, kind, activationId))}
-        answer={(answer) => client.answerQuestion(id, answer)}
-        saveNote={(note) => client.writeNote(id, note)}
-      />
+      {#if !narrow || detailsOpen}
+        <WorkflowRunPanel
+          run={runDoc}
+          events={open?.events ?? []}
+          {selected}
+          {conversation}
+          computerName={pickers.computerName}
+          accountName={pickers.accountName}
+          {openChat}
+          openRun={openDoc}
+          command={(kind, activationId) => void act(() => client.command(id, kind, activationId))}
+          answer={(answer) => client.answerQuestion(id, answer)}
+          saveNote={(note) => client.writeNote(id, note)}
+          drivers={pickers.drivers}
+          changeDriver={(next) => void act(() => client.command(id, 'driver', undefined, next))}
+          close={narrow ? () => (detailsOpen = false) : undefined}
+        />
+      {/if}
     {:else}
       <p class="workflow-status" role="status">
         {summary || client.mode === 'loading' ? 'Opening…' : 'This workflow is no longer saved.'}
@@ -519,12 +654,20 @@
     {/if}
   </div>
 </section>
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && (dropMenu || adding)) {
+      dropMenu = undefined;
+      adding = false;
+    }
+  }}
+/>
 {#if starting && draft}<WorkflowStart
     definition={draft}
     {pickers}
     close={() => (starting = false)}
-    start={async (inputs, driver) => {
-      const runId = await client.startRun(id, inputs, driver, { kind: 'user' });
+    start={async (inputs, driver, trigger) => {
+      const runId = await client.startRun(id, inputs, driver, { kind: 'user' }, trigger);
       starting = false;
       openDoc(runId);
     }}
@@ -544,8 +687,8 @@
         if (confirming === 'stop') void act(() => client.command(id, 'stop'));
         else if (confirming === 'delete')
           void act(async () => {
-            const chats = run
-              ? run.agents.filter((a) => !a.listed).map((a) => a.conversationId)
+            const chats = runDoc
+              ? runDoc.agents.filter((a) => !a.listed).map((a) => a.conversationId)
               : [];
             await client.remove(id);
             if (alsoChats && chats.length) await deleteChats(chats);
@@ -553,7 +696,9 @@
           });
         else
           void act(async () => {
+            const assistant = draft?.assistant?.conversationId;
             await client.remove(id);
+            if (alsoChats && assistant) await deleteChats([assistant]);
             closed();
           });
       }}
@@ -563,11 +708,14 @@
         {:else if confirming === 'delete'}Delete the run <strong>{title}</strong> and its history?
         {:else}Delete <strong>{title}</strong>? Its runs stay.{/if}
       </p>
-      {#if confirming === 'delete' && run?.agents.some((a) => !a.listed)}<label class="checkbox"
-          ><input type="checkbox" bind:checked={alsoChats} />Also delete its {run.agents.filter(
+      {#if confirming === 'delete' && runDoc?.agents.some((a) => !a.listed)}<label class="checkbox"
+          ><input type="checkbox" bind:checked={alsoChats} />Also delete its {runDoc.agents.filter(
             (a) => !a.listed,
           ).length}
           chats</label
+        >{/if}
+      {#if confirming === 'deleteDefinition' && draft?.assistant}<label class="checkbox"
+          ><input type="checkbox" bind:checked={alsoChats} />Also delete its chat</label
         >{/if}
       {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
       <div class="dialog-actions">
@@ -592,6 +740,10 @@
     min-width: 0;
     padding: 12px 20px 16px;
     gap: 10px;
+    container-type: inline-size;
+  }
+  .workflow-page.panel {
+    padding: 10px 12px 12px;
   }
   .workflow-toolbar {
     display: flex;
@@ -601,12 +753,13 @@
     min-width: 0;
     flex-wrap: wrap;
   }
+  /* The buttons go below the name when it would have less than this beside them. */
   .workflow-heading {
     display: flex;
     align-items: center;
     gap: 10px;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 150px;
   }
   .workflow-heading > :global(svg) {
     flex-shrink: 0;
@@ -625,6 +778,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .panel .workflow-heading h1,
+  .panel .title-input {
+    font-size: var(--text-md);
   }
   .title-input {
     width: 100%;
@@ -662,6 +819,13 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+    margin-left: auto;
+  }
+  /* Too narrow for the buttons' names, they keep their icons and their names on hover. */
+  @container (max-width: 520px) {
+    .workflow-tools .label {
+      display: none;
+    }
   }
   .issues {
     display: inline-flex;
@@ -688,6 +852,11 @@
     background: var(--surface-overlay);
     box-shadow: var(--shadow-lg);
   }
+  .drop-menu {
+    position: fixed;
+    right: auto;
+    z-index: 40;
+  }
   .menu button {
     justify-content: flex-start;
     padding: 7px 10px;
@@ -699,6 +868,7 @@
     background: var(--hover);
   }
   .workflow-body {
+    position: relative;
     display: flex;
     flex: 1;
     min-height: 0;
@@ -714,7 +884,13 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     background: var(--surface-1);
+    overflow-x: hidden;
     overflow-y: auto;
+  }
+  .workflow-settings header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
   .workflow-settings h2 {
     margin: 0;
@@ -744,35 +920,23 @@
     color: var(--text-muted);
     font-size: var(--text-sm);
   }
-  .setup-hint,
   .error-banner {
     margin: 0;
   }
-  .setup-hint .text-button {
-    display: inline-flex;
-    gap: 4px;
+  /* Narrow, step settings and run details lie over the graph's right side. */
+  .narrow .workflow-body > :global(aside) {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 5;
+    width: min(360px, calc(100% - 16px));
+    max-height: none;
+    box-shadow: var(--shadow-lg);
   }
-  @media (max-width: 900px) {
-    /* The page scrolls as a whole: the graph, then its details at their own height. */
-    .workflow-page {
+  @media (max-width: 600px) {
+    .workflow-page:not(.panel) {
       padding: 8px 10px 10px;
-      overflow-y: auto;
-    }
-    .workflow-body {
-      flex: none;
-      flex-direction: column;
-    }
-    .workflow-body > :global(.workflow-canvas) {
-      flex: none;
-      height: 55dvh;
-      min-height: 300px;
-    }
-    .workflow-body > :global(aside) {
-      max-height: none;
-      overflow: visible;
-    }
-    .workflow-settings {
-      width: 100%;
     }
   }
 </style>

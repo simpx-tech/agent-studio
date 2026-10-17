@@ -625,7 +625,7 @@ test('compact chat shell keeps navigation and the editor accessible', async ({ p
   await page.goto('/');
   await expect(page.locator('.page-title')).toHaveText('New conversation');
   await expect(page.locator('.chat-layout')).toBeVisible();
-  await expect(page.getByRole('button', { name: /^(Overview|Workflows)$/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Overview$/ })).toHaveCount(0);
   await expect(page.locator('.new-chat, .sidebar-bottom, .brand small')).toHaveCount(0);
   await expect(page.getByText('Personal workspace', { exact: true })).toHaveCount(0);
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
@@ -2018,13 +2018,12 @@ test('computer then folder scopes CLI choices and groups active and history with
   const historyTab = page.getByRole('tab', { name: /^History/ });
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
   await expect(history).toBeHidden();
-  // The tabs go Active, History, Screens, then Workflows, and the arrows wrap around them.
+  // The tabs go Active, History and Screens, and the arrows wrap around them; Workflows is a
+  // button of its own above them.
   const screensTab = page.getByRole('tab', { name: /^Screens/ });
-  const workflowsTab = page.getByRole('tab', { name: /^Workflows/ });
+  await expect(page.getByRole('tab', { name: /^Workflows/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Workflows/ })).toBeVisible();
   await activeTab.press('End');
-  await expect(workflowsTab).toBeFocused();
-  await expect(page.locator('#conversation-panel-workflows')).toBeVisible();
-  await workflowsTab.press('ArrowLeft');
   await expect(screensTab).toBeFocused();
   await expect(page.locator('#conversation-panel-screens')).toBeVisible();
   await screensTab.press('ArrowLeft');
@@ -2034,8 +2033,8 @@ test('computer then folder scopes CLI choices and groups active and history with
   await historyTab.press('ArrowLeft');
   await expect(activeTab).toBeFocused();
   await activeTab.press('ArrowLeft');
-  await expect(workflowsTab).toBeFocused();
-  await workflowsTab.press('ArrowRight');
+  await expect(screensTab).toBeFocused();
+  await screensTab.press('ArrowRight');
   await expect(activeTab).toBeFocused();
   await expect(active).toBeVisible();
   await expect(active.locator('.conversation-item')).toHaveAttribute('aria-current', 'page');

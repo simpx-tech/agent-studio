@@ -28,15 +28,19 @@ import {
 } from './workflow-mission';
 import { generalCall, generalTools, type GeneralTool, type StoreAccess } from './workflow-tools';
 import {
+  mayContinue,
   readDefinition,
   readRun,
   runActive,
+  triggerLabels,
   type Actor,
   type EventInput,
   type Lease,
   type RunAlert,
   type RunCommand,
+  type RunDriverChoice,
   type RunNote,
+  type TriggerKind,
   type WorkflowDefinition,
   type WorkflowDoc,
   type WorkflowEvent,
@@ -44,6 +48,8 @@ import {
   type WorkflowSummary,
 } from './workflow-model';
 import { latestSlot, slotRunId } from './workflow-schedule';
+import { mergeDefinition } from './workflow-merge';
+import { TriggerWatch, eventRunId } from './workflow-triggers';
 import type { Schedule } from './workflow-model';
 import type { QuestionAnswer } from './questions';
 
@@ -411,11 +417,13 @@ export class WorkflowClient {
     if (!result.ok) throw new Error('A run with this id exists already.');
     void this.supervise();
   }
+  /** Starts a run of a workflow at a trigger: its first manual one unless `trigger` names one. */
   async startRun(
     definitionId: string,
     inputs: Record<string, string>,
-    preferred: string,
+    driver: string | RunDriverChoice,
     actor: Actor,
+    trigger?: string,
   ) {
     const read = await this.access.read(definitionId);
     const definition = read ? readDefinition(read.body) : undefined;
@@ -428,17 +436,78 @@ export class WorkflowClient {
         definition,
         read.revision,
         inputs,
-        { preferred, elsewhere: definition.elsewhere },
+        typeof driver === 'string'
+          ? {
+              preferred: driver,
+              elsewhere: definition.elsewhere,
+              ...(definition.continueOn ? { continueOn: definition.continueOn } : {}),
+            }
+          : driver,
         actor,
         Date.now(),
+        trigger ? { nodeId: trigger, kind: 'manual' } : undefined,
       ),
     );
     return id;
   }
+  /**
+   * Starts a mission. One started from a chat is driven here at once, so the tools of the reply
+   * about to start in that chat already answer.
+   */
   async startMission(spec: Omit<Parameters<typeof newMission>[0], 'now'>) {
     const id = crypto.randomUUID();
     await this.createRun(id, newMission({ ...spec, now: Date.now() }));
+    if (spec.chat && spec.driver.preferred === this.self()) {
+      await this.refresh();
+      await this.supervise();
+    }
     return id;
+  }
+  /**
+   * Saves your edits of a workflow made over `base`, its body at `revision`. When the agent or
+   * another device saved meanwhile, your changes are merged over theirs and saved again.
+   */
+  async saveDraft(
+    id: string,
+    revision: number,
+    base: WorkflowDefinition,
+    mine: WorkflowDefinition,
+  ): Promise<{ revision: number; body: WorkflowDefinition }> {
+    let expected = revision;
+    let body = mine;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const result = await this.put(id, 'definition', expected, body);
+      if (result.ok) {
+        await this.load([id]);
+        return { revision: result.doc.revision, body };
+      }
+      const theirs = result.current ? readDefinition(result.current.body) : undefined;
+      if (!result.current || !theirs) throw new Error('This workflow is no longer saved.');
+      body = mergeDefinition(base, mine, theirs);
+      expected = result.current.revision;
+    }
+    throw new Error('The workflow kept changing. Try again.');
+  }
+  /** Changes a saved workflow, retrying over newer copies. */
+  async changeDefinition(id: string, change: (definition: WorkflowDefinition) => void) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const read = await this.access.read(id);
+      const current = read ? readDefinition(read.body) : undefined;
+      if (!read || !current) throw new Error('This workflow is no longer saved.');
+      change(current);
+      current.updatedAt = new Date(this.now).toISOString();
+      const result = await this.put(id, 'definition', read.revision, current);
+      if (result.ok) {
+        await this.load([id]);
+        return;
+      }
+    }
+    throw new Error('The workflow kept changing. Try again.');
+  }
+  /** The workflow or mission whose chat this is: an assistant, or a mission's orchestrator. */
+  workflowOf(conversationId: string): WorkflowSummary | undefined {
+    for (const summary of this.summaries.values()) if (summary.chat === conversationId) return summary;
+    return undefined;
   }
   /** Changes a run as the user asks: through its driver when this page drives it. */
   private async changeRun(id: string, change: (run: WorkflowRun) => void) {
@@ -467,12 +536,18 @@ export class WorkflowClient {
     }
     throw new Error('The run kept changing. Try again.');
   }
-  command(id: string, kind: RunCommand['kind'], activationId?: string) {
+  command(
+    id: string,
+    kind: RunCommand['kind'],
+    activationId?: string,
+    driver?: RunDriverChoice,
+  ) {
     return this.changeRun(id, (run) => {
       run.commands.push({
         id: crypto.randomUUID(),
         kind,
         ...(activationId ? { activationId } : {}),
+        ...(driver ? { driver } : {}),
         at: new Date(this.now).toISOString(),
         by: this.self(),
       });
@@ -569,7 +644,8 @@ export class WorkflowClient {
     if (lease && lease.expiresAt > now && lease.holder !== me) return false;
     if (lease?.holder === me) return true;
     if (summary.preferred === me || !summary.preferred) return true;
-    if (summary.elsewhere === false) return false;
+    if (!mayContinue({ elsewhere: summary.elsewhere, continueOn: summary.continueOn }, me))
+      return false;
     const host = this.options.host();
     const since = now - (lease?.expiresAt ?? Date.parse(summary.updatedAt));
     // The computer a run prefers drives it while it is online, unless it leaves it for long.
@@ -607,9 +683,16 @@ export class WorkflowClient {
         if (!lease.granted) continue;
         const read = await backend.read([summary.id]).catch(() => undefined);
         const doc = read?.docs[0];
-        const run = doc ? readRun(doc.body) : undefined;
+        let run = doc ? readRun(doc.body) : undefined;
         if (!doc || !run) continue;
-        const driver = new RunDriver(doc.id, run, doc.revision, host, {
+        let revision = doc.revision;
+        if (run.pending) {
+          // A webhook's request: the run is built from its workflow here.
+          const built = await this.materialize(doc.id, run, revision, backend);
+          if (!built) continue;
+          ({ run, revision } = built);
+        }
+        const driver = new RunDriver(doc.id, run, revision, host, {
           put: (id, expected, body, events) =>
             backend.put({ id, kind: 'run', expected, body, events }),
         });
@@ -627,6 +710,7 @@ export class WorkflowClient {
         }
       }
       await this.fireSchedules(host, backend);
+      await this.fireTriggers(host, backend);
     } finally {
       this.supervising = false;
       this.settleFirst();
@@ -724,17 +808,51 @@ export class WorkflowClient {
     return read && body ? { body, revision: read.revision } : undefined;
   }
 
+  /**
+   * Whether this computer runs a workflow's triggered runs: the computer it names (or any, when
+   * it names none), or, while that one is offline, one it may continue on: those it lists, or
+   * servers when it lists none.
+   */
+  private triggersHere(summary: WorkflowSummary, host: WorkflowHost) {
+    const me = host.self();
+    const runsOn = summary.runsOn || me.environmentId;
+    if (runsOn === me.environmentId) return true;
+    if (host.online(runsOn) === true) return false;
+    if (!mayContinue({ elsewhere: summary.elsewhere, continueOn: summary.continueOn }, me.environmentId))
+      return false;
+    return summary.continueOn ? true : me.server;
+  }
+  /** The run a trigger starts, from the workflow as saved now. */
+  private async triggered(
+    summary: WorkflowSummary,
+    trigger: { nodeId: string; kind: TriggerKind; text?: string; payload?: unknown },
+    actor: Actor,
+    now: number,
+  ) {
+    const definition = await this.definition(summary.id).catch(() => undefined);
+    if (!definition) return undefined;
+    const me = this.self();
+    return staticRun(
+      summary.id,
+      definition.body,
+      definition.revision,
+      {},
+      {
+        preferred: definition.body.runsOn || me,
+        elsewhere: definition.body.elsewhere,
+        ...(definition.body.continueOn ? { continueOn: definition.body.continueOn } : {}),
+      },
+      actor,
+      now,
+      trigger,
+    );
+  }
   /** Starts the runs schedules call for, once per slot across computers. */
   private async fireSchedules(host: WorkflowHost, backend: Backend) {
-    const me = host.self();
     const now = this.now;
     for (const summary of this.summaries.values()) {
       if (summary.kind !== 'definition' || !summary.schedules.length) continue;
-      const runsOn = summary.runsOn || me.environmentId;
-      const here =
-        runsOn === me.environmentId ||
-        (summary.elsewhere !== false && me.server && host.online(runsOn) !== true);
-      if (!here) continue;
+      if (!this.triggersHere(summary, host)) continue;
       for (const schedule of summary.schedules) {
         const slot = latestSlot({ ...(schedule as Schedule), enabled: true }, now);
         if (slot == null) continue;
@@ -743,19 +861,22 @@ export class WorkflowClient {
         this.fired.set(key, slot);
         // A slot more than a day old is not started late.
         if (slot < now - 24 * 60 * 60 * 1000) continue;
-        const definition = await this.definition(summary.id).catch(() => undefined);
-        if (!definition) continue;
-        const id = await slotRunId(summary.id, schedule.id, slot);
-        const run = staticRun(
-          summary.id,
-          definition.body,
-          definition.revision,
-          {},
-          { preferred: runsOn, elsewhere: definition.body.elsewhere },
+        const at = new Date(slot).toISOString();
+        const nodeId =
+          schedule.nodeId ??
+          (await this.definition(summary.id).catch(() => undefined))?.body.graph.nodes.find(
+            (n) => n.type === 'start',
+          )?.id;
+        if (!nodeId) continue;
+        const run = await this.triggered(
+          summary,
+          { nodeId, kind: 'schedule', text: at, payload: { scheduledFor: at } },
           { kind: 'schedule', scheduleId: schedule.id },
           now,
         );
-        run.slot = { scheduleId: schedule.id, at: new Date(slot).toISOString() };
+        if (!run) continue;
+        run.slot = { scheduleId: schedule.id, at };
+        const id = await slotRunId(summary.id, schedule.id, slot);
         // Another computer that started this slot already holds its run.
         await backend
           .put({
@@ -769,6 +890,90 @@ export class WorkflowClient {
       }
     }
     void this.refresh();
+  }
+  private triggerWatch = new TriggerWatch();
+  /** Starts the runs that chat, workflow, computer and usage triggers call for. */
+  private async fireTriggers(host: WorkflowHost, backend: Backend) {
+    const summaries = [...this.summaries.values()];
+    const watched = summaries.filter(
+      (s) => s.kind === 'definition' && s.triggers.length && this.triggersHere(s, host),
+    );
+    const fires = this.triggerWatch.observe(
+      host,
+      watched,
+      summaries.filter((s) => s.kind === 'run'),
+      this.chats,
+    );
+    for (const fire of fires) {
+      const summary = this.summaries.get(fire.definitionId);
+      if (!summary) continue;
+      const now = this.now;
+      const run = await this.triggered(
+        summary,
+        { nodeId: fire.nodeId, kind: fire.kind, text: fire.text, payload: fire.payload },
+        { kind: 'trigger', nodeId: fire.nodeId, trigger: fire.kind },
+        now,
+      );
+      if (!run) continue;
+      const id = await eventRunId(fire.definitionId, fire.nodeId, fire.key);
+      await backend
+        .put({
+          id,
+          kind: 'run',
+          expected: null,
+          body: run,
+          events: [
+            { kind: 'started', text: `Started by its ${triggerLabels[fire.kind].toLowerCase()} trigger` },
+          ],
+        })
+        .catch(() => {});
+    }
+    if (fires.length) void this.refresh();
+  }
+  /**
+   * Builds a run a webhook started through the relay, which knows only its workflow, trigger and
+   * request, from the workflow as saved now. Undefined when another computer did, or the
+   * workflow is gone (the run then fails).
+   */
+  private async materialize(id: string, pending: WorkflowRun, revision: number, backend: Backend) {
+    const definitionId = pending.definition?.id;
+    const summary = definitionId ? this.summaries.get(definitionId) : undefined;
+    const trigger = pending.trigger;
+    const built =
+      summary && trigger
+        ? await this.triggered(
+            summary,
+            {
+              nodeId: trigger.nodeId,
+              kind: 'webhook',
+              text: trigger.text,
+              payload: trigger.payload,
+            },
+            pending.createdBy,
+            Date.parse(pending.createdAt) || this.now,
+          )
+        : undefined;
+    const run: WorkflowRun = built
+      ? { ...built, createdAt: pending.createdAt, startedAt: pending.startedAt, driver: pending.driver }
+      : {
+          ...pending,
+          pending: undefined,
+          status: 'failed',
+          detail: 'Its workflow is no longer saved.',
+          endedAt: new Date(this.now).toISOString(),
+        };
+    delete run.pending;
+    const result = await backend
+      .put({
+        id,
+        kind: 'run',
+        expected: revision,
+        body: run,
+        events: built ? [] : [{ kind: 'failed', text: 'Its workflow is no longer saved.' }],
+      })
+      .catch(() => undefined);
+    if (!result?.ok || !built) return undefined;
+    return { run, revision: result.doc.revision };
   }
 
   // ---- Tool calls -----------------------------------------------------------------------------
@@ -789,7 +994,15 @@ export class WorkflowClient {
           title: conversation?.title ?? '',
         });
       } else if ((missionTools as readonly string[]).includes(call.tool)) {
-        const entry = call.mission ? this.drivers.get(call.mission.runId) : undefined;
+        let entry = call.mission ? this.drivers.get(call.mission.runId) : undefined;
+        // A mission started from this chat a moment ago may still be being claimed here.
+        for (let tries = 0; !entry && call.mission && tries < 20; tries++) {
+          const known = this.summaries.get(call.mission.runId);
+          if (known && (!runActive(known.status) || known.preferred !== this.self())) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          void this.supervise();
+          entry = this.drivers.get(call.mission.runId);
+        }
         if (!entry) {
           const summary = call.mission ? this.summaries.get(call.mission.runId) : undefined;
           throw new Error(

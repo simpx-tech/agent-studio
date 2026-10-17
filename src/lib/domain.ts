@@ -244,6 +244,8 @@ export const messageSchema = z
     tookOver: z.string().uuid().optional(),
     // The usage limit that stopped the reply, in the provider's words; never replayed.
     usageLimit: usageLimitSchema.optional(),
+    // A message a workflow wrote in the chat, such as a mission's update, not the user's own.
+    sentBy: z.literal('workflow').optional(),
   })
   .refine(
     (message) =>

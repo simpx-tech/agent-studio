@@ -8,11 +8,14 @@ import {
   graphIssues,
   isNodeType,
   keyFrom,
+  nodeConfig,
   nodeIdSchema,
   nodeKeySchema,
   nodeSchema,
   readDefinition,
   readRun,
+  triggerOf,
+  webhookSecret,
   type Actor,
   type GraphIssue,
   type WorkflowDefinition,
@@ -96,6 +99,7 @@ const inputs = {
     .object({
       id: z.string(),
       inputs: z.record(z.string(), z.string()).optional(),
+      trigger: z.string().optional(),
       computer: z.string().optional(),
     })
     .strict(),
@@ -297,18 +301,25 @@ export async function generalCall(
         );
       const before = existing ? readDefinition(existing.body) : undefined;
       const at = new Date(now).toISOString();
-      const schedules = graph.nodes.some(
-        (n) =>
-          n.type === 'start' &&
-          Array.isArray((n.config as { schedules?: unknown[] }).schedules) &&
-          (n.config as { schedules: unknown[] }).schedules.length,
-      );
+      // A webhook keeps the secret it had, or gets one; agents leave it empty.
+      for (const node of graph.nodes) {
+        if (node.type !== 'start' || triggerOf(node) !== 'webhook') continue;
+        const config = node.config as { webhook?: { secret?: string } };
+        if ((config.webhook?.secret ?? '').length >= 16) continue;
+        const old = before?.graph.nodes.find((n) => n.id === node.id);
+        const kept = old ? nodeConfig(old, 'start').webhook.secret : '';
+        config.webhook = { ...config.webhook, secret: kept.length >= 16 ? kept : webhookSecret() };
+      }
+      // A workflow its triggers start runs on a computer of its own: this one unless it has one.
+      const triggered = graph.nodes.some((n) => n.type === 'start' && triggerOf(n) !== 'manual');
       const definition: WorkflowDefinition = {
         name: input.name,
         description: input.description ?? before?.description ?? '',
         graph,
-        runsOn: before?.runsOn || (schedules ? host.self().environmentId : ''),
+        runsOn: before?.runsOn || (triggered ? host.self().environmentId : ''),
         elsewhere: before?.elsewhere ?? true,
+        ...(before?.continueOn ? { continueOn: before.continueOn } : {}),
+        ...(before?.assistant ? { assistant: before.assistant } : {}),
         createdAt: before?.createdAt ?? at,
         updatedAt: at,
         createdBy: before?.createdBy ?? actor,
@@ -342,6 +353,10 @@ export async function generalCall(
         );
       const computer = input.computer ? findComputer(host, input.computer) : undefined;
       if (input.computer && !computer) throw new Error(`No computer is called ${input.computer}.`);
+      const trigger = input.trigger
+        ? definition.graph.nodes.find((n) => n.type === 'start' && n.key === input.trigger)
+        : undefined;
+      if (input.trigger && !trigger) throw new Error(`No trigger step has the key ${input.trigger}.`);
       const run = staticRun(
         input.id,
         definition,
@@ -350,9 +365,11 @@ export async function generalCall(
         {
           preferred: computer?.environmentId ?? host.self().environmentId,
           elsewhere: definition.elsewhere,
+          ...(definition.continueOn ? { continueOn: definition.continueOn } : {}),
         },
         actor,
         now,
+        trigger ? { nodeId: trigger.id, kind: 'manual' } : undefined,
       );
       const id = crypto.randomUUID();
       await host.createRun(id, run);

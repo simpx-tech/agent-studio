@@ -154,7 +154,7 @@ Terminal/session operations such as `/resume`, `/workflows`, and `/loop` remain 
 
 ## Workflows and missions
 
-Agent Studio's own workflows automate work across chats, agents, accounts and computers, from the sidebar's **Workflows** tab: static workflows are graphs of steps you or an agent draw and edit, and missions give an orchestrator agent a goal it pursues with its own agents for as long as it takes. Both show live in a 2D graph with their history, and run on whichever computer drives them, handing over when it goes offline. Chats can create, run and follow them with the workflow tools. See [Workflows](WORKFLOWS.md).
+Agent Studio's own workflows automate work across chats, agents, accounts and computers, from the **Workflows** button above the sidebar's tabs, which starts a workflow chat: static workflows are graphs of steps you and the chat's agent draw and edit, started by any of their triggers, and missions give an orchestrator agent, the chat's own, a goal it pursues with its own agents for as long as it takes. Both show live in a 2D graph beside their chat with their history, and run on the computer chosen, handing over to the ones allowed when it goes offline. Any chat can create, run and follow them with the workflow tools. See [Workflows](WORKFLOWS.md).
 
 ## Claude workflows
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { MessageSquare, Pencil, Plus, RotateCcw, SkipForward, Trash2, X } from '@lucide/svelte';
   import QuestionForm from './QuestionForm.svelte';
+  import DriverPicker from './DriverPicker.svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
   import { messageText, type Conversation } from '$lib/domain';
   import {
@@ -9,11 +10,13 @@
     isNodeType,
     questionRequest,
     type Activation,
+    type RunDriverChoice,
     type RunNote,
+    type RunQuestion,
     type WorkflowEvent,
     type WorkflowRun,
   } from '$lib/workflow-model';
-  import { chatActivity } from '$lib/workflow-view';
+  import { chatActivity, type DriverChoice } from '$lib/workflow-view';
   import type { QuestionAnswer } from '$lib/questions';
   let {
     run,
@@ -27,6 +30,8 @@
     command,
     answer,
     saveNote,
+    drivers,
+    changeDriver,
     close,
   }: {
     run: WorkflowRun;
@@ -42,8 +47,30 @@
     saveNote: (
       note: Pick<RunNote, 'title' | 'text'> & { id?: string; deleted?: boolean },
     ) => Promise<void>;
+    /** The computers that run workflows, and a change of where this run continues. */
+    drivers?: DriverChoice[];
+    changeDriver?: (driver: RunDriverChoice) => void;
     close?: () => void;
   } = $props();
+  let confirming = $state<string>();
+  let confirmError = $state('');
+  async function decide(item: RunQuestion, approve: boolean) {
+    confirming = item.id;
+    confirmError = '';
+    try {
+      await answer({
+        requestId: item.id,
+        skipped: false,
+        answers: [
+          { id: 'answer', values: [approve ? item.confirm!.approve : item.confirm!.reject] },
+        ],
+      });
+    } catch (error) {
+      confirmError = String(error).replace(/^Error: /, '');
+    } finally {
+      confirming = undefined;
+    }
+  }
   let tab = $state<'details' | 'history' | 'notes' | 'chats'>('details');
   let editing = $state<{ id?: string; title: string; text: string }>();
   let noteError = $state('');
@@ -171,7 +198,27 @@
   {#if pending.length}
     <div class="questions">
       {#each pending as item (item.id)}
-        <QuestionForm request={questionRequest(item)} running={active} send={answer} />
+        {#if item.confirm}
+          <div class="confirm" role="group" aria-label="Confirm">
+            {#if item.questions[0].header}<strong>{item.questions[0].header}</strong>{/if}
+            <p class="prose">{item.questions[0].question}</p>
+            <div class="confirm-actions">
+              <button
+                class="secondary"
+                disabled={!active || confirming === item.id}
+                onclick={() => void decide(item, false)}>{item.confirm.reject}</button
+              >
+              <button
+                class="primary"
+                disabled={!active || confirming === item.id}
+                onclick={() => void decide(item, true)}>{item.confirm.approve}</button
+              >
+            </div>
+            {#if confirmError}<p class="error" role="alert">{confirmError}</p>{/if}
+          </div>
+        {:else}
+          <QuestionForm request={questionRequest(item)} running={active} send={answer} />
+        {/if}
       {/each}
     </div>
   {/if}
@@ -313,6 +360,16 @@
         </dl>
         {#if run.output}<h4>Output</h4>
           {@render long('output', run.output)}{/if}
+        {#if drivers?.length && changeDriver}
+          <div class="driver">
+            <DriverPicker
+              {drivers}
+              value={run.driver}
+              disabled={!active}
+              onchange={(next) => changeDriver(next)}
+            />
+          </div>
+        {/if}
       {/if}
     {:else if tab === 'history'}
       {#if !events.length}<p class="muted">Nothing yet.</p>{/if}
@@ -391,6 +448,28 @@
 </aside>
 
 <style>
+  .confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius-lg);
+    background: var(--accent-soft);
+  }
+  .confirm .prose {
+    margin: 0;
+  }
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .driver {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
   .run-panel {
     display: flex;
     flex-direction: column;

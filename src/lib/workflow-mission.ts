@@ -43,6 +43,7 @@ export function newMission({
   driver,
   actor,
   now,
+  chat,
 }: {
   title: string;
   text: string;
@@ -51,6 +52,9 @@ export function newMission({
   driver: WorkflowRun['driver'];
   actor: Actor;
   now: number;
+  // A mission started from a chat: that chat is its first orchestrator session, whose first
+  // message is the mission as you wrote it.
+  chat?: { conversationId: string; environmentId: string; connectionId?: string };
 }): WorkflowRun {
   const at = iso(now);
   return readRun({
@@ -63,6 +67,38 @@ export function newMission({
     createdBy: actor,
     driver,
     mission: { text, ...(location ? { location } : {}), orchestrator },
+    ...(chat
+      ? {
+          sessions: [
+            {
+              conversationId: chat.conversationId,
+              environmentId: chat.environmentId,
+              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
+              startedAt: at,
+              reason: 'start',
+              turns: 1,
+              failures: 0,
+            },
+          ],
+          agents: [
+            {
+              conversationId: chat.conversationId,
+              revision: 1,
+              role: 'orchestrator',
+              title: 'Orchestrator 1',
+              environmentId: chat.environmentId,
+              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
+              provider: orchestrator.provider,
+              model: orchestrator.model,
+              reasoning: orchestrator.reasoning,
+              ...(location ? { location } : {}),
+              listed: false,
+              status: 'running',
+              startedAt: at,
+            },
+          ],
+        }
+      : {}),
   })!;
 }
 const firstWords = (text: string) => {
@@ -419,7 +455,8 @@ async function driveOrchestrator(driver: RunDriver) {
     driver.change();
   };
   if (session.retryAt && Date.parse(session.retryAt) > driver.now) return;
-  if (last?.role === 'assistant' && last.status !== 'complete' && last.id === session.replyId) {
+  // The reply the engine asked for, or the one to a message you wrote in the chat.
+  if (last?.role === 'assistant' && last.status !== 'complete') {
     const error = last.error ?? '';
     if (last.usageLimit || /usage limit|rate limit|hit your/i.test(error)) {
       const settings = conversation.settings;
@@ -451,20 +488,22 @@ async function driveOrchestrator(driver: RunDriver) {
     if (/interrupted when the app closed|no longer running|went on in the original/i.test(error))
       return send(driver, session, conversation.id, missionResume);
     if (last.status === 'error') {
-      const failures = session.failures + 1;
-      if (failures >= 3) {
-        set({ failures });
-        endSession(driver, session, 'failed');
-        driver.event('session', 'The orchestrator failed three times; starting a new session');
-        return;
-      }
-      if (!session.retryAt)
+      // Each failure counts once: when it is first seen, before the wait for its retry.
+      if (!session.retryAt) {
+        const failures = session.failures + 1;
+        if (failures >= 3) {
+          set({ failures });
+          endSession(driver, session, 'failed');
+          driver.event('session', 'The orchestrator failed three times; starting a new session');
+          return;
+        }
         return set({ failures, retryAt: iso(driver.now + 30_000 * 4 ** (failures - 1)) });
-      set({ failures, retryAt: undefined });
+      }
+      set({ retryAt: undefined });
       return send(driver, session, conversation.id, missionRetry(error));
     }
     // Stopped in its chat: it waits for the next event or reminder.
-  }
+  } else if (last?.role === 'assistant' && session.failures) set({ failures: 0 });
   if (run.status !== 'running') return;
   if (run.inbox.length) {
     const gather = memory(driver);
@@ -477,7 +516,11 @@ async function driveOrchestrator(driver: RunDriver) {
           ? host.conversation(item.conversationId)?.messages.find((m) => m.id === item.messageId)
           : undefined;
       return message && item.kind === 'agent' && message.status === 'complete'
-        ? { ...item, reply: replyText(message) }
+        ? {
+            ...item,
+            reply: replyText(message),
+            agent: run.agents.find((a) => a.conversationId === item.conversationId)?.title,
+          }
         : item;
     });
     run.inbox = [];

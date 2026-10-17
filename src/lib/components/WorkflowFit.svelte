@@ -3,10 +3,20 @@
   // Fits the graph into view once its cards are measured and whenever `token` changes, as after a
   // step is added or the canvas changes size. A graph too wide to read whole shows its start at a
   // readable size instead, since the graph reads from left to right.
-  let { token, width, height }: { token: number; width: number; height: number } = $props();
+  let {
+    token,
+    width,
+    height,
+    readable = 0.65,
+  }: {
+    token: number;
+    width: number;
+    height: number;
+    /** The smallest zoom that fits a whole graph; a wider one shows its start at this zoom. */
+    readable?: number;
+  } = $props();
   const flow = useSvelteFlow();
   const initialized = useNodesInitialized();
-  const readable = 0.65;
   const pad = 24;
   let fitted = false;
   let seen: number | undefined;

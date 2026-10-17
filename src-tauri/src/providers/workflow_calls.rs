@@ -46,7 +46,7 @@ pub fn known(name: &str) -> bool {
 pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a mission with mission_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both appear under Workflows in Agent Studio's sidebar.";
 
 const STEPS: &str = "Steps (type: settings in config; outputs):
-- start: inputs [{name, label, default, multiline}], schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]; out. Exactly one.
+- start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any run or mission), statuses: [completed|failed|stopped]}. webhook: webhook {secret} (leave it empty; the editor makes one), started by a POST to its URL. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. Its output is what fired it (a chat's reply, a run's output, the webhook's body); out.
 - agent: prompt, location {computerId, environmentId, path} (omit for the driving computer, empty path for a Standalone folder), provider claude|codex|gemini, connectionId (an account's connection id; empty for the least used account), model (empty for the CLI default), reasoning, json (ask for a JSON reply), schema (a JSON Schema as text), chat continue|new (a repeated run for the same loop item continues its chat or starts a new one), title, listed (show the chat in Active), instructions; out, error.
 - message: target step|chat, step (the key of an earlier step whose chat it uses) or conversationId, text, mode next|steer, wait; out, error.
 - read: target, step or conversationId, what reply|messages|chat, count; out, error.
@@ -55,6 +55,7 @@ const STEPS: &str = "Steps (type: settings in config; outputs):
 - merge: waits for every incoming branch; out.
 - wait: mode for|until, amount, unit seconds|minutes|hours|days, until (HH:MM or an ISO time); out.
 - ask: header, question, choices, multiple; out (the answer).
+- confirm: header, question, approve, reject (button labels); approved, rejected.
 - notify: title, text; out.
 - set: values [{name, value, json}]; out (an object of the values).
 - screen: like agent without prompt, plus screenTitle, spec (what the screen shows and does), screenId (to update one); out, error.
@@ -62,7 +63,7 @@ const STEPS: &str = "Steps (type: settings in config; outputs):
 - screenData: environmentId, screenId, op load|save, key, value, json; out.
 - workflow: workflowId, inputs {name: value}, wait; out (its output), error.
 - end: output, status completed|failed.
-Text settings are templates: {{input.NAME}} a start input, {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
+Text settings are templates: {{input.NAME}} a manual trigger's input, {{trigger.output}} and {{trigger.json.PATH}} what fired the run, {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{
@@ -107,9 +108,10 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
             "nodes":{"type":"array","items":{"type":"object"}},
             "edges":{"type":"array","items":{"type":"object"}}
         }), &["name","nodes","edges"]),
-        tool("workflow_run", "Start a run of a saved workflow with its start inputs. computer names the computer that drives it (an id or name); it defaults to this one. Returns the run's id; follow it with workflow_status.", json!({
+        tool("workflow_run", "Start a run of a saved workflow with its inputs, at its first manual trigger or at the trigger step whose key you name. computer names the computer that drives it (an id or name); it defaults to this one. Returns the run's id; follow it with workflow_status.", json!({
             "id":{"type":"string"},
             "inputs":{"type":"object","additionalProperties":{"type":"string"}},
+            "trigger":{"type":"string"},
             "computer":{"type":"string"}
         }), &["id"]),
         tool("workflow_status", "Read a run or mission: its status, what it waits for, each step or agent with its status and output, open questions and recent history.", json!({"id":{"type":"string"}}), &["id"]),

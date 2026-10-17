@@ -37,6 +37,61 @@ describe('missions', () => {
     expect(driver.run.agents[0].listed).toBe(false);
   });
 
+  it('takes the chat a mission was started from as its first orchestrator session', async () => {
+    const t = testHost();
+    const chat = crypto.randomUUID();
+    t.conversations.set(chat, {
+      id: chat,
+      title: 'Game assets',
+      settings: { provider: 'claude', model: '', reasoning: 'max', instructions: '' },
+      createdAt: 'a',
+      updatedAt: 'a',
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          role: 'user',
+          status: 'complete',
+          createdAt: 'a',
+          blocks: [{ type: 'markdown', text: 'Make every asset.' }],
+        },
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          status: 'running',
+          createdAt: 'a',
+          blocks: [],
+        },
+      ],
+    });
+    const run = newMission({
+      title: '',
+      text: 'Make every asset.',
+      orchestrator: { provider: 'claude', connectionId: '', model: '', reasoning: 'max' },
+      driver: { preferred: t.environmentId, elsewhere: true },
+      actor: { kind: 'user' },
+      now: t.now(),
+      chat: { conversationId: chat, environmentId: t.environmentId },
+    });
+    expect(run.title).toBe('Make every asset.');
+    const driver = await t.driver(run);
+    await driver.tick(tickMission);
+    // No other session starts while the chat's own reply runs.
+    expect(t.started).toEqual([]);
+    expect(driver.run.agents).toMatchObject([
+      { conversationId: chat, role: 'orchestrator', status: 'running' },
+    ]);
+    // A failed reply to your own message is retried once, after its wait.
+    const reply = t.conversations.get(chat)!.messages.at(-1)!;
+    Object.assign(reply, { status: 'error', error: 'Network error' });
+    await driver.tick(tickMission);
+    expect(driver.run.sessions[0].failures).toBe(1);
+    t.advance(31_000);
+    await driver.tick(tickMission);
+    expect(driver.run.sessions[0].failures).toBe(1);
+    expect(t.sent.at(-1)).toMatchObject({ conversationId: chat });
+    expect(t.sent.at(-1)!.text).toMatch(/^\[Mission update\]/);
+  });
+
   it('spawns agents with the mission and its notes, and wakes the orchestrator with their replies', async () => {
     const { t, driver, tick } = await mission();
     await tick();
@@ -68,7 +123,12 @@ describe('missions', () => {
     await tick();
     expect(t.sent).toHaveLength(1);
     expect(t.sent[0].conversationId).toBe(orchestrator);
-    expect(t.sent[0].text).toContain('Agent "Sword"');
+    // One line an event, then the agents' replies.
+    const [header, event, blank] = t.sent[0].text.split('\n');
+    expect(header).toBe('[Mission update]');
+    expect(event).toMatch(/^- \S+ Agent "Sword" \([0-9a-f-]{36}\) finished\.$/);
+    expect(blank).toBe('');
+    expect(t.sent[0].text).toContain('Reply of "Sword"');
     expect(t.sent[0].text).toContain('The sword is in C:\\game\\sword.glb.');
     expect(driver.run.inbox).toEqual([]);
     expect(t.released).toContain(worker.id);

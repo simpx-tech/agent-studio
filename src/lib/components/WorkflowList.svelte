@@ -6,25 +6,22 @@
     CircleX,
     LoaderCircle,
     MessageCircleQuestionMark,
-    Plus,
     Target,
     Workflow,
   } from '@lucide/svelte';
   import type { WorkflowClient } from '$lib/workflow-client.svelte';
-  import type { WorkflowSummary } from '$lib/workflow-model';
+  import { triggerLabels, type TriggerKind, type WorkflowSummary } from '$lib/workflow-model';
   import { scheduleLabel } from '$lib/workflow-schedule';
   let {
     client,
     query,
     selected,
     open,
-    create,
   }: {
     client: WorkflowClient;
     query: string;
     selected?: string;
     open: (id: string) => void;
-    create: (kind: 'workflow' | 'mission') => void;
   } = $props();
   const matches = (summary: WorkflowSummary) =>
     !query.trim() || summary.title.toLowerCase().includes(query.trim().toLowerCase());
@@ -101,10 +98,6 @@
 {/snippet}
 
 <div class="workflow-list">
-  <div class="workflow-actions">
-    <button class="secondary" onclick={() => create('workflow')}><Plus size={14} />Workflow</button>
-    <button class="secondary" onclick={() => create('mission')}><Target size={14} />Mission</button>
-  </div>
   {#if client.mode === 'unavailable'}
     <p class="workflow-empty">Update the relay to use workflows here.</p>
   {:else}
@@ -123,6 +116,7 @@
         [
           `${summary.steps} step${summary.steps === 1 ? '' : 's'}`,
           ...summary.schedules.map((s) => scheduleLabel(s as never)),
+          ...summary.triggers.map((t) => triggerLabels[t.kind as TriggerKind] ?? t.kind),
         ].join(' · '),
       )}{:else}<p class="workflow-empty">No workflows.</p>{/each}
     {#if finished.length}
@@ -141,16 +135,6 @@
     flex-direction: column;
     gap: 2px;
     padding: 4px 6px 12px;
-  }
-  .workflow-actions {
-    display: flex;
-    gap: 6px;
-    padding: 4px 4px 8px;
-  }
-  .workflow-actions button {
-    flex: 1;
-    height: 30px;
-    font-size: var(--text-sm);
   }
   h2 {
     margin: 10px 8px 4px;

@@ -26,6 +26,7 @@ export const nodeTypeIds = [
   'merge',
   'wait',
   'ask',
+  'confirm',
   'notify',
   'set',
   'screen',
@@ -85,21 +86,78 @@ export const scheduleSchema = z.object({
 });
 export type Schedule = z.infer<typeof scheduleSchema>;
 
+/**
+ * What starts a run at a Trigger step. A workflow may have several, each starting its own runs:
+ * you (Run, or an agent's workflow_run), a schedule, a chat's reply ending or asking, another
+ * workflow's run ending, a request to its webhook, a computer coming online or going offline, or
+ * an account whose usage limit reset.
+ */
+export const triggerKinds = [
+  'manual',
+  'schedule',
+  'chat',
+  'workflow',
+  'webhook',
+  'computer',
+  'usage',
+] as const;
+export type TriggerKind = (typeof triggerKinds)[number];
+export const chatEvents = ['completed', 'failed', 'stopped', 'question'] as const;
+export const runEndings = ['completed', 'failed', 'stopped'] as const;
+const anyId = z.union([uuid, z.literal('')]).default('');
+export const triggerConfigShape = {
+  trigger: z.enum(triggerKinds).default('manual'),
+  inputs: z
+    .array(
+      z.object({
+        name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
+        label: z.string().default(''),
+        default: z.string().default(''),
+        multiline: z.boolean().default(false),
+      }),
+    )
+    .default([]),
+  schedules: z.array(scheduleSchema).default([]),
+  // A reply in a matching chat: every filter left empty matches any chat.
+  chat: z
+    .object({
+      events: z.array(z.enum(chatEvents)).default(['completed']),
+      environmentId: anyId,
+      path: z.string().default(''),
+      provider: z.union([z.enum(providerIds), z.literal('')]).default(''),
+      title: z.string().default(''),
+      // Chats workflows start, left out unless asked for, so a workflow never wakes itself.
+      workflowChats: z.boolean().default(false),
+    })
+    .prefault({}),
+  workflow: z
+    .object({
+      // A saved workflow whose runs it follows, or '' for missions and runs of any workflow.
+      workflowId: anyId,
+      statuses: z.array(z.enum(runEndings)).default(['completed']),
+    })
+    .prefault({}),
+  // The relay starts a run when its URL receives a POST; the secret is in the URL.
+  webhook: z.object({ secret: z.string().default('') }).prefault({}),
+  computer: z
+    .object({
+      environmentId: anyId,
+      event: z.enum(['online', 'offline']).default('online'),
+    })
+    .prefault({}),
+  // An account, or any account of a provider, whose 5-hour or weekly limit reset after it was
+  // reached.
+  usage: z
+    .object({
+      connectionId: anyId,
+      provider: z.union([z.enum(providerIds), z.literal('')]).default(''),
+    })
+    .prefault({}),
+};
+
 /** Each step's settings, with defaults for anything left out. */
 export const configSchemas = {
-  start: z.object({
-    inputs: z
-      .array(
-        z.object({
-          name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
-          label: z.string().default(''),
-          default: z.string().default(''),
-          multiline: z.boolean().default(false),
-        }),
-      )
-      .default([]),
-    schedules: z.array(scheduleSchema).default([]),
-  }),
+  start: z.object(triggerConfigShape),
   agent: z.object({
     ...agentChoiceShape,
     prompt: z.string().default(''),
@@ -147,6 +205,13 @@ export const configSchemas = {
     question: z.string().default(''),
     choices: z.array(z.string()).default([]),
     multiple: z.boolean().default(false),
+  }),
+  // Asks you to approve, then follows Approved or Rejected.
+  confirm: z.object({
+    header: z.string().default(''),
+    question: z.string().default(''),
+    approve: z.string().default('Approve'),
+    reject: z.string().default('Reject'),
   }),
   notify: z.object({
     title: z.string().default(''),
@@ -233,6 +298,7 @@ export const actorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('agent'), conversationId: uuid, title: z.string().optional() }),
   z.object({ kind: z.literal('schedule'), scheduleId: z.string() }),
   z.object({ kind: z.literal('workflow'), runId: uuid }),
+  z.object({ kind: z.literal('trigger'), nodeId: z.string(), trigger: z.string() }),
 ]);
 export type Actor = z.infer<typeof actorSchema>;
 
@@ -240,9 +306,13 @@ export const definitionSchema = z.object({
   name: z.string().trim().min(1),
   description: z.string().default(''),
   graph: graphSchema.default({ nodes: [], edges: [] }),
-  // The computer that runs scheduled runs, and whether another may when it is offline.
+  // The computer that runs its triggered runs, and whether another may when it is offline:
+  // any computer, or only those `continueOn` names when it does.
   runsOn: z.union([uuid, z.literal('')]).default(''),
   elsewhere: z.boolean().default(true),
+  continueOn: z.array(uuid).optional(),
+  // The chat in which you change it with an agent, which the chat lists leave out.
+  assistant: z.object({ conversationId: uuid }).optional(),
   createdAt: time,
   updatedAt: time,
   createdBy: actorSchema,
@@ -260,11 +330,28 @@ const outputShape = {
 export const outputSchema = z.object(outputShape);
 export type StepOutput = z.infer<typeof outputSchema>;
 
+/**
+ * The computer that drives a run, and which may continue it while that one is offline: any
+ * computer (`elsewhere`), or, when `continueOn` names some, only those.
+ */
+export const driverSchema = z.object({
+  preferred: uuid,
+  elsewhere: z.boolean().default(true),
+  continueOn: z.array(uuid).optional(),
+});
+export type RunDriverChoice = z.infer<typeof driverSchema>;
+/** Whether `environmentId` may continue a run its preferred computer left. */
+export const mayContinue = (driver: Partial<RunDriverChoice>, environmentId: string) =>
+  driver.elsewhere !== false &&
+  (driver.continueOn === undefined || driver.continueOn.includes(environmentId));
+
 export const commandSchema = z.object({
   id: uuid,
-  kind: z.enum(['pause', 'resume', 'stop', 'retry', 'skip']),
+  kind: z.enum(['pause', 'resume', 'stop', 'retry', 'skip', 'driver']),
   // A step's activation for retry and skip.
   activationId: z.string().optional(),
+  // Where the run continues, for `driver`.
+  driver: driverSchema.optional(),
   at: time,
   by: z.string().optional(),
 });
@@ -277,6 +364,8 @@ export const runQuestionSchema = z.object({
   status: z.enum(['pending', 'answered', 'cancelled']),
   source: z.enum(['step', 'orchestrator']),
   activationId: z.string().optional(),
+  // A Confirm step's question, answered with one of its two buttons.
+  confirm: z.object({ approve: z.string(), reject: z.string() }).optional(),
   createdAt: time,
   questions: z
     .array(
@@ -503,8 +592,19 @@ export const runSchema = z.object({
   startedAt: time,
   endedAt: time.optional(),
   createdBy: actorSchema,
-  driver: z.object({ preferred: uuid, elsewhere: z.boolean().default(true) }),
+  driver: driverSchema,
   definition: z.object({ id: uuid, revision: count, name: z.string() }).optional(),
+  // The trigger that started it and what it handed over.
+  trigger: z
+    .object({
+      nodeId: nodeIdSchema,
+      kind: z.string().min(1),
+      text: z.string().default(''),
+      payload: z.unknown().optional(),
+    })
+    .optional(),
+  // Started by a webhook through the relay: its driver builds the run from its workflow first.
+  pending: z.boolean().optional(),
   inputs: z.record(z.string(), z.string()).default({}),
   graph: graphSchema.default({ nodes: [], edges: [] }),
   mission: missionSchema.optional(),
@@ -591,10 +691,13 @@ export const summarySchema = z.object({
   listed: z.array(z.string()).default([]),
   preferred: z.string().optional(),
   elsewhere: z.boolean().optional(),
+  continueOn: z.array(z.string()).optional(),
   schedules: z
     .array(
       z.object({
         id: z.string(),
+        // The Trigger step the schedule starts runs at.
+        nodeId: z.string().optional(),
         every: z.string(),
         interval: z.number(),
         at: z.string(),
@@ -604,10 +707,36 @@ export const summarySchema = z.object({
       }),
     )
     .default([]),
+  // Triggers the computers running a workflow watch for: chat, workflow, computer and usage ones,
+  // with their settings. A webhook's secret never leaves its workflow.
+  triggers: z
+    .array(
+      z.object({
+        nodeId: z.string(),
+        kind: z.string(),
+        config: z.record(z.string(), z.unknown()).default({}),
+      }),
+    )
+    .default([]),
   runsOn: z.string().optional(),
   parent: z.string().optional(),
+  // The chat to open: a workflow's assistant chat, or a mission's orchestrator.
+  chat: z.string().optional(),
+  // What started a run.
+  trigger: z.string().optional(),
+  pending: z.boolean().optional(),
 });
 export type WorkflowSummary = z.infer<typeof summarySchema>;
+export type SummaryTrigger = WorkflowSummary['triggers'][number];
+
+/** The kind of a Trigger step, read from its settings as written. */
+export function triggerOf(node: { config?: unknown }): TriggerKind {
+  const config = (node.config ?? {}) as { trigger?: unknown; schedules?: unknown };
+  const kind = triggerKinds.find((k) => k === config.trigger);
+  if (kind) return kind;
+  // Steps written before triggers had kinds started runs by hand and on their schedules.
+  return Array.isArray(config.schedules) && config.schedules.length ? 'schedule' : 'manual';
+}
 
 const active = (status?: string) => status === 'running' || status === 'paused';
 export const runActive = (status?: string) => active(status);
@@ -631,34 +760,63 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
     conversations: [],
     listed: [],
     schedules: [],
+    triggers: [],
     alerts: [],
     detail: '',
     description: '',
   };
+  const ids = (value: unknown) =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : undefined;
   if (doc.kind === 'definition') {
     const graph = (body.graph ?? {}) as { nodes?: unknown };
-    const nodes = list(graph.nodes) as { type?: unknown; config?: Record<string, unknown> }[];
-    const start = nodes.find((n) => n?.type === 'start');
-    const schedules = list(start?.config?.schedules)
-      .map((s) => scheduleSchema.safeParse(s).data)
-      .filter((s): s is Schedule => !!s && s.enabled)
-      .map(({ id, every, interval, at, days, timezone, since }) => ({
-        id,
-        every,
-        interval,
-        at,
-        days,
-        timezone,
-        ...(since ? { since } : {}),
-      }));
+    const nodes = list(graph.nodes) as {
+      id?: unknown;
+      type?: unknown;
+      config?: Record<string, unknown>;
+    }[];
+    const schedules: WorkflowSummary['schedules'] = [];
+    const triggers: SummaryTrigger[] = [];
+    for (const node of nodes) {
+      if (node?.type !== 'start' || typeof node.id !== 'string') continue;
+      const kind = triggerOf(node);
+      if (kind === 'schedule')
+        for (const schedule of list(node.config?.schedules)) {
+          const s = scheduleSchema.safeParse(schedule).data;
+          if (!s?.enabled) continue;
+          const { id, every, interval, at, days, timezone, since } = s;
+          schedules.push({
+            id,
+            nodeId: node.id,
+            every,
+            interval,
+            at,
+            days,
+            timezone,
+            ...(since ? { since } : {}),
+          });
+        }
+      else if (kind === 'chat' || kind === 'workflow' || kind === 'computer' || kind === 'usage') {
+        const config = node.config?.[kind];
+        triggers.push({
+          nodeId: node.id,
+          kind,
+          config: config && typeof config === 'object' ? (config as Record<string, unknown>) : {},
+        });
+      } else if (kind === 'webhook') triggers.push({ nodeId: node.id, kind, config: {} });
+    }
+    const assistant = text((body.assistant as { conversationId?: unknown } | undefined)?.conversationId);
+    const continueOn = ids(body.continueOn);
     return {
       ...base,
       title: text(body.name) || 'Workflow',
       description: text(body.description),
       steps: nodes.length,
       schedules,
+      triggers,
       ...(text(body.runsOn) ? { runsOn: text(body.runsOn) } : {}),
       elsewhere: body.elsewhere !== false,
+      ...(continueOn ? { continueOn } : {}),
+      ...(assistant ? { chat: assistant, conversations: [assistant] } : {}),
     };
   }
   const status = runStatuses.find((s) => s === body.status);
@@ -673,9 +831,17 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
     if (typeof agent?.conversationId !== 'string') continue;
     (agent.listed === true ? listed : conversations).push(agent.conversationId);
   }
-  const driver = (body.driver ?? {}) as { preferred?: unknown; elsewhere?: unknown };
+  const driver = (body.driver ?? {}) as {
+    preferred?: unknown;
+    elsewhere?: unknown;
+    continueOn?: unknown;
+  };
   const definition = (body.definition ?? {}) as { id?: unknown };
   const parent = (body.parent ?? {}) as { runId?: unknown };
+  const sessions = list(body.sessions) as { conversationId?: unknown; endedAt?: unknown }[];
+  const session = sessions.filter((s) => !s?.endedAt).at(-1) ?? sessions.at(-1);
+  const continueOn = ids(driver.continueOn);
+  const trigger = text((body.trigger as { kind?: unknown } | undefined)?.kind);
   return {
     ...base,
     title: text(body.title) || 'Workflow',
@@ -693,6 +859,12 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
     listed,
     ...(text(driver.preferred) ? { preferred: text(driver.preferred) } : {}),
     elsewhere: driver.elsewhere !== false,
+    ...(continueOn ? { continueOn } : {}),
+    ...(body.mode === 'dynamic' && text(session?.conversationId)
+      ? { chat: text(session?.conversationId) }
+      : {}),
+    ...(trigger ? { trigger } : {}),
+    ...(body.pending === true ? { pending: true } : {}),
     ...(text(parent.runId) ? { parent: text(parent.runId) } : {}),
     alerts: list(body.alerts)
       .map((alert) => alertSchema.safeParse(alert).data)
@@ -716,7 +888,7 @@ export const nodeCatalog: Record<
   NodeType,
   { label: string; ports: string[]; input: boolean; description: string }
 > = {
-  start: { label: 'Start', ports: ['out'], input: false, description: 'Where a run begins.' },
+  start: { label: 'Trigger', ports: ['out'], input: false, description: 'What starts a run.' },
   agent: {
     label: 'Agent',
     ports: ['out', 'error'],
@@ -745,6 +917,12 @@ export const nodeCatalog: Record<
   merge: { label: 'Merge', ports: ['out'], input: true, description: 'Wait for every branch.' },
   wait: { label: 'Wait', ports: ['out'], input: true, description: 'Wait for a time.' },
   ask: { label: 'Ask', ports: ['out'], input: true, description: 'Ask you a question.' },
+  confirm: {
+    label: 'Confirm',
+    ports: ['approved', 'rejected'],
+    input: true,
+    description: 'Ask you to approve.',
+  },
   notify: { label: 'Notify', ports: ['out'], input: true, description: 'Send a notification.' },
   set: { label: 'Set', ports: ['out'], input: true, description: 'Compute values.' },
   screen: {
@@ -780,7 +958,26 @@ export const portLabels: Record<string, string> = {
   false: 'False',
   each: 'Each',
   done: 'Done',
+  approved: 'Approved',
+  rejected: 'Rejected',
 };
+/** What each kind of trigger is called on its step and in pickers. */
+export const triggerLabels: Record<TriggerKind, string> = {
+  manual: 'Manual',
+  schedule: 'Schedule',
+  chat: 'Chat',
+  workflow: 'Workflow ends',
+  webhook: 'Webhook',
+  computer: 'Computer',
+  usage: 'Usage reset',
+};
+/** A webhook's secret: 32 random bytes as base64url. */
+export function webhookSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let text = '';
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 /** The ports a step offers, whatever its type. */
 export const nodePorts = (type: string): string[] =>
   isNodeType(type) ? nodeCatalog[type].ports : ['out'];
@@ -836,7 +1033,7 @@ export function newDefinition(
     name,
     description: '',
     graph: {
-      nodes: [{ ...newNode('start', { x: 0, y: 0 }, []), key: 'start', title: 'Start' }],
+      nodes: [{ ...newNode('start', { x: 0, y: 0 }, []), key: 'start', title: 'Manual' }],
       edges: [],
     },
     createdAt: now,
@@ -876,8 +1073,7 @@ export function graphIssues(graph: WorkflowGraph): GraphIssue[] {
       });
   }
   const starts = graph.nodes.filter((n) => n.type === 'start');
-  if (!starts.length) issues.push({ message: 'Add a Start step.', blocking: true });
-  if (starts.length > 1) issues.push({ message: 'Keep one Start step.', blocking: true });
+  if (!starts.length) issues.push({ message: 'Add a trigger.', blocking: true });
   const edgeIds = new Set<string>();
   for (const edge of graph.edges) {
     if (edgeIds.has(edge.id))
@@ -922,7 +1118,7 @@ export function graphIssues(graph: WorkflowGraph): GraphIssue[] {
     if (!reached.has(node.id) && node.type !== 'start')
       issues.push({
         nodeId: node.id,
-        message: `${node.title || node.key} is not connected to Start.`,
+        message: `${node.title || node.key} is not connected to a trigger.`,
         blocking: false,
       });
   for (const node of graph.nodes) {
@@ -932,8 +1128,22 @@ export function graphIssues(graph: WorkflowGraph): GraphIssue[] {
     const missing = (what: string) =>
       issues.push({ nodeId: node.id, message: `${label}: ${what}`, blocking: true });
     switch (node.type) {
+      case 'start': {
+        const c = config as NodeConfig<'start'>;
+        if (c.trigger === 'schedule' && !c.schedules.some((s) => s.enabled))
+          missing('add a schedule.');
+        if (c.trigger === 'webhook' && c.webhook.secret.length < 16)
+          missing('create its webhook URL.');
+        if (c.trigger === 'chat' && !c.chat.events.length) missing('choose what in a chat starts it.');
+        if (c.trigger === 'workflow' && !c.workflow.statuses.length)
+          missing('choose which endings start it.');
+        break;
+      }
       case 'agent':
         if (!(config as NodeConfig<'agent'>).prompt.trim()) missing('write a prompt.');
+        break;
+      case 'confirm':
+        if (!(config as NodeConfig<'confirm'>).question.trim()) missing('write what to confirm.');
         break;
       case 'screen':
         if (!(config as NodeConfig<'screen'>).spec.trim()) missing('describe the screen.');

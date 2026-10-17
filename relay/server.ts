@@ -30,7 +30,13 @@ import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
 import { screenRequestSchema } from '../src/lib/screens.ts';
-import { handleWorkflows, recentAlerts, relayWorkflows } from './workflows.ts';
+import {
+  handleWorkflows,
+  hookPath,
+  recentAlerts,
+  relayWorkflows,
+  startFromHook,
+} from './workflows.ts';
 import {
   ImageUploadError,
   imageStore,
@@ -1030,6 +1036,7 @@ export function createRelay({
       workspace,
       sessions,
       push,
+      workflows,
       expire,
       handle,
       active,
@@ -1059,6 +1066,8 @@ export function createRelay({
     }
   }
   const sessions = browserSessions(registry, (workspace) => context(workspace).sessions, now);
+  // Webhook requests whose address named no webhook, by address, limited as pairing attempts are.
+  const hookAttempts = new Map<string, { count: number; expires: number }>();
   const server = createServer(async (req, res) => {
     // Refusals before a workspace is known close their connection, so a request that will never
     // be read cannot hold one open by sending its body slowly.
@@ -1073,6 +1082,46 @@ export function createRelay({
     try {
       if (req.url?.split('?')[0] === '/v1/browser-session') {
         await sessions.handle(req, res);
+        return;
+      }
+      // A webhook trigger's request (docs/WORKFLOWS.md), made without signing in: the secret in
+      // its address authorizes it, checked before its body is read.
+      const hook = req.url?.split('?')[0].match(hookPath);
+      if (hook) {
+        if (req.method !== 'POST') {
+          send(405, { error: 'A webhook takes POST requests.' });
+          return;
+        }
+        for (const [id, value] of hookAttempts) if (value.expires <= now()) hookAttempts.delete(id);
+        const address = req.socket.remoteAddress ?? 'unknown';
+        const attempt = hookAttempts.get(address);
+        if ((attempt?.count ?? 0) >= 10 || hookAttempts.size >= 10_000) {
+          send(429, { error: 'Too many webhook requests. Try again in a minute.' });
+          return;
+        }
+        const result = await startFromHook({
+          stores: [...contexts.values()].filter((c) => c.active()).map((c) => c.workflows),
+          workflowId: hook[1],
+          nodeId: hook[2],
+          secret: hook[3],
+          read: async () => {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) chunks.push(chunk as Buffer);
+            return Buffer.concat(chunks).toString('utf8');
+          },
+          now,
+        });
+        if (!result.ok) {
+          if (result.code === 404)
+            hookAttempts.set(address, {
+              count: (attempt?.count ?? 0) + 1,
+              expires: attempt?.expires ?? now() + 60_000,
+            });
+          send(result.code, { error: result.error });
+          return;
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ runId: result.runId }));
         return;
       }
       if (serveDownloads(req, res, downloadsDirectory) || servePublic(req, res, files)) return;

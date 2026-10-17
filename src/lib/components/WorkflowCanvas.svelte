@@ -13,6 +13,7 @@
   import { untrack } from 'svelte';
   import WorkflowCard from './WorkflowCard.svelte';
   import WorkflowFit from './WorkflowFit.svelte';
+  import WorkflowFlowBridge from './WorkflowFlowBridge.svelte';
   import { appearance } from '$lib/appearance.svelte';
   import type { GraphCard, GraphLink } from '$lib/workflow-view';
   let {
@@ -24,6 +25,7 @@
     connect,
     remove,
     moved,
+    dropped,
     openChat,
     label,
     fit = 0,
@@ -36,6 +38,15 @@
     connect?: (source: string, port: string, target: string) => void;
     remove?: (nodes: string[], edges: string[]) => void;
     moved?: (id: string, position: { x: number; y: number }) => void;
+    /**
+     * A connection dragged from a step's output and dropped on empty space: the new step goes
+     * there, `at` on the graph and `screen` where the pointer left it.
+     */
+    dropped?: (
+      from: { node: string; port: string },
+      at: { x: number; y: number },
+      screen: { x: number; y: number },
+    ) => void;
     openChat?: (conversationId: string) => void;
     label: string;
     /** Changes when the graph should be fit into view, as after a step is added. */
@@ -66,6 +77,8 @@
   let edges = $state.raw<Edge[]>([]);
   // Where the reader dragged cards of a run, which its live updates keep.
   const dragged = new Map<string, { x: number; y: number }>();
+  // A workflow keeps at least one trigger.
+  const triggers = $derived(cards.filter((card) => card.data.type === 'start').length);
   $effect(() => {
     const next = cards.map((card): Node => ({
       id: card.id,
@@ -73,7 +86,7 @@
       position: (!editable && dragged.get(card.id)) || card.position,
       data: { ...card.data, openChat, editable },
       selected: card.id === selected,
-      deletable: editable && card.data.type !== 'start',
+      deletable: editable && (card.data.type !== 'start' || triggers > 1),
       connectable: editable,
       draggable: true,
     }));
@@ -98,12 +111,36 @@
     // The workflow's own copy decides what the graph shows.
     return false;
   }
+  let toFlow: ((x: number, y: number) => { x: number; y: number }) | undefined;
+  function connectEnd(
+    event: MouseEvent | TouchEvent,
+    state: {
+      isValid: boolean | null;
+      fromNode: { id: string } | null;
+      fromHandle: { id?: string | null; type: string } | null;
+      toNode: unknown;
+    },
+  ) {
+    if (!editable || !dropped || !toFlow) return;
+    if (state.isValid || state.toNode || !state.fromNode || state.fromHandle?.type !== 'source')
+      return;
+    const point = 'changedTouches' in event ? event.changedTouches[0] : event;
+    if (!point) return;
+    dropped(
+      { node: state.fromNode.id, port: state.fromHandle.id ?? 'out' },
+      toFlow(point.clientX, point.clientY),
+      { x: point.clientX, y: point.clientY },
+    );
+  }
   async function beforeDelete({ nodes: gone, edges: cut }: { nodes: Node[]; edges: Edge[] }) {
-    if (editable)
+    if (editable) {
+      const starts = gone.filter((n) => (n.data as { type?: string }).type === 'start');
+      const keep = starts.length >= triggers ? starts[0]?.id : undefined;
       remove?.(
-        gone.filter((n) => (n.data as { type?: string }).type !== 'start').map((n) => n.id),
+        gone.filter((n) => n.id !== keep).map((n) => n.id),
         cut.map((e) => e.id),
       );
+    }
     return false;
   }
 </script>
@@ -127,6 +164,7 @@
     deleteKey={editable ? ['Delete', 'Backspace'] : null}
     proOptions={{ hideAttribution: true }}
     onbeforeconnect={beforeConnect}
+    onconnectend={connectEnd}
     onbeforedelete={beforeDelete}
     onnodeclick={({ node }) => select(node.id)}
     onpaneclick={() => select(undefined)}
@@ -141,7 +179,8 @@
     defaultEdgeOptions={{ type: 'smoothstep' }}
   >
     <WorkflowFit token={fit + grown} {width} {height} />
-    <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
+    <WorkflowFlowBridge ready={(api) => (toFlow = api.toFlow)} />
+    <Background variant={BackgroundVariant.Dots} gap={18} size={1.6} />
     <Controls showLock={false} />
     {#if cards.length > 8}<MiniMap pannable zoomable class="workflow-minimap" />{/if}
   </SvelteFlow>
@@ -160,7 +199,7 @@
   }
   .workflow-canvas :global(.svelte-flow) {
     --xy-background-color: var(--surface-sunken);
-    --xy-background-pattern-color: var(--border-strong);
+    --xy-background-pattern-color: color-mix(in srgb, var(--text-muted) 38%, transparent);
     --xy-edge-stroke: var(--border-strong);
     --xy-edge-stroke-selected: var(--accent-strong);
     --xy-edge-stroke-width: 1.5;

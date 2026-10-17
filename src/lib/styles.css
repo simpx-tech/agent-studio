@@ -625,13 +625,49 @@ pre {
   width: 24px;
   height: 24px;
 }
+/* Workflows, above the chat tabs: a section of the sidebar of its own. */
+.workflows-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  width: 100%;
+  min-height: 30px;
+  margin-top: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.workflows-button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.workflows-button.current {
+  background: var(--surface-3);
+  color: var(--text);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px var(--border);
+}
+.workflows-button > svg {
+  flex-shrink: 0;
+  color: var(--accent-strong);
+}
+.workflows-button > span:first-of-type {
+  flex: 1;
+  text-align: left;
+}
 .conversation-tabs {
-  /* Screens and Workflows show their icon when the sidebar is too narrow for every label. */
+  /* Screens shows its icon when the sidebar is too narrow for every label. */
   container-type: inline-size;
   display: flex;
   flex-shrink: 0;
   gap: 2px;
-  margin: 10px 0 6px;
+  margin: 6px 0 6px;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

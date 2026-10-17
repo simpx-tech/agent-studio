@@ -203,6 +203,91 @@ describe('static workflow runs', () => {
     expect(driver.run.output).toContain('MAKE A');
   });
 
+  it('starts at the trigger that fired, with what it handed over', async () => {
+    const definition = workflow(
+      [
+        ['manual', 'start', { inputs: [{ name: 'topic', default: 'swords' }] }],
+        ['chat', 'start', { trigger: 'chat' }],
+        ['end', 'end', { output: '{{trigger.kind}}: {{trigger.json.reply}} / {{input.topic}}' }],
+      ],
+      [
+        ['manual', 'end'],
+        ['chat', 'end'],
+      ],
+    );
+    const t = testHost();
+    const run = staticRun(
+      crypto.randomUUID(),
+      definition,
+      1,
+      {},
+      { preferred: t.environmentId, elsewhere: true },
+      { kind: 'trigger', nodeId: 'chat', trigger: 'chat' },
+      t.now(),
+      { nodeId: 'chat', kind: 'chat', text: 'Built.', payload: { reply: 'Built.' } },
+    );
+    expect(run.activations.map((a) => a.nodeId)).toEqual(['chat']);
+    const driver = await t.driver(run);
+    await driver.tick();
+    expect(driver.run.status).toBe('completed');
+    expect(driver.run.output).toBe('chat: Built. / swords');
+    // A manual run starts at the first manual trigger.
+    const manual = staticRun(
+      crypto.randomUUID(),
+      definition,
+      1,
+      { topic: 'maps' },
+      { preferred: t.environmentId, elsewhere: true },
+      { kind: 'user' },
+      t.now(),
+    );
+    expect(manual.activations.map((a) => a.nodeId)).toEqual(['manual']);
+    expect(manual.trigger).toMatchObject({ nodeId: 'manual', kind: 'manual' });
+  });
+
+  it('follows Approved or Rejected after a Confirm step', async () => {
+    const steps = (): Parameters<typeof workflow>[0] => [
+      ['start', 'start'],
+      ['ok', 'confirm', { question: 'Publish {{run.title}}?', approve: 'Publish' }],
+      ['yes', 'end', { output: 'published' }],
+      ['no', 'end', { output: 'kept' }],
+    ];
+    const links: Parameters<typeof workflow>[1] = [
+      ['start', 'ok'],
+      ['ok', 'yes', 'approved'],
+      ['ok', 'no', 'rejected'],
+    ];
+    for (const [answer, output] of [
+      ['Publish', 'published'],
+      ['Reject', 'kept'],
+    ]) {
+      const { driver } = await start(workflow(steps(), links));
+      await driver.tick();
+      const question = driver.run.questions[0];
+      expect(question.confirm).toEqual({ approve: 'Publish', reject: 'Reject' });
+      expect(question.questions[0].question).toBe('Publish Test?');
+      expect(driver.run.detail).toBe('Waiting for your approval');
+      Object.assign(question, {
+        status: 'answered',
+        revision: 2,
+        answers: [{ id: 'answer', values: [answer] }],
+      });
+      await driver.tick();
+      expect(driver.run.output).toBe(output);
+    }
+    // Skipping is not approving.
+    const { driver } = await start(workflow(steps(), links));
+    await driver.tick();
+    Object.assign(driver.run.questions[0], {
+      status: 'answered',
+      revision: 2,
+      skipped: true,
+      answers: [],
+    });
+    await driver.tick();
+    expect(driver.run.output).toBe('kept');
+  });
+
   it('asks the user and continues with the answer', async () => {
     const { driver } = await start(
       workflow(

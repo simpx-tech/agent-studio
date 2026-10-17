@@ -90,6 +90,7 @@
     MessageSquare,
     Zap,
     Workflow,
+    Target,
   } from '@lucide/svelte';
   import {
     abandonedReplyError,
@@ -173,17 +174,26 @@
   } from '$lib/light-chats';
   import ScreenView from '$lib/components/ScreenView.svelte';
   import WorkflowList from '$lib/components/WorkflowList.svelte';
-  import MissionDialog from '$lib/components/MissionDialog.svelte';
+  import DriverPicker from '$lib/components/DriverPicker.svelte';
   import { WorkflowClient } from '$lib/workflow-client.svelte';
   import type { ChatSpec, Readiness, WorkflowHost } from '$lib/workflow-engine';
   import type { WorkflowPickers } from '$lib/workflow-view';
-  import { newDefinition } from '$lib/workflow-model';
+  import { newDefinition, type RunDriverChoice } from '$lib/workflow-model';
+  import { ORCHESTRATOR_INSTRUCTIONS, assistantInstructions } from '$lib/workflow-prompts';
+  import {
+    highestReasoning,
+    rememberWorkflowAgent,
+    rememberWorkflowMode,
+    workflowAgent,
+    workflowMode,
+  } from '$lib/workflow-preferences';
   import {
     loadScreenData,
     notifyWorkflow,
     runScreenAction,
     saveScreenData,
     setQuietChats,
+    workflowHookUrl as webhookUrl,
   } from '$lib/transport';
   import { notificationWorkflow } from '$lib/notifications';
   import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
@@ -343,6 +353,7 @@
     type SavedDraft,
     type SavedScratch,
     type ScratchChat,
+    type ScratchWorkflow,
   } from '$lib/drafts';
   import {
     fastModeName,
@@ -472,20 +483,31 @@
   };
   let screenShelves = $state<Record<string, ScreenShelf>>({});
   let openedScreen = $state<{ environmentId: string; id: string }>();
-  // The workflow or run the main area shows (docs/WORKFLOWS.md), and the New mission dialog.
+  // The workflow or run the main area shows as a page (docs/WORKFLOWS.md).
   let openedWorkflow = $state<string>();
-  let missionOpen = $state(false);
+  // Chats that hid the panel of their workflow, by chat or scratch chat; window memory only.
+  let workflowPanelHidden = $state<Record<string, boolean>>({});
+  // Where a mission a new mission chat starts runs, chosen beside its composer.
+  let missionDriver = $state<RunDriverChoice>();
   // The graph library loads with the first workflow opened, not with every start of the page.
   let workflowViewModule: Promise<typeof import('$lib/components/WorkflowView.svelte')> | undefined;
   const workflowView = () =>
     (workflowViewModule ??= import('$lib/components/WorkflowView.svelte'));
+  let workflowPanelModule:
+    | Promise<typeof import('$lib/components/WorkflowPanel.svelte')>
+    | undefined;
+  const workflowPanel = () =>
+    (workflowPanelModule ??= import('$lib/components/WorkflowPanel.svelte'));
   // Definitions and runs, and the runs this desktop drives.
   const workflows = new WorkflowClient({
     host: () => (loaded && installation ? workflowHost : undefined),
     drives: desktop(),
     alert: (summary, alert) => {
       // A run on screen needs no alert of its own.
-      if (view === 'workflow' && openedWorkflow === summary.id && document.hasFocus()) return;
+      const shown =
+        (view === 'workflow' && openedWorkflow === summary.id) ||
+        (view === 'chat' && !!activeId && workflows.workflowOf(activeId)?.id === summary.id);
+      if (shown && document.hasFocus()) return;
       void notifyWorkflow(summary.id, alert);
     },
   });
@@ -1013,6 +1035,8 @@
   });
   let saveQueue = Promise.resolve();
   const active = $derived(workspace.conversations.find((c) => c.id === activeId));
+  // The scratch chat shown, while no conversation is: a new chat, or a workflow chat.
+  const currentScratch = $derived(!active ? scratches.find((s) => s.id === scratchId) : undefined);
   const subagentReply = $derived(
     subagentView ? active?.messages.find((m) => m.id === subagentView.messageId) : undefined,
   );
@@ -1561,6 +1585,7 @@
       .filter(
         (s) =>
           s.filled &&
+          !s.workflow &&
           (!search ||
             `${s.title} ${s.location?.path ?? ''} ${computers.find((computer) => computer.id === (s.location ? locationComputerId(s.location) : s.computerId))?.name ?? ''}`
               .toLowerCase()
@@ -1863,7 +1888,15 @@
   const screensChecked = $derived(Object.values(screenShelves).some((shelf) => shelf.checkedAt));
   const viewTitle = $derived(
     {
-      chat: active?.title ?? 'New conversation',
+      chat:
+        active?.title ??
+        (currentScratch?.workflow && !currentScratch.workflow.id
+          ? currentScratch.workflow.mode === 'mission'
+            ? 'New mission'
+            : 'New workflow'
+          : currentScratch?.workflow?.id
+            ? (workflows.summaries.get(currentScratch.workflow.id)?.title ?? 'Workflow')
+            : 'New conversation'),
       connections: 'Connections',
       settings: 'Settings',
       screen: openedScreenSummary?.title ?? 'Screen',
@@ -1960,6 +1993,21 @@
 
   // ---- Workflows (docs/WORKFLOWS.md) -----------------------------------------------------------
   const activeWorkflow = $derived(active ? workflows.runOf(active.id) : undefined);
+  // The workflow whose chat this is: its assistant or a mission's orchestrator, or a workflow
+  // chat about to become one.
+  const chatWorkflow = $derived(
+    active ? workflows.workflowOf(active.id)?.id : currentScratch?.workflow?.id,
+  );
+  // A workflow chat keeps the workflows' own remembered agent.
+  const workflowChat = $derived(!!currentScratch?.workflow || !!chatWorkflow);
+  const panelKey = $derived(activeId ?? (scratchId ? `scratch:${scratchId}` : ''));
+  const workflowPanelShown = $derived(
+    view === 'chat' &&
+      !!chatWorkflow &&
+      !workflowPanelHidden[panelKey] &&
+      artifactView?.mode !== 'panel' &&
+      !subagentShown,
+  );
   const workflowsInProgress = $derived(
     [...workflows.summaries.values()].filter(
       (s) => s.kind === 'run' && (s.status === 'running' || s.status === 'paused'),
@@ -1968,24 +2016,70 @@
   const workflowsWaiting = $derived(
     [...workflows.summaries.values()].some((s) => s.kind === 'run' && s.questions > 0),
   );
+  /**
+   * Opens a workflow, run or mission: a workflow or mission in its chat, with its graph beside it,
+   * and a static run as a page of its own.
+   */
   function openWorkflow(id: string) {
     if (!id) return;
+    sidebarOpen = false;
+    conversationScope = 'workflows';
+    const summary = workflows.summaries.get(id);
+    const chat = summary?.chat
+      ? workspace.conversations.find((c) => c.id === summary.chat)
+      : undefined;
+    if (chat && (summary?.kind === 'definition' || summary?.mode === 'dynamic')) {
+      delete workflowPanelHidden[chat.id];
+      openConversation(chat);
+      conversationScope = 'workflows';
+      return;
+    }
+    if (summary?.kind === 'definition') {
+      newWorkflowChat('workflow', id);
+      return;
+    }
+    expandWorkflow(id);
+  }
+  /** Shows a workflow, run or mission as a page of its own. */
+  function expandWorkflow(id: string) {
     openedWorkflow = id;
     view = 'workflow';
     conversationScope = 'workflows';
     sidebarOpen = false;
   }
-  async function createWorkflow() {
-    const id = crypto.randomUUID();
-    try {
-      const result = await workflows.saveDefinition(
-        id,
-        null,
-        newDefinition('New workflow', { kind: 'user' }),
-      );
-      if (result.ok) openWorkflow(id);
-    } catch (error) {
-      notice = String(error).replace(/^Error: /, '');
+  /**
+   * A chat that starts a new workflow or mission, the one left with a draft if there is one;
+   * with `id`, the chat that becomes that workflow's assistant.
+   */
+  function newWorkflowChat(mode: 'workflow' | 'mission' = workflowMode(), id?: string) {
+    const kept = scratches.find((s) =>
+      id ? s.workflow?.id === id : s.workflow && !s.workflow.id && s.filled,
+    );
+    if (kept) {
+      openScratch(kept);
+      return;
+    }
+    // On this computer, Standalone, with the agent chosen last for workflows.
+    const here = installation
+      ? computers.find((c) => c.environments.some((e) => e.id === installation!.id))
+      : undefined;
+    const computerId = here?.id ?? selectedComputerId;
+    const location = computerId ? standaloneLocation(computerId) : undefined;
+    newChat(workflowAgent().provider, undefined, location, location ? undefined : computerId, true, false, {
+      mode,
+      ...(id ? { id } : {}),
+    });
+  }
+  function setWorkflowMode(mode: 'workflow' | 'mission') {
+    const scratch = scratches.find((s) => s.id === scratchId);
+    if (!scratch?.workflow || scratch.workflow.id) return;
+    scratch.workflow = { mode };
+    rememberWorkflowMode(mode);
+    const key = draftKey.scratch(scratch.id);
+    const draft = drafts.get(key);
+    if (draft) {
+      draft.updatedAt = Date.now();
+      draftChanged(key);
     }
   }
   const computerNameOf = (environmentId?: string) =>
@@ -2043,7 +2137,7 @@
     if (conversation.archived) conversation.archived = false;
     delete conversation.rewind;
     rewoundDrafts.delete(conversation.id);
-    addUserMessage(conversation, { text, images: [] }, now);
+    addUserMessage(conversation, { text, images: [], sentBy: 'workflow' }, now);
     return { replyId: beginWorkflowReply(conversation, now) };
   }
   // Workflow chats whose process goes once their running reply ends, such as an orchestrator
@@ -2075,7 +2169,7 @@
       messages: [],
     });
     const conversation = workspace.conversations.find((c) => c.id === spec.id)!;
-    addUserMessage(conversation, { text: spec.text, images: [] }, now);
+    addUserMessage(conversation, { text: spec.text, images: [], sentBy: 'workflow' }, now);
     return { replyId: beginWorkflowReply(conversation, now, spec.mission) };
   }
   function workflowReadiness(settings: ChatSettings, location?: ChatLocation): Readiness {
@@ -3953,8 +4047,17 @@
     )
       return;
     settingsRevision++;
-    if (remember) rememberSettings(workspace.preferences, settings);
-    if (chosen) rememberAgent(workspace.preferences, settings);
+    if (workflowChat)
+      rememberWorkflowAgent({
+        provider: settings.provider,
+        connectionId: settings.connectionId ?? '',
+        model: settings.model,
+        reasoning: settings.reasoning,
+      });
+    else {
+      if (remember) rememberSettings(workspace.preferences, settings);
+      if (chosen) rememberAgent(workspace.preferences, settings);
+    }
     // An account chosen for a new chat stays, whatever the accounts' usage.
     if (chosen && !active) followBalance(false);
     if (active) {
@@ -3971,10 +4074,16 @@
     if (active) return;
     if (selectedLocation && !availableProviders.includes(value as ProviderId)) return;
     const settings = settingsFor(workspace.preferences, value as ProviderId);
+    if (workflowChat) {
+      const remembered = workflowAgent(value as ProviderId);
+      if (remembered.model) settings.model = remembered.model;
+      settings.reasoning = remembered.reasoning;
+    }
     if (selectedLocation)
       settings.connectionId = preferredConnection(settings.provider, selectedLocation);
     const model = models[settings.provider].find((m) => m.id === settings.model);
     if (
+      !workflowChat &&
       workspace.preferences.reasoningByProvider[settings.provider]?.[settings.model] ===
         undefined &&
       model
@@ -4036,10 +4145,15 @@
     if (view !== 'connections') untrack(() => (connectionsHighlight = ''));
   });
   function chooseModel(model: string) {
-    const reasoning =
-      workspace.preferences.reasoningByProvider[selectedSettings.provider]?.[model] ??
-      availableModels.find((m) => m.id === model)?.defaultReasoning ??
-      '';
+    const levels = availableModels.find((m) => m.id === model)?.reasoningLevels ?? [];
+    // A workflow chat keeps its reasoning where the model has it, else the model's highest.
+    const reasoning = workflowChat
+      ? levels.includes(selectedSettings.reasoning)
+        ? selectedSettings.reasoning
+        : highestReasoning(levels)
+      : (workspace.preferences.reasoningByProvider[selectedSettings.provider]?.[model] ??
+        availableModels.find((m) => m.id === model)?.defaultReasoning ??
+        '');
     changeSettings({ ...selectedSettings, model, reasoning });
   }
   // A chat started on a computer or in a folder is revealed in the sidebar and focused, unless
@@ -4053,6 +4167,8 @@
     computerId?: string,
     reveal = true,
     named = true,
+    // A chat that starts a workflow or mission, or becomes a workflow's assistant chat.
+    flow?: ScratchWorkflow,
   ) {
     if (!loaded || selectingLocation) return;
     // Opening a chat on a computer can register its CLI logins as connections.
@@ -4061,9 +4177,22 @@
     sidebarOpen = false;
     folderBrowserOpen = false;
     locationGeneration++;
-    conversationScope = 'active';
+    conversationScope = flow ? 'workflows' : 'active';
     locationPending = false;
     draftSettings = settingsFor(workspace.preferences, provider);
+    if (flow) {
+      // Claude at its maximum reasoning, until other choices are remembered.
+      const agent = workflowAgent(provider);
+      draftSettings = {
+        ...draftSettings,
+        provider: agent.provider,
+        ...(agent.model ? { model: agent.model } : {}),
+        reasoning: agent.reasoning,
+        instructions: '',
+        // The account chosen last, where it is connected.
+        ...(agent.connectionId ? { connectionId: agent.connectionId } : {}),
+      };
+    }
     // A new chat on a WSL folder runs inside its distribution, whichever folder or recent
     // location it starts from.
     const recent = (workspace.preferences.recentLocations ?? []).map((l) =>
@@ -4119,6 +4248,7 @@
       title: '',
       filled: false,
       balanced: draftBalanced,
+      ...(flow ? { workflow: flow } : {}),
     });
     switchDraft(currentDraftKey());
     editorOpen = false;
@@ -4133,7 +4263,7 @@
     }
     // Chat from Connections and `/new` name the agent and account to start with. An account
     // balancing chooses is no choice of the user's to remember.
-    if (provider) {
+    if (provider && !flow) {
       rememberSettings(workspace.preferences, draftSettings);
       rememberAgent(
         workspace.preferences,
@@ -4476,7 +4606,7 @@
     view = 'chat';
     if (!activeId && scratchId === scratch.id) return;
     locationGeneration++;
-    conversationScope = 'active';
+    conversationScope = scratch.workflow ? 'workflows' : 'active';
     locationPending = false;
     const location = scratchLocation(workspace.fleet, scratch);
     const available = !!location && !!locationExecutionEnvironment(workspace.fleet, location);
@@ -4571,13 +4701,13 @@
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const tablist = (event.currentTarget as HTMLElement).parentElement;
-    const scopes = ['active', 'history', 'screens', 'workflows'] as const;
-    const index = scopes.indexOf(conversationScope);
+    const scopes = ['active', 'history', 'screens'] as const;
+    const index = Math.max(0, scopes.indexOf(conversationScope as (typeof scopes)[number]));
     conversationScope =
       event.key === 'Home'
         ? 'active'
         : event.key === 'End'
-          ? 'workflows'
+          ? 'screens'
           : scopes[(index + (event.key === 'ArrowLeft' ? scopes.length - 1 : 1)) % scopes.length];
     await tick();
     tablist?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
@@ -4839,12 +4969,13 @@
   function scratchPlace(key: string): SavedScratch | undefined {
     const scratch = scratchFor(key);
     if (!scratch) return;
-    const { computerId, location, settings, createdAt } = $state.snapshot(scratch);
+    const { computerId, location, settings, createdAt, workflow } = $state.snapshot(scratch);
     return {
       computerId,
       ...(location ? { location } : {}),
       ...(settings ? { settings } : {}),
       createdAt,
+      ...(workflow ? { workflow } : {}),
     };
   }
   // A new session continues the scratch chat edited last, until another chat opens or text is
@@ -4853,6 +4984,8 @@
     let latest: Scratch | undefined;
     let at = -1;
     for (const scratch of scratches) {
+      // Workflow chats wait under Workflows.
+      if (scratch.workflow) continue;
       const updatedAt = drafts.get(draftKey.scratch(scratch.id))?.updatedAt ?? -1;
       if (updatedAt > at) {
         latest = scratch;
@@ -5325,10 +5458,34 @@
     const now = new Date().toISOString();
     const isNewConversation = !active;
     const sentDraft = composerDraftKey;
+    // A workflow chat's first message makes its workflow or mission first; a failure keeps it.
+    let bound: Awaited<ReturnType<typeof bindWorkflowChat>> | undefined;
+    const flow = !active && !retry && !queuedMessage ? currentScratch?.workflow : undefined;
+    if (flow) {
+      try {
+        bound = await bindWorkflowChat(flow, text);
+      } catch (error) {
+        if (session === workspaceSession) notice = String(error).replace(/^Error: /, '');
+        return;
+      }
+      if (session !== workspaceSession || activeId) return;
+      // A mission another computer runs starts its own chat there.
+      if (!bound.conversationId) {
+        prompt = '';
+        clearImages();
+        forgetDraft(sentDraft);
+        dropScratch(sentDraft);
+        openWorkflow(bound.runId!);
+        return;
+      }
+    }
     if (!active) {
       const c: Conversation = {
-        id: crypto.randomUUID(),
-        settings: structuredClone($state.snapshot(selectedSettings)),
+        id: bound?.conversationId ?? crypto.randomUUID(),
+        settings: {
+          ...structuredClone($state.snapshot(selectedSettings)),
+          ...(bound ? { instructions: bound.instructions } : {}),
+        },
         location: selectedLocation ? { ...selectedLocation } : undefined,
         title: text.slice(0, 80) || 'Image conversation',
         titleStatus: 'pending',
@@ -5336,6 +5493,7 @@
         updatedAt: now,
         messages: [],
       };
+      if (bound) workflows.own(c.id);
       workspace.conversations.unshift(c);
       activeId = c.id;
     }
@@ -5348,7 +5506,8 @@
     }
     if (conversation.archived) {
       conversation.archived = false;
-      revealConversation(conversation);
+      // A workflow's chat stays under Workflows.
+      if (!hiddenChats.has(conversation.id)) revealConversation(conversation);
     }
     // Any submission, including a retry, ends the chance to undo a rewind.
     delete conversation.rewind;
@@ -5388,23 +5547,98 @@
       modelName: selectedModelName(conversation.settings.model, availableModels),
       compact,
       created: isNewConversation,
-      remember: true,
+      remember: !bound,
+      ...(bound?.mission ? { mission: bound.mission } : {}),
     });
+  }
+  /**
+   * What a workflow chat's first message makes (docs/WORKFLOWS.md): a new workflow whose
+   * assistant the chat becomes, the assistant of an existing one, or a mission the chat
+   * orchestrates. A mission another computer runs starts there, without this chat.
+   */
+  async function bindWorkflowChat(flow: ScratchWorkflow, text: string) {
+    const conversationId = crypto.randomUUID();
+    const actor = { kind: 'user' as const, ...(installation ? { environmentId: installation.id } : {}) };
+    if (flow.mode === 'mission') {
+      rememberWorkflowMode('mission');
+      const settings = selectedSettings;
+      const location = selectedLocation;
+      const driver: RunDriverChoice = missionDriver ?? {
+        preferred: workflowPickers.defaultDriver,
+        elsewhere: true,
+      };
+      const here = driver.preferred === installation?.id;
+      const runId = await workflows.startMission({
+        title: '',
+        text,
+        ...(location?.path ? { location: { ...location } } : {}),
+        orchestrator: {
+          provider: settings.provider,
+          connectionId: settings.connectionId ?? '',
+          model: settings.model,
+          reasoning: settings.reasoning,
+        },
+        driver,
+        actor,
+        ...(here && installation
+          ? {
+              chat: {
+                conversationId,
+                environmentId: installation.id,
+                ...(settings.connectionId ? { connectionId: settings.connectionId } : {}),
+              },
+            }
+          : {}),
+      });
+      return {
+        conversationId: here ? conversationId : undefined,
+        runId,
+        instructions: ORCHESTRATOR_INSTRUCTIONS,
+        mission: { runId, role: 'orchestrator' as const },
+      };
+    }
+    rememberWorkflowMode('workflow');
+    let workflowId = flow.id;
+    if (workflowId)
+      await workflows.changeDefinition(workflowId, (d) => (d.assistant = { conversationId }));
+    else {
+      workflowId = crypto.randomUUID();
+      const line = text.trim().split('\n')[0] ?? '';
+      const name = line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'New workflow';
+      const result = await workflows.saveDefinition(workflowId, null, {
+        ...newDefinition(name, actor),
+        assistant: { conversationId },
+      });
+      if (!result.ok) throw new Error('The workflow could not be saved.');
+    }
+    return {
+      conversationId,
+      runId: undefined,
+      instructions: assistantInstructions(workflowId),
+      mission: undefined,
+    };
   }
   function addUserMessage(
     conversation: Conversation,
-    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & { images: StoredImage[] },
+    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & {
+      images: StoredImage[];
+      sentBy?: 'workflow';
+    },
     now: string,
   ) {
     conversation.messages.push(userMessage(input, now));
   }
   function userMessage(
-    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & { images: StoredImage[] },
+    input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & {
+      images: StoredImage[];
+      sentBy?: 'workflow';
+    },
     now: string,
   ): Message {
     return {
       id: crypto.randomUUID(),
       role: 'user',
+      ...(input.sentBy ? { sentBy: input.sentBy } : {}),
       ...(input.skills?.length ? { skills: input.skills } : {}),
       ...(input.mentions?.length ? { mentions: input.mentions } : {}),
       blocks: [
@@ -6076,14 +6310,20 @@
               >{pendingChats}</span
             >{/if}
         </span>
-      </span><button
-        class="icon-button"
-        onclick={() => newChat()}
-        aria-label="New conversation"
-        title="New conversation (Ctrl+N)"
-        aria-keyshortcuts="Control+N Meta+N"
-        disabled={!loaded}><Plus size={15} /></button
-      >
+      </span>{#if conversationScope === 'workflows'}<button
+          class="icon-button"
+          onclick={() => newWorkflowChat()}
+          aria-label="New workflow"
+          title="New workflow"
+          disabled={!loaded}><Plus size={15} /></button
+        >{:else}<button
+          class="icon-button"
+          onclick={() => newChat()}
+          aria-label="New conversation"
+          title="New conversation (Ctrl+N)"
+          aria-keyshortcuts="Control+N Meta+N"
+          disabled={!loaded}><Plus size={15} /></button
+        >{/if}
     </div>
     <label class="search"
       ><Search size={14} /><input
@@ -6100,6 +6340,21 @@
           aria-label="Clear search"><X size={12} /></button
         >{/if}</label
     >
+    <button
+      class="workflows-button"
+      class:current={conversationScope === 'workflows'}
+      aria-pressed={conversationScope === 'workflows'}
+      disabled={!loaded}
+      onclick={() => {
+        conversationScope = 'workflows';
+        if (!workflowChat && view !== 'workflow') newWorkflowChat();
+      }}
+      ><Workflow size={15} aria-hidden="true" /><span>Workflows</span>{#if workflowsInProgress}<span
+          class="conversation-tab-count"
+          class:workflow-attention={workflowsWaiting}
+          aria-label={`${workflowsInProgress} in progress`}>{workflowsInProgress}</span
+        >{/if}</button
+    >
     <div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
       {#each conversationGroups as group}
         <button
@@ -6107,7 +6362,10 @@
           role="tab"
           aria-selected={conversationScope === group.id}
           aria-controls={`conversation-panel-${group.id}`}
-          tabindex={conversationScope === group.id ? 0 : -1}
+          tabindex={conversationScope === group.id ||
+          (conversationScope === 'workflows' && group.id === 'active')
+            ? 0
+            : -1}
           onclick={() => (conversationScope = group.id as 'active' | 'history')}
           onkeydown={conversationTabKey}
           ><span>{group.name}</span><span class="conversation-tab-count">{group.count}</span
@@ -6127,23 +6385,6 @@
         ><LayoutDashboard size={14} class="tab-icon" aria-hidden="true" /><span class="tab-label"
           >Screens</span
         >{#if screensChecked}<span class="conversation-tab-count">{screenCount}</span>{/if}</button
-      >
-      <button
-        id="conversation-tab-workflows"
-        role="tab"
-        aria-selected={conversationScope === 'workflows'}
-        aria-controls="conversation-panel-workflows"
-        aria-label="Workflows"
-        title="Workflows"
-        tabindex={conversationScope === 'workflows' ? 0 : -1}
-        onclick={() => (conversationScope = 'workflows')}
-        onkeydown={conversationTabKey}
-        ><Workflow size={14} class="tab-icon" aria-hidden="true" /><span class="tab-label"
-          >Workflows</span
-        >{#if workflowsInProgress}<span
-            class="conversation-tab-count"
-            class:workflow-attention={workflowsWaiting}>{workflowsInProgress}</span
-          >{/if}</button
       >
     </div>
     <div class="conversation-list">
@@ -6481,20 +6722,15 @@
       <div
         id="conversation-panel-workflows"
         class="conversation-section"
-        role="tabpanel"
-        tabindex="0"
-        aria-labelledby="conversation-tab-workflows"
+        role="region"
+        aria-label="Workflows"
         hidden={conversationScope !== 'workflows'}
       >
         <WorkflowList
           client={workflows}
           {query}
-          selected={view === 'workflow' ? openedWorkflow : undefined}
+          selected={view === 'workflow' ? openedWorkflow : view === 'chat' ? chatWorkflow : undefined}
           open={openWorkflow}
-          create={(kind) => {
-            if (kind === 'mission') missionOpen = true;
-            else void createWorkflow();
-          }}
         />
       </div>
     </div>
@@ -6570,7 +6806,7 @@
     {#if view === 'chat'}
       <div
         class="chat-workspace"
-        class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
+        class:has-side-panel={artifactView?.mode === 'panel' || subagentShown || workflowPanelShown}
       >
         <section
           class="chat-layout"
@@ -6599,7 +6835,19 @@
               </div>
             </div>
           {/if}
-          {#if activeWorkflow}<div class="workflow-banner" role="note">
+          {#if chatWorkflow && !workflowPanelShown}{@const shown = workflows.summaries.get(chatWorkflow)}<div
+              class="workflow-banner"
+              role="note"
+            >
+              {#if shown?.mode === 'dynamic'}<Target size={14} aria-hidden="true" />{:else}<Workflow
+                  size={14}
+                  aria-hidden="true"
+                />{/if}<span><strong>{shown?.title ?? 'Workflow'}</strong></span><button
+                class="text-button"
+                onclick={() => delete workflowPanelHidden[panelKey]}>Show graph</button
+              >
+            </div>
+          {:else if activeWorkflow && !chatWorkflow}<div class="workflow-banner" role="note">
               <Workflow size={14} aria-hidden="true" /><span
                 >Workflow · <strong>{activeWorkflow.title}</strong></span
               ><button class="text-button" onclick={() => openWorkflow(activeWorkflow.id)}
@@ -6922,7 +7170,15 @@
                     >{/if}<span class="eyebrow"
                     >A conversation with {selectedAccount?.name ?? selectedAgent.name}</span
                   >
-                  <h1>What’s on your mind?</h1>
+                  <h1>
+                    {currentScratch?.workflow
+                      ? currentScratch.workflow.id
+                        ? 'What should change?'
+                        : currentScratch.workflow.mode === 'mission'
+                          ? 'What’s the mission?'
+                          : 'What should it do?'
+                      : 'What’s on your mind?'}
+                  </h1>
                 </div>{/if}
             </div>
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
@@ -7045,7 +7301,11 @@
                 aria-label="Message"
                 placeholder={activeRunning && !waitingReply
                   ? `Message ${selectedAgent.name} after this reply…`
-                  : `Message ${selectedAgent.name}…`}
+                  : currentScratch?.workflow && !currentScratch.workflow.id
+                    ? currentScratch.workflow.mode === 'mission'
+                      ? 'Describe the mission…'
+                      : 'Describe the workflow…'
+                    : `Message ${selectedAgent.name}…`}
                 bind:value={prompt}
                 rows="3"
                 onpaste={(event) => {
@@ -7121,7 +7381,29 @@
                 </p>{/if}
               <div class="composer-bottom">
                 <div class="composer-tools">
-                  <PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning} change={changeSettings} />
+                  {#if currentScratch?.workflow && !currentScratch.workflow.id}<ChoicePicker
+                      label="Create"
+                      value={currentScratch.workflow.mode}
+                      options={[
+                        { id: 'workflow', name: 'Workflow' },
+                        { id: 'mission', name: 'Mission' },
+                      ]}
+                      onchange={(value) => setWorkflowMode(value as 'workflow' | 'mission')}
+                    >
+                      {#snippet icon()}{#if currentScratch?.workflow?.mode === 'mission'}<Target
+                            size={16}
+                          />{:else}<Workflow size={16} />{/if}{/snippet}
+                    </ChoicePicker>
+                    {#if currentScratch.workflow.mode === 'mission'}<DriverPicker
+                        compact
+                        drivers={workflowPickers.drivers}
+                        value={missionDriver ?? {
+                          preferred: workflowPickers.defaultDriver,
+                          elsewhere: true,
+                        }}
+                        onchange={(next) => (missionDriver = next)}
+                      />{/if}
+                  {:else}<PlanModePicker settings={selectedSettings} disabled={!loaded || activeRunning} change={changeSettings} />{/if}
                   {#if fastOffered}<button
                       type="button"
                       class="fast-toggle"
@@ -7200,6 +7482,22 @@
               changeMode={(mode) => showArtifactAs(chat, mode)}
               close={() => delete artifactViews[chat]}
             />{/key}{/if}
+        {#if workflowPanelShown && chatWorkflow}{@const key = panelKey}{#await workflowPanel() then { default: WorkflowPanel }}{#key `${workspaceSession}/${chatWorkflow}`}<WorkflowPanel
+                client={workflows}
+                id={chatWorkflow}
+                pickers={workflowPickers}
+                conversation={(id) => workspace.conversations.find((c) => c.id === id)}
+                openChat={(id) => {
+                  const conversation = workspace.conversations.find((c) => c.id === id);
+                  if (conversation) openConversation(conversation);
+                }}
+                openDoc={openWorkflow}
+                deleteChats={deleteWorkflowChats}
+                closed={() => newWorkflowChat()}
+                expand={() => chatWorkflow && expandWorkflow(chatWorkflow)}
+                close={() => (workflowPanelHidden[key] = true)}
+                {webhookUrl}
+              />{/key}{/await}{/if}
         {#if subagentShown && subagentReply && subagentView && panelChat}{@const chat = panelChat}{#key chat}<SubagentPanel
               message={subagentReply}
               agentId={subagentView.agentId}
@@ -7310,8 +7608,15 @@
             deleteChats={deleteWorkflowChats}
             closed={() => {
               openedWorkflow = undefined;
-              view = 'chat';
+              newWorkflowChat();
             }}
+            chat={(() => {
+              const shown = openedWorkflow ? workflows.summaries.get(openedWorkflow) : undefined;
+              return shown && (shown.kind === 'definition' || shown.mode === 'dynamic')
+                ? () => openWorkflow(shown.id)
+                : undefined;
+            })()}
+            {webhookUrl}
           />
         {/key}
       {:catch error}
@@ -7320,23 +7625,6 @@
     {/if}
   </main>
 </div>
-{#if missionOpen}<MissionDialog
-    pickers={workflowPickers}
-    provider={selectedSettings.provider === 'gemini' ? 'claude' : selectedSettings.provider}
-    close={() => (missionOpen = false)}
-    start={async (spec) => {
-      const id = await workflows.startMission({
-        title: spec.title,
-        text: spec.text,
-        ...(spec.location ? { location: spec.location } : {}),
-        orchestrator: spec.orchestrator,
-        driver: { preferred: spec.driver, elsewhere: spec.elsewhere },
-        actor: { kind: 'user', ...(installation ? { environmentId: installation.id } : {}) },
-      });
-      missionOpen = false;
-      openWorkflow(id);
-    }}
-  />{/if}
 {#if folderBrowserOpen && !active}
   <FolderBrowser
     computerId={selectedComputer?.computerId ?? selectedComputerId}

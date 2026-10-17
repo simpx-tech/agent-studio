@@ -19,6 +19,13 @@
     SquareTerminal,
     Workflow,
     CircleDashed,
+    CircleCheckBig,
+    Clock,
+    Gauge,
+    MessagesSquare,
+    Monitor,
+    Webhook,
+    Waypoints,
   } from '@lucide/svelte';
   let { type, size = 15 }: { type: string; size?: number } = $props();
   const icons = {
@@ -40,6 +47,15 @@
     end: Flag,
     orchestrator: BrainCircuit,
     task: ListTodo,
+    confirm: CircleCheckBig,
+    // A trigger's kind, as `trigger:<kind>`.
+    'trigger:manual': Play,
+    'trigger:schedule': Clock,
+    'trigger:chat': MessagesSquare,
+    'trigger:workflow': Waypoints,
+    'trigger:webhook': Webhook,
+    'trigger:computer': Monitor,
+    'trigger:usage': Gauge,
   } as const;
   const Icon = $derived(icons[type as keyof typeof icons] ?? CircleDashed);
 </script>

@@ -8,6 +8,7 @@ import { createRelay } from '../../relay/server.ts';
 import { pushService } from '../../relay/push';
 import { recentAlerts } from '../../relay/workflows';
 import { emptyShared } from './sync';
+import { newDefinition, webhookSecret } from './workflow-model';
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -38,8 +39,73 @@ async function relay() {
     await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
     rmSync(directory, { recursive: true, force: true });
   });
-  return { call, desktop, directory, advance: (ms: number) => (time += ms) };
+  // A request as a webhook's caller sends it: no pairing key, no device.
+  const hook = (path: string, body: string, method = 'POST') =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: method === 'GET' ? undefined : body,
+    }).then(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as any,
+    }));
+  return { call, hook, desktop, directory, advance: (ms: number) => (time += ms) };
 }
+
+describe('relay webhooks', () => {
+  it('start a pending run of the workflow its address names, with the request as payload', async () => {
+    const r = await relay();
+    const id = crypto.randomUUID();
+    const secret = webhookSecret();
+    const definition = newDefinition('Deploy', { kind: 'user' });
+    definition.graph.nodes[0].config = { trigger: 'webhook', webhook: { secret } };
+    const node = definition.graph.nodes[0].id;
+    definition.runsOn = r.desktop;
+    await r.call('PUT', `workflows/${id}`, {
+      kind: 'definition',
+      expected: null,
+      body: definition,
+    });
+    const started = await r.hook(`/v1/hooks/${id}/${node}/${secret}`, '{"branch":"main"}');
+    expect(started.status).toBe(202);
+    const read = await r.call('POST', 'workflows/read', { ids: [started.body.runId] });
+    expect(read.body.docs[0].body).toMatchObject({
+      mode: 'static',
+      title: 'Deploy',
+      status: 'running',
+      pending: true,
+      driver: { preferred: r.desktop },
+      definition: { id, name: 'Deploy' },
+      trigger: { nodeId: node, kind: 'webhook', payload: { branch: 'main' } },
+    });
+    // Text that is not JSON goes on as text.
+    const text = await r.hook(`/v1/hooks/${id}/${node}/${secret}`, 'deploy now');
+    const second = await r.call('POST', 'workflows/read', { ids: [text.body.runId] });
+    expect(second.body.docs[0].body.trigger.payload).toEqual({ body: 'deploy now' });
+    // A wrong secret, step or workflow names no webhook, and too many such requests wait.
+    expect((await r.hook(`/v1/hooks/${id}/${node}/${webhookSecret()}`, '{}')).status).toBe(404);
+    expect((await r.hook(`/v1/hooks/${id}/other/${secret}`, '{}')).status).toBe(404);
+    expect((await r.hook(`/v1/hooks/${id}/${node}/${secret}`, '', 'GET')).status).toBe(405);
+    for (let i = 0; i < 8; i++)
+      await r.hook(`/v1/hooks/${crypto.randomUUID()}/${node}/${secret}`, '{}');
+    expect((await r.hook(`/v1/hooks/${id}/${node}/${secret}`, '{}')).status).toBe(429);
+  });
+
+  it('refuses a workflow without a computer to run on', async () => {
+    const r = await relay();
+    const id = crypto.randomUUID();
+    const secret = webhookSecret();
+    const definition = newDefinition('Deploy', { kind: 'user' });
+    definition.graph.nodes[0].config = { trigger: 'webhook', webhook: { secret } };
+    await r.call('PUT', `workflows/${id}`, {
+      kind: 'definition',
+      expected: null,
+      body: definition,
+    });
+    const refused = await r.hook(`/v1/hooks/${id}/${definition.graph.nodes[0].id}/${secret}`, '{}');
+    expect(refused.status).toBe(409);
+  });
+});
 
 describe('relay workflow store', () => {
   it('keeps definitions and runs, reports its revision and refuses stale writes', async () => {

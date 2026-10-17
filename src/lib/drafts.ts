@@ -29,7 +29,13 @@ export type ScratchChat = {
   location?: ChatLocation;
   settings?: ChatSettings;
   createdAt: number;
+  /**
+   * A chat that starts a workflow or a mission with its first message, or becomes the assistant
+   * chat of the workflow `id` names (docs/WORKFLOWS.md).
+   */
+  workflow?: ScratchWorkflow;
 };
+export type ScratchWorkflow = { mode: 'workflow' | 'mission'; id?: string };
 export type SavedScratch = Omit<ScratchChat, 'id'>;
 
 export const draftKey = {
@@ -67,6 +73,9 @@ const savedScratchSchema = z.object({
   location: locationSchema.optional(),
   settings: chatSettingsSchema.optional(),
   createdAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  workflow: z
+    .object({ mode: z.enum(['workflow', 'mission']), id: z.string().uuid().optional() })
+    .optional(),
 });
 const savedDraftSchema = z.object({
   key: z

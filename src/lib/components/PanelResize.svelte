@@ -4,12 +4,15 @@
   // The left divider of a docked right-side panel, which remembers its width on this device.
   let {
     availableWidth,
+    defaultWidth: initialWidth,
     onresize,
     storageKey,
     label,
     controls,
   }: {
     availableWidth: number;
+    /** Its width until the reader resizes it; otherwise 42% of the space, at most 620px. */
+    defaultWidth?: number;
     onresize: (width: number) => void;
     storageKey: string;
     label: string;
@@ -26,7 +29,7 @@
     previous?: number;
   }>();
   const maxWidth = $derived(Math.max(minWidth, Math.floor(availableWidth - 420)));
-  const defaultWidth = $derived(Math.min(620, Math.round(availableWidth * 0.42)));
+  const defaultWidth = $derived(initialWidth ?? Math.min(620, Math.round(availableWidth * 0.42)));
   const width = $derived(Math.max(minWidth, Math.min(maxWidth, preferredWidth ?? defaultWidth)));
 
   $effect(() => onresize(width));

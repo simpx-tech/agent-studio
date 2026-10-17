@@ -6,9 +6,6 @@ import type { InboxItem, RunNote, WorkflowRun } from './workflow-model';
  * with what happened since.
  */
 
-export const ORCHESTRATOR_INSTRUCTIONS =
-  'You are the orchestrator of an Agent Studio mission. You coordinate the work: plan it, start agents with mission_spawn to do it, review what they deliver, and drive the mission to a complete, professional result. Use the mission tools to act; use your own tools to check results, not to do work an agent should do.';
-
 const rules = `## How this works
 - Plan with mission_plan: break the mission into tasks with their dependencies, and keep the plan current as you learn. The user watches it live as a graph.
 - Do the work through agents. mission_spawn starts a new chat for a task on the computer, folder, account and model you choose, and returns at once. Give each agent a complete, self-contained task: the goal, the context it needs, constraints, where the files are, what to deliver and how to check it.
@@ -18,7 +15,22 @@ const rules = `## How this works
 - Shared context: record decisions, conventions, progress and learnings with mission_note. Notes outlive this session and go with every agent you start (unless includeContext is false), so a later session or agent continues from them.
 - Ask the user with mission_ask only when a decision is truly theirs, and keep working on everything else meanwhile.
 - Turns: after starting or changing work, end your turn with a short status. You are woken with a message whenever something happens: an agent finishes (with its reply), an answer arrives, a timer fires, a computer goes offline or comes back. Do not poll or wait in a loop.
-- Finish with mission_complete only when everything is done and checked, with a summary of the results and where they are.`;
+- Finish with mission_complete only when everything is done and checked, with a summary of the results and where they are.
+- The user can write to you in this chat at any time: treat what they write as instructions and feedback for the mission and answer it. Messages that begin with [Mission update] come from Agent Studio.`;
+
+/** The orchestrator's instructions, which each of its sessions keeps. */
+export const ORCHESTRATOR_INSTRUCTIONS = `You are the orchestrator of an Agent Studio mission. You coordinate the work: plan it, start agents with mission_spawn to do it, review what they deliver, and drive the mission to a complete, professional result. Use the mission tools to act; use your own tools to check results, not to do work an agent should do. Begin each session with mission_state.
+
+${rules}`;
+
+/** What a workflow's assistant chat knows: which workflow it changes, and how. */
+export function assistantInstructions(workflowId: string): string {
+  return `You help the user build and change the Agent Studio workflow ${workflowId} in this chat. They see its graph live beside the chat and may edit it themselves at the same time.
+- Read it with workflow_read before each change, then send the whole workflow back with workflow_save, with its id and the revision you read. If the save says it changed meanwhile, read it again and redo your change on top: the other change is the user's.
+- Keep what the user built: change only what they ask for, and keep step ids, keys and positions you are not changing.
+- Make it work end to end: real prompts for agent steps, connected steps, sensible triggers, and no issues that block running. Explain briefly what you changed.
+- Run it with workflow_run and follow it with workflow_status when they ask you to try it.`;
+}
 
 /** The first message of an orchestrator session. */
 export function missionBrief(run: WorkflowRun, session: number, state: string): string {
@@ -36,8 +48,6 @@ ${mission.text}${place}
 
 You are its orchestrator in Agent Studio.${handover}
 
-${rules}
-
 ## Now
 ${state}
 
@@ -47,15 +57,21 @@ Begin with mission_state.`;
 const time = (at: string) =>
   new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 
-/** A turn's message: what happened since the orchestrator's last turn. */
-export function missionUpdate(items: (InboxItem & { reply?: string })[], status: string): string {
-  const lines = items.map((item) => {
-    const head = `- ${time(item.at)} ${item.text}`;
-    return item.reply !== undefined
-      ? `${head} Its reply:\n\n${item.reply.trim() || '(empty)'}\n`
-      : head;
-  });
-  return `[Mission update]\n${lines.join('\n')}\n\n${status}\n\nContinue the mission.`;
+/** A turn's message: what happened since the orchestrator's last turn, one line an event (which
+ *  the chat's summary of the message reads), then the replies of the agents that finished. */
+export function missionUpdate(
+  items: (InboxItem & { reply?: string; agent?: string })[],
+  status: string,
+): string {
+  const events = items.map((item) => `- ${time(item.at)} ${item.text.replace(/\s+/g, ' ').trim()}`);
+  const replies = items.flatMap((item) =>
+    item.reply === undefined
+      ? []
+      : [
+          `Reply of ${item.agent ? `"${item.agent}"` : `chat ${item.conversationId}`} (${time(item.at)}):\n\n${item.reply.trim() || '(empty)'}\n\n`,
+        ],
+  );
+  return `[Mission update]\n${events.join('\n')}\n\n${replies.join('')}${status}\n\nContinue the mission.`;
 }
 
 export const missionReminder = (count: number) =>

@@ -254,8 +254,10 @@ try {
       await sleep(2000);
     }
   };
+  // The Workflows button lists them (and opens a new workflow chat); a row opens its workflow's
+  // chat with the graph beside it.
   const openWorkflow = async (title) => {
-    await page.click('#conversation-tab-workflows');
+    await page.click('.workflows-button');
     await page.waitFor(
       (title) => [...document.querySelectorAll('.workflow-row')].some((row) => row.title === title),
       title,
