@@ -61,7 +61,7 @@ fn plan_response(
 }
 
 /// The tools Agent Studio itself answers in a Codex chat.
-fn dynamic_tools() -> Vec<Value> {
+fn dynamic_tools(request: &RunRequest) -> Vec<Value> {
     let mut tools = vec![
         plan_tool(),
         super::visualize::codex_tool(),
@@ -71,12 +71,16 @@ fn dynamic_tools() -> Vec<Value> {
         super::artifact_tool::codex_tool(),
     ];
     tools.extend(crate::screens::tools::codex_tools());
+    tools.extend(super::workflow_calls::codex_tools(
+        request.workflow_tools(),
+        request.mission.is_some(),
+    ));
     tools
 }
 fn start_params(request: &RunRequest) -> Value {
     // `never` also silently declines MCP user input inside Codex. Allow only
     // that interaction category, keeping ordinary execution approvals disabled.
-    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":dynamic_tools()});
+    let mut params = json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"dynamicTools":dynamic_tools(request)});
     if !request.agent.model.is_empty() {
         params["model"] = json!(request.agent.model);
     }
@@ -339,6 +343,7 @@ pub async fn run(
             _ = cancel.cancelled(), if !cancelling => {
                 questions.close();
                 questions.elicitation.close();
+                questions.workflow.close();
                 questions.steering.ready(false);
                 if thread.is_empty() || turn.is_empty() {
                     process.healthy = false;
@@ -362,6 +367,12 @@ pub async fn run(
                 let failed = live && result.is_err();
                 questions.delivered(delivery, result);
                 if failed { process.healthy = false; return Err("Could not send answers to Codex.".into()); }
+            },
+            Some(delivery) = questions.workflow.rx.recv(), if !cancelling => {
+                let result = if questions.workflow.can_deliver(&delivery) {
+                    process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send the workflow's answer to Codex.".to_string())
+                } else { Err("Codex is no longer waiting for this workflow call.".into()) };
+                questions.workflow.delivered(delivery, result);
             },
             Some(delivery) = questions.elicitation.rx.recv(), if !cancelling => {
                 let result = if questions.elicitation.can_deliver(&delivery) {
@@ -471,6 +482,10 @@ pub async fn run(
                     }
                     if let Some(response) = questions.codex(&value, &thread) {
                         if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not respond to the Codex question")?; }
+                        continue;
+                    }
+                    if let Some(response) = questions.workflow.codex(&value, &thread) {
+                        if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not answer the workflow tool")?; }
                         continue;
                     }
                     if let Some((response, event)) = screen_tools.codex(&value, &thread, screen_context.as_deref()).await {
@@ -782,12 +797,34 @@ mod tests {
         let request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture-model","reasoning":"high","instructions":"Do not reinterpret quotes"},"messages":[{"role":"user","text":"'\" $(literal)\nhello"}]})).unwrap();
         assert_eq!(
             start_params(&request),
-            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":dynamic_tools()})
+            json!({"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":false,"skill_approval":false,"request_permissions":false,"mcp_elicitations":true}},"sandbox":"danger-full-access","ephemeral":true,"model":"fixture-model","dynamicTools":dynamic_tools(&request)})
         );
         let turn = turn_params(&request, "fixture-thread");
         assert_eq!(turn["effort"], "high");
         assert_eq!(turn["input"][0]["text"], request.prompt());
         assert!(start_params(&request).get("cwd").is_none()); // Inherit validated process cwd, including WSL.
+    }
+    #[test]
+    fn saved_chats_get_workflow_tools_and_orchestrators_mission_tools() {
+        let names = |request: &RunRequest| {
+            dynamic_tools(request)
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
+        assert!(!names(&request).contains(&"workflow_save".to_string()));
+        request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(names(&request).contains(&"workflow_save".to_string()));
+        assert!(!names(&request).contains(&"mission_spawn".to_string()));
+        request.mission = Some(super::super::workflow_calls::Binding {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            role: "orchestrator".into(),
+        });
+        assert!(request.validate().is_ok());
+        assert!(names(&request).contains(&"mission_spawn".to_string()));
+        request.conversation_only = true;
+        assert!(request.validate().is_err());
     }
     #[test]
     fn plan_tool_validates_parent_and_bounds_without_changing_work() {

@@ -626,6 +626,8 @@ pre {
   height: 24px;
 }
 .conversation-tabs {
+  /* Screens and Workflows show their icon when the sidebar is too narrow for every label. */
+  container-type: inline-size;
   display: flex;
   flex-shrink: 0;
   gap: 2px;
@@ -661,6 +663,50 @@ pre {
 }
 [aria-selected='true'] > .conversation-tab-count {
   color: var(--text-muted);
+}
+.conversation-tabs .tab-icon {
+  display: none;
+  flex-shrink: 0;
+}
+@container (max-width: 340px) {
+  .conversation-tabs .tab-icon {
+    display: inline;
+  }
+  .conversation-tabs .tab-label {
+    display: none;
+  }
+  .conversation-tabs [role='tab']:has(> .tab-icon) {
+    flex: 0 0 auto;
+    padding-inline: 8px;
+  }
+}
+/* A workflow waits for your answer. */
+.conversation-tab-count.workflow-attention {
+  color: var(--warning);
+}
+/* Above a chat a workflow started: which run it belongs to. */
+.workflow-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.workflow-banner > svg {
+  flex-shrink: 0;
+  color: var(--accent-strong);
+}
+.workflow-banner > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .conversation-list {
   flex: 1;

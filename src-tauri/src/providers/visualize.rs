@@ -67,6 +67,8 @@ fn valid(args: &Value) -> bool {
 
 #[derive(Default)]
 pub struct Visualizer {
+    /// More tools of the agent_studio server, such as the workflow tools a saved chat gets.
+    pub extra: Vec<Value>,
     visuals: Vec<Visualization>,
     published: bool,
     // Only the parent assistant's actual tool calls can publish a Claude visual.
@@ -74,6 +76,13 @@ pub struct Visualizer {
     accepted: HashMap<String, Visualization>,
 }
 impl Visualizer {
+    /// A reply's visualizer whose agent_studio server also offers `extra` tools.
+    pub fn with_tools(extra: Vec<Value>) -> Self {
+        Self {
+            extra,
+            ..Default::default()
+        }
+    }
     pub fn has_visuals(&self) -> bool {
         self.published
     }
@@ -177,6 +186,7 @@ impl Visualizer {
                     super::background::tool(),
                 ];
                 tools.extend(crate::screens::tools::tools());
+                tools.extend(self.extra.iter().cloned());
                 response["result"] = json!({ "tools": tools })
             }
             "tools/call" if m["params"]["name"] == "visualize" => {

@@ -2018,9 +2018,13 @@ test('computer then folder scopes CLI choices and groups active and history with
   const historyTab = page.getByRole('tab', { name: /^History/ });
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
   await expect(history).toBeHidden();
-  // The tabs go Active, History, then Screens, and the arrows wrap around them.
+  // The tabs go Active, History, Screens, then Workflows, and the arrows wrap around them.
   const screensTab = page.getByRole('tab', { name: /^Screens/ });
+  const workflowsTab = page.getByRole('tab', { name: /^Workflows/ });
   await activeTab.press('End');
+  await expect(workflowsTab).toBeFocused();
+  await expect(page.locator('#conversation-panel-workflows')).toBeVisible();
+  await workflowsTab.press('ArrowLeft');
   await expect(screensTab).toBeFocused();
   await expect(page.locator('#conversation-panel-screens')).toBeVisible();
   await screensTab.press('ArrowLeft');
@@ -2030,8 +2034,8 @@ test('computer then folder scopes CLI choices and groups active and history with
   await historyTab.press('ArrowLeft');
   await expect(activeTab).toBeFocused();
   await activeTab.press('ArrowLeft');
-  await expect(screensTab).toBeFocused();
-  await screensTab.press('ArrowRight');
+  await expect(workflowsTab).toBeFocused();
+  await workflowsTab.press('ArrowRight');
   await expect(activeTab).toBeFocused();
   await expect(active).toBeVisible();
   await expect(active.locator('.conversation-item')).toHaveAttribute('aria-current', 'page');

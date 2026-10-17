@@ -241,6 +241,8 @@ pub fn fingerprint(request: &RunRequest, exe: &Executable) -> Result<String, Str
         "outputSchema": if request.agent.provider == "claude" && !request.compact { request.agent.output_schema.as_deref() } else { None },
         "planMode": request.agent.plan_mode,
         "claudeInstructions": request.claude_instructions,
+        // An orchestrator's process has the mission tools, which no other chat's has.
+        "mission": request.mission.as_ref().map(|m| &m.run_id),
         "plugins": crate::plugins::for_run(request),
         "sharedContext": request.shared_context,
         "program": exe.program,

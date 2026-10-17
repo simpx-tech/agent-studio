@@ -337,6 +337,9 @@ function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
     // Consume all lifecycle events, including suppressed ones, so switching
     // chats later cannot replay an alert the reader already saw.
     if (notice.conversationId === foregroundConversation()) continue;
+    // A workflow's chats end quietly; the workflow reports what matters (docs/WORKFLOWS.md).
+    if (notice.kind !== 'attention' && notice.conversationId && quietChats().has(notice.conversationId))
+      continue;
     // Notification/audio failure must never fail saving or interrupt a CLI run.
     // Native delivery retains an actionable error in Connections.
     void invoke('desktop_notification', { notice }).catch(() => {});
@@ -913,6 +916,7 @@ export function watchRelayConnection(listener: (ready: boolean) => void): () => 
 }
 function notifyRelayConnection(ready: boolean) {
   if (!ready) accountUpdateGate.clear();
+  if (!ready) noteWorkflows(undefined);
   for (const listener of relayConnectionListeners) listener(ready);
 }
 
@@ -1349,6 +1353,7 @@ let relayStoresImages = false;
 const oldRelayImages = 'Update the relay to sync conversations with images.';
 function noteImageStore(probe: { status: number; body: any }) {
   if (probe.status !== 200) return;
+  noteWorkflows(probe.body?.workflows);
   relayStoresImages = probe.body?.images === 1;
   relayLight = probe.body?.light === 1;
   if (lightSession && !relayLight) throw new Error(lightRelayGone);
@@ -3733,4 +3738,98 @@ export async function openLink(url: string) {
     const { openUrl } = await import('@tauri-apps/plugin-opener');
     await openUrl(url);
   } else window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+// ---- Workflows (docs/WORKFLOWS.md) ------------------------------------------------------------
+
+/** The relay's workflow store revision from its revision answer, or undefined without one. */
+let relayWorkflows: number | undefined;
+const workflowRevisionListeners = new Set<(revision: number | undefined) => void>();
+function noteWorkflows(value: unknown) {
+  const next =
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  if (next === relayWorkflows) return;
+  relayWorkflows = next;
+  for (const listener of workflowRevisionListeners) listener(next);
+}
+/** The revision of the relay's workflow store, while this device reaches one that has it. */
+export const relayWorkflowRevision = () => (relayConnected ? relayWorkflows : undefined);
+export function watchRelayWorkflows(listener: (revision: number | undefined) => void) {
+  workflowRevisionListeners.add(listener);
+  return () => void workflowRevisionListeners.delete(listener);
+}
+/** A request of the relay's workflow store. */
+export function workflowRelay(
+  method: 'POST' | 'PUT',
+  path: string,
+  body: unknown,
+): Promise<{ status: number; body: any }> {
+  return relayRaw(method, `v1/workflows/${path}`, body);
+}
+/** The files of this computer's own workflow store, in app data. */
+export const workflowFiles = {
+  read: (name: string) =>
+    invoke<string | null>('workflow_file_read', { name }).then((text) => text ?? undefined),
+  write: (name: string, text: string) => invoke<void>('workflow_file_write', { name, text }),
+  remove: (name: string) => invoke<void>('workflow_file_remove', { name }),
+  names: () => invoke<string[]>('workflow_file_names'),
+};
+export const workflowCallSchema = z.object({
+  id: z.string().uuid(),
+  runId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  connectionId: z.string().uuid().nullable().optional(),
+  tool: z.string().min(1),
+  input: z.unknown(),
+  mission: z
+    .object({ runId: z.string().uuid(), role: z.literal('orchestrator') })
+    .nullable()
+    .optional(),
+});
+/** A workflow tool call of a reply this computer runs, which this window answers. */
+export type WorkflowCall = z.infer<typeof workflowCallSchema>;
+export async function watchWorkflowCalls(
+  listener: (call: WorkflowCall) => void,
+): Promise<() => void> {
+  if (!desktop()) return () => {};
+  return listen<unknown>('studio-workflow-call', ({ payload }) => {
+    const call = workflowCallSchema.safeParse(payload);
+    if (call.success) listener(call.data);
+  });
+}
+/** Calls still waiting for this window, as after a reload. */
+export async function pendingWorkflowCalls(): Promise<WorkflowCall[]> {
+  if (!desktop()) return [];
+  return z.array(workflowCallSchema).parse(await invoke('pending_workflow_calls'));
+}
+export async function answerWorkflowCall(call: WorkflowCall, text: string, error: boolean) {
+  await invoke('answer_workflow_call', {
+    runId: call.runId,
+    connectionId: call.connectionId ?? null,
+    id: call.id,
+    text,
+    error,
+  });
+}
+
+// Chats whose end alerts stay quiet: the chats of workflow runs.
+let quietChats: () => Set<string> = () => new Set();
+export function setQuietChats(chats: () => Set<string>) {
+  quietChats = chats;
+}
+/** A workflow run's alert, as a desktop notification that opens the workflow. */
+export async function notifyWorkflow(
+  runId: string,
+  alert: { id: string; kind: 'question' | 'notify' | 'completed' | 'failed'; title: string; text: string },
+) {
+  if (!desktop() || serverHost()) return;
+  await invoke('desktop_notification', {
+    notice: {
+      kind: alert.kind === 'question' ? 'attention' : alert.kind === 'failed' ? 'error' : 'complete',
+      workflowId: runId,
+      tag: `${runId}:workflow:${alert.id}`,
+      title: alert.title,
+      body: alert.kind === 'question' ? `Question: ${alert.text}` : alert.text,
+    },
+  }).catch(() => {});
 }

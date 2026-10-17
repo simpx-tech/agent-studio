@@ -484,6 +484,7 @@ describe('real HTTP relay', () => {
         revision: 0,
         images: 1,
         light: 1,
+        workflows: 0,
       },
     });
   });
@@ -1316,6 +1317,7 @@ describe('real HTTP relay', () => {
       revision: 0,
       images: 1,
       light: 1,
+      workflows: 0,
     });
     const workspace = emptyShared();
     workspace.fleet.computers.push({ id: crypto.randomUUID(), name: 'Desktop' });
@@ -1326,6 +1328,7 @@ describe('real HTTP relay', () => {
       revision: 1,
       images: 1,
       light: 1,
+      workflows: 0,
     });
   });
   it('routes work to the exact environment, claims once, streams progress, cancels and deduplicates submissions', async () => {

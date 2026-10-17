@@ -317,3 +317,94 @@ async fn installed_codex_compares_two_files_side_by_side() {
     assert!(answer.contains("<!-- files:pair -->"), "{answer}");
     eprintln!("Answer: {answer}");
 }
+
+/// An orchestrator's Codex thread starts with the workflow tools as dynamic tools, and its calls
+/// reach this computer's window, here a stand-in, whose answers reach the model.
+#[tokio::test]
+#[ignore = "Opt-in installed Codex CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_codex_answers_workflow_tools_through_the_window() {
+    use crate::providers::workflow_calls::{Binding, Call, Context};
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test. Call the workflow_list tool once, then call the mission_state tool once. Run no other tool and no command. Then reply with one short sentence naming the workflow and the mission title they report.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    let mission = Binding {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        role: "orchestrator".into(),
+    };
+    request.mission = Some(mission.clone());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("codex").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-workflow-test".into(),
+        String::new(),
+    )
+    .unwrap();
+    let channel = EventSink::new(|_| Ok(()));
+    let hub = Questions::default();
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    let (calls, mut heard) = tokio::sync::mpsc::unbounded_channel::<Call>();
+    questions.workflow.attach(Some(Context {
+        conversation_id: request.conversation_id.clone().unwrap(),
+        connection_id: None,
+        mission: Some(mission.clone()),
+        emit: Arc::new(move |call: &Call| {
+            let _ = calls.send(call.clone());
+        }),
+    }));
+    let window = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            let mut tools = vec![];
+            while let Some(call) = heard.recv().await {
+                tools.push(call.tool.clone());
+                let text = match call.tool.as_str() {
+                    "workflow_list" => json!({"workflows":[{"id":"w1","name":"Nightly report","steps":3}],"runs":[]}).to_string(),
+                    "mission_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
+                    other => format!("Unexpected tool {other}"),
+                };
+                let _ = hub
+                    .4
+                    .answer(&call.run_id, None, &call.id, text, false)
+                    .await;
+            }
+            tools
+        })
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        run(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    process.kill().await;
+    drop(questions);
+    let (status, answer) = result.expect("Installed CLI failed");
+    let tools = tokio::time::timeout(Duration::from_secs(5), window)
+        .await
+        .ok()
+        .and_then(|t| t.ok())
+        .unwrap_or_default();
+    assert_eq!(status, "complete");
+    assert!(tools.contains(&"workflow_list".to_string()), "{tools:?}");
+    assert!(tools.contains(&"mission_state".to_string()), "{tools:?}");
+    assert!(answer.contains("Nightly report"), "{answer}");
+    assert!(answer.contains("Probe mission"), "{answer}");
+    eprintln!("Tools {tools:?}; answer: {answer}");
+}

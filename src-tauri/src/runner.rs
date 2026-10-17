@@ -196,11 +196,13 @@ pub async fn run(
         channel.send(event).map_err(|e| e.to_string())
     });
     output.screens = screens;
-    let questions = app.state::<crate::providers::questions::Questions>().open(
+    let workflow = crate::providers::workflow_calls::context(&app, &request, connection_id.clone());
+    let mut questions = app.state::<crate::providers::questions::Questions>().open(
         &request.run_id,
         connection_id,
         output.clone(),
     )?;
+    questions.workflow.attach(workflow);
     let tracking = matches!(request.agent.provider.as_str(), "claude" | "codex")
         && request.conversation_id.is_some();
     let mut observation = crate::spend::Observation {
@@ -735,7 +737,12 @@ async fn stream_turn(
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     decoder.compactions.manual = request.compact;
-    let mut visualizer = crate::providers::visualize::Visualizer::default();
+    let mut visualizer = crate::providers::visualize::Visualizer::with_tools(
+        crate::providers::workflow_calls::tools(
+            request.workflow_tools(),
+            request.mission.is_some(),
+        ),
+    );
     let mut sender = crate::providers::sent_files::FileSender::default();
     let mut shower = crate::providers::artifact_tool::ArtifactShower::default();
     let mut screen_tools = crate::screens::tools::Agent::default();
@@ -776,15 +783,17 @@ async fn stream_turn(
     let mut steering: HashMap<String, crate::providers::steering::Delivery> = HashMap::new();
     let mut diagnostics = String::new();
     loop {
-        let (answer_rx, steering_rx, elicitation_rx, take_over_rx) = match questions.as_mut() {
-            Some(q) => (
-                Some(&mut q.rx),
-                Some(&mut q.steering.rx),
-                Some(&mut q.elicitation.rx),
-                Some(&mut q.take_over.rx),
-            ),
-            None => (None, None, None, None),
-        };
+        let (answer_rx, steering_rx, elicitation_rx, take_over_rx, workflow_rx) =
+            match questions.as_mut() {
+                Some(q) => (
+                    Some(&mut q.rx),
+                    Some(&mut q.steering.rx),
+                    Some(&mut q.elicitation.rx),
+                    Some(&mut q.take_over.rx),
+                    Some(&mut q.workflow.rx),
+                ),
+                None => (None, None, None, None, None),
+            };
         let mut turn_ended = false;
         tokio::select! {
             biased;
@@ -798,6 +807,7 @@ async fn stream_turn(
             _ = cancel.cancelled(), if !interrupting => {
                 if let Some(q) = &questions { q.close(); }
                 if let Some(q) = &questions { q.elicitation.close(); }
+                if let Some(q) = &questions { q.workflow.close(); }
                 if let Some(q) = &questions { q.steering.ready(false); }
                 if persistent && prompt_sent && stdin_open {
                     // Ask the CLI to end this turn in-band so it stays usable for the next reply.
@@ -852,6 +862,13 @@ async fn stream_turn(
                     process.healthy = false; break Err(send_failed.into());
                 }
                 steering.insert(delivery.input.id.clone(), delivery);
+            },
+            Some(delivery) = async { match workflow_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                let q = &questions.as_ref().unwrap().workflow;
+                let result = if stdin_open && q.can_deliver(&delivery) {
+                    process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send the workflow's answer to Claude.".to_string())
+                } else { Err("Claude is no longer waiting for this workflow call.".into()) };
+                q.delivered(delivery, result);
             },
             Some(delivery) = async { match elicitation_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
                 let q = &questions.as_ref().unwrap().elicitation;
@@ -969,6 +986,7 @@ async fn stream_turn(
                             for event in sender.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             for event in shower.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             for event in screen_tools.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                            if let Some(q) = &mut questions { q.workflow.observe_claude(&value); }
                             if value["type"] == "control_request" {
                                 let own_session = value["session_id"].is_null() || value["session_id"].as_str() == Some(process.session_id.as_str());
                                 if let Some(response) = questions.as_mut().and_then(|q| q.claude_plan(&value, initialized && prompt_sent && !interrupting && !request.compact && own_session)) {
@@ -990,6 +1008,10 @@ async fn stream_turn(
                                 }
                                 if let Some(response) = input_lifetime.awaited.claude_response(&value) {
                                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                    continue;
+                                }
+                                if let Some(response) = questions.as_mut().and_then(|q| q.workflow.claude(&value)) {
+                                    if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?; }
                                     continue;
                                 }
                                 if let Some(response) = screen_tools.claude(&value, screen_context.as_deref()).await {

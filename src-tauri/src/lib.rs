@@ -47,6 +47,7 @@ mod undo;
 mod updates;
 mod usage;
 mod watchdog;
+mod workflow_files;
 mod wsl;
 use std::io::Write;
 use std::sync::Mutex;
@@ -1301,6 +1302,31 @@ async fn manage_elicitation(
     call.once(questions.2.manage(&run_id, connection_id.as_deref(), input))
         .await
 }
+/// This window's answer to a workflow tool call of a reply this computer runs.
+#[tauri::command]
+async fn answer_workflow_call(
+    questions: State<'_, providers::questions::Questions>,
+    call: calls::Call,
+    run_id: String,
+    connection_id: Option<String>,
+    id: String,
+    text: String,
+    error: bool,
+) -> Result<(), String> {
+    call.once(
+        questions
+            .4
+            .answer(&run_id, connection_id.as_deref(), &id, text, error),
+    )
+    .await
+}
+/// Workflow tool calls still waiting for this computer's window, which a reloaded window takes.
+#[tauri::command]
+async fn pending_workflow_calls(
+    questions: State<'_, providers::questions::Questions>,
+) -> Result<Vec<providers::workflow_calls::Call>, String> {
+    Ok(questions.4.pending())
+}
 #[tauri::command]
 async fn steer_run(
     questions: State<'_, providers::questions::Questions>,
@@ -1635,6 +1661,7 @@ pub fn run() {
         .manage(folder_icons::FolderIcons::default())
         .manage(Storage::default())
         .manage(drafts::DraftStorage::default())
+        .manage(workflow_files::WorkflowFiles::default())
         .manage(notifications::Notifications::default())
         .manage(relay::Relay::default())
         .manage(usage::UsageState::default())
@@ -1824,6 +1851,12 @@ pub fn run() {
             release_conversation,
             undo_files,
             answer_question,
+            answer_workflow_call,
+            pending_workflow_calls,
+            workflow_files::workflow_file_read,
+            workflow_files::workflow_file_write,
+            workflow_files::workflow_file_remove,
+            workflow_files::workflow_file_names,
             manage_elicitation,
             steer_run,
             sign_in,

@@ -11,11 +11,14 @@
     connectionId,
     running,
     writing = false,
+    send,
   }: {
     request: QuestionRequest;
     runId?: string;
     connectionId?: string;
     running: boolean;
+    /** Delivers the answer elsewhere than a run, as a workflow's questions do. */
+    send?: (answer: QuestionAnswer) => Promise<void>;
     /**
      * Claude is still writing these questions: shown as they arrive, not answerable yet, in the
      * card the recorded question then fills, so it stays in place once it can be answered.
@@ -40,7 +43,7 @@
     },
   );
   const lastStep = $derived(step === request.questions.length - 1);
-  const active = $derived(running && request.status === 'pending' && !!runId && !sent);
+  const active = $derived(running && request.status === 'pending' && (!!runId || !!send) && !sent);
   const answer = $derived<QuestionAnswer>({
     requestId: request.id,
     skipped: false,
@@ -80,13 +83,14 @@
     if (!multiple) custom.set(id, '');
   }
   async function submit(skipped = false) {
-    if (!active || writing || busy || !runId || (!skipped && !lastStep)) return;
+    if (!active || writing || busy || (!runId && !send) || (!skipped && !lastStep)) return;
     const response = skipped ? { requestId: request.id, skipped, answers: [] } : answer;
     if (!validAnswer(request, response)) return;
     busy = true;
     error = '';
     try {
-      await answerQuestion(runId, response, connectionId);
+      if (send) await send(response);
+      else await answerQuestion(runId!, response, connectionId);
       sent = true;
     } catch (e) {
       error = String(e).replace(/^Error: /, '');

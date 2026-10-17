@@ -22,6 +22,7 @@ pub mod sessions;
 pub mod steering;
 pub mod take_over;
 pub mod visualize;
+pub mod workflow_calls;
 
 #[derive(Clone, Debug)]
 pub struct Executable {
@@ -599,6 +600,9 @@ pub struct RunRequest {
     pub claude_default_model: Option<String>,
     #[serde(default)]
     pub workflow: Option<serde_json::Value>,
+    // The mission this conversation orchestrates, which gives it the mission tools.
+    #[serde(default)]
+    pub mission: Option<workflow_calls::Binding>,
     pub run_id: String,
     // The renderer switched this conversation to another account of the same agent.
     // Version 2 native bindings detect that themselves; legacy bindings need this
@@ -747,6 +751,15 @@ impl RunRequest {
         if self.workflow.is_some() {
             return Err("The app-owned step sequencer was removed. Ask Claude to run a native Workflow or a saved /workflow-name command.".into());
         }
+        if let Some(mission) = &self.mission {
+            mission.validate()?;
+            if self.conversation_only
+                || self.conversation_id.is_none()
+                || !matches!(self.agent.provider.as_str(), "claude" | "codex")
+            {
+                return Err("Only a saved Claude or Codex chat orchestrates a mission.".into());
+            }
+        }
         uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid run id")?;
         if !valid_provider(&self.agent.provider) {
             return Err("Unknown provider".into());
@@ -852,6 +865,11 @@ impl RunRequest {
     pub fn uses_claude_visualizer(&self) -> bool {
         self.agent.provider == "claude" && self.tools_enabled()
     }
+    /// Whether the chat gets the workflow tools: a saved Claude or Codex conversation with tools.
+    pub fn workflow_tools(&self) -> bool {
+        self.conversation_id.is_some()
+            && (self.uses_codex_server() || self.uses_claude_visualizer())
+    }
     pub fn prompt(&self) -> String {
         // Image bytes are separate visual inputs, never text tokens or shell paths.
         let messages: Vec<_> = self
@@ -926,8 +944,13 @@ impl RunRequest {
         } else {
             ""
         };
+        let workflows = if self.workflow_tools() {
+            workflow_calls::GUIDANCE
+        } else {
+            ""
+        };
         if studio_tools {
-            format!("{tools} {visuals} {files} {questions} {screens}")
+            format!("{tools} {visuals} {files} {questions} {screens} {workflows}")
         } else {
             tools
         }
@@ -1584,6 +1607,7 @@ mod tests {
             shared_context: Default::default(),
             claude_default_model: None,
             workflow: None,
+            mission: None,
             conversation_only: false,
             account_switch: false,
             forked: false,

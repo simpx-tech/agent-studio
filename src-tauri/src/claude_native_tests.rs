@@ -1582,3 +1582,95 @@ async fn installed_claude_continues_a_chat_whose_transcript_was_cleaned_up() {
     // The project folder named after the throwaway folder holds only this test's files.
     std::fs::remove_dir_all(continued.parent().unwrap()).unwrap();
 }
+
+/// An orchestrator's reply reaches the workflow tools through the SDK server: each call goes to
+/// this computer's window, here a stand-in answering it, and the window's answer reaches the CLI.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_answers_workflow_tools_through_the_window() {
+    use crate::providers::workflow_calls::{Binding, Call, Context};
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test. Call mcp__agent_studio__workflow_list once, then call mcp__agent_studio__mission_state once. Run no other tool. Then reply with one short sentence naming the workflow and the mission title they report.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    let mission = Binding {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        role: "orchestrator".into(),
+    };
+    request.mission = Some(mission.clone());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-workflow-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let channel = EventSink::new(|_| Ok(()));
+    let hub = Questions::default();
+    let mut questions = hub.open(&request.run_id, None, channel.clone()).unwrap();
+    // The window: each call it hears is answered as the workflow engine would answer it.
+    let (calls, mut heard) = tokio::sync::mpsc::unbounded_channel::<Call>();
+    questions.workflow.attach(Some(Context {
+        conversation_id: request.conversation_id.clone().unwrap(),
+        connection_id: None,
+        mission: Some(mission.clone()),
+        emit: Arc::new(move |call: &Call| {
+            let _ = calls.send(call.clone());
+        }),
+    }));
+    let window = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            let mut tools = vec![];
+            while let Some(call) = heard.recv().await {
+                tools.push((call.tool.clone(), call.mission.clone()));
+                let text = match call.tool.as_str() {
+                    "workflow_list" => json!({"workflows":[{"id":"w1","name":"Nightly report","steps":3}],"runs":[]}).to_string(),
+                    "mission_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
+                    other => format!("Unexpected tool {other}"),
+                };
+                let _ = hub
+                    .4
+                    .answer(&call.run_id, None, &call.id, text, false)
+                    .await;
+            }
+            tools
+        })
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    process.kill().await;
+    drop(questions);
+    let (status, answer) = result.expect("Installed CLI failed");
+    let tools = tokio::time::timeout(Duration::from_secs(5), window).await;
+    assert_eq!(status, "complete");
+    let tools = tools.ok().and_then(|t| t.ok()).unwrap_or_default();
+    let names: Vec<&str> = tools.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(names.contains(&"workflow_list"), "{names:?}");
+    assert!(names.contains(&"mission_state"), "{names:?}");
+    assert!(tools
+        .iter()
+        .all(|(_, binding)| binding.as_ref() == Some(&mission)));
+    assert!(answer.contains("Nightly report"), "{answer}");
+    assert!(answer.contains("Probe mission"), "{answer}");
+    eprintln!("Tools {names:?}; answer: {answer}");
+}

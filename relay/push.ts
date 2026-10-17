@@ -12,6 +12,7 @@ import {
   chatNotification,
   noticeBodyLimit,
   noticeTitleLimit,
+  notificationLine,
   requestsAttention,
   type PushNotice,
   type StaleAlert,
@@ -86,6 +87,8 @@ export const subscriptionSchema = z.object({
 const noticeSchema = z.object({
   kind: z.enum(['complete', 'attention', 'error', 'cancelled', 'test']),
   conversationId: z.string().uuid().optional(),
+  // A workflow's alert opens the workflow instead of a chat.
+  workflowId: z.string().uuid().optional(),
   tag: z.string().max(100),
   // Bounded by chatNotification in code points, at most two UTF-16 units each; these count
   // units, with room to spare so a longer limit never makes saved alerts unreadable.
@@ -208,6 +211,7 @@ export function pushService({
   pendingCount,
   conversationTitle = () => undefined,
   conversationExists = () => true,
+  quiet = () => false,
   active = () => true,
 }: {
   directory: string;
@@ -220,6 +224,8 @@ export function pushService({
   conversationTitle?: (conversationId: string) => string | undefined;
   // An alert held for a chat deleted meanwhile is dropped.
   conversationExists?: (conversationId: string) => boolean;
+  // A chat a workflow started, whose end its workflow reports instead (docs/WORKFLOWS.md).
+  quiet?: (conversationId: string) => boolean;
   active?: () => boolean;
 }) {
   const file = join(directory, 'web-push.json');
@@ -529,13 +535,14 @@ export function pushService({
           continue;
         const base = { conversationId: conversation.id, tag: `studio-${message.runId}` };
         const status = message.status;
-        if (status !== 'running' && (!old || old.status === 'running'))
+        if (status !== 'running' && (!old || old.status === 'running')) {
+          if (quiet(conversation.id)) continue;
           enqueue(next, `${message.runId}:terminal`, () => ({
             ...base,
             kind: status,
             ...chatNotification(status, conversation, message),
           }));
-        else if (status === 'running')
+        } else if (status === 'running')
           // Keys already announced still refresh an alert that is being held.
           for (const key of attentionKeys(message))
             enqueue(next, `${message.runId}:${key}`, () => ({
@@ -626,7 +633,7 @@ export function pushService({
         : attention
           ? 'attention'
           : undefined;
-      if (!kind) return;
+      if (!kind || (kind !== 'attention' && quiet(request.data.conversationId))) return;
       try {
         const next = pruned();
         // Built at most once per update, and only for an alert that goes out or is refreshed.
@@ -645,6 +652,40 @@ export function pushService({
               { title: conversationTitle(request.data.conversationId) ?? '' },
               (reply ??= jobReply(job, questions, elicitations)),
               key,
+            ),
+          }));
+        save(next);
+        void drain();
+      } catch {
+        unavailable = true;
+      }
+    },
+    /**
+     * The alerts a workflow run raised (a question, a Notify step, its end), each once, under
+     * the workflow's title.
+     */
+    workflowAlerts(
+      runId: string,
+      title: string,
+      alerts: { id: string; kind: 'question' | 'notify' | 'completed' | 'failed'; text: string }[],
+    ) {
+      if (!alerts.length) return;
+      try {
+        const next = pruned();
+        for (const alert of alerts)
+          enqueue(next, `workflow:${runId}:${alert.id}`, () => ({
+            kind:
+              alert.kind === 'question'
+                ? 'attention'
+                : alert.kind === 'failed'
+                  ? 'error'
+                  : 'complete',
+            workflowId: runId,
+            tag: `studio-workflow-${runId}`,
+            title: notificationLine(title, noticeTitleLimit),
+            body: notificationLine(
+              alert.kind === 'question' ? `Question: ${alert.text}` : alert.text,
+              noticeBodyLimit,
             ),
           }));
         save(next);

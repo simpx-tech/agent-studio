@@ -30,6 +30,7 @@ import { mentionRequestSchema } from '../src/lib/mentions.ts';
 import { accountUpdateSchema, accountActionSchema } from '../src/lib/live-usage.ts';
 import { executionHost } from '../src/lib/fleet.ts';
 import { screenRequestSchema } from '../src/lib/screens.ts';
+import { handleWorkflows, recentAlerts, relayWorkflows } from './workflows.ts';
 import {
   ImageUploadError,
   imageStore,
@@ -329,6 +330,8 @@ export function createRelay({
     };
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const sessions = sessionStore(directory, token, now);
+    // Definitions and runs of workflows, beside the workspace (docs/WORKFLOWS.md).
+    const workflows = relayWorkflows(directory, now);
     const push = pushService({
       directory,
       token,
@@ -336,9 +339,12 @@ export function createRelay({
       active,
       sessionActive: (identity) => active() && sessions.active(identity),
       send: pushSender,
+      // A workflow's chats stay out of the count, as they stay out of the chat lists.
       pendingCount: () =>
         pendingChatCount(
-          state.workspace.conversations,
+          ((chats) => state.workspace.conversations.filter((c) => !chats.has(c.id)))(
+            workflows.workflowChats(),
+          ),
           new Map(
             [...jobs.values()]
               .filter((job) => job.method === 'run')
@@ -347,6 +353,7 @@ export function createRelay({
         ),
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
       conversationExists: (id) => state.workspace.conversations.some((c) => c.id === id),
+      quiet: (id) => workflows.workflowChats().has(id),
     });
     const images = imageStore(directory, now);
     const file = join(directory, 'workspace.json');
@@ -699,6 +706,8 @@ export function createRelay({
             images: 1,
             // Chats can be read light, and uploads keep the recorded work they leave out.
             light: 1,
+            // The workflow store's revision: it moves with every change of a workflow.
+            workflows: workflows.revision(),
           });
           return;
         }
@@ -813,6 +822,25 @@ export function createRelay({
           });
           res.end(bytes);
           return;
+        }
+        if (url.pathname.startsWith('/v1/workflows/')) {
+          if (
+            await handleWorkflows({
+              method: req.method ?? 'GET',
+              path: url.pathname,
+              body: () => body(req, authorized),
+              store: workflows,
+              actor: typeof actor === 'string' ? actor : '',
+              desktop: bearer,
+              send,
+              written: (id, kind, value) => {
+                if (kind !== 'run') return;
+                const title = typeof value.title === 'string' ? value.title : 'Workflow';
+                push.workflowAlerts(id, title, recentAlerts(value, now()));
+              },
+            })
+          )
+            return;
         }
         if (url.pathname === '/v1/heartbeat' && req.method === 'POST') {
           const value = presenceInput.parse(await body(req, authorized));

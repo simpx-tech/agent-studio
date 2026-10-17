@@ -399,6 +399,9 @@ export type RunRequest = {
   agent: ChatSettings;
   // Workspace-wide Claude chat instructions, appended to the CLI's system prompt.
   claudeInstructions?: string;
+  // The mission this conversation orchestrates (docs/WORKFLOWS.md), which gives it the mission
+  // tools; part of the parked process's identity.
+  mission?: { runId: string; role: 'orchestrator' };
   // A message sent while the conversation's Claude reply only waits for background work: that
   // reply hands this one its process and ends. `messages` are the user message and the reply
   // placeholder the conversation gains once the host confirms, on the executing host as well.

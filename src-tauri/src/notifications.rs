@@ -46,6 +46,9 @@ pub struct Notifications(Mutex<Option<Saved>>);
 pub struct Notice {
     kind: Kind,
     conversation_id: Option<String>,
+    // A workflow run's alert (docs/WORKFLOWS.md), which opens the workflow.
+    #[serde(default)]
+    workflow_id: Option<String>,
     tag: String,
     // The chat's title and a line about its reply (`chatNotification` in the page). Without
     // them the notice shows the generic text of its kind.
@@ -67,7 +70,20 @@ enum Kind {
 impl Notice {
     fn validate(&self) -> Result<(), String> {
         let (id, event) = self.tag.split_once(':').ok_or("Invalid notification")?;
-        let valid = if self.kind == Kind::Test {
+        let valid = if let Some(run) = &self.workflow_id {
+            // One alert of a run, named by the run and the alert.
+            uuid::Uuid::parse_str(run).is_ok()
+                && id == run
+                && event.strip_prefix("workflow:").is_some_and(|alert| {
+                    !alert.is_empty()
+                        && alert.len() <= 64
+                        && alert
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })
+                && self.conversation_id.is_none()
+                && self.kind != Kind::Test
+        } else if self.kind == Kind::Test {
             id == "test"
                 && uuid::Uuid::parse_str(event).is_ok()
                 && self.conversation_id.is_none()
@@ -96,6 +112,13 @@ impl Notice {
         } else {
             Err("Invalid notification".into())
         }
+    }
+    /// What a click opens: the chat, or `workflow:<id>` for a workflow's alert.
+    fn target(&self) -> Option<String> {
+        self.workflow_id
+            .as_ref()
+            .map(|id| format!("workflow:{id}"))
+            .or_else(|| self.conversation_id.clone())
     }
     fn content(&self) -> (String, String) {
         let (title, body) = match self.kind {
@@ -293,7 +316,7 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
     {
         // Retain the native callback after banner dismissal for Notification Center clicks.
         let target = app.clone();
-        let id = notice.conversation_id.clone();
+        let id = notice.target();
         tauri_winrt_notification::Toast::new(&app.config().identifier)
             .title(&title).text1(&body).sound(None)
             .on_activated(move |_| { open(&target, id.as_deref()); Ok(()) })
@@ -323,14 +346,16 @@ fn show(app: &tauri::AppHandle, notice: &Notice) -> Result<(), String> {
             .hint(notify_rust::Hint::DesktopEntry(
                 app.config().identifier.clone(),
             ));
-        if notice.conversation_id.is_some() {
+        if notice.workflow_id.is_some() {
+            notification.action("default", "Open workflow");
+        } else if notice.conversation_id.is_some() {
             notification.action("default", "Open chat");
         }
         let handle = notification.show().map_err(|_| "Could not send a desktop notification. Check your system notification settings and try the test again.")?;
         // Every banner keeps a listener for its click. Some Linux notification servers never
         // report a dismissal, so such a listener waits until the app quits.
         let app = app.clone();
-        let id = notice.conversation_id.clone();
+        let id = notice.target();
         std::thread::spawn(move || {
             let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
                 if matches!(response, notify_rust::NotificationResponse::Default)
@@ -404,6 +429,7 @@ mod tests {
         let mut n = Notice {
             kind: Kind::Complete,
             conversation_id: Some(id.clone()),
+            workflow_id: None,
             tag: format!("{id}:terminal"),
             title: Some("Fix the login flow".into()),
             body: Some("Done. The login flow now keeps the session.".into()),
@@ -435,6 +461,16 @@ mod tests {
         assert!(n.validate().is_err());
         n.title = None;
         assert!(n.validate().is_ok());
+        // A workflow's alert names its run and the alert, and no chat.
+        n.kind = Kind::Attention;
+        n.workflow_id = Some(id.clone());
+        n.tag = format!("{id}:workflow:a1b2");
+        assert!(n.validate().is_ok());
+        assert_eq!(n.target(), Some(format!("workflow:{id}")));
+        n.tag = format!("{}:workflow:a1b2", uuid::Uuid::new_v4());
+        assert!(n.validate().is_err());
+        n.tag = format!("{id}:workflow:../x");
+        assert!(n.validate().is_err());
     }
     #[test]
     fn shows_the_chat_title_and_reply_line_as_plain_bounded_text() {
@@ -442,6 +478,7 @@ mod tests {
         let mut n = Notice {
             kind: Kind::Cancelled,
             conversation_id: Some(id.clone()),
+            workflow_id: None,
             tag: format!("{id}:terminal"),
             title: Some("Fix\u{0}the <toast> & \u{ffff}titles\n".into()),
             body: Some(format!("Stopped: {}", "word ".repeat(60))),

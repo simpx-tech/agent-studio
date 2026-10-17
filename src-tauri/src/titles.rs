@@ -50,6 +50,7 @@ pub(crate) fn background_request(
         shared_context: Default::default(),
         claude_default_model: None,
         workflow: None,
+        mission: None,
         conversation_only: true,
         account_switch: false,
         forked: false,

@@ -89,6 +89,7 @@
     AlarmClock,
     MessageSquare,
     Zap,
+    Workflow,
   } from '@lucide/svelte';
   import {
     abandonedReplyError,
@@ -171,6 +172,20 @@
     workSignature,
   } from '$lib/light-chats';
   import ScreenView from '$lib/components/ScreenView.svelte';
+  import WorkflowList from '$lib/components/WorkflowList.svelte';
+  import MissionDialog from '$lib/components/MissionDialog.svelte';
+  import { WorkflowClient } from '$lib/workflow-client.svelte';
+  import type { ChatSpec, Readiness, WorkflowHost } from '$lib/workflow-engine';
+  import type { WorkflowPickers } from '$lib/workflow-view';
+  import { newDefinition } from '$lib/workflow-model';
+  import {
+    loadScreenData,
+    notifyWorkflow,
+    runScreenAction,
+    saveScreenData,
+    setQuietChats,
+  } from '$lib/transport';
+  import { notificationWorkflow } from '$lib/notifications';
   import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import InputTemplates from '$lib/components/InputTemplates.svelte';
@@ -349,7 +364,7 @@
 
   initAppearance();
 
-  type View = 'chat' | 'connections' | 'settings' | 'screen';
+  type View = 'chat' | 'connections' | 'settings' | 'screen' | 'workflow';
   let installation = $state<Installation>();
   let wslDiscovery = $state<WslDiscovery>();
   let wslError = $state('');
@@ -446,7 +461,7 @@
   let locationGeneration = 0;
   let settingsRevision = 0;
   let collapsedGroups = $state<Record<string, boolean>>({});
-  let conversationScope = $state<'active' | 'history' | 'screens'>('active');
+  let conversationScope = $state<'active' | 'history' | 'screens' | 'workflows'>('active');
   // Screens (docs/SCREENS.md): each computer keeps its own and lists them when asked. This window
   // keeps the lists it read for the session, by the host that answered.
   type ScreenShelf = {
@@ -457,6 +472,24 @@
   };
   let screenShelves = $state<Record<string, ScreenShelf>>({});
   let openedScreen = $state<{ environmentId: string; id: string }>();
+  // The workflow or run the main area shows (docs/WORKFLOWS.md), and the New mission dialog.
+  let openedWorkflow = $state<string>();
+  let missionOpen = $state(false);
+  // The graph library loads with the first workflow opened, not with every start of the page.
+  let workflowViewModule: Promise<typeof import('$lib/components/WorkflowView.svelte')> | undefined;
+  const workflowView = () =>
+    (workflowViewModule ??= import('$lib/components/WorkflowView.svelte'));
+  // Definitions and runs, and the runs this desktop drives.
+  const workflows = new WorkflowClient({
+    host: () => (loaded && installation ? workflowHost : undefined),
+    drives: desktop(),
+    alert: (summary, alert) => {
+      // A run on screen needs no alert of its own.
+      if (view === 'workflow' && openedWorkflow === summary.id && document.hasFocus()) return;
+      void notifyWorkflow(summary.id, alert);
+    },
+  });
+  const hiddenChats = $derived(workflows.chats);
   let modelGeneration = 0;
   let models = $state<ModelCatalog>(structuredClone(fallbackModels));
   let modelsLoading = $state(false);
@@ -1512,6 +1545,8 @@
   );
   const recent = $derived(
     [...workspace.conversations]
+      // A workflow's chats stay with their workflow.
+      .filter((c) => !hiddenChats.has(c.id))
       .filter((c) =>
         `${c.title} ${providers[c.settings.provider].name} ${c.location?.path ?? ''} ${computers.find((computer) => computer.id === (c.location ? locationComputerId(c.location) : ''))?.name ?? ''}`
           .toLowerCase()
@@ -1576,7 +1611,9 @@
   });
   const snoozeOf = (c: Conversation) => snoozeState(snoozesByChat.get(c.id), c, lastStart);
   const heldChat = (id: string) => workspace.conversations.find((c) => c.id === id);
-  const pendingChats = $derived(pendingChatCount(workspace.conversations));
+  const pendingChats = $derived(
+    pendingChatCount(workspace.conversations.filter((c) => !hiddenChats.has(c.id))),
+  );
   // Chats whose reply finished while the reader was elsewhere keep a dot in the sidebar until
   // they are opened. Reading state belongs to this window: never saved, exported or synced.
   let finishedChats = $state<FinishedChats>({});
@@ -1830,6 +1867,7 @@
       connections: 'Connections',
       settings: 'Settings',
       screen: openedScreenSummary?.title ?? 'Screen',
+      workflow: (openedWorkflow && workflows.summaries.get(openedWorkflow)?.title) || 'Workflow',
     }[view],
   );
   /** Reads the screens of each reachable host again, unless it answered moments ago. */
@@ -1920,10 +1958,356 @@
     void tick().then(() => composerInput?.focus());
   }
 
+  // ---- Workflows (docs/WORKFLOWS.md) -----------------------------------------------------------
+  const activeWorkflow = $derived(active ? workflows.runOf(active.id) : undefined);
+  const workflowsInProgress = $derived(
+    [...workflows.summaries.values()].filter(
+      (s) => s.kind === 'run' && (s.status === 'running' || s.status === 'paused'),
+    ).length,
+  );
+  const workflowsWaiting = $derived(
+    [...workflows.summaries.values()].some((s) => s.kind === 'run' && s.questions > 0),
+  );
+  function openWorkflow(id: string) {
+    if (!id) return;
+    openedWorkflow = id;
+    view = 'workflow';
+    conversationScope = 'workflows';
+    sidebarOpen = false;
+  }
+  async function createWorkflow() {
+    const id = crypto.randomUUID();
+    try {
+      const result = await workflows.saveDefinition(
+        id,
+        null,
+        newDefinition('New workflow', { kind: 'user' }),
+      );
+      if (result.ok) openWorkflow(id);
+    } catch (error) {
+      notice = String(error).replace(/^Error: /, '');
+    }
+  }
+  const computerNameOf = (environmentId?: string) =>
+    (environmentId &&
+      (computers.find((c) => c.environments.some((e) => e.id === environmentId))?.name ??
+        workspace.fleet.environments.find((e) => e.id === environmentId)?.name)) ||
+    'A computer';
+  const accountNameOf = (connectionId?: string) => {
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    return workspace.fleet.accounts.find((a) => a.id === connection?.accountId)?.name ?? '';
+  };
+  /** Deletes the chats a deleted run started, as deleting each would. */
+  async function deleteWorkflowChats(ids: string[]) {
+    const gone = new Set(ids);
+    for (const conversation of workspace.conversations.filter((c) => gone.has(c.id))) {
+      const reply = conversation.messages.find((m) => m.status === 'running');
+      if (reply?.runId)
+        await cancelRun(
+          reply.runId,
+          reply.settings?.connectionId ?? conversation.settings.connectionId,
+          true,
+        ).catch(() => {});
+      delete queued[conversation.id];
+      await releaseConversation(conversation.id, conversation.settings.connectionId).catch(
+        () => {},
+      );
+      forgetDraft(draftKey.chat(conversation.id));
+      closePanels(conversation.id);
+    }
+    workspace.conversations = workspace.conversations.filter((c) => !gone.has(c.id));
+    if (activeId && gone.has(activeId)) newChat();
+    await persist();
+  }
+  // A chat a workflow starts: an ordinary conversation, sent its first message through the reply
+  // path the composer uses, without a title request.
+  function beginWorkflowReply(conversation: Conversation, now: string, mission?: ChatSpec['mission']) {
+    const { provider, model } = conversation.settings;
+    const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
+    void startReply(conversation, {
+      now,
+      modelName: selectedModelName(model, modelChoices(catalog, provider, model)),
+      ...(mission ? { mission } : {}),
+    });
+    // The reply's placeholder joins its chat before its request goes out.
+    const reply = conversation.messages.at(-1);
+    if (reply?.role !== 'assistant') throw new Error('The reply could not start.');
+    return reply.id;
+  }
+  async function sendWorkflowMessage(id: string, text: string) {
+    const conversation = workspace.conversations.find((c) => c.id === id);
+    if (!conversation) throw new Error('That chat is no longer here.');
+    if (conversationRunning(conversation) || stopping[id] || takingOver[id])
+      throw new Error('Its reply is still running.');
+    const now = new Date().toISOString();
+    if (conversation.archived) conversation.archived = false;
+    delete conversation.rewind;
+    rewoundDrafts.delete(conversation.id);
+    addUserMessage(conversation, { text, images: [] }, now);
+    return { replyId: beginWorkflowReply(conversation, now) };
+  }
+  // Workflow chats whose process goes once their running reply ends, such as an orchestrator
+  // that completed its mission from that reply (docs/WORKFLOWS.md).
+  const releaseAfterReply = new Set<string>();
+  function releaseWorkflowChat(id: string) {
+    const conversation = workspace.conversations.find((c) => c.id === id);
+    if (!conversation) return void releaseAfterReply.delete(id);
+    if (conversationRunning(conversation) || queued[id]?.length)
+      return void releaseAfterReply.add(id);
+    releaseAfterReply.delete(id);
+    void closeConversation(id, conversation.settings.connectionId).catch(() => {});
+  }
+  async function startWorkflowChat(spec: ChatSpec) {
+    // A chat a driver created before it stopped continues where it is.
+    if (workspace.conversations.some((c) => c.id === spec.id))
+      return sendWorkflowMessage(spec.id, spec.text);
+    const now = new Date().toISOString();
+    const location = spec.location ? insideDistribution(workspace.fleet, spec.location) : undefined;
+    if (!spec.listed) workflows.own(spec.id);
+    workspace.conversations.unshift({
+      id: spec.id,
+      settings: { ...spec.settings },
+      ...(location ? { location: { ...location } } : {}),
+      title: spec.title,
+      titleStatus: 'fallback',
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    });
+    const conversation = workspace.conversations.find((c) => c.id === spec.id)!;
+    addUserMessage(conversation, { text: spec.text, images: [] }, now);
+    return { replyId: beginWorkflowReply(conversation, now, spec.mission) };
+  }
+  function workflowReadiness(settings: ChatSettings, location?: ChatLocation): Readiness {
+    const connection = workspace.fleet.connections.find((c) => c.id === settings.connectionId);
+    const environment =
+      connection?.environmentId ??
+      (location ? (location.executionEnvironmentId ?? location.environmentId) : installation?.id);
+    if (environment && !environmentOnline(environment))
+      return { ready: false, reason: `Waiting for ${computerNameOf(environment)}` };
+    if (!settings.connectionId)
+      return {
+        ready: false,
+        reason: `No ${providers[settings.provider].name} account on ${computerNameOf(environment)}`,
+      };
+    if (needsSignIn(settings.connectionId))
+      return { ready: false, reason: `${accountNameOf(settings.connectionId)} needs sign-in` };
+    if (!readyToSend({ settings, location } as Conversation))
+      return { ready: false, reason: `Waiting for ${accountNameOf(settings.connectionId) || 'its account'}` };
+    return { ready: true };
+  }
+  function workflowLeastUsed(
+    provider: ProviderId,
+    location: ChatLocation | undefined,
+    model: string,
+    exclude: string[] = [],
+  ) {
+    const at =
+      location ??
+      (installation
+        ? { computerId: installation.computerId, environmentId: installation.id, path: '' }
+        : undefined);
+    const candidates = locationConnections(workspace.fleet, at, provider).filter(
+      (c) => !exclude.includes(c.id) && canChooseConnection(c.id) && !needsSignIn(c.id),
+    );
+    const ready = candidates.filter((c) => connectionStatus(c.id)?.auth === 'ready');
+    const pool = ready.length ? ready : candidates;
+    if (!pool.length) return undefined;
+    const accounts = new Map(workspace.fleet.connections.map((c) => [c.id, c.accountId]));
+    const activity = accountActivity(workspace.conversations, (id) => accounts.get(id));
+    return balancedAccount(
+      pool.map((c) => {
+        const settings = { provider, model: '', connectionId: c.id };
+        const snapshot = snapshotFor(usageSnapshots, settings);
+        if (!snapshot) void refreshUsage(settings);
+        return {
+          connectionId: c.id,
+          snapshot,
+          running: activity.get(c.accountId)?.running ?? 0,
+          lastUsed: activity.get(c.accountId)?.lastUsed ?? 0,
+        };
+      }),
+      { provider, model },
+      Date.now(),
+    );
+  }
+  function recentFolders(environmentId: string) {
+    return [
+      ...new Set(
+        (workspace.preferences.recentLocations ?? [])
+          .filter((l) => (l.executionEnvironmentId ?? l.environmentId) === environmentId && l.path)
+          .map((l) => l.path),
+      ),
+    ];
+  }
+  const serverEnvironment = (environmentId: string) =>
+    (environmentId === installation?.id && !!installation?.server) ||
+    !!presence.find((p) => p.environmentId === environmentId)?.features?.includes('server');
+  const workflowHost: WorkflowHost = {
+    self: () => ({
+      environmentId: installation!.id,
+      computerId: installation!.computerId,
+      server: !!installation!.server,
+      name: computerNameOf(installation!.id),
+    }),
+    now: () => Date.now(),
+    fleet: () => workspace.fleet,
+    online: (environmentId) => environmentOnline(environmentId),
+    conversation: (id) => workspace.conversations.find((c) => c.id === id),
+    conversations: () => workspace.conversations,
+    startChat: startWorkflowChat,
+    sendToChat: sendWorkflowMessage,
+    async steerChat(id, text) {
+      const reply = workspace.conversations.find((c) => c.id === id)?.messages.at(-1);
+      if (reply?.role !== 'assistant' || reply.status !== 'running' || !reply.runId)
+        throw new Error('Its reply has ended.');
+      await steerRun(reply.runId, { id: crypto.randomUUID(), text }, reply.settings?.connectionId);
+    },
+    async stopChat(id) {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      const reply = conversation?.messages.find((m) => m.status === 'running');
+      if (!conversation || !reply?.runId) return;
+      if (runs[id] === reply.runId) stopping[id] = true;
+      await cancelRun(reply.runId, reply.settings?.connectionId ?? conversation.settings.connectionId);
+    },
+    releaseChat: releaseWorkflowChat,
+    switchAccount(id, connectionId) {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      if (!conversation) return;
+      conversation.settings = { ...conversation.settings, connectionId };
+      void persistChat(id);
+    },
+    readiness: workflowReadiness,
+    usage: (connectionId, provider) =>
+      snapshotFor(usageSnapshots, { provider, model: '', connectionId }),
+    refreshUsage: (connectionId, provider) =>
+      void refreshUsage({ provider, model: '', connectionId }, true),
+    leastUsed: workflowLeastUsed,
+    screens: { run: runScreenAction, load: loadScreenData, save: saveScreenData },
+    createRun: (id, run) => workflows.createRun(id, run),
+    knownRun: (id) => workflows.knownRun(id),
+    definition: (id) => workflows.definition(id),
+    computers: () =>
+      computers.flatMap((view) => {
+        const environment = view.environments[0];
+        if (!environment) return [];
+        const at = { computerId: environment.computerId, environmentId: environment.id, path: '' };
+        return [
+          {
+            environmentId: environment.id,
+            computerId: environment.computerId,
+            name: view.name,
+            platform: environment.platform,
+            online: environmentOnline(environment.id),
+            server: serverEnvironment(executionHost(workspace.fleet, environment.id)),
+            providers: providerIds.filter((p) =>
+              locationConnections(workspace.fleet, at, p).some(
+                (c) => connectionStatus(c.id)?.installed !== false,
+              ),
+            ),
+            folders: recentFolders(environment.id),
+          },
+        ];
+      }),
+    accounts: () =>
+      workspace.fleet.connections.flatMap((c) => {
+        const account = workspace.fleet.accounts.find((a) => a.id === c.accountId);
+        if (!account) return [];
+        const status = connectionStatus(c.id);
+        return [
+          {
+            connectionId: c.id,
+            name: account.name,
+            provider: account.provider,
+            environmentId: c.environmentId,
+            ready: status?.auth === 'ready' && !!status.installed && environmentOnline(c.environmentId),
+            detail: status?.detail ?? 'Not checked yet',
+          },
+        ];
+      }),
+  };
+  const workflowPickers = $derived<WorkflowPickers>({
+    computers: computers.flatMap((view) =>
+      view.environments[0]
+        ? [
+            {
+              id: view.environments[0].id,
+              name: view.name,
+              ...(environmentOnline(view.environments[0].id) ? {} : { detail: 'Offline' }),
+            },
+          ]
+        : [],
+    ),
+    location: (environmentId) => {
+      const environment = workspace.fleet.environments.find((e) => e.id === environmentId);
+      return environment
+        ? { computerId: environment.computerId, environmentId: environment.id }
+        : undefined;
+    },
+    folders: recentFolders,
+    accounts: (provider, environmentId) =>
+      workspace.fleet.connections.flatMap((c) => {
+        const account = workspace.fleet.accounts.find((a) => a.id === c.accountId);
+        return c.environmentId === environmentId && account?.provider === provider
+          ? [{ id: c.id, name: account.name }]
+          : [];
+      }),
+    models: (provider, connectionId) => {
+      const catalog =
+        modelCache.get(modelScopeKey({ provider, connectionId: connectionId || undefined }))
+          ?.catalog ?? fallbackModels;
+      return modelChoices(catalog, provider, '').map((m) => ({
+        id: m.id,
+        name: m.name,
+        levels: m.reasoningLevels,
+      }));
+    },
+    chats: () =>
+      workspace.conversations
+        .filter((c) => !hiddenChats.has(c.id))
+        .map((c) => ({ id: c.id, name: c.title })),
+    screens: (environmentId) =>
+      Object.values(screenShelves)
+        .flatMap((shelf) => shelf.screens)
+        .filter((s) => s.environmentId === environmentId)
+        .map((s) => ({ id: s.id, name: s.title })),
+    workflows: () =>
+      [...workflows.summaries.values()]
+        .filter((s) => s.kind === 'definition')
+        .map((s) => ({ id: s.id, name: s.title })),
+    computerName: computerNameOf,
+    accountName: accountNameOf,
+    here: installation?.id ?? '',
+    drivers: workspace.fleet.environments
+      .filter((e) => !e.discoveredOn && e.platform !== 'wsl')
+      .map((e) => ({
+        id: e.id,
+        name: computerNameOf(e.id),
+        server: serverEnvironment(e.id),
+        ...(environmentOnline(e.id) ? {} : { detail: 'Offline' }),
+      })),
+    defaultDriver:
+      desktop() && installation
+        ? installation.id
+        : (workspace.fleet.environments.find(
+            (e) => !e.discoveredOn && serverEnvironment(e.id) && environmentOnline(e.id),
+          )?.id ??
+          workspace.fleet.environments.find((e) => !e.discoveredOn && environmentOnline(e.id))
+            ?.id ??
+          ''),
+  });
+
   let relayRestorePending = $state(true);
   let notificationTarget = $state<string>();
   function followNotification() {
     if (!notificationTarget || !loaded) return;
+    if (notificationTarget.startsWith('workflow:')) {
+      openWorkflow(notificationTarget.slice('workflow:'.length));
+      notificationTarget = undefined;
+      if (notificationWorkflow(window.location.hash))
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      return;
+    }
     const conversation = workspace.conversations.find((c) => c.id === notificationTarget);
     if (!conversation) return; // A cold start may still be downloading the checkpoint.
     // Unsent drafts stay with their own chat. Only an image still being read waits for it.
@@ -1982,6 +2366,8 @@
   });
   onMount(() => {
     let disposed = false;
+    // A workflow's chats end without an alert of their own.
+    setQuietChats(() => workflows.chats);
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
     const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
@@ -1992,7 +2378,9 @@
     const stopAnswers = watchAppAnswers();
     let stopNotifications = () => {};
     void watchDesktopNotifications((id) => {
-      notificationTarget = notificationConversation(`#conversation=${id}`);
+      notificationTarget = id.startsWith('workflow:')
+        ? `workflow:${notificationWorkflow(`#workflow=${id.slice(9)}`) ?? ''}`
+        : notificationConversation(`#conversation=${id}`);
       followNotification();
     }).then((stop) => {
       if (disposed) stop();
@@ -2018,7 +2406,10 @@
       .then((views) => views.forEach(applySignIn))
       .catch(() => {});
     const notificationHash = () => {
-      notificationTarget = notificationConversation(window.location.hash);
+      const workflow = notificationWorkflow(window.location.hash);
+      notificationTarget = workflow
+        ? `workflow:${workflow}`
+        : notificationConversation(window.location.hash);
       followNotification();
     };
     const notificationMessage = (event: MessageEvent) => {
@@ -2027,7 +2418,10 @@
         event.data?.type !== 'studio-notification-open'
       )
         return;
-      notificationTarget = notificationConversation(event.data.hash);
+      const workflow = notificationWorkflow(event.data.hash);
+      notificationTarget = workflow
+        ? `workflow:${workflow}`
+        : notificationConversation(event.data.hash);
       followNotification();
     };
     if (!desktop()) {
@@ -2389,6 +2783,8 @@
         await persist();
         await restoreRelayConnection();
         followNotification();
+        // Workflows read their store once the relay connection is known (docs/WORKFLOWS.md).
+        workflows.start();
       } catch (e) {
         storageError = `Could not load your workspace. ${String(e)} No saved data has been overwritten.`;
       }
@@ -2397,6 +2793,7 @@
     })();
     return () => {
       disposed = true;
+      workflows.stop();
       stopAccountUpdates();
       stopBackgroundWork();
       stopUsageRefresh();
@@ -4058,7 +4455,8 @@
     sidebarOpen = false;
     locationGeneration++;
     folderBrowserOpen = false;
-    revealConversation(c);
+    // A workflow's chat opens from its graph and keeps the sidebar where it is.
+    if (!hiddenChats.has(c.id)) revealConversation(c);
     locationPending = false;
     activeId = c.id;
     switchDraft(draftKey.chat(c.id));
@@ -4173,13 +4571,13 @@
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const tablist = (event.currentTarget as HTMLElement).parentElement;
-    const scopes = ['active', 'history', 'screens'] as const;
+    const scopes = ['active', 'history', 'screens', 'workflows'] as const;
     const index = scopes.indexOf(conversationScope);
     conversationScope =
       event.key === 'Home'
         ? 'active'
         : event.key === 'End'
-          ? 'screens'
+          ? 'workflows'
           : scopes[(index + (event.key === 'ArrowLeft' ? scopes.length - 1 : 1)) % scopes.length];
     await tick();
     tablist?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
@@ -5034,9 +5432,12 @@
       created?: boolean;
       remember?: boolean;
       takeOver?: { reply: Message; wait: number; user: Message; itemId: string };
+      // The mission a workflow's orchestrator chat drives, which gives it the mission tools.
+      mission?: { runId: string; role: 'orchestrator' };
     },
   ) {
     const { now, compact, takeOver } = options;
+    const mission = options.mission ?? workflows.missionOf(conversation.id);
     const session = workspaceSession;
     // The reply taken over ends as it hands over, with the text it has now.
     const history = historyFor(
@@ -5160,6 +5561,7 @@
               location: conversation.location?.path ? { ...conversation.location } : undefined,
               ...(accountSwitch ? { accountSwitch: true } : {}),
               ...(conversation.forked ? { forked: true } : {}),
+              ...(mission ? { mission } : {}),
               ...(takeOver
                 ? {
                     takeOver: {
@@ -5231,6 +5633,10 @@
         if (paired) void syncNow(true);
         if (activeId === conversation.id) void scrollToEnd();
         void refreshUsage(responseSettings, true);
+        // A workflow waiting for this reply goes on at once.
+        workflows.nudge();
+        if (releaseAfterReply.has(conversation.id))
+          setTimeout(() => releaseWorkflowChat(conversation.id));
       } else if (session === workspaceSession && takingOver[conversation.id] === takeOver?.itemId)
         delete takingOver[conversation.id];
     }
@@ -5491,15 +5897,20 @@
       : '';
   async function exportWorkspace() {
     try {
+      // Workflows go with the export, from their own store (docs/WORKFLOWS.md).
+      const workflowStore = await workflows.exportAll().catch(() => undefined);
       if (desktop()) {
         const { invoke } = await import('@tauri-apps/api/core');
         const exported = await invoke<{ path: string; missingImages: number }>('export_workspace', {
-          workspace: $state.snapshot(workspace),
+          workspace: { ...$state.snapshot(workspace), ...(workflowStore ? { workflowStore } : {}) },
         });
         notice = `Workspace exported to ${exported.path}.${unexported(exported.missingImages)}`;
       } else {
         // A light Viewer puts back each chat's work from the relay as it writes the file.
-        const { blob, missing } = await browserExport($state.snapshot(workspace));
+        const { blob, missing } = await browserExport({
+          ...$state.snapshot(workspace),
+          ...(workflowStore ? { workflowStore } : {}),
+        } as Workspace);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -5677,7 +6088,11 @@
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
-        placeholder={conversationScope === 'screens' ? 'Search screens' : 'Search conversations'}
+        placeholder={conversationScope === 'screens'
+          ? 'Search screens'
+          : conversationScope === 'workflows'
+            ? 'Search workflows'
+            : 'Search conversations'}
         bind:value={query}
       />{#if query}<button
           class="icon-button"
@@ -5704,11 +6119,31 @@
         role="tab"
         aria-selected={conversationScope === 'screens'}
         aria-controls="conversation-panel-screens"
+        aria-label="Screens"
+        title="Screens"
         tabindex={conversationScope === 'screens' ? 0 : -1}
         onclick={() => (conversationScope = 'screens')}
         onkeydown={conversationTabKey}
-        ><span>Screens</span
+        ><LayoutDashboard size={14} class="tab-icon" aria-hidden="true" /><span class="tab-label"
+          >Screens</span
         >{#if screensChecked}<span class="conversation-tab-count">{screenCount}</span>{/if}</button
+      >
+      <button
+        id="conversation-tab-workflows"
+        role="tab"
+        aria-selected={conversationScope === 'workflows'}
+        aria-controls="conversation-panel-workflows"
+        aria-label="Workflows"
+        title="Workflows"
+        tabindex={conversationScope === 'workflows' ? 0 : -1}
+        onclick={() => (conversationScope = 'workflows')}
+        onkeydown={conversationTabKey}
+        ><Workflow size={14} class="tab-icon" aria-hidden="true" /><span class="tab-label"
+          >Workflows</span
+        >{#if workflowsInProgress}<span
+            class="conversation-tab-count"
+            class:workflow-attention={workflowsWaiting}>{workflowsInProgress}</span
+          >{/if}</button
       >
     </div>
     <div class="conversation-list">
@@ -6043,6 +6478,25 @@
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}
       </div>
+      <div
+        id="conversation-panel-workflows"
+        class="conversation-section"
+        role="tabpanel"
+        tabindex="0"
+        aria-labelledby="conversation-tab-workflows"
+        hidden={conversationScope !== 'workflows'}
+      >
+        <WorkflowList
+          client={workflows}
+          {query}
+          selected={view === 'workflow' ? openedWorkflow : undefined}
+          open={openWorkflow}
+          create={(kind) => {
+            if (kind === 'mission') missionOpen = true;
+            else void createWorkflow();
+          }}
+        />
+      </div>
     </div>
     <div class="sidebar-tools">
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
@@ -6145,6 +6599,13 @@
               </div>
             </div>
           {/if}
+          {#if activeWorkflow}<div class="workflow-banner" role="note">
+              <Workflow size={14} aria-hidden="true" /><span
+                >Workflow · <strong>{activeWorkflow.title}</strong></span
+              ><button class="text-button" onclick={() => openWorkflow(activeWorkflow.id)}
+                >Open workflow</button
+              >
+            </div>{/if}
           <div class="chat-toolbar" aria-label="Conversation settings">
             <div class="chat-configuration">
               <div class="chat-setting computer-setting">
@@ -6833,9 +7294,49 @@
           deleted={screenDeleted}
         />
       {/key}
+    {:else if view === 'workflow' && openedWorkflow}
+      {#await workflowView() then { default: WorkflowView }}
+        {#key `${workspaceSession}/${openedWorkflow}`}
+          <WorkflowView
+            client={workflows}
+            id={openedWorkflow}
+            pickers={workflowPickers}
+            conversation={(id) => workspace.conversations.find((c) => c.id === id)}
+            openChat={(id) => {
+              const conversation = workspace.conversations.find((c) => c.id === id);
+              if (conversation) openConversation(conversation);
+            }}
+            openDoc={openWorkflow}
+            deleteChats={deleteWorkflowChats}
+            closed={() => {
+              openedWorkflow = undefined;
+              view = 'chat';
+            }}
+          />
+        {/key}
+      {:catch error}
+        <p class="error-banner" role="alert">{String(error).replace(/^Error: /, '')}</p>
+      {/await}
     {/if}
   </main>
 </div>
+{#if missionOpen}<MissionDialog
+    pickers={workflowPickers}
+    provider={selectedSettings.provider === 'gemini' ? 'claude' : selectedSettings.provider}
+    close={() => (missionOpen = false)}
+    start={async (spec) => {
+      const id = await workflows.startMission({
+        title: spec.title,
+        text: spec.text,
+        ...(spec.location ? { location: spec.location } : {}),
+        orchestrator: spec.orchestrator,
+        driver: { preferred: spec.driver, elsewhere: spec.elsewhere },
+        actor: { kind: 'user', ...(installation ? { environmentId: installation.id } : {}) },
+      });
+      missionOpen = false;
+      openWorkflow(id);
+    }}
+  />{/if}
 {#if folderBrowserOpen && !active}
   <FolderBrowser
     computerId={selectedComputer?.computerId ?? selectedComputerId}

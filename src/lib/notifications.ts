@@ -4,6 +4,8 @@ export type NotificationKind = 'complete' | 'attention' | 'error' | 'cancelled' 
 export type PushNotice = {
   kind: NotificationKind;
   conversationId?: string;
+  // A workflow's alert opens the workflow (docs/WORKFLOWS.md).
+  workflowId?: string;
   tag: string;
   pendingCount?: number;
   // The chat's title and a line about its reply. Tests and older senders leave them out
@@ -446,4 +448,8 @@ function graphemes(text: string, count: number): string {
 
 export function notificationConversation(hash: string): string | undefined {
   return /^#conversation=([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/i.exec(hash)?.[1];
+}
+/** The workflow run a notification opens, from the address it gives the page. */
+export function notificationWorkflow(hash: string): string | undefined {
+  return /^#workflow=([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/i.exec(hash)?.[1];
 }

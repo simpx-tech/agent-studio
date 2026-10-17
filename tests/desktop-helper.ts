@@ -203,6 +203,25 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (command === 'relay_resume') return null;
           if (command === 'plugin:window|is_maximized') return false;
+          // This computer's workflow store (src-tauri/src/workflow_files.rs), kept across reloads.
+          if (command.startsWith('workflow_file_')) {
+            const files: Record<string, string> = JSON.parse(
+              localStorage.getItem('test-workflow-files') ?? '{}',
+            );
+            if (command === 'workflow_file_names') return Object.keys(files);
+            if (command === 'workflow_file_read') return files[args.name] ?? null;
+            if (command === 'workflow_file_write') files[args.name] = args.text;
+            if (command === 'workflow_file_remove') delete files[args.name];
+            localStorage.setItem('test-workflow-files', JSON.stringify(files));
+            return;
+          }
+          // Workflow tool calls a test sends with `emitTauriEvent('studio-workflow-call', call)`
+          // are answered here.
+          if (command === 'pending_workflow_calls') return (window as any).pendingWorkflowCalls ?? [];
+          if (command === 'answer_workflow_call') {
+            ((window as any).workflowAnswers ??= []).push(args);
+            return;
+          }
           // Native events reach the page's listeners through `emitTauriEvent(event, payload)`.
           if (command === 'plugin:event|listen') {
             const listeners = ((window as any).tauriListeners ??= {});
@@ -1039,6 +1058,7 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (command === 'run_agent') {
             localStorage.setItem('test-last-request', JSON.stringify(args.request));
+            ((window as any).runRequests ??= []).push(args.request);
             const turnCount = Number(localStorage.getItem('test-run-count') ?? 0) + 1;
             localStorage.setItem('test-run-count', String(turnCount));
             const id = args.onEvent.id;

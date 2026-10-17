@@ -27,6 +27,8 @@ worker.addEventListener('push', (event) => {
       notice = { kind: value.kind, tag: String(value.tag ?? 'studio-reply').slice(0, 100) };
       if (typeof value.conversationId === 'string' && /^[a-f0-9-]{36}$/i.test(value.conversationId))
         notice.conversationId = value.conversationId;
+      if (typeof value.workflowId === 'string' && /^[a-f0-9-]{36}$/i.test(value.workflowId))
+        notice.workflowId = value.workflowId;
       if (Number.isSafeInteger(value.pendingCount) && value.pendingCount >= 0)
         notice.pendingCount = value.pendingCount;
       if (typeof value.title === 'string') notice.title = value.title;
@@ -51,7 +53,12 @@ worker.addEventListener('push', (event) => {
           // still rings rather than changing the old alert silently.
           renotify: true,
           icon: '/icons/icon-192.png',
-          data: { conversationId: notice.conversationId, sentAt, id },
+          data: {
+            conversationId: notice.conversationId,
+            workflowId: notice.workflowId,
+            sentAt,
+            id,
+          },
         } as NotificationOptions)
         // Shown first, since a push must show an alert. iOS keeps the older alert of a tag
         // beside the new one, and alerts of chats read on another device are stale.
@@ -72,7 +79,13 @@ worker.addEventListener('push', (event) => {
 worker.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const id = event.notification.data?.conversationId;
-  const hash = typeof id === 'string' && /^[a-f0-9-]{36}$/i.test(id) ? `#conversation=${id}` : '';
+  const workflow = event.notification.data?.workflowId;
+  const hash =
+    typeof id === 'string' && /^[a-f0-9-]{36}$/i.test(id)
+      ? `#conversation=${id}`
+      : typeof workflow === 'string' && /^[a-f0-9-]{36}$/i.test(workflow)
+        ? `#workflow=${workflow}`
+        : '';
   event.waitUntil(
     (async () => {
       const clients = await worker.clients.matchAll({ type: 'window', includeUncontrolled: true });
