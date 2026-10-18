@@ -179,6 +179,121 @@ test('a chat saves a screen that runs only allowed actions, keeps values and sta
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('test-screens')!))).toEqual([]);
 });
 
+test('a screen calls only the MCP tools the user allowed, as the account that made it', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  const issues = `<p id="status">Loading…</p><ul id="issues"></ul>
+<button id="projects">Projects</button><p id="projects-status"></p>
+<script>
+  const status = document.getElementById('status');
+  studio.mcpJson('claude.ai Linear', 'list_issues', { state: 'open' }).then(
+    (result) => {
+      status.textContent = result.issues.length + ' issues';
+      for (const issue of result.issues) {
+        const item = document.createElement('li');
+        item.textContent = issue.title;
+        document.getElementById('issues').append(item);
+      }
+    },
+    (error) => (status.textContent = error.message),
+  );
+  document.getElementById('projects').onclick = () =>
+    studio.mcp('claude.ai Linear', 'list_projects', {}).then(
+      (result) => (document.getElementById('projects-status').textContent = result.text),
+      (error) => (document.getElementById('projects-status').textContent = error.message),
+    );
+</script>`;
+  await replySavingScreen(page, (conversationId) =>
+    screen(conversationId, {
+      html: issues,
+      actions: [],
+      mcpTools: [
+        { server: 'claude.ai Linear', tool: 'list_issues', description: 'Lists my open issues' },
+        { server: 'claude.ai Linear', tool: 'list_projects' },
+      ],
+      account: { provider: 'claude', connectionId: '' },
+    }),
+  );
+  // The reply's own account calls the tools, named as Connections names it.
+  const { provider, connectionId } = await page.evaluate(
+    () =>
+      JSON.parse(localStorage.getItem('test-last-request')!).agent as {
+        provider: string;
+        connectionId: string;
+      },
+  );
+  const name = await page.evaluate((id) => {
+    const fleet = JSON.parse(localStorage.getItem('test-workspace')!).fleet;
+    const connection = fleet.connections.find((c: { id: string }) => c.id === id);
+    return fleet.accounts.find((a: { id: string }) => a.id === connection.accountId).name as string;
+  }, connectionId);
+  const agent = provider === 'claude' ? 'Claude' : 'Codex';
+  const label = name.includes(agent) ? name : `${name} (${agent})`;
+  await page.evaluate(
+    (account) => {
+      const screens = JSON.parse(localStorage.getItem('test-screens')!);
+      screens[0].account = account;
+      localStorage.setItem('test-screens', JSON.stringify(screens));
+      (window as any).screenToolResults = {
+        list_issues: {
+          content: [{ type: 'text', text: '2 issues' }],
+          structuredContent: { issues: [{ title: 'Fix sync' }, { title: 'Add tools' }] },
+        },
+        list_projects: {
+          error:
+            'Sign in to the MCP server claude.ai Linear for this account first, from MCPs in Model context.',
+        },
+      };
+    },
+    { provider, connectionId },
+  );
+  await page.getByRole('tab', { name: /^Screens/ }).click();
+  await expect(
+    page.getByRole('button', { name: 'My pull requests, its actions wait for your approval' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'My pull requests Open screen' }).click();
+  const frame = page.frameLocator('iframe[title="My pull requests screen"]');
+  // Nothing is called before the user allows it.
+  await expect(frame.locator('#status')).toContainText('has not allowed this screen’s actions');
+  await expect(
+    page.getByText(/This screen calls 2 MCP tools on .+\. Review before allowing\./),
+  ).toBeVisible();
+  expect(await page.evaluate(() => (window as any).screenToolCalls ?? [])).toEqual([]);
+  await page.getByRole('button', { name: 'Review actions', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Allow screen actions' });
+  await expect(
+    dialog.getByRole('region', { name: 'MCP tool list_issues of claude.ai Linear' }),
+  ).toContainText('Lists my open issues');
+  await expect(
+    dialog.getByRole('region', { name: 'MCP tool list_projects of claude.ai Linear' }),
+  ).toBeVisible();
+  await expect(dialog).toContainText(`calls these 2 MCP tools as ${label} on`);
+  await expect(dialog.locator('.action-script')).toHaveCount(0);
+  await page.screenshot({ path: 'artifacts/screens-mcp-review.png' });
+  await dialog.getByRole('button', { name: 'Allow actions' }).click();
+  await expect(dialog).toBeHidden();
+  // The page starts again and receives the tool's structured result.
+  await expect(frame.locator('#status')).toHaveText('2 issues');
+  await expect(frame.locator('#issues li')).toHaveText(['Fix sync', 'Add tools']);
+  expect(await page.evaluate(() => (window as any).screenToolCalls)).toEqual([
+    {
+      op: 'mcp',
+      id: screenId,
+      server: 'claude.ai Linear',
+      tool: 'list_issues',
+      arguments: { state: 'open' },
+    },
+  ]);
+  // A tool that cannot be called says why in the page.
+  await frame.getByRole('button', { name: 'Projects' }).click();
+  await expect(frame.locator('#projects-status')).toHaveText(
+    'Sign in to the MCP server claude.ai Linear for this account first, from MCPs in Model context.',
+  );
+  await page.screenshot({ path: 'artifacts/screens-mcp-allowed.png' });
+});
+
 test('a screen can neither open chats by itself nor reach undeclared or stale calls', async ({
   page,
 }) => {

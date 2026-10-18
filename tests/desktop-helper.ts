@@ -678,8 +678,9 @@ export async function mockDesktop(page: Page, mode = 'success') {
             };
           }
           // Screens this computer keeps: tests seed `test-screens` with whole screens (with
-          // `allowed`, `digest` and saved `data`), read `screenRequests` and `screenRuns`, answer a
-          // run with `screenOutputs[action]`, and hold runs with `holdScreenRun`.
+          // `allowed`, `digest` and saved `data`), read `screenRequests`, `screenRuns` and
+          // `screenToolCalls`, answer a run with `screenOutputs[action]` and a tool call with
+          // `screenToolResults[tool]` (`{ error }` fails it), and hold runs with `holdScreenRun`.
           if (command === 'manage_screen') {
             const w = window as any;
             const request = args.request;
@@ -688,8 +689,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
             const keep = () => localStorage.setItem('test-screens', JSON.stringify(screens));
             const detail = ({ data: _data, ...screen }: any) => ({
               ...screen,
+              mcpTools: screen.mcpTools ?? [],
               commands: screen.actions.length,
-              allowed: !screen.actions.length || !!screen.allowed,
+              tools: screen.mcpTools?.length ?? 0,
+              allowed: (!screen.actions.length && !screen.mcpTools?.length) || !!screen.allowed,
             });
             if (request.op === 'list')
               return {
@@ -697,6 +700,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   const {
                     html: _html,
                     actions: _actions,
+                    mcpTools: _tools,
+                    account: _account,
                     digest: _digest,
                     ...summary
                   } = detail(screen);
@@ -747,6 +752,24 @@ export async function mockDesktop(page: Page, mode = 'success') {
                 timedOut: false,
                 durationMs: 12,
               };
+            }
+            if (request.op === 'mcp') {
+              if (!detail(screen).allowed)
+                throw 'The user has not allowed this screen’s actions yet. They can review and allow them above the screen.';
+              if (
+                !screen.mcpTools?.some(
+                  (t: any) => t.server === request.server && t.tool === request.tool,
+                )
+              )
+                throw `This screen declares no MCP tool ${request.tool} of ${request.server}.`;
+              (w.screenToolCalls ??= []).push(request);
+              const result = w.screenToolResults?.[request.tool];
+              if (result?.error) throw result.error;
+              return (
+                result ?? {
+                  content: [{ type: 'text', text: JSON.stringify(request.arguments ?? {}) }],
+                }
+              );
             }
           }
           if (command === 'read_native_instructions') {

@@ -133,6 +133,7 @@ async fn installed_codex_saves_a_screen_whose_action_runs_once_allowed() {
                 .handle(
                     root,
                     "agent-studio-test".into(),
+                    &crate::screens::mcp::Unlaunched,
                     serde_json::from_value(request).unwrap(),
                 )
                 .await

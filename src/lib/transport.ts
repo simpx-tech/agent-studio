@@ -78,10 +78,12 @@ import {
   screenDetailSchema,
   screenOutcomeSchema,
   screenSummarySchema,
+  screenToolResultSchema,
   type ScreenDetail,
   type ScreenOutcome,
   type ScreenRequest,
   type ScreenSummary,
+  type ScreenToolResult,
 } from './screens';
 import { createContextCache, type ContextSnapshot, type NativeInstructions } from './context';
 import {
@@ -3684,6 +3686,18 @@ export async function runScreenAction(
 ): Promise<ScreenOutcome> {
   return screenOutcomeSchema.parse(
     await screenRequest(environmentId, { op: 'run', id, action, params }),
+  );
+}
+/** Calls one of a screen's MCP tools through the CLI of the account it records. */
+export async function callScreenTool(
+  environmentId: string,
+  id: string,
+  server: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<ScreenToolResult> {
+  return screenToolResultSchema.parse(
+    await screenRequest(environmentId, { op: 'mcp', id, server, tool, arguments: args }),
   );
 }
 /** Allows exactly the actions the user reviewed, named by their digest. */

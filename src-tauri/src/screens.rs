@@ -15,6 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+pub mod mcp;
 mod run;
 pub mod tools;
 
@@ -72,6 +73,26 @@ pub struct Action {
     pub timeout: Option<u64>,
 }
 
+/// An MCP tool a screen's page may call, as the user allows it: a tool of one of the servers
+/// its account's CLI has, named as that CLI names them (`mcp__<server>__<tool>`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTool {
+    pub server: String,
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// The account whose CLI calls a screen's MCP tools: the one the chat that created the screen
+/// replied with, on the computer that keeps it. No connection is this computer's own CLI login.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub provider: String,
+    pub connection_id: Option<String>,
+}
+
 /// Where a screen's actions run, recorded from the reply that created it. Only this computer
 /// reads it; no caller ever supplies it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -116,7 +137,13 @@ pub struct Screen {
     pub html: String,
     #[serde(default)]
     pub actions: Vec<Action>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_tools: Vec<McpTool>,
     pub site: Site,
+    /// Recorded when a chat creates the screen, or saves one that has none or whose account is
+    /// no longer connected here; screens saved before MCP tools have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
     /// The conversation that created the screen, and the reply that saved it last.
     pub conversation_id: String,
     pub run_id: String,
@@ -127,18 +154,41 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// What the user allows: the actions and where they run. The HTML can only call them.
+    /// What the user allows: the actions and where they run, and the MCP tools with the account
+    /// that calls them. The HTML can only call them. A screen without MCP tools keeps the
+    /// digest it had before them, and with it the approval the user gave.
     pub fn digest(&self) -> String {
-        let canonical = json!({ "actions": self.actions, "site": self.site });
+        let canonical = if self.mcp_tools.is_empty() {
+            json!({ "actions": self.actions, "site": self.site })
+        } else {
+            json!({
+                "actions": self.actions,
+                "site": self.site,
+                "mcpTools": self.mcp_tools,
+                "account": self.account,
+            })
+        };
         hex(&Sha256::digest(canonical.to_string().as_bytes()))
     }
-    /// Whether its actions may run: none to allow, or the user allowed exactly these.
+    /// Whether its actions and tools may run: none to allow, or the user allowed exactly these.
     pub fn allowed(&self) -> bool {
-        self.actions.is_empty()
+        (self.actions.is_empty() && self.mcp_tools.is_empty())
             || self
                 .approval
                 .as_ref()
                 .is_some_and(|approval| approval.digest == self.digest())
+    }
+    /// The declared tool a page calls, once the user allowed the screen's actions and tools.
+    pub fn tool(&self, server: &str, tool: &str) -> Result<&McpTool, String> {
+        let declared = self
+            .mcp_tools
+            .iter()
+            .find(|known| known.server == server && known.tool == tool)
+            .ok_or_else(|| format!("This screen declares no MCP tool {tool} of {server}."))?;
+        if !self.allowed() {
+            return Err(NOT_ALLOWED.into());
+        }
+        Ok(declared)
     }
 }
 
@@ -171,6 +221,8 @@ pub struct Summary {
     pub updated_at: String,
     /// How many actions it declares.
     pub commands: usize,
+    /// How many MCP tools it declares.
+    pub tools: usize,
     pub allowed: bool,
 }
 
@@ -188,6 +240,7 @@ impl From<&Screen> for Summary {
             created_at: screen.created_at.clone(),
             updated_at: screen.updated_at.clone(),
             commands: screen.actions.len(),
+            tools: screen.mcp_tools.len(),
             allowed: screen.allowed(),
         }
     }
@@ -201,6 +254,10 @@ pub struct Detail {
     pub summary: Summary,
     pub html: String,
     pub actions: Vec<Action>,
+    pub mcp_tools: Vec<McpTool>,
+    /// The account that calls its MCP tools, which the window names by its connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
     /// What allowing these actions names, so a changed screen is never allowed unseen.
     pub digest: String,
 }
@@ -211,6 +268,8 @@ impl From<&Screen> for Detail {
             summary: screen.into(),
             html: screen.html.clone(),
             actions: screen.actions.clone(),
+            mcp_tools: screen.mcp_tools.clone(),
+            account: screen.account.clone(),
             digest: screen.digest(),
         }
     }
@@ -224,6 +283,7 @@ pub struct Definition {
     pub description: String,
     pub html: String,
     pub actions: Vec<Action>,
+    pub mcp_tools: Vec<McpTool>,
 }
 
 /// Text the user reads when allowing a screen: on one line, and without characters that hide
@@ -497,13 +557,60 @@ fn action(item: &Value) -> Result<Action, String> {
     })
 }
 
-pub const FIELDS: &[&str] = &["id", "title", "description", "html", "actions"];
+/// A server's or a tool's name, as the user reads it when allowing the tool and the CLI finds
+/// it: one line as written, without control or hidden characters.
+fn tool_name(value: Option<&Value>, field: &str) -> Result<String, String> {
+    let text = value
+        .and_then(Value::as_str)
+        .ok_or(format!("{field} must be text."))?;
+    if text.trim().is_empty() {
+        return Err(format!("{field} must not be empty."));
+    }
+    if text.trim() != text {
+        return Err(format!("{field} must not start or end with spaces."));
+    }
+    if let Some(c) = text
+        .chars()
+        .find(|c| c.is_control() || crate::console::hidden(*c))
+    {
+        return Err(format!(
+            "{field} contains a hidden character (U+{:04X}).",
+            c as u32
+        ));
+    }
+    Ok(text.into())
+}
+
+fn mcp_tool(item: &Value) -> Result<McpTool, String> {
+    let object = item.as_object().ok_or(
+        "each MCP tool must be an object such as {\"server\":\"linear\",\"tool\":\"list_issues\"}.",
+    )?;
+    unexpected(object, &["server", "tool", "description"])
+        .map_err(|error| format!("MCP tool: {error}"))?;
+    let server = tool_name(object.get("server"), "server")?;
+    let tool = tool_name(object.get("tool"), "tool")?;
+    let named = |error: String| format!("MCP tool {tool} of {server}: {error}");
+    // Agent Studio answers its own tools inside the chat that calls them.
+    if server == "agent_studio" {
+        return Err(named(
+            "agent_studio is Agent Studio's own server, whose tools work only in a chat.".into(),
+        ));
+    }
+    let description = line(object.get("description"), "description", false).map_err(named)?;
+    Ok(McpTool {
+        server,
+        tool,
+        description,
+    })
+}
+
+pub const FIELDS: &[&str] = &["id", "title", "description", "html", "actions", "mcpTools"];
 
 /// Checks a chat's submission completely, before anything is saved.
 pub fn definition(args: &Value) -> Result<Definition, String> {
     let object = args
         .as_object()
-        .ok_or("Send title, html and optionally id, description and actions.")?;
+        .ok_or("Send title, html and optionally id, description, actions and mcpTools.")?;
     unexpected(object, FIELDS).map_err(|error| {
         format!("This call has an {error} Send the complete screen in those fields.")
     })?;
@@ -542,12 +649,39 @@ pub fn definition(args: &Value) -> Result<Definition, String> {
         }
         Some(_) => return Err("actions must be a list of the commands the screen runs.".into()),
     };
+    let mcp_tools = match object.get("mcpTools") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(list)) => {
+            let mut tools: Vec<McpTool> = Vec::new();
+            for item in list {
+                let tool = mcp_tool(item)?;
+                if tools
+                    .iter()
+                    .any(|known| known.server == tool.server && known.tool == tool.tool)
+                {
+                    return Err(format!(
+                        "The MCP tool {} of {} is listed twice.",
+                        tool.tool, tool.server
+                    ));
+                }
+                tools.push(tool);
+            }
+            tools
+        }
+        Some(_) => {
+            return Err(
+                "mcpTools must be a list of the MCP tools the page calls, each {server, tool}."
+                    .into(),
+            )
+        }
+    };
     Ok(Definition {
         id,
         title,
         description,
         html: html.into(),
         actions,
+        mcp_tools,
     })
 }
 
@@ -738,12 +872,15 @@ fn read_data(root: &Path, id: &str) -> Result<Map<String, Value>, String> {
 }
 
 /// Saves what a chat submitted, as a new screen or a new revision of one this computer keeps.
-/// An update keeps where the screen runs, and keeps the user's approval while the actions
-/// stay the same.
+/// An update keeps where the screen runs and the account that calls its MCP tools, unless
+/// `usable` finds that account gone, and keeps the user's approval while the actions, the tools
+/// and that account stay the same. `account` is the saving chat's.
 pub(crate) fn store(
     root: &Path,
     definition: Definition,
     site: Site,
+    account: Option<Account>,
+    usable: &dyn Fn(&Account) -> bool,
     conversation_id: &str,
     run_id: &str,
 ) -> Result<(Screen, bool), String> {
@@ -771,7 +908,13 @@ pub(crate) fn store(
                     description: definition.description,
                     html: definition.html,
                     actions: definition.actions,
+                    mcp_tools: definition.mcp_tools,
                     site: previous.site.clone(),
+                    account: previous
+                        .account
+                        .clone()
+                        .filter(|kept| usable(kept))
+                        .or(account),
                     conversation_id: previous.conversation_id.clone(),
                     run_id: run_id.into(),
                     created_at: previous.created_at.clone(),
@@ -789,7 +932,9 @@ pub(crate) fn store(
                 description: definition.description,
                 html: definition.html,
                 actions: definition.actions,
+                mcp_tools: definition.mcp_tools,
                 site,
+                account,
                 conversation_id: conversation_id.into(),
                 run_id: run_id.into(),
                 created_at: time.clone(),
@@ -813,10 +958,12 @@ pub(crate) fn store(
 }
 
 /// This computer's screens and the actions they run, one request at a time for each change.
-/// Actions run side by side, as many at once as they are asked for.
+/// Actions and MCP calls run side by side, as many at once as they are asked for.
 #[derive(Default)]
 pub struct Screens {
     changes: tokio::sync::Mutex<()>,
+    /// The CLIs that answer the screens' MCP calls.
+    pub calls: mcp::Calls,
 }
 
 /// What a window or another device asks of this computer's screens.
@@ -832,6 +979,14 @@ pub enum Request {
         action: String,
         #[serde(default)]
         params: Map<String, Value>,
+    },
+    /// Calls one of the MCP tools the screen declares, with the arguments its page passes.
+    Mcp {
+        id: String,
+        server: String,
+        tool: String,
+        #[serde(default)]
+        arguments: Map<String, Value>,
     },
     Approve {
         id: String,
@@ -866,10 +1021,12 @@ fn encode<T: Serialize>(value: &T) -> Result<Value, String> {
 }
 
 impl Screens {
+    /// Answers one request. `launch` starts the CLI that answers a screen's MCP calls.
     pub async fn handle(
         &self,
         root: PathBuf,
         namespace: String,
+        launch: &dyn mcp::Launch,
         request: Request,
     ) -> Result<Value, String> {
         match request {
@@ -898,6 +1055,19 @@ impl Screens {
                     run::execute(&root, &namespace, &screen.site, declared, variables).await?;
                 encode(&outcome)
             }
+            Request::Mcp {
+                id,
+                server,
+                tool,
+                arguments,
+            } => {
+                let screen = blocking(move || read(&root, &id)).await?;
+                screen.tool(&server, &tool)?;
+                let account = screen.account.clone().ok_or(NO_ACCOUNT)?;
+                self.calls
+                    .call(&screen, &account, launch, &server, &tool, arguments)
+                    .await
+            }
             Request::Approve { id, digest } => {
                 let _change = self.changes.lock().await;
                 let screen = blocking(move || {
@@ -921,10 +1091,13 @@ impl Screens {
                     Ok(screen)
                 })
                 .await?;
+                // A screen that may call nothing keeps no CLI for its calls.
+                self.calls.release(&screen.id).await;
                 encode(&Detail::from(&screen))
             }
             Request::Delete { id } => {
                 let _change = self.changes.lock().await;
+                self.calls.release(&id).await;
                 blocking(move || {
                     checked_id(&id)?;
                     for path in [file(&root, &id), data_file(&root, &id)] {
@@ -973,9 +1146,11 @@ impl Screens {
 }
 
 pub const NOT_ALLOWED: &str = "The user has not allowed this screen's actions yet. They can review and allow them above the screen.";
+const NO_ACCOUNT: &str =
+    "This screen has no account to call MCP tools with. Ask a chat to save it again.";
 
-/// A window or another device reads this computer's screens or runs one of their actions.
-/// `environmentId` only routes the request here.
+/// A window or another device reads this computer's screens, runs one of their actions or
+/// calls one of their MCP tools. `environmentId` only routes the request here.
 #[tauri::command]
 pub async fn manage_screen(
     app: tauri::AppHandle,
@@ -985,11 +1160,15 @@ pub async fn manage_screen(
 ) -> Result<Value, String> {
     let root = root(&app)?;
     let namespace = app.config().identifier.clone();
-    // An action runs once, however many copies of its call the window sends (calls.rs).
-    if matches!(request, Request::Run { .. }) {
-        return call.once(screens.handle(root, namespace, request)).await;
+    let launch = mcp::Host(app.clone());
+    // An action or a tool runs once, however many copies of its call the window sends
+    // (calls.rs).
+    if matches!(request, Request::Run { .. } | Request::Mcp { .. }) {
+        return call
+            .once(screens.handle(root, namespace, &launch, request))
+            .await;
     }
-    screens.handle(root, namespace, request).await
+    screens.handle(root, namespace, &launch, request).await
 }
 
 /// The screens a chat's tools read: summaries, or one screen whole with its saved values.
@@ -1007,16 +1186,34 @@ pub(crate) async fn opened(
     })
     .await
 }
+/// Saves a chat's screen. `usable` names the accounts still connected where it runs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn saved(
     screens: &Screens,
     root: PathBuf,
     definition: Definition,
     site: Site,
+    account: Option<Account>,
+    usable: impl Fn(&Account) -> bool + Send + 'static,
     conversation_id: String,
     run_id: String,
 ) -> Result<(Screen, bool), String> {
     let _change = screens.changes.lock().await;
-    blocking(move || store(&root, definition, site, &conversation_id, &run_id)).await
+    let screen = blocking(move || {
+        store(
+            &root,
+            definition,
+            site,
+            account,
+            &usable,
+            &conversation_id,
+            &run_id,
+        )
+    })
+    .await?;
+    // Its next call starts a CLI that reads the account's servers and sign-ins as they are now.
+    screens.calls.release(&screen.0.id).await;
+    Ok(screen)
 }
 
 #[cfg(test)]
@@ -1045,6 +1242,196 @@ mod tests {
             folder: "C:\\Projects\\studio".into(),
             project: "C:\\Projects\\studio".into(),
         }
+    }
+    fn account(connection: &str) -> Account {
+        Account {
+            provider: "claude".into(),
+            connection_id: Some(connection.into()),
+        }
+    }
+    /// A computer without CLIs: a call that passes every check fails to start one.
+    struct NoCli;
+    impl mcp::Launch for NoCli {
+        fn launch(&self, _site: &Site, account: &Account) -> mcp::Launched {
+            let named = account.connection_id.clone().unwrap_or_default();
+            Box::pin(async move { Err(format!("No CLI for {named} here.")) })
+        }
+    }
+
+    #[test]
+    fn a_screen_declares_the_mcp_tools_its_page_calls() {
+        let mut args = submission();
+        args["mcpTools"] = json!([
+            {"server": "claude.ai Linear", "tool": "list_issues", "description": "Lists my\nissues"},
+            {"server": "github", "tool": "search_pull_requests"}
+        ]);
+        let parsed = definition(&args).unwrap();
+        assert_eq!(
+            parsed.mcp_tools,
+            [
+                McpTool {
+                    server: "claude.ai Linear".into(),
+                    tool: "list_issues".into(),
+                    description: "Lists my issues".into(),
+                },
+                McpTool {
+                    server: "github".into(),
+                    tool: "search_pull_requests".into(),
+                    description: String::new(),
+                },
+            ]
+        );
+        let refuse = |tools: Value, expected: &str| {
+            let mut args = submission();
+            args["mcpTools"] = tools;
+            let error = definition(&args).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        };
+        refuse(json!({"server": "x"}), "mcpTools must be a list");
+        refuse(
+            json!(["mcp__linear__list_issues"]),
+            "each MCP tool must be an object",
+        );
+        refuse(json!([{"tool": "list_issues"}]), "server must be text");
+        refuse(
+            json!([{"server": "linear", "tool": " list"}]),
+            "start or end with spaces",
+        );
+        refuse(json!([{"server": "line\u{200b}ar", "tool": "x"}]), "U+200B");
+        refuse(
+            json!([{"server": "linear", "tool": "a\nb"}]),
+            "hidden character",
+        );
+        refuse(
+            json!([{"server": "linear", "tool": "x", "args": {}}]),
+            "unknown field args",
+        );
+        refuse(
+            json!([{"server": "agent_studio", "tool": "visualize"}]),
+            "Agent Studio's own server",
+        );
+        refuse(
+            json!([{"server": "linear", "tool": "x"}, {"server": "linear", "tool": "x"}]),
+            "listed twice",
+        );
+    }
+
+    #[test]
+    fn the_approval_names_the_tools_and_their_account_and_keeps_earlier_digests() {
+        let mut screen = Screen {
+            id: uuid::Uuid::new_v4().to_string(),
+            revision: 1,
+            title: "x".into(),
+            description: String::new(),
+            html: "x".into(),
+            actions: definition(&json!({"title":"x","html":"x","actions":[{"name":"list","shell":"bash","script":"ls"}]}))
+                .unwrap()
+                .actions,
+            mcp_tools: vec![],
+            site: Site {
+                environment_id: "e".into(),
+                distribution: None,
+                folder: "/w".into(),
+                project: String::new(),
+            },
+            account: Some(account("first")),
+            conversation_id: String::new(),
+            run_id: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            approval: None,
+        };
+        // Screens without MCP tools keep the digest earlier releases recorded approvals with,
+        // whatever account they now record.
+        let earlier = r#"{"actions":[{"name":"list","script":"ls","shell":"bash"}],"site":{"environmentId":"e","folder":"/w","project":""}}"#;
+        assert_eq!(screen.digest(), hex(&Sha256::digest(earlier.as_bytes())));
+        screen.approval = Some(Approval {
+            digest: screen.digest(),
+            at: now(),
+        });
+        assert!(screen.allowed());
+        // Declaring a tool, or calling it as another account, needs the user again.
+        screen.mcp_tools = vec![McpTool {
+            server: "linear".into(),
+            tool: "list_issues".into(),
+            description: String::new(),
+        }];
+        assert!(!screen.allowed());
+        assert_eq!(
+            screen.tool("linear", "list_issues").unwrap_err(),
+            NOT_ALLOWED
+        );
+        screen.approval = Some(Approval {
+            digest: screen.digest(),
+            at: now(),
+        });
+        assert!(screen.allowed());
+        assert_eq!(
+            screen.tool("linear", "list_issues").unwrap().tool,
+            "list_issues"
+        );
+        assert!(screen
+            .tool("linear", "delete_issue")
+            .unwrap_err()
+            .contains("declares no MCP tool delete_issue of linear"));
+        screen.account = Some(account("second"));
+        assert!(!screen.allowed());
+        // A screen of tools alone waits for the user too.
+        screen.actions.clear();
+        screen.approval = None;
+        assert!(!screen.allowed());
+        screen.mcp_tools.clear();
+        assert!(screen.allowed());
+    }
+
+    #[test]
+    fn the_store_keeps_the_account_that_calls_a_screens_tools() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screens");
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let mut args = submission();
+        args["mcpTools"] = json!([{"server": "linear", "tool": "list_issues"}]);
+        let save = |args: &Value, chat: &str, usable: &dyn Fn(&Account) -> bool| {
+            store(
+                &root,
+                definition(args).unwrap(),
+                site(),
+                Some(account(chat)),
+                usable,
+                &conversation,
+                &conversation,
+            )
+            .unwrap()
+            .0
+        };
+        let created = save(&args, "creator", &|_| true);
+        assert_eq!(created.account, Some(account("creator")));
+        // Another chat's update keeps it, and with it the user's approval.
+        let mut allowed = created.clone();
+        allowed.approval = Some(Approval {
+            digest: allowed.digest(),
+            at: now(),
+        });
+        write(&root, &allowed).unwrap();
+        args["id"] = json!(created.id);
+        args["html"] = json!("<p>new</p>");
+        let updated = save(&args, "other", &|_| true);
+        assert_eq!(updated.account, Some(account("creator")));
+        assert!(updated.allowed());
+        // An account no longer connected there gives way to the saving chat's.
+        let moved = save(&args, "other", &|kept| {
+            kept.connection_id.as_deref() != Some("creator")
+        });
+        assert_eq!(moved.account, Some(account("other")));
+        assert!(!moved.allowed());
+        // A screen saved before MCP tools takes the account of the chat that saves it next.
+        let mut older = read(&root, &created.id).unwrap();
+        older.account = None;
+        write(&root, &older).unwrap();
+        assert_eq!(
+            save(&args, "third", &|_| true).account,
+            Some(account("third"))
+        );
     }
 
     #[test]
@@ -1243,6 +1630,8 @@ mod tests {
             &root,
             definition(&submission()).unwrap(),
             site(),
+            None,
+            &|_| true,
             &conversation,
             &run,
         )
@@ -1267,6 +1656,8 @@ mod tests {
             &root,
             definition(&update).unwrap(),
             elsewhere,
+            None,
+            &|_| true,
             &conversation,
             &run,
         )
@@ -1279,6 +1670,8 @@ mod tests {
             &root,
             definition(&update).unwrap(),
             site(),
+            None,
+            &|_| true,
             &conversation,
             &run,
         )
@@ -1291,6 +1684,8 @@ mod tests {
             &root,
             definition(&update).unwrap(),
             wsl,
+            None,
+            &|_| true,
             &conversation,
             &run,
         )
@@ -1302,6 +1697,8 @@ mod tests {
             &root,
             definition(&update).unwrap(),
             site(),
+            None,
+            &|_| true,
             &conversation,
             &run,
         )
@@ -1323,6 +1720,8 @@ mod tests {
             &root,
             definition(&submission()).unwrap(),
             site(),
+            None,
+            &|_| true,
             &conversation,
             &conversation,
         )
@@ -1335,6 +1734,7 @@ mod tests {
                     .handle(
                         root,
                         "agent-studio-test".into(),
+                        &NoCli,
                         serde_json::from_value(request).unwrap(),
                     )
                     .await
@@ -1404,5 +1804,74 @@ mod tests {
             MISSING
         );
         assert!(!data_file(&root, &screen.id).exists());
+    }
+
+    #[tokio::test]
+    async fn a_page_calls_only_the_tools_it_declares_once_allowed_as_its_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screens");
+        let screens = Screens::default();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let mut args = submission();
+        args["mcpTools"] = json!([{"server": "linear", "tool": "list_issues"}]);
+        let (screen, _) = store(
+            &root,
+            definition(&args).unwrap(),
+            site(),
+            Some(account("creator")),
+            &|_| true,
+            &conversation,
+            &conversation,
+        )
+        .unwrap();
+        let ask = |request: Value| {
+            let root = root.clone();
+            let screens = &screens;
+            async move {
+                screens
+                    .handle(
+                        root,
+                        "agent-studio-test".into(),
+                        &NoCli,
+                        serde_json::from_value(request).unwrap(),
+                    )
+                    .await
+            }
+        };
+        let call = |tool: &str| json!({"op": "mcp", "id": screen.id, "server": "linear", "tool": tool, "arguments": {"team": "x"}});
+        let listed = ask(json!({"op": "list"})).await.unwrap();
+        assert_eq!(listed["screens"][0]["tools"], 1);
+        assert_eq!(listed["screens"][0]["allowed"], false);
+        assert_eq!(ask(call("list_issues")).await.unwrap_err(), NOT_ALLOWED);
+        let detail = ask(json!({"op": "read", "id": screen.id})).await.unwrap();
+        assert_eq!(
+            detail["mcpTools"],
+            json!([{"server": "linear", "tool": "list_issues"}])
+        );
+        assert_eq!(
+            detail["account"],
+            json!({"provider": "claude", "connectionId": "creator"})
+        );
+        ask(json!({"op": "approve", "id": screen.id, "digest": detail["digest"]}))
+            .await
+            .unwrap();
+        assert!(ask(call("delete_issue"))
+            .await
+            .unwrap_err()
+            .contains("declares no MCP tool"));
+        // An allowed tool goes to the CLI of the screen's own account.
+        assert_eq!(
+            ask(call("list_issues")).await.unwrap_err(),
+            "No CLI for creator here."
+        );
+        // A screen without an account has none to call with.
+        let mut older = read(&root, &screen.id).unwrap();
+        older.account = None;
+        older.approval = Some(Approval {
+            digest: older.digest(),
+            at: now(),
+        });
+        write(&root, &older).unwrap();
+        assert_eq!(ask(call("list_issues")).await.unwrap_err(), NO_ACCOUNT);
     }
 }

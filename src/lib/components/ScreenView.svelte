@@ -13,6 +13,7 @@
   import {
     allowScreen,
     artifactPreviewUrl,
+    callScreenTool,
     deleteScreen,
     loadScreenData,
     readScreen,
@@ -37,6 +38,7 @@
     id,
     summary,
     computerName,
+    accountName,
     online,
     openConversation,
     chat,
@@ -49,6 +51,8 @@
     /** What the Screens list knows of it, shown while it opens. */
     summary?: ScreenSummary;
     computerName: string;
+    /** The account that calls its MCP tools, as Connections names it. */
+    accountName: (account: ScreenDetail['account']) => string;
     online: boolean;
     /** Opens the chat that created the screen, when it is in this workspace. */
     openConversation?: () => void;
@@ -80,7 +84,19 @@
   let deleteError = $state('');
   const title = $derived(detail?.title ?? summary?.title ?? 'Screen');
   const folder = $derived(screenFolderName(detail ?? summary ?? { project: '', folder: '' }));
-  const pending = $derived(!!detail?.actions.length && !detail.allowed);
+  const reviewable = $derived(!!(detail?.actions.length || detail?.mcpTools.length));
+  const pending = $derived(reviewable && !detail?.allowed);
+  /** What the screen asks to be allowed, as its request says it. */
+  const asks = $derived.by(() => {
+    if (!detail) return '';
+    const [actions, tools] = [detail.actions.length, detail.mcpTools.length];
+    return [
+      actions ? `runs ${actions === 1 ? 'an action' : `${actions} actions`}` : '',
+      tools ? `calls ${tools === 1 ? 'an MCP tool' : `${tools} MCP tools`}` : '',
+    ]
+      .filter(Boolean)
+      .join(' and ');
+  });
   const message = (e: unknown) =>
     (e instanceof Error ? e.message : String(e)).replace(/^Error: /, '');
 
@@ -161,6 +177,16 @@
         delete running[key];
       }
     }
+    if (call.method === 'mcp') {
+      if (!detail?.allowed) throw new Error(notAllowed);
+      const key = ++serial;
+      running[key] = call.tool;
+      try {
+        return await callScreenTool(environmentId, id, call.server, call.tool, call.arguments);
+      } finally {
+        delete running[key];
+      }
+    }
     if (call.method === 'load') return (await loadScreenData(environmentId, id))[call.key] ?? null;
     if (call.method === 'save') {
       await saveScreenData(environmentId, id, call.key, call.value);
@@ -232,7 +258,7 @@
             ', ',
           )}</span
         >{/if}
-      {#if detail?.actions.length}<button
+      {#if reviewable}<button
           class="icon-button"
           class:screen-pending={pending}
           title={pending ? 'Review and allow its actions' : 'Its actions'}
@@ -273,9 +299,7 @@
     </div>
   {:else if pending && detail}<div class="setup-hint" role="status">
       <ShieldAlert size={15} aria-hidden="true" /><span
-        >This screen runs {detail.actions.length === 1
-          ? 'an action'
-          : `${detail.actions.length} actions`} on {computerName}. Review before allowing.</span
+        >This screen {asks} on {computerName}. Review before allowing.</span
       ><button
         class="text-button"
         onclick={() => {
@@ -307,6 +331,7 @@
 {#if reviewing && detail}<ScreenActions
     screen={detail}
     {computerName}
+    accountName={accountName(detail.account)}
     busy={reviewBusy}
     error={reviewError}
     allow={() => void review(true)}

@@ -18,6 +18,15 @@ const json = (value: unknown) => {
     return undefined;
   }
 };
+/** A server's or a tool's name, as a screen declares it: one line as written. */
+const toolName = (value: unknown) =>
+  typeof value === 'string' &&
+  value.length >= 1 &&
+  value.trim() === value &&
+  !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : undefined;
+const toolNameSchema = z.string().refine((name) => toolName(name) !== undefined);
 
 /**
  * What a window or another device asks the computer that keeps a screen. The relay checks it
@@ -35,6 +44,16 @@ export const screenRequestSchema = z.discriminatedUnion('op', [
     })
     .strict()
     .refine((request) => json(request.params ?? {}) !== undefined),
+  z
+    .object({
+      op: z.literal('mcp'),
+      id: screenIdSchema,
+      server: toolNameSchema,
+      tool: toolNameSchema,
+      arguments: z.record(z.string(), z.unknown()).optional(),
+    })
+    .strict()
+    .refine((request) => json(request.arguments ?? {}) !== undefined),
   z
     .object({
       op: z.literal('approve'),
@@ -71,6 +90,8 @@ export const screenSummarySchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   commands: z.number().int().nonnegative(),
+  // How many MCP tools it declares; hosts before MCP tools report none.
+  tools: z.number().int().nonnegative().optional(),
   allowed: z.boolean(),
 });
 export type ScreenSummary = z.infer<typeof screenSummarySchema>;
@@ -96,12 +117,30 @@ export const screenActionSchema = z.object({
   timeout: z.number().int().positive().optional(),
 });
 export type ScreenAction = z.infer<typeof screenActionSchema>;
+/** An MCP tool a screen's page may call, through the CLI of the account it records. */
+export const screenToolSchema = z.object({
+  server: z.string(),
+  tool: z.string(),
+  description: z.string().optional(),
+});
+export type ScreenTool = z.infer<typeof screenToolSchema>;
 export const screenDetailSchema = screenSummarySchema.extend({
   html: z.string(),
   actions: z.array(screenActionSchema),
+  mcpTools: z.array(screenToolSchema).default([]),
+  // The account whose CLI calls its tools; no connection is its computer's own CLI login.
+  account: z
+    .object({ provider: z.string(), connectionId: z.string().nullable().optional() })
+    .optional(),
   digest: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type ScreenDetail = z.infer<typeof screenDetailSchema>;
+/** What an MCP tool returned: its content blocks, and its structured result when it has one. */
+export const screenToolResultSchema = z.object({
+  content: z.array(z.unknown()),
+  structuredContent: z.unknown().optional(),
+});
+export type ScreenToolResult = z.infer<typeof screenToolResultSchema>;
 
 export const screenOutcomeSchema = z.object({
   exitCode: z.number().int().nullable(),
@@ -143,6 +182,13 @@ export function mergeScreenCards(left: ScreenCard[] = [], right: ScreenCard[] = 
 /** What a screen's page asks of the window that shows it. */
 export type ScreenCall =
   | { id: number; method: 'run'; action: string; params: Record<string, unknown> }
+  | {
+      id: number;
+      method: 'mcp';
+      server: string;
+      tool: string;
+      arguments: Record<string, unknown>;
+    }
   | { id: number; method: 'load'; key: string }
   | { id: number; method: 'save'; key: string; value: unknown }
   | { id: number; method: 'chat'; text: string };
@@ -167,6 +213,12 @@ export function screenCall(data: unknown, token: string): ScreenCall | undefined
     if (typeof data.action !== 'string' || !nameSchema.safeParse(data.action).success) return;
     if (!plainObject(params) || json(params) === undefined) return;
     return { id, method: 'run', action: data.action, params };
+  }
+  if (data.method === 'mcp') {
+    const [server, tool] = [toolName(data.server), toolName(data.tool)];
+    const args = data.arguments ?? {};
+    if (!server || !tool || !plainObject(args) || json(args) === undefined) return;
+    return { id, method: 'mcp', server, tool, arguments: args };
   }
   if (data.method === 'load') {
     const key = keyOf(data.key);
@@ -223,6 +275,10 @@ const ask = (method, args) => new Promise((resolve, reject) => {
   pending.set(id, { resolve, reject });
   parent.postMessage(Object.assign({ type: 'studio-screen', token, id, method }, args), '*');
 });
+const textOf = (content) => (Array.isArray(content) ? content : [])
+  .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+  .map((block) => block.text)
+  .join('\\n');
 const studio = {
   theme: ${literal(theme)},
   screen: Object.freeze(${literal(screen)}),
@@ -232,6 +288,15 @@ const studio = {
     if (result.timedOut) throw new Error(name + ' stopped at its time limit.');
     if (result.exitCode !== 0) throw new Error((result.stderr || result.stdout).trim() || name + ' ended with exit code ' + result.exitCode + '.');
     try { return JSON.parse(result.stdout); } catch { throw new Error(name + ' did not print JSON.'); }
+  },
+  async mcp(server, tool, args) {
+    const result = await ask('mcp', { server, tool, arguments: args == null ? {} : args });
+    return Object.assign({}, result, { text: textOf(result.content) });
+  },
+  async mcpJson(server, tool, args) {
+    const result = await studio.mcp(server, tool, args);
+    if (result.structuredContent != null) return result.structuredContent;
+    try { return JSON.parse(result.text); } catch { throw new Error(tool + ' did not return JSON.'); }
   },
   load: (key) => ask('load', { key }),
   save: (key, value) => ask('save', { key, value: value === undefined ? null : value }),

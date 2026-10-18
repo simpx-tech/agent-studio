@@ -1567,6 +1567,10 @@ async fn release_owned_work(app: &tauri::AppHandle) {
         token.cancel();
     }
     app.state::<mcp::Management>().sweep(app, true).await;
+    app.state::<std::sync::Arc<screens::Screens>>()
+        .calls
+        .shutdown()
+        .await;
     app.state::<pool::Pool>().shutdown().await;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

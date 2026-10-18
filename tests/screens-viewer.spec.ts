@@ -8,8 +8,9 @@ import { signInPwa } from './pwa-helper';
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-// The Viewer reads a screen from the computer that keeps it and runs its actions there, through
-// the relay's `screens` jobs: the phone never holds a screen beyond the window showing it.
+// The Viewer reads a screen from the computer that keeps it and runs its actions and MCP tools
+// there, through the relay's `screens` jobs: the phone never holds a screen beyond the window
+// showing it.
 test('the Viewer opens a computer’s screen and runs its actions through the relay', async ({
   page,
 }, testInfo) => {
@@ -71,14 +72,18 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
     createdAt: '2026-10-02T12:00:00.000Z',
     updatedAt: '2026-10-02T12:30:00.000Z',
     commands: 1,
+    tools: 1,
     allowed: true,
   };
   const detail = {
     ...summary,
-    html: `<h2>Builds</h2><p id="status">Checking…</p><script>
+    html: `<h2>Builds</h2><p id="status">Checking…</p><p id="prs"></p><script>
       studio.json('status').then(
         (value) => (document.getElementById('status').textContent = value.passing + ' builds passing'),
         (error) => (document.getElementById('status').textContent = error.message));
+      studio.mcpJson('github', 'list_pull_requests', { state: 'open' }).then(
+        (value) => (document.getElementById('prs').textContent = value.open + ' pull requests open'),
+        (error) => (document.getElementById('prs').textContent = error.message));
     </script>`,
     actions: [
       {
@@ -89,6 +94,8 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
         timeout: 60,
       },
     ],
+    mcpTools: [{ server: 'github', tool: 'list_pull_requests' }],
+    account: { provider: 'codex', connectionId: connection },
     digest: 'b'.repeat(64),
   };
   // The computer that keeps the screen answers its jobs, as its window would.
@@ -137,7 +144,9 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
                     timedOut: false,
                     durationMs: 40,
                   }
-                : {};
+                : request.op === 'mcp'
+                  ? { content: [{ type: 'text', text: JSON.stringify({ open: 2 }) }] }
+                  : {};
         await call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result });
       }
     } catch (error) {
@@ -155,6 +164,9 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
       { op: 'read', id: '../workspace' },
       { op: 'list', path: 'C:\\' },
       { op: 'run', id: screenId, action: 'status', params: {}, script: 'whoami' },
+      { op: 'mcp', id: screenId, server: '', tool: 'list_pull_requests' },
+      { op: 'mcp', id: screenId, server: 'github', tool: 'list_pull_requests', command: 'npx' },
+      { op: 'mcp', id: screenId, server: 'github', tool: 'list_pull_requests', arguments: [1] },
     ])
       await call(
         'POST',
@@ -181,6 +193,7 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
     await expect(page.getByRole('heading', { name: 'Team dashboard' })).toBeVisible();
     const frame = page.frameLocator('iframe[title="Team dashboard screen"]');
     await expect(frame.locator('#status')).toHaveText('3 builds passing');
+    await expect(frame.locator('#prs')).toHaveText('2 pull requests open');
     await page.screenshot({ path: testInfo.outputPath('viewer-screen.png') });
     await page.screenshot({ path: 'artifacts/screens-viewer.png' });
     expect(screenJobs).toEqual(
@@ -188,6 +201,16 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
         { environmentId: host, request: { op: 'list' } },
         { environmentId: host, request: { op: 'read', id: screenId } },
         { environmentId: host, request: { op: 'run', id: screenId, action: 'status', params: {} } },
+        {
+          environmentId: host,
+          request: {
+            op: 'mcp',
+            id: screenId,
+            server: 'github',
+            tool: 'list_pull_requests',
+            arguments: { state: 'open' },
+          },
+        },
       ]),
     );
     expect(workerError).toBe('');

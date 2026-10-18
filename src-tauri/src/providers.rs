@@ -78,12 +78,7 @@ impl Executable {
         renewal: Option<PathBuf>,
     ) {
         if child.try_wait().ok().flatten().is_none() {
-            if let Some(lock) = &renewal {
-                let deadline = tokio::time::Instant::now() + RENEWAL_WAIT;
-                while renewing(lock) && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-            }
+            wait_for_renewal(renewal.as_deref()).await;
             drop(input);
             drop(child.stdin.take());
             if let Some(mut output) = output {
@@ -142,9 +137,10 @@ const RENEWAL_STALE: Duration = Duration::from_secs(15);
 pub type Output = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 /// CLIs `finish` is still ending in the background, which quitting waits for.
 static ENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-struct Ending;
+/// A CLI ending in the background, which quitting waits for while it is held.
+pub(crate) struct Ending;
 impl Ending {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         ENDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ending
     }
@@ -157,6 +153,18 @@ impl Drop for Ending {
 /// Whether a CLI is still ending in the background (`Executable::finish`).
 pub fn ending() -> bool {
     ENDING.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+/// Holds the end of a CLI's input while its profile's lock shows Claude Code renewing the login,
+/// up to the token request's own timeout (`Executable::end`).
+pub(crate) async fn wait_for_renewal(lock: Option<&Path>) {
+    let Some(lock) = lock else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + RENEWAL_WAIT;
+    while renewing(lock) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 fn renewing(lock: &Path) -> bool {

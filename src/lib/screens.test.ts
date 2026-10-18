@@ -3,10 +3,13 @@ import {
   mergeScreenCards,
   screenCall,
   screenCardsSchema,
+  screenDetailSchema,
   screenDocument,
   screenFolderName,
   screenReply,
   screenRequestSchema,
+  screenSummarySchema,
+  screenToolResultSchema,
   type ScreenCard,
 } from './screens';
 import { applyRunEvent, retainRunEvent, savesAtOnce } from './activity';
@@ -62,6 +65,71 @@ describe('screen requests', () => {
       false,
     );
   });
+
+  it('call a declared MCP tool by its server and name, with arguments of any size', () => {
+    for (const request of [
+      { op: 'mcp', id, server: 'linear', tool: 'list_issues' },
+      { op: 'mcp', id, server: 'claude.ai Linear', tool: 'list_issues', arguments: { a: 1 } },
+      { op: 'mcp', id, server: 'linear', tool: 'x', arguments: { text: 'x'.repeat(100_000) } },
+    ])
+      expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
+    for (const request of [
+      { op: 'mcp', id, server: '', tool: 'list_issues' },
+      { op: 'mcp', id, server: 'linear', tool: ' list_issues' },
+      { op: 'mcp', id, server: 'line\nar', tool: 'list_issues' },
+      { op: 'mcp', id, server: 'linear', tool: 'list_issues', arguments: ['x'] },
+      { op: 'mcp', id, server: 'linear', tool: 'list_issues', command: 'npx' },
+      { op: 'mcp', id: '../x', server: 'linear', tool: 'list_issues' },
+      { op: 'mcp', id, server: 'linear', tool: 'list_issues', arguments: { big: 1n } },
+    ])
+      expect(
+        screenRequestSchema.safeParse(request).success,
+        JSON.stringify(request, (_, v) => (typeof v === 'bigint' ? String(v) : v)),
+      ).toBe(false);
+  });
+
+  it('read hosts from before MCP tools as screens without them', () => {
+    const summary = {
+      id,
+      revision: 1,
+      title: 'PRs',
+      description: '',
+      environmentId,
+      project: '',
+      folder: 'C:\\x',
+      conversationId: environmentId,
+      createdAt: '',
+      updatedAt: '',
+      commands: 1,
+      allowed: true,
+    };
+    const older = screenDetailSchema.parse({
+      ...summary,
+      html: '<p></p>',
+      actions: [],
+      digest: 'a'.repeat(64),
+    });
+    expect(older.mcpTools).toEqual([]);
+    expect(older.account).toBeUndefined();
+    expect(screenSummarySchema.parse(summary).tools).toBeUndefined();
+    const current = screenDetailSchema.parse({
+      ...summary,
+      tools: 1,
+      html: '<p></p>',
+      actions: [],
+      mcpTools: [{ server: 'linear', tool: 'list_issues', description: 'Lists issues' }],
+      account: { provider: 'claude', connectionId: environmentId },
+      digest: 'a'.repeat(64),
+    });
+    expect(current.mcpTools[0].tool).toBe('list_issues');
+    expect(current.account?.connectionId).toBe(environmentId);
+    expect(
+      screenToolResultSchema.parse({
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: { ok: true },
+      }).structuredContent,
+    ).toEqual({ ok: true });
+  });
 });
 
 describe('the bridge of a screen page', () => {
@@ -95,6 +163,22 @@ describe('the bridge of a screen page', () => {
       value: null,
     });
     expect(screenCall(message({ method: 'chat', text: 'Review #12' }), token)?.method).toBe('chat');
+    expect(
+      screenCall(
+        message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: { a: 1 } }),
+        token,
+      ),
+    ).toEqual({
+      id: 1,
+      method: 'mcp',
+      server: 'linear',
+      tool: 'list_issues',
+      arguments: { a: 1 },
+    });
+    // Without arguments the tool receives an empty object.
+    expect(
+      screenCall(message({ method: 'mcp', server: 'linear', tool: 'list_issues' }), token),
+    ).toMatchObject({ arguments: {} });
     // Values, keys and messages of any size, and any number of params.
     const params = Object.fromEntries(
       Array.from({ length: 13 }, (_, i) => [`p${i}`, 'x'.repeat(10_000)]),
@@ -127,6 +211,10 @@ describe('the bridge of a screen page', () => {
       message({ method: 'load', key: '' }),
       message({ method: 'save', key: 'line\nbreak', value: 1 }),
       message({ method: 'chat', text: '   ' }),
+      message({ method: 'mcp', server: '', tool: 'list_issues' }),
+      message({ method: 'mcp', server: 'linear', tool: 'list\tissues' }),
+      message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: 'x' }),
+      message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: [] }),
       message({ method: 'exec', script: 'whoami' }),
       null,
       'studio-screen',
@@ -157,6 +245,8 @@ describe('the bridge of a screen page', () => {
     expect(page.match(/<\/script>/g)).toHaveLength(1);
     expect(page).toContain('\\u003c/script\\u003e');
     expect(page).toContain("Object.defineProperty(window, 'studio'");
+    expect(page).toContain("ask('mcp', { server, tool, arguments:");
+    expect(page).toContain('async mcpJson(server, tool, args)');
     expect(page).toContain('color-scheme:light');
     expect(page.indexOf('</head><body>')).toBeLessThan(page.indexOf('<h1>Mine</h1>'));
     // The page itself follows as given, fragment or whole document.

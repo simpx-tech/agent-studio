@@ -1952,7 +1952,14 @@
   function noteScreen(detail: ScreenDetail) {
     const host = screenHost(detail.environmentId);
     if (!host) return;
-    const { html: _html, actions: _actions, digest: _digest, ...summary } = detail;
+    const {
+      html: _html,
+      actions: _actions,
+      mcpTools: _tools,
+      account: _account,
+      digest: _digest,
+      ...summary
+    } = detail;
     const shelf = (screenShelves[host] ??= { screens: [], loading: false });
     const index = shelf.screens.findIndex((s) => s.id === detail.id);
     if (index >= 0) shelf.screens[index] = summary;
@@ -1973,6 +1980,19 @@
     if (shelf) shelf.screens = shelf.screens.filter((s) => s.id !== id);
     openedScreen = undefined;
     view = 'chat';
+  }
+  /** The account that calls a screen's MCP tools, as Connections names it. */
+  function screenAccountName(account: ScreenDetail['account']) {
+    if (!account) return 'the account of the next chat that saves it';
+    const provider =
+      ({ claude: 'Claude', codex: 'Codex' } as Record<string, string>)[account.provider] ??
+      account.provider;
+    if (!account.connectionId) return `this computer’s ${provider} CLI login`;
+    const fleet = workspace.fleet;
+    const connection = fleet.connections.find((c) => c.id === account.connectionId);
+    const name = connection && fleet.accounts.find((a) => a.id === connection.accountId)?.name;
+    if (!name) return `a ${provider} account no longer connected`;
+    return name.toLowerCase().includes(provider.toLowerCase()) ? name : `${name} (${provider})`;
   }
   /** `studio.chat`: a new conversation in the screen's folder, with the text as its draft. */
   function chatFromScreen(text: string, screen: ScreenDetail) {
@@ -6682,7 +6702,7 @@
             {#if !collapsedGroups[groupKey]}<div class="folder-conversations screen-list">
                 {#each group.screens as screen (screen.id)}{@const current =
                     view === 'screen' && openedScreen?.id === screen.id}{@const waiting =
-                    screen.commands > 0 && !screen.allowed}
+                    (screen.commands > 0 || (screen.tools ?? 0) > 0) && !screen.allowed}
                   <div class="conversation-row">
                     <button
                       class="conversation-item screen-item"
@@ -7587,6 +7607,7 @@
             'Its computer'}
           online={environmentOnline(screen.environmentId)}
           openConversation={creator ? () => openConversation(creator) : undefined}
+          accountName={screenAccountName}
           chat={chatFromScreen}
           changed={noteScreen}
           deleted={screenDeleted}

@@ -5,6 +5,7 @@
   let {
     screen,
     computerName,
+    accountName,
     busy = false,
     error = '',
     allow,
@@ -13,6 +14,8 @@
   }: {
     screen: ScreenDetail;
     computerName: string;
+    /** The account whose CLI calls its MCP tools. */
+    accountName: string;
     busy?: boolean;
     error?: string;
     /** Allows exactly the actions shown, named by the screen's digest. */
@@ -49,12 +52,12 @@
   {close}
 >
   <div class="screen-review">
-    <p>
-      <strong>{screen.title}</strong> runs {screen.actions.length === 1
-        ? 'this command'
-        : `these ${screen.actions.length} commands`} on <strong>{computerName}</strong> in
-      <code>{screen.folder}</code> when its page asks.
-    </p>
+    {#if screen.actions.length}<p>
+        <strong>{screen.title}</strong> runs {screen.actions.length === 1
+          ? 'this command'
+          : `these ${screen.actions.length} commands`} on <strong>{computerName}</strong> in
+        <code>{screen.folder}</code> when its page asks.
+      </p>{/if}
     {#each screen.actions as action (action.name)}
       {@const highlighted = highlightCode(action.script, action.shell)}
       <section class="screen-action" aria-label={`Action ${action.name}`}>
@@ -77,6 +80,21 @@
         <pre class="action-script"><code class="hljs"
             >{#if highlighted}{@html highlighted.html}{:else}{action.script}{/if}</code
           ></pre>
+      </section>
+    {/each}
+    {#if screen.mcpTools.length}<p>
+        {#if screen.actions.length}It{:else}<strong>{screen.title}</strong>{/if} calls {screen
+          .mcpTools.length === 1
+          ? 'this MCP tool'
+          : `these ${screen.mcpTools.length} MCP tools`} as <strong>{accountName}</strong> on
+        <strong>{computerName}</strong> when its page asks.
+      </p>{/if}
+    {#each screen.mcpTools as tool (JSON.stringify([tool.server, tool.tool]))}
+      <section class="screen-action" aria-label={`MCP tool ${tool.tool} of ${tool.server}`}>
+        <header>
+          <code class="action-name">{tool.tool}</code><span>{tool.server}</span>
+        </header>
+        {#if tool.description}<p>{tool.description}</p>{/if}
       </section>
     {/each}
   </div>
