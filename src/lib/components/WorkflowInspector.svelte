@@ -16,6 +16,7 @@
     triggerLabels,
     triggerOf,
     webhookSecret,
+    WORKFLOW_ACCOUNT,
     type NodeConfig,
     type TriggerKind,
     type NodeType,
@@ -124,7 +125,13 @@
   );
   const provider = $derived((config.provider as ProviderId) ?? 'claude');
   const accounts = $derived(pickers.accounts(provider, environment));
-  const models = $derived(pickers.models(provider, (config.connectionId as string) ?? ''));
+  // Following the workflow chat's account, the agent's own catalog lists the models.
+  const models = $derived(
+    pickers.models(
+      provider,
+      config.connectionId === WORKFLOW_ACCOUNT ? '' : ((config.connectionId as string) ?? ''),
+    ),
+  );
   const levels = $derived(
     models.find((m) => m.id === config.model)?.levels ?? ['low', 'medium', 'high'],
   );
@@ -300,7 +307,11 @@
       <ChoicePicker
         field
         label="Account"
-        options={[{ id: '', name: 'Least used' }, ...accounts]}
+        options={[
+          { id: '', name: 'Least used' },
+          { id: WORKFLOW_ACCOUNT, name: 'Same as workflow chat' },
+          ...accounts,
+        ]}
         value={(config.connectionId as string) ?? ''}
         onchange={(value) => chooseAgent({ connectionId: value })}
       />

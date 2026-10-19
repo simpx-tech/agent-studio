@@ -39,12 +39,19 @@ export type NodeType = (typeof nodeTypeIds)[number];
 export const isNodeType = (type: string): type is NodeType =>
   (nodeTypeIds as readonly string[]).includes(type);
 
+/**
+ * An account choice that follows the workflow's own chat (requested 2026-10-19): the account of
+ * the orchestrator of the dynamic workflow that started the run, else of the workflow's assistant,
+ * connected where the agent runs.
+ */
+export const WORKFLOW_ACCOUNT = 'workflow';
 // Which account and model an agent of a step or dynamic workflow uses. An empty connection takes the
-// least used ready account of the agent on the computer; an empty model is the CLI's default.
+// least used ready account of the agent on the computer, and `WORKFLOW_ACCOUNT` the workflow
+// chat's; an empty model is the CLI's default.
 const agentChoiceShape = {
   location: locationSchema.optional(),
   provider: z.enum(providerIds).default('claude'),
-  connectionId: z.union([uuid, z.literal('')]).default(''),
+  connectionId: z.union([uuid, z.literal(''), z.literal(WORKFLOW_ACCOUNT)]).default(''),
   model: z.string().default(''),
   reasoning: reasoningSchema.default(''),
 };

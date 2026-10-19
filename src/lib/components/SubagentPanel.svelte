@@ -4,7 +4,7 @@
   import { activityDisplayStatus, type ActivityDisplayStatus } from '$lib/activity';
   import type { Message } from '$lib/domain';
   import { renderMarkdown } from '$lib/markdown';
-  import { showPanel } from '$lib/side-panels';
+  import { panelRoom, showPanel } from '$lib/side-panels';
   import { openLink } from '$lib/transport';
   import {
     delegatingSubagent,
@@ -101,10 +101,10 @@
     const focused = document.activeElement as HTMLElement | null;
     const workspace = dialog?.parentElement;
     const observer = new ResizeObserver(() => {
-      if (workspace) workspaceWidth = workspace.getBoundingClientRect().width;
+      if (workspace) workspaceWidth = panelRoom(workspace);
     });
     if (workspace) {
-      workspaceWidth = workspace.getBoundingClientRect().width;
+      workspaceWidth = panelRoom(workspace);
       observer.observe(workspace);
     }
     mounted = true;

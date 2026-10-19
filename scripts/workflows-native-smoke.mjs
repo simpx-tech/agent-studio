@@ -146,10 +146,20 @@ try {
     },
     messages: [],
   });
+  // The Workflows row's list, unfolded (as an earlier run may have left it), takes the chat
+  // lists' place: fold it to reach the chats.
+  const showChats = () =>
+    page.evaluate(() => {
+      const row = document.querySelector('.workflows-row .sidebar-nav-row');
+      if (row?.getAttribute('aria-expanded') === 'true') row.click();
+    });
   // A save the app started during startup detection can land after this one, so seed again
   // until the reloaded app lists the chat.
   const listed = () =>
     page.evaluate(async (title) => {
+      const row = document.querySelector('.workflows-row .sidebar-nav-row');
+      if (row?.getAttribute('aria-expanded') === 'true') row.click();
+      await new Promise((resolve) => setTimeout(resolve, 100));
       document.querySelector('#conversation-tab-history')?.click();
       await new Promise((resolve) => setTimeout(resolve, 100));
       return [...document.querySelectorAll('.conversation-item')].some((e) => e.title === title);
@@ -179,6 +189,7 @@ try {
   assert.equal(status.auth, 'ready', 'Codex must be signed in');
 
   const openChat = async (title) => {
+    await showChats();
     for (const tab of ['#conversation-tab-active', '#conversation-tab-history']) {
       await page.click(tab);
       const found = await page.evaluate((title) => {
@@ -305,6 +316,7 @@ try {
   // The Agent step's chat replied and stays out of the chat lists.
   const stepChat = await conversation(run.body.agents[0].conversationId);
   assert.match(text(stepChat.messages.findLast((m) => m.role === 'assistant')), /GREETING NATIVE/);
+  await showChats();
   const rows = await page.evaluate(async () => {
     const titles = [];
     for (const tab of ['#conversation-tab-active', '#conversation-tab-history']) {
@@ -399,6 +411,12 @@ try {
     ended.body.tasks.every((t) => t.status === 'done'),
     `A task did not settle: ${JSON.stringify(report.mission.tasks)}`,
   );
+  // The history opens from History in the run's header.
+  await page.evaluate(() => {
+    const button = document.querySelector('.workflow-main button[aria-label="History"]');
+    if (button?.getAttribute('aria-pressed') !== 'true') button?.click();
+  });
+  await page.waitFor(() => document.querySelectorAll('.run-sheet .entry').length > 0);
   report.historyEntries = await page.evaluate(
     () => document.querySelectorAll('.run-sheet .entry').length,
   );
@@ -413,12 +431,14 @@ try {
     () => !document.querySelector('[aria-label="Message"]'),
   );
   assert(report.workerReadOnly, 'The worker chat offers a composer');
-  // It opened in the orchestrator's place, the graph still beside it, with the way back.
+  // It opened in the chat card beside the graph, with the way back to the orchestrator.
   report.workerBeside = await page.evaluate(() => ({
-    graph: !!document.querySelector('#workflow-panel .workflow-card'),
+    graph: !!document.querySelector('.workflow-main .workflow-card'),
     back: document.querySelector('.workflow-owned .back')?.textContent.trim(),
   }));
   assert.deepEqual(report.workerBeside, { graph: true, back: 'Orchestrator' });
+  // The graph fits itself to the narrower canvas a moment after the card opens.
+  await sleep(800);
   await capture('worker-read-only');
   await noErrorBanner('in the worker chat');
   assert.deepEqual(page.errors, []);

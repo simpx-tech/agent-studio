@@ -34,6 +34,21 @@ export function leaveChats(
 }
 
 /**
+ * The width a docked side panel and the chat beside it share: the workspace's, without the padding
+ * and the gap between them that chats shown as cards leave (requested 2026-10-19).
+ */
+export function panelRoom(workspace: HTMLElement) {
+  const style = getComputedStyle(workspace);
+  const spaced = (value: string) => parseFloat(value) || 0;
+  return (
+    workspace.getBoundingClientRect().width -
+    spaced(style.paddingLeft) -
+    spaced(style.paddingRight) -
+    spaced(style.columnGap)
+  );
+}
+
+/**
  * Shows a panel's dialog beside the chat when docked, and otherwise as a drawer over it, which
  * takes focus as any modal does. Opening it moves focus to `control`; a docked panel shown again
  * with its chat puts focus back where it was, since the browser moves focus into any dialog it

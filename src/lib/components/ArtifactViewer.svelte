@@ -6,7 +6,7 @@
   import { visualizationPreview } from '$lib/visualization-preview';
   import { appearance } from '$lib/appearance.svelte';
   import { highlightCode } from '$lib/markdown';
-  import { showPanel } from '$lib/side-panels';
+  import { panelRoom, showPanel } from '$lib/side-panels';
   import { artifactPreviewUrl, downloadArtifact } from '$lib/transport';
   import PanelResize from './PanelResize.svelte';
   let {
@@ -69,10 +69,10 @@
     const focused = document.activeElement as HTMLElement | null;
     const workspace = dialog?.parentElement;
     const observer = new ResizeObserver(() => {
-      if (workspace) workspaceWidth = workspace.getBoundingClientRect().width;
+      if (workspace) workspaceWidth = panelRoom(workspace);
     });
     if (workspace) {
-      workspaceWidth = workspace.getBoundingClientRect().width;
+      workspaceWidth = panelRoom(workspace);
       observer.observe(workspace);
     }
     mounted = true;

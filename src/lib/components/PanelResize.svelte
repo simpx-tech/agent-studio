@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  // The left divider of a docked right-side panel, which remembers its width on this device.
+  // The left divider of a docked right-side panel, or the right one of a left-side card such as a
+  // workflow's chat, which remembers its width on this device.
   let {
     availableWidth,
     share: defaultShare,
@@ -9,6 +10,7 @@
     storageKey,
     label,
     controls,
+    side = 'left',
   }: {
     availableWidth: number;
     /**
@@ -21,7 +23,11 @@
     label: string;
     /** The id of the panel it resizes. */
     controls: string;
+    /** The edge of the panel it lies on: the left of a panel on the right, or the right. */
+    side?: 'left' | 'right';
   } = $props();
+  // Moving toward the panel's middle narrows it.
+  const outward = $derived(side === 'left' ? -1 : 1);
   const minWidth = 360;
   const proportional = $derived(defaultShare !== undefined);
   // The reader's width, or their share of the space when proportional.
@@ -81,7 +87,7 @@
   }
   function move(event: PointerEvent) {
     if (!drag || drag.pointerId !== event.pointerId) return;
-    choose(drag.width + drag.x - event.clientX);
+    choose(drag.width + outward * (event.clientX - drag.x));
   }
   function finish(cancel = false) {
     if (!drag) return;
@@ -106,8 +112,8 @@
     }
     if (drag) return;
     const step = event.shiftKey ? 50 : 10;
-    if (event.key === 'ArrowLeft') choose(width + step);
-    else if (event.key === 'ArrowRight') choose(width - step);
+    if (event.key === 'ArrowLeft') choose(width - outward * step);
+    else if (event.key === 'ArrowRight') choose(width + outward * step);
     else if (event.key === 'Home') choose(minWidth);
     else if (event.key === 'End') choose(maxWidth);
     else if (event.key === 'Enter') reset();
@@ -124,6 +130,7 @@
 <div
   bind:this={handle}
   class="panel-resizer"
+  class:right={side === 'right'}
   class:dragging={!!drag}
   role="separator"
   tabindex="0"
@@ -134,7 +141,9 @@
   aria-valuemax={maxWidth}
   aria-valuenow={width}
   aria-valuetext={`${width} pixels`}
-  title="Drag to resize. Left arrow widens, right arrow narrows; double-click or press Enter to reset."
+  title={side === 'left'
+    ? 'Drag to resize. Left arrow widens, right arrow narrows; double-click or press Enter to reset.'
+    : 'Drag to resize. Right arrow widens, left arrow narrows; double-click or press Enter to reset.'}
   onpointerdown={start}
   onpointermove={move}
   onpointerup={(event) => {
@@ -162,6 +171,10 @@
     inset: 0 auto 0 0;
     width: 2px;
     background: transparent;
+  }
+  .panel-resizer.right,
+  .panel-resizer.right::after {
+    inset: 0 0 0 auto;
   }
   .panel-resizer:hover::after,
   .panel-resizer:focus-visible::after,

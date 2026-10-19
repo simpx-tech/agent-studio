@@ -186,6 +186,7 @@
   import type { ChatSpec, Readiness, WorkflowHost } from '$lib/workflow-engine';
   import type { WorkflowPickers } from '$lib/workflow-view';
   import {
+    WORKFLOW_ACCOUNT,
     newDefinition,
     runActive,
     type RunDriverChoice,
@@ -240,6 +241,7 @@
   import BrowserStatus from '$lib/components/BrowserStatus.svelte';
   import WorkspaceLogin from '$lib/components/WorkspaceLogin.svelte';
   import ToolbarActions from '$lib/components/ToolbarActions.svelte';
+  import PanelResize from '$lib/components/PanelResize.svelte';
   import SidebarResize from '$lib/components/SidebarResize.svelte';
   import FleetManager from '$lib/components/FleetManager.svelte';
   import FolderBrowser from '$lib/components/FolderBrowser.svelte';
@@ -506,25 +508,20 @@
   // by workflow.
   let openedWorkflowRun = $state<string>();
   let panelRuns = $state<Record<string, string | undefined>>({});
-  // Whether each chat shows its workflow's panel, by chat or scratch chat; window memory only.
-  // Untouched, it shows beside the chat on wide windows and waits behind the bar above the chat
-  // on narrow ones, where it would cover the chat.
-  let workflowPanelChoice = $state<Record<string, 'shown' | 'hidden'>>({});
-  // Whether a static workflow shows its chat beside its graph, by workflow; window memory only.
-  // It opens while the workflow is made and when you open a chat of it, and closes when the
-  // workflow is opened again (requested 2026-10-19).
+  // Whether a workflow shows its chat beside its graph, by workflow; window memory only. It opens
+  // while the workflow is made and when you open a chat of it, and is closed when the workflow is
+  // opened again (requested 2026-10-19).
   let workflowChatOpen = $state<Record<string, boolean>>({});
+  // The chat card's width beside a workflow's graph, which its right edge resizes, and the space
+  // it shares.
+  let chatCardWidth = $state<number>();
+  let chatWorkspaceWidth = $state(0);
   // Where a mission a new mission chat starts runs, chosen beside its composer.
   let missionDriver = $state<RunDriverChoice>();
   // The graph library loads with the first workflow opened, not with every start of the page.
   let workflowViewModule: Promise<typeof import('$lib/components/WorkflowView.svelte')> | undefined;
   const workflowView = () =>
     (workflowViewModule ??= import('$lib/components/WorkflowView.svelte'));
-  let workflowPanelModule:
-    | Promise<typeof import('$lib/components/WorkflowPanel.svelte')>
-    | undefined;
-  const workflowPanel = () =>
-    (workflowPanelModule ??= import('$lib/components/WorkflowPanel.svelte'));
   // Definitions and runs, and the runs this desktop drives.
   const workflows = new WorkflowClient({
     host: () => (loaded && installation ? workflowHost : undefined),
@@ -1919,6 +1916,7 @@
     () =>
       ({
         chat:
+          (workflowChatShown && readOnlyChat ? active?.title : undefined) ??
           (chatWorkflow ? workflows.summaries.get(chatWorkflow)?.title : undefined) ??
           active?.title ??
           (currentScratch?.workflow && !currentScratch.workflow.id
@@ -2080,14 +2078,9 @@
       ? run.definitionId
       : run.id;
   });
-  // A static workflow shows its graph in the chat's place, and its chat as a card beside it on
-  // demand (requested 2026-10-19); a dynamic one keeps its orchestrator's chat with the graph
-  // beside it.
-  const graphFirst = $derived.by(() => {
-    if (view !== 'chat' || !chatWorkflow) return false;
-    const summary = workflows.summaries.get(chatWorkflow);
-    return summary ? summary.kind === 'definition' || summary.mode === 'static' : !active;
-  });
+  // A workflow, static or dynamic, shows its graph in the chat's place, and its chat as a card at
+  // the graph's left on demand (requested 2026-10-19).
+  const graphFirst = $derived(view === 'chat' && !!chatWorkflow);
   const workflowChatShown = $derived(graphFirst && !!chatWorkflow && !!workflowChatOpen[chatWorkflow]);
   // The chat a workflow's own chats lead back to: its assistant, or the orchestrator of a dynamic
   // workflow you started.
@@ -2099,16 +2092,6 @@
   });
   // A workflow chat keeps the workflows' own remembered agent.
   const workflowChat = $derived(!!currentScratch?.workflow || !!chatWorkflow);
-  const panelKey = $derived(activeId ?? (scratchId ? `scratch:${scratchId}` : ''));
-  const workflowPanelShown = $derived(
-    view === 'chat' &&
-      !!chatWorkflow &&
-      !graphFirst &&
-      (workflowPanelChoice[panelKey] ?? (viewportWidth >= 1000 ? 'shown' : 'hidden')) ===
-        'shown' &&
-      artifactView?.mode !== 'panel' &&
-      !subagentShown,
-  );
   const workflowsInProgress = $derived(
     [...workflows.summaries.values()].filter(
       (s) => s.kind === 'run' && (s.status === 'running' || s.status === 'paused'),
@@ -2117,10 +2100,9 @@
   const workflowsWaiting = $derived(
     [...workflows.summaries.values()].some((s) => s.kind === 'run' && s.questions > 0),
   );
-  // The sidebar lists the workflows under its Workflows row (requested 2026-10-19, in place of a
-  // page of them): each saved workflow and each dynamic workflow you started, the newest first,
-  // folded until opened and then as last left on this device, since the running ones also lead
-  // the Active list.
+  // The sidebar's Workflows row unfolds the list of workflows in place of the chats (requested
+  // 2026-10-19, in place of a page of them): each saved workflow and each dynamic workflow you
+  // started, the newest first, folded until opened and then as last left on this device.
   let workflowsExpanded = $state(
     typeof localStorage !== 'undefined' &&
       localStorage.getItem('agent-studio.workflows-expanded') === 'true',
@@ -2171,10 +2153,9 @@
       : undefined;
     // A dynamic workflow another run started has no chat of yours: it opens as a page.
     if (chat && (target?.kind === 'definition' || (target?.mode === 'dynamic' && !target.parent))) {
-      workflowPanelChoice[chat.id] = 'shown';
       panelRuns[target.id] = owner ? id : undefined;
-      // A static workflow opens on its graph; its chat waits until you open it.
-      if (target.kind === 'definition') workflowChatOpen[target.id] = false;
+      // A workflow opens on its graph; its chat waits until you open it.
+      workflowChatOpen[target.id] = false;
       openConversation(chat);
       return;
     }
@@ -2186,17 +2167,20 @@
     }
     expandWorkflow(id);
   }
-  /**
-   * Shows a chat of the workflow on screen where its chat goes: the card beside a static
-   * workflow's graph, or the chat's place beside a dynamic one's.
-   */
+  /** Whether a workflow has a chat here to show: a run only when its orchestrator chat is. */
+  function workflowHasChat(id: string) {
+    const summary = workflows.summaries.get(id);
+    return (
+      summary?.kind !== 'run' ||
+      (!!summary.chat && workspace.conversations.some((c) => c.id === summary.chat))
+    );
+  }
+  /** Shows a chat of the workflow on screen in the chat card beside its graph. */
   function openWorkflowChat(id: string) {
     const conversation = workspace.conversations.find((c) => c.id === id);
     if (!conversation) return;
-    const panel = workflowPanelShown;
     openConversation(conversation);
-    if (graphFirst && chatWorkflow) workflowChatOpen[chatWorkflow] = true;
-    if (panel) workflowPanelChoice[conversation.id] = 'shown';
+    if (chatWorkflow) workflowChatOpen[chatWorkflow] = true;
   }
   // A chat of yours that becomes a workflow's (requested 2026-10-19): the assistant of a new static
   // workflow it builds from the conversation, or, when it runs on this computer, the orchestrator
@@ -2249,7 +2233,7 @@
         const asked = [...conversation.messages]
           .reverse()
           .find((m) => m.role === 'user' && !m.sentBy);
-        await workflows.startMission({
+        const runId = await workflows.startMission({
           title: conversation.title,
           text: (asked && messageText(asked).trim()) || conversation.title,
           ...(conversation.location?.path ? { location: { ...conversation.location } } : {}),
@@ -2268,6 +2252,7 @@
           },
         });
         workflows.own(conversation.id);
+        workflowChatOpen[runId] = true;
         conversation.settings = { ...settings, instructions: instructions(ORCHESTRATOR_INSTRUCTIONS) };
         await sendWorkflowMessage(conversation.id, DYNAMIC_FROM_CHAT);
       }
@@ -2277,21 +2262,25 @@
       makingWorkflow = false;
     }
   }
-  /** Opens or closes a static workflow's chat: its assistant, else the chat that becomes it. */
+  /**
+   * Opens or closes a workflow's chat: a static workflow's assistant, else the chat that becomes
+   * it, or a dynamic workflow's orchestrator.
+   */
   function toggleWorkflowChat(workflowId: string) {
     if (workflowChatOpen[workflowId] && view === 'chat') {
       workflowChatOpen[workflowId] = false;
       return;
     }
-    workflowChatOpen[workflowId] = true;
     const summary = workflows.summaries.get(workflowId);
-    const assistant = summary?.chat
+    const own = summary?.chat
       ? workspace.conversations.find((c) => c.id === summary.chat)
       : undefined;
-    if (assistant) {
-      if (activeId !== assistant.id) openConversation(assistant);
-    } else if (currentScratch?.workflow?.id !== workflowId || view !== 'chat')
+    if (own) {
+      if (activeId !== own.id) openConversation(own);
+    } else if (summary?.kind === 'run') return;
+    else if (currentScratch?.workflow?.id !== workflowId || view !== 'chat')
       newWorkflowChat('workflow', workflowId);
+    workflowChatOpen[workflowId] = true;
     void tick().then(() => composerInput?.focus());
   }
   /** Shows a workflow, run or mission as a page of its own, with a run of the workflow shown. */
@@ -4490,7 +4479,9 @@
         reasoning: agent.reasoning,
         instructions: '',
         // The account chosen last, where it is connected.
-        ...(agent.connectionId ? { connectionId: agent.connectionId } : {}),
+        ...(agent.connectionId && agent.connectionId !== WORKFLOW_ACCOUNT
+          ? { connectionId: agent.connectionId }
+          : {}),
       };
     }
     // A new chat on a WSL folder runs inside its distribution, whichever folder or recent
@@ -5890,6 +5881,7 @@
             }
           : {}),
       });
+      workflowChatOpen[runId] = true;
       return {
         conversationId: here ? conversationId : undefined,
         runId,
@@ -6682,7 +6674,11 @@
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
-        placeholder={conversationScope === 'screens' ? 'Search screens' : 'Search conversations'}
+        placeholder={workflowsExpanded
+          ? 'Search workflows'
+          : conversationScope === 'screens'
+            ? 'Search screens'
+            : 'Search conversations'}
         bind:value={query}
       />{#if query}<button
           class="icon-button"
@@ -6716,7 +6712,11 @@
           onclick={() => newWorkflowChat()}><Plus size={14} /></button
         >
       </div>
-      {#if workflowsExpanded}<ul id="sidebar-workflows" class="workflow-list" aria-label="Workflows">
+    </div>
+    <!-- Unfolded, the workflows take the list's place, however many there are (requested
+      2026-10-19); folding them shows the chats again. -->
+    {#if workflowsExpanded}<div class="conversation-list workflow-browser">
+      <ul id="sidebar-workflows" class="workflow-list" aria-label="Workflows">
           {#each listedWorkflows as { summary, run } (summary.id)}{@const shown = workflowOnScreen(
               summary.id,
             )}{@const started = Date.parse(run?.createdAt ?? '')}<li>
@@ -6746,9 +6746,8 @@
             </li>{:else}<li class="sidebar-empty">
               {query ? 'No matches.' : 'No workflows yet.'}
             </li>{/each}
-        </ul>{/if}
-    </div>
-    <div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
+      </ul>
+    </div>{:else}<div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
       {#each conversationGroups as group}
         <button
           id={`conversation-tab-${group.id}`}
@@ -7157,7 +7156,7 @@
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}
       </div>
-    </div>
+    </div>{/if}
     <div class="sidebar-tools">
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
           class="update-button"
@@ -7229,14 +7228,17 @@
 
     {#if view === 'chat'}
       <div
-        class="chat-workspace"
-        class:has-side-panel={artifactView?.mode === 'panel' || subagentShown || workflowPanelShown}
+        class="chat-workspace card-layout"
+        class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
         class:graph-first={graphFirst}
+        bind:clientWidth={chatWorkspaceWidth}
       >
         <section
+          id="chat-area"
           class="chat-layout"
           class:workflow-chat-card={graphFirst}
           class:closed={graphFirst && !workflowChatShown}
+          style:--chat-card-width={graphFirst && chatCardWidth ? `${chatCardWidth}px` : undefined}
           aria-label="Chat"
           ondragenter={(event) => {
             if (hasDraggedFiles(event)) {
@@ -7262,30 +7264,16 @@
               </div>
             </div>
           {/if}
-          {#if graphFirst}<div class="workflow-chat-head">
-              <MessageSquare size={15} aria-hidden="true" /><span
-                >{readOnlyChat ? (active?.title.split(' · ').at(-1) ?? 'Chat') : 'Assistant'}</span
-              ><button
-                class="icon-button"
-                title="Close"
-                aria-label="Close the chat"
-                onclick={() => chatWorkflow && (workflowChatOpen[chatWorkflow] = false)}
-                ><X size={16} /></button
-              >
-            </div>{/if}
-          {#if chatWorkflow && !workflowPanelShown && !graphFirst}{@const shown = workflows.summaries.get(chatWorkflow)}<div
-              class="workflow-banner"
-              role="note"
-            >
-              {#if shown?.mode === 'dynamic'}<Target size={14} aria-hidden="true" />{:else}<Workflow
-                  size={14}
-                  aria-hidden="true"
-                />{/if}<span><strong>{shown?.title ?? 'Workflow'}</strong></span><button
-                class="text-button"
-                onclick={() => (workflowPanelChoice[panelKey] = 'shown')}>Show graph</button
-              >
-            </div>
-          {:else if activeWorkflow && !chatWorkflow && !readOnlyChat}<div
+          {#if graphFirst && viewportWidth > 760}<PanelResize
+              side="right"
+              availableWidth={chatWorkspaceWidth}
+              share={0.36}
+              onresize={(width) => (chatCardWidth = width)}
+              storageKey="agent-studio.workflow-chat-share"
+              label="Resize chat"
+              controls="chat-area"
+            />{/if}
+          {#if activeWorkflow && !chatWorkflow && !readOnlyChat}<div
               class="workflow-banner"
               role="note"
             >
@@ -7295,7 +7283,7 @@
                 >Open workflow</button
               >
             </div>{/if}
-          {#if !graphFirst}<div class="chat-toolbar" aria-label="Conversation settings">
+          <div class="chat-toolbar" aria-label="Conversation settings">
             <div class="chat-configuration">
               <div class="chat-setting computer-setting">
                 <ChoicePicker
@@ -7542,7 +7530,14 @@
                 aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
               >
             </ToolbarActions>{/key}
-          </div>{/if}
+            {#if graphFirst}<button
+                class="icon-button card-close"
+                title="Close"
+                aria-label="Close the chat"
+                onclick={() => chatWorkflow && (workflowChatOpen[chatWorkflow] = false)}
+                ><X size={16} /></button
+              >{/if}
+          </div>
           {#if accountSwitchPending || nextReplyChanged}
             <p class="next-reply-settings" role="status">
               Next message: {#if accountSwitchPending}<span
@@ -7979,20 +7974,6 @@
               changeMode={(mode) => showArtifactAs(chat, mode)}
               close={() => delete artifactViews[chat]}
             />{/key}{/if}
-        {#if workflowPanelShown && chatWorkflow}{@const key = panelKey}{@const workflowId = chatWorkflow}{#await workflowPanel() then { default: WorkflowPanel }}{#key `${workspaceSession}/${chatWorkflow}`}<WorkflowPanel
-                client={workflows}
-                id={chatWorkflow}
-                pickers={workflowPickers}
-                conversation={(id) => workspace.conversations.find((c) => c.id === id)}
-                openChat={openWorkflowChat}
-                openDoc={openWorkflow}
-                deleteChats={deleteWorkflowChats}
-                closed={() => newChat()}
-                expand={(run) => chatWorkflow && expandWorkflow(chatWorkflow, run)}
-                close={() => (workflowPanelChoice[key] = 'hidden')}
-                bind:run={panelRuns[workflowId]}
-                {webhookUrl}
-              />{/key}{/await}{/if}
         {#if graphFirst && chatWorkflow}{@const workflowId = chatWorkflow}{#await workflowView() then { default: WorkflowView }}{#key `${workspaceSession}/${workflowId}`}<div
                 class="workflow-main"
               >
@@ -8005,7 +7986,7 @@
                   openDoc={openWorkflow}
                   deleteChats={deleteWorkflowChats}
                   closed={() => newChat()}
-                  chat={() => toggleWorkflowChat(workflowId)}
+                  chat={workflowHasChat(workflowId) ? () => toggleWorkflowChat(workflowId) : undefined}
                   chatShown={workflowChatShown}
                   bind:run={panelRuns[workflowId]}
                   {webhookUrl}

@@ -62,7 +62,7 @@
     changeDriver,
     select,
     clearFilter,
-    stacked = false,
+    close,
   }: {
     run: WorkflowRun;
     events: WorkflowEvent[];
@@ -88,8 +88,8 @@
     /** Shows an entry's card on the graph. */
     select: (card: string | undefined) => void;
     clearFilter: () => void;
-    /** Below the graph rather than beside it. */
-    stacked?: boolean;
+    /** Closes it, beside the graph it opened from. */
+    close?: () => void;
   } = $props();
   const active = $derived(run.status === 'running' || run.status === 'paused');
   const message = (e: unknown) => String(e).replace(/^Error: /, '');
@@ -332,7 +332,13 @@
   </div>
 {/snippet}
 
-<aside class="run-sheet" class:stacked aria-label="Run">
+<aside class="run-sheet" aria-label="Run">
+  {#if close}<header class="sheet-head">
+      <h2>History</h2>
+      <button class="icon-button" title="Close" aria-label="Close the history" onclick={close}
+        ><X size={16} /></button
+      >
+    </header>{/if}
   {#if pending.length || asking.length}
     <section class="needs-you" aria-label="Waiting for you">
       {#each pending as item (item.id)}
@@ -514,7 +520,7 @@
     </section>
     <section class="history" aria-label="History">
       <header class="history-head">
-        <h3>History</h3>
+        {#if !close}<h3>History</h3>{/if}
         {#if filter}<span class="filter-chip"
             >{filterName}<button
               class="icon-button"
@@ -573,9 +579,17 @@
     overflow: hidden;
     font-size: var(--text-sm);
   }
-  .run-sheet.stacked {
-    width: auto;
-    flex: 1 1 55%;
+  .sheet-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sheet-head h2 {
+    flex: 1;
+    margin: 0;
+    font-size: var(--text-md);
   }
   section {
     padding: 12px 14px;

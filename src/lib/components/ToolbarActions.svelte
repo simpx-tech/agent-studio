@@ -41,6 +41,29 @@
       gap: 0;
     }
   }
+  /* A narrow chat area keeps the actions in the same menu, at its own size. */
+  @container chat-area (max-width: 560px) {
+    .mobile-actions-toggle {
+      display: flex;
+    }
+    .action-items {
+      display: none;
+    }
+    .action-items.open {
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      gap: 2px;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      z-index: 31;
+      padding: 6px;
+      background: var(--surface-overlay);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-lg);
+    }
+  }
   @media (max-width: 650px) {
     .mobile-actions-toggle {
       display: flex;

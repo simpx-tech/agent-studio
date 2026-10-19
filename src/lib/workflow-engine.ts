@@ -14,6 +14,7 @@ import { markdownText } from './notifications';
 import type { UsageSnapshot } from './usage';
 import {
   KEPT_ALERTS,
+  WORKFLOW_ACCOUNT,
   answerText,
   nodeConfig,
   readRun,
@@ -1104,6 +1105,13 @@ export class RunDriver {
     const conversationId = activation.conversationId ?? previous?.conversationId;
     const existing = conversationId ? this.host.conversation(conversationId) : undefined;
     let connectionId = existing?.settings.connectionId ?? config.connectionId;
+    // An account the step names; following the workflow chat's, the one it finds where the step
+    // runs; otherwise the least used, which gives way to another with room.
+    let chosen = !!config.connectionId && config.connectionId !== WORKFLOW_ACCOUNT;
+    if (!existing && config.connectionId === WORKFLOW_ACCOUNT) {
+      connectionId = (await this.workflowAccount(config.provider, location)) ?? '';
+      chosen = !!connectionId;
+    }
     if (!connectionId)
       connectionId = this.host.leastUsed(config.provider, location, config.model) ?? '';
     const settings: ChatSettings = existing
@@ -1128,7 +1136,7 @@ export class RunDriver {
     if (until) {
       // Without a chosen account, another with room takes the step.
       const other =
-        !config.connectionId && !existing
+        !chosen && !existing
           ? this.host.leastUsed(
               config.provider,
               location,
@@ -1229,6 +1237,49 @@ export class RunDriver {
     this.update(activation, { conversationId: conversation.id, replyId });
   }
 
+  /**
+   * The account of the chat this run answers to, connected where `location` runs and of the
+   * agent `provider`: the orchestrator's of the nearest dynamic workflow up the runs that started
+   * it, else the assistant's of the nearest static workflow that has one, this one first.
+   */
+  private async workflowAccount(
+    provider: ProviderId,
+    location: ChatLocation,
+  ): Promise<string | undefined> {
+    let assistant: string | undefined;
+    let source: string | undefined;
+    const seen = new Set<string>();
+    let id: string | undefined = this.id;
+    let run: WorkflowRun | undefined = this.run;
+    while (run && id && !seen.has(id)) {
+      seen.add(id);
+      if (run.mode === 'dynamic') {
+        const session = [...run.sessions].reverse().find((s) => !s.endedAt) ?? run.sessions.at(-1);
+        const chat = session ? this.host.conversation(session.conversationId) : undefined;
+        source = chat?.settings.connectionId ?? session?.connectionId;
+        if (source) break;
+      } else if (!assistant && run.definition) {
+        const definition = await this.host.definition(run.definition.id);
+        const chat = definition?.body.assistant
+          ? this.host.conversation(definition.body.assistant.conversationId)
+          : undefined;
+        assistant = chat?.settings.connectionId;
+      }
+      id = run.parent?.runId;
+      run = id ? this.host.knownRun(id) : undefined;
+    }
+    source ??= assistant;
+    if (!source) return undefined;
+    const fleet = this.host.fleet();
+    const accountId = fleet.connections.find((c) => c.id === source)?.accountId;
+    if (!accountId || fleet.accounts.find((a) => a.id === accountId)?.provider !== provider)
+      return undefined;
+    const environment = location.executionEnvironmentId ?? location.environmentId;
+    return fleet.connections.find(
+      (c) => c.accountId === accountId && c.environmentId === environment,
+    )?.id;
+  }
+
   /** Starts the run of another workflow a Run workflow step calls: static, or dynamic. */
   private async startChild(activation: Activation, node: WorkflowNode) {
     const config = nodeConfig(node, 'workflow');
@@ -1247,13 +1298,25 @@ export class RunDriver {
     if (config.kind === 'dynamic') {
       const goal = this.render(config.goal, activation).trim();
       if (!goal) return this.fail(activation, 'Its goal is empty.');
+      const self = this.host.self();
+      const connectionId =
+        config.connectionId === WORKFLOW_ACCOUNT
+          ? ((await this.workflowAccount(
+              config.provider,
+              config.location ?? {
+                computerId: self.computerId,
+                environmentId: self.environmentId,
+                path: '',
+              },
+            )) ?? '')
+          : config.connectionId;
       child = newMission({
         title: this.render(config.title, activation),
         text: goal,
         ...(config.location ? { location: config.location } : {}),
         orchestrator: {
           provider: config.provider,
-          connectionId: config.connectionId,
+          connectionId,
           model: config.model,
           reasoning: config.reasoning,
         },

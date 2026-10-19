@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { staticRun, type RunDriver } from './workflow-engine';
+import type { Conversation } from './domain';
+import { newMission, staticRun, type RunDriver } from './workflow-engine';
 import {
+  WORKFLOW_ACCOUNT,
   newNode,
   readRun,
   summarize,
@@ -437,6 +439,103 @@ describe('static workflow runs', () => {
     await driver.tick();
     expect(driver.run.status).toBe('completed');
     expect(driver.run.output).toBe(`Sharp from ${childId}`);
+  });
+
+  it("takes the workflow chat's account: an orchestrator's that started it, else its assistant's", async () => {
+    const definitionId = crypto.randomUUID();
+    const steps = workflow(
+      [
+        ['start', 'start'],
+        ['draft', 'agent', { prompt: 'Draft it.', connectionId: WORKFLOW_ACCOUNT }],
+        ['end', 'end', { output: '{{draft.output}}' }],
+      ],
+      [
+        ['start', 'draft'],
+        ['draft', 'end'],
+      ],
+    );
+    const chat = (connectionId: string): Conversation => ({
+      id: crypto.randomUUID(),
+      title: 'Chat',
+      settings: { provider: 'claude', model: '', reasoning: '', instructions: '', connectionId },
+      createdAt: '2026-10-19T12:00:00.000Z',
+      updatedAt: '2026-10-19T12:00:00.000Z',
+      messages: [],
+    });
+    const begin = async (
+      t: ReturnType<typeof testHost>,
+      definition: WorkflowDefinition,
+      parent?: string,
+    ) => {
+      t.definitions.set(definitionId, { body: definition, revision: 1 });
+      const run = staticRun(
+        definitionId,
+        definition,
+        1,
+        {},
+        { preferred: t.environmentId, elsewhere: true },
+        { kind: 'user' },
+        t.now(),
+      );
+      if (parent) run.parent = { runId: parent };
+      const driver = await t.driver(run);
+      await driver.tick();
+      return t.started.at(-1)!.settings.connectionId;
+    };
+    // Without a chat to follow, the least used account (the first here) takes the step.
+    const plain = testHost();
+    expect(await begin(plain, steps)).toBe(plain.connections[0]);
+    // The assistant's account, rather than the least used one.
+    const own = testHost();
+    const assistant = chat(own.connections[1]);
+    own.conversations.set(assistant.id, assistant);
+    const assisted = { ...steps, assistant: { conversationId: assistant.id } };
+    expect(await begin(own, assisted)).toBe(own.connections[1]);
+    // Run by a dynamic workflow, its orchestrator's account, over the assistant's.
+    const called = testHost();
+    const helper = chat(called.connections[0]);
+    const orchestrator = chat(called.connections[1]);
+    called.conversations.set(helper.id, { ...helper, id: assistant.id });
+    called.conversations.set(orchestrator.id, orchestrator);
+    const parentId = crypto.randomUUID();
+    const parent = newMission({
+      title: 'Assets',
+      text: 'Make the assets.',
+      orchestrator: { provider: 'claude', connectionId: '', model: '', reasoning: '' },
+      driver: { preferred: called.environmentId, elsewhere: true },
+      actor: { kind: 'user' },
+      now: called.now(),
+    });
+    parent.sessions = [
+      {
+        conversationId: orchestrator.id,
+        environmentId: called.environmentId,
+        startedAt: '2026-10-19T12:00:00.000Z',
+        reason: 'start',
+        turns: 1,
+        failures: 0,
+      },
+    ];
+    called.runs.set(parentId, parent);
+    expect(await begin(called, assisted, parentId)).toBe(called.connections[1]);
+    // An account of another agent is not this one's: the step takes the least used.
+    const other = testHost();
+    const codex = chat(other.connections[1]);
+    other.conversations.set(codex.id, codex);
+    const codexSteps = workflow(
+      [
+        ['start', 'start'],
+        [
+          'draft',
+          'agent',
+          { prompt: 'Draft it.', provider: 'codex', connectionId: WORKFLOW_ACCOUNT },
+        ],
+      ],
+      [['start', 'draft']],
+    );
+    expect(await begin(other, { ...codexSteps, assistant: { conversationId: codex.id } })).toBe(
+      other.connections[0],
+    );
   });
 
   it('starts another run when a Run workflow step whose run failed is retried', async () => {

@@ -52,6 +52,7 @@
     triggerLabels,
     triggerOf,
     webhookSecret,
+    WORKFLOW_ACCOUNT,
     type NodeType,
     type RunDriverChoice,
     type TriggerKind,
@@ -288,8 +289,11 @@
       if (type === 'agent' || type === 'screen') {
         const agent = workflowAgent();
         const known =
-          !pickers.balancing &&
-          pickers.accounts(agent.provider, pickers.here).some((a) => a.id === agent.connectionId);
+          agent.connectionId === WORKFLOW_ACCOUNT ||
+          (!pickers.balancing &&
+            pickers
+              .accounts(agent.provider, pickers.here)
+              .some((a) => a.id === agent.connectionId));
         node.config = {
           ...node.config,
           provider: agent.provider,
@@ -510,10 +514,23 @@
         : missionCards(current, lookup, names);
     });
   });
+  // A run's history lies beside its graph only while open (requested 2026-10-19): from History in
+  // the header, a card chosen on the graph, or something new the run waits on you for.
+  let historyOpen = $state(false);
+  const waiting = $derived(kind === 'run' ? (summary?.questions ?? 0) : 0);
+  let waitingSeen = 0;
+  $effect(() => {
+    const count = waiting;
+    untrack(() => {
+      if (count > waitingSeen) historyOpen = true;
+      waitingSeen = count;
+    });
+  });
   // Choosing a card shows it on the graph and its entries alone in the history.
   function chooseCard(next: string | undefined) {
     selected = next;
     filter = next;
+    if (next) historyOpen = true;
   }
   const lease = $derived(client.leases[id]);
   const driverName = $derived(
@@ -711,6 +728,16 @@
               onclick={() => (confirming = 'delete')}><Trash2 size={16} /></button
             >{/if}
         {/if}
+        {#if runDoc}<button
+            class="secondary"
+            aria-label="History"
+            aria-pressed={historyOpen}
+            onclick={() => (historyOpen = !historyOpen)}
+            ><History size={15} /><span class="label">History</span>{#if waiting}<span
+                class="waiting-count"
+                title="Waiting for you">{waiting}</span
+              >{/if}</button
+          >{/if}
         {#if variant === 'page' && chat}<button
             class="secondary"
             aria-label="Chat"
@@ -736,7 +763,7 @@
     {#if error || client.error}<div class="error-banner" role="alert">
         <CircleAlert size={15} aria-hidden="true" />{error || client.error}
       </div>{/if}
-    <div class="workflow-body" class:stacked={narrow && !!runDoc}>
+    <div class="workflow-body">
       {#if kind === 'definition' && draft && editorGraph}
         <WorkflowCanvas
           label="Workflow steps"
@@ -897,29 +924,29 @@
               target.kind === 'node' ? { ...target, at, screen } : { kind: 'pane', at, screen },
             )}
         />
-        <WorkflowRunPanel
-          run={runDoc}
-          events={open?.events ?? []}
-          {now}
-          {selected}
-          {filter}
-          {conversation}
-          computerName={pickers.computerName}
-          accountName={pickers.accountName}
-          {openChat}
-          openRun={openDoc}
-          command={(kind, activationId) => void act(() => client.command(id, kind, activationId))}
-          answer={(answer) => client.answerQuestion(id, answer)}
-          saveNote={(note) => client.writeNote(id, note)}
-          drivers={pickers.drivers}
-          changeDriver={(next) => void act(() => client.command(id, 'driver', undefined, next))}
-          select={(card) => (selected = card)}
-          clearFilter={() => {
-            filter = undefined;
-            selected = undefined;
-          }}
-          stacked={narrow}
-        />
+        {#if historyOpen}<WorkflowRunPanel
+            run={runDoc}
+            events={open?.events ?? []}
+            {now}
+            {selected}
+            {filter}
+            {conversation}
+            computerName={pickers.computerName}
+            accountName={pickers.accountName}
+            {openChat}
+            openRun={openDoc}
+            command={(kind, activationId) => void act(() => client.command(id, kind, activationId))}
+            answer={(answer) => client.answerQuestion(id, answer)}
+            saveNote={(note) => client.writeNote(id, note)}
+            drivers={pickers.drivers}
+            changeDriver={(next) => void act(() => client.command(id, 'driver', undefined, next))}
+            select={(card) => (selected = card)}
+            clearFilter={() => {
+              filter = undefined;
+              selected = undefined;
+            }}
+            close={() => (historyOpen = false)}
+          />{/if}
       {:else}
         <p class="workflow-status" role="status">
           {summary || client.mode === 'loading' ? 'Opening…' : 'This workflow is no longer saved.'}
@@ -1322,13 +1349,16 @@
   .run-mark.status-failed {
     color: var(--danger);
   }
-  /* Narrow, a run's history goes below its graph. */
-  .workflow-body.stacked {
-    flex-direction: column;
-  }
-  .workflow-body.stacked > :global(.workflow-canvas) {
-    flex: 0 0 42%;
-    min-height: 200px;
+  .waiting-count {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    line-height: 18px;
+    text-align: center;
   }
   .workflow-settings {
     display: flex;
@@ -1392,7 +1422,23 @@
   .error-banner {
     margin: 0;
   }
-  /* Narrow, a step's settings lie over the graph's right side; a run's history goes below it. */
+  /* Narrow, a run's history keeps to a narrower column, since choosing a card on the graph shows
+     its entries, and lies over the graph only where there is no room for both. */
+  .narrow .workflow-body > :global(.run-sheet) {
+    width: min(340px, 48%);
+  }
+  @container (max-width: 560px) {
+    .workflow-body > :global(.run-sheet) {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      bottom: 8px;
+      z-index: 5;
+      width: calc(100% - 16px);
+      box-shadow: var(--shadow-lg);
+    }
+  }
+  /* Narrow, a step's settings lie over the graph's right side. */
   .narrow .workflow-body > :global(aside:not(.run-sheet)) {
     position: absolute;
     top: 8px;
