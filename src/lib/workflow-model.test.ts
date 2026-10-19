@@ -37,7 +37,12 @@ describe('workflow model', () => {
       prompt: 'Hi',
       chat: 'continue',
       connectionId: '',
-      listed: false,
+    });
+    // A Run workflow step runs a saved workflow unless it names a goal of its own.
+    expect(nodeConfig({ type: 'workflow', config: {} }, 'workflow')).toMatchObject({
+      kind: 'static',
+      goal: '',
+      wait: true,
     });
     // Settings that no longer fit fall back to the defaults instead of failing.
     expect(nodeConfig({ type: 'wait', config: { amount: 'soon' } }, 'wait').amount).toBe(5);

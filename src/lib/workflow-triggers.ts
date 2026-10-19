@@ -144,7 +144,7 @@ export class TriggerWatch {
             runId: run.id,
             title: run.title,
             status: run.status,
-            mode: run.mode === 'dynamic' ? 'mission' : 'workflow',
+            mode: run.mode === 'dynamic' ? 'dynamic' : 'static',
             ...(run.definitionId ? { workflowId: run.definitionId } : {}),
           },
         });

@@ -1,6 +1,6 @@
 //! Workflow tools (docs/WORKFLOWS.md): SDK tools of Claude's agent_studio server and Codex
-//! dynamic tools that build, run and read workflows, and for a mission's orchestrator, drive
-//! the mission. The host only checks that a call is the conversation's own (Claude's registered
+//! dynamic tools that build, run and read workflows, and for a dynamic workflow's orchestrator,
+//! drive it. The host only checks that a call is the conversation's own (Claude's registered
 //! parent tool use, Codex's parent thread without a namespace) and hands it to this computer's
 //! window, whose workflow engine answers it through `answer_workflow_call`, as an answered
 //! question reaches its run.
@@ -21,33 +21,33 @@ pub const GENERAL: [&str; 6] = [
     "workflow_save",
     "workflow_run",
     "workflow_status",
-    "mission_start",
+    "dynamic_start",
 ];
-/// Tools only a mission's orchestrator gets.
-pub const MISSION: [&str; 13] = [
-    "mission_state",
-    "mission_plan",
-    "mission_spawn",
-    "mission_message",
-    "mission_stop",
-    "mission_read",
-    "mission_chats",
-    "mission_ask",
-    "mission_note",
-    "mission_wait",
-    "mission_screen",
-    "mission_run_workflow",
-    "mission_complete",
+/// Tools only a dynamic workflow's orchestrator gets.
+pub const DYNAMIC: [&str; 13] = [
+    "dynamic_state",
+    "dynamic_plan",
+    "dynamic_spawn",
+    "dynamic_message",
+    "dynamic_stop",
+    "dynamic_read",
+    "dynamic_chats",
+    "dynamic_ask",
+    "dynamic_note",
+    "dynamic_wait",
+    "dynamic_screen",
+    "dynamic_run_workflow",
+    "dynamic_complete",
 ];
 pub fn known(name: &str) -> bool {
-    GENERAL.contains(&name) || MISSION.contains(&name)
+    GENERAL.contains(&name) || DYNAMIC.contains(&name)
 }
 
-pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a mission with mission_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both appear under Workflows in Agent Studio's sidebar.";
+pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a dynamic workflow with dynamic_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both kinds appear on the Workflows page of Agent Studio, static and dynamic.";
 
 const STEPS: &str = "Steps (type: settings in config; outputs):
-- start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any run or mission), statuses: [completed|failed|stopped]}. webhook: webhook {secret} (leave it empty; the editor makes one), started by a POST to its URL. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. Its output is what fired it (a chat's reply, a run's output, the webhook's body); out.
-- agent: prompt, location {computerId, environmentId, path} (omit for the driving computer, empty path for a Standalone folder), provider claude|codex|gemini, connectionId (an account's connection id; empty for the least used account), model (empty for the CLI default), reasoning, json (ask for a JSON reply), schema (a JSON Schema as text), chat continue|new (a repeated run for the same loop item continues its chat or starts a new one), title, listed (show the chat in Active), instructions; out, error.
+- start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any other workflow, static or dynamic), statuses: [completed|failed|stopped]}. webhook: webhook {secret} (leave it empty; the editor makes one), started by a POST to its URL. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. Its output is what fired it (a chat's reply, a run's output, the webhook's body); out.
+- agent: prompt, location {computerId, environmentId, path} (omit for the driving computer, empty path for a Standalone folder), provider claude|codex|gemini, connectionId (an account's connection id; empty for the least used account), model (empty for the CLI default), reasoning, json (ask for a JSON reply), schema (a JSON Schema as text), chat continue|new (a repeated run for the same loop item continues its chat or starts a new one), title, instructions; out, error. Its chat belongs to the run: the user reads it from the workflow but never writes in it.
 - message: target step|chat, step (the key of an earlier step whose chat it uses) or conversationId, text, mode next|steer, wait; out, error.
 - read: target, step or conversationId, what reply|messages|chat, count; out, error.
 - condition: left, op contains|notContains|equals|notEquals|matches|greater|less|empty|notEmpty|true, right, ignoreCase; true, false.
@@ -61,9 +61,9 @@ const STEPS: &str = "Steps (type: settings in config; outputs):
 - screen: like agent without prompt, plus screenTitle, spec (what the screen shows and does), screenId (to update one); out, error.
 - screenAction: environmentId, screenId, action, params {name: value}; out (stdout), error.
 - screenData: environmentId, screenId, op load|save, key, value, json; out.
-- workflow: workflowId, inputs {name: value}, wait; out (its output), error.
+- workflow (runs another workflow and continues with its result): kind static|dynamic; static: workflowId, inputs {name: value} for its manual trigger; dynamic: goal (a template: what the child dynamic workflow pursues), plus the orchestrator's provider, connectionId, model, reasoning and location like an agent step; wait (default true); out (the child's result: an End step's output or the dynamic workflow's summary, also as JSON when it parses), error.
 - end: output, status completed|failed.
-Text settings are templates: {{input.NAME}} a manual trigger's input, {{trigger.output}} and {{trigger.json.PATH}} what fired the run, {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
+Text settings are templates: {{input.NAME}} a manual trigger's input, {{trigger.output}} and {{trigger.json.PATH}} what fired the run, {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{KEY.run}} the run a Run workflow step started, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{
@@ -90,15 +90,15 @@ fn questions() -> Value {
     },"required":["id","question"],"additionalProperties":false}})
 }
 
-/// The tools a conversation gets: none without a saved conversation, the mission tools only
-/// for an orchestrator.
+/// The tools a conversation gets: none without a saved conversation, the dynamic workflow tools
+/// only for an orchestrator.
 pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
     if !enabled {
         return vec![];
     }
     let save = format!("Create or replace a static workflow: a graph of steps Agent Studio runs, which the user also edits in its Workflows view. Omit id to create one; to change one, read it with workflow_read and send the whole workflow again with its id and revision. nodes: [{{id, key, type, title, config, position {{x, y}}, onError, retries, retryDelay}}] (key: lowercase letters, digits and _, unique; positions are optional, laid out from top to bottom when missing); edges: [{{source, sourcePort, target}}] from a step's output port to the next step. Returns the id, revision and anything that keeps it from running.\n{STEPS}");
     let mut list = vec![
-        tool("workflow_list", "List the saved workflows (id, name, steps, schedules) and the runs and missions of this workspace (id, title, mode, status, what each waits for).", json!({}), &[]),
+        tool("workflow_list", "List the saved workflows (id, name, steps, schedules) and the runs of this workspace, static and dynamic (id, title, mode, status, what each waits for).", json!({}), &[]),
         tool("workflow_read", "Read a saved workflow whole: name, description, revision, nodes and edges, to change it with workflow_save.", json!({"id":{"type":"string"}}), &["id"]),
         tool("workflow_save", &save, json!({
             "id":{"type":"string"},
@@ -114,20 +114,20 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
             "trigger":{"type":"string"},
             "computer":{"type":"string"}
         }), &["id"]),
-        tool("workflow_status", "Read a run or mission: its status, what it waits for, each step or agent with its status and output, open questions and recent history.", json!({"id":{"type":"string"}}), &["id"]),
-        tool("mission_start", "Start a mission: an orchestrator agent pursues the goal by itself, planning, starting agents on the computers and accounts it chooses, reviewing their work and asking the user when needed, until it is done, across sessions, computers and days. The user watches it live in the Workflows view. Returns the mission's id.", json!({
-            "mission":{"type":"string","minLength":1,"description":"The goal, with everything the orchestrator should know."},
+        tool("workflow_status", "Read a run, static or dynamic: its status, what it waits for, each step or agent with its status and output, open questions and recent history.", json!({"id":{"type":"string"}}), &["id"]),
+        tool("dynamic_start", "Start a dynamic workflow: an orchestrator agent pursues the goal by itself, planning, starting agents on the computers and accounts it chooses, reviewing their work and asking the user when needed, until it is done, across sessions, computers and days. The user watches it live in the Workflows view. Returns its run id.", json!({
+            "goal":{"type":"string","minLength":1,"description":"The goal, with everything the orchestrator should know."},
             "title":{"type":"string"},
             "folder":{"type":"object","description":"The project's folder: computer (id or name) and its absolute path.","properties":{"computer":{"type":"string"},"path":{"type":"string"}},"required":["path"],"additionalProperties":false},
             "orchestrator":agent_choice()
-        }), &["mission"]),
+        }), &["goal"]),
     ];
     if orchestrator {
         list.extend([
-            tool("mission_state", "Read the mission whole: its goal, plan, every agent with its status, computer, account and the length of its latest reply, notes, open questions, timers, the computers with their online state, folders and installed agents, every account with its 5-hour and weekly usage, pace and resets, and recent history. include picks parts.", json!({
+            tool("dynamic_state", "Read this dynamic workflow whole: its goal, plan, every agent with its status, computer, account and the length of its latest reply, notes, open questions, timers, the computers with their online state, folders and installed agents, every account with its 5-hour and weekly usage, pace and resets, and recent history. include picks parts.", json!({
                 "include":{"type":"array","items":{"type":"string","enum":["plan","agents","notes","questions","timers","computers","accounts","history"]}}
             }), &[]),
-            tool("mission_plan", "Add, change or remove tasks of the mission's plan, which the user sees live as a graph: id (stable, yours), title, description, status planned|running|done|failed|blocked|skipped|cancelled, dependsOn (task ids), phase, result (a short note of what came of it). Send only the fields that change.", json!({
+            tool("dynamic_plan", "Add, change or remove tasks of the plan, which the user sees live as a graph: id (stable, yours), title, description, status planned|running|done|failed|blocked|skipped|cancelled, dependsOn (task ids), phase, result (a short note of what came of it). Send only the fields that change.", json!({
                 "tasks":{"type":"array","items":{"type":"object","properties":{
                     "id":{"type":"string","minLength":1},"title":{"type":"string"},"description":{"type":"string"},
                     "status":{"type":"string","enum":["planned","running","done","failed","blocked","skipped","cancelled"]},
@@ -135,7 +135,7 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
                 },"required":["id"],"additionalProperties":false}},
                 "remove":{"type":"array","items":{"type":"string"}}
             }), &[]),
-            tool("mission_spawn", "Start an agent: a new chat that works on its task by itself. It returns at once with the agent's id; you hear when it finishes, with its reply. It may wait first for its computer, its account's sign-in or a usage reset, which mission_state shows. computer: an id or name (default: the computer of the project folder, else this one). folder: an absolute path on that computer, or empty for a Standalone folder of its own (default: the project folder when it is on that computer). The mission and its notes go with the task unless includeContext is false. after names agents whose work this one continues.", json!({
+            tool("dynamic_spawn", "Start an agent: a new chat that works on its task by itself. It returns at once with the agent's id; you hear when it finishes, with its reply. It may wait first for its computer, its account's sign-in or a usage reset, which dynamic_state shows. computer: an id or name (default: the computer of the project folder, else this one). folder: an absolute path on that computer, or empty for a Standalone folder of its own (default: the project folder when it is on that computer). The goal and its notes go with the task unless includeContext is false. after names agents whose work this one continues. Its chat belongs to this workflow: the user reads it from the workflow but never writes in it.", json!({
                 "title":{"type":"string","minLength":1},
                 "task":{"type":"string","minLength":1,"description":"Everything the agent needs to do and deliver."},
                 "taskId":{"type":"string","description":"The plan task this agent works on."},
@@ -143,34 +143,37 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
                 "folder":{"type":"string"},
                 "agent":agent_choice(),
                 "includeContext":{"type":"boolean"},
-                "after":{"type":"array","items":{"type":"string"}},
-                "listed":{"type":"boolean","description":"Show its chat in the user's chat list."}
+                "after":{"type":"array","items":{"type":"string"}}
             }), &["title","task"]),
-            tool("mission_message", "Send a chat (an agent's, by its id, or any other) a message: next (default) is its next message, sent once its reply ends; steer goes into its running reply. You hear when the reply ends.", json!({
+            tool("dynamic_message", "Send a chat (an agent's, by its id, or any other) a message: next (default) is its next message, sent once its reply ends; steer goes into its running reply. You hear when the reply ends.", json!({
                 "chat":{"type":"string"},"text":{"type":"string","minLength":1},"mode":{"type":"string","enum":["next","steer"]}
             }), &["chat","text"]),
-            tool("mission_stop", "Stop a chat's running reply.", json!({"chat":{"type":"string"}}), &["chat"]),
-            tool("mission_read", "Read a chat: its latest reply (default), its last count messages, or the whole conversation.", json!({
+            tool("dynamic_stop", "Stop a chat's running reply.", json!({"chat":{"type":"string"}}), &["chat"]),
+            tool("dynamic_read", "Read a chat: its latest reply (default), its last count messages, or the whole conversation.", json!({
                 "chat":{"type":"string"},"what":{"type":"string","enum":["reply","messages","chat"]},"count":{"type":"integer","minimum":1}
             }), &["chat"]),
-            tool("mission_chats", "List chats: this mission's agents (default) or every chat of the workspace, with their computer, folder, agent, account and status. query filters by title.", json!({
-                "scope":{"type":"string","enum":["mission","all"]},"query":{"type":"string"}
+            tool("dynamic_chats", "List chats: this workflow's agents (default) or every chat of the workspace, with their computer, folder, agent, account and status. query filters by title.", json!({
+                "scope":{"type":"string","enum":["workflow","all"]},"query":{"type":"string"}
             }), &[]),
-            tool("mission_ask", "Ask the user questions without waiting: other work goes on, and the answer arrives with a later turn. Ask only what needs their decision. Each question has an id, the question, an optional header, options and multiSelect.", json!({"questions":questions()}), &["questions"]),
-            tool("mission_note", "Write, change or delete a shared note of the mission: decisions, conventions, progress, learnings. Notes outlive this session; a later session or agent continues from them. Omit id to add one.", json!({
+            tool("dynamic_ask", "Ask the user questions without waiting: other work goes on, and the answer arrives with a later turn. Ask only what needs their decision. Each question has an id, the question, an optional header, options and multiSelect.", json!({"questions":questions()}), &["questions"]),
+            tool("dynamic_note", "Write, change or delete a shared note of this workflow: decisions, conventions, progress, learnings. Notes outlive this session; a later session or agent continues from them. Omit id to add one.", json!({
                 "id":{"type":"string"},"title":{"type":"string"},"text":{"type":"string"},"delete":{"type":"boolean"}
             }), &[]),
-            tool("mission_wait", "Set a timer that wakes you at a time (until, ISO 8601) or after seconds, for example at a usage reset. End your turn after it.", json!({
+            tool("dynamic_wait", "Set a timer that wakes you at a time (until, ISO 8601) or after seconds, for example at a usage reset. End your turn after it.", json!({
                 "until":{"type":"string"},"seconds":{"type":"number","minimum":1},"reason":{"type":"string"}
             }), &[]),
-            tool("mission_screen", "Use a screen of a computer: run one of its allowed actions (op run, action, params), or load (op load) or save (op save, key, value) its data. Build screens yourself with save_screen.", json!({
+            tool("dynamic_screen", "Use a screen of a computer: run one of its allowed actions (op run, action, params), or load (op load) or save (op save, key, value) its data. Build screens yourself with save_screen.", json!({
                 "op":{"type":"string","enum":["run","load","save"]},"computer":{"type":"string"},"screen":{"type":"string"},
                 "action":{"type":"string"},"params":{"type":"object"},"key":{"type":"string"},"value":{}
             }), &["op","screen"]),
-            tool("mission_run_workflow", "Run a saved static workflow with its inputs. With wait, its output arrives with a later turn when it ends.", json!({
-                "id":{"type":"string"},"inputs":{"type":"object","additionalProperties":{"type":"string"}},"wait":{"type":"boolean"}
-            }), &["id"]),
-            tool("mission_complete", "End the mission once its goal is fully achieved and checked, with a summary of what was done and where the results are; or as failed when it cannot be achieved.", json!({
+            tool("dynamic_run_workflow", "Run another workflow as a child of this one: a saved static workflow by id with its inputs, or a child dynamic workflow with a goal of its own (title, folder and orchestrator optional). Returns its run id; with wait (default true), its result (an End step's output or the child's summary) arrives with a later turn when it ends.", json!({
+                "id":{"type":"string"},"inputs":{"type":"object","additionalProperties":{"type":"string"}},
+                "goal":{"type":"string"},"title":{"type":"string"},
+                "folder":{"type":"object","properties":{"computer":{"type":"string"},"path":{"type":"string"}},"required":["path"],"additionalProperties":false},
+                "orchestrator":agent_choice(),
+                "wait":{"type":"boolean"}
+            }), &[]),
+            tool("dynamic_complete", "End this dynamic workflow once its goal is fully achieved and checked, with a summary of what was done and where the results are; or as failed when it cannot be achieved.", json!({
                 "summary":{"type":"string","minLength":1},"status":{"type":"string","enum":["completed","failed"]}
             }), &["summary"]),
         ]);
@@ -188,7 +191,7 @@ pub fn codex_tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
         .collect()
 }
 
-/// The mission a conversation orchestrates, as its run request names it.
+/// The dynamic workflow a conversation orchestrates, as its run request names it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Binding {
@@ -197,9 +200,9 @@ pub struct Binding {
 }
 impl Binding {
     pub fn validate(&self) -> Result<(), String> {
-        uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid mission")?;
+        uuid::Uuid::parse_str(&self.run_id).map_err(|_| "Invalid dynamic workflow")?;
         if self.role != "orchestrator" {
-            return Err("Invalid mission role".into());
+            return Err("Invalid orchestrator role".into());
         }
         Ok(())
     }
@@ -381,7 +384,7 @@ impl Session {
     }
     fn allowed(&self, name: &str) -> bool {
         GENERAL.contains(&name)
-            || (MISSION.contains(&name)
+            || (DYNAMIC.contains(&name)
                 && self.context.as_ref().is_some_and(|c| c.mission.is_some()))
     }
     /// Hands a call to the window, or returns the refusal the CLI gets at once.
@@ -394,7 +397,7 @@ impl Session {
         };
         if !self.allowed(name) {
             return Some(wire.respond(
-                "Only a mission's orchestrator uses the mission tools.",
+                "Only a dynamic workflow's orchestrator uses these tools.",
                 true,
             ));
         }
@@ -554,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_listed_for_saved_chats_and_mission_tools_for_orchestrators() {
+    fn tools_are_listed_for_saved_chats_and_dynamic_tools_for_orchestrators() {
         assert!(tools(false, true).is_empty());
         let names = |list: Vec<Value>| {
             list.iter()
@@ -564,7 +567,7 @@ mod tests {
         assert_eq!(names(tools(true, false)), GENERAL);
         assert_eq!(
             names(tools(true, true)).len(),
-            GENERAL.len() + MISSION.len()
+            GENERAL.len() + DYNAMIC.len()
         );
         assert!(tools(true, false)[2]["description"]
             .as_str()
@@ -630,16 +633,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mission_tools_answer_only_an_orchestrator() {
+    async fn dynamic_tools_answer_only_an_orchestrator() {
         let hub = Hub::default();
         let (mut session, calls) = open_session(&hub, false);
-        let value = json!({"id":4,"method":"item/tool/call","params":{"threadId":"root","tool":"mission_state","arguments":{}}});
+        let value = json!({"id":4,"method":"item/tool/call","params":{"threadId":"root","tool":"dynamic_state","arguments":{}}});
         let refusal = session.codex(&value, "root").unwrap().unwrap();
         assert_eq!(refusal["result"]["success"], false);
         drop(session);
         let (mut orchestrator, calls_2) = open_session(&Hub::default(), true);
         assert!(orchestrator.codex(&value, "root").unwrap().is_none());
-        assert_eq!(calls_2.lock().unwrap()[0].tool, "mission_state");
+        assert_eq!(calls_2.lock().unwrap()[0].tool, "dynamic_state");
         // A child thread's call is refused.
         let child = json!({"id":5,"method":"item/tool/call","params":{"threadId":"child","tool":"workflow_list","arguments":{}}});
         assert_eq!(

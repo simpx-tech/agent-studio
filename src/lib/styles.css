@@ -517,6 +517,27 @@ pre {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
 }
+/* Workflows that run now lead the Active tab's list, each a row that opens its workflow with
+   the time it has run, or the question mark while it waits for your answer. */
+.running-workflows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.running-workflows + .snoozed-chats,
+.running-workflows + .conversation-computer {
+  margin-top: 14px;
+}
+.workflow-run-item > svg:first-child {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  margin-top: -6.5px;
+  color: var(--accent-text);
+}
+.conversation-item .conversation-paused {
+  color: var(--warning);
+}
 /* Once the app starts again, chats snoozed until then open the Active tab's list, above its
    computers, each a card with its title and the icon buttons Open, Snooze again and Close. */
 .snoozed-chats {
@@ -792,6 +813,34 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* A chat a workflow run started has no composer: it names its workflow and opens it. */
+.workflow-owned {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.workflow-owned > svg {
+  flex-shrink: 0;
+  color: var(--accent-strong);
+}
+.workflow-owned > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-owned .text-button {
+  flex-shrink: 0;
+  gap: 4px;
 }
 .conversation-list {
   flex: 1;

@@ -26,6 +26,13 @@
     Monitor,
     Webhook,
     Waypoints,
+    CircleAlert,
+    CircleCheck,
+    CircleStop,
+    CircleX,
+    Laptop,
+    SlidersHorizontal,
+    StickyNote,
   } from '@lucide/svelte';
   let { type, size = 15 }: { type: string; size?: number } = $props();
   const icons = {
@@ -56,6 +63,24 @@
     'trigger:webhook': Webhook,
     'trigger:computer': Monitor,
     'trigger:usage': Gauge,
+    // What a run's history records, as `event:<kind>`.
+    'event:started': Play,
+    'event:session': BrainCircuit,
+    'event:plan': ListTodo,
+    'event:agent': Bot,
+    'event:question': MessageCircleQuestionMark,
+    'event:note': StickyNote,
+    'event:wait': Hourglass,
+    'event:workflow': Workflow,
+    'event:computer': Monitor,
+    'event:usage': Gauge,
+    'event:error': CircleAlert,
+    'event:command': SlidersHorizontal,
+    'event:driver': Laptop,
+    'event:notify': Bell,
+    'event:completed': CircleCheck,
+    'event:failed': CircleX,
+    'event:stopped': CircleStop,
   } as const;
   const Icon = $derived(icons[type as keyof typeof icons] ?? CircleDashed);
 </script>

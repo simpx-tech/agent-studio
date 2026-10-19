@@ -152,13 +152,14 @@
       : '';
   };
   const sent = $derived(clock(message.createdAt));
-  // A message a workflow wrote: a mission update's first event, without the chat ids written for
-  // the orchestrator, and how many more it lists (one a line, before the agents' replies), or
-  // else its first line of substance.
+  // A message a workflow wrote: an update's first event, without the chat ids written for the
+  // orchestrator, and how many more it lists (one a line, before the agents' replies), or else
+  // its first line of substance. Updates written before 2026-10-19 begin [Mission update].
   const update = $derived.by(() => {
     if (message.sentBy !== 'workflow') return '';
     const lines = text.split('\n');
-    const start = lines.findIndex((line) => line.trim() === '[Mission update]');
+    const heading = (line: string) => /^\[(Workflow|Mission) update\]$/.test(line.trim());
+    const start = lines.findIndex(heading);
     const events: string[] = [];
     for (const line of start < 0 ? [] : lines.slice(start + 1)) {
       if (!line.startsWith('- ')) break;
@@ -166,7 +167,7 @@
     }
     const first = (
       events[0] ??
-      lines.find((line) => line.trim() && line.trim() !== '[Mission update]') ??
+      lines.find((line) => line.trim() && !heading(line)) ??
       ''
     )
       .replace(/^[-#\s]+/, '')

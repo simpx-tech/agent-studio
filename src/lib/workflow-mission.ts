@@ -1,15 +1,16 @@
 import { z } from 'zod';
 import { providerIds, type ChatLocation, type ChatSettings, type ProviderId } from './domain';
+import { answerText, taskStatuses, type Actor, type RunAgent, type WorkflowRun } from './workflow-model';
 import {
-  answerText,
-  readRun,
-  taskStatuses,
-  type Actor,
-  type AgentChoice,
-  type RunAgent,
-  type WorkflowRun,
-} from './workflow-model';
-import { RunDriver, chatText, clock, iso, replyText, replying, staticRun } from './workflow-engine';
+  RunDriver,
+  chatText,
+  clock,
+  iso,
+  newMission,
+  replyText,
+  replying,
+  staticRun,
+} from './workflow-engine';
 import {
   ORCHESTRATOR_INSTRUCTIONS,
   agentResume,
@@ -23,88 +24,20 @@ import {
 import { exhaustedUntil, usageReport } from './workflow-usage';
 
 /**
- * Missions (docs/WORKFLOWS.md): an orchestrator agent's conversation on the computer driving
- * the run, woken with what happened since its last turn, and the agents it starts. The driver
- * keeps everything that outlives a session in the run: plan, agents, notes, questions, timers
- * and what the orchestrator has not heard yet.
+ * Dynamic workflows (docs/WORKFLOWS.md): an orchestrator agent's conversation on the computer
+ * driving the run, woken with what happened since its last turn, and the agents it starts. The
+ * driver keeps everything that outlives a session in the run: plan, agents, notes, questions,
+ * timers and what the orchestrator has not heard yet. Internally, and in saved runs, a dynamic
+ * workflow is still called a mission.
  */
+
+export { newMission };
 
 const minute = 60_000;
 /** How long the orchestrator waits after an event before hearing it, gathering others. */
 export const GATHER_MS = 3_000;
 /** Reminders after turns that leave nothing in progress, in minutes. */
 const reminders = [1, 5, 15, 30, 60];
-
-export function newMission({
-  title,
-  text,
-  location,
-  orchestrator,
-  driver,
-  actor,
-  now,
-  chat,
-}: {
-  title: string;
-  text: string;
-  location?: ChatLocation;
-  orchestrator: AgentChoice;
-  driver: WorkflowRun['driver'];
-  actor: Actor;
-  now: number;
-  // A mission started from a chat: that chat is its first orchestrator session, whose first
-  // message is the mission as you wrote it.
-  chat?: { conversationId: string; environmentId: string; connectionId?: string };
-}): WorkflowRun {
-  const at = iso(now);
-  return readRun({
-    mode: 'dynamic',
-    title: title.trim() || firstWords(text),
-    status: 'running',
-    createdAt: at,
-    updatedAt: at,
-    startedAt: at,
-    createdBy: actor,
-    driver,
-    mission: { text, ...(location ? { location } : {}), orchestrator },
-    ...(chat
-      ? {
-          sessions: [
-            {
-              conversationId: chat.conversationId,
-              environmentId: chat.environmentId,
-              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
-              startedAt: at,
-              reason: 'start',
-              turns: 1,
-              failures: 0,
-            },
-          ],
-          agents: [
-            {
-              conversationId: chat.conversationId,
-              revision: 1,
-              role: 'orchestrator',
-              title: 'Orchestrator 1',
-              environmentId: chat.environmentId,
-              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
-              provider: orchestrator.provider,
-              model: orchestrator.model,
-              reasoning: orchestrator.reasoning,
-              ...(location ? { location } : {}),
-              listed: false,
-              status: 'running',
-              startedAt: at,
-            },
-          ],
-        }
-      : {}),
-  })!;
-}
-const firstWords = (text: string) => {
-  const line = text.trim().split('\n')[0] ?? '';
-  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'Mission';
-};
 
 /** In-memory state a driver keeps for its mission between ticks. */
 type Memory = { online: Map<string, boolean>; gatheringSince?: number };
@@ -189,9 +122,10 @@ function reconcileAgents(driver: RunDriver) {
       });
       driver.event('agent', `${agent.title} finished`, {
         conversationId: agent.conversationId,
+        messageId: reply.id,
         taskId: agent.taskId,
       });
-      if (!queued && !agent.listed) driver.host.releaseChat(agent.conversationId);
+      if (!queued && !agent.external) driver.host.releaseChat(agent.conversationId);
       continue;
     }
     if (reply.usageLimit || /usage limit|rate limit|hit your/i.test(reply.error ?? '')) {
@@ -371,7 +305,6 @@ async function startAgent(driver: RunDriver, agent: RunAgent) {
           location,
           settings,
           text: pending.text,
-          listed: agent.listed,
         });
     set({
       status: 'running',
@@ -547,7 +480,7 @@ async function driveOrchestrator(driver: RunDriver) {
     count: count + 1,
     at: iso(driver.now + reminders[Math.min(count + 1, reminders.length - 1)] * minute),
   };
-  if (count + 1 === 3) driver.alert('notify', 'The mission has nothing in progress.');
+  if (count + 1 === 3) driver.alert('notify', 'The workflow has nothing in progress.');
   return send(driver, session, conversation.id, missionReminder(count + 1));
 }
 
@@ -646,7 +579,6 @@ async function startSession(driver: RunDriver) {
     connectionId: settings.connectionId,
     provider: settings.provider,
     model: settings.model,
-    listed: false,
   });
   driver.event('session', `Orchestrator session ${number} started on ${self.name}`, {
     conversationId: id,
@@ -677,7 +609,6 @@ async function startSession(driver: RunDriver) {
           )
         : JSON.stringify(missionState(driver, ['computers', 'accounts']), null, 2),
     ),
-    listed: false,
     mission: { runId: driver.id, role: 'orchestrator' },
   });
   const session = run.sessions.find((s) => s.conversationId === id);
@@ -715,7 +646,9 @@ function updateDetail(driver: RunDriver) {
     conversation && replying(conversation) ? 'Orchestrator working' : '',
     running ? `${running} agent${running === 1 ? '' : 's'} running` : '',
     waiting.length ? `${waiting.length} waiting` : '',
-    run.questions.some((q) => q.status === 'pending') ? 'Waiting for your answer' : '',
+    run.questions.some((q) => q.status === 'pending') || run.agents.some((a) => a.asking)
+      ? 'Waiting for your answer'
+      : '',
   ].filter(Boolean);
   const detail =
     parts.join(' · ') ||
@@ -743,7 +676,7 @@ export function missionState(driver: RunDriver, include?: string[]) {
   const accounts = host.accounts();
   const account = (connectionId?: string) => accounts.find((a) => a.connectionId === connectionId);
   return {
-    mission: {
+    goal: {
       id: driver.id,
       title: run.title,
       text: run.mission?.text,
@@ -878,8 +811,8 @@ const questionsInput = z
   )
   .min(1);
 const inputs = {
-  mission_state: z.object({ include: z.array(z.string()).optional() }).strict(),
-  mission_plan: z
+  dynamic_state: z.object({ include: z.array(z.string()).optional() }).strict(),
+  dynamic_plan: z
     .object({
       tasks: z
         .array(
@@ -899,7 +832,7 @@ const inputs = {
       remove: z.array(z.string()).optional(),
     })
     .strict(),
-  mission_spawn: z
+  dynamic_spawn: z
     .object({
       title: z.string().trim().min(1),
       task: z.string().trim().min(1),
@@ -909,29 +842,28 @@ const inputs = {
       agent: agentChoiceInput.optional(),
       includeContext: z.boolean().optional(),
       after: z.array(z.string()).optional(),
-      listed: z.boolean().optional(),
     })
     .strict(),
-  mission_message: z
+  dynamic_message: z
     .object({
       chat: z.string(),
       text: z.string().trim().min(1),
       mode: z.enum(['next', 'steer']).optional(),
     })
     .strict(),
-  mission_stop: z.object({ chat: z.string() }).strict(),
-  mission_read: z
+  dynamic_stop: z.object({ chat: z.string() }).strict(),
+  dynamic_read: z
     .object({
       chat: z.string(),
       what: z.enum(['reply', 'messages', 'chat']).optional(),
       count: z.number().int().positive().optional(),
     })
     .strict(),
-  mission_chats: z
-    .object({ scope: z.enum(['mission', 'all']).optional(), query: z.string().optional() })
+  dynamic_chats: z
+    .object({ scope: z.enum(['workflow', 'all']).optional(), query: z.string().optional() })
     .strict(),
-  mission_ask: z.object({ questions: questionsInput }).strict(),
-  mission_note: z
+  dynamic_ask: z.object({ questions: questionsInput }).strict(),
+  dynamic_note: z
     .object({
       id: z.string().optional(),
       title: z.string().optional(),
@@ -939,14 +871,14 @@ const inputs = {
       delete: z.boolean().optional(),
     })
     .strict(),
-  mission_wait: z
+  dynamic_wait: z
     .object({
       until: z.string().optional(),
       seconds: z.number().positive().optional(),
       reason: z.string().optional(),
     })
     .strict(),
-  mission_screen: z
+  dynamic_screen: z
     .object({
       op: z.enum(['run', 'load', 'save']),
       computer: z.string().optional(),
@@ -957,14 +889,18 @@ const inputs = {
       value: z.unknown().optional(),
     })
     .strict(),
-  mission_run_workflow: z
+  dynamic_run_workflow: z
     .object({
-      id: z.string(),
+      id: z.string().optional(),
       inputs: z.record(z.string(), z.string()).optional(),
+      goal: z.string().optional(),
+      title: z.string().optional(),
+      folder: z.object({ computer: z.string().optional(), path: z.string() }).strict().optional(),
+      orchestrator: agentChoiceInput.optional(),
       wait: z.boolean().optional(),
     })
     .strict(),
-  mission_complete: z
+  dynamic_complete: z
     .object({
       summary: z.string().trim().min(1),
       status: z.enum(['completed', 'failed']).optional(),
@@ -1015,19 +951,19 @@ export async function missionCall(
   const input = parsed.data as never;
   const run = driver.run;
   const host = driver.host;
-  if (tool !== 'mission_state' && tool !== 'mission_read' && tool !== 'mission_chats' && run.idle) {
+  if (tool !== 'dynamic_state' && tool !== 'dynamic_read' && tool !== 'dynamic_chats' && run.idle) {
     run.idle = undefined;
     driver.change();
   }
   switch (tool) {
-    case 'mission_state':
+    case 'dynamic_state':
       return JSON.stringify(
         missionState(driver, (input as { include?: string[] }).include),
         null,
         2,
       );
-    case 'mission_plan': {
-      const { tasks = [], remove = [] } = input as z.infer<typeof inputs.mission_plan>;
+    case 'dynamic_plan': {
+      const { tasks = [], remove = [] } = input as z.infer<typeof inputs.dynamic_plan>;
       const at = iso(driver.now);
       for (const change of tasks) {
         const existing = run.tasks.find((t) => t.id === change.id);
@@ -1069,13 +1005,13 @@ export async function missionCall(
       driver.change();
       return `The plan has ${run.tasks.length} tasks.`;
     }
-    case 'mission_spawn': {
-      const spec = input as z.infer<typeof inputs.mission_spawn>;
+    case 'dynamic_spawn': {
+      const spec = input as z.infer<typeof inputs.dynamic_spawn>;
       const self = host.self();
       const project = run.mission?.location;
       const computer = spec.computer ? findComputer(driver, spec.computer) : undefined;
       if (spec.computer && !computer)
-        throw new Error(`No computer is called ${spec.computer}. mission_state lists them.`);
+        throw new Error(`No computer is called ${spec.computer}. dynamic_state lists them.`);
       const projectEnvironment = project
         ? (project.executionEnvironmentId ?? project.environmentId)
         : undefined;
@@ -1095,7 +1031,7 @@ export async function missionCall(
         'claude') as ProviderId;
       if (!target.providers.includes(provider))
         throw new Error(
-          `${target.name} has no ${provider} CLI. mission_state lists each computer's agents.`,
+          `${target.name} has no ${provider} CLI. dynamic_state lists each computer's agents.`,
         );
       const named =
         'account' in choice
@@ -1128,7 +1064,6 @@ export async function missionCall(
         model,
         reasoning: (choice.reasoning ?? '') as RunAgent['reasoning'],
         location,
-        listed: !!spec.listed,
         status: 'waiting',
         wait: 'Starting',
         pending: { text: workerTask(run, spec.task, spec.includeContext !== false), mode: 'next' },
@@ -1154,10 +1089,10 @@ export async function missionCall(
         folder: path || '(Standalone)',
       });
     }
-    case 'mission_message': {
-      const { chat, text, mode = 'next' } = input as z.infer<typeof inputs.mission_message>;
+    case 'dynamic_message': {
+      const { chat, text, mode = 'next' } = input as z.infer<typeof inputs.dynamic_message>;
       const conversation = host.conversation(chat);
-      if (!conversation) throw new Error('No chat has that id. mission_chats lists them.');
+      if (!conversation) throw new Error('No chat has that id. dynamic_chats lists them.');
       let agent = run.agents.find((a) => a.conversationId === chat);
       if (agent?.role === 'orchestrator') throw new Error('That is your own chat.');
       if (mode === 'steer' && replying(conversation)) {
@@ -1181,7 +1116,7 @@ export async function missionCall(
           provider: conversation.settings.provider,
           model: conversation.settings.model,
           reasoning: conversation.settings.reasoning,
-          listed: true,
+          external: true,
           status: 'waiting',
           after: [],
           startedAt: iso(driver.now),
@@ -1201,8 +1136,8 @@ export async function missionCall(
         ? 'Sent.'
         : `Queued: ${agent.wait ?? 'it goes out when its reply ends'}.`;
     }
-    case 'mission_stop': {
-      const { chat } = input as z.infer<typeof inputs.mission_stop>;
+    case 'dynamic_stop': {
+      const { chat } = input as z.infer<typeof inputs.dynamic_stop>;
       const conversation = host.conversation(chat);
       if (!conversation) throw new Error('No chat has that id.');
       const agent = run.agents.find((a) => a.conversationId === chat);
@@ -1216,14 +1151,14 @@ export async function missionCall(
       if (replying(conversation)) await host.stopChat(chat);
       return 'Stopped.';
     }
-    case 'mission_read': {
-      const { chat, what = 'reply', count } = input as z.infer<typeof inputs.mission_read>;
+    case 'dynamic_read': {
+      const { chat, what = 'reply', count } = input as z.infer<typeof inputs.dynamic_read>;
       const conversation = host.conversation(chat);
       if (!conversation) throw new Error('No chat has that id.');
       return chatText(conversation, what, count) || '(Nothing yet.)';
     }
-    case 'mission_chats': {
-      const { scope = 'mission', query } = input as z.infer<typeof inputs.mission_chats>;
+    case 'dynamic_chats': {
+      const { scope = 'workflow', query } = input as z.infer<typeof inputs.dynamic_chats>;
       const own = new Set(run.agents.map((a) => a.conversationId));
       const computers = host.computers();
       const accounts = host.accounts();
@@ -1243,13 +1178,13 @@ export async function missionCall(
             account: accounts.find((a) => a.connectionId === c.settings.connectionId)?.name ?? '',
             status: last?.role === 'assistant' ? last.status : 'idle',
             updatedAt: c.updatedAt,
-            ...(own.has(c.id) ? { mission: true } : {}),
+            ...(own.has(c.id) ? { workflow: true } : {}),
           };
         });
       return JSON.stringify(list, null, 2);
     }
-    case 'mission_ask': {
-      const { questions } = input as z.infer<typeof inputs.mission_ask>;
+    case 'dynamic_ask': {
+      const { questions } = input as z.infer<typeof inputs.dynamic_ask>;
       const ids = new Set(questions.map((q) => q.id));
       if (ids.size !== questions.length) throw new Error('Give each question its own id.');
       const id = crypto.randomUUID();
@@ -1274,8 +1209,8 @@ export async function missionCall(
       driver.event('question', questions.map((q) => q.question).join(' / '));
       return `Asked (question ${id}). The answer arrives with a later turn; keep working meanwhile.`;
     }
-    case 'mission_note': {
-      const note = input as z.infer<typeof inputs.mission_note>;
+    case 'dynamic_note': {
+      const note = input as z.infer<typeof inputs.dynamic_note>;
       const existing = note.id ? run.notes.find((n) => n.id === note.id) : undefined;
       if (note.delete) {
         if (!existing) throw new Error('No note has that id.');
@@ -1311,8 +1246,8 @@ export async function missionCall(
       driver.event('note', `Noted ${note.title || id}`);
       return `Note ${id} saved.`;
     }
-    case 'mission_wait': {
-      const { until, seconds, reason } = input as z.infer<typeof inputs.mission_wait>;
+    case 'dynamic_wait': {
+      const { until, seconds, reason } = input as z.infer<typeof inputs.dynamic_wait>;
       const at = until ? Date.parse(until) : seconds ? driver.now + seconds * 1000 : NaN;
       if (!Number.isFinite(at)) throw new Error('Give until as an ISO time, or seconds.');
       const id = crypto.randomUUID().slice(0, 8);
@@ -1326,8 +1261,8 @@ export async function missionCall(
       driver.event('wait', `Timer for ${clock(at)}${reason ? `: ${reason}` : ''}`);
       return `Timer ${id} set for ${iso(at)}. End your turn; you are woken then.`;
     }
-    case 'mission_screen': {
-      const request = input as z.infer<typeof inputs.mission_screen>;
+    case 'dynamic_screen': {
+      const request = input as z.infer<typeof inputs.dynamic_screen>;
       const computer =
         findComputer(driver, request.computer) ??
         host.computers().find((c) => c.environmentId === host.self().environmentId)!;
@@ -1356,31 +1291,92 @@ export async function missionCall(
       );
       return 'Saved.';
     }
-    case 'mission_run_workflow': {
-      const {
-        id,
-        inputs: values = {},
-        wait = true,
-      } = input as z.infer<typeof inputs.mission_run_workflow>;
-      const definition = await host.definition(id);
-      if (!definition) throw new Error('No saved workflow has that id. workflow_list lists them.');
+    case 'dynamic_run_workflow': {
+      const spec = input as z.infer<typeof inputs.dynamic_run_workflow>;
+      const wait = spec.wait ?? true;
+      const self = host.self();
+      // It runs where this one does, and may continue where this one may.
+      const choice = {
+        preferred: self.environmentId,
+        elsewhere: run.driver.elsewhere,
+        ...(run.driver.continueOn ? { continueOn: [...run.driver.continueOn] } : {}),
+      };
+      const actor: Actor = { kind: 'workflow', runId: driver.id };
+      let child: WorkflowRun;
+      if (spec.goal?.trim()) {
+        // A dynamic workflow of its own: in the folder given, else this one's, with the
+        // orchestrator given, else this one's choice.
+        let location = run.mission?.location;
+        if (spec.folder) {
+          const computer = spec.folder.computer
+            ? findComputer(driver, spec.folder.computer)
+            : host.computers().find((c) => c.environmentId === self.environmentId);
+          if (!computer)
+            throw new Error(`No computer is called ${spec.folder.computer}. dynamic_state lists them.`);
+          location = {
+            computerId: computer.computerId,
+            environmentId: computer.environmentId,
+            path: spec.folder.path.trim(),
+          };
+        }
+        const base = run.mission?.orchestrator;
+        const provider = (spec.orchestrator?.provider ?? base?.provider ?? 'claude') as ProviderId;
+        const account = spec.orchestrator?.account
+          ? findAccount(driver, spec.orchestrator.account, provider, self.environmentId)
+          : undefined;
+        if (spec.orchestrator?.account && !account)
+          throw new Error(`No ${provider} account called ${spec.orchestrator.account} on ${self.name}.`);
+        const same = provider === base?.provider;
+        child = newMission({
+          title: spec.title ?? '',
+          text: spec.goal.trim(),
+          ...(location ? { location } : {}),
+          orchestrator: {
+            provider,
+            connectionId: account ?? (same && !spec.orchestrator?.provider ? base!.connectionId : ''),
+            model: spec.orchestrator?.model ?? (same ? base!.model : ''),
+            reasoning: (spec.orchestrator?.reasoning ??
+              (same ? base!.reasoning : '')) as RunAgent['reasoning'],
+          },
+          driver: choice,
+          actor,
+          now: driver.now,
+        });
+      } else {
+        if (!spec.id?.trim())
+          throw new Error('Give the id of a saved workflow, or a goal for a dynamic one.');
+        const definition = await host.definition(spec.id.trim());
+        if (!definition)
+          throw new Error('No saved workflow has that id. workflow_list lists them.');
+        child = staticRun(
+          spec.id.trim(),
+          definition.body,
+          definition.revision,
+          spec.inputs ?? {},
+          choice,
+          actor,
+          driver.now,
+        );
+      }
       const runId = crypto.randomUUID();
-      const child = staticRun(
-        id,
-        definition.body,
-        definition.revision,
-        values,
-        { preferred: host.self().environmentId, elsewhere: run.driver.elsewhere },
-        { kind: 'workflow', runId: driver.id },
-        driver.now,
-      );
-      await host.createRun(runId, child);
-      run.children.push({ runId, revision: 1, title: child.title, wait, status: 'running' });
-      driver.event('workflow', `Started workflow ${child.title}`);
-      return `Workflow run ${runId} started.${wait ? ' Its output arrives with a later turn.' : ''}`;
+      child.parent = { runId: driver.id };
+      const entry = { runId, revision: 1, title: child.title, wait, status: 'running' as const };
+      run.children.push(entry);
+      driver.change();
+      // Recorded before it exists, so a driver that stops in between still follows it.
+      await driver.flush();
+      try {
+        await host.createRun(runId, child);
+      } catch (error) {
+        run.children = run.children.filter((c) => c !== entry);
+        driver.change();
+        throw error;
+      }
+      driver.event('workflow', `Started ${child.title}`, { runId });
+      return `Run ${runId} of ${child.mode === 'dynamic' ? 'the dynamic workflow' : 'the workflow'} "${child.title}" started.${wait ? ' Its result arrives with a later turn when it ends.' : ''}`;
     }
-    case 'mission_complete': {
-      const { summary, status = 'completed' } = input as z.infer<typeof inputs.mission_complete>;
+    case 'dynamic_complete': {
+      const { summary, status = 'completed' } = input as z.infer<typeof inputs.dynamic_complete>;
       run.output = summary;
       for (const agent of run.agents)
         if (
@@ -1401,12 +1397,23 @@ export async function missionCall(
         if (question.status === 'pending')
           Object.assign(question, { status: 'cancelled', revision: question.revision + 1 });
       for (const timer of run.timers) if (timer.status === 'pending') timer.status = 'cancelled';
+      // The plan settles: a task whose agents all finished is done, one still going is cancelled.
+      for (const task of run.tasks) {
+        if (task.status !== 'running' && task.status !== 'blocked') continue;
+        const agents = run.agents.filter((a) => a.taskId === task.id);
+        const done = !!agents.length && agents.every((a) => a.status === 'done');
+        Object.assign(task, {
+          status: done ? 'done' : 'cancelled',
+          revision: task.revision + 1,
+          updatedAt: iso(driver.now),
+        });
+      }
       run.status = status;
       run.endedAt = iso(driver.now);
       run.detail = '';
       run.inbox = [];
       for (const session of run.sessions) if (!session.endedAt) endSession(driver, session);
-      driver.event(status, status === 'completed' ? 'Mission complete' : 'Mission failed');
+      driver.event(status, status === 'completed' ? 'Workflow complete' : 'Workflow failed');
       driver.alert(
         status,
         summary
@@ -1414,9 +1421,9 @@ export async function missionCall(
           .find((l) => l.trim())
           ?.trim() ?? summary,
       );
-      for (const agent of run.agents) if (!agent.listed) host.releaseChat(agent.conversationId);
+      for (const agent of run.agents) if (!agent.external) host.releaseChat(agent.conversationId);
       driver.change();
-      return status === 'completed' ? 'The mission is complete.' : 'The mission ended as failed.';
+      return status === 'completed' ? 'The workflow is complete.' : 'The workflow ended as failed.';
     }
   }
 }

@@ -3,7 +3,7 @@ import { locationSchema, providerIds, reasoningSchema } from './domain.ts';
 
 /**
  * Workflows (docs/WORKFLOWS.md): static workflows, graphs of steps you or an agent draw, and
- * missions, which an orchestrator agent manages. Both are documents of the workflow store
+ * dynamic workflows, which an orchestrator agent manages. Both are documents of the workflow store
  * (src/lib/workflow-store.ts), never of the workspace. This module is shared with the relay, so
  * it imports with extensions and keeps to what Node's type stripping runs.
  */
@@ -39,7 +39,7 @@ export type NodeType = (typeof nodeTypeIds)[number];
 export const isNodeType = (type: string): type is NodeType =>
   (nodeTypeIds as readonly string[]).includes(type);
 
-// Which account and model an agent of a step or mission uses. An empty connection takes the
+// Which account and model an agent of a step or dynamic workflow uses. An empty connection takes the
 // least used ready account of the agent on the computer; an empty model is the CLI's default.
 const agentChoiceShape = {
   location: locationSchema.optional(),
@@ -132,7 +132,7 @@ export const triggerConfigShape = {
     .prefault({}),
   workflow: z
     .object({
-      // A saved workflow whose runs it follows, or '' for missions and runs of any workflow.
+      // A saved workflow whose runs it follows, or '' for runs of any workflow, static or dynamic.
       workflowId: anyId,
       statuses: z.array(z.enum(runEndings)).default(['completed']),
     })
@@ -167,8 +167,6 @@ export const configSchemas = {
     // A repeated run of the step for the same loop item continues its chat, or starts a new one.
     chat: z.enum(['continue', 'new']).default('continue'),
     title: z.string().default(''),
-    // Whether the chat appears in Active and History like the chats you start.
-    listed: z.boolean().default(false),
     instructions: z.string().default(''),
   }),
   message: z.object({
@@ -234,7 +232,6 @@ export const configSchemas = {
     spec: z.string().default(''),
     // A screen to update instead of creating one.
     screenId: z.string().default(''),
-    listed: z.boolean().default(false),
   }),
   screenAction: z.object({
     environmentId: z.union([uuid, z.literal('')]).default(''),
@@ -250,9 +247,15 @@ export const configSchemas = {
     value: z.string().default(''),
     json: z.boolean().default(false),
   }),
+  // Runs another workflow and continues with its result: a saved static workflow, given inputs
+  // for its manual trigger, or a dynamic workflow pursuing a goal with an orchestrator of its own.
   workflow: z.object({
+    kind: z.enum(['static', 'dynamic']).default('static'),
     workflowId: z.union([uuid, z.literal('')]).default(''),
     inputs: z.record(z.string(), z.string()).default({}),
+    goal: z.string().default(''),
+    title: z.string().default(''),
+    ...agentChoiceShape,
     wait: z.boolean().default(true),
   }),
   end: z.object({
@@ -490,8 +493,13 @@ export const runAgentSchema = z.object({
   model: z.string().default(''),
   reasoning: reasoningSchema.default(''),
   location: locationSchema.optional(),
-  listed: z.boolean().default(false),
+  // A chat of yours a dynamic workflow writes to, which stays yours: listed and answering you.
+  // The chats a workflow starts belong to it alone, as do those runs before 2026-10-19 marked
+  // `listed` when an Agent step or an orchestrator asked to list them.
+  external: z.boolean().optional(),
   status: z.enum(agentStatuses),
+  // What its chat asks you now, until you answer it.
+  asking: z.string().optional(),
   waitUntil: time.optional(),
   wait: z.string().optional(),
   // The reply the workflow waits for, and a message it sends once the agent can start.
@@ -619,13 +627,14 @@ export const runSchema = z.object({
   timers: z.array(timerSchema).default([]),
   inbox: z.array(inboxSchema).default([]),
   output: z.string().optional(),
-  // Runs this one started: a Run workflow step's, or a mission's.
+  // Runs this one started: a Run workflow step's, or a dynamic workflow's.
   children: z.array(childSchema).default([]),
   // Its latest alerts (questions, Notify steps, its end), which each device shows once.
   alerts: z.array(alertSchema).default([]),
-  // The step of another run that started this one, which waits for it.
-  parent: z.object({ runId: uuid, activationId: uuid }).optional(),
-  // A mission's reminders after turns that left nothing in progress.
+  // The run that started this one: a Run workflow step's, which waits for it, or a dynamic
+  // workflow's.
+  parent: z.object({ runId: uuid, activationId: uuid.optional() }).optional(),
+  // A dynamic workflow's reminders after turns that left nothing in progress.
   idle: z.object({ count: count, at: time }).optional(),
   // Start inputs of a scheduled run name their slot.
   slot: z.object({ scheduleId: z.string(), at: time }).optional(),
@@ -686,7 +695,7 @@ export const summarySchema = z.object({
   running: count.default(0),
   steps: count.default(0),
   alerts: z.array(alertSchema).default([]),
-  // Chats the run started that stay out of the chat lists, and those it lists.
+  // The chats that belong to it, which the chat lists leave out, and chats of yours it writes to.
   conversations: z.array(z.string()).default([]),
   listed: z.array(z.string()).default([]),
   preferred: z.string().optional(),
@@ -720,7 +729,7 @@ export const summarySchema = z.object({
     .default([]),
   runsOn: z.string().optional(),
   parent: z.string().optional(),
-  // The chat to open: a workflow's assistant chat, or a mission's orchestrator.
+  // The chat to open: a workflow's assistant chat, or a dynamic workflow's orchestrator.
   chat: z.string().optional(),
   // What started a run.
   trigger: z.string().optional(),
@@ -822,14 +831,15 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
   const status = runStatuses.find((s) => s === body.status);
   const agents = list(body.agents) as {
     conversationId?: unknown;
-    listed?: unknown;
+    external?: unknown;
     status?: unknown;
+    asking?: unknown;
   }[];
   const conversations: string[] = [];
   const listed: string[] = [];
   for (const agent of agents) {
     if (typeof agent?.conversationId !== 'string') continue;
-    (agent.listed === true ? listed : conversations).push(agent.conversationId);
+    (agent.external === true ? listed : conversations).push(agent.conversationId);
   }
   const driver = (body.driver ?? {}) as {
     preferred?: unknown;
@@ -851,8 +861,10 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
     ...(text(definition.id) ? { definitionId: text(definition.id) } : {}),
     ...(text(body.createdAt) ? { createdAt: text(body.createdAt) } : {}),
     ...(text(body.endedAt) ? { endedAt: text(body.endedAt) } : {}),
-    questions: list(body.questions).filter((q) => (q as { status?: unknown })?.status === 'pending')
-      .length,
+    // Its own questions and those its agents' chats ask you.
+    questions:
+      list(body.questions).filter((q) => (q as { status?: unknown })?.status === 'pending')
+        .length + agents.filter((a) => typeof a?.asking === 'string' && a.asking).length,
     running: agents.filter((a) => a?.status === 'running').length,
     steps: list((body.graph as { nodes?: unknown } | undefined)?.nodes).length,
     conversations,
@@ -1184,9 +1196,12 @@ export function graphIssues(graph: WorkflowGraph): GraphIssue[] {
         if (!c.environmentId || !c.screenId || !c.key.trim()) missing('choose a screen and key.');
         break;
       }
-      case 'workflow':
-        if (!(config as NodeConfig<'workflow'>).workflowId) missing('choose a workflow.');
+      case 'workflow': {
+        const c = config as NodeConfig<'workflow'>;
+        if (c.kind === 'dynamic' && !c.goal.trim()) missing('write its goal.');
+        if (c.kind !== 'dynamic' && !c.workflowId) missing('choose a workflow.');
         break;
+      }
     }
   }
   return issues;

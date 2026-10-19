@@ -12,6 +12,7 @@ import {
   type GraphIssue,
   type NodeType,
   type RunAgent,
+  type WorkflowEvent,
   type WorkflowGraph,
   type WorkflowNode,
   type WorkflowRun,
@@ -39,6 +40,7 @@ export type CardStatus =
   | 'waiting'
   | 'attention'
   | 'done'
+  | 'skipped'
   | 'failed'
   | 'stopped';
 export type CardRow = {
@@ -47,6 +49,8 @@ export type CardRow = {
   status: CardStatus;
   detail?: string;
   conversationId?: string;
+  /** The run of another workflow it stands for. */
+  runId?: string;
 };
 export type CardData = {
   kind: 'step' | 'orchestrator' | 'task' | 'agent' | 'question' | 'workflow';
@@ -66,6 +70,8 @@ export type CardData = {
   count?: string;
   issue?: string;
   conversationId?: string;
+  /** A step the ended run never reached, or a task it never began. */
+  unreached?: boolean;
   [key: string]: unknown;
 };
 export type GraphCard = { id: string; position: { x: number; y: number }; data: CardData };
@@ -87,6 +93,7 @@ const statusTexts: Record<CardStatus, string> = {
   waiting: 'Waiting',
   attention: 'Waiting for you',
   done: 'Done',
+  skipped: 'Skipped',
   failed: 'Failed',
   stopped: 'Stopped',
 };
@@ -116,7 +123,7 @@ function replyActivity(reply: Message): string {
 /** A step's settings in a few words, for its card. */
 export function stepSummary(
   node: WorkflowNode,
-  names: { computer?: (id: string) => string } = {},
+  names: { computer?: (id: string) => string; workflow?: (id: string) => string | undefined } = {},
 ): string {
   if (!isNodeType(node.type)) return `Unknown step: ${node.type}`;
   const type = node.type as NodeType;
@@ -202,8 +209,12 @@ export function stepSummary(
       const config = nodeConfig(node, 'screenData');
       return `${config.op === 'load' ? 'Load' : 'Save'} ${config.key}`;
     }
-    case 'workflow':
-      return 'Another workflow';
+    case 'workflow': {
+      const config = nodeConfig(node, 'workflow');
+      if (config.kind === 'dynamic')
+        return config.title.trim() || config.goal.trim().split('\n')[0] || 'A dynamic workflow';
+      return (config.workflowId && names.workflow?.(config.workflowId)) || 'Another workflow';
+    }
     case 'merge':
       return 'All branches';
     case 'end':
@@ -234,7 +245,7 @@ const links = (
 export function definitionCards(
   graph: WorkflowGraph,
   issues: GraphIssue[],
-  names: { computer?: (id: string) => string } = {},
+  names: { computer?: (id: string) => string; workflow?: (id: string) => string | undefined } = {},
 ): { cards: GraphCard[]; links: GraphLink[] } {
   return {
     cards: graph.nodes.map((node) => ({
@@ -260,20 +271,29 @@ export function definitionCards(
   };
 }
 
-const activationStatus = (a: Activation): CardStatus =>
+export const activationStatus = (a: Activation): CardStatus =>
   a.status === 'waiting'
     ? a.waitFor === 'question'
       ? 'attention'
       : 'waiting'
-    : a.status === 'skipped'
-      ? 'done'
-      : (a.status as CardStatus);
+    : (a.status as CardStatus);
+const childStatus = (status: string): CardStatus =>
+  status === 'running'
+    ? 'running'
+    : status === 'paused'
+      ? 'waiting'
+      : status === 'completed'
+        ? 'done'
+        : status === 'failed'
+          ? 'failed'
+          : 'stopped';
+const runEnded = (run: WorkflowRun) => run.status !== 'running' && run.status !== 'paused';
 
 /** A static run's graph: its steps with what each did, and does now. */
 export function staticRunCards(
   run: WorkflowRun,
   conversation: (id: string) => Conversation | undefined,
-  names: { computer?: (id: string) => string } = {},
+  names: { computer?: (id: string) => string; workflow?: (id: string) => string | undefined } = {},
 ): { cards: GraphCard[]; links: GraphLink[] } {
   const placed = flowsSideways(run.graph.nodes, run.graph.edges)
     ? arrangeSteps(run.graph.nodes, run.graph.edges)
@@ -291,6 +311,7 @@ export function staticRunCards(
       'failed',
       'stopped',
       'done',
+      'skipped',
     ];
     const status = order.find((s) => activations.some((a) => activationStatus(a) === s)) ?? 'idle';
     const current = activations.find((a) => activationStatus(a) === status);
@@ -311,6 +332,19 @@ export function staticRunCards(
         conversationId,
       };
     });
+    // The runs a Run workflow step started, each opening there.
+    for (const activation of activations) {
+      const child = activation.childRunId
+        ? run.children.find((c) => c.runId === activation.childRunId)
+        : undefined;
+      if (child)
+        rows.push({
+          id: child.runId,
+          label: child.title,
+          status: childStatus(child.status),
+          runId: child.runId,
+        });
+    }
     const loop = activations.find((a) => a.loop)?.loop;
     return {
       id: node.id,
@@ -332,6 +366,7 @@ export function staticRunCards(
           : activations.length > 1
             ? { count: `×${activations.length}` }
             : {}),
+        ...(runEnded(run) && !activations.length ? { unreached: true } : {}),
         key: node.key,
       },
     };
@@ -353,11 +388,12 @@ const agentStatus = (agent: RunAgent, chat: Conversation | undefined): CardStatu
   if (agent.status === 'lost') return 'failed';
   return agent.status;
 };
-const taskStatus = (status: string): CardStatus =>
-  status === 'blocked'
-    ? 'waiting'
-    : status === 'cancelled' || status === 'skipped'
-      ? 'stopped'
+// A task still going when its run ended stopped there.
+const taskStatus = (status: string, ended: boolean): CardStatus =>
+  status === 'cancelled' || (ended && (status === 'running' || status === 'blocked'))
+    ? 'stopped'
+    : status === 'blocked'
+      ? 'waiting'
       : (status as CardStatus);
 
 /** A mission's graph: its orchestrator, plan, agents, questions and workflows, laid out. */
@@ -441,7 +477,7 @@ export function missionCards(
       ? 'attention'
       : rows.some((r) => r.status === 'running')
         ? 'running'
-        : taskStatus(task.status);
+        : taskStatus(task.status, runEnded(run));
     cards.push({
       id: `task:${task.id}`,
       position: { x: 0, y: 0 },
@@ -456,6 +492,7 @@ export function missionCards(
         ports: [{ id: 'out', label: '' }],
         input: true,
         ...(task.phase ? { phase: task.phase } : {}),
+        ...(runEnded(run) && status === 'planned' ? { unreached: true } : {}),
       },
     });
     const deps = task.dependsOn.filter((d) => taskIds.has(d));
@@ -552,16 +589,7 @@ export function missionCards(
     });
   }
   for (const child of run.children) {
-    const status: CardStatus =
-      child.status === 'running'
-        ? 'running'
-        : child.status === 'paused'
-          ? 'waiting'
-          : child.status === 'completed'
-            ? 'done'
-            : child.status === 'failed'
-              ? 'failed'
-              : 'stopped';
+    const status = childStatus(child.status);
     cards.push({
       id: `workflow:${child.runId}`,
       position: { x: 0, y: 0 },
@@ -594,6 +622,154 @@ export function missionCards(
   for (const card of cards) card.position = positions.get(card.id) ?? card.position;
   return { cards, links: result };
 }
+/**
+ * One entry of a run's history, in the order things happened: each time a step ran (a loop's
+ * items and steps a run returned to each have their own), and what else the run recorded.
+ */
+export type TimelineEntry = {
+  id: string;
+  at: string;
+  endedAt?: string;
+  /** Its mark: a step's type, or `event:<kind>`. */
+  icon: string;
+  title: string;
+  /** A line about how it went, when the entry itself does not tell. */
+  detail: string;
+  status: CardStatus;
+  /** The graph card it belongs to. */
+  card?: string;
+  activation?: Activation;
+  /** The loop item it ran for, from 1, and how many times its step ran before for that item. */
+  item?: number;
+  again?: number;
+  chat?: string;
+  /** The reply it stands for, when the run recorded it. */
+  messageId?: string;
+  runId?: string;
+  /** Recorded text the entry can show in full. */
+  text?: string;
+};
+
+const portWords: Record<string, string> = {
+  true: 'True',
+  false: 'False',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  error: 'Error',
+  done: 'Done',
+};
+const runEvents = new Set(['command', 'driver', 'completed', 'failed', 'stopped']);
+const byTime = (a: TimelineEntry, b: TimelineEntry) => a.at.localeCompare(b.at);
+// The computer that drove a run first is where it ran; only a later one changes something.
+const firstDriver = (events: WorkflowEvent[]) => events.find((event) => event.kind === 'driver');
+
+/** A static run's history: each step as it ran, then the run's own events, in time order. */
+export function staticTimeline(run: WorkflowRun, events: WorkflowEvent[]): TimelineEntry[] {
+  const nodes = new Map(run.graph.nodes.map((node) => [node.id, node]));
+  const times = new Map<string, number>();
+  const entries = run.activations
+    .map((activation, index) => ({ activation, index }))
+    .sort(
+      (a, b) =>
+        (a.activation.startedAt ?? a.activation.createdAt).localeCompare(
+          b.activation.startedAt ?? b.activation.createdAt,
+        ) || a.index - b.index,
+    )
+    .map(({ activation: a }): TimelineEntry => {
+      const node = nodes.get(a.nodeId);
+      const key = `${a.nodeId} ${a.scope}`;
+      const again = times.get(key) ?? 0;
+      times.set(key, again + 1);
+      const index = a.scope ? Number(a.scope.split('#').at(-1)) : NaN;
+      const port = a.output?.port;
+      const status = activationStatus(a);
+      return {
+        id: a.id,
+        at: a.startedAt ?? a.createdAt,
+        ...(a.endedAt ? { endedAt: a.endedAt } : {}),
+        icon: node?.type === 'start' ? `trigger:${triggerOf(node)}` : (node?.type ?? 'step'),
+        title: node?.title || node?.key || 'A removed step',
+        detail:
+          a.status === 'waiting'
+            ? (a.wait ?? '')
+            : a.status === 'failed'
+              ? (a.error ?? '')
+              : port && port !== 'out' && portWords[port]
+                ? portWords[port]
+                : a.loop
+                  ? `${a.loop.items.length} item${a.loop.items.length === 1 ? '' : 's'}`
+                  : '',
+        status,
+        card: a.nodeId,
+        activation: a,
+        ...(Number.isFinite(index) ? { item: index + 1 } : {}),
+        ...(again ? { again } : {}),
+        ...(a.conversationId ? { chat: a.conversationId } : {}),
+        ...(a.childRunId ? { runId: a.childRunId } : {}),
+      };
+    });
+  const first = firstDriver(events);
+  for (const event of events) {
+    if (!runEvents.has(event.kind) || event === first) continue;
+    entries.push({
+      id: `event:${event.seq}`,
+      at: event.at,
+      icon: `event:${event.kind}`,
+      title: event.text,
+      detail: '',
+      status:
+        event.kind === 'completed' ? 'done' : event.kind === 'failed' ? 'failed' : 'idle',
+      ...(event.kind === 'completed' && run.output ? { text: run.output } : {}),
+    });
+  }
+  return entries.sort(byTime);
+}
+
+/** A dynamic workflow's history: what its orchestrator and agents did, as the run recorded it. */
+export function dynamicTimeline(run: WorkflowRun, events: WorkflowEvent[]): TimelineEntry[] {
+  const tasks = new Set(run.tasks.map((t) => t.id));
+  const agents = new Map(run.agents.map((agent) => [agent.conversationId, agent]));
+  const cardOf = (event: WorkflowEvent): string | undefined => {
+    const agent = event.conversationId ? agents.get(event.conversationId) : undefined;
+    if (agent?.role === 'orchestrator' || event.kind === 'session') return 'orchestrator';
+    const task = agent?.taskId ?? event.taskId;
+    if (task && tasks.has(task)) return `task:${task}`;
+    if (agent) return `agent:${agent.conversationId}`;
+    const runId = typeof event.runId === 'string' ? event.runId : undefined;
+    if (runId && run.children.some((c) => c.runId === runId)) return `workflow:${runId}`;
+    return undefined;
+  };
+  const first = firstDriver(events);
+  return events
+    .filter((event) => event.kind !== 'step' && event !== first)
+    .map((event): TimelineEntry => {
+      const failed = event.kind === 'failed' || / failed\b/.test(event.text);
+      const done =
+        event.kind === 'completed' || (event.kind === 'agent' && / finished$/.test(event.text));
+      const messageId = typeof event.messageId === 'string' ? event.messageId : undefined;
+      const runId = typeof event.runId === 'string' ? event.runId : undefined;
+      const card = cardOf(event);
+      return {
+        id: `event:${event.seq}`,
+        at: event.at,
+        icon: `event:${event.kind}`,
+        title: event.text,
+        detail: '',
+        status:
+          event.kind === 'error' || failed
+            ? 'failed'
+            : done
+              ? 'done'
+              : 'idle',
+        ...(card ? { card } : {}),
+        ...(event.conversationId ? { chat: event.conversationId } : {}),
+        ...(messageId ? { messageId } : {}),
+        ...(runId ? { runId } : {}),
+        ...(event.kind === 'completed' && run.output ? { text: run.output } : {}),
+      };
+    });
+}
+
 /** About how tall a card draws, for laying cards out before they are measured. */
 export const cardHeight = (data: CardData) => 74 + (data.subtitle ? 18 : 0) + data.rows.length * 30;
 
@@ -614,6 +790,8 @@ export type WorkflowPickers = {
   workflows(): Choice[];
   computerName(environmentId: string): string;
   accountName(connectionId?: string): string;
+  /** Whether new chats start on the least used account, as new agent steps then do. */
+  balancing: boolean;
   /** The environment of this computer, which drives runs started here by default. */
   here: string;
   /** Computers that can drive a run, and the one a new run prefers. */

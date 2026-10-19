@@ -212,6 +212,7 @@ export function pushService({
   conversationTitle = () => undefined,
   conversationExists = () => true,
   quiet = () => false,
+  isolated = () => false,
   active = () => true,
 }: {
   directory: string;
@@ -224,8 +225,10 @@ export function pushService({
   conversationTitle?: (conversationId: string) => string | undefined;
   // An alert held for a chat deleted meanwhile is dropped.
   conversationExists?: (conversationId: string) => boolean;
-  // A chat a workflow started, whose end its workflow reports instead (docs/WORKFLOWS.md).
+  // A workflow's chat, whose end its workflow reports instead (docs/WORKFLOWS.md).
   quiet?: (conversationId: string) => boolean;
+  // A chat that belongs to a workflow run, whose questions its run reports too.
+  isolated?: (conversationId: string) => boolean;
   active?: () => boolean;
 }) {
   const file = join(directory, 'web-push.json');
@@ -535,6 +538,7 @@ export function pushService({
           continue;
         const base = { conversationId: conversation.id, tag: `studio-${message.runId}` };
         const status = message.status;
+        if (isolated(conversation.id)) continue;
         if (status !== 'running' && (!old || old.status === 'running')) {
           if (quiet(conversation.id)) continue;
           enqueue(next, `${message.runId}:terminal`, () => ({
@@ -633,7 +637,8 @@ export function pushService({
         : attention
           ? 'attention'
           : undefined;
-      if (!kind || (kind !== 'attention' && quiet(request.data.conversationId))) return;
+      const chat = request.data.conversationId;
+      if (!kind || isolated(chat) || (kind !== 'attention' && quiet(chat))) return;
       try {
         const next = pruned();
         // Built at most once per update, and only for an alert that goes out or is refreshed.

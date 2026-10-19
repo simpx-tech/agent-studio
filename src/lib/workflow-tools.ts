@@ -32,7 +32,7 @@ import type { PutResult } from './workflow-store';
 /**
  * The workflow tools every saved Claude and Codex chat gets (docs/WORKFLOWS.md), answered by the
  * window of the computer running the chat: definitions to list, read and save, runs to start
- * and follow, and missions to start.
+ * and follow, and dynamic workflows to start.
  */
 export interface StoreAccess {
   summaries(): WorkflowSummary[];
@@ -56,7 +56,7 @@ export const generalTools = [
   'workflow_save',
   'workflow_run',
   'workflow_status',
-  'mission_start',
+  'dynamic_start',
 ] as const;
 export type GeneralTool = (typeof generalTools)[number];
 
@@ -104,9 +104,9 @@ const inputs = {
     })
     .strict(),
   workflow_status: z.object({ id: z.string() }).strict(),
-  mission_start: z
+  dynamic_start: z
     .object({
-      mission: z.string().trim().min(1),
+      goal: z.string().trim().min(1),
       title: z.string().optional(),
       folder: z.object({ computer: z.string().optional(), path: z.string() }).strict().optional(),
       orchestrator: z
@@ -254,7 +254,7 @@ export async function generalCall(
             .map((s) => ({
               id: s.id,
               title: s.title,
-              mode: s.mode === 'dynamic' ? 'mission' : 'workflow',
+              mode: s.mode === 'dynamic' ? 'dynamic' : 'static',
               status: s.status,
               waits: s.detail || undefined,
               updatedAt: s.updatedAt,
@@ -386,11 +386,11 @@ export async function generalCall(
       const { id } = parsed.data as z.infer<typeof inputs.workflow_status>;
       const doc = await store.read(id, 0);
       const run = doc?.kind === 'run' ? readRun(doc.body) : undefined;
-      if (!doc || !run) throw new Error('No run or mission has that id. workflow_list lists them.');
+      if (!doc || !run) throw new Error('No run has that id. workflow_list lists them.');
       return JSON.stringify(runStatus(host, run, doc.events), null, 2);
     }
-    case 'mission_start': {
-      const input = parsed.data as z.infer<typeof inputs.mission_start>;
+    case 'dynamic_start': {
+      const input = parsed.data as z.infer<typeof inputs.dynamic_start>;
       const self = host.self();
       const computer = input.folder?.computer
         ? findComputer(host, input.folder.computer)
@@ -412,7 +412,7 @@ export async function generalCall(
         : undefined;
       const run = newMission({
         title: input.title ?? '',
-        text: input.mission,
+        text: input.goal,
         ...(input.folder?.path && computer
           ? {
               location: {
@@ -434,7 +434,7 @@ export async function generalCall(
       });
       const id = crypto.randomUUID();
       await host.createRun(id, run);
-      return `Started mission ${id} "${run.title}". The user follows it under Workflows; workflow_status reads it.`;
+      return `Started the dynamic workflow ${id} "${run.title}". The user follows it under Workflows; workflow_status reads it.`;
     }
   }
 }
@@ -454,7 +454,7 @@ export function runStatus(host: WorkflowHost, run: WorkflowRun, events: Workflow
   };
   return {
     title: run.title,
-    mode: run.mode === 'dynamic' ? 'mission' : 'workflow',
+    mode: run.mode === 'dynamic' ? 'dynamic' : 'static',
     status: run.status,
     ...(run.detail ? { waits: run.detail } : {}),
     ...(run.output !== undefined ? { output: run.output } : {}),

@@ -360,6 +360,7 @@ export function createRelay({
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
       conversationExists: (id) => state.workspace.conversations.some((c) => c.id === id),
       quiet: (id) => workflows.workflowChats().has(id),
+      isolated: (id) => workflows.runChats().has(id),
     });
     const images = imageStore(directory, now);
     const file = join(directory, 'workspace.json');

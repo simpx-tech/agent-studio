@@ -169,11 +169,18 @@ export function workflowStore(files: StoreFiles, now: () => number = Date.now) {
     ready,
     /** The store's revision: it moves with every change of a document or a run's driver. */
     revision: () => index.revision,
-    /** The chats runs started, by run, for chat lists and counts that leave them out. */
+    /** Every workflow's chats, for chat lists and counts that leave them out. */
     workflowChats(): Set<string> {
       const chats = new Set<string>();
       for (const summary of summaries.values())
         for (const id of summary.conversations) chats.add(id);
+      return chats;
+    },
+    /** The chats that belong to runs, which raise no alerts of their own. */
+    runChats(): Set<string> {
+      const chats = new Set<string>();
+      for (const summary of summaries.values())
+        if (summary.kind === 'run') for (const id of summary.conversations) chats.add(id);
       return chats;
     },
     summaries: () => [...summaries.values()],

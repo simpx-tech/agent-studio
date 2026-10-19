@@ -34,7 +34,7 @@
   }: {
     client: WorkflowClient;
     computerName: (environmentId: string) => string;
-    /** Opens a workflow, run or mission. */
+    /** Opens a workflow or run, static or dynamic. */
     open: (id: string) => void;
     /** A new workflow chat. */
     create: () => void;
@@ -129,7 +129,7 @@
       {@render statusMark(s)}
       <span class="row-text">
         <span class="row-title"
-          >{#if s.mode === 'dynamic'}<Target size={13} aria-label="Mission" />{/if}{s.title}</span
+          >{#if s.mode === 'dynamic'}<Target size={13} aria-label="Dynamic" />{/if}{s.title}</span
         >
         <span class="row-detail">{runDetail(s)}</span>
       </span>

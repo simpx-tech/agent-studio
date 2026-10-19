@@ -10,6 +10,7 @@
     LoaderCircle,
     MessageCircleQuestionMark,
     MessageSquare,
+    SquareArrowOutUpRight,
   } from '@lucide/svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
   import type { CardData, CardStatus } from '$lib/workflow-view';
@@ -17,7 +18,11 @@
     data,
     selected = false,
   }: {
-    data: CardData & { openChat?: (conversationId: string) => void; editable?: boolean };
+    data: CardData & {
+      openChat?: (conversationId: string) => void;
+      openRun?: (runId: string) => void;
+      editable?: boolean;
+    };
     selected?: boolean;
   } = $props();
   // Steps flow downwards: what follows a step leaves from the bottom of its card, in its ports'
@@ -33,7 +38,7 @@
   {#if status === 'running'}<LoaderCircle {size} class="spinning" aria-hidden="true" />
   {:else if status === 'attention'}<MessageCircleQuestionMark {size} aria-hidden="true" />
   {:else if status === 'waiting' || status === 'queued'}<Hourglass {size} aria-hidden="true" />
-  {:else if status === 'done'}<CircleCheck {size} aria-hidden="true" />
+  {:else if status === 'done' || status === 'skipped'}<CircleCheck {size} aria-hidden="true" />
   {:else if status === 'failed'}<CircleX {size} aria-hidden="true" />
   {:else if status === 'stopped'}<CircleStop {size} aria-hidden="true" />
   {:else if status === 'planned'}<CircleDashed {size} aria-hidden="true" />{/if}
@@ -44,7 +49,8 @@
   class:selected
   class:editable={data.editable}
   class:issue={!!data.issue}
-  title={data.issue ?? data.statusText}
+  class:unreached={data.unreached}
+  title={data.issue ?? (data.unreached ? 'Not reached' : data.statusText)}
 >
   {#if data.input}<Handle type="target" position={Position.Top} class="workflow-handle" />{/if}
   <header>
@@ -78,6 +84,15 @@
                 event.stopPropagation();
                 data.openChat?.(row.conversationId!);
               }}><MessageSquare size={13} /></button
+            >{:else if row.runId && data.openRun}<button
+              class="row-open nodrag"
+              type="button"
+              title="Open run"
+              aria-label={`Open the run of ${row.label}`}
+              onclick={(event) => {
+                event.stopPropagation();
+                data.openRun?.(row.runId!);
+              }}><SquareArrowOutUpRight size={13} /></button
             >{/if}
         </li>
       {/each}
@@ -213,6 +228,19 @@
   .status-done > header .card-status,
   li.status-done .row-mark {
     color: var(--success);
+  }
+  /* Skipped: settled without running, in the muted color. */
+  .status-skipped > header .card-status,
+  li.status-skipped .row-mark {
+    color: var(--text-muted);
+  }
+  /* A step the ended run never reached, or a task it never began, fades back. */
+  .workflow-card.unreached {
+    opacity: 0.5;
+    box-shadow: none;
+  }
+  .workflow-card.unreached.selected {
+    opacity: 0.8;
   }
   .status-failed > header .card-status,
   li.status-failed .row-mark {

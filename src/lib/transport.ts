@@ -339,8 +339,13 @@ function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
     // Consume all lifecycle events, including suppressed ones, so switching
     // chats later cannot replay an alert the reader already saw.
     if (notice.conversationId === foregroundConversation()) continue;
-    // A workflow's chats end quietly; the workflow reports what matters (docs/WORKFLOWS.md).
-    if (notice.kind !== 'attention' && notice.conversationId && quietChats().has(notice.conversationId))
+    // A workflow's chats end quietly, and the chats of its runs ask nothing of their own: the
+    // workflow alerts for what matters (docs/WORKFLOWS.md).
+    if (
+      notice.conversationId &&
+      (isolatedChats().has(notice.conversationId) ||
+        (notice.kind !== 'attention' && quietChats().has(notice.conversationId)))
+    )
       continue;
     // Notification/audio failure must never fail saving or interrupt a CLI run.
     // Native delivery retains an actionable error in Connections.
@@ -3956,10 +3961,13 @@ export async function answerWorkflowCall(call: WorkflowCall, text: string, error
   });
 }
 
-// Chats whose end alerts stay quiet: the chats of workflow runs.
+// Chats whose end alerts stay quiet, every chat of a workflow, and those that raise no alert at
+// all, the chats of its runs.
 let quietChats: () => Set<string> = () => new Set();
-export function setQuietChats(chats: () => Set<string>) {
+let isolatedChats: () => Set<string> = () => new Set();
+export function setQuietChats(chats: () => Set<string>, isolated: () => Set<string>) {
   quietChats = chats;
+  isolatedChats = isolated;
 }
 /** A workflow run's alert, as a desktop notification that opens the workflow. */
 export async function notifyWorkflow(

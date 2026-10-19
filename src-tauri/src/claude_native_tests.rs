@@ -1593,7 +1593,7 @@ async fn installed_claude_answers_workflow_tools_through_the_window() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
     std::fs::create_dir_all(&runtime).unwrap();
-    let text = "This is an Agent Studio integration test. Call mcp__agent_studio__workflow_list once, then call mcp__agent_studio__mission_state once. Run no other tool. Then reply with one short sentence naming the workflow and the mission title they report.";
+    let text = "This is an Agent Studio integration test. Call mcp__agent_studio__workflow_list once, then call mcp__agent_studio__dynamic_state once. Run no other tool. Then reply with one short sentence naming the workflow and the dynamic workflow title they report.";
     let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
     request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
     let mission = Binding {
@@ -1635,7 +1635,7 @@ async fn installed_claude_answers_workflow_tools_through_the_window() {
                 tools.push((call.tool.clone(), call.mission.clone()));
                 let text = match call.tool.as_str() {
                     "workflow_list" => json!({"workflows":[{"id":"w1","name":"Nightly report","steps":3}],"runs":[]}).to_string(),
-                    "mission_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
+                    "dynamic_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
                     other => format!("Unexpected tool {other}"),
                 };
                 let _ = hub
@@ -1667,7 +1667,7 @@ async fn installed_claude_answers_workflow_tools_through_the_window() {
     let tools = tools.ok().and_then(|t| t.ok()).unwrap_or_default();
     let names: Vec<&str> = tools.iter().map(|(name, _)| name.as_str()).collect();
     assert!(names.contains(&"workflow_list"), "{names:?}");
-    assert!(names.contains(&"mission_state"), "{names:?}");
+    assert!(names.contains(&"dynamic_state"), "{names:?}");
     assert!(tools
         .iter()
         .all(|(_, binding)| binding.as_ref() == Some(&mission)));

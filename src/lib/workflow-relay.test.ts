@@ -204,6 +204,7 @@ describe('workflow alerts', () => {
       ) => {},
     );
     const quiet = new Set<string>();
+    const isolated = new Set<string>();
     const push = pushService({
       directory,
       token: 'synthetic-workflow-notification-key',
@@ -211,6 +212,7 @@ describe('workflow alerts', () => {
       sessionActive: () => true,
       send,
       quiet: (id) => quiet.has(id),
+      isolated: (id) => isolated.has(id),
     });
     const key = createECDH('prime256v1');
     key.generateKeys();
@@ -230,6 +232,7 @@ describe('workflow alerts', () => {
       push,
       send,
       quiet,
+      isolated,
       settle: async () => {
         time += 20_001;
         await push.drain();
@@ -278,6 +281,56 @@ describe('workflow alerts', () => {
     f.push.changed(emptyShared(), value);
     await f.settle();
     expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps the chats of a run from asking through a push of their own', async () => {
+    const f = service();
+    const asking = (title: string) => {
+      const id = crypto.randomUUID();
+      const value = emptyShared();
+      value.conversations.push({
+        id,
+        title,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
+        messages: [
+          {
+            id: crypto.randomUUID(),
+            runId: crypto.randomUUID(),
+            role: 'assistant',
+            status: 'running',
+            createdAt: new Date().toISOString(),
+            blocks: [],
+            questions: [
+              {
+                id: crypto.randomUUID(),
+                revision: 1,
+                status: 'pending',
+                questions: [
+                  { id: 'q', header: '', question: 'Which?', options: [], multiSelect: false },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      return { id, value };
+    };
+    // A run's chat says nothing: its run alerts for it.
+    const worker = asking('Worker');
+    f.quiet.add(worker.id);
+    f.isolated.add(worker.id);
+    f.push.changed(emptyShared(), worker.value);
+    await f.settle();
+    expect(f.send).not.toHaveBeenCalled();
+    // A workflow's assistant still asks as a chat does.
+    const assistant = asking('Assistant');
+    f.quiet.add(assistant.id);
+    f.push.changed(emptyShared(), assistant.value);
+    await f.settle();
+    await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(f.send.mock.calls[0][1])).toMatchObject({ kind: 'attention' });
   });
 
   it('reads only alerts a run raised in the last ten minutes', () => {

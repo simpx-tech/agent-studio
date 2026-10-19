@@ -75,7 +75,8 @@
       .filter((n) => n.id !== node.id && n.type !== 'start' && n.type !== 'end')
       .flatMap((n) => [
         `${n.key}.output`,
-        ...(n.type === 'agent' || n.type === 'set' ? [`${n.key}.json`] : []),
+        ...(['agent', 'set', 'workflow'].includes(n.type) ? [`${n.key}.json`] : []),
+        ...(n.type === 'workflow' ? [`${n.key}.run`] : []),
       ]),
     'item',
     'index',
@@ -571,7 +572,7 @@
           <ChoicePicker
             field
             label="Workflow"
-            options={[{ id: '', name: 'Any other workflow or mission' }, ...pickers.workflows()]}
+            options={[{ id: '', name: 'Any other workflow' }, ...pickers.workflows()]}
             value={watched.workflowId}
             onchange={(value) => setPart('workflow', { workflowId: value })}
           />
@@ -824,7 +825,6 @@
       </div>
       {@render toggle('Reply with JSON', 'json')}
       {#if config.json}{@render text('JSON Schema', 'schema', 4, '{"type": "object", …}')}{/if}
-      {@render toggle('List the chat in Active', 'listed')}
       {@render text('Chat instructions', 'instructions', 3)}
     {:else if type === 'screen'}
       {@render agentFields()}
@@ -1002,8 +1002,21 @@
           'json',
         )}{/if}
     {:else if type === 'workflow'}
-      {@render pick('Workflow', 'workflowId', pickers.workflows())}
-      {@render pairsEditor('Inputs', 'inputs', 'Input')}
+      {@render pick('Runs', 'kind', [
+        { id: 'static', name: 'A saved workflow' },
+        { id: 'dynamic', name: 'A dynamic workflow' },
+      ])}
+      {#if config.kind === 'dynamic'}
+        {@render text('Goal', 'goal', 5, 'What it should achieve')}
+        {@render text('Title', 'title', 0, 'From its goal')}
+        <fieldset class="list">
+          <legend>Orchestrator</legend>
+          {@render agentFields()}
+        </fieldset>
+      {:else}
+        {@render pick('Workflow', 'workflowId', pickers.workflows())}
+        {@render pairsEditor('Inputs', 'inputs', 'Input')}
+      {/if}
       {@render toggle('Wait for it to end', 'wait')}
     {:else if type === 'end'}
       {@render text('Output', 'output', 4, '{{report.output}}')}

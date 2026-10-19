@@ -28,6 +28,7 @@
     moved,
     dropped,
     openChat,
+    openRun,
     label,
     fit = 0,
   }: {
@@ -49,6 +50,8 @@
       screen: { x: number; y: number },
     ) => void;
     openChat?: (conversationId: string) => void;
+    /** Opens the run of another workflow a card shows. */
+    openRun?: (runId: string) => void;
     label: string;
     /** Changes when the graph should be fit into view, as after a step is added. */
     fit?: number;
@@ -86,7 +89,7 @@
       id: card.id,
       type: 'card',
       position: (!editable && dragged.get(card.id)) || card.position,
-      data: { ...card.data, openChat, editable },
+      data: { ...card.data, openChat, openRun, editable },
       selected: card.id === selected,
       deletable: editable && (card.data.type !== 'start' || triggers > 1),
       connectable: editable,

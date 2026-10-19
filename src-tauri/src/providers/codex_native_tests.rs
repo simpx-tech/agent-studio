@@ -328,7 +328,7 @@ async fn installed_codex_answers_workflow_tools_through_the_window() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
     std::fs::create_dir_all(&runtime).unwrap();
-    let text = "This is an Agent Studio integration test. Call the workflow_list tool once, then call the mission_state tool once. Run no other tool and no command. Then reply with one short sentence naming the workflow and the mission title they report.";
+    let text = "This is an Agent Studio integration test. Call the workflow_list tool once, then call the dynamic_state tool once. Run no other tool and no command. Then reply with one short sentence naming the workflow and the mission title they report.";
     let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
     request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
     let mission = Binding {
@@ -369,7 +369,7 @@ async fn installed_codex_answers_workflow_tools_through_the_window() {
                 tools.push(call.tool.clone());
                 let text = match call.tool.as_str() {
                     "workflow_list" => json!({"workflows":[{"id":"w1","name":"Nightly report","steps":3}],"runs":[]}).to_string(),
-                    "mission_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
+                    "dynamic_state" => json!({"mission":{"title":"Probe mission","status":"running"}}).to_string(),
                     other => format!("Unexpected tool {other}"),
                 };
                 let _ = hub
@@ -404,7 +404,7 @@ async fn installed_codex_answers_workflow_tools_through_the_window() {
         .unwrap_or_default();
     assert_eq!(status, "complete");
     assert!(tools.contains(&"workflow_list".to_string()), "{tools:?}");
-    assert!(tools.contains(&"mission_state".to_string()), "{tools:?}");
+    assert!(tools.contains(&"dynamic_state".to_string()), "{tools:?}");
     assert!(answer.contains("Nightly report"), "{answer}");
     assert!(answer.contains("Probe mission"), "{answer}");
     eprintln!("Tools {tools:?}; answer: {answer}");

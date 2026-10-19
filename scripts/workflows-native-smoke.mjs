@@ -336,7 +336,7 @@ try {
   // 3. A mission: its orchestrator plans, spawns a worker and completes after its answer.
   const missionTitle = 'Workflows QA mission';
   const started = await ask(
-    `Call mission_start once, with title "${missionTitle}", orchestrator {"provider": "codex", "reasoning": "low"} and this mission: "This is an Agent Studio QA test of missions; keep it minimal. Add one task to the plan with mission_plan. Then spawn exactly one agent with mission_spawn (agent provider codex, reasoning low, taskId the task's id) whose task is: Do not use any tools. Reply exactly: WORKER DONE. End your turn after spawning it. When you hear that the agent finished, mark the task done with mission_plan and call mission_complete with the summary QA mission complete." Use no other tool and reply with one line: MISSION followed by the mission's id.`,
+    `Call dynamic_start once, with title "${missionTitle}", orchestrator {"provider": "codex", "reasoning": "low"} and this goal: "This is an Agent Studio QA test of dynamic workflows; keep it minimal. Add one task to the plan with dynamic_plan. Then spawn exactly one agent with dynamic_spawn (agent provider codex, reasoning low, taskId the task's id) whose task is: Do not use any tools. Reply exactly: WORKER DONE. End your turn after spawning it. When you hear that the agent finished, mark the task done with dynamic_plan and call dynamic_complete with the summary QA mission complete." Use no other tool and reply with one line: MISSION followed by the mission's id.`,
   );
   report.started = text(started).trim();
   const findMission = async () =>
@@ -344,7 +344,7 @@ try {
   const deadline = Date.now() + 120_000;
   let mission;
   while (!(mission = await findMission())) {
-    assert(Date.now() < deadline, 'mission_start saved no mission');
+    assert(Date.now() < deadline, 'dynamic_start saved no mission');
     await sleep(1000);
   }
   assert(report.started.includes(mission.id), `The reply named another mission: ${report.started}`);
@@ -394,6 +394,28 @@ try {
     () => document.querySelectorAll('.workflow-card').length,
   );
   await noErrorBanner('in the mission view');
+  // Its plan settled, its history lists what happened, and its worker's chat is the
+  // workflow's: read there, without a composer.
+  assert(
+    ended.body.tasks.every((t) => t.status === 'done'),
+    `A task did not settle: ${JSON.stringify(report.mission.tasks)}`,
+  );
+  report.historyEntries = await page.evaluate(
+    () => document.querySelectorAll('.run-sheet .entry').length,
+  );
+  assert(report.historyEntries >= 4, `The history shows ${report.historyEntries} entries`);
+  await page.evaluate(() =>
+    [...document.querySelectorAll('.workflow-card button')]
+      .find((b) => /^Open the chat of /.test(b.getAttribute('aria-label') ?? ''))
+      ?.click(),
+  );
+  await page.waitFor(() => !!document.querySelector('.workflow-owned'));
+  report.workerReadOnly = await page.evaluate(
+    () => !document.querySelector('[aria-label="Message"]'),
+  );
+  assert(report.workerReadOnly, 'The worker chat offers a composer');
+  await capture('worker-read-only');
+  await noErrorBanner('in the worker chat');
   assert.deepEqual(page.errors, []);
   await writeFile(`${output}/native-report.json`, JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));

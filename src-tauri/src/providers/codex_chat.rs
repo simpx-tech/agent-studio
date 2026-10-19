@@ -805,7 +805,7 @@ mod tests {
         assert!(start_params(&request).get("cwd").is_none()); // Inherit validated process cwd, including WSL.
     }
     #[test]
-    fn saved_chats_get_workflow_tools_and_orchestrators_mission_tools() {
+    fn saved_chats_get_workflow_tools_and_orchestrators_dynamic_tools() {
         let names = |request: &RunRequest| {
             dynamic_tools(request)
                 .iter()
@@ -816,13 +816,13 @@ mod tests {
         assert!(!names(&request).contains(&"workflow_save".to_string()));
         request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
         assert!(names(&request).contains(&"workflow_save".to_string()));
-        assert!(!names(&request).contains(&"mission_spawn".to_string()));
+        assert!(!names(&request).contains(&"dynamic_spawn".to_string()));
         request.mission = Some(super::super::workflow_calls::Binding {
             run_id: uuid::Uuid::new_v4().to_string(),
             role: "orchestrator".into(),
         });
         assert!(request.validate().is_ok());
-        assert!(names(&request).contains(&"mission_spawn".to_string()));
+        assert!(names(&request).contains(&"dynamic_spawn".to_string()));
         request.conversation_only = true;
         assert!(request.validate().is_err());
     }

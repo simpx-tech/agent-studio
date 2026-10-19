@@ -10,6 +10,7 @@ import {
   type ProviderId,
 } from './domain';
 import type { Fleet } from './fleet';
+import { markdownText } from './notifications';
 import type { UsageSnapshot } from './usage';
 import {
   KEPT_ALERTS,
@@ -18,6 +19,8 @@ import {
   readRun,
   triggerOf,
   type Activation,
+  type Actor,
+  type AgentChoice,
   type EventInput,
   type NodeType,
   type RunAgent,
@@ -55,7 +58,6 @@ export type ChatSpec = {
   location?: ChatLocation;
   settings: ChatSettings;
   text: string;
-  listed: boolean;
   mission?: { runId: string; role: 'orchestrator' };
 };
 export type ScreenOutcome = { exitCode: number | null; stdout: string; stderr: string };
@@ -97,12 +99,12 @@ export interface WorkflowHost {
     load(environmentId: string, id: string): Promise<Record<string, unknown>>;
     save(environmentId: string, id: string, key: string, value: unknown): Promise<void>;
   };
-  /** Creates another run, for Run workflow steps and missions. */
+  /** Creates another run, for Run workflow steps and dynamic workflows. */
   createRun(id: string, run: WorkflowRun): Promise<void>;
   /** The latest known copy of a run, for parents following their children. */
   knownRun(id: string): WorkflowRun | undefined;
   definition(id: string): Promise<{ body: WorkflowDefinition; revision: number } | undefined>;
-  /** Every computer (each environment a chat can run in), as missions choose between them. */
+  /** Every computer (each environment a chat can run in), as orchestrators choose between them. */
   computers(): {
     environmentId: string;
     computerId: string;
@@ -153,6 +155,8 @@ export class RunDriver {
   private base: WorkflowRun;
   revision: number;
   private events: EventInput[] = [];
+  /** How many history entries it has written, so views showing its run read them. */
+  written = 0;
   private dirty = false;
   private writing: Promise<void> | undefined;
   /** Set when the run's document is gone from the store. */
@@ -227,6 +231,7 @@ export class RunDriver {
         if (result.ok) {
           this.base = body;
           this.revision = result.doc.revision;
+          this.written += events.length;
           if (!this.dirty && !this.events.length) return;
           continue;
         }
@@ -249,10 +254,11 @@ export class RunDriver {
     }
   }
 
-  /** Advances the run once: commands, then its steps or its mission. */
+  /** Advances the run once: commands, then its steps or its orchestrator. */
   async tick(mission?: (driver: RunDriver) => Promise<void>) {
     if (this.removed) return;
     this.applyCommands();
+    if (this.run.status === 'running' || this.run.status === 'paused') this.watchQuestions();
     if (!this.suspended && this.run.status === 'running') {
       if (this.run.mode === 'static') await this.tickStatic();
       else if (mission) await mission(this);
@@ -282,7 +288,7 @@ export class RunDriver {
             run.status = 'running';
             run.detail = '';
             this.event('command', 'Resumed');
-            if (run.mode === 'dynamic') this.inbox('command', 'The user resumed the mission.');
+            if (run.mode === 'dynamic') this.inbox('command', 'The user resumed the workflow.');
           }
           break;
         case 'stop':
@@ -374,6 +380,40 @@ export class RunDriver {
       { id: crypto.randomUUID(), at: iso(this.now), kind, text, ...extra },
     ];
     this.change();
+  }
+
+  /**
+   * What the chats of its agents ask you: each agent's open question, which lists and the run
+   * show until it is answered, and one alert for each, under the workflow. Its chats raise none
+   * of their own.
+   */
+  private watchQuestions() {
+    for (const agent of this.run.agents) {
+      const live = agent.status === 'running' || agent.status === 'waiting';
+      const reply = live ? this.host.conversation(agent.conversationId)?.messages.at(-1) : undefined;
+      const asks =
+        reply?.role === 'assistant' && reply.status === 'running' ? openRequests(reply) : [];
+      for (const ask of asks) {
+        const key = `ask:${reply!.id}:${ask.key}`;
+        if (this.run.handled.includes(key)) continue;
+        this.run.handled = [...this.run.handled, key];
+        this.alert('question', `${agent.title}: ${ask.text}`);
+        const step = agent.activationId
+          ? this.run.activations.find((a) => a.id === agent.activationId)
+          : undefined;
+        this.event('question', `${agent.title} asks: ${ask.text}`, {
+          conversationId: agent.conversationId,
+          ...(agent.taskId ? { taskId: agent.taskId } : {}),
+          ...(step ? { nodeId: step.nodeId, activationId: step.id } : {}),
+        });
+      }
+      const asking = asks[0]?.text;
+      if (asking === agent.asking) continue;
+      if (asking) agent.asking = asking;
+      else delete agent.asking;
+      agent.revision += 1;
+      this.change();
+    }
   }
 
   // ---- Static runs ----------------------------------------------------------------------------
@@ -932,7 +972,9 @@ export class RunDriver {
         });
       }
       case 'child': {
-        const child = this.run.children.find((c) => c.activationId === activation.id);
+        const child =
+          this.run.children.find((c) => c.runId === activation.childRunId) ??
+          this.run.children.find((c) => c.activationId === activation.id);
         const known = child ? this.host.knownRun(child.runId) : undefined;
         if (!child || !known || known.status === 'running' || known.status === 'paused') return;
         Object.assign(child, {
@@ -940,8 +982,12 @@ export class RunDriver {
           output: known.output,
           revision: child.revision + 1,
         });
-        if (known.status === 'completed')
-          return this.finish(activation, { text: known.output ?? '' });
+        if (known.status === 'completed') {
+          // Its result, and its value when it is JSON.
+          const text = known.output ?? '';
+          const json = replyJson(text);
+          return this.finish(activation, { text, ...(json !== undefined ? { json } : {}) });
+        }
         return this.fail(
           activation,
           `${known.title} ${known.status === 'failed' ? 'failed' : 'stopped'}: ${known.detail || known.output || ''}`.trim(),
@@ -978,8 +1024,7 @@ export class RunDriver {
           json: screen ? { ...screen } : undefined,
         });
       }
-      if (conversation && node && agentLike(node.type) && !nodeConfig(node, 'agent').listed)
-        this.host.releaseChat(conversation.id);
+      if (conversation && node && agentLike(node.type)) this.host.releaseChat(conversation.id);
       return this.finish(activation, {
         ref: { conversationId: conversation!.id, messageId: reply.id },
         ...(json !== undefined ? { json } : {}),
@@ -1127,7 +1172,6 @@ export class RunDriver {
       connectionId: settings.connectionId,
       provider: settings.provider,
       model: settings.model,
-      listed: config.listed,
     });
     // The chat's id is saved before the chat exists, so a driver that stops in between reuses it.
     await this.flush();
@@ -1137,12 +1181,11 @@ export class RunDriver {
       location: location.path ? location : { ...location, path: '' },
       settings,
       text,
-      listed: config.listed,
     });
     this.update(activation, { replyId });
   }
 
-  /** Records a chat the run started, which stays out of the chat lists unless listed. */
+  /** Records a chat that belongs to the run, which the chat lists leave out. */
   trackAgent(
     agent: Pick<RunAgent, 'conversationId' | 'role' | 'title' | 'environmentId' | 'provider'> &
       Partial<RunAgent>,
@@ -1157,7 +1200,6 @@ export class RunDriver {
       this.run.agents.push({
         model: '',
         reasoning: '',
-        listed: false,
         after: [],
         ...agent,
         revision: 1,
@@ -1187,40 +1229,86 @@ export class RunDriver {
     this.update(activation, { conversationId: conversation.id, replyId });
   }
 
+  /** Starts the run of another workflow a Run workflow step calls: static, or dynamic. */
   private async startChild(activation: Activation, node: WorkflowNode) {
     const config = nodeConfig(node, 'workflow');
-    const existing = this.run.children.find((c) => c.activationId === activation.id);
-    if (existing) return this.wait(activation, 'child', `Waiting for ${existing.title}`);
-    const definition = await this.host.definition(config.workflowId);
-    if (!definition) return this.fail(activation, 'That workflow no longer exists.');
-    const inputs: Record<string, string> = {};
-    for (const [name, value] of Object.entries(config.inputs))
-      inputs[name] = this.render(value, activation);
-    const id = crypto.randomUUID();
-    const child = staticRun(
-      config.workflowId,
-      definition.body,
-      definition.revision,
-      inputs,
-      {
-        preferred: this.host.self().environmentId,
-        elsewhere: this.run.driver.elsewhere,
-      },
-      { kind: 'workflow', runId: this.id },
-      this.now,
-    );
+    // A run it started that still goes on; a retry after one ended starts another.
+    const earlier = this.run.children.filter((c) => c.activationId === activation.id);
+    const going = earlier.find((c) => c.status === 'running' || c.status === 'paused');
+    if (going) return this.wait(activation, 'child', `Waiting for ${going.title}`);
+    // It runs where this run does, and may continue where this one may.
+    const driver = {
+      preferred: this.host.self().environmentId,
+      elsewhere: this.run.driver.elsewhere,
+      ...(this.run.driver.continueOn ? { continueOn: [...this.run.driver.continueOn] } : {}),
+    };
+    const actor: Actor = { kind: 'workflow', runId: this.id };
+    let child: WorkflowRun;
+    if (config.kind === 'dynamic') {
+      const goal = this.render(config.goal, activation).trim();
+      if (!goal) return this.fail(activation, 'Its goal is empty.');
+      child = newMission({
+        title: this.render(config.title, activation),
+        text: goal,
+        ...(config.location ? { location: config.location } : {}),
+        orchestrator: {
+          provider: config.provider,
+          connectionId: config.connectionId,
+          model: config.model,
+          reasoning: config.reasoning,
+        },
+        driver,
+        actor,
+        now: this.now,
+      });
+    } else {
+      const definition = await this.host.definition(config.workflowId);
+      if (!definition) return this.fail(activation, 'That workflow no longer exists.');
+      const inputs: Record<string, string> = {};
+      for (const [name, value] of Object.entries(config.inputs))
+        inputs[name] = this.render(value, activation);
+      child = staticRun(
+        config.workflowId,
+        definition.body,
+        definition.revision,
+        inputs,
+        driver,
+        actor,
+        this.now,
+      );
+    }
+    const id =
+      activation.childRunId && !earlier.some((c) => c.runId === activation.childRunId)
+        ? activation.childRunId
+        : crypto.randomUUID();
     child.parent = { runId: this.id, activationId: activation.id };
-    await this.host.createRun(id, child);
-    this.run.children.push({
+    const entry = {
       runId: id,
       revision: 1,
       title: child.title,
       activationId: activation.id,
       wait: config.wait,
-      status: 'running',
+      status: 'running' as const,
+    };
+    this.run.children.push(entry);
+    this.update(activation, { childRunId: id });
+    // The child's id is saved before the child, so a driver that stops in between reuses it.
+    await this.flush();
+    try {
+      await this.host.createRun(id, child);
+    } catch (error) {
+      if (!/exists already/.test(String(error))) {
+        this.run.children = this.run.children.filter((c) => c !== entry);
+        this.change();
+        throw error;
+      }
+    }
+    this.event('workflow', `Started ${child.title}`, {
+      nodeId: node.id,
+      activationId: activation.id,
+      runId: id,
     });
-    this.event('step', `Started ${child.title}`, { nodeId: node.id, activationId: activation.id });
-    if (!config.wait) return this.finish(activation, { text: id });
+    if (!config.wait) return this.finish(activation, { text: id, json: { runId: id } });
     this.wait(activation, 'child', `Waiting for ${child.title}`);
   }
 
@@ -1326,6 +1414,8 @@ export class RunDriver {
     const source = this.latest(node.id, activation.scope);
     if (!source) return undefined;
     if (rest[0] === 'chat') return source.conversationId;
+    // The run a Run workflow step started.
+    if (rest[0] === 'run') return source.childRunId;
     return this.field(source.output, rest);
   }
   private field(output: StepOutput | undefined, rest: string[]): unknown {
@@ -1344,20 +1434,40 @@ export class RunDriver {
     const waiting = run.activations.filter((a) => a.status === 'waiting' && a.waitFor !== 'merge');
     const running = run.activations.filter((a) => a.status === 'running' && !a.loop);
     const question = waiting.find((a) => a.waitFor === 'question');
+    const asking = run.agents.some((a) => a.asking);
     const detail = question
       ? (question.wait ?? 'Waiting for your answer')
-      : waiting.length && !running.length
-        ? `${this.label(waiting[0])}: ${waiting[0].wait ?? 'waiting'}`
-        : running.length
-          ? running.length === 1
-            ? `${this.label(running[0])} running`
-            : `${running.length} steps running`
-          : '';
+      : asking
+        ? 'Waiting for your answer'
+        : waiting.length && !running.length
+          ? `${this.label(waiting[0])}: ${waiting[0].wait ?? 'waiting'}`
+          : running.length
+            ? running.length === 1
+              ? `${this.label(running[0])} running`
+              : `${running.length} steps running`
+            : '';
     if (detail !== run.detail) {
       run.detail = detail;
       this.change();
     }
   }
+}
+
+/** The questions and forms a running reply waits for you to answer, in a line each. */
+export function openRequests(reply: Message): { key: string; text: string }[] {
+  return [
+    ...(reply.questions ?? [])
+      .filter((q) => q.status === 'pending')
+      .map((q) => ({
+        key: `q:${q.id}`,
+        text: q.planApproval
+          ? 'A plan to approve'
+          : markdownText(q.questions[0]?.question) || 'A question',
+      })),
+    ...(reply.elicitations ?? [])
+      .filter((e) => e.status === 'pending')
+      .map((e) => ({ key: `e:${e.id}`, text: 'A form to fill in' })),
+  ];
 }
 
 /** The scope of a loop's item. */
@@ -1407,6 +1517,78 @@ export function chatText(
     .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}:\n${replyText(m)}`)
     .join('\n\n');
 }
+
+/**
+ * A new dynamic workflow: an orchestrator pursues `text`. One started from a chat takes that chat
+ * as its first orchestrator session, whose first message is the goal as you wrote it.
+ */
+export function newMission({
+  title,
+  text,
+  location,
+  orchestrator,
+  driver,
+  actor,
+  now,
+  chat,
+}: {
+  title: string;
+  text: string;
+  location?: ChatLocation;
+  orchestrator: AgentChoice;
+  driver: WorkflowRun['driver'];
+  actor: Actor;
+  now: number;
+  chat?: { conversationId: string; environmentId: string; connectionId?: string };
+}): WorkflowRun {
+  const at = iso(now);
+  return readRun({
+    mode: 'dynamic',
+    title: title.trim() || firstWords(text),
+    status: 'running',
+    createdAt: at,
+    updatedAt: at,
+    startedAt: at,
+    createdBy: actor,
+    driver,
+    mission: { text, ...(location ? { location } : {}), orchestrator },
+    ...(chat
+      ? {
+          sessions: [
+            {
+              conversationId: chat.conversationId,
+              environmentId: chat.environmentId,
+              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
+              startedAt: at,
+              reason: 'start',
+              turns: 1,
+              failures: 0,
+            },
+          ],
+          agents: [
+            {
+              conversationId: chat.conversationId,
+              revision: 1,
+              role: 'orchestrator',
+              title: 'Orchestrator 1',
+              environmentId: chat.environmentId,
+              ...(chat.connectionId ? { connectionId: chat.connectionId } : {}),
+              provider: orchestrator.provider,
+              model: orchestrator.model,
+              reasoning: orchestrator.reasoning,
+              ...(location ? { location } : {}),
+              status: 'running',
+              startedAt: at,
+            },
+          ],
+        }
+      : {}),
+  })!;
+}
+const firstWords = (text: string) => {
+  const line = text.trim().split(/\r?\n/)[0] ?? '';
+  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || 'Dynamic workflow';
+};
 
 /** A new run of a static workflow, starting at its Start step. */
 export function staticRun(

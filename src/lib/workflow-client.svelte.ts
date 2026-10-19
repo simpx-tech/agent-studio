@@ -138,6 +138,8 @@ export class WorkflowClient {
   private drivers = new Map<string, { driver: RunDriver; renewedAt: number; busy: boolean }>();
   private known = new Map<string, { revision: number; run: WorkflowRun }>();
   private watched = new Map<string, number>();
+  /** The history entries of each run driven here that its view has read. */
+  private read = new Map<string, number>();
   private timers: ReturnType<typeof setInterval>[] = [];
   private stops: (() => void)[] = [];
   private refreshing: Promise<void> | undefined;
@@ -151,23 +153,56 @@ export class WorkflowClient {
     this.firstPass = new Promise((resolve) => (this.settleFirst = resolve));
   }
 
-  /** Chats the chat lists leave out: every run's own, unless a step lists them. */
+  /** Chats the chat lists leave out: workflows' assistants and every chat a run started. */
   get chats(): Set<string> {
     const chats = new Set(this.ownChats);
     for (const summary of this.summaries.values())
       for (const id of summary.conversations) chats.add(id);
     return chats;
   }
+  /**
+   * Chats that belong to a run: they raise no alerts of their own, since the run alerts for
+   * what matters (docs/WORKFLOWS.md).
+   */
+  get isolated(): Set<string> {
+    const chats = new Set(this.ownChats);
+    for (const summary of this.summaries.values())
+      if (summary.kind === 'run') for (const id of summary.conversations) chats.add(id);
+    return chats;
+  }
   /** Keeps a chat a run is starting out of the chat lists before its run is written. */
   own(conversationId: string) {
     if (!this.ownChats.includes(conversationId)) this.ownChats = [...this.ownChats, conversationId];
   }
-  /** The run a chat belongs to, for the banner above it. */
+  /** The run a chat belongs to, or writes to, for the banner above it. */
   runOf(conversationId: string): WorkflowSummary | undefined {
     for (const summary of this.summaries.values())
-      if (summary.conversations.includes(conversationId) || summary.listed.includes(conversationId))
+      if (
+        summary.kind === 'run' &&
+        (summary.conversations.includes(conversationId) || summary.listed.includes(conversationId))
+      )
         return summary;
     return undefined;
+  }
+  /**
+   * Whether a chat is the workflow's to drive: every chat a run started, read but never written
+   * in, except the chat you talk to a dynamic workflow you started in, its orchestrator's.
+   */
+  readOnly(conversationId: string): boolean {
+    const yours = (mode?: string, parent?: unknown, chat?: string) =>
+      mode === 'dynamic' && !parent && chat === conversationId;
+    for (const summary of this.summaries.values())
+      if (summary.kind === 'run' && summary.conversations.includes(conversationId))
+        return !yours(summary.mode, summary.parent, summary.chat);
+    if (!this.ownChats.includes(conversationId)) return false;
+    // A chat a run driven here started a moment ago, before the store lists it.
+    for (const { driver } of this.drivers.values()) {
+      const run = driver.run;
+      if (!run.agents.some((a) => a.conversationId === conversationId && !a.external)) continue;
+      const session = run.sessions.filter((s) => !s.endedAt).at(-1) ?? run.sessions.at(-1);
+      return !yours(run.mode, run.parent, session?.conversationId);
+    }
+    return false;
   }
   get now() {
     return Date.now() + this.offset;
@@ -350,9 +385,14 @@ export class WorkflowClient {
     }
     if (backend !== this.backend) return;
     for (const doc of read.docs) {
+      // Reads may overlap: each entry is taken once, and a copy a driver here published since
+      // is not replaced by an older one.
       const open = this.docs.get(doc.id);
-      const events = [...(open?.events ?? []), ...(read.events[doc.id] ?? [])];
-      this.docs.set(doc.id, { doc, events, seq: doc.seq });
+      const known = open?.seq ?? 0;
+      const fresh = (read.events[doc.id] ?? []).filter((event) => event.seq > known);
+      const events = [...(open?.events ?? []), ...fresh];
+      const kept = open && open.doc.revision > doc.revision ? open.doc : doc;
+      this.docs.set(doc.id, { doc: kept, events, seq: Math.max(known, doc.seq) });
     }
   }
   /** A document's current copy: the driver's own for a run this page drives. */
@@ -451,8 +491,8 @@ export class WorkflowClient {
     return id;
   }
   /**
-   * Starts a mission. One started from a chat is driven here at once, so the tools of the reply
-   * about to start in that chat already answer.
+   * Starts a dynamic workflow. One started from a chat is driven here at once, so the tools of
+   * the reply about to start in that chat already answer.
    */
   async startMission(spec: Omit<Parameters<typeof newMission>[0], 'now'>) {
     const id = crypto.randomUUID();
@@ -504,9 +544,13 @@ export class WorkflowClient {
     }
     throw new Error('The workflow kept changing. Try again.');
   }
-  /** The workflow or mission whose chat this is: an assistant, or a mission's orchestrator. */
+  /**
+   * The workflow whose chat this is: a static workflow's assistant, or the orchestrator of a
+   * dynamic workflow you started.
+   */
   workflowOf(conversationId: string): WorkflowSummary | undefined {
-    for (const summary of this.summaries.values()) if (summary.chat === conversationId) return summary;
+    for (const summary of this.summaries.values())
+      if (summary.chat === conversationId && !summary.parent) return summary;
     return undefined;
   }
   /** Changes a run as the user asks: through its driver when this page drives it. */
@@ -617,12 +661,18 @@ export class WorkflowClient {
       updatedAt: driver.run.updatedAt,
       body: structuredClone(driver.run) as unknown as Record<string, unknown>,
     };
-    if (this.watched.has(driver.id) || open)
+    if (this.watched.has(driver.id) || open) {
       this.docs.set(driver.id, { doc, events: open?.events ?? [], seq: open?.seq ?? 0 });
+      // The history it wrote since, read back for the view showing its run.
+      if (this.read.get(driver.id) !== driver.written) {
+        this.read.set(driver.id, driver.written);
+        void this.load([driver.id]);
+      }
+    }
     const own = new Set(this.ownChats);
     let added = false;
     for (const agent of driver.run.agents)
-      if (!agent.listed && !own.has(agent.conversationId)) {
+      if (!agent.external && !own.has(agent.conversationId)) {
         own.add(agent.conversationId);
         added = true;
       }
@@ -792,7 +842,7 @@ export class WorkflowClient {
     const read = await this.backend.read(ids, Object.fromEntries(ids.map((id) => [id, 0])));
     return { docs: read.docs.map(({ seq, ...doc }) => doc), events: read.events };
   }
-  /** The mission a chat orchestrates now, which its replies name for their tools. */
+  /** The dynamic workflow a chat orchestrates now, which its replies name for their tools. */
   missionOf(conversationId: string): { runId: string; role: 'orchestrator' } | undefined {
     for (const [id, { driver }] of this.drivers)
       if (driver.run.sessions.some((s) => !s.endedAt && s.conversationId === conversationId))
@@ -995,7 +1045,7 @@ export class WorkflowClient {
         });
       } else if ((missionTools as readonly string[]).includes(call.tool)) {
         let entry = call.mission ? this.drivers.get(call.mission.runId) : undefined;
-        // A mission started from this chat a moment ago may still be being claimed here.
+        // A dynamic workflow started from this chat a moment ago may still be being claimed here.
         for (let tries = 0; !entry && call.mission && tries < 20; tries++) {
           const known = this.summaries.get(call.mission.runId);
           if (known && (!runActive(known.status) || known.preferred !== this.self())) break;
@@ -1007,14 +1057,14 @@ export class WorkflowClient {
           const summary = call.mission ? this.summaries.get(call.mission.runId) : undefined;
           throw new Error(
             summary && !runActive(summary.status)
-              ? `This mission has ended (${summary.status}).`
-              : 'This mission continues on another computer; this session no longer orchestrates it.',
+              ? `This dynamic workflow has ended (${summary.status}).`
+              : 'This dynamic workflow continues on another computer; this session no longer orchestrates it.',
           );
         }
         const session = entry.driver.run.sessions.find(
           (s) => !s.endedAt && s.conversationId === call.conversationId,
         );
-        if (!session) throw new Error('This session no longer orchestrates the mission.');
+        if (!session) throw new Error('This session no longer orchestrates this dynamic workflow.');
         text = await missionCall(entry.driver, call.tool as MissionTool, call.input);
         await entry.driver.flush();
         this.publish(entry.driver);

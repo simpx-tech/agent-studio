@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { GATHER_MS, missionCall, newMission, tickMission } from './workflow-mission';
 import { RunDriver } from './workflow-engine';
 import { readRun } from './workflow-model';
+import { dynamicTimeline, missionCards } from './workflow-view';
 import { testHost } from './workflow-test-host';
 
 async function mission(t = testHost()) {
@@ -19,7 +20,7 @@ async function mission(t = testHost()) {
   return { t, driver, tick };
 }
 
-describe('missions', () => {
+describe('dynamic workflows', () => {
   it('briefs an orchestrator session on the driving computer', async () => {
     const { t, driver, tick } = await mission();
     await tick();
@@ -27,17 +28,17 @@ describe('missions', () => {
     const spec = t.started[0];
     expect(spec.mission).toEqual({ runId: driver.id, role: 'orchestrator' });
     expect(spec.location?.path).toBe('C:\\game');
-    expect(spec.settings.instructions).toMatch(/orchestrator of an Agent Studio mission/);
-    expect(spec.text).toContain('# Mission: Game assets');
+    expect(spec.settings.instructions).toMatch(/orchestrator of an Agent Studio dynamic workflow/);
+    expect(spec.text).toContain('# Goal: Game assets');
     expect(spec.text).toContain('Make every asset of the game, reviewed.');
     expect(spec.text).toContain('"accounts"');
     expect(driver.run.sessions).toMatchObject([{ conversationId: spec.id, reason: 'start' }]);
     expect(driver.run.agents).toMatchObject([{ conversationId: spec.id, role: 'orchestrator' }]);
     // Its own chat stays out of the chat lists.
-    expect(driver.run.agents[0].listed).toBe(false);
+    expect(driver.run.agents[0].external).toBeUndefined();
   });
 
-  it('takes the chat a mission was started from as its first orchestrator session', async () => {
+  it('takes the chat a dynamic workflow was started from as its first orchestrator session', async () => {
     const t = testHost();
     const chat = crypto.randomUUID();
     t.conversations.set(chat, {
@@ -89,17 +90,17 @@ describe('missions', () => {
     await driver.tick(tickMission);
     expect(driver.run.sessions[0].failures).toBe(1);
     expect(t.sent.at(-1)).toMatchObject({ conversationId: chat });
-    expect(t.sent.at(-1)!.text).toMatch(/^\[Mission update\]/);
+    expect(t.sent.at(-1)!.text).toMatch(/^\[Workflow update\]/);
   });
 
-  it('spawns agents with the mission and its notes, and wakes the orchestrator with their replies', async () => {
+  it('spawns agents with the goal and its notes, and wakes the orchestrator with their replies', async () => {
     const { t, driver, tick } = await mission();
     await tick();
     const orchestrator = t.started[0].id;
-    await missionCall(driver, 'mission_note', { title: 'Style', text: 'Low poly, flat colors.' });
-    await missionCall(driver, 'mission_plan', { tasks: [{ id: 'sword', title: 'Sword model' }] });
+    await missionCall(driver, 'dynamic_note', { title: 'Style', text: 'Low poly, flat colors.' });
+    await missionCall(driver, 'dynamic_plan', { tasks: [{ id: 'sword', title: 'Sword model' }] });
     const spawned = JSON.parse(
-      await missionCall(driver, 'mission_spawn', {
+      await missionCall(driver, 'dynamic_spawn', {
         title: 'Sword',
         task: 'Model the sword.',
         taskId: 'sword',
@@ -108,7 +109,7 @@ describe('missions', () => {
     expect(spawned).toMatchObject({ status: 'running', computer: 'Desktop', folder: 'C:\\game' });
     const worker = t.started[1];
     expect(worker.id).toBe(spawned.agent);
-    expect(worker.text).toContain('## Mission');
+    expect(worker.text).toContain('## Goal');
     expect(worker.text).toContain('Low poly, flat colors.');
     expect(worker.text).toContain('Model the sword.');
     expect(driver.run.tasks[0].status).toBe('running');
@@ -125,19 +126,50 @@ describe('missions', () => {
     expect(t.sent[0].conversationId).toBe(orchestrator);
     // One line an event, then the agents' replies.
     const [header, event, blank] = t.sent[0].text.split('\n');
-    expect(header).toBe('[Mission update]');
+    expect(header).toBe('[Workflow update]');
     expect(event).toMatch(/^- \S+ Agent "Sword" \([0-9a-f-]{36}\) finished\.$/);
     expect(blank).toBe('');
     expect(t.sent[0].text).toContain('Reply of "Sword"');
     expect(t.sent[0].text).toContain('The sword is in C:\\game\\sword.glb.');
     expect(driver.run.inbox).toEqual([]);
     expect(t.released).toContain(worker.id);
+    // Its history shows the agent's reply on the task it worked on.
+    await driver.flush();
+    const saved = await t.store.read([driver.id], { [driver.id]: 0 });
+    const finished = dynamicTimeline(driver.run, saved.events[driver.id]).find(
+      (e) => e.title === 'Sword finished',
+    );
+    expect(finished).toMatchObject({ card: 'task:sword', status: 'done', chat: worker.id });
+    expect(finished?.messageId).toBe(t.conversations.get(worker.id)!.messages.at(-1)!.id);
+  });
+
+  it('runs other workflows, static by id or dynamic with a goal, and hears how they end', async () => {
+    const { t, driver, tick } = await mission();
+    await tick();
+    const started = await missionCall(driver, 'dynamic_run_workflow', {
+      goal: 'Make the sound effects.',
+      title: 'Sounds',
+    });
+    const [[childId, child]] = [...t.runs];
+    expect(started).toContain(childId);
+    expect(child).toMatchObject({ mode: 'dynamic', title: 'Sounds', parent: { runId: driver.id } });
+    expect(child.mission).toMatchObject({
+      text: 'Make the sound effects.',
+      location: { path: 'C:\\game' },
+      orchestrator: { provider: 'claude', reasoning: 'high' },
+    });
+    await expect(missionCall(driver, 'dynamic_run_workflow', {})).rejects.toThrow(
+      /id of a saved workflow, or a goal/,
+    );
+    t.runs.set(childId, { ...child, status: 'completed', output: 'Twelve sounds.' });
+    await tick();
+    expect(driver.run.inbox.map((i) => i.text).join('\n')).toContain('Twelve sounds.');
   });
 
   it('asks without blocking and hears the answer', async () => {
     const { t, driver, tick } = await mission();
     await tick();
-    const reply = await missionCall(driver, 'mission_ask', {
+    const reply = await missionCall(driver, 'dynamic_ask', {
       questions: [{ id: 'style', question: 'Which art style?', options: [{ label: 'Flat' }] }],
     });
     expect(reply).toMatch(/^Asked/);
@@ -199,11 +231,11 @@ describe('missions', () => {
     expect(t.sent[0].text).toContain('interrupted');
   });
 
-  it('starts a new session when another computer takes the mission over', async () => {
+  it('starts a new session when another computer takes the workflow over', async () => {
     const pc = testHost();
     const first = await mission(pc);
     await first.tick();
-    await missionCall(first.driver, 'mission_plan', { tasks: [{ id: 'a', title: 'Assets list' }] });
+    await missionCall(first.driver, 'dynamic_plan', { tasks: [{ id: 'a', title: 'Assets list' }] });
     await first.driver.flush();
     // The VPS reads the run from the store and drives it from its own computer.
     const vps = testHost({ environmentId: '33333333-3333-4333-8333-333333333333' });
@@ -226,20 +258,20 @@ describe('missions', () => {
       ['Orchestrator 1', 'done'],
       ['Orchestrator 2', 'running'],
     ]);
-    expect(vps.started[0].text).toContain('This is session 2 of this mission');
+    expect(vps.started[0].text).toContain('This is session 2 of this dynamic workflow');
     expect(vps.started[0].text).toContain('Assets list');
     // The project folder is on the other computer, so the new session works in its own folder.
     expect(vps.started[0].location?.path).toBe('');
   });
 
-  it('completes the mission and stops what still runs', async () => {
+  it('completes the workflow and stops what still runs', async () => {
     const { t, driver, tick } = await mission();
     await tick();
-    await missionCall(driver, 'mission_spawn', { title: 'Extra', task: 'Something.' });
-    const text = await missionCall(driver, 'mission_complete', {
+    await missionCall(driver, 'dynamic_spawn', { title: 'Extra', task: 'Something.' });
+    const text = await missionCall(driver, 'dynamic_complete', {
       summary: 'All assets are in C:\\game.',
     });
-    expect(text).toBe('The mission is complete.');
+    expect(text).toBe('The workflow is complete.');
     expect(driver.run.status).toBe('completed');
     expect(driver.run.output).toBe('All assets are in C:\\game.');
     expect(driver.run.agents.find((a) => a.title === 'Extra')?.status).toBe('stopped');
@@ -250,12 +282,34 @@ describe('missions', () => {
     expect(driver.run.sessions.every((s) => !!s.endedAt)).toBe(true);
   });
 
+  it('shows skipped tasks as settled and tasks never begun as not reached', async () => {
+    const { driver, tick } = await mission();
+    await tick();
+    await missionCall(driver, 'dynamic_plan', {
+      tasks: [
+        { id: 'fix', title: 'Fix review findings', status: 'skipped' },
+        { id: 'later', title: 'Later' },
+      ],
+    });
+    await missionCall(driver, 'dynamic_complete', { summary: 'Done.' });
+    const cards = missionCards(driver.run, () => undefined, {
+      computer: () => 'Desktop',
+      account: () => '',
+    }).cards;
+    expect(cards.find((c) => c.id === 'task:fix')?.data).toMatchObject({
+      status: 'skipped',
+      statusText: 'Skipped',
+    });
+    expect(cards.find((c) => c.id === 'task:fix')?.data.unreached).toBeUndefined();
+    expect(cards.find((c) => c.id === 'task:later')?.data.unreached).toBe(true);
+  });
+
   it('refuses malformed calls with what is wrong', async () => {
     const { driver, tick } = await mission();
     await tick();
-    await expect(missionCall(driver, 'mission_spawn', { title: 'x' })).rejects.toThrow(/task/);
+    await expect(missionCall(driver, 'dynamic_spawn', { title: 'x' })).rejects.toThrow(/task/);
     await expect(
-      missionCall(driver, 'mission_spawn', { title: 'x', task: 'y', computer: 'Laptop' }),
+      missionCall(driver, 'dynamic_spawn', { title: 'x', task: 'y', computer: 'Laptop' }),
     ).rejects.toThrow(/No computer is called Laptop/);
   });
 });

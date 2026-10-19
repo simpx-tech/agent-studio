@@ -3,10 +3,12 @@ import { staticRun, type RunDriver } from './workflow-engine';
 import {
   newNode,
   readRun,
+  summarize,
   type NodeType,
   type WorkflowDefinition,
   type WorkflowNode,
 } from './workflow-model';
+import { staticTimeline } from './workflow-view';
 import { testHost } from './workflow-test-host';
 
 /** A workflow from steps given as [key, type, config] and connections as [from, to, port]. */
@@ -83,7 +85,8 @@ describe('static workflow runs', () => {
     await driver.tick();
     expect(t.started).toHaveLength(1);
     expect(t.started[0].text).toBe('Research swords.');
-    expect(t.started[0].listed).toBe(false);
+    // Its chat belongs to the run.
+    expect(driver.run.agents[0].external).toBeUndefined();
     expect(driver.run.agents.map((a) => a.conversationId)).toEqual([t.started[0].id]);
     expect(driver.run.detail).toBe('research running');
     t.answer(t.started[0].id, 'Swords are sharp.');
@@ -138,6 +141,43 @@ describe('static workflow runs', () => {
     expect(driver.run.status).toBe('completed');
     expect(driver.run.output).toBe('v2');
     expect(t.started).toHaveLength(2);
+  });
+
+  it('records each step as it ran, in order, a return to an earlier step included', async () => {
+    const { t, driver } = await start(
+      workflow(
+        [
+          ['start', 'start'],
+          ['draft', 'agent', { prompt: 'Draft it.' }],
+          ['check', 'condition', { left: '{{previous.output}}', op: 'contains', right: 'good' }],
+          ['fix', 'message', { target: 'step', step: 'draft', text: 'Better.' }],
+          ['end', 'end', { output: '{{draft.output}}' }],
+        ],
+        [
+          ['start', 'draft'],
+          ['draft', 'check'],
+          ['check', 'end', 'true'],
+          ['check', 'fix', 'false'],
+          ['fix', 'check'],
+        ],
+      ),
+    );
+    await driver.tick();
+    t.answer(t.started[0].id, 'meh');
+    await driver.tick();
+    t.answer(t.started[0].id, 'good now');
+    await driver.tick();
+    expect(driver.run.status).toBe('completed');
+    const history = staticTimeline(driver.run, []);
+    expect(history.map((e) => [e.title, e.again ?? 0, e.detail])).toEqual([
+      ['start', 0, ''],
+      ['draft', 0, ''],
+      ['check', 0, 'False'],
+      ['fix', 0, ''],
+      ['check', 1, 'True'],
+      ['end', 0, ''],
+    ]);
+    expect(history[1]).toMatchObject({ card: 'draft', chat: t.started[0].id, status: 'done' });
   });
 
   it('loops over items one after another with each item in its own scope', async () => {
@@ -313,6 +353,129 @@ describe('static workflow runs', () => {
     });
     await driver.tick();
     expect(driver.run.output).toBe('Style: Flat');
+  });
+
+  it('alerts once for what an agent asks in its chat, and shows it until answered', async () => {
+    const { t, driver } = await start(
+      workflow(
+        [
+          ['start', 'start'],
+          ['work', 'agent', { prompt: 'Work.' }],
+        ],
+        [['start', 'work']],
+      ),
+    );
+    await driver.tick();
+    const reply = t.conversations.get(t.started[0].id)!.messages.at(-1)!;
+    const request = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending' as const,
+      questions: [
+        { id: 'color', header: '', question: 'Which color?', options: [], multiSelect: false },
+      ],
+    };
+    reply.questions = [request];
+    await driver.tick();
+    await driver.tick();
+    expect(driver.run.alerts.filter((a) => a.kind === 'question').map((a) => a.text)).toEqual([
+      'work: Which color?',
+    ]);
+    expect(driver.run.agents[0].asking).toBe('Which color?');
+    expect(driver.run.detail).toBe('Waiting for your answer');
+    const summary = summarize({
+      id: driver.id,
+      kind: 'run',
+      revision: 1,
+      updatedAt: 'now',
+      body: driver.run as never,
+    });
+    expect(summary.questions).toBe(1);
+    reply.questions = [
+      {
+        ...request,
+        status: 'answered',
+        revision: 2,
+        response: { requestId: request.id, skipped: false, answers: [{ id: 'color', values: ['Red'] }] },
+      },
+    ];
+    await driver.tick();
+    expect(driver.run.agents[0].asking).toBeUndefined();
+    expect(driver.run.detail).toBe('work running');
+    expect(driver.run.alerts.filter((a) => a.kind === 'question')).toHaveLength(1);
+  });
+
+  it('runs a dynamic workflow from a Run workflow step and continues with its result', async () => {
+    const { t, driver } = await start(
+      workflow(
+        [
+          ['start', 'start', { inputs: [{ name: 'topic' }] }],
+          ['research', 'workflow', { kind: 'dynamic', goal: 'Research {{input.topic}}.' }],
+          ['end', 'end', { output: '{{research.json.verdict}} from {{research.run}}' }],
+        ],
+        [
+          ['start', 'research'],
+          ['research', 'end'],
+        ],
+      ),
+      { topic: 'swords' },
+    );
+    await driver.tick();
+    const [[childId, child]] = [...t.runs];
+    expect(child).toMatchObject({
+      mode: 'dynamic',
+      title: 'Research swords.',
+      parent: { runId: driver.id, activationId: driver.run.activations[1].id },
+    });
+    expect(child.mission?.text).toBe('Research swords.');
+    expect(driver.run.activations[1]).toMatchObject({
+      status: 'waiting',
+      waitFor: 'child',
+      childRunId: childId,
+    });
+    t.runs.set(childId, { ...child, status: 'completed', output: '{"verdict": "Sharp"}' });
+    await driver.tick();
+    expect(driver.run.status).toBe('completed');
+    expect(driver.run.output).toBe(`Sharp from ${childId}`);
+  });
+
+  it('starts another run when a Run workflow step whose run failed is retried', async () => {
+    const definitionId = crypto.randomUUID();
+    const { t, driver } = await start(
+      workflow(
+        [
+          ['start', 'start'],
+          ['call', 'workflow', { workflowId: definitionId }],
+        ],
+        [['start', 'call']],
+      ),
+    );
+    t.definitions.set(definitionId, {
+      body: workflow(
+        [
+          ['start', 'start'],
+          ['end', 'end', { output: 'Inner' }],
+        ],
+        [['start', 'end']],
+      ),
+      revision: 1,
+    });
+    await driver.tick();
+    const first = driver.run.activations[1].childRunId!;
+    t.runs.set(first, { ...t.runs.get(first)!, status: 'failed', detail: 'Broke' });
+    await driver.tick();
+    expect(driver.run.status).toBe('failed');
+    driver.run.commands.push({
+      id: crypto.randomUUID(),
+      kind: 'retry',
+      activationId: driver.run.activations[1].id,
+      at: 'now',
+    });
+    await driver.tick();
+    const second = driver.run.activations[1].childRunId!;
+    expect(second).not.toBe(first);
+    expect(t.runs.get(second)?.title).toBe('Test');
+    expect(driver.run.status).toBe('running');
   });
 
   it('waits for a usage reset instead of failing, and continues an interrupted reply', async () => {

@@ -151,6 +151,7 @@ describe('workflow store', () => {
     const a = id();
     const hidden = id();
     const listed = id();
+    const older = id();
     await store.put({
       id: a,
       kind: 'run',
@@ -159,7 +160,9 @@ describe('workflow store', () => {
         mode: 'dynamic',
         agents: [
           { conversationId: hidden, status: 'running' },
-          { conversationId: listed, listed: true, status: 'done' },
+          { conversationId: listed, external: true, status: 'done' },
+          // Runs before 2026-10-19 marked chats a step or orchestrator asked to list: the run's.
+          { conversationId: older, listed: true, status: 'done' },
         ],
         questions: [{ status: 'pending' }, { status: 'answered' }],
         driver: { preferred: id(), elsewhere: false },
@@ -171,11 +174,21 @@ describe('workflow store', () => {
       status: 'running',
       questions: 1,
       running: 1,
-      conversations: [hidden],
+      conversations: [hidden, older],
       listed: [listed],
       elsewhere: false,
     });
-    expect([...store.workflowChats()]).toEqual([hidden]);
+    expect([...store.workflowChats()]).toEqual([hidden, older]);
+    // A workflow's assistant is one of its chats, but no run's.
+    const assistant = id();
+    await store.put({
+      id: id(),
+      kind: 'definition',
+      expected: null,
+      body: { name: 'Writer', assistant: { conversationId: assistant } },
+    });
+    expect([...store.workflowChats()].sort()).toEqual([hidden, older, assistant].sort());
+    expect([...store.runChats()]).toEqual([hidden, older]);
   });
 
   it('runs one operation at a time', async () => {

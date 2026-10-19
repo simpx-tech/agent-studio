@@ -67,6 +67,7 @@
     RefreshCw,
     LoaderCircle,
     MessageCircleQuestionMark,
+    CirclePause,
     Activity,
     CircleStop,
     X,
@@ -183,7 +184,7 @@
   import { WorkflowClient } from '$lib/workflow-client.svelte';
   import type { ChatSpec, Readiness, WorkflowHost } from '$lib/workflow-engine';
   import type { WorkflowPickers } from '$lib/workflow-view';
-  import { newDefinition, type RunDriverChoice } from '$lib/workflow-model';
+  import { newDefinition, runActive, type RunDriverChoice } from '$lib/workflow-model';
   import { ORCHESTRATOR_INSTRUCTIONS, assistantInstructions } from '$lib/workflow-prompts';
   import {
     highestReasoning,
@@ -514,12 +515,7 @@
     drives: desktop(),
     alert: (summary, alert) => {
       // A run on screen needs no alert of its own.
-      const shown =
-        (view === 'workflow' &&
-          (openedWorkflow === summary.id || openedWorkflowRun === summary.id)) ||
-        (view === 'chat' && !!activeId && workflows.workflowOf(activeId)?.id === summary.id) ||
-        (view === 'chat' && panelRuns[panelKey] === summary.id);
-      if (shown && document.hasFocus()) return;
+      if (runShown(summary.id) && document.hasFocus()) return;
       void notifyWorkflow(summary.id, alert);
     },
   });
@@ -1782,8 +1778,11 @@
         connectionId: observedReply.settings.connectionId,
       }),
   );
+  // A chat a workflow run started is the workflow's to drive: it is read here, never written in.
+  const readOnlyChat = $derived(!!active && workflows.readOnly(active.id));
   const canSend = $derived(
     loaded &&
+      !readOnlyChat &&
       !historyBusy &&
       !historyAction &&
       !imagesLoading &&
@@ -1814,6 +1813,7 @@
   );
   const canSteer = $derived(
     loaded &&
+      !readOnlyChat &&
       activeRunning &&
       steeringSupported &&
       !observedReply?.compact &&
@@ -1898,7 +1898,7 @@
   const screensLoading = $derived(Object.values(screenShelves).some((shelf) => shelf.loading));
   // A count shows once a computer answered, so an unread list never reads as none.
   const screensChecked = $derived(Object.values(screenShelves).some((shelf) => shelf.checkedAt));
-  // A workflow's chat is named by its workflow or mission.
+  // A workflow's chat is named by its workflow, static or dynamic.
   const viewTitle = $derived.by(
     () =>
       ({
@@ -1907,7 +1907,7 @@
           active?.title ??
           (currentScratch?.workflow && !currentScratch.workflow.id
             ? currentScratch.workflow.mode === 'mission'
-              ? 'New mission'
+              ? 'New dynamic workflow'
               : 'New workflow'
             : currentScratch?.workflow?.id
               ? 'Workflow'
@@ -2029,6 +2029,28 @@
 
   // ---- Workflows (docs/WORKFLOWS.md) -----------------------------------------------------------
   const activeWorkflow = $derived(active ? workflows.runOf(active.id) : undefined);
+  // Workflows that run now lead the Active list: each run you or a trigger started, without the
+  // runs another run started, which that run shows.
+  const listedRuns = $derived.by(() => {
+    const search = query.trim().toLowerCase();
+    return [...workflows.summaries.values()]
+      .filter(
+        (s) =>
+          s.kind === 'run' &&
+          runActive(s.status) &&
+          !s.parent &&
+          (!search || s.title.toLowerCase().includes(search)),
+      )
+      .sort((a, b) => (b.createdAt ?? b.updatedAt).localeCompare(a.createdAt ?? a.updatedAt));
+  });
+  /** Whether a run is on screen: its page, its chat, or the panel beside a chat. */
+  function runShown(id: string) {
+    return (
+      (view === 'workflow' && (openedWorkflow === id || openedWorkflowRun === id)) ||
+      (view === 'chat' && !!activeId && workflows.workflowOf(activeId)?.id === id) ||
+      (view === 'chat' && panelRuns[panelKey] === id)
+    );
+  }
   // The workflow whose chat this is: its assistant or a mission's orchestrator, or a workflow
   // chat about to become one.
   const chatWorkflow = $derived(
@@ -2073,7 +2095,8 @@
     const chat = target?.chat
       ? workspace.conversations.find((c) => c.id === target.chat)
       : undefined;
-    if (chat && (target?.kind === 'definition' || target?.mode === 'dynamic')) {
+    // A dynamic workflow another run started has no chat of yours: it opens as a page.
+    if (chat && (target?.kind === 'definition' || (target?.mode === 'dynamic' && !target.parent))) {
       workflowPanelChoice[chat.id] = 'shown';
       panelRuns[chat.id] = owner ? id : undefined;
       openConversation(chat);
@@ -2218,7 +2241,7 @@
       return sendWorkflowMessage(spec.id, spec.text);
     const now = new Date().toISOString();
     const location = spec.location ? insideDistribution(workspace.fleet, spec.location) : undefined;
-    if (!spec.listed) workflows.own(spec.id);
+    workflows.own(spec.id);
     workspace.conversations.unshift({
       id: spec.id,
       settings: { ...spec.settings },
@@ -2262,9 +2285,15 @@
       (installation
         ? { computerId: installation.computerId, environmentId: installation.id, path: '' }
         : undefined);
-    const candidates = locationConnections(workspace.fleet, at, provider).filter(
+    const usable = locationConnections(workspace.fleet, at, provider).filter(
       (c) => !exclude.includes(c.id) && canChooseConnection(c.id) && !needsSignIn(c.id),
     );
+    // With balancing on, the accounts Settings leaves out take part only when no other can.
+    const left = workspace.preferences.balanceAccounts
+      ? new Set(workspace.preferences.balanceExcluded)
+      : new Set<string>();
+    const kept = usable.filter((c) => !left.has(c.accountId));
+    const candidates = kept.length ? kept : usable;
     const ready = candidates.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     const pool = ready.length ? ready : candidates;
     if (!pool.length) return undefined;
@@ -2432,6 +2461,7 @@
         .map((s) => ({ id: s.id, name: s.title })),
     computerName: computerNameOf,
     accountName: accountNameOf,
+    balancing: !!workspace.preferences.balanceAccounts,
     here: installation?.id ?? '',
     drivers: workspace.fleet.environments
       .filter((e) => !e.discoveredOn && e.platform !== 'wsl')
@@ -2521,8 +2551,11 @@
   });
   onMount(() => {
     let disposed = false;
-    // A workflow's chats end without an alert of their own.
-    setQuietChats(() => workflows.chats);
+    // A workflow's chats end without an alert of their own, and its runs' chats raise none.
+    setQuietChats(
+      () => workflows.chats,
+      () => workflows.isolated,
+    );
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
     const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
@@ -5462,7 +5495,7 @@
     }
   }
   async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
-    if (activeSteering) return;
+    if (activeSteering || readOnlyChat) return;
     if (preparingCommand) return;
     if (queuedMessage?.mentions?.length && queuedMessage.mentionConnectionId !== selectedSettings.connectionId) {
       const restored = restoreToDraft([queuedMessage], prompt, attachedImages);
@@ -6520,6 +6553,52 @@
           aria-labelledby={`conversation-tab-${group.id}`}
           hidden={conversationScope !== group.id}
         >
+          {#if group.id === 'active' && listedRuns.length}<section
+              class="running-workflows"
+              aria-labelledby="running-workflows-heading"
+            >
+              <h2 id="running-workflows-heading" class="snoozed-heading">
+                <Workflow size={13} aria-hidden="true" />Workflows
+              </h2>
+              {#each listedRuns as s (s.id)}{@const started = Date.parse(
+                  s.createdAt ?? '',
+                )}{@const shown = runShown(s.id)}{@const state = s.questions
+                  ? 'Waiting for you'
+                  : s.status === 'paused'
+                    ? 'Paused'
+                    : s.detail || 'Running'}
+                <div class="conversation-row">
+                  <button
+                    class="conversation-item workflow-run-item"
+                    class:current={shown}
+                    aria-current={shown ? 'page' : undefined}
+                    title={`${s.title} · ${state}`}
+                    aria-label={`${s.title}, ${state.toLowerCase()}`}
+                    onclick={() => openWorkflow(s.id)}
+                    >{#if s.mode === 'dynamic'}<Target
+                        size={13}
+                        aria-hidden="true"
+                      />{:else}<Workflow size={13} aria-hidden="true" />{/if}<span>{s.title}</span
+                    >{#if s.questions}<MessageCircleQuestionMark
+                        size={14}
+                        class="conversation-waiting"
+                        aria-hidden="true"
+                      />{:else if s.status === 'paused'}<CirclePause
+                        size={14}
+                        class="conversation-paused"
+                        aria-hidden="true"
+                      />{:else if Number.isFinite(started)}<span
+                        class="conversation-running"
+                        aria-hidden="true">{toolElapsed(Math.max(0, clock.now - started))}</span
+                      >{:else}<LoaderCircle
+                        size={14}
+                        class="spinning conversation-running"
+                        aria-hidden="true"
+                      />{/if}</button
+                  >
+                </div>
+              {/each}
+            </section>{/if}
           {#if group.id === 'active' && listedSnoozes.length}<section
               class="snoozed-chats"
               aria-labelledby="snoozed-heading"
@@ -6768,7 +6847,9 @@
                   </div>
                 {/each}{/if}
             </div>
-          {:else}{#if group.id !== 'active' || !listedSnoozes.length}<p class="sidebar-empty">
+          {:else}{#if group.id !== 'active' || (!listedSnoozes.length && !listedRuns.length)}<p
+                class="sidebar-empty"
+              >
                 {query
                   ? `No matches in ${group.name.toLowerCase()}.`
                   : group.id === 'active'
@@ -6956,7 +7037,10 @@
                 onclick={() => (workflowPanelChoice[panelKey] = 'shown')}>Show graph</button
               >
             </div>
-          {:else if activeWorkflow && !chatWorkflow}<div class="workflow-banner" role="note">
+          {:else if activeWorkflow && !chatWorkflow && !readOnlyChat}<div
+              class="workflow-banner"
+              role="note"
+            >
               <Workflow size={14} aria-hidden="true" /><span
                 >Workflow · <strong>{activeWorkflow.title}</strong></span
               ><button class="text-button" onclick={() => openWorkflow(activeWorkflow.id)}
@@ -7093,6 +7177,7 @@
                   fallbackToFirst={false}
                   placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                   disabled={!loaded ||
+                    readOnlyChat ||
                     selectingLocation ||
                     (desktop() && !selectedLocation && !active) ||
                     (!!active && !switchableConnections.length)}
@@ -7115,6 +7200,7 @@
                   value={selectedSettings.model}
                   options={availableModels}
                   disabled={!loaded ||
+                    readOnlyChat ||
                     (desktop() && (locationPending || (!selectedLocation && !active)))}
                   onchange={chooseModel}
                 >
@@ -7136,6 +7222,7 @@
                   value={selectedSettings.reasoning}
                   options={reasoningOptions}
                   disabled={!loaded ||
+                    readOnlyChat ||
                     reasoningOptions.length < 2 ||
                     (desktop() && (locationPending || (!selectedLocation && !active)))}
                   onchange={(value) =>
@@ -7146,14 +7233,14 @@
               </div>
             </div>
             {#key activeId}<ToolbarActions>
-              {#if active && !active.archived}<button
+              {#if active && !active.archived && !readOnlyChat}<button
                   class="icon-button"
                   disabled={activeRunning}
                   onclick={() => archiveOpenChat()}
                   title="Move to history"
                   aria-label="Move to history"><Archive size={16} /></button
                 >{/if}
-              {#if active}{@const snoozed = !!snoozeOf(active)}<button
+              {#if active && !readOnlyChat}{@const snoozed = !!snoozeOf(active)}<button
                   class="icon-button snooze-toggle"
                   disabled={activeRunning}
                   aria-pressed={snoozed}
@@ -7161,7 +7248,7 @@
                   title={snoozed ? 'Cancel snooze' : 'Snooze until the app restarts'}
                   aria-label="Snooze"><AlarmClock size={16} /></button
                 >{/if}
-              {#if active}<button
+              {#if active && !readOnlyChat}<button
                   class="icon-button"
                   disabled={forking || imagesLoading || forkPoint(active) < 0}
                   onclick={() => active && void forkChat(active.id)}
@@ -7181,7 +7268,7 @@
               <button
                 class="icon-button"
                 onclick={() => (editorOpen = true)}
-                disabled={!loaded || activeRunning}
+                disabled={!loaded || activeRunning || readOnlyChat}
                 title="Chat instructions"
                 aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
               >
@@ -7229,22 +7316,24 @@
                     switchNotice={switchNotices.get(m.id)}
                     switchColor={connectionColor(accountSwitches.get(m.id))}
                     agent={active.settings}
-                    canRetry={i === active.messages.length - 1 &&
+                    canRetry={!readOnlyChat &&
+                      i === active.messages.length - 1 &&
                       (m.status === 'error' || m.status === 'cancelled') &&
                       !activeRunning}
                     retry={() => void send(true)}
                     retryDisabled={!canSend}
-                    switchAccount={i === active.messages.length - 1 &&
+                    switchAccount={!readOnlyChat &&
+                    i === active.messages.length - 1 &&
                     switchableConnections.length &&
                     !activeRunning
                       ? () => agentPicker?.showPicker()
                       : undefined}
-                    rewind={m.role === 'user' ? () => openRewind(m.id) : undefined}
-                    undoEdits={m.runId && m.fileChanges?.edits.length
+                    rewind={m.role === 'user' && !readOnlyChat ? () => openRewind(m.id) : undefined}
+                    undoEdits={!readOnlyChat && m.runId && m.fileChanges?.edits.length
                       ? () => openUndoFiles(m.runId)
                       : undefined}
                     historyDisabled={activeRunning || historyBusy || !!activeQueue.length}
-                    fork={m.role === 'assistant' && m.status !== 'running'
+                    fork={!readOnlyChat && m.role === 'assistant' && m.status !== 'running'
                       ? () => active && void forkChat(active.id, m.id)
                       : undefined}
                     forkDisabled={forking || imagesLoading}
@@ -7284,7 +7373,7 @@
                       ? currentScratch.workflow.id
                         ? 'What should change?'
                         : currentScratch.workflow.mode === 'mission'
-                          ? 'What’s the mission?'
+                          ? 'What’s the goal?'
                           : 'What should it do?'
                       : 'What’s on your mind?'}
                   </h1>
@@ -7303,7 +7392,7 @@
                         aria-checked={mode === 'workflow'}
                         tabindex={mode === 'workflow' ? 0 : -1}
                         onclick={() => setWorkflowMode('workflow')}
-                        ><Workflow size={15} aria-hidden="true" />Workflow</button
+                        ><Workflow size={15} aria-hidden="true" />Static</button
                       ><button
                         type="button"
                         role="radio"
@@ -7311,7 +7400,7 @@
                         aria-checked={mode === 'mission'}
                         tabindex={mode === 'mission' ? 0 : -1}
                         onclick={() => setWorkflowMode('mission')}
-                        ><Target size={15} aria-hidden="true" />Mission</button
+                        ><Target size={15} aria-hidden="true" />Dynamic</button
                       >
                     </div>{/if}
                 </div>{/if}
@@ -7319,7 +7408,19 @@
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
           </div>
           <div class="composer-area" bind:this={composerArea}>
-            {#if active?.rewind}<div class="setup-hint neutral" role="status">
+            {#if readOnlyChat}<div class="workflow-owned" role="note">
+                {#if activeWorkflow?.mode === 'dynamic'}<Target
+                    size={15}
+                    aria-hidden="true"
+                  />{:else}<Workflow size={15} aria-hidden="true" />{/if}<span
+                  >Part of <strong>{activeWorkflow?.title ?? 'a workflow'}</strong></span
+                >{#if activeWorkflow}<button
+                    class="text-button"
+                    onclick={() => activeWorkflow && openWorkflow(activeWorkflow.id)}
+                    >Open workflow<ArrowRight size={13} /></button
+                  >{/if}
+              </div>
+            {:else}{#if active?.rewind}<div class="setup-hint neutral" role="status">
                 <Rewind size={15} aria-hidden="true" /><span
                   >Conversation rewound; files unchanged.</span
                 ><button
@@ -7438,7 +7539,7 @@
                   ? `Message ${selectedAgent.name} after this reply…`
                   : currentScratch?.workflow && !currentScratch.workflow.id
                     ? currentScratch.workflow.mode === 'mission'
-                      ? 'Describe the mission…'
+                      ? 'Describe the goal…'
                       : 'Describe the workflow…'
                     : `Message ${selectedAgent.name}…`}
                 bind:value={prompt}
@@ -7595,7 +7696,7 @@
               preview={!desktop() && !paired}
               accountName={workspace.fleet.accounts.find(a => a.id === workspace.fleet.connections.find(c => c.id === selectedSettings.connectionId)?.accountId)?.name}
               accountUnavailable={!canQueryConnection(selectedSettings.connectionId, selectedSettings.provider)}
-            />
+            />{/if}
           </div>
         </section>
         {#if artifactView && panelChat}{@const chat = panelChat}{#key `${chat}:${artifactView.artifact.id}`}<ArtifactViewer
