@@ -332,7 +332,7 @@
   </div>
 {/snippet}
 
-<aside class="run-sheet" aria-label="Run">
+<aside id="workflow-side" class="run-sheet" aria-label="Run">
   {#if close}<header class="sheet-head">
       <h2>History</h2>
       <button class="icon-button" title="Close" aria-label="Close the history" onclick={close}
@@ -570,7 +570,7 @@
   .run-sheet {
     display: flex;
     flex-direction: column;
-    width: 400px;
+    width: var(--workflow-side-width, 400px);
     flex-shrink: 0;
     min-height: 0;
     border: 1px solid var(--border);

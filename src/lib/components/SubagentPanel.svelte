@@ -149,6 +149,15 @@
 </script>
 
 <svelte:window bind:innerWidth={viewportWidth} />
+<!-- Docked, the gap between the chat and the panel resizes it. -->
+{#if docked}<PanelResize
+    gutter={12}
+    availableWidth={workspaceWidth}
+    onresize={(width) => (panelWidth = width)}
+    storageKey="agent-studio.subagent-panel-width"
+    label="Resize sub-agent panel"
+    controls="subagent-panel"
+  />{/if}
 <dialog
   bind:this={dialog}
   id="subagent-panel"
@@ -169,13 +178,6 @@
     dismiss();
   }}
 >
-  {#if docked}<PanelResize
-      availableWidth={workspaceWidth}
-      onresize={(width) => (panelWidth = width)}
-      storageKey="agent-studio.subagent-panel-width"
-      label="Resize sub-agent panel"
-      controls="subagent-panel"
-    />{/if}
   <header>
     <span class="agent-mark" aria-hidden="true"><Bot size={18} /></span>
     <div class="heading">

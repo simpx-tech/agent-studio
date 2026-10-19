@@ -96,9 +96,9 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  // An ordinary chat is a card on the workspace.
+  // An ordinary chat's conversation is a card on the workspace.
   expect(
-    await page.locator('.chat-layout').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
+    await page.locator('.chat-body').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
   ).not.toBe('0px');
   // The sidebar's Workflows row is folded at first; unfolded, its list takes the chats' place.
   const row = page.getByRole('button', { name: /^Workflows/ });
@@ -257,6 +257,9 @@ test('a workflow is edited on its graph, beside its chat card, which resizes', a
   expect(
     await inspector.evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
+  // With the chat closed, the graph has the room for a step's settings beside it.
+  await card.getByRole('button', { name: 'Close the chat' }).click();
+  await expect(card).toBeHidden();
   // An agent can take the account of the workflow's own chat.
   await graph.locator('.workflow-card').filter({ hasText: 'Write' }).click();
   await graph.getByRole('combobox', { name: 'Account' }).click();
@@ -269,9 +272,41 @@ test('a workflow is edited on its graph, beside its chat card, which resizes', a
       return now.nodes.find((n: any) => n.key === 'write')?.config.connectionId;
     })
     .toBe('workflow');
-  // The chat card resizes from its right edge, by keys and by pointer.
-  const edge = card.getByRole('separator', { name: 'Resize chat' });
-  const before = (await card.boundingBox())!.width;
+  // The step's settings resize from the gap beside them, by keys and by pointer.
+  const inspectorBox = graph.locator('.workflow-inspector');
+  const sideGap = page.getByRole('separator', { name: 'Resize side panel' });
+  const [canvasBox, sideBox, settingsBox] = await Promise.all([
+    graph.locator('.workflow-canvas').boundingBox(),
+    sideGap.boundingBox(),
+    inspectorBox.boundingBox(),
+  ]);
+  expect(sideBox!.x).toBeGreaterThanOrEqual(canvasBox!.x + canvasBox!.width - 1);
+  expect(sideBox!.x + sideBox!.width).toBeLessThanOrEqual(settingsBox!.x + 1);
+  await sideGap.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect
+    .poll(async () => (await inspectorBox.boundingBox())!.width)
+    .toBeGreaterThan(settingsBox!.width + 5);
+  const side = (await sideGap.boundingBox())!;
+  await page.mouse.move(side.x + side.width / 2, side.y + 150);
+  await page.mouse.down();
+  await page.mouse.move(side.x - 50, side.y + 150, { steps: 5 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await inspectorBox.boundingBox())!.width)
+    .toBeGreaterThan(settingsBox!.width + 40);
+  // The chat card resizes from the gap between it and the graph, by keys and by pointer.
+  await graph.getByRole('button', { name: 'Chat', exact: true }).click();
+  await expect(card).toBeVisible();
+  const edge = page.getByRole('separator', { name: 'Resize chat' });
+  const [cardBox, edgeBox, mainBox] = await Promise.all([
+    card.boundingBox(),
+    edge.boundingBox(),
+    graph.boundingBox(),
+  ]);
+  expect(edgeBox!.x).toBeGreaterThanOrEqual(cardBox!.x + cardBox!.width - 1);
+  expect(edgeBox!.x + edgeBox!.width).toBeLessThanOrEqual(mainBox!.x + 1);
+  const before = cardBox!.width;
   await edge.focus();
   await page.keyboard.press('ArrowRight');
   await expect.poll(async () => (await card.boundingBox())!.width).toBeGreaterThan(before + 5);
@@ -467,9 +502,17 @@ test('the graph has right-click menus, and step settings colour the values they 
   await expect(stepMenu.getByRole('menuitem', { name: 'Delete' })).toBeDisabled();
   await page.keyboard.press('Escape');
   await expect(stepMenu).toHaveCount(0);
-  // A right-click on a connection removes it.
+  // A right-click on a connection removes it, once the graph stopped gliding to fit its view.
   await expect(graph.locator('.svelte-flow__edge')).toHaveCount(2);
-  await graph.locator('.svelte-flow__edge').first().click({ button: 'right', force: true });
+  const connection = graph.locator('.svelte-flow__edge').first();
+  await expect
+    .poll(async () => {
+      const first = JSON.stringify(await connection.boundingBox());
+      await page.waitForTimeout(150);
+      return first === JSON.stringify(await connection.boundingBox());
+    })
+    .toBe(true);
+  await connection.click({ button: 'right', force: true });
   await page
     .getByRole('menu', { name: 'Connection' })
     .getByRole('menuitem', { name: 'Delete connection' })

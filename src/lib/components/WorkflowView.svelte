@@ -29,6 +29,7 @@
   import ChoicePicker from './ChoicePicker.svelte';
   import WorkflowInspector from './WorkflowInspector.svelte';
   import WorkflowRunPanel from './WorkflowRunPanel.svelte';
+  import PanelResize from './PanelResize.svelte';
   import WorkflowStart from './WorkflowStart.svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
   import DriverPicker from './DriverPicker.svelte';
@@ -517,6 +518,23 @@
   // A run's history lies beside its graph only while open (requested 2026-10-19): from History in
   // the header, a card chosen on the graph, or something new the run waits on you for.
   let historyOpen = $state(false);
+  // The panel at the graph's right (a step's settings, the workflow's, a run's history) shares one
+  // width, which the gap beside it resizes while it lies beside the graph rather than over it
+  // (requested 2026-10-19).
+  let sideWidth = $state<number>();
+  let bodyWidth = $state(0);
+  const sideBeside = $derived(
+    kind === 'definition'
+      ? (!!selectedNode || settingsOpen) && !narrow
+      : historyOpen && !!runDoc && width > 560,
+  );
+  const sideDefault = $derived(
+    kind === 'definition'
+      ? Math.min(480, Math.max(360, Math.round(bodyWidth * 0.36)))
+      : narrow
+        ? Math.min(340, Math.round(bodyWidth * 0.48))
+        : 400,
+  );
   const waiting = $derived(kind === 'run' ? (summary?.questions ?? 0) : 0);
   let waitingSeen = 0;
   $effect(() => {
@@ -602,6 +620,18 @@
       </ChoicePicker>
     </div>{/if}
 {/snippet}
+
+{#snippet sideGap()}<PanelResize
+    gutter={10}
+    availableWidth={bodyWidth}
+    minWidth={300}
+    reserve={320}
+    defaultWidth={sideDefault}
+    onresize={(next) => (sideWidth = next)}
+    storageKey="agent-studio.workflow-side-width"
+    label="Resize side panel"
+    controls="workflow-side"
+  />{/snippet}
 
 {#if kind === 'definition' && run}
   <!-- A run of this workflow, in its place until Back. -->
@@ -763,7 +793,11 @@
     {#if error || client.error}<div class="error-banner" role="alert">
         <CircleAlert size={15} aria-hidden="true" />{error || client.error}
       </div>{/if}
-    <div class="workflow-body">
+    <div
+      class="workflow-body"
+      bind:clientWidth={bodyWidth}
+      style:--workflow-side-width={sideWidth ? `${sideWidth}px` : undefined}
+    >
       {#if kind === 'definition' && draft && editorGraph}
         <WorkflowCanvas
           label="Workflow steps"
@@ -832,6 +866,7 @@
             ><WandSparkles size={15} aria-hidden="true" />Arrange</button
           >
         </div>
+        {#if sideBeside}{@render sideGap()}{/if}
         {#if selectedNode}
           <WorkflowInspector
             node={selectedNode}
@@ -852,7 +887,7 @@
             close={() => (selected = undefined)}
           />
         {:else if settingsOpen}
-          <aside class="workflow-settings" aria-label="Workflow settings">
+          <aside id="workflow-side" class="workflow-settings" aria-label="Workflow settings">
             <header>
               <h2>Workflow</h2>
               <button
@@ -924,6 +959,7 @@
               target.kind === 'node' ? { ...target, at, screen } : { kind: 'pane', at, screen },
             )}
         />
+        {#if sideBeside}{@render sideGap()}{/if}
         {#if historyOpen}<WorkflowRunPanel
             run={runDoc}
             events={open?.events ?? []}
@@ -1324,12 +1360,12 @@
   .menu button:hover {
     background: var(--hover);
   }
+  /* The gap beside the panel at the graph's right is the handle that resizes it. */
   .workflow-body {
     position: relative;
     display: flex;
     flex: 1;
     min-height: 0;
-    gap: 10px;
   }
   .run-mark {
     display: inline-flex;
@@ -1364,7 +1400,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    width: 340px;
+    width: var(--workflow-side-width, 340px);
     flex-shrink: 0;
     padding: 14px;
     border: 1px solid var(--border);
@@ -1425,7 +1461,7 @@
   /* Narrow, a run's history keeps to a narrower column, since choosing a card on the graph shows
      its entries, and lies over the graph only where there is no room for both. */
   .narrow .workflow-body > :global(.run-sheet) {
-    width: min(340px, 48%);
+    width: var(--workflow-side-width, min(340px, 48%));
   }
   @container (max-width: 560px) {
     .workflow-body > :global(.run-sheet) {

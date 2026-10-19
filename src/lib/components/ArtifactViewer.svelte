@@ -103,6 +103,15 @@
 </script>
 
 <svelte:window bind:innerWidth={viewportWidth} />
+<!-- Docked, the gap between the chat and the panel resizes it. -->
+{#if docked}<PanelResize
+    gutter={12}
+    availableWidth={workspaceWidth}
+    onresize={(width) => (panelWidth = width)}
+    storageKey="agent-studio.artifact-panel-width"
+    label="Resize artifact panel"
+    controls="artifact-viewer"
+  />{/if}
 <dialog
   bind:this={dialog}
   id="artifact-viewer"
@@ -124,13 +133,6 @@
     dismiss();
   }}
 >
-  {#if docked}<PanelResize
-      availableWidth={workspaceWidth}
-      onresize={(width) => (panelWidth = width)}
-      storageKey="agent-studio.artifact-panel-width"
-      label="Resize artifact panel"
-      controls="artifact-viewer"
-    />{/if}
   <header>
     <div>
       <span class="eyebrow">Artifact</span>

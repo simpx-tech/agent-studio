@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  // The left divider of a docked right-side panel, or the right one of a left-side card such as a
-  // workflow's chat, which remembers its width on this device.
+  // The divider of a panel, which remembers its width on this device: the left edge of a panel on
+  // the right, or the right edge of one on the left, such as a workflow's chat. As a gutter it is
+  // the gap between the two panels itself, invisible but for its cursor (requested 2026-10-19).
   let {
     availableWidth,
     share: defaultShare,
@@ -11,6 +12,10 @@
     label,
     controls,
     side = 'left',
+    gutter,
+    minWidth = 360,
+    reserve = 420,
+    defaultWidth,
   }: {
     availableWidth: number;
     /**
@@ -25,10 +30,16 @@
     controls: string;
     /** The edge of the panel it lies on: the left of a panel on the right, or the right. */
     side?: 'left' | 'right';
+    /** The width of the gap it fills between the panel and what it sits beside, in pixels. */
+    gutter?: number;
+    minWidth?: number;
+    /** The room it always leaves for what the panel sits beside. */
+    reserve?: number;
+    /** The panel's width until the reader resizes it. */
+    defaultWidth?: number;
   } = $props();
   // Moving toward the panel's middle narrows it.
   const outward = $derived(side === 'left' ? -1 : 1);
-  const minWidth = 360;
   const proportional = $derived(defaultShare !== undefined);
   // The reader's width, or their share of the space when proportional.
   let preferred = $state<number>();
@@ -39,17 +50,19 @@
     width: number;
     previous?: number;
   }>();
-  const maxWidth = $derived(Math.max(minWidth, Math.floor(availableWidth - 420)));
+  // The room the panel and what it sits beside share, without the gap a gutter takes.
+  const room = $derived(Math.max(0, availableWidth - (gutter ?? 0)));
+  const maxWidth = $derived(Math.max(minWidth, Math.floor(room - reserve)));
   const wanted = $derived(
     proportional
-      ? Math.round((preferred ?? defaultShare!) * availableWidth)
-      : (preferred ?? Math.min(620, Math.round(availableWidth * 0.42))),
+      ? Math.round((preferred ?? defaultShare!) * room)
+      : (preferred ?? defaultWidth ?? Math.min(620, Math.round(room * 0.42))),
   );
   const width = $derived(Math.max(minWidth, Math.min(maxWidth, wanted)));
   /** Keeps a width the reader chose, as a share of the space when proportional. */
   function choose(next: number) {
     const clamped = Math.round(Math.max(minWidth, Math.min(maxWidth, next)));
-    preferred = proportional && availableWidth > 0 ? clamped / availableWidth : clamped;
+    preferred = proportional && room > 0 ? clamped / room : clamped;
   }
 
   $effect(() => onresize(width));
@@ -131,7 +144,9 @@
   bind:this={handle}
   class="panel-resizer"
   class:right={side === 'right'}
+  class:gutter={gutter !== undefined}
   class:dragging={!!drag}
+  style:flex-basis={gutter !== undefined ? `${gutter}px` : undefined}
   role="separator"
   tabindex="0"
   aria-label={label}
@@ -176,9 +191,21 @@
   .panel-resizer.right::after {
     inset: 0 0 0 auto;
   }
-  .panel-resizer:hover::after,
-  .panel-resizer:focus-visible::after,
-  .panel-resizer.dragging::after {
+  /* The gap between two panels, its own flex item. */
+  .panel-resizer.gutter {
+    position: relative;
+    inset: auto;
+    flex-grow: 0;
+    flex-shrink: 0;
+    width: auto;
+    align-self: stretch;
+  }
+  .panel-resizer.gutter::after {
+    inset: 0 auto 0 50%;
+    transform: translateX(-50%);
+  }
+  /* Invisible but for its cursor; a keyboard's focus still shows where it is. */
+  .panel-resizer:focus-visible::after {
     background: var(--accent-border);
   }
   :global(:root.panel-resizing),

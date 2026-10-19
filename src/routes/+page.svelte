@@ -390,7 +390,7 @@
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
   import '$lib/styles.css';
-  import { initAppearance } from '$lib/appearance.svelte';
+  import { appearance, initAppearance } from '$lib/appearance.svelte';
 
   initAppearance();
 
@@ -7229,8 +7229,11 @@
     {#if view === 'chat'}
       <div
         class="chat-workspace card-layout"
+        class:card-chat={appearance.chatCard === 'chat'}
+        class:card-header={appearance.chatCard === 'header'}
         class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
         class:graph-first={graphFirst}
+        class:chat-open={graphFirst && workflowChatShown}
         bind:clientWidth={chatWorkspaceWidth}
       >
         <section
@@ -7264,15 +7267,6 @@
               </div>
             </div>
           {/if}
-          {#if graphFirst && viewportWidth > 760}<PanelResize
-              side="right"
-              availableWidth={chatWorkspaceWidth}
-              share={0.36}
-              onresize={(width) => (chatCardWidth = width)}
-              storageKey="agent-studio.workflow-chat-share"
-              label="Resize chat"
-              controls="chat-area"
-            />{/if}
           {#if activeWorkflow && !chatWorkflow && !readOnlyChat}<div
               class="workflow-banner"
               role="note"
@@ -7538,6 +7532,9 @@
                 ><X size={16} /></button
               >{/if}
           </div>
+          <!-- What lies below the toolbar, a card of its own when ordinary chats show the
+            conversation as the card. -->
+          <div class="chat-body">
           {#if accountSwitchPending || nextReplyChanged}
             <p class="next-reply-settings" role="status">
               Next message: {#if accountSwitchPending}<span
@@ -7966,7 +7963,19 @@
               accountUnavailable={!canQueryConnection(selectedSettings.connectionId, selectedSettings.provider)}
             />{/if}
           </div>
+          </div>
         </section>
+        <!-- The gap between a workflow's chat card and its graph resizes the card. -->
+        {#if graphFirst && workflowChatShown && viewportWidth > 760}<PanelResize
+            gutter={16}
+            side="right"
+            availableWidth={chatWorkspaceWidth}
+            share={0.36}
+            onresize={(width) => (chatCardWidth = width)}
+            storageKey="agent-studio.workflow-chat-share"
+            label="Resize chat"
+            controls="chat-area"
+          />{/if}
         {#if artifactView && panelChat}{@const chat = panelChat}{#key `${chat}:${artifactView.artifact.id}`}<ArtifactViewer
               artifact={artifactView.artifact}
               mode={artifactView.mode}

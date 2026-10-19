@@ -472,7 +472,7 @@
   </fieldset>
 {/snippet}
 
-<aside class="workflow-inspector" aria-label="Step settings">
+<aside id="workflow-side" class="workflow-inspector" aria-label="Step settings">
   <header>
     <span class="inspector-icon"
       ><WorkflowIcon type={node.type === 'start' ? `trigger:${trigger}` : node.type} size={15} /></span
@@ -1116,8 +1116,8 @@
   .workflow-inspector {
     display: flex;
     flex-direction: column;
-    /* Wider when the graph has the room, for the values steps write. */
-    width: clamp(360px, 36%, 480px);
+    /* Wider when the graph has the room, for the values steps write; the gap beside it resizes it. */
+    width: var(--workflow-side-width, clamp(360px, 36%, 480px));
     flex-shrink: 0;
     min-height: 0;
     border: 1px solid var(--border);
