@@ -19,6 +19,7 @@ mod mentions;
 mod models;
 mod native_instructions;
 mod notifications;
+mod page_guard;
 mod page_preview;
 mod plugins;
 mod pool;
@@ -26,6 +27,7 @@ mod profiles;
 mod protocol;
 mod providers;
 mod relay;
+mod reply_feed;
 mod retention;
 mod runner;
 mod saved;
@@ -491,7 +493,12 @@ async fn list_models(
 struct AppSession {
     id: String,
     started_at: u64,
+    /// An earlier page of this process asked already: the window reloaded, and the app did not
+    /// start again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reloaded: bool,
 }
+static APP_SESSION_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static APP_SESSION: std::sync::OnceLock<AppSession> = std::sync::OnceLock::new();
 fn app_session_started() -> &'static AppSession {
     APP_SESSION.get_or_init(|| AppSession {
@@ -499,11 +506,15 @@ fn app_session_started() -> &'static AppSession {
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64),
+        reloaded: false,
     })
 }
 #[tauri::command]
 async fn app_session() -> AppSession {
-    app_session_started().clone()
+    AppSession {
+        reloaded: APP_SESSION_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst),
+        ..app_session_started().clone()
+    }
 }
 #[tauri::command]
 async fn get_installation(app: tauri::AppHandle) -> Result<profiles::Installation, String> {
@@ -959,15 +970,27 @@ async fn run_agent(
     request: providers::RunRequest,
     on_event: Channel<protocol::RunEvent>,
     connection_id: Option<String>,
+    job: Option<bool>,
 ) -> Result<String, String> {
     // A second copy of this call (calls.rs) holds its own handle on the window's channel, which
     // ends the channel in the window when it goes: keep each until the reply has answered.
     let channel = on_event.clone();
     let answer = call
-        .once(reply(app, &runs, request, on_event, connection_id))
+        .once(reply(
+            app,
+            &runs,
+            request,
+            on_event,
+            connection_id,
+            job.unwrap_or(false),
+        ))
         .await;
     drop(channel);
     answer
+}
+/// How a reply's events reach the window following it through `channel`.
+fn follower(channel: Channel<protocol::RunEvent>) -> reply_feed::Window {
+    std::sync::Arc::new(move |event| channel.send(event).map_err(|e| e.to_string()))
 }
 async fn reply(
     app: tauri::AppHandle,
@@ -975,7 +998,11 @@ async fn reply(
     request: providers::RunRequest,
     on_event: Channel<protocol::RunEvent>,
     connection_id: Option<String>,
+    // Another device asked for this reply through the relay (reply_feed.rs).
+    job: bool,
 ) -> Result<String, String> {
+    // The document that asked: a reload before the reply joins those a window follows refuses it.
+    let document = runs.document();
     request.validate()?;
     // A request from an app older than the image store carries its images inline: keep them
     // and send references on, as every other request does.
@@ -1032,20 +1059,60 @@ async fn reply(
     )
     .await?;
     let id = request.run_id.clone();
-    let _ = on_event.send(protocol::RunEvent::Activity {
+    // What the reply reports outlives the window's document: a reload follows it again.
+    let feed = runs.open_feed(
+        document,
+        &id,
+        request.conversation_id.clone(),
+        job,
+        follower(on_event),
+    )?;
+    let _ = feed.send(protocol::RunEvent::Activity {
         text: "Starting the provider CLI".into(),
     });
     let handle = app.clone();
     let result = profiles::scope(
         profile,
-        runner::run(app, request, on_event, cancel, connection_id),
+        runner::run(app, request, feed.clone(), cancel, connection_id),
     )
     .await;
     if let Ok(mut active) = runs.0.lock() {
         active.remove(&id);
     }
+    runs.2.finish(&feed, result.clone());
     prune_chat_images(&handle);
     result
+}
+/// The replies this app runs that a window may follow (reply_feed.rs): a reloaded window takes
+/// up each one its document saved as running.
+#[tauri::command]
+async fn live_runs(runs: State<'_, runner::Runs>) -> Result<Vec<reply_feed::LiveRun>, String> {
+    Ok(runs.2.live())
+}
+/// Follows a reply this app runs from a window that reloaded since it began: what the reply
+/// reported comes again, then the rest as it comes, and the answer is the reply's end.
+#[tauri::command]
+async fn follow_run(
+    runs: State<'_, runner::Runs>,
+    call: calls::Call,
+    run_id: String,
+    on_event: Channel<protocol::RunEvent>,
+) -> Result<String, String> {
+    let feeds = runs.2.clone();
+    let channel = on_event.clone();
+    let answer = call
+        .once(async move {
+            let feed = feeds
+                .get(&run_id)
+                .ok_or("This response is no longer running.")?;
+            let window = follower(on_event);
+            let end = feed.follow(window.clone()).await;
+            feeds.release(&feed, &window);
+            end
+        })
+        .await;
+    drop(channel);
+    answer
 }
 /// Removes stored chat images no saved chat names any more, off the UI thread.
 fn prune_chat_images(app: &tauri::AppHandle) {
@@ -1694,6 +1761,8 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 watchdog::watch_webview(&window);
+                // F5, Ctrl+R and the menu's Reload no longer reload the window.
+                page_guard::guard(&window);
             }
             // When a Claude profile's two shared files need Windows' permission, ask once for
             // every account that needs it.
@@ -1743,7 +1812,8 @@ pub fn run() {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
-                webview.state::<runner::Runs>().interrupt_for_reload();
+                // Replies run on through a reload, and the new document follows them again.
+                webview.state::<runner::Runs>().reloaded();
                 for token in plugins::active_tokens() {
                     token.cancel();
                 }
@@ -1848,6 +1918,8 @@ pub fn run() {
             drafts::load_drafts,
             drafts::save_drafts,
             run_agent,
+            live_runs,
+            follow_run,
             generate_title,
             cancel_title,
             generate_folder_icon,
@@ -2020,12 +2092,21 @@ mod app_session_tests {
         assert!(started.started_at > 1_700_000_000_000);
         let value = serde_json::to_value(started).unwrap();
         assert_eq!(value["startedAt"], started.started_at);
+        assert!(value.get("reloaded").is_none());
+    }
+    #[tokio::test]
+    async fn a_later_page_of_the_same_process_reloaded() {
+        let first = super::app_session().await;
+        let second = super::app_session().await;
+        assert_eq!(first.id, second.id);
+        assert!(!first.reloaded && second.reloaded);
+        assert_eq!(serde_json::to_value(second).unwrap()["reloaded"], true);
     }
 }
 #[cfg(test)]
 mod command_future_tests {
     use super::*;
-    fn size<A, B, C, D, E, G, F: std::future::Future>(_: fn(A, B, C, D, E, G) -> F) -> usize {
+    fn size<A, B, C, D, E, G, H, F: std::future::Future>(_: fn(A, B, C, D, E, G, H) -> F) -> usize {
         std::mem::size_of::<F>()
     }
     /// Tauri moves a command's future on the window thread's stack before spawning it, several
@@ -2042,6 +2123,7 @@ mod command_future_tests {
                     providers::RunRequest,
                     Channel<protocol::RunEvent>,
                     Option<String>,
+                    Option<bool>,
                 ) -> _,
         );
         assert!(

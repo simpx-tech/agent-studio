@@ -488,8 +488,8 @@ export const endedWithoutRun = (message: Pick<Message, 'error'>) =>
 /**
  * A saved workspace, ready to use. Replies saved as running stopped with the app that ran them,
  * so they read as interrupted, unless this device follows runs other computers report (the
- * Viewer), or names the replies it ran itself (`runsHere`, a server, whose restart leaves the
- * replies of other computers running).
+ * Viewer), or names the replies that stopped (`runsHere`: a server's restart leaves the replies
+ * of other computers running, and a reload of the window those its computer still runs).
  */
 export function restoreWorkspace(
   value: unknown,

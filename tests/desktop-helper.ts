@@ -87,6 +87,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
         for (const handler of (window as any).tauriListeners?.[event] ?? [])
           callbacks.get(handler)?.({ event, id: handler, payload });
       };
+      // A reply a reloaded window follows again (`follow_run` below): more of it, then its end.
+      (window as any).emitFollowed = (runId: string, event: unknown) =>
+        (window as any).followEmits?.[runId]?.(event);
+      (window as any).endFollowed = (runId: string, end: string) =>
+        (window as any).followEnds?.[runId]?.(end);
       // Ends the sign-in waiting for a connection (or a provider's own login) as its CLI would.
       (window as any).finishSignIn = (key: string, phase: string, message = '') => {
         const views = JSON.parse(localStorage.getItem('test-sign-ins') ?? '[]');
@@ -1078,6 +1083,35 @@ export async function mockDesktop(page: Page, mode = 'success') {
               at: new Date().toISOString(),
             });
             return;
+          }
+          // Replies the app ran on through a reload of the window (src-tauri/src/reply_feed.rs).
+          // A test lists them in `test-live-runs`, each with the `events` `follow_run` replays and
+          // the `end` it answers with; without one, the follower waits for `endFollowed(runId,
+          // end)`, and `emitFollowed(runId, event)` sends it more meanwhile.
+          if (command === 'live_runs')
+            return JSON.parse(localStorage.getItem('test-live-runs') ?? '[]').map((run: any) => ({
+              runId: run.runId,
+              conversationId: run.conversationId,
+              job: !!run.job,
+              ended: !!run.ended,
+            }));
+          if (command === 'follow_run') {
+            const w = window as any;
+            (w.followed ??= []).push(args.runId);
+            const live = JSON.parse(localStorage.getItem('test-live-runs') ?? '[]').find(
+              (run: any) => run.runId === args.runId,
+            );
+            if (!live) throw 'This response is no longer running.';
+            const id = args.onEvent.id;
+            let index = 0;
+            const emit = (message: unknown) => callbacks.get(id)?.({ message, index: index++ });
+            for (const message of live.events ?? []) emit(message);
+            (w.followEmits ??= {})[args.runId] = emit;
+            const end =
+              live.end ??
+              (await new Promise((resolve) => ((w.followEnds ??= {})[args.runId] = resolve)));
+            if (end !== 'complete' && end !== 'cancelled') throw end;
+            return end;
           }
           if (command === 'run_agent') {
             localStorage.setItem('test-last-request', JSON.stringify(args.request));

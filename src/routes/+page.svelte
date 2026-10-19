@@ -131,6 +131,11 @@
     saveWorkspace,
     detectProviders,
     runAgent,
+    followRun,
+    liveRuns,
+    resumeJobs,
+    unresumedJobs,
+    type LiveRun,
     cancelRun,
     abandonedReplies,
     releaseConversation,
@@ -2635,17 +2640,31 @@
     }, 5 * 60_000);
     // Nothing reports a reply this computer runs without its run, so it is looked for.
     const abandonPoll = setInterval(() => void endAbandonedReplies(), 10_000);
+    // Replies other devices asked for that ran on through a reload wait this long for the relay
+    // to take their requests up again, then end here on their own.
+    let jobResumeTimer: ReturnType<typeof setTimeout> | undefined;
     void (async () => {
       try {
         const local = await getInstallation();
-        workspace = await loadWorkspace(local);
+        // Replies this computer still runs: a reloaded window follows them again, so they are
+        // no interrupted ones. Listed before the workspace is read, so none ends unseen between.
+        const live = await liveRuns().catch((): LiveRun[] => []);
+        workspace = await loadWorkspace(local, live);
         installation = local;
         if (installation && desktop()) registerInstallation(workspace.fleet, installation);
+        // History lists the chats used from this start of the app until the next one under it.
+        // A server's starts are no one's sessions.
+        const started =
+          desktop() && !installation?.server
+            ? await appSession().catch(() => undefined)
+            : undefined;
         // Legacy chats retain a stable owning computer when the workspace is synchronized.
         for (const conversation of workspace.conversations) {
           // Start each app session with a clean Active list without changing chat recency. A
-          // server starts with no one at its window and leaves everyone's chats where they are.
-          if (desktop() && !installation?.server) conversation.archived = true;
+          // server starts with no one at its window and leaves everyone's chats where they are,
+          // and a reloaded window is no new start of the app.
+          if (desktop() && !installation?.server && !started?.reloaded)
+            conversation.archived = true;
           if (!conversation.location)
             conversation.location = conversationLocation(
               conversation,
@@ -2653,13 +2672,12 @@
               installation,
             );
         }
-        // History lists the chats used from this start of the app until the next one under it.
-        // A server's starts are no one's sessions.
-        const started =
-          desktop() && !installation?.server
-            ? await appSession().catch(() => undefined)
-            : undefined;
-        const session = started && installation && { ...started, environmentId: installation.id };
+        const session = started &&
+          installation && {
+            id: started.id,
+            startedAt: started.startedAt,
+            environmentId: installation.id,
+          };
         if (session && appSessionSchema.safeParse(session).success)
           workspace.appSessions = recordAppSession(
             workspace.appSessions,
@@ -2893,7 +2911,19 @@
               await flushWorkspace();
               refreshNewConnections();
             },
+            followReply: (runId) => followLiveReply(runId),
           });
+        // Replies that ran on while the window reloaded, followed again from their start. Those
+        // another device asked for go on publishing their requests once the relay answers.
+        const jobs = live.filter((run) => run.job).map((run) => run.runId);
+        for (const run of liveInChatOrder(live.filter((run) => !run.job)))
+          followLiveReply(run.runId);
+        if (jobs.length) {
+          resumeJobs(jobs);
+          jobResumeTimer = setTimeout(() => {
+            for (const runId of unresumedJobs()) followLiveReply(runId);
+          }, 30_000);
+        }
         await persist();
         await restoreRelayConnection();
         followNotification();
@@ -2934,6 +2964,7 @@
       clearInterval(wslPoll);
       clearInterval(serverPoll);
       clearInterval(abandonPoll);
+      clearTimeout(jobResumeTimer);
       window.removeEventListener('focus', onReturn);
       window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
@@ -5672,11 +5703,49 @@
       createdAt: now,
     };
   }
+  /**
+   * Replies a reload of the window left running, in the order of their chats' messages: two of one
+   * chat (a reply waiting for background work and the message that took it over) are followed in
+   * turn, so the later one is the chat's running reply, as it was.
+   */
+  function liveInChatOrder(live: LiveRun[]): LiveRun[] {
+    const places = new Map<string, number>();
+    for (const conversation of workspace.conversations)
+      for (const message of conversation.messages)
+        if (message.status === 'running' && message.runId) places.set(message.runId, places.size);
+    return [...live].sort((a, b) => (places.get(a.runId) ?? -1) - (places.get(b.runId) ?? -1));
+  }
+  /**
+   * Follows again a reply this computer ran on through a reload of the window (reply_feed.rs).
+   * One no chat holds as running, whose chat went or recorded its end, is stopped and let go.
+   */
+  function followLiveReply(runId: string) {
+    for (const conversation of workspace.conversations) {
+      const message = conversation.messages.find(
+        (m) => m.role === 'assistant' && m.runId === runId,
+      );
+      if (!message) continue;
+      if (message.status === 'running') {
+        void startReply(conversation, {
+          now: message.createdAt,
+          modelName: message.modelName ?? '',
+          resume: message,
+        });
+        return;
+      }
+      break;
+    }
+    void cancelRun(runId)
+      .catch(() => {})
+      .then(() => followRun(runId, () => {}))
+      .catch(() => {});
+  }
   // Answer the conversation's latest messages and follow the reply until it ends. A reply sent
   // from the queue of a conversation that is not open leaves remembered choices unchanged.
   // A message that takes over a reply waiting for background work (`takeOver`) joins the
   // conversation only once the host confirms that reply handed over its process; until then it
-  // stays queued, and a refusal leaves it there.
+  // stays queued, and a refusal leaves it there. A reply this computer ran on through a reload of
+  // the window (`resume`) is followed again from its start (src-tauri/src/reply_feed.rs).
   async function startReply(
     conversation: Conversation,
     options: {
@@ -5688,28 +5757,33 @@
       takeOver?: { reply: Message; wait: number; user: Message; itemId: string };
       // The mission a workflow's orchestrator chat drives, which gives it the mission tools.
       mission?: { runId: string; role: 'orchestrator' };
+      resume?: Message;
     },
   ) {
-    const { now, compact, takeOver } = options;
+    const { now, compact, takeOver, resume } = options;
     const mission = options.mission ?? workflows.missionOf(conversation.id);
     const session = workspaceSession;
     // The reply taken over ends as it hands over, with the text it has now.
-    const history = historyFor(
-      takeOver
-        ? {
-            ...conversation,
-            messages: [
-              ...conversation.messages.map((m) =>
-                m.id === takeOver.reply.id ? { ...m, status: 'complete' as const } : m,
-              ),
-              takeOver.user,
-            ],
-          }
-        : conversation,
+    const history = resume
+      ? []
+      : historyFor(
+          takeOver
+            ? {
+                ...conversation,
+                messages: [
+                  ...conversation.messages.map((m) =>
+                    m.id === takeOver.reply.id ? { ...m, status: 'complete' as const } : m,
+                  ),
+                  takeOver.user,
+                ],
+              }
+            : conversation,
+        );
+    const assistantId = resume?.id ?? crypto.randomUUID();
+    const responseSettings = structuredClone(
+      $state.snapshot(resume?.settings ?? conversation.settings),
     );
-    const assistantId = crypto.randomUUID();
-    const responseSettings = structuredClone($state.snapshot(conversation.settings));
-    const runId = crypto.randomUUID();
+    const runId = resume?.runId ?? crypto.randomUUID();
     // Legacy host bindings cannot tell an account switch from a moved chat by themselves.
     const accountSwitch =
       !!responseSettings.connectionId &&
@@ -5720,7 +5794,7 @@
           m.settings.connectionId !== responseSettings.connectionId,
       );
     if (options.remember) rememberSettings(workspace.preferences, responseSettings);
-    const placeholder: Message = {
+    const placeholder: Message = resume ?? {
       id: assistantId,
       role: 'assistant',
       settings: responseSettings,
@@ -5755,14 +5829,19 @@
         rewoundDrafts.delete(conversation.id);
         conversation.messages.push(takeOver.user);
       }
-      conversation.messages.push(placeholder);
-      conversation.updatedAt = now;
+      if (!resume) {
+        conversation.messages.push(placeholder);
+        conversation.updatedAt = now;
+      }
       runs[conversation.id] = runId;
       holdWork(conversation.id);
     };
     if (joined) join();
     const message = () => conversation.messages.find((m) => m.id === assistantId)!;
     const started = performance.now();
+    // How long the reply has run: one followed again has run since it was sent.
+    const elapsed = () =>
+      resume ? Math.max(0, Date.now() - Date.parse(resume.createdAt)) : performance.now() - started;
     let reasoningSavedAt = 0;
     // The computer that runs a reply publishes its progress; a reply routed to another computer
     // is published by that computer, so this copy of it is only saved here.
@@ -5770,7 +5849,7 @@
     // Events of a take-over wait for the host to confirm it.
     const early: RunEvent[] = [];
     try {
-      if (joined) await within(persistChat(conversation.id), replySaveWait);
+      if (joined && !resume) await within(persistChat(conversation.id), replySaveWait);
       if (session !== workspaceSession) return;
       // The folder's icon is chosen after the title, so a new chat starts one background
       // request at a time beside its reply.
@@ -5800,36 +5879,39 @@
         if (activeId === conversation.id) void scrollToEnd(true);
         for (const event of early.splice(0)) apply(event);
       };
+      const onEvent = (event: RunEvent) => {
+        if (session === workspaceSession) receive(event);
+      };
       const result = stopping[conversation.id]
         ? 'cancelled'
-        : await runAgent(
-            {
-              runId,
-              ...(compact ? { compact: true } : {}),
-              agent: responseSettings,
-              ...(instructions.trim() ? { claudeInstructions: instructions } : {}),
-              messages: history,
-              conversationId: conversation.id,
-              historyRevision: conversation.historyRevision,
-              assistantId,
-              location: conversation.location?.path ? { ...conversation.location } : undefined,
-              ...(accountSwitch ? { accountSwitch: true } : {}),
-              ...(conversation.forked ? { forked: true } : {}),
-              ...(mission ? { mission } : {}),
-              ...(takeOver
-                ? {
-                    takeOver: {
-                      runId: takeOver.reply.runId!,
-                      wait: takeOver.wait,
-                      messages: added,
-                    },
-                  }
-                : {}),
-            },
-            (event) => {
-              if (session === workspaceSession) receive(event);
-            },
-          );
+        : resume
+          ? await followRun(runId, onEvent)
+          : await runAgent(
+              {
+                runId,
+                ...(compact ? { compact: true } : {}),
+                agent: responseSettings,
+                ...(instructions.trim() ? { claudeInstructions: instructions } : {}),
+                messages: history,
+                conversationId: conversation.id,
+                historyRevision: conversation.historyRevision,
+                assistantId,
+                location: conversation.location?.path ? { ...conversation.location } : undefined,
+                ...(accountSwitch ? { accountSwitch: true } : {}),
+                ...(conversation.forked ? { forked: true } : {}),
+                ...(mission ? { mission } : {}),
+                ...(takeOver
+                  ? {
+                      takeOver: {
+                        runId: takeOver.reply.runId!,
+                        wait: takeOver.wait,
+                        messages: added,
+                      },
+                    }
+                  : {}),
+              },
+              onEvent,
+            );
       if (session !== workspaceSession || !joined) return;
       message().status = result;
       if (result === 'complete') {
@@ -5869,7 +5951,7 @@
       }
     } finally {
       if (session === workspaceSession && joined) {
-        message().durationMs = message().accountUsage?.runDurationMs ?? performance.now() - started;
+        message().durationMs = message().accountUsage?.runDurationMs ?? elapsed();
         delete message().backgroundWait;
         delete heardWaits[runId];
         delete questionDrafts[runId];

@@ -195,6 +195,7 @@ it('invalidates host skill inventories after Viewer plugin mutations, including 
 async function hostOf(
   job: { id: string; method: string; args: Record<string, unknown> },
   update: (body: any) => { status: number; body: unknown } = () => ({ status: 200, body: {} }),
+  followReply?: (runId: string) => void,
 ) {
   const transport = await import('./transport');
   const workspace = initialWorkspace();
@@ -225,6 +226,7 @@ async function hostOf(
     localRuns: () => [],
     apply: async () => {},
     checkpointRun: async () => {},
+    followReply,
   });
   const updates: any[] = [];
   let claimed = false;
@@ -254,7 +256,7 @@ async function hostOf(
     return { status: 200, body: [] };
   });
   await transport.resumeRelay();
-  return { transport, updates };
+  return { transport, updates, host, workspace };
 }
 
 it('ends a read whose result the relay refuses with the reason, not an expiry', async () => {
@@ -420,6 +422,150 @@ it("sends a job's question at once and its other events shortly after they arriv
   vi.useRealTimers();
   await vi.waitFor(() => expect(updates.at(-1)?.status).toBe('complete'));
   await vi.waitFor(() => transport.disconnectRelay());
+});
+
+// A reply another device asked for runs on here while this window reloads
+// (src-tauri/src/reply_feed.rs). `held` is how the relay answers for its request now.
+async function reloadedHost(
+  held: (job: Record<string, unknown>) => unknown,
+  followReply?: (runId: string) => void,
+) {
+  const connectionId = crypto.randomUUID();
+  const id = crypto.randomUUID();
+  const job = {
+    id,
+    method: 'run',
+    args: { connectionId, request: { runId: id, agent: { provider: 'claude' } } },
+  };
+  const { transport, updates, host } = await hostOf(job, undefined, followReply);
+  const followed: string[] = [];
+  const heartbeats: string[][] = [];
+  let channel: { onmessage: (event: unknown) => void } | undefined;
+  let finish = (_: unknown) => {};
+  const original = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'run_agent') throw new Error('The reply runs already.');
+    if (command === 'follow_run') {
+      followed.push(args.runId);
+      channel = args.onEvent;
+      return new Promise((resolve) => (finish = resolve));
+    }
+    if (command === 'relay_request' && args.path === 'v1/heartbeat')
+      heartbeats.push(args.body.running);
+    if (command === 'relay_request' && args.path === 'v1/jobs') return { status: 200, body: [] };
+    if (command === 'relay_request' && args.path === `v1/jobs/${id}` && args.method === 'GET')
+      return held({
+        ...job,
+        source: crypto.randomUUID(),
+        target: host,
+        status: 'running',
+        events: [],
+        cancel: false,
+      });
+    return original(command, args);
+  });
+  return {
+    transport,
+    updates,
+    id,
+    followed,
+    heartbeats,
+    emit: (event: unknown) => channel?.onmessage(event),
+    finish: (end: unknown) => finish(end),
+  };
+}
+
+it('goes on publishing a reply another device asked for after this window reloaded', async () => {
+  const host = await reloadedHost((job) => ({ status: 200, body: job }));
+  host.transport.resumeJobs([host.id]);
+  await host.transport.pollRelay();
+  // The relay keeps the request alive meanwhile, and the window follows the reply already
+  // running instead of starting it again.
+  expect(host.heartbeats[0]).toContain(host.id);
+  await vi.waitFor(() => expect(host.followed).toEqual([host.id]));
+  host.emit({ kind: 'text', text: 'Still checking the files' });
+  await vi.waitFor(() =>
+    expect(host.updates.at(-1)?.events).toContainEqual({
+      kind: 'text',
+      text: 'Still checking the files',
+    }),
+  );
+  host.finish('complete');
+  await vi.waitFor(() => expect(host.updates.at(-1)?.status).toBe('complete'));
+  expect(host.transport.unresumedJobs()).toEqual([]);
+  await vi.waitFor(() => host.transport.disconnectRelay());
+});
+
+it('ends a reply here once the relay no longer holds the request it answers', async () => {
+  // The page follows such a reply like one of its own.
+  const followReply = vi.fn();
+  const host = await reloadedHost(
+    () => ({ status: 404, body: { error: 'Request is gone.' } }),
+    followReply,
+  );
+  host.transport.resumeJobs([host.id]);
+  await host.transport.pollRelay();
+  await vi.waitFor(() => expect(followReply).toHaveBeenCalledWith(host.id));
+  expect(host.followed).toEqual([]);
+  expect(host.updates).toEqual([]);
+  expect(host.transport.unresumedJobs()).toEqual([]);
+  await vi.waitFor(() => host.transport.disconnectRelay());
+});
+
+it('hands back the replies the relay never took up again, for the window to end itself', async () => {
+  const host = await reloadedHost((job) => ({ status: 200, body: job }));
+  host.transport.resumeJobs([host.id]);
+  expect(host.transport.unresumedJobs()).toEqual([host.id]);
+  await host.transport.pollRelay();
+  expect(host.followed).toEqual([]);
+  await vi.waitFor(() => host.transport.disconnectRelay());
+});
+
+it('keeps running the replies a reloaded window follows again, and interrupts the rest', async () => {
+  const transport = await import('./transport');
+  const workspace = initialWorkspace();
+  const stillRunning = crypto.randomUUID();
+  const reply = (runId: string) => ({
+    id: crypto.randomUUID(),
+    runId,
+    role: 'assistant' as const,
+    createdAt: '2026-10-19T12:25:27.485Z',
+    status: 'running' as const,
+    settings: settingsFor(workspace.preferences),
+    blocks: [{ type: 'markdown' as const, text: 'Saving the updated screen now' }],
+  });
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Edvisor PR Tracking',
+    titleStatus: 'generated',
+    createdAt: '2026-10-19T12:25:27.485Z',
+    updatedAt: '2026-10-19T12:25:27.485Z',
+    settings: settingsFor(workspace.preferences),
+    messages: [reply(stillRunning), reply(crypto.randomUUID())],
+  });
+  native.invoke.mockImplementation(async (command) =>
+    command === 'load_workspace' ? structuredClone(workspace) : null,
+  );
+  const live = [{ runId: stillRunning, job: false, ended: false }];
+  const [following, gone] = (await transport.loadWorkspace(undefined, live)).conversations[0]
+    .messages;
+  expect(following).toMatchObject({ status: 'running' });
+  expect(following.error).toBeUndefined();
+  expect(gone).toMatchObject({ status: 'cancelled', error: interruptedReplyError });
+});
+
+it('tells a page after the first one of the app process that the window reloaded', async () => {
+  const transport = await import('./transport');
+  native.invoke.mockImplementation(async (command) =>
+    command === 'app_session'
+      ? { id: crypto.randomUUID(), startedAt: 1_790_000_000_000, reloaded: true }
+      : null,
+  );
+  expect(await transport.appSession()).toMatchObject({ reloaded: true });
+  native.invoke.mockImplementation(async (command) =>
+    command === 'app_session' ? { id: crypto.randomUUID(), startedAt: 1_790_000_000_000 } : null,
+  );
+  expect(await transport.appSession()).toMatchObject({ reloaded: false });
 });
 
 it('routes MCP management and OAuth polling to the exact selected host', async () => {

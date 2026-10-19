@@ -587,6 +587,11 @@ type RuntimeContext = {
     status?: 'complete' | 'cancelled' | 'error',
     error?: string,
   ) => Promise<void>;
+  /**
+   * Follows a reply this computer runs for another device whose request the relay no longer
+   * holds, after this window reloaded: it ends here, like a reply of this window's own.
+   */
+  followReply?: (runId: string) => void;
 };
 type RelayState = { instanceId: string; revision: number; workspace: SharedWorkspace };
 let runtime: RuntimeContext | undefined;
@@ -700,6 +705,9 @@ const workerRuns = new Map<string, RelayJob>();
 // The runs this computer's CLIs are answering for this window, those of replies a queued message
 // took over included, until each ends.
 const ownRuns = new Set<string>();
+// Replies another device asked for that ran on while this window reloaded, until the relay answers
+// and their requests go on publishing them (`resumeJob`).
+const jobsToResume = new Set<string>();
 /** Whether this computer is running work another device asked of it. */
 export const workingForOthers = () => workerRuns.size > 0;
 // Optional reads never keep this device from disconnecting; late results are discarded.
@@ -1037,7 +1045,8 @@ function deadRunHere(fleet: Fleet, conversation: Conversation, message: Message)
   return (
     !runtime.localRuns().includes(message.runId) &&
     !workerRuns.has(message.runId) &&
-    !ownRuns.has(message.runId)
+    !ownRuns.has(message.runId) &&
+    !jobsToResume.has(message.runId)
   );
 }
 // Replies this computer runs without holding a run for them, by run, from when a check first found
@@ -2310,7 +2319,7 @@ async function relayTail(generation: number): Promise<Presence[] | null> {
         ? { features: runtime.installation.server ? ['signIn', 'server'] : ['signIn'] }
         : {}),
       connections,
-      running: desktop() ? [...runtime.localRuns(), ...workerRuns.keys()] : [],
+      running: desktop() ? [...runtime.localRuns(), ...workerRuns.keys(), ...jobsToResume] : [],
       accountUpdates: accountHeartbeat(),
     });
     if (generation !== relayGeneration) return null;
@@ -2325,6 +2334,7 @@ async function relayTail(generation: number): Promise<Presence[] | null> {
         workerRuns.set(job.id, job);
         void executeJob(job);
       }
+    for (const runId of jobsToResume) void resumeJob(runId, generation);
     return presence;
   }
 }
@@ -2373,6 +2383,8 @@ async function localCall(
   method: RelayJob['method'],
   args: Record<string, unknown>,
   onEvent?: (event: RunEvent) => void,
+  // Another device asked for this work through the relay, whose request this window publishes.
+  job = false,
 ): Promise<any> {
   if (!desktop())
     throw new Error('Choose a connected computer to run its agents from this device.');
@@ -2382,7 +2394,7 @@ async function localCall(
     const { runId } = args.request as RunRequest;
     ownRuns.add(runId);
     try {
-      return await invoke('run_agent', { ...args, onEvent: channel });
+      return await invoke('run_agent', { ...args, ...(job ? { job } : {}), onEvent: channel });
     } finally {
       ownRuns.delete(runId);
     }
@@ -2516,8 +2528,13 @@ function awaitsAnswer(event: RunEvent) {
     (event.kind === 'tool' && !!event.tool && !event.tool.parentId && asksTheUser(event.tool.name))
   );
 }
-async function executeJob(job: RelayJob) {
+/**
+ * Does the work `job` asks of this computer and publishes its progress and end to the relay.
+ * `resumed`: the reply runs already, and this window, reloaded since it began, follows it again.
+ */
+async function executeJob(job: RelayJob, resumed = false) {
   const generation = relayGeneration;
+  let following = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let soon: ReturnType<typeof setTimeout> | undefined;
   let publishing = Promise.resolve();
@@ -2611,7 +2628,7 @@ async function executeJob(job: RelayJob) {
     timer = setInterval(() => {
       void publish().catch(() => {});
     }, 700);
-    result = await localCall(job.method, job.args, (event) => {
+    const onEvent = (event: RunEvent) => {
       if (job.method === 'signIn') {
         // A sign-in's latest state is all its device needs, and it waits for each at once.
         const view = signInViewSchema.safeParse(event);
@@ -2625,11 +2642,18 @@ async function executeJob(job: RelayJob) {
       // The execution host retains results even if the initiating computer disconnects.
       persistEvent(event);
       publishSoon(awaitsAnswer(event));
-    });
+    };
+    if (resumed) following = true;
+    result =
+      resumed && job.method === 'run'
+        ? await followRun(job.id, onEvent)
+        : await localCall(job.method, job.args, onEvent, true);
     status = result === 'cancelled' ? 'cancelled' : 'complete';
   } catch (e) {
     status = 'error';
     error = String(e);
+    // A reply that runs here ends here even when its request cannot be taken up again.
+    if (resumed && !following) runtime?.followReply?.(job.id);
   } finally {
     clearInterval(timer);
     clearTimeout(soon);
@@ -3260,24 +3284,41 @@ export async function loadModels(
       )
     : structuredClone(fallbackModels);
 }
-export async function loadWorkspace(installation?: Installation): Promise<Workspace> {
+export async function loadWorkspace(
+  installation?: Installation,
+  // Replies this computer still runs, which a reloaded window follows again.
+  live: LiveRun[] = [],
+): Promise<Workspace> {
   const value = desktop() ? await invoke<unknown>('load_workspace') : null;
   if (!value) return initialWorkspace();
-  // A restarted server interrupts only the replies it ran; other computers' replies run on.
+  const following = new Set(live.map((run) => run.runId));
+  // A restarted server interrupts only the replies it ran; other computers' replies run on. A
+  // reply that runs on here through a reload of the window is no interrupted one either.
   return restoreWorkspace(
     value,
-    installation?.server
-      ? { runsHere: (c, m, fleet) => runsOn(fleet, c, m, installation.id) }
+    installation?.server || following.size
+      ? {
+          runsHere: (c, m, fleet) =>
+            !(m.runId && following.has(m.runId)) &&
+            (!installation?.server || runsOn(fleet, c, m, installation.id)),
+        }
       : undefined,
   );
 }
-/** The app session this desktop process opened when it started; page reloads keep it. */
-export async function appSession(): Promise<{ id: string; startedAt: string } | undefined> {
+/**
+ * The app session this desktop process opened when it started; page reloads keep it, and a page
+ * after the first one of the process hears that it `reloaded`.
+ */
+export async function appSession(): Promise<
+  { id: string; startedAt: string; reloaded: boolean } | undefined
+> {
   if (!desktop()) return undefined;
-  const value = await invoke<{ id?: unknown; startedAt?: unknown } | null>('app_session');
+  const value = await invoke<{ id?: unknown; startedAt?: unknown; reloaded?: unknown } | null>(
+    'app_session',
+  );
   const startedAt = new Date(typeof value?.startedAt === 'number' ? value.startedAt : NaN);
   if (typeof value?.id !== 'string' || Number.isNaN(startedAt.getTime())) return undefined;
-  return { id: value.id, startedAt: startedAt.toISOString() };
+  return { id: value.id, startedAt: startedAt.toISOString(), reloaded: value.reloaded === true };
 }
 /** The desktop host asks for the whole workspace when it cannot complete a patch. */
 const needsWholeWorkspace = 'The whole workspace is needed to save this change.';
@@ -3382,6 +3423,85 @@ export async function runAgent(
     },
     request.runId,
   );
+}
+/**
+ * A reply this computer runs that this window may follow (src-tauri/src/reply_feed.rs): a window
+ * that reloads takes up again each reply its document saved as running.
+ */
+export type LiveRun = { runId: string; conversationId?: string; job: boolean; ended: boolean };
+const liveRunSchema = z.object({
+  runId: z.string().min(1),
+  conversationId: z.string().optional(),
+  job: z.boolean(),
+  ended: z.boolean(),
+});
+/** The replies this computer runs, and those that ended while no window followed them. */
+export async function liveRuns(): Promise<LiveRun[]> {
+  if (!desktop()) return [];
+  const live = await invoke<unknown>('live_runs');
+  return Array.isArray(live) ? z.array(liveRunSchema).parse(live) : [];
+}
+/**
+ * Follows a reply this computer runs from this window, which reloaded since the reply began: its
+ * events so far come again, then the rest as they come, and the answer is its end.
+ */
+export async function followRun(
+  runId: string,
+  onEvent: (event: RunEvent) => void,
+): Promise<'complete' | 'cancelled'> {
+  if (!desktop()) throw new Error('Only the computer running a reply follows it this way.');
+  const channel = new Channel<RunEvent>();
+  channel.onmessage = (event) => {
+    if (event.kind === 'skillschanged') invalidateSources();
+    else onEvent(event);
+  };
+  ownRuns.add(runId);
+  try {
+    return await invoke('follow_run', { runId, onEvent: channel });
+  } finally {
+    ownRuns.delete(runId);
+  }
+}
+/**
+ * Replies other devices asked for that ran on while this window reloaded. Their requests go on
+ * publishing them once the relay answers (`resumeJob`); `unresumedJobs` hands back those it never
+ * took, which the window then follows on its own.
+ */
+export function resumeJobs(runIds: string[]) {
+  for (const runId of runIds) jobsToResume.add(runId);
+}
+export function unresumedJobs(): string[] {
+  const left = [...jobsToResume].filter((runId) => !resumingJobs.has(runId));
+  for (const runId of left) jobsToResume.delete(runId);
+  return left;
+}
+const resumingJobs = new Set<string>();
+async function resumeJob(runId: string, generation: number) {
+  if (!runtime || resumingJobs.has(runId)) return;
+  resumingJobs.add(runId);
+  try {
+    const response = await relayRaw('GET', `v1/jobs/${runId}`);
+    if (generation !== relayGeneration || !jobsToResume.has(runId)) return;
+    jobsToResume.delete(runId);
+    const job = response.status === 200 ? (response.body as RelayJob) : undefined;
+    if (
+      job?.method === 'run' &&
+      job.id === runId &&
+      job.target === runtime.installation.id &&
+      (job.status === 'running' || job.status === 'queued') &&
+      !workerRuns.has(runId)
+    ) {
+      workerRuns.set(runId, job);
+      void executeJob(job, true);
+    }
+    // The device that asked no longer follows its request: the reply still ends here, in the chat
+    // this computer publishes.
+    else runtime.followReply?.(runId);
+  } catch {
+    // The relay did not answer: the next poll asks again.
+  } finally {
+    resumingJobs.delete(runId);
+  }
 }
 export async function cancelRun(runId: string, connectionId?: string, waitForCompletion = false) {
   if (remoteRuns.has(runId) || remoteTarget(connectionId)) {

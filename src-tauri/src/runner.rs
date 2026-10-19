@@ -10,27 +10,58 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{ipc::Channel, Manager};
+use tauri::Manager;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+/// A request a document asked for just before the window reloaded, which no document follows.
+pub const RELOADED: &str =
+    "This response was interrupted when the app reloaded. Retry from the current window.";
 /// A reply or file Undo this app owns, with the conversation it belongs to.
 pub struct Run {
     pub conversation: Option<String>,
     pub cancel: CancellationToken,
 }
+/// The replies and file Undos this app runs, the window reloads counted, and what each reply
+/// reported, for a reloaded window to follow (reply_feed.rs).
 #[derive(Default)]
-pub struct Runs(pub Mutex<HashMap<String, Run>>, AtomicU64);
+pub struct Runs(
+    pub Mutex<HashMap<String, Run>>,
+    AtomicU64,
+    pub Arc<crate::reply_feed::Feeds>,
+);
 impl Runs {
-    // A reloaded document cannot receive the old run's IPC or answer its questions.
-    // Leave entries registered until the owned process tree has actually stopped.
-    pub fn interrupt_for_reload(&self) {
-        if let Ok(active) = self.0.lock() {
+    /// The window reloaded. Its replies run on, and the new document follows them again; a
+    /// request the old document left waiting to begin is refused, since nothing would follow it.
+    pub fn reloaded(&self) {
+        if let Ok(_active) = self.0.lock() {
             self.1.fetch_add(1, Ordering::SeqCst);
-            for run in active.values() {
-                run.cancel.cancel();
-            }
+            self.2.detach_all();
         }
+    }
+
+    /// The window's document, which a reload replaces.
+    pub fn document(&self) -> u64 {
+        self.1.load(Ordering::SeqCst)
+    }
+
+    /// Starts keeping what the admitted reply `id` reports for the window that asked for it in
+    /// `document`. A reload since then refuses it, so a reply never runs that no document follows:
+    /// the new document listed the replies to follow before this one would have joined them.
+    pub fn open_feed(
+        &self,
+        document: u64,
+        id: &str,
+        conversation: Option<String>,
+        job: bool,
+        window: crate::reply_feed::Window,
+    ) -> Result<Arc<crate::reply_feed::Feed>, String> {
+        let mut active = self.0.lock().map_err(|_| "Run registry lock failed")?;
+        if self.1.load(Ordering::SeqCst) != document {
+            active.remove(id);
+            return Err(RELOADED.into());
+        }
+        Ok(self.2.open(id, conversation, job, window))
     }
 
     /// Admit work for a conversation. Different conversations run side by side; one
@@ -51,7 +82,7 @@ impl Runs {
             {
                 let mut active = self.0.lock().map_err(|_| "Run registry lock failed")?;
                 if generation != self.1.load(Ordering::SeqCst) {
-                    return Err("This response was interrupted when the app reloaded. Retry from the current window.".into());
+                    return Err(RELOADED.into());
                 }
                 let same = |run: &Run| {
                     conversation.is_some() && run.conversation.as_deref() == conversation
@@ -172,7 +203,7 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
 pub async fn run(
     app: tauri::AppHandle,
     request: RunRequest,
-    channel: Channel<RunEvent>,
+    feed: Arc<crate::reply_feed::Feed>,
     cancel: CancellationToken,
     connection_id: Option<String>,
 ) -> Result<String, String> {
@@ -193,7 +224,7 @@ pub async fn run(
         if let RunEvent::Usage { usage } = &mut event {
             usage.revision = Some(usage_revision.fetch_add(1, Ordering::Relaxed) + 1);
         }
-        channel.send(event).map_err(|e| e.to_string())
+        feed.send(event)
     });
     output.screens = screens;
     let workflow = crate::providers::workflow_calls::context(&app, &request, connection_id.clone());
@@ -1263,9 +1294,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!current.is_cancelled() && !beside.is_cancelled());
-        runs.interrupt_for_reload();
-        assert!(current.is_cancelled() && beside.is_cancelled());
-        assert!(!unrelated.is_cancelled(), "reload is scoped to this app");
+        runs.reloaded();
+        assert!(
+            !current.is_cancelled() && !beside.is_cancelled() && !unrelated.is_cancelled(),
+            "a reload stops no reply"
+        );
         assert!(runs.0.lock().unwrap().contains_key("current"));
     }
 
@@ -1319,12 +1352,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_waits_for_owned_process_cleanup_after_reload() {
+    async fn a_reply_keeps_its_conversation_across_a_reload() {
         let runs = Runs::default();
-        runs.begin("old", Some("a"), CancellationToken::new(), None)
+        let old = CancellationToken::new();
+        runs.begin("old", Some("a"), old.clone(), None)
             .await
             .unwrap();
-        runs.interrupt_for_reload();
+        runs.reloaded();
+        // The reloaded window follows the running reply rather than starting another.
+        assert!(runs
+            .begin("new", Some("a"), CancellationToken::new(), None)
+            .await
+            .unwrap_err()
+            .contains("already responding"));
+        runs.begin("elsewhere", Some("b"), CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert!(!old.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_a_stopped_reply_to_end() {
+        let runs = Runs::default();
+        let old = CancellationToken::new();
+        runs.begin("old", Some("a"), old.clone(), None)
+            .await
+            .unwrap();
+        old.cancel();
         let replacement = CancellationToken::new();
         let next = runs.begin("new", Some("a"), replacement.clone(), None);
         tokio::pin!(next);
@@ -1343,24 +1397,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn another_reload_invalidates_a_request_waiting_in_the_previous_document() {
+    async fn a_reload_refuses_a_request_waiting_in_the_previous_document() {
         let runs = Runs::default();
-        runs.begin("old", Some("a"), CancellationToken::new(), None)
+        let old = CancellationToken::new();
+        runs.begin("old", Some("a"), old.clone(), None)
             .await
             .unwrap();
-        runs.interrupt_for_reload();
+        old.cancel();
         let next = runs.begin("stale", Some("a"), CancellationToken::new(), None);
         tokio::pin!(next);
         assert!(tokio::time::timeout(Duration::from_millis(75), &mut next)
             .await
             .is_err());
-        runs.interrupt_for_reload();
+        runs.reloaded();
         runs.0.lock().unwrap().remove("old");
         assert!(next.await.unwrap_err().contains("app reloaded"));
         assert!(runs.0.lock().unwrap().is_empty());
         runs.begin("current", Some("a"), CancellationToken::new(), None)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_reply_asked_for_before_a_reload_never_runs_unfollowed() {
+        let runs = Runs::default();
+        let window: crate::reply_feed::Window = Arc::new(|_| Ok(()));
+        let document = runs.document();
+        runs.begin("late", Some("a"), CancellationToken::new(), None)
+            .await
+            .unwrap();
+        runs.reloaded();
+        let refused = runs.open_feed(document, "late", Some("a".into()), false, window.clone());
+        assert_eq!(refused.err().as_deref(), Some(RELOADED));
+        assert!(runs.0.lock().unwrap().is_empty());
+        assert!(runs.2.live().is_empty());
+        // A request of the current document joins the replies a reload would list.
+        let document = runs.document();
+        runs.begin("current", Some("a"), CancellationToken::new(), None)
+            .await
+            .unwrap();
+        runs.open_feed(document, "current", Some("a".into()), false, window)
+            .unwrap();
+        runs.reloaded();
+        assert_eq!(runs.2.live().len(), 1);
     }
 
     #[test]

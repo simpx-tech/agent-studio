@@ -1,6 +1,20 @@
 {
   "identifier": "com.vinicius.agentstudio.reload-qa",
   "productName": "Agent Studio Reload QA",
-  "build": { "beforeDevCommand": "", "devUrl": null },
-  "app": { "windows": [{ "title": "Agent Studio Reload QA", "width": 1200, "height": 900 }] }
+  "build": { "beforeBuildCommand": "", "beforeDevCommand": "" },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Studio Reload QA",
+        "decorations": false,
+        "dragDropEnabled": false,
+        "width": 1380,
+        "height": 900,
+        "minWidth": 840,
+        "minHeight": 640,
+        "backgroundColor": "#111113",
+        "additionalBrowserArgs": "--remote-debugging-port=19881"
+      }
+    ]
+  }
 }
