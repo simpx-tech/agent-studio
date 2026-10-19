@@ -254,21 +254,20 @@ try {
       await sleep(2000);
     }
   };
-  // The sidebar's Workflows row opens the Workflows page; a workflow or run there opens in its
-  // chat with the graph beside it.
+  // The sidebar lists the workflows under its Workflows row: a static workflow opens on its
+  // graph, a dynamic one in its orchestrator's chat with the graph beside it.
   const openWorkflow = async (title) => {
-    await page.click('.sidebar-nav-row');
+    await page.evaluate(() => {
+      const row = document.querySelector('.workflows-row .sidebar-nav-row');
+      if (row?.getAttribute('aria-expanded') !== 'true') row?.click();
+    });
     await page.waitFor(
       (title) =>
-        [...document.querySelectorAll('.workflow-tile, .run-row')].some(
-          (item) => item.querySelector('.tile-title, .row-title')?.textContent.trim() === title,
-        ),
+        [...document.querySelectorAll('.workflow-item')].some((item) => item.title === title),
       title,
     );
     await page.evaluate((title) => {
-      [...document.querySelectorAll('.workflow-tile, .run-row')]
-        .find((item) => item.querySelector('.tile-title, .row-title')?.textContent.trim() === title)
-        .click();
+      [...document.querySelectorAll('.workflow-item')].find((item) => item.title === title).click();
     }, title);
     await page.waitFor(() => document.querySelectorAll('.workflow-card').length > 0);
     await sleep(800);
@@ -414,6 +413,12 @@ try {
     () => !document.querySelector('[aria-label="Message"]'),
   );
   assert(report.workerReadOnly, 'The worker chat offers a composer');
+  // It opened in the orchestrator's place, the graph still beside it, with the way back.
+  report.workerBeside = await page.evaluate(() => ({
+    graph: !!document.querySelector('#workflow-panel .workflow-card'),
+    back: document.querySelector('.workflow-owned .back')?.textContent.trim(),
+  }));
+  assert.deepEqual(report.workerBeside, { graph: true, back: 'Orchestrator' });
   await capture('worker-read-only');
   await noErrorBanner('in the worker chat');
   assert.deepEqual(page.errors, []);

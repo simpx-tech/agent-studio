@@ -33,6 +33,13 @@ export function assistantInstructions(workflowId: string): string {
 - Run it with workflow_run and follow it with workflow_status when they ask you to try it.`;
 }
 
+/** What a chat of yours that becomes a static workflow's assistant is asked first. */
+export const STATIC_FROM_CHAT =
+  'Turn what we discussed in this conversation into this Agent Studio workflow: build its graph with workflow_read and workflow_save, then say in a few lines what it does, what starts it and what it needs from me.';
+/** What a chat of yours that becomes a dynamic workflow's orchestrator is asked first. */
+export const DYNAMIC_FROM_CHAT =
+  'This conversation is now an Agent Studio dynamic workflow, and you are its orchestrator: pursue what we discussed here as its goal, to a complete result. Begin with dynamic_state.';
+
 /** The first message of an orchestrator session. */
 export function missionBrief(run: WorkflowRun, session: number, state: string): string {
   const goal = run.mission!;

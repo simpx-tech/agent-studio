@@ -1,8 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 
-// Workflows (docs/WORKFLOWS.md): the Workflows page lists them, and static and dynamic workflows start
-// from a chat with their graph beside it, on the desktop mock, whose replies wait until a test
+// Workflows (docs/WORKFLOWS.md): the sidebar lists them, static workflows show their graph with
+// their chat as a card beside it, dynamic workflows their orchestrator's chat with the graph beside
+// it, and a chat of yours can become either, on the desktop mock, whose replies wait until a test
 // finishes them and whose workflow store lives in local storage.
 
 type Request = {
@@ -54,30 +55,61 @@ async function send(page: Page, text: string) {
   await page.getByLabel('Message', { exact: true }).fill(text);
   await page.getByRole('button', { name: 'Send message' }).click();
 }
-/** The Workflows page, from the sidebar, and a new workflow chat from it. */
+/** The sidebar's list of workflows, unfolded from its Workflows row. */
+async function workflowList(page: Page) {
+  const row = page.getByRole('button', { name: /^Workflows/ });
+  if ((await row.getAttribute('aria-expanded')) !== 'true') await row.click();
+  return page.getByRole('list', { name: 'Workflows' });
+}
+/** A new workflow chat, from the plus beside the sidebar's Workflows row. */
 async function newWorkflowChat(page: Page) {
-  await page.getByRole('button', { name: /^Workflows/ }).click();
-  await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await page.getByRole('button', { name: 'New workflow' }).click();
+}
+/** A new static workflow whose assistant saved these steps, its graph on screen. */
+async function savedWorkflow(
+  page: Page,
+  name: string,
+  nodes: (start: any) => unknown[],
+  edges: (start: string) => unknown[],
+) {
+  await newWorkflowChat(page);
+  await send(page, `Make ${name}.`);
+  await expect.poll(async () => (await requests(page)).length).toBe(1);
+  const [assistant] = await requests(page);
+  const workflowId = assistant.agent.instructions.match(/workflow ([0-9a-f-]{36})/)![1];
+  const read = JSON.parse((await call(page, assistant, 'workflow_read', { id: workflowId })).text);
+  const saved = await call(page, assistant, 'workflow_save', {
+    id: workflowId,
+    revision: read.revision,
+    name,
+    nodes: nodes(read.nodes[0]),
+    edges: edges(read.nodes[0].key),
+  });
+  expect(saved.error).toBe(false);
+  await reply(page, assistant.runId, 'Done.');
+  return { assistant, workflowId };
 }
 
-test('a workflow starts from a chat whose agent builds it beside its graph', async ({ page }) => {
+test('a static workflow starts from a chat and shows its graph, its chat beside it', async ({
+  page,
+}) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  // The Workflows page, empty at first.
-  await page.getByRole('button', { name: /^Workflows/ }).click();
-  await expect(page.getByText('No workflows yet.')).toBeVisible();
-  await page.getByRole('button', { name: 'New workflow' }).click();
+  // The sidebar lists workflows under its Workflows row, folded at first, and none yet.
+  await expect(page.getByRole('button', { name: /^Workflows/ })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  );
+  const list = await workflowList(page);
+  await expect(list).toContainText('No workflows yet.');
+  await newWorkflowChat(page);
   await expect(page.getByRole('heading', { name: 'What should it do?' })).toBeVisible();
   await expect(page.getByLabel('Message', { exact: true })).toHaveAttribute(
     'placeholder',
     'Describe the workflow…',
   );
-  await expect(page.getByRole('radio', { name: 'Static' })).toHaveAttribute(
-    'aria-checked',
-    'true',
-  );
+  await expect(page.getByRole('radio', { name: 'Static' })).toHaveAttribute('aria-checked', 'true');
   await send(page, 'Write about swords every morning.');
   // The chat becomes the workflow's assistant: Claude at its maximum reasoning, told which
   // workflow it changes.
@@ -89,8 +121,12 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
   const workflowId = assistant.agent.instructions.match(/workflow ([0-9a-f-]{36})/)?.[1];
   expect(workflowId).toBeTruthy();
   expect(assistant.messages.at(-1)?.text).toBe('Write about swords every morning.');
-  const panel = page.getByRole('dialog', { name: 'Workflow' });
-  await expect(panel.locator('.workflow-card')).toHaveCount(1);
+  // The graph takes the chat's place, and the chat shows as a card at its left.
+  const graph = page.locator('.workflow-main');
+  const card = page.locator('.workflow-chat-card');
+  await expect(graph.locator('.workflow-card')).toHaveCount(1);
+  await expect(card.locator('.workflow-chat-head')).toContainText('Assistant');
+  await expect(page.locator('.chat-toolbar')).toHaveCount(0);
   // The assistant saves a workflow, which the graph shows at once, from top to bottom.
   const read = JSON.parse((await call(page, assistant, 'workflow_read', { id: workflowId })).text);
   const saved = await call(page, assistant, 'workflow_save', {
@@ -108,41 +144,48 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
     ],
   });
   expect(saved.error).toBe(false);
-  await expect(panel.locator('.workflow-card')).toHaveCount(3);
-  await expect(panel.getByLabel('Workflow name')).toHaveValue('Sword writer');
+  await expect(graph.locator('.workflow-card')).toHaveCount(3);
+  await expect(graph.getByLabel('Workflow name')).toHaveValue('Sword writer');
   // The chat is named by its workflow.
   await expect(page.locator('.page-title')).toHaveText('Sword writer');
-  await expect(panel.locator('.svelte-flow__background')).toBeVisible();
+  await expect(graph.locator('.svelte-flow__background')).toBeVisible();
   const top = async (title: string) =>
-    (await panel.locator('.workflow-card').filter({ hasText: title }).boundingBox())!.y;
+    (await graph.locator('.workflow-card').filter({ hasText: title }).boundingBox())!.y;
   expect(await top('Write')).toBeLessThan(await top('Finish'));
-  // The chat and the graph share the window by halves, as it grows and shrinks.
-  const share = () =>
-    page.evaluate(() => {
-      const dialog = document.querySelector('#workflow-panel')!;
-      return (
-        dialog.getBoundingClientRect().width / dialog.parentElement!.getBoundingClientRect().width
-      );
-    });
-  expect(await share()).toBeCloseTo(0.5, 1);
-  await page.setViewportSize({ width: 1800, height: 900 });
-  await expect.poll(share).toBeCloseTo(0.5, 1);
-  await page.setViewportSize({ width: 1380, height: 900 });
-  // It stays out of the chat lists; the workflow is on the Workflows page.
+  const cardBox = (await card.boundingBox())!;
+  const graphBox = (await graph.boundingBox())!;
+  expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(graphBox.x + 1);
+  // Closed, the chat gives the graph the whole width; the graph's Chat button opens it again.
   await reply(page, assistant.runId, 'It writes about swords each morning.');
+  await card.getByRole('button', { name: 'Close the chat' }).click();
+  await expect(card).toBeHidden();
+  await expect
+    .poll(async () => (await graph.boundingBox())!.width)
+    .toBeGreaterThan(graphBox.width + cardBox.width - 20);
+  const chatButton = graph.getByRole('button', { name: 'Chat', exact: true });
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
+  await chatButton.click();
+  await expect(card).toBeVisible();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
+  // It stays out of the chat lists; the sidebar lists it, marked while it is on screen.
   await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);
-  await page.getByRole('button', { name: /^Workflows/ }).click();
-  const tile = page.locator('.workflow-tile').filter({ hasText: 'Sword writer' });
-  await expect(tile).toContainText('Never run');
-  // It opens in its chat, with its graph beside it.
-  await tile.click();
-  await expect(panel.locator('.workflow-card')).toHaveCount(3);
+  const item = list.locator('.workflow-item').filter({ hasText: 'Sword writer' });
+  await expect(item).toHaveAttribute('aria-current', 'page');
+  // From another chat it opens on its graph, its chat closed until you ask for it.
+  await page.keyboard.press('Control+n');
+  await expect(graph).toHaveCount(0);
+  await expect(item).not.toHaveAttribute('aria-current', 'page');
+  await item.click();
+  await expect(graph.locator('.workflow-card')).toHaveCount(3);
+  await expect(card).toBeHidden();
+  await chatButton.click();
   await expect(
     page.locator('.message').filter({ hasText: 'It writes about swords' }),
   ).toBeVisible();
   // A connection dragged from a step's output to empty space adds a step there.
-  const write = panel.locator('.workflow-card').filter({ hasText: 'Write' });
+  const write = graph.locator('.workflow-card').filter({ hasText: 'Write' });
   const handle = write.locator('.svelte-flow__handle.source').first();
   // The graph glides into view after a change; the handle is where it stays.
   await expect
@@ -153,7 +196,7 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
     })
     .toBe(true);
   const from = (await handle.boundingBox())!;
-  const canvas = (await panel.locator('.workflow-canvas').boundingBox())!;
+  const canvas = (await graph.locator('.workflow-canvas').boundingBox())!;
   await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
   await page.mouse.down();
   await page.mouse.move(canvas.x + canvas.width - 100, canvas.y + canvas.height - 70, { steps: 8 });
@@ -163,9 +206,9 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
     .getByRole('menu', { name: 'Add a step here' })
     .getByRole('menuitem', { name: 'Confirm' })
     .click();
-  await expect(panel.locator('.workflow-card')).toHaveCount(4);
-  await expect(panel.locator('.svelte-flow__edge')).toHaveCount(3);
-  await panel.getByLabel('What to confirm').fill('Publish it?');
+  await expect(graph.locator('.workflow-card')).toHaveCount(4);
+  await expect(graph.locator('.svelte-flow__edge')).toHaveCount(3);
+  await graph.getByLabel('What to confirm').fill('Publish it?');
   // Your edits save by themselves, merged with the agent's.
   await expect
     .poll(async () => {
@@ -176,87 +219,217 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
     })
     .toBe('Publish it?');
   // The inspector never scrolls sideways.
-  const inspector = panel.locator('.inspector-body');
+  const inspector = graph.locator('.inspector-body');
   expect(
     await inspector.evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
 });
 
-test('a workflow runs beside its chat, through a Confirm step, with its history', async ({
+test('a workflow runs in its graph, through an agent and a Confirm step, with its history', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  await newWorkflowChat(page);
-  await send(page, 'Publish a post after I approve it.');
-  await expect.poll(async () => (await requests(page)).length).toBe(1);
-  const [assistant] = await requests(page);
-  const workflowId = assistant.agent.instructions.match(/workflow ([0-9a-f-]{36})/)![1];
-  const read = JSON.parse((await call(page, assistant, 'workflow_read', { id: workflowId })).text);
-  await call(page, assistant, 'workflow_save', {
-    id: workflowId,
-    revision: read.revision,
-    name: 'Poster',
-    nodes: [
-      read.nodes[0],
+  await savedWorkflow(
+    page,
+    'Poster',
+    (start) => [
+      start,
+      { key: 'draft', type: 'agent', title: 'Draft', config: { prompt: 'Draft a post.' } },
       { key: 'ok', type: 'confirm', config: { question: 'Publish it?', approve: 'Publish' } },
       { key: 'yes', type: 'end', config: { output: 'published' } },
       { key: 'no', type: 'end', config: { output: 'kept' } },
     ],
-    edges: [
-      { source: read.nodes[0].key, target: 'ok' },
+    (start) => [
+      { source: start, target: 'draft' },
+      { source: 'draft', target: 'ok' },
       { source: 'ok', sourcePort: 'approved', target: 'yes' },
       { source: 'ok', sourcePort: 'rejected', target: 'no' },
     ],
-  });
-  await reply(page, assistant.runId, 'Done.');
-  const panel = page.getByRole('dialog', { name: 'Workflow' });
-  await expect(panel.locator('.workflow-card')).toHaveCount(4);
+  );
+  const graph = page.locator('.workflow-main');
+  const card = page.locator('.workflow-chat-card');
+  await expect(graph.locator('.workflow-card')).toHaveCount(5);
   // With nothing to choose, Run starts at once, and the run shows in the workflow's place.
-  await panel.getByRole('button', { name: 'Run', exact: true }).click();
-  await expect(panel.locator('.run-status')).toHaveText('Running');
-  await expect(panel.getByRole('button', { name: 'Back to the workflow' })).toBeVisible();
+  await graph.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(graph.locator('.run-status')).toHaveText('Running');
+  await expect(graph.getByRole('button', { name: 'Back to the workflow' })).toBeVisible();
   // While it runs, it leads the Active list.
+  await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(page.locator('.workflow-run-item').filter({ hasText: 'Poster' })).toBeVisible();
+  // Its agent's chat opens where the workflow's chat goes, to read, with the way back.
+  await expect.poll(async () => (await requests(page)).length).toBe(2);
+  const draft = (await requests(page))[1];
+  await reply(page, draft.runId, 'A post about swords.');
+  await graph.getByRole('button', { name: 'Open the chat of Draft' }).click();
+  await expect(card.locator('.workflow-chat-head')).toContainText('Draft');
+  await expect(card.locator('.message').filter({ hasText: 'A post about swords.' })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveCount(0);
+  await expect(graph.locator('.run-status')).toHaveText('Running');
+  await card.locator('.workflow-owned').getByRole('button', { name: 'Assistant' }).click();
+  await expect(card.locator('.workflow-chat-head')).toContainText('Assistant');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await expect(graph.locator('.run-status')).toHaveText('Running');
   // The run asks for approval with the step's own buttons.
-  const waiting = panel.getByRole('region', { name: 'Waiting for you' });
+  const waiting = graph.getByRole('region', { name: 'Waiting for you' });
   await waiting.getByRole('button', { name: 'Publish', exact: true }).click();
-  await expect(panel.locator('.run-status')).toHaveText('Completed');
-  await expect(panel.getByRole('region', { name: 'Run', exact: true })).toContainText('published');
+  await expect(graph.locator('.run-status')).toHaveText('Completed');
+  await expect(graph.getByRole('region', { name: 'Run', exact: true })).toContainText('published');
   // Its history lists each step as it ran, in order, each opening on what it did.
-  const history = panel.getByRole('region', { name: 'History' });
+  const history = graph.getByRole('region', { name: 'History' });
   await expect(history.locator('.entry-title > span')).toHaveText([
     'Manual',
+    'Draft',
     'ok',
     'yes',
     'Completed',
   ]);
-  await expect(history.locator('.entry').nth(1)).toContainText('Approved');
-  await history.locator('.entry-head').nth(2).click();
-  await expect(history.locator('.entry').nth(2)).toContainText('published');
+  await expect(history.locator('.entry').nth(2)).toContainText('Approved');
+  await history.locator('.entry-head').nth(3).click();
+  await expect(history.locator('.entry').nth(3)).toContainText('published');
   // Choosing a step on the graph shows its entries alone.
-  await panel.locator('.workflow-card').filter({ hasText: 'ok' }).click();
+  await graph.locator('.workflow-card').filter({ hasText: 'ok' }).click();
   await expect(history.locator('.entry')).toHaveCount(1);
   await history.getByRole('button', { name: 'Show the whole history' }).click();
-  await expect(history.locator('.entry')).toHaveCount(4);
+  await expect(history.locator('.entry')).toHaveCount(5);
   await expect(page.locator('.workflow-run-item')).toHaveCount(0);
-  // Back, the workflow keeps its runs beside Run; the Workflows page lists it among what ran.
-  await panel.getByRole('button', { name: 'Back to the workflow' }).click();
-  await expect(panel.locator('.workflow-card')).toHaveCount(4);
-  await panel.getByRole('combobox', { name: 'Runs', exact: true }).click();
+  // Back, the workflow keeps its runs beside Run, and a run opens in its place again.
+  await graph.getByRole('button', { name: 'Back to the workflow' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveCount(5);
+  await graph.getByRole('combobox', { name: 'Runs', exact: true }).click();
   await expect(page.getByRole('option')).toHaveCount(1);
   await expect(page.getByRole('option')).toContainText('Completed');
-  await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: /^Workflows/ }).click();
-  const recent = page.locator('.run-row').filter({ hasText: 'Poster' });
-  await expect(recent).toContainText('Completed');
-  await expect(page.locator('.workflow-tile').filter({ hasText: 'Poster' })).toContainText(
-    'Completed',
+  await page.getByRole('option').click();
+  await expect(graph.locator('.run-status')).toHaveText('Completed');
+  // The sidebar lists the workflow, no longer running.
+  const item = (await workflowList(page)).locator('.workflow-item').filter({ hasText: 'Poster' });
+  await expect(item).toHaveAttribute('aria-current', 'page');
+  await expect(item.locator('.conversation-running')).toHaveCount(0);
+});
+
+test('the graph has right-click menus, and step settings colour the values they name @webkit', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await savedWorkflow(
+    page,
+    'News',
+    (start) => [
+      start,
+      {
+        key: 'facts',
+        type: 'set',
+        title: 'Facts',
+        config: {
+          values: [{ name: 'topic', value: 'About {{trigger.text}} from {{nowhere.output}}' }],
+        },
+      },
+      { key: 'done', type: 'end', title: 'Done', config: { output: '{{facts.output}}' } },
+    ],
+    (start) => [
+      { source: start, target: 'facts' },
+      { source: 'facts', target: 'done' },
+    ],
   );
-  // A run opens in its workflow's panel again.
-  await recent.click();
-  await expect(panel.locator('.run-status')).toHaveText('Completed');
+  const graph = page.locator('.workflow-main');
+  await expect(graph.locator('.workflow-card')).toHaveCount(3);
+  await page.locator('.workflow-chat-card').getByRole('button', { name: 'Close the chat' }).click();
+  // A right-click on a step offers its settings, a copy and its removal. The menu takes the
+  // keyboard: the arrows move through it, and Escape closes it, leaving the step unselected.
+  const facts = graph.locator('.workflow-card').filter({ hasText: 'Facts' });
+  await facts.click({ button: 'right' });
+  const stepMenu = page.getByRole('menu', { name: 'Step' });
+  await expect(stepMenu.getByRole('menuitem', { name: 'Settings' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(stepMenu.getByRole('menuitem', { name: 'Duplicate' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(stepMenu).toHaveCount(0);
+  await expect(graph.locator('.svelte-flow__node.selected')).toHaveCount(0);
+  await facts.click({ button: 'right' });
+  await stepMenu.getByRole('menuitem', { name: 'Settings' }).click();
+  await expect(stepMenu).toHaveCount(0);
+  await expect(graph.locator('.svelte-flow__node.selected')).toHaveCount(1);
+  // A Set step names each value on a line of its own, with the value below it across the
+  // settings, coloured by what it names and marked where it names no step.
+  const inspector = graph.locator('.inspector-body');
+  const value = inspector.getByLabel('Value of topic');
+  await expect(value).toHaveValue('About {{trigger.text}} from {{nowhere.output}}');
+  const field = inspector
+    .locator('.template-field')
+    .filter({ has: page.getByLabel('Value of topic') });
+  await expect(field.locator('.value-trigger')).toHaveText('{{trigger.text}}');
+  await expect(field.locator('.value-unknown')).toHaveText('{{nowhere.output}}');
+  const settingsWidth = (await inspector.boundingBox())!.width;
+  expect((await value.boundingBox())!.width).toBeGreaterThan(settingsWidth - 80);
+  expect(
+    (await inspector.getByLabel('Name', { exact: true }).boundingBox())!.width,
+  ).toBeGreaterThan(settingsWidth / 2);
+  // Colours follow the text as it is written, and the field grows with it.
+  await value.fill('Start\n{{facts.output}}\nand {{input.topic}} for {{item.name}}');
+  await expect(field.locator('.value-step')).toHaveText('{{facts.output}}');
+  await expect(field.locator('.value-input')).toHaveText('{{input.topic}}');
+  await expect(field.locator('.value-loop')).toHaveText('{{item.name}}');
+  await expect(field.locator('.value-unknown')).toHaveCount(0);
+  expect(await value.evaluate((area) => area.scrollHeight - area.clientHeight)).toBeLessThanOrEqual(
+    1,
+  );
+  const [mirror, area] = await field.evaluate((element) =>
+    ['.mirror', 'textarea'].map((selector) => {
+      const box = element.querySelector(selector)!.getBoundingClientRect();
+      return { top: box.top, height: box.height };
+    }),
+  );
+  expect(Math.abs(mirror.top - area.top)).toBeLessThanOrEqual(1);
+  expect(Math.abs(mirror.height - area.height)).toBeLessThanOrEqual(1);
+  // The values to insert carry the same colours.
+  await expect(inspector.locator('.value-chip.chip-trigger').first()).toBeVisible();
+  // A copy keeps the step's settings under a key of its own; removing it leaves the rest.
+  await facts.click({ button: 'right' });
+  await stepMenu.getByRole('menuitem', { name: 'Duplicate' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveCount(4);
+  const copy = graph.locator('.workflow-card').filter({ hasText: 'Facts' }).nth(1);
+  await copy.click({ button: 'right' });
+  await stepMenu.getByRole('menuitem', { name: 'Delete' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveCount(3);
+  // The only trigger cannot be removed.
+  await graph.locator('.workflow-card').filter({ hasText: 'Manual' }).click({ button: 'right' });
+  await expect(stepMenu.getByRole('menuitem', { name: 'Delete' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(stepMenu).toHaveCount(0);
+  // A right-click on a connection removes it.
+  await expect(graph.locator('.svelte-flow__edge')).toHaveCount(2);
+  await graph.locator('.svelte-flow__edge').first().click({ button: 'right', force: true });
+  await page
+    .getByRole('menu', { name: 'Connection' })
+    .getByRole('menuitem', { name: 'Delete connection' })
+    .click();
+  await expect(graph.locator('.svelte-flow__edge')).toHaveCount(1);
+  // A right-click on empty space adds a step there, or tidies the graph.
+  const canvas = (await graph.locator('.workflow-canvas').boundingBox())!;
+  await page.mouse.click(canvas.x + canvas.width - 50, canvas.y + 60, { button: 'right' });
+  const graphMenu = page.getByRole('menu', { name: 'Graph' });
+  await expect(graphMenu.getByRole('menuitem', { name: 'Arrange' })).toBeVisible();
+  await expect(graphMenu.getByRole('menuitem', { name: 'Fit to view' })).toBeVisible();
+  await graphMenu.getByRole('menuitem', { name: 'Message' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveCount(4);
+  // A press elsewhere closes a menu.
+  const beside = (await graph.locator('.workflow-canvas').boundingBox())!;
+  await page.mouse.click(beside.x + 30, beside.y + beside.height / 2, { button: 'right' });
+  await expect(graphMenu).toBeVisible();
+  await graph.locator('.workflow-toolbar').click({ position: { x: 4, y: 4 } });
+  await expect(graphMenu).toHaveCount(0);
+  // The trigger's choices of what starts it each show their icon.
+  await graph.locator('.workflow-card').filter({ hasText: 'Manual' }).click();
+  await inspector.getByRole('combobox', { name: 'Trigger' }).click();
+  const options = page.getByRole('option');
+  await expect(options).toHaveCount(7);
+  expect(
+    await options.evaluateAll((all) => all.every((o) => o.querySelector('.option-icon svg'))),
+  ).toBe(true);
+  await page.keyboard.press('Escape');
 });
 
 test('a dynamic workflow starts from a chat and its orchestrator works in it', async ({ page }) => {
@@ -273,9 +446,23 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   const [orchestrator] = await requests(page);
   expect(orchestrator.mission?.role).toBe('orchestrator');
   expect(orchestrator.messages.at(-1)?.text).toBe('Make every asset of the game, reviewed.');
-  expect(orchestrator.agent.instructions).toMatch(/orchestrator of an Agent Studio dynamic workflow/);
+  expect(orchestrator.agent.instructions).toMatch(
+    /orchestrator of an Agent Studio dynamic workflow/,
+  );
   const panel = page.getByRole('dialog', { name: 'Workflow' });
   await expect(panel.locator('.workflow-card.kind-orchestrator')).toBeVisible();
+  // The chat and the graph share the window by halves, as it grows and shrinks.
+  const share = () =>
+    page.evaluate(() => {
+      const dialog = document.querySelector('#workflow-panel')!;
+      return (
+        dialog.getBoundingClientRect().width / dialog.parentElement!.getBoundingClientRect().width
+      );
+    });
+  expect(await share()).toBeCloseTo(0.5, 1);
+  await page.setViewportSize({ width: 1800, height: 900 });
+  await expect.poll(share).toBeCloseTo(0.5, 1);
+  await page.setViewportSize({ width: 1380, height: 900 });
   // It plans and starts an agent while its turn runs.
   const plan = await call(page, orchestrator, 'dynamic_plan', {
     tasks: [{ id: 'sword', title: 'Sword model' }],
@@ -291,11 +478,15 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   const worker = (await requests(page))[1];
   expect(worker.mission).toBeUndefined();
   await expect(panel.locator('.workflow-card').filter({ hasText: 'Sword model' })).toBeVisible();
-  // While it runs, it leads the Active list.
+  // While it runs, it leads the Active list, and the sidebar's list counts its time.
   await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(
     page.locator('.workflow-run-item').filter({ hasText: 'Make every asset of the game' }),
   ).toBeVisible();
+  const item = (await workflowList(page))
+    .locator('.workflow-item')
+    .filter({ hasText: 'Make every asset of the game' });
+  await expect(item.locator('.conversation-running')).toBeVisible();
   // The agent's chat asks you something: the run shows it, with no alert of the chat's own.
   await page.evaluate((runId) => {
     const w = window as any;
@@ -321,13 +512,17 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   await waiting.getByRole('button', { name: 'Send answers' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).answersSent?.length ?? 0)).toBe(1);
   await expect(waiting).toHaveCount(0);
-  const notices = await page.evaluate(() => JSON.parse(localStorage.getItem('test-notices') ?? '[]'));
+  const notices = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('test-notices') ?? '[]'),
+  );
   expect(notices.filter((n: any) => n.conversationId === worker.conversationId)).toEqual([]);
-  // Its chat is the workflow's: you read it there, without a composer.
+  // Its chat opens in the orchestrator's place, beside the graph, to read without a composer,
+  // with the way back.
   await panel.getByRole('button', { name: 'Open the chat of Sword' }).click();
   await expect(page.locator('.workflow-owned')).toContainText('Make every asset of the game');
   await expect(page.getByLabel('Message', { exact: true })).toHaveCount(0);
-  await page.locator('.workflow-owned').getByRole('button', { name: 'Open workflow' }).click();
+  await expect(panel.locator('.workflow-card.kind-orchestrator')).toBeVisible();
+  await page.locator('.workflow-owned').getByRole('button', { name: 'Orchestrator' }).click();
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
   await expect(panel.locator('.workflow-card.kind-orchestrator')).toBeVisible();
   // Another chat's call of an orchestrator's tool is refused.
@@ -358,12 +553,88 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   const finished = history.locator('.entry').filter({ hasText: 'Sword finished' });
   await finished.locator('.entry-head').click();
   await expect(finished).toContainText('The sword is in assets/sword.glb.');
-  // Its chats stay out of the Active list, which it left once it ended; the workflow is on the
-  // Workflows page.
+  // Its chats stay out of the Active list, which it left once it ended; the sidebar still lists
+  // it.
+  await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);
+  await expect(page.locator('.workflow-run-item')).toHaveCount(0);
+  await expect(item).toHaveAttribute('aria-current', 'page');
+  await expect(item.locator('.conversation-running')).toHaveCount(0);
+});
+
+test('a chat of yours becomes a static or dynamic workflow from its toolbar', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await send(page, 'Every morning, collect the game news and summarise it.');
+  await expect.poll(async () => (await requests(page)).length).toBe(1);
+  const [first] = await requests(page);
+  await reply(page, first.runId, 'Here are three sources to watch.');
+  await page.getByRole('button', { name: 'Make a workflow' }).click();
+  await page
+    .getByRole('menu', { name: 'Make a workflow' })
+    .getByRole('menuitem', { name: 'Static' })
+    .click();
+  // The same chat asks its agent to build the workflow from what you discussed.
+  await expect.poll(async () => (await requests(page)).length).toBe(2);
+  const assistant = (await requests(page))[1];
+  expect(assistant.conversationId).toBe(first.conversationId);
+  expect(assistant.messages.at(-1)?.text).toMatch(
+    /^Turn what we discussed in this conversation into this Agent Studio workflow/,
+  );
+  expect(assistant.agent.instructions).toMatch(/workflow [0-9a-f-]{36}/);
+  // Its graph shows with the chat beside it, its earlier messages kept.
+  const graph = page.locator('.workflow-main');
+  await expect(graph.locator('.workflow-card')).toHaveCount(1);
+  const card = page.locator('.workflow-chat-card');
+  await expect(card.locator('.workflow-chat-head')).toContainText('Assistant');
+  await expect(
+    card.locator('.message').filter({ hasText: 'Here are three sources to watch.' }),
+  ).toBeVisible();
+  await expect(card.locator('.workflow-update')).toHaveCount(1);
+  // It left the chat lists for the sidebar's workflows.
   await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);
-  await page.getByRole('button', { name: /^Workflows/ }).click();
+  const list = await workflowList(page);
+  await expect(list.locator('.workflow-item')).toHaveCount(1);
+  await reply(page, assistant.runId, 'It collects the news each morning.');
+  // A chat that runs here can become a dynamic workflow too, whose orchestrator it becomes.
+  await page.keyboard.press('Control+n');
+  await expect(graph).toHaveCount(0);
+  await send(page, 'Ship the demo build.');
+  await expect.poll(async () => (await requests(page)).length).toBe(3);
+  const second = (await requests(page))[2];
+  await reply(page, second.runId, 'The demo needs a build and a page.');
+  await page.getByRole('button', { name: 'Make a workflow' }).click();
+  await page
+    .getByRole('menu', { name: 'Make a workflow' })
+    .getByRole('menuitem', { name: 'Dynamic' })
+    .click();
+  await expect.poll(async () => (await requests(page)).length).toBe(4);
+  const orchestrator = (await requests(page))[3];
+  expect(orchestrator.conversationId).toBe(second.conversationId);
+  expect(orchestrator.mission?.role).toBe('orchestrator');
+  expect(orchestrator.agent.instructions).toMatch(
+    /orchestrator of an Agent Studio dynamic workflow/,
+  );
+  expect(orchestrator.messages.at(-1)?.text).toMatch(/^This conversation is now an Agent Studio/);
+  // The orchestrator keeps the chat, with its graph beside it.
+  const panel = page.getByRole('dialog', { name: 'Workflow' });
+  await expect(panel.locator('.workflow-card.kind-orchestrator')).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
   await expect(
-    page.locator('.run-row').filter({ hasText: 'Make every asset of the game, reviewed.' }),
-  ).toContainText('Completed');
+    page.locator('.message').filter({ hasText: 'The demo needs a build and a page.' }),
+  ).toBeVisible();
+  // The chat is the workflow's now: not one of the chats to move to History or snooze.
+  await expect(page.getByRole('button', { name: 'Move to history' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Snooze' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Make a workflow' })).toHaveCount(0);
+  // While it runs it leads the Active list as a workflow, never as a chat.
+  await expect(
+    page.locator('.workflow-run-item').filter({ hasText: 'Ship the demo build.' }),
+  ).toBeVisible();
+  await expect(
+    page.locator('#conversation-panel-active .conversation-item:not(.workflow-run-item)'),
+  ).toHaveCount(0);
+  await expect(list.locator('.workflow-item')).toHaveCount(2);
+  await reply(page, orchestrator.runId, 'Planning.');
 });

@@ -685,6 +685,55 @@ pre {
   flex: 1;
   text-align: left;
 }
+.sidebar-nav-row > .expanded-chevron {
+  transform: rotate(90deg);
+}
+/* The Workflows row unfolds the list of workflows under it, with a + for a new one. */
+.workflows-section {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.workflows-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 8px;
+}
+.workflows-row > .sidebar-nav-row {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.workflows-new {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  color: var(--text-muted);
+}
+.workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 32vh;
+  margin: 2px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.workflow-list .sidebar-empty {
+  margin: 4px 10px;
+}
+.workflow-item > svg:first-child {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  margin-top: -6.5px;
+  color: var(--text-faint);
+}
+.workflow-item.current > svg:first-child {
+  color: var(--accent-strong);
+}
 .nav-count {
   min-width: 18px;
   padding: 0 6px;
@@ -813,6 +862,40 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Make a workflow, in a chat's toolbar: a small menu of the two kinds under its button. */
+.workflow-from-chat {
+  position: relative;
+  display: flex;
+}
+.workflow-from-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-lg);
+}
+.workflow-from-menu button {
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.workflow-from-menu button:not(:disabled):hover {
+  background: var(--hover);
+  color: var(--text);
 }
 /* A chat a workflow run started has no composer: it names its workflow and opens it. */
 .workflow-owned {
@@ -1001,6 +1084,7 @@ pre {
   margin: 1px 0 4px;
 }
 .conversation-list .conversation-item,
+.workflow-list .conversation-item,
 .conversation-list .scratch-item {
   user-select: none;
   -webkit-touch-callout: none;
@@ -1017,11 +1101,13 @@ pre {
   gap: 8px;
 }
 .conversation-list .conversation-item:hover,
+.workflow-list .conversation-item:hover,
 .conversation-list .scratch-item:hover {
   background: var(--hover);
   color: var(--text);
 }
 .conversation-list .conversation-item.current,
+.workflow-list .conversation-item.current,
 .conversation-list .scratch-item.current {
   background: var(--selected);
   color: var(--text);
@@ -1044,6 +1130,7 @@ pre {
 /* The open chat or draft has an accent bar at its left edge, distinct from the elapsed time of
    a running reply. */
 .conversation-list .conversation-item.current::before,
+.workflow-list .conversation-item.current::before,
 .conversation-list .scratch-item.current::before {
   content: '';
   position: absolute;
@@ -1345,6 +1432,68 @@ pre {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+/* A static workflow fills the chat's place with its graph; its chat is a card beside it that opens
+   on demand and closes with its own button (requested 2026-10-19). */
+.chat-workspace.graph-first > .chat-layout {
+  flex: 0 0 clamp(340px, 34%, 520px);
+  margin: 4px 0 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--bg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.chat-workspace.graph-first > .chat-layout.closed {
+  display: none;
+}
+.graph-first .message-column {
+  padding-inline: 16px;
+}
+.graph-first .composer-area {
+  --composer-inset: 12px;
+  padding-inline: 12px;
+}
+.workflow-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.workflow-chat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 6px 4px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.workflow-chat-head > svg {
+  flex-shrink: 0;
+  color: var(--accent-strong);
+}
+.workflow-chat-head > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Narrow, the open card lies over the graph. */
+@media (max-width: 760px) {
+  .chat-workspace.graph-first {
+    position: relative;
+  }
+  .chat-workspace.graph-first > .chat-layout:not(.closed) {
+    position: absolute;
+    inset: 4px 8px 8px;
+    z-index: 30;
+    margin: 0;
+    box-shadow: var(--shadow-xl);
+  }
 }
 @media (min-width: 1100px) {
   .has-side-panel .chat-configuration {

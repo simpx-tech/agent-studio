@@ -4,6 +4,7 @@ import {
   loopItems,
   renderTemplate,
   replyJson,
+  templateParts,
   templatePaths,
   valueAt,
   valueText,
@@ -26,6 +27,46 @@ describe('workflow templates', () => {
       JSON.stringify({ items: [{ name: 'Sword' }] }, null, 2),
     );
     expect(templatePaths('{{a.b}} {{ a.b }} {{c}}')).toEqual(['a.b', 'c']);
+  });
+
+  it('splits text into plain parts and the values it names, for their colours', () => {
+    const known = (key: string) => key === 'research';
+    expect(
+      templateParts(
+        'From {{input.topic}}, {{ trigger.text }} and {{previous.output}}: {{research.json.title}}',
+        known,
+      ),
+    ).toEqual([
+      { text: 'From ' },
+      { text: '{{input.topic}}', kind: 'input' },
+      { text: ', ' },
+      { text: '{{ trigger.text }}', kind: 'trigger' },
+      { text: ' and ' },
+      { text: '{{previous.output}}', kind: 'previous' },
+      { text: ': ' },
+      { text: '{{research.json.title}}', kind: 'step' },
+    ]);
+    // Loop items and the run's own values, and a step no key names.
+    expect(
+      templateParts('{{item.name}}{{index}} {{run.title}} {{now}} {{gone.output}}{{}}', known).map(
+        (part) => part.kind,
+      ),
+    ).toEqual([
+      'loop',
+      'loop',
+      undefined,
+      'run',
+      undefined,
+      'run',
+      undefined,
+      'unknown',
+      'unknown',
+    ]);
+    // Text without values is one plain part, and an empty text none.
+    expect(templateParts('Plain {text}', known)).toEqual([{ text: 'Plain {text}' }]);
+    expect(templateParts('', known)).toEqual([]);
+    // Without a way to tell, every step key counts as known.
+    expect(templateParts('{{anything.output}}')[0].kind).toBe('step');
   });
 
   it('reads parts of JSON values', () => {

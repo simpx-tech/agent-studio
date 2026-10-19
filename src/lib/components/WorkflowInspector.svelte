@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Copy, Plus, RefreshCw, Trash2, X } from '@lucide/svelte';
   import ChoicePicker from './ChoicePicker.svelte';
+  import TemplateField from './TemplateField.svelte';
   import WorkflowIcon from './WorkflowIcon.svelte';
   import {
     chatEvents,
@@ -24,6 +25,7 @@
   } from '$lib/workflow-model';
   import { reasoningName } from '$lib/models';
   import { scheduleLabel } from '$lib/workflow-schedule';
+  import { templateParts } from '$lib/workflow-templates';
   import { chatEventLabels, type WorkflowPickers } from '$lib/workflow-view';
   import type { ProviderId, Reasoning } from '$lib/domain';
   import { highestReasoning, rememberWorkflowAgent, workflowAgent } from '$lib/workflow-preferences';
@@ -83,6 +85,10 @@
     'run.title',
     'now',
   ]);
+  // Whether a step has a key, for the values a text names.
+  const hasKey = (key: string) => graph.nodes.some((n) => n.key === key);
+  // What each value to insert names, for its colour.
+  const valueKind = (path: string) => templateParts(`{{${path}}}`, hasKey)[0]?.kind ?? 'run';
   let focused: HTMLInputElement | HTMLTextAreaElement | undefined;
   let focusedField: ((text: string) => void) | undefined;
   function insert(path: string) {
@@ -213,19 +219,18 @@
   };
 </script>
 
-{#snippet text(label: string, field: string, rows = 0, placeholder = '')}
+{#snippet text(label: string, field: string, rows = 0, placeholder = '', mono = false)}
   <label class="field"
-    ><span>{label}</span>{#if rows}<textarea
-        {rows}
-        {placeholder}
-        value={(config[field] as string) ?? ''}
-        onfocus={track((value) => set(field, value))}
-        oninput={(event) => set(field, event.currentTarget.value)}></textarea>{:else}<input
-        {placeholder}
-        value={(config[field] as string) ?? ''}
-        onfocus={track((value) => set(field, value))}
-        oninput={(event) => set(field, event.currentTarget.value)}
-      />{/if}</label
+    ><span>{label}</span><TemplateField
+      {label}
+      rows={Math.max(1, rows)}
+      {placeholder}
+      {mono}
+      known={hasKey}
+      value={(config[field] as string) ?? ''}
+      onfocus={track((value) => set(field, value))}
+      oninput={(value) => set(field, value)}
+    /></label
   >
 {/snippet}
 {#snippet toggle(label: string, field: string)}
@@ -410,33 +415,38 @@
   <fieldset class="list">
     <legend>{label}</legend>
     {#each pairs(field) as [key, value], index (index)}
-      <div class="pair">
-        <input
-          aria-label={keyLabel}
-          placeholder={keyLabel}
-          value={key}
-          onchange={(event) => {
-            const next = pairs(field).map(([k, v], i) =>
-              i === index ? [event.currentTarget.value, v] : [k, v],
-            );
-            set(field, Object.fromEntries(next.filter(([k]) => k)));
-          }}
-        /><input
-          aria-label="Value"
+      <div class="entry">
+        <div class="entry-head">
+          <input
+            class="mono"
+            aria-label={keyLabel}
+            placeholder={keyLabel}
+            value={key}
+            onchange={(event) => {
+              const next = pairs(field).map(([k, v], i) =>
+                i === index ? [event.currentTarget.value, v] : [k, v],
+              );
+              set(field, Object.fromEntries(next.filter(([k]) => k)));
+            }}
+          /><button
+            type="button"
+            class="icon-button"
+            aria-label={`Remove ${key}`}
+            onclick={() =>
+              set(field, Object.fromEntries(pairs(field).filter((_, i) => i !== index)))}
+            ><X size={14} /></button
+          >
+        </div>
+        <TemplateField
+          label={`Value of ${key}`}
           placeholder="Value"
+          known={hasKey}
           {value}
           onfocus={track((text) =>
             set(field, { ...Object.fromEntries(pairs(field)), [key]: text }),
           )}
-          oninput={(event) =>
-            set(field, { ...Object.fromEntries(pairs(field)), [key]: event.currentTarget.value })}
-        /><button
-          type="button"
-          class="icon-button"
-          aria-label={`Remove ${key}`}
-          onclick={() => set(field, Object.fromEntries(pairs(field).filter((_, i) => i !== index)))}
-          ><X size={14} /></button
-        >
+          oninput={(text) => set(field, { ...Object.fromEntries(pairs(field)), [key]: text })}
+        />
       </div>
     {/each}
     <button
@@ -502,7 +512,13 @@
           options={triggerKinds.map((kind) => ({ id: kind, name: triggerLabels[kind] }))}
           value={trigger}
           onchange={(value) => chooseTrigger(value as TriggerKind)}
-        />
+        >
+          {#snippet icon()}<WorkflowIcon type={`trigger:${trigger}`} size={15} />{/snippet}
+          {#snippet optionIcon(option)}<WorkflowIcon
+              type={`trigger:${option.id}`}
+              size={15}
+            />{/snippet}
+        </ChoicePicker>
       </div>
       {#if trigger === 'chat' && startConfig}
         {@const chat = startConfig.chat}
@@ -824,7 +840,7 @@
         />
       </div>
       {@render toggle('Reply with JSON', 'json')}
-      {#if config.json}{@render text('JSON Schema', 'schema', 4, '{"type": "object", …}')}{/if}
+      {#if config.json}{@render text('JSON Schema', 'schema', 4, '{"type": "object", …}', true)}{/if}
       {@render text('Chat instructions', 'instructions', 3)}
     {:else if type === 'screen'}
       {@render agentFields()}
@@ -925,20 +941,49 @@
       <fieldset class="list">
         <legend>Values</legend>
         {#each entries as entry, index (index)}
-          <div class="pair">
-            <input
-              class="mono"
-              aria-label="Name"
-              value={entry.name}
-              oninput={(event) =>
-                set(
-                  'values',
-                  entries.map((e, i) =>
-                    i === index ? { ...e, name: event.currentTarget.value.trim() } : e,
-                  ),
-                )}
-            /><input
-              aria-label="Value"
+          <div class="entry">
+            <div class="entry-head">
+              <input
+                class="mono"
+                aria-label="Name"
+                placeholder="name"
+                value={entry.name}
+                oninput={(event) =>
+                  set(
+                    'values',
+                    entries.map((e, i) =>
+                      i === index ? { ...e, name: event.currentTarget.value.trim() } : e,
+                    ),
+                  )}
+              /><label class="checkbox" title="Parse as JSON"
+                ><input
+                  type="checkbox"
+                  checked={entry.json}
+                  onchange={(event) =>
+                    set(
+                      'values',
+                      entries.map((e, i) =>
+                        i === index ? { ...e, json: event.currentTarget.checked } : e,
+                      ),
+                    )}
+                />JSON</label
+              ><button
+                type="button"
+                class="icon-button"
+                aria-label={`Remove ${entry.name}`}
+                onclick={() =>
+                  set(
+                    'values',
+                    entries.filter((_, i) => i !== index),
+                  )}><X size={14} /></button
+              >
+            </div>
+            <TemplateField
+              label={`Value of ${entry.name}`}
+              rows={2}
+              placeholder={entry.json ? '{"key": "{{previous.output}}"}' : '{{previous.output}}'}
+              mono={entry.json}
+              known={hasKey}
               value={entry.value}
               onfocus={track((value) =>
                 set(
@@ -946,35 +991,12 @@
                   entries.map((e, i) => (i === index ? { ...e, value } : e)),
                 ),
               )}
-              oninput={(event) =>
+              oninput={(value) =>
                 set(
                   'values',
-                  entries.map((e, i) =>
-                    i === index ? { ...e, value: event.currentTarget.value } : e,
-                  ),
+                  entries.map((e, i) => (i === index ? { ...e, value } : e)),
                 )}
-            /><label class="checkbox" title="Parse as JSON"
-              ><input
-                type="checkbox"
-                checked={entry.json}
-                onchange={(event) =>
-                  set(
-                    'values',
-                    entries.map((e, i) =>
-                      i === index ? { ...e, json: event.currentTarget.checked } : e,
-                    ),
-                  )}
-              />JSON</label
-            ><button
-              type="button"
-              class="icon-button"
-              aria-label={`Remove ${entry.name}`}
-              onclick={() =>
-                set(
-                  'values',
-                  entries.filter((_, i) => i !== index),
-                )}><X size={14} /></button
-            >
+            />
           </div>
         {/each}
         <button
@@ -1070,7 +1092,7 @@
       <div class="values" aria-label="Values to insert">
         {#each values as value (value)}<button
             type="button"
-            class="value-chip"
+            class="value-chip chip-{valueKind(value)}"
             onmousedown={(event) => event.preventDefault()}
             onclick={() => insert(value)}>{`{{${value}}}`}</button
           >{/each}
@@ -1083,7 +1105,8 @@
   .workflow-inspector {
     display: flex;
     flex-direction: column;
-    width: 360px;
+    /* Wider when the graph has the room, for the values steps write. */
+    width: clamp(360px, 36%, 480px);
     flex-shrink: 0;
     min-height: 0;
     border: 1px solid var(--border);
@@ -1171,6 +1194,30 @@
     align-items: center;
     gap: 6px;
   }
+  /* A named value: its name on one line, its value below it with the whole width. */
+  .entry {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+  }
+  .entry-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .entry-head input:not([type]) {
+    flex: 1;
+    min-width: 0;
+  }
+  .entry-head .checkbox {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+  }
   .pair :global(.checkbox) {
     flex-shrink: 0;
     font-size: var(--text-xs);
@@ -1252,6 +1299,21 @@
   }
   .value-chip:hover {
     background: var(--hover);
+  }
+  .chip-input {
+    color: var(--syntax-string);
+  }
+  .chip-trigger {
+    color: var(--syntax-number);
+  }
+  .chip-previous {
+    color: var(--syntax-type);
+  }
+  .chip-step {
+    color: var(--syntax-title);
+  }
+  .chip-loop {
+    color: var(--syntax-keyword);
   }
   @media (max-width: 900px) {
     .workflow-inspector {

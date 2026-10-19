@@ -29,6 +29,7 @@
     dropped,
     openChat,
     openRun,
+    menu,
     label,
     fit = 0,
   }: {
@@ -52,6 +53,15 @@
     openChat?: (conversationId: string) => void;
     /** Opens the run of another workflow a card shows. */
     openRun?: (runId: string) => void;
+    /**
+     * A right-click on a card, a connection or empty space, where it was on the graph (`at`) and
+     * on the screen.
+     */
+    menu?: (
+      target: { kind: 'pane' | 'node' | 'edge'; id?: string },
+      at: { x: number; y: number },
+      screen: { x: number; y: number },
+    ) => void;
     label: string;
     /** Changes when the graph should be fit into view, as after a step is added. */
     fit?: number;
@@ -137,6 +147,14 @@
       { x: point.clientX, y: point.clientY },
     );
   }
+  function openMenu(event: MouseEvent, target: { kind: 'pane' | 'node' | 'edge'; id?: string }) {
+    if (!menu) return;
+    event.preventDefault();
+    menu(target, toFlow?.(event.clientX, event.clientY) ?? { x: 0, y: 0 }, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
   async function beforeDelete({ nodes: gone, edges: cut }: { nodes: Node[]; edges: Edge[] }) {
     if (editable) {
       const starts = gone.filter((n) => (n.data as { type?: string }).type === 'start');
@@ -174,6 +192,9 @@
     onbeforedelete={beforeDelete}
     onnodeclick={({ node }) => select(node.id)}
     onpaneclick={() => select(undefined)}
+    onnodecontextmenu={({ node, event }) => openMenu(event, { kind: 'node', id: node.id })}
+    onpanecontextmenu={({ event }) => openMenu(event, { kind: 'pane' })}
+    onedgecontextmenu={({ edge, event }) => openMenu(event, { kind: 'edge', id: edge.id })}
     onmovestart={(event) => {
       if (event) panned = true;
     }}

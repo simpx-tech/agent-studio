@@ -13,6 +13,40 @@ export function templatePaths(text: string): string[] {
   return paths;
 }
 
+/** What a placeholder names, which the step settings colour it by. */
+export type TemplateKind = 'input' | 'trigger' | 'previous' | 'loop' | 'run' | 'step' | 'unknown';
+export type TemplatePart = { text: string; kind?: TemplateKind };
+
+/**
+ * A text split into plain text and its placeholders, each with what it names; `known` tells
+ * whether a step has the key a placeholder starts with.
+ */
+export function templateParts(
+  text: string,
+  known: (key: string) => boolean = () => true,
+): TemplatePart[] {
+  const parts: TemplatePart[] = [];
+  let last = 0;
+  for (const match of text.matchAll(placeholder)) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index) });
+    const head = match[1].trim().split('.')[0];
+    const kind: TemplateKind =
+      head === 'input' || head === 'trigger' || head === 'previous'
+        ? head
+        : head === 'item' || head === 'index'
+          ? 'loop'
+          : head === 'run' || head === 'now'
+            ? 'run'
+            : head && known(head)
+              ? 'step'
+              : 'unknown';
+    parts.push({ text: match[0], kind });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
 /** A value as text: objects and lists as indented JSON. */
 export function valueText(value: unknown): string {
   if (value === undefined || value === null) return '';

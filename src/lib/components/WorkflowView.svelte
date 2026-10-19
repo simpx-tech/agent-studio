@@ -8,6 +8,7 @@
     CirclePlay,
     CircleStop,
     CircleX,
+    Copy,
     History,
     LoaderCircle,
     Maximize2,
@@ -16,6 +17,7 @@
     Play,
     Plus,
     Settings2,
+    SquareArrowOutUpRight,
     Target,
     Trash2,
     WandSparkles,
@@ -37,6 +39,8 @@
   import type { WorkflowClient } from '$lib/workflow-client.svelte';
   import { mergeDefinition } from '$lib/workflow-merge';
   import {
+    freshKey,
+    freshNodeId,
     graphIssues,
     newNode,
     nodeCatalog,
@@ -47,6 +51,7 @@
     runActive,
     triggerLabels,
     triggerOf,
+    webhookSecret,
     type NodeType,
     type RunDriverChoice,
     type TriggerKind,
@@ -80,6 +85,7 @@
     variant = 'page',
     expand,
     chat,
+    chatShown = false,
     close,
     back,
     switchRun,
@@ -100,8 +106,10 @@
     variant?: 'page' | 'panel';
     /** Shows it as a page of its own, from the panel, with the run it shows. */
     expand?: (run?: string) => void;
-    /** Returns to the chat that changes or drives it, from its page. */
+    /** Shows its chat: returns to it from its page, or opens and closes it beside the graph. */
     chat?: () => void;
+    /** Whether its chat shows beside it. */
+    chatShown?: boolean;
     /** Closes the panel. */
     close?: () => void;
     /** Returns to the workflow whose run this is. */
@@ -140,6 +148,13 @@
   let adding = $state(false);
   let starting = $state(false);
   let fit = $state(0);
+  // A right-click on the graph: a menu of what can be done there.
+  let contextMenu = $state<{
+    kind: 'pane' | 'node' | 'edge';
+    id?: string;
+    at: { x: number; y: number };
+    screen: { x: number; y: number };
+  }>();
   // A connection dropped on empty space: the step menu opens where it was dropped.
   let dropMenu = $state<{
     from: { node: string; port: string };
@@ -332,6 +347,111 @@
     starting = false;
     run = runId;
   }
+  /** A copy of a step beside it, with a key, schedules and a webhook address of its own. */
+  function duplicate(id: string) {
+    edit((definition) => {
+      const node = definition.graph.nodes.find((n) => n.id === id);
+      if (!node) return;
+      const copy = structuredClone($state.snapshot(node)) as typeof node;
+      copy.id = freshNodeId();
+      copy.key = freshKey(
+        node.type,
+        definition.graph.nodes.map((n) => n.key),
+      );
+      copy.position = { x: node.position.x + 40, y: node.position.y + 40 };
+      const config = copy.config as {
+        schedules?: { id: string }[];
+        webhook?: { secret?: string };
+      };
+      if (Array.isArray(config.schedules))
+        config.schedules = config.schedules.map((s) => ({
+          ...s,
+          id: crypto.randomUUID().slice(0, 8),
+        }));
+      if (config.webhook?.secret) config.webhook = { ...config.webhook, secret: webhookSecret() };
+      definition.graph.nodes.push(copy);
+      selected = copy.id;
+      settingsOpen = false;
+    });
+  }
+  /** Removes a step and its connections, keeping a workflow's last trigger. */
+  function removeStep(id: string) {
+    edit((definition) => {
+      const node = definition.graph.nodes.find((n) => n.id === id);
+      if (
+        !node ||
+        (node.type === 'start' &&
+          definition.graph.nodes.filter((n) => n.type === 'start').length < 2)
+      )
+        return;
+      definition.graph.nodes = definition.graph.nodes.filter((n) => n.id !== id);
+      definition.graph.edges = definition.graph.edges.filter(
+        (e) => e.source !== id && e.target !== id,
+      );
+      if (selected === id) selected = undefined;
+    });
+  }
+  // The chat, the history and the run a run's card leads to.
+  const cardTargets = (id: string) => {
+    const card = runGraph?.cards.find((c) => c.id === id);
+    if (!card) return {};
+    const rows = [...card.data.rows].reverse();
+    return {
+      chat: card.data.conversationId ?? rows.find((r) => r.conversationId)?.conversationId,
+      run:
+        (typeof card.data.runId === 'string' ? card.data.runId : undefined) ??
+        rows.find((r) => r.runId)?.runId,
+    };
+  };
+  /**
+   * Closes the right-click menu and does what its item does with what the menu was opened on,
+   * read before closing it, since the menu's own values follow it.
+   */
+  function fromMenu(run: (target: NonNullable<typeof contextMenu>) => void) {
+    const target = contextMenu;
+    contextMenu = undefined;
+    if (target) run(target);
+  }
+  // The menu takes the keyboard while it is open, so Escape and the arrow keys reach it rather
+  // than the step that had focus, and gives focus back when Escape closes it.
+  let menuElement = $state<HTMLElement>();
+  let menuReturn: HTMLElement | undefined;
+  function openContextMenu(next: NonNullable<typeof contextMenu>) {
+    adding = false;
+    dropMenu = undefined;
+    menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    contextMenu = next;
+  }
+  $effect(() => {
+    menuElement?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+  });
+  function menuKey(event: KeyboardEvent) {
+    const items = [
+      ...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(
+        '[role="menuitem"]:not(:disabled)',
+      ),
+    ];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      event.key === 'ArrowDown' || event.key === 'ArrowRight'
+        ? at + 1
+        : event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+          ? at - 1
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? items.length - 1
+              : undefined;
+    if (next === undefined || !items.length) return;
+    event.preventDefault();
+    items[(next + items.length) % items.length].focus();
+  }
+  const menuPlace = $derived.by(() => {
+    if (!contextMenu) return undefined;
+    const x = Math.min(contextMenu.screen.x, window.innerWidth - 340);
+    const y = Math.min(contextMenu.screen.y, window.innerHeight - 340);
+    return { x: Math.max(8, x), y: Math.max(8, y) };
+  });
   // The step menu where a connection was dropped stays within the window.
   const dropPlace = $derived.by(() => {
     if (!dropMenu) return undefined;
@@ -480,6 +600,7 @@
     {variant}
     expand={expand ? () => expand(run) : undefined}
     {chat}
+    {chatShown}
     {close}
     back={() => (run = undefined)}
     switchRun={(next) => (run = next)}
@@ -591,10 +712,10 @@
             >{/if}
         {/if}
         {#if variant === 'page' && chat}<button
-            class="icon-button"
-            title="Chat"
-            aria-label="Show its chat"
-            onclick={chat}><MessageSquare size={16} /></button
+            class="secondary"
+            aria-label="Chat"
+            aria-pressed={chatShown}
+            onclick={chat}><MessageSquare size={15} /><span class="label">Chat</span></button
           >{/if}
         {#if variant === 'panel'}
           {#if expand}<button
@@ -646,8 +767,10 @@
             })}
           dropped={(from, at, screen) => {
             adding = false;
+            contextMenu = undefined;
             dropMenu = { from, at, screen };
           }}
+          menu={(target, at, screen) => openContextMenu({ ...target, at, screen })}
           remove={(nodes, edges) =>
             edit((d) => {
               d.graph.nodes = d.graph.nodes.filter((n) => !nodes.includes(n.id));
@@ -768,6 +891,11 @@
           select={chooseCard}
           {openChat}
           openRun={openDoc}
+          {fit}
+          menu={(target, at, screen) =>
+            openContextMenu(
+              target.kind === 'node' ? { ...target, at, screen } : { kind: 'pane', at, screen },
+            )}
         />
         <WorkflowRunPanel
           run={runDoc}
@@ -802,12 +930,111 @@
 {/if}
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === 'Escape' && (dropMenu || adding)) {
+    if (event.key === 'Escape' && (dropMenu || adding || contextMenu)) {
+      const back = contextMenu ? menuReturn : undefined;
       dropMenu = undefined;
       adding = false;
+      contextMenu = undefined;
+      if (back?.isConnected) back.focus();
     }
   }}
+  onpointerdown={(event) => {
+    // A menu closes on a press anywhere but in it.
+    if (contextMenu && !(event.target instanceof Element && event.target.closest('.context-menu')))
+      contextMenu = undefined;
+  }}
 />
+{#if contextMenu && menuPlace}
+  {@const target = contextMenu}
+  <div
+    class="menu context-menu"
+    class:steps={kind === 'definition' && target.kind === 'pane'}
+    bind:this={menuElement}
+    onkeydown={menuKey}
+    role="menu"
+    tabindex="-1"
+    aria-label={target.kind === 'pane' ? 'Graph' : target.kind === 'edge' ? 'Connection' : 'Step'}
+    style:left={`${menuPlace.x}px`}
+    style:top={`${menuPlace.y}px`}
+  >
+    {#if kind === 'definition' && draft}
+      {#if target.kind === 'pane'}
+        {#each ['start', ...nodeTypeIds.filter((t) => t !== 'start')] as NodeType[] as type (type)}
+          <button
+            role="menuitem"
+            onclick={() =>
+              fromMenu((t) => {
+                selected = undefined;
+                addStep(type, t.at);
+              })}><WorkflowIcon {type} /><span>{nodeCatalog[type].label}</span></button
+          >
+        {/each}
+        <hr />
+        <button role="menuitem" onclick={() => fromMenu(arrange)}
+          ><WandSparkles size={15} aria-hidden="true" /><span>Arrange</span></button
+        >
+        <button role="menuitem" onclick={() => fromMenu(() => fit++)}
+          ><Maximize2 size={15} aria-hidden="true" /><span>Fit to view</span></button
+        >
+      {:else if target.kind === 'node' && target.id}
+        {@const id = target.id}
+        <button
+          role="menuitem"
+          onclick={() =>
+            fromMenu((t) => {
+              selected = t.id;
+              settingsOpen = false;
+            })}><Settings2 size={15} aria-hidden="true" /><span>Settings</span></button
+        >
+        <button role="menuitem" onclick={() => fromMenu((t) => t.id && duplicate(t.id))}
+          ><Copy size={15} aria-hidden="true" /><span>Duplicate</span></button
+        >
+        <button
+          role="menuitem"
+          class="danger-item"
+          disabled={draft.graph.nodes.find((n) => n.id === id)?.type === 'start' &&
+            draft.graph.nodes.filter((n) => n.type === 'start').length < 2}
+          onclick={() => fromMenu((t) => t.id && removeStep(t.id))}
+          ><Trash2 size={15} aria-hidden="true" /><span>Delete</span></button
+        >
+      {:else if target.kind === 'edge' && target.id}
+        <button
+          role="menuitem"
+          class="danger-item"
+          onclick={() =>
+            fromMenu((t) =>
+              edit((d) => (d.graph.edges = d.graph.edges.filter((e) => e.id !== t.id))),
+            )}><Trash2 size={15} aria-hidden="true" /><span>Delete connection</span></button
+        >
+      {/if}
+    {:else if target.kind === 'node' && target.id}
+      {@const leads = cardTargets(target.id)}
+      {#if leads.chat}<button
+          role="menuitem"
+          onclick={() =>
+            fromMenu((t) => {
+              const chat = t.id && cardTargets(t.id).chat;
+              if (chat) openChat(chat);
+            })}><MessageSquare size={15} aria-hidden="true" /><span>Open chat</span></button
+        >{/if}
+      <button role="menuitem" onclick={() => fromMenu((t) => t.id && chooseCard(t.id))}
+        ><History size={15} aria-hidden="true" /><span>Show its history</span></button
+      >
+      {#if leads.run}<button
+          role="menuitem"
+          onclick={() =>
+            fromMenu((t) => {
+              const run = t.id && cardTargets(t.id).run;
+              if (run) openDoc(run);
+            })}><SquareArrowOutUpRight size={15} aria-hidden="true" /><span>Open run</span></button
+        >{/if}
+    {:else}
+      <button role="menuitem" onclick={() => fromMenu(() => fit++)}
+        ><Maximize2 size={15} aria-hidden="true" /><span>Fit to view</span></button
+      >
+    {/if}
+  </div>
+{/if}
 {#if starting && draft}<WorkflowStart
     definition={draft}
     {pickers}
@@ -967,6 +1194,16 @@
     flex-shrink: 0;
     margin-left: auto;
   }
+  /* The settings and the chat stay pressed while they are open. */
+  .workflow-tools button[aria-pressed='true'] {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .workflow-tools button[aria-pressed='true']:not(:disabled):hover {
+    background: var(--accent-soft-hover);
+    color: var(--accent-hover);
+  }
   /* Too narrow for the buttons' names, they keep their icons and their names on hover. */
   @container (max-width: 520px) {
     .workflow-tools .label {
@@ -1028,6 +1265,25 @@
   .drop-menu {
     position: fixed;
     z-index: 40;
+  }
+  /* A right-click menu: one column of actions, or the steps to add and the graph's actions. */
+  .context-menu {
+    position: fixed;
+    z-index: 40;
+    grid-template-columns: minmax(170px, 1fr);
+  }
+  .context-menu.steps {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+  .context-menu hr {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 4px 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+  .context-menu .danger-item {
+    color: var(--danger);
   }
   .menu button {
     justify-content: flex-start;
@@ -1143,7 +1399,7 @@
     right: 8px;
     bottom: 8px;
     z-index: 5;
-    width: min(360px, calc(100% - 16px));
+    width: min(400px, calc(100% - 16px));
     max-height: none;
     box-shadow: var(--shadow-lg);
   }
