@@ -4,15 +4,18 @@
   // The left divider of a docked right-side panel, which remembers its width on this device.
   let {
     availableWidth,
-    defaultWidth: initialWidth,
+    share: defaultShare,
     onresize,
     storageKey,
     label,
     controls,
   }: {
     availableWidth: number;
-    /** Its width until the reader resizes it; otherwise 42% of the space, at most 620px. */
-    defaultWidth?: number;
+    /**
+     * Keeps a share of the space rather than a width, this one until the reader resizes it, so
+     * the panel and what it sits beside grow and shrink together with the window.
+     */
+    share?: number;
     onresize: (width: number) => void;
     storageKey: string;
     label: string;
@@ -20,7 +23,9 @@
     controls: string;
   } = $props();
   const minWidth = 360;
-  let preferredWidth = $state<number>();
+  const proportional = $derived(defaultShare !== undefined);
+  // The reader's width, or their share of the space when proportional.
+  let preferred = $state<number>();
   let handle = $state<HTMLDivElement>();
   let drag = $state<{
     pointerId: number;
@@ -29,8 +34,17 @@
     previous?: number;
   }>();
   const maxWidth = $derived(Math.max(minWidth, Math.floor(availableWidth - 420)));
-  const defaultWidth = $derived(initialWidth ?? Math.min(620, Math.round(availableWidth * 0.42)));
-  const width = $derived(Math.max(minWidth, Math.min(maxWidth, preferredWidth ?? defaultWidth)));
+  const wanted = $derived(
+    proportional
+      ? Math.round((preferred ?? defaultShare!) * availableWidth)
+      : (preferred ?? Math.min(620, Math.round(availableWidth * 0.42))),
+  );
+  const width = $derived(Math.max(minWidth, Math.min(maxWidth, wanted)));
+  /** Keeps a width the reader chose, as a share of the space when proportional. */
+  function choose(next: number) {
+    const clamped = Math.round(Math.max(minWidth, Math.min(maxWidth, next)));
+    preferred = proportional && availableWidth > 0 ? clamped / availableWidth : clamped;
+  }
 
   $effect(() => onresize(width));
   // A root class keeps the drag cursor rule cheap for every other style recalculation.
@@ -44,15 +58,16 @@
   onMount(() => {
     try {
       const saved = Number(localStorage.getItem(storageKey));
-      if (Number.isFinite(saved) && saved >= minWidth) preferredWidth = saved;
+      if (proportional ? saved > 0 && saved < 1 : Number.isFinite(saved) && saved >= minWidth)
+        preferred = saved;
     } catch {
       // Layout preferences remain optional when browser storage is unavailable.
     }
   });
   function save() {
     try {
-      if (preferredWidth === undefined) localStorage.removeItem(storageKey);
-      else localStorage.setItem(storageKey, String(preferredWidth));
+      if (preferred === undefined) localStorage.removeItem(storageKey);
+      else localStorage.setItem(storageKey, String(preferred));
     } catch {
       // Resizing still works for this session.
     }
@@ -61,27 +76,25 @@
     if (event.button !== 0 || !event.isPrimary) return;
     event.preventDefault();
     handle?.focus();
-    drag = { pointerId: event.pointerId, x: event.clientX, width, previous: preferredWidth };
+    drag = { pointerId: event.pointerId, x: event.clientX, width, previous: preferred };
     handle?.setPointerCapture(event.pointerId);
   }
   function move(event: PointerEvent) {
     if (!drag || drag.pointerId !== event.pointerId) return;
-    preferredWidth = Math.round(
-      Math.max(minWidth, Math.min(maxWidth, drag.width + drag.x - event.clientX)),
-    );
+    choose(drag.width + drag.x - event.clientX);
   }
   function finish(cancel = false) {
     if (!drag) return;
     const previous = drag;
     drag = undefined;
-    if (cancel) preferredWidth = previous.previous;
+    if (cancel) preferred = previous.previous;
     else save();
     if (handle?.hasPointerCapture(previous.pointerId))
       handle.releasePointerCapture(previous.pointerId);
   }
   function reset() {
     finish(true);
-    preferredWidth = undefined;
+    preferred = undefined;
     save();
   }
   function keydown(event: KeyboardEvent) {
@@ -93,10 +106,10 @@
     }
     if (drag) return;
     const step = event.shiftKey ? 50 : 10;
-    if (event.key === 'ArrowLeft') preferredWidth = Math.min(maxWidth, width + step);
-    else if (event.key === 'ArrowRight') preferredWidth = Math.max(minWidth, width - step);
-    else if (event.key === 'Home') preferredWidth = minWidth;
-    else if (event.key === 'End') preferredWidth = maxWidth;
+    if (event.key === 'ArrowLeft') choose(width + step);
+    else if (event.key === 'ArrowRight') choose(width - step);
+    else if (event.key === 'Home') choose(minWidth);
+    else if (event.key === 'End') choose(maxWidth);
     else if (event.key === 'Enter') reset();
     else return;
     event.preventDefault();

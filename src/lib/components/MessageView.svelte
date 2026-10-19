@@ -164,11 +164,14 @@
       if (!line.startsWith('- ')) break;
       events.push(line);
     }
-    const first =
-      (events[0] ?? lines.find((line) => line.trim() && line.trim() !== '[Mission update]') ?? '')
-        .replace(/^[-#\s]+/, '')
-        .replace(/\s*\([0-9a-f]{8}-[0-9a-f-]{27}\)/gi, '')
-        .trim();
+    const first = (
+      events[0] ??
+      lines.find((line) => line.trim() && line.trim() !== '[Mission update]') ??
+      ''
+    )
+      .replace(/^[-#\s]+/, '')
+      .replace(/\s*\([0-9a-f]{8}-[0-9a-f-]{27}\)/gi, '')
+      .trim();
     return events.length > 1 ? `${first} · ${events.length - 1} more` : first;
   });
   // Its own sub-agents still running, then those of the replies it took over that it waits for.

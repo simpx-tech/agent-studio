@@ -8,11 +8,14 @@
   let {
     takeFocus = false,
     close,
+    run = $bindable(),
     ...view
-  }: Omit<ComponentProps<typeof WorkflowView>, 'variant' | 'close'> & {
+  }: Omit<ComponentProps<typeof WorkflowView>, 'variant' | 'close' | 'run'> & {
     /** Whether it takes focus when it opens: only when the reader opened it. */
     takeFocus?: boolean;
     close: () => void;
+    /** The run of the workflow it shows in the workflow's place. */
+    run?: string;
   } = $props();
   let viewportWidth = $state(0);
   let workspaceWidth = $state(0);
@@ -60,13 +63,13 @@
 >
   {#if docked}<PanelResize
       availableWidth={workspaceWidth}
-      defaultWidth={Math.round(Math.min(workspaceWidth * 0.55, workspaceWidth - 640))}
+      share={0.5}
       onresize={(width) => (panelWidth = width)}
-      storageKey="agent-studio.workflow-panel-width"
+      storageKey="agent-studio.workflow-panel-share"
       label="Resize workflow panel"
       controls="workflow-panel"
     />{/if}
-  <WorkflowView {...view} variant="panel" {close} />
+  <WorkflowView {...view} variant="panel" {close} bind:run />
 </dialog>
 
 <style>
@@ -98,8 +101,8 @@
     position: relative;
     inset: auto;
     align-self: stretch;
-    flex: 0 0 var(--workflow-panel-width, 55%);
-    width: var(--workflow-panel-width, 55%);
+    flex: 0 0 var(--workflow-panel-width, 50%);
+    width: var(--workflow-panel-width, 50%);
     min-width: 360px;
     height: auto;
     min-height: 0;

@@ -1,6 +1,6 @@
 import type { Conversation, Message } from './domain';
 import { liveAction } from './activity-groups';
-import { layeredLayout } from './workflow-layout';
+import { arrangeSteps, flowsSideways, layeredLayout, STEP_WIDTH } from './workflow-layout';
 import {
   isNodeType,
   nodeCatalog,
@@ -60,6 +60,8 @@ export type CardData = {
   statusText: string;
   rows: CardRow[];
   ports: { id: string; label: string }[];
+  /** The ports a connection leaves from. */
+  connected?: string[];
   input: boolean;
   count?: string;
   issue?: string;
@@ -75,7 +77,7 @@ export type GraphLink = {
   label?: string;
   active?: boolean;
 };
-export const CARD_WIDTH = 248;
+export const CARD_WIDTH = STEP_WIDTH;
 
 const statusTexts: Record<CardStatus, string> = {
   idle: '',
@@ -123,11 +125,18 @@ export function stepSummary(
       const config = nodeConfig(node, 'start');
       switch (triggerOf(node)) {
         case 'schedule':
-          return config.schedules.filter((s) => s.enabled).map(scheduleLabel).join(' · ') || 'No schedule';
+          return (
+            config.schedules
+              .filter((s) => s.enabled)
+              .map(scheduleLabel)
+              .join(' · ') || 'No schedule'
+          );
         case 'chat': {
           const c = config.chat;
           const events = c.events.map((e) => chatEventLabels[e]).join(', ');
-          const where = c.environmentId ? ` on ${names.computer?.(c.environmentId) ?? 'a computer'}` : '';
+          const where = c.environmentId
+            ? ` on ${names.computer?.(c.environmentId) ?? 'a computer'}`
+            : '';
           return `${events || 'Nothing'} in ${c.title.trim() ? `“${c.title.trim()}”` : 'any chat'}${where}`;
         }
         case 'workflow':
@@ -204,6 +213,9 @@ export function stepSummary(
 
 const ports = (node: WorkflowNode) =>
   nodePorts(node.type).map((id) => ({ id, label: portLabels[id] ?? id }));
+const connectedPorts = (graph: WorkflowGraph, node: WorkflowNode) => [
+  ...new Set(graph.edges.filter((e) => e.source === node.id).map((e) => e.sourcePort)),
+];
 const takesInput = (node: WorkflowNode) =>
   isNodeType(node.type) ? nodeCatalog[node.type].input : true;
 const links = (
@@ -238,6 +250,7 @@ export function definitionCards(
         statusText: '',
         rows: [],
         ports: ports(node),
+        connected: connectedPorts(graph, node),
         input: takesInput(node),
         issue: issues.find((i) => i.nodeId === node.id && i.blocking)?.message,
         key: node.key,
@@ -262,6 +275,9 @@ export function staticRunCards(
   conversation: (id: string) => Conversation | undefined,
   names: { computer?: (id: string) => string } = {},
 ): { cards: GraphCard[]; links: GraphLink[] } {
+  const placed = flowsSideways(run.graph.nodes, run.graph.edges)
+    ? arrangeSteps(run.graph.nodes, run.graph.edges)
+    : undefined;
   const byNode = new Map<string, Activation[]>();
   for (const activation of run.activations)
     byNode.set(activation.nodeId, [...(byNode.get(activation.nodeId) ?? []), activation]);
@@ -298,7 +314,7 @@ export function staticRunCards(
     const loop = activations.find((a) => a.loop)?.loop;
     return {
       id: node.id,
-      position: node.position,
+      position: placed?.get(node.id) ?? node.position,
       data: {
         kind: 'step',
         type: node.type,
@@ -309,6 +325,7 @@ export function staticRunCards(
         statusText: current?.wait ?? statusText(status),
         rows,
         ports: ports(node),
+        connected: connectedPorts(run.graph, node),
         input: takesInput(node),
         ...(loop
           ? { count: `${loop.finished.length}/${loop.items.length}` }
@@ -572,7 +589,7 @@ export function missionCards(
   const positions = layeredLayout(
     cards.map((card) => ({ id: card.id, width: CARD_WIDTH, height: cardHeight(card.data) })),
     result,
-    { gapX: 72, gapY: 28 },
+    { gapX: 32, gapY: 56 },
   );
   for (const card of cards) card.position = positions.get(card.id) ?? card.position;
   return { cards, links: result };
@@ -606,3 +623,27 @@ export type WorkflowPickers = {
 
 /** The computers that can drive runs: desktops and servers, never a WSL distribution. */
 export type DriverChoice = Choice & { server: boolean };
+
+/** A run's status, in words. */
+export const runStatusNames: Record<string, string> = {
+  running: 'Running',
+  paused: 'Paused',
+  completed: 'Completed',
+  failed: 'Failed',
+  stopped: 'Stopped',
+};
+
+/** When a run started or ended: its time today, else its day and time. */
+export function runTime(at: string | undefined, now = new Date()): string {
+  if (!at) return '';
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return '';
+  const time = date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  return now.toDateString() === date.toDateString()
+    ? time
+    : `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}

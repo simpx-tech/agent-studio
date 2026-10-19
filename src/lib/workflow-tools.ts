@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { providerIds, type ProviderId } from './domain';
 import { staticRun, type WorkflowHost } from './workflow-engine';
-import { layeredLayout } from './workflow-layout';
+import { arrangeSteps } from './workflow-layout';
 import {
   configSchemas,
   freshNodeId,
@@ -197,11 +197,7 @@ export function normalizeGraph(
     resultEdges.push({ id, source, target, sourcePort: input.sourcePort || 'out' });
   }
   if (nodes.some((n) => !n.position)) {
-    const positions = layeredLayout(
-      result.map((n) => ({ id: n.id, width: 240, height: 96 })),
-      resultEdges,
-      { gapX: 80, gapY: 40 },
-    );
+    const positions = arrangeSteps(result, resultEdges);
     for (const node of result) node.position = positions.get(node.id) ?? node.position;
   }
   const graph = { nodes: result, edges: resultEdges };
@@ -310,6 +306,16 @@ export async function generalCall(
         const kept = old ? nodeConfig(old, 'start').webhook.secret : '';
         config.webhook = { ...config.webhook, secret: kept.length >= 16 ? kept : webhookSecret() };
       }
+      // A schedule runs from when it was set: one added now from now, so a slot earlier today never
+      // starts a run at once, and one kept keeps its time.
+      for (const node of graph.nodes) {
+        if (node.type !== 'start' || triggerOf(node) !== 'schedule') continue;
+        const config = node.config as { schedules?: { id: string; since?: string }[] };
+        const old = before?.graph.nodes.find((n) => n.id === node.id);
+        const kept = old ? nodeConfig(old, 'start').schedules : [];
+        for (const schedule of config.schedules ?? [])
+          schedule.since ??= kept.find((k) => k.id === schedule.id)?.since ?? at;
+      }
       // A workflow its triggers start runs on a computer of its own: this one unless it has one.
       const triggered = graph.nodes.some((n) => n.type === 'start' && triggerOf(n) !== 'manual');
       const definition: WorkflowDefinition = {
@@ -356,7 +362,8 @@ export async function generalCall(
       const trigger = input.trigger
         ? definition.graph.nodes.find((n) => n.type === 'start' && n.key === input.trigger)
         : undefined;
-      if (input.trigger && !trigger) throw new Error(`No trigger step has the key ${input.trigger}.`);
+      if (input.trigger && !trigger)
+        throw new Error(`No trigger step has the key ${input.trigger}.`);
       const run = staticRun(
         input.id,
         definition,

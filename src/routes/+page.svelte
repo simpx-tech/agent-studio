@@ -178,7 +178,7 @@
     workSignature,
   } from '$lib/light-chats';
   import ScreenView from '$lib/components/ScreenView.svelte';
-  import WorkflowList from '$lib/components/WorkflowList.svelte';
+  import WorkflowsHome from '$lib/components/WorkflowsHome.svelte';
   import DriverPicker from '$lib/components/DriverPicker.svelte';
   import { WorkflowClient } from '$lib/workflow-client.svelte';
   import type { ChatSpec, Readiness, WorkflowHost } from '$lib/workflow-engine';
@@ -380,7 +380,7 @@
 
   initAppearance();
 
-  type View = 'chat' | 'connections' | 'settings' | 'screen' | 'workflow';
+  type View = 'chat' | 'connections' | 'settings' | 'screen' | 'workflow' | 'workflows';
   let installation = $state<Installation>();
   let wslDiscovery = $state<WslDiscovery>();
   let wslError = $state('');
@@ -477,7 +477,7 @@
   let locationGeneration = 0;
   let settingsRevision = 0;
   let collapsedGroups = $state<Record<string, boolean>>({});
-  let conversationScope = $state<'active' | 'history' | 'screens' | 'workflows'>('active');
+  let conversationScope = $state<'active' | 'history' | 'screens'>('active');
   // Screens (docs/SCREENS.md): each computer keeps its own and lists them when asked. This window
   // keeps the lists it read for the session, by the host that answered.
   type ScreenShelf = {
@@ -490,8 +490,13 @@
   let openedScreen = $state<{ environmentId: string; id: string }>();
   // The workflow or run the main area shows as a page (docs/WORKFLOWS.md).
   let openedWorkflow = $state<string>();
-  // Chats that hid the panel of their workflow, by chat or scratch chat; window memory only.
-  let workflowPanelHidden = $state<Record<string, boolean>>({});
+  // The run of it the page shows in its place, and the run each workflow panel shows, by chat.
+  let openedWorkflowRun = $state<string>();
+  let panelRuns = $state<Record<string, string | undefined>>({});
+  // Whether each chat shows its workflow's panel, by chat or scratch chat; window memory only.
+  // Untouched, it shows beside the chat on wide windows and waits behind the bar above the chat
+  // on narrow ones, where it would cover the chat.
+  let workflowPanelChoice = $state<Record<string, 'shown' | 'hidden'>>({});
   // Where a mission a new mission chat starts runs, chosen beside its composer.
   let missionDriver = $state<RunDriverChoice>();
   // The graph library loads with the first workflow opened, not with every start of the page.
@@ -510,8 +515,10 @@
     alert: (summary, alert) => {
       // A run on screen needs no alert of its own.
       const shown =
-        (view === 'workflow' && openedWorkflow === summary.id) ||
-        (view === 'chat' && !!activeId && workflows.workflowOf(activeId)?.id === summary.id);
+        (view === 'workflow' &&
+          (openedWorkflow === summary.id || openedWorkflowRun === summary.id)) ||
+        (view === 'chat' && !!activeId && workflows.workflowOf(activeId)?.id === summary.id) ||
+        (view === 'chat' && panelRuns[panelKey] === summary.id);
       if (shown && document.hasFocus()) return;
       void notifyWorkflow(summary.id, alert);
     },
@@ -1891,22 +1898,26 @@
   const screensLoading = $derived(Object.values(screenShelves).some((shelf) => shelf.loading));
   // A count shows once a computer answered, so an unread list never reads as none.
   const screensChecked = $derived(Object.values(screenShelves).some((shelf) => shelf.checkedAt));
-  const viewTitle = $derived(
-    {
-      chat:
-        active?.title ??
-        (currentScratch?.workflow && !currentScratch.workflow.id
-          ? currentScratch.workflow.mode === 'mission'
-            ? 'New mission'
-            : 'New workflow'
-          : currentScratch?.workflow?.id
-            ? (workflows.summaries.get(currentScratch.workflow.id)?.title ?? 'Workflow')
-            : 'New conversation'),
-      connections: 'Connections',
-      settings: 'Settings',
-      screen: openedScreenSummary?.title ?? 'Screen',
-      workflow: (openedWorkflow && workflows.summaries.get(openedWorkflow)?.title) || 'Workflow',
-    }[view],
+  // A workflow's chat is named by its workflow or mission.
+  const viewTitle = $derived.by(
+    () =>
+      ({
+        chat:
+          (chatWorkflow ? workflows.summaries.get(chatWorkflow)?.title : undefined) ??
+          active?.title ??
+          (currentScratch?.workflow && !currentScratch.workflow.id
+            ? currentScratch.workflow.mode === 'mission'
+              ? 'New mission'
+              : 'New workflow'
+            : currentScratch?.workflow?.id
+              ? 'Workflow'
+              : 'New conversation'),
+        connections: 'Connections',
+        settings: 'Settings',
+        screen: openedScreenSummary?.title ?? 'Screen',
+        workflow: (openedWorkflow && workflows.summaries.get(openedWorkflow)?.title) || 'Workflow',
+        workflows: 'Workflows',
+      })[view],
   );
   /** Reads the screens of each reachable host again, unless it answered moments ago. */
   function refreshScreens(hosts: string[] = screenHosts, force = false) {
@@ -2029,7 +2040,8 @@
   const workflowPanelShown = $derived(
     view === 'chat' &&
       !!chatWorkflow &&
-      !workflowPanelHidden[panelKey] &&
+      (workflowPanelChoice[panelKey] ?? (viewportWidth >= 1000 ? 'shown' : 'hidden')) ===
+        'shown' &&
       artifactView?.mode !== 'panel' &&
       !subagentShown,
   );
@@ -2041,35 +2053,49 @@
   const workflowsWaiting = $derived(
     [...workflows.summaries.values()].some((s) => s.kind === 'run' && s.questions > 0),
   );
+  // The sidebar's Workflows row stands for the Workflows page and every workflow opened from it.
+  const workflowsCurrent = $derived(
+    view === 'workflows' || view === 'workflow' || (view === 'chat' && !!chatWorkflow),
+  );
   /**
    * Opens a workflow, run or mission: a workflow or mission in its chat, with its graph beside it,
-   * and a static run as a page of its own.
+   * a run of a saved workflow in that workflow's panel, and any other run as a page of its own.
    */
   function openWorkflow(id: string) {
     if (!id) return;
     sidebarOpen = false;
-    conversationScope = 'workflows';
     const summary = workflows.summaries.get(id);
-    const chat = summary?.chat
-      ? workspace.conversations.find((c) => c.id === summary.chat)
+    const owner =
+      summary?.kind === 'run' && summary.mode !== 'dynamic' && summary.definitionId
+        ? workflows.summaries.get(summary.definitionId)
+        : undefined;
+    const target = owner ?? summary;
+    const chat = target?.chat
+      ? workspace.conversations.find((c) => c.id === target.chat)
       : undefined;
-    if (chat && (summary?.kind === 'definition' || summary?.mode === 'dynamic')) {
-      delete workflowPanelHidden[chat.id];
+    if (chat && (target?.kind === 'definition' || target?.mode === 'dynamic')) {
+      workflowPanelChoice[chat.id] = 'shown';
+      panelRuns[chat.id] = owner ? id : undefined;
       openConversation(chat);
-      conversationScope = 'workflows';
       return;
     }
-    if (summary?.kind === 'definition') {
-      newWorkflowChat('workflow', id);
+    if (target?.kind === 'definition') {
+      newWorkflowChat('workflow', target.id);
+      panelRuns[panelKey] = owner ? id : undefined;
       return;
     }
     expandWorkflow(id);
   }
-  /** Shows a workflow, run or mission as a page of its own. */
-  function expandWorkflow(id: string) {
+  /** Shows a workflow, run or mission as a page of its own, with a run of the workflow shown. */
+  function expandWorkflow(id: string, run?: string) {
     openedWorkflow = id;
+    openedWorkflowRun = run;
     view = 'workflow';
-    conversationScope = 'workflows';
+    sidebarOpen = false;
+  }
+  /** The Workflows page. */
+  function openWorkflows() {
+    view = 'workflows';
     sidebarOpen = false;
   }
   /**
@@ -2094,6 +2120,16 @@
       mode,
       ...(id ? { id } : {}),
     });
+  }
+  /** The arrow keys move between Workflow and Mission on a new workflow chat's welcome. */
+  function workflowKindKey(event: KeyboardEvent, mode: 'workflow' | 'mission') {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const next = mode === 'mission' ? 'workflow' : 'mission';
+    setWorkflowMode(next);
+    void tick().then(() =>
+      document.querySelector<HTMLElement>(`.workflow-kind [data-kind="${next}"]`)?.focus(),
+    );
   }
   function setWorkflowMode(mode: 'workflow' | 'mission') {
     const scratch = scratches.find((s) => s.id === scratchId);
@@ -4228,7 +4264,7 @@
     sidebarOpen = false;
     folderBrowserOpen = false;
     locationGeneration++;
-    conversationScope = flow ? 'workflows' : 'active';
+    if (!flow) conversationScope = 'active';
     locationPending = false;
     draftSettings = settingsFor(workspace.preferences, provider);
     if (flow) {
@@ -4657,7 +4693,7 @@
     view = 'chat';
     if (!activeId && scratchId === scratch.id) return;
     locationGeneration++;
-    conversationScope = scratch.workflow ? 'workflows' : 'active';
+    if (!scratch.workflow) conversationScope = 'active';
     locationPending = false;
     const location = scratchLocation(workspace.fleet, scratch);
     const available = !!location && !!locationExecutionEnvironment(workspace.fleet, location);
@@ -6412,29 +6448,19 @@
               >{pendingChats}</span
             >{/if}
         </span>
-      </span>{#if conversationScope === 'workflows'}<button
-          class="icon-button"
-          onclick={() => newWorkflowChat()}
-          aria-label="New workflow"
-          title="New workflow"
-          disabled={!loaded}><Plus size={15} /></button
-        >{:else}<button
-          class="icon-button"
-          onclick={() => newChat()}
-          aria-label="New conversation"
-          title="New conversation (Ctrl+N)"
-          aria-keyshortcuts="Control+N Meta+N"
-          disabled={!loaded}><Plus size={15} /></button
-        >{/if}
+      </span><button
+        class="icon-button"
+        onclick={() => newChat()}
+        aria-label="New conversation"
+        title="New conversation (Ctrl+N)"
+        aria-keyshortcuts="Control+N Meta+N"
+        disabled={!loaded}><Plus size={15} /></button
+      >
     </div>
     <label class="search"
       ><Search size={14} /><input
         aria-label="Search conversations"
-        placeholder={conversationScope === 'screens'
-          ? 'Search screens'
-          : conversationScope === 'workflows'
-            ? 'Search workflows'
-            : 'Search conversations'}
+        placeholder={conversationScope === 'screens' ? 'Search screens' : 'Search conversations'}
         bind:value={query}
       />{#if query}<button
           class="icon-button"
@@ -6443,17 +6469,15 @@
         >{/if}</label
     >
     <button
-      class="workflows-button"
-      class:current={conversationScope === 'workflows'}
-      aria-pressed={conversationScope === 'workflows'}
+      class="sidebar-nav-row"
+      class:current={workflowsCurrent}
+      aria-current={workflowsCurrent ? 'page' : undefined}
       disabled={!loaded}
-      onclick={() => {
-        conversationScope = 'workflows';
-        if (!workflowChat && view !== 'workflow') newWorkflowChat();
-      }}
-      ><Workflow size={15} aria-hidden="true" /><span>Workflows</span>{#if workflowsInProgress}<span
-          class="conversation-tab-count"
-          class:workflow-attention={workflowsWaiting}
+      onclick={openWorkflows}
+      ><Workflow size={16} aria-hidden="true" /><span>Workflows</span>{#if workflowsInProgress}<span
+          class="nav-count"
+          class:attention={workflowsWaiting}
+          title={workflowsWaiting ? 'Waiting for you' : 'In progress'}
           aria-label={`${workflowsInProgress} in progress`}>{workflowsInProgress}</span
         >{/if}</button
     >
@@ -6464,10 +6488,7 @@
           role="tab"
           aria-selected={conversationScope === group.id}
           aria-controls={`conversation-panel-${group.id}`}
-          tabindex={conversationScope === group.id ||
-          (conversationScope === 'workflows' && group.id === 'active')
-            ? 0
-            : -1}
+          tabindex={conversationScope === group.id ? 0 : -1}
           onclick={() => (conversationScope = group.id as 'active' | 'history')}
           onkeydown={conversationTabKey}
           ><span>{group.name}</span><span class="conversation-tab-count">{group.count}</span
@@ -6821,20 +6842,6 @@
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}
       </div>
-      <div
-        id="conversation-panel-workflows"
-        class="conversation-section"
-        role="region"
-        aria-label="Workflows"
-        hidden={conversationScope !== 'workflows'}
-      >
-        <WorkflowList
-          client={workflows}
-          {query}
-          selected={view === 'workflow' ? openedWorkflow : view === 'chat' ? chatWorkflow : undefined}
-          open={openWorkflow}
-        />
-      </div>
     </div>
     <div class="sidebar-tools">
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button
@@ -6946,7 +6953,7 @@
                   aria-hidden="true"
                 />{/if}<span><strong>{shown?.title ?? 'Workflow'}</strong></span><button
                 class="text-button"
-                onclick={() => delete workflowPanelHidden[panelKey]}>Show graph</button
+                onclick={() => (workflowPanelChoice[panelKey] = 'shown')}>Show graph</button
               >
             </div>
           {:else if activeWorkflow && !chatWorkflow}<div class="workflow-banner" role="note">
@@ -7281,6 +7288,32 @@
                           : 'What should it do?'
                       : 'What’s on your mind?'}
                   </h1>
+                  {#if currentScratch?.workflow && !currentScratch.workflow.id}{@const mode =
+                      currentScratch.workflow.mode}<div
+                      class="workflow-kind"
+                      role="radiogroup"
+                      aria-label="Create"
+                      tabindex="-1"
+                      onkeydown={(event) => workflowKindKey(event, mode)}
+                    >
+                      <button
+                        type="button"
+                        role="radio"
+                        data-kind="workflow"
+                        aria-checked={mode === 'workflow'}
+                        tabindex={mode === 'workflow' ? 0 : -1}
+                        onclick={() => setWorkflowMode('workflow')}
+                        ><Workflow size={15} aria-hidden="true" />Workflow</button
+                      ><button
+                        type="button"
+                        role="radio"
+                        data-kind="mission"
+                        aria-checked={mode === 'mission'}
+                        tabindex={mode === 'mission' ? 0 : -1}
+                        onclick={() => setWorkflowMode('mission')}
+                        ><Target size={15} aria-hidden="true" />Mission</button
+                      >
+                    </div>{/if}
                 </div>{/if}
             </div>
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>
@@ -7483,19 +7516,7 @@
                 </p>{/if}
               <div class="composer-bottom">
                 <div class="composer-tools">
-                  {#if currentScratch?.workflow && !currentScratch.workflow.id}<ChoicePicker
-                      label="Create"
-                      value={currentScratch.workflow.mode}
-                      options={[
-                        { id: 'workflow', name: 'Workflow' },
-                        { id: 'mission', name: 'Mission' },
-                      ]}
-                      onchange={(value) => setWorkflowMode(value as 'workflow' | 'mission')}
-                    >
-                      {#snippet icon()}{#if currentScratch?.workflow?.mode === 'mission'}<Target
-                            size={16}
-                          />{:else}<Workflow size={16} />{/if}{/snippet}
-                    </ChoicePicker>
+                  {#if currentScratch?.workflow && !currentScratch.workflow.id}
                     {#if currentScratch.workflow.mode === 'mission'}<DriverPicker
                         compact
                         drivers={workflowPickers.drivers}
@@ -7595,9 +7616,10 @@
                 }}
                 openDoc={openWorkflow}
                 deleteChats={deleteWorkflowChats}
-                closed={() => newWorkflowChat()}
-                expand={() => chatWorkflow && expandWorkflow(chatWorkflow)}
-                close={() => (workflowPanelHidden[key] = true)}
+                closed={openWorkflows}
+                expand={(run) => chatWorkflow && expandWorkflow(chatWorkflow, run)}
+                close={() => (workflowPanelChoice[key] = 'hidden')}
+                bind:run={panelRuns[key]}
                 {webhookUrl}
               />{/key}{/await}{/if}
         {#if subagentShown && subagentReply && subagentView && panelChat}{@const chat = panelChat}{#key chat}<SubagentPanel
@@ -7695,6 +7717,15 @@
           deleted={screenDeleted}
         />
       {/key}
+    {:else if view === 'workflows'}
+      {#key workspaceSession}
+        <WorkflowsHome
+          client={workflows}
+          computerName={computerNameOf}
+          open={openWorkflow}
+          create={() => newWorkflowChat()}
+        />
+      {/key}
     {:else if view === 'workflow' && openedWorkflow}
       {#await workflowView() then { default: WorkflowView }}
         {#key `${workspaceSession}/${openedWorkflow}`}
@@ -7711,8 +7742,9 @@
             deleteChats={deleteWorkflowChats}
             closed={() => {
               openedWorkflow = undefined;
-              newWorkflowChat();
+              openWorkflows();
             }}
+            bind:run={openedWorkflowRun}
             chat={(() => {
               const shown = openedWorkflow ? workflows.summaries.get(openedWorkflow) : undefined;
               return shown && (shown.kind === 'definition' || shown.mode === 'dynamic')

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { useNodesInitialized, useSvelteFlow } from '@xyflow/svelte';
   // Fits the graph into view once its cards are measured and whenever `token` changes, as after a
-  // step is added or the canvas changes size. A graph too wide to read whole shows its start at a
-  // readable size instead, since the graph reads from left to right.
+  // step is added or the canvas changes size. A graph too big to read whole shows its start at a
+  // readable size instead: its top, centred while it is narrower than the view.
   let {
     token,
     width,
@@ -12,12 +12,14 @@
     token: number;
     width: number;
     height: number;
-    /** The smallest zoom that fits a whole graph; a wider one shows its start at this zoom. */
+    /** The smallest zoom that fits a whole graph; a bigger one shows its start at this zoom. */
     readable?: number;
   } = $props();
   const flow = useSvelteFlow();
   const initialized = useNodesInitialized();
+  // Room at the sides, and at the top for the tools that float over the graph.
   const pad = 24;
+  const top = 56;
   let fitted = false;
   let seen: number | undefined;
   function fit(duration = 200) {
@@ -34,11 +36,18 @@
       void flow.fitView({ padding: 0.15, maxZoom: 1, duration });
       return;
     }
-    const y =
-      bounds.height * readable < height - 2 * pad
-        ? (height - bounds.height * readable) / 2 - bounds.y * readable
-        : pad - bounds.y * readable;
-    void flow.setViewport({ x: pad - bounds.x * readable, y, zoom: readable }, { duration });
+    const place = (size: number, room: number, from: number, start: number) =>
+      size * readable < room - start - pad
+        ? (room - size * readable) / 2 - from * readable
+        : start - from * readable;
+    void flow.setViewport(
+      {
+        x: place(bounds.width, width, bounds.x, pad),
+        y: place(bounds.height, height, bounds.y, top),
+        zoom: readable,
+      },
+      { duration },
+    );
   }
   // Once the cards and the canvas are both measured.
   $effect(() => {

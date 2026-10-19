@@ -626,40 +626,59 @@ pre {
   height: 24px;
 }
 /* Workflows, above the chat tabs: a section of the sidebar of its own. */
-.workflows-button {
+/* A page of its own the sidebar opens, as a quiet row like a chat's, above the tabs. */
+.sidebar-nav-row {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: 9px;
   flex-shrink: 0;
   width: 100%;
-  min-height: 30px;
-  margin-top: 10px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  min-height: 32px;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
   color: var(--text-secondary);
-  font-size: var(--text-sm);
-  font-weight: 500;
+  font-size: var(--text-base);
+  font-weight: 400;
 }
-.workflows-button:hover:not(:disabled) {
+.sidebar-nav-row:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
 }
-.workflows-button.current {
-  background: var(--surface-3);
+.sidebar-nav-row.current {
+  background: var(--selected);
   color: var(--text);
-  box-shadow:
-    var(--shadow-sm),
-    inset 0 0 0 1px var(--border);
 }
-.workflows-button > svg {
+.sidebar-nav-row > svg {
   flex-shrink: 0;
-  color: var(--accent-strong);
+  color: var(--text-muted);
 }
-.workflows-button > span:first-of-type {
+.sidebar-nav-row.current > svg,
+.sidebar-nav-row:hover:not(:disabled) > svg {
+  color: var(--accent-text);
+}
+.sidebar-nav-row > span:first-of-type {
   flex: 1;
   text-align: left;
+}
+.nav-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.nav-count.attention {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 .conversation-tabs {
   /* Screens shows its icon when the sidebar is too narrow for every label. */
@@ -716,9 +735,39 @@ pre {
     padding-inline: 8px;
   }
 }
-/* A workflow waits for your answer. */
-.conversation-tab-count.workflow-attention {
-  color: var(--warning);
+/* A new workflow chat chooses what it creates, under its heading. */
+.workflow-kind {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 14px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--hover);
+}
+.workflow-kind [role='radio'] {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 4px 14px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.workflow-kind [role='radio']:hover {
+  color: var(--text);
+}
+.workflow-kind [aria-checked='true'] {
+  background: var(--surface-3);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+.workflow-kind [aria-checked='true'] svg {
+  color: var(--accent-text);
 }
 /* Above a chat a workflow started: which run it belongs to. */
 .workflow-banner {

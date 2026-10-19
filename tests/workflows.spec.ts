@@ -1,9 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 
-// Workflows (docs/WORKFLOWS.md): workflows and missions start from a chat, their graph beside
-// it, on the desktop mock, whose replies wait until a test finishes them and whose workflow store
-// lives in local storage.
+// Workflows (docs/WORKFLOWS.md): the Workflows page lists them, and workflows and missions start
+// from a chat with their graph beside it, on the desktop mock, whose replies wait until a test
+// finishes them and whose workflow store lives in local storage.
 
 type Request = {
   runId: string;
@@ -54,18 +54,30 @@ async function send(page: Page, text: string) {
   await page.getByLabel('Message', { exact: true }).fill(text);
   await page.getByRole('button', { name: 'Send message' }).click();
 }
+/** The Workflows page, from the sidebar, and a new workflow chat from it. */
+async function newWorkflowChat(page: Page) {
+  await page.getByRole('button', { name: /^Workflows/ }).click();
+  await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+}
 
 test('a workflow starts from a chat whose agent builds it beside its graph', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  // The Workflows page, empty at first.
   await page.getByRole('button', { name: /^Workflows/ }).click();
+  await expect(page.getByText('No workflows yet.')).toBeVisible();
+  await page.getByRole('button', { name: 'New workflow' }).click();
   await expect(page.getByRole('heading', { name: 'What should it do?' })).toBeVisible();
   await expect(page.getByLabel('Message', { exact: true })).toHaveAttribute(
     'placeholder',
     'Describe the workflow…',
   );
-  await expect(page.getByRole('combobox', { name: 'Create' })).toContainText('Workflow');
+  await expect(page.getByRole('radio', { name: 'Workflow' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
   await send(page, 'Write about swords every morning.');
   // The chat becomes the workflow's assistant: Claude at its maximum reasoning, told which
   // workflow it changes.
@@ -79,7 +91,7 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
   expect(assistant.messages.at(-1)?.text).toBe('Write about swords every morning.');
   const panel = page.getByRole('dialog', { name: 'Workflow' });
   await expect(panel.locator('.workflow-card')).toHaveCount(1);
-  // The assistant saves a workflow, which the graph shows at once.
+  // The assistant saves a workflow, which the graph shows at once, from top to bottom.
   const read = JSON.parse((await call(page, assistant, 'workflow_read', { id: workflowId })).text);
   const saved = await call(page, assistant, 'workflow_save', {
     id: workflowId,
@@ -98,13 +110,37 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
   expect(saved.error).toBe(false);
   await expect(panel.locator('.workflow-card')).toHaveCount(3);
   await expect(panel.getByLabel('Workflow name')).toHaveValue('Sword writer');
+  // The chat is named by its workflow.
+  await expect(page.locator('.page-title')).toHaveText('Sword writer');
   await expect(panel.locator('.svelte-flow__background')).toBeVisible();
-  // It stays out of the chat lists; the workflow is listed under Workflows.
+  const top = async (title: string) =>
+    (await panel.locator('.workflow-card').filter({ hasText: title }).boundingBox())!.y;
+  expect(await top('Write')).toBeLessThan(await top('Finish'));
+  // The chat and the graph share the window by halves, as it grows and shrinks.
+  const share = () =>
+    page.evaluate(() => {
+      const dialog = document.querySelector('#workflow-panel')!;
+      return (
+        dialog.getBoundingClientRect().width / dialog.parentElement!.getBoundingClientRect().width
+      );
+    });
+  expect(await share()).toBeCloseTo(0.5, 1);
+  await page.setViewportSize({ width: 1800, height: 900 });
+  await expect.poll(share).toBeCloseTo(0.5, 1);
+  await page.setViewportSize({ width: 1380, height: 900 });
+  // It stays out of the chat lists; the workflow is on the Workflows page.
   await reply(page, assistant.runId, 'It writes about swords each morning.');
   await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);
   await page.getByRole('button', { name: /^Workflows/ }).click();
-  await expect(page.locator('.workflow-row').filter({ hasText: 'Sword writer' })).toBeVisible();
+  const tile = page.locator('.workflow-tile').filter({ hasText: 'Sword writer' });
+  await expect(tile).toContainText('Never run');
+  // It opens in its chat, with its graph beside it.
+  await tile.click();
+  await expect(panel.locator('.workflow-card')).toHaveCount(3);
+  await expect(
+    page.locator('.message').filter({ hasText: 'It writes about swords' }),
+  ).toBeVisible();
   // A connection dragged from a step's output to empty space adds a step there.
   const write = panel.locator('.workflow-card').filter({ hasText: 'Write' });
   const handle = write.locator('.svelte-flow__handle.source').first();
@@ -120,8 +156,8 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
   const canvas = (await panel.locator('.workflow-canvas').boundingBox())!;
   await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
   await page.mouse.down();
-  await page.mouse.move(from.x + 60, canvas.y + canvas.height - 60, { steps: 8 });
-  await page.mouse.move(from.x + 80, canvas.y + canvas.height - 50, { steps: 4 });
+  await page.mouse.move(canvas.x + canvas.width - 100, canvas.y + canvas.height - 70, { steps: 8 });
+  await page.mouse.move(canvas.x + canvas.width - 80, canvas.y + canvas.height - 60, { steps: 4 });
   await page.mouse.up();
   await page
     .getByRole('menu', { name: 'Add a step here' })
@@ -146,11 +182,13 @@ test('a workflow starts from a chat whose agent builds it beside its graph', asy
   ).toBeLessThanOrEqual(1);
 });
 
-test('a workflow runs from its graph, through a Confirm step', async ({ page }) => {
+test('a workflow runs beside its chat, through a Confirm step, and lists its runs', async ({
+  page,
+}) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: /^Workflows/ }).click();
+  await newWorkflowChat(page);
   await send(page, 'Publish a post after I approve it.');
   await expect.poll(async () => (await requests(page)).length).toBe(1);
   const [assistant] = await requests(page);
@@ -175,24 +213,37 @@ test('a workflow runs from its graph, through a Confirm step', async ({ page }) 
   await reply(page, assistant.runId, 'Done.');
   const panel = page.getByRole('dialog', { name: 'Workflow' });
   await expect(panel.locator('.workflow-card')).toHaveCount(4);
+  // With nothing to choose, Run starts at once, and the run shows in the workflow's place.
   await panel.getByRole('button', { name: 'Run', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Run Poster' });
-  await expect(dialog.getByRole('combobox', { name: 'Runs on' })).toBeVisible();
-  await dialog.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(panel.locator('.run-status')).toHaveText('Running');
+  await expect(panel.getByRole('button', { name: 'Back to the runs' })).toBeVisible();
   // The run asks for approval with the step's own buttons.
-  await expect(page.locator('.run-status')).toHaveText('Running');
   await page.getByRole('button', { name: 'Publish', exact: true }).click();
-  await expect(page.locator('.run-status')).toHaveText('Completed');
-  await expect(page.locator('.run-panel')).toContainText('published');
+  await expect(panel.locator('.run-status')).toHaveText('Completed');
+  await expect(panel.locator('.run-panel')).toContainText('published');
+  // Back, the workflow lists its run; the Workflows page lists it among what ran.
+  await panel.getByRole('button', { name: 'Back to the runs' }).click();
+  await expect(panel.getByRole('tab', { name: /^Runs/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(panel.locator('.run-row')).toHaveCount(1);
+  await expect(panel.locator('.run-row')).toContainText('Manual');
+  await expect(panel.locator('.run-row')).toContainText('Completed');
+  await page.getByRole('button', { name: /^Workflows/ }).click();
+  const recent = page.locator('.run-row').filter({ hasText: 'Poster' });
+  await expect(recent).toContainText('Completed');
+  await expect(page.locator('.workflow-tile').filter({ hasText: 'Poster' })).toContainText(
+    'Completed',
+  );
+  // A run opens in its workflow's panel again.
+  await recent.click();
+  await expect(panel.locator('.run-status')).toHaveText('Completed');
 });
 
 test('a mission starts from a chat and its orchestrator works in it', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: /^Workflows/ }).click();
-  await page.getByRole('combobox', { name: 'Create' }).click();
-  await page.getByRole('option', { name: 'Mission' }).click();
+  await newWorkflowChat(page);
+  await page.getByRole('radio', { name: 'Mission' }).click();
   await expect(page.getByRole('heading', { name: /the mission\?/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /^Runs on/ })).toBeVisible();
   await send(page, 'Make every asset of the game, reviewed.');
@@ -242,7 +293,11 @@ test('a mission starts from a chat and its orchestrator works in it', async ({ p
   const done = await call(page, wake, 'mission_complete', { summary: 'The sword is done.' });
   expect(done.error).toBe(false);
   await expect(panel.locator('.run-status')).toHaveText('Completed');
-  // Its chats stay out of the Active list.
+  // Its chats stay out of the Active list; the mission is on the Workflows page.
   await page.getByRole('tab', { name: /^Active/ }).click();
   await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);
+  await page.getByRole('button', { name: /^Workflows/ }).click();
+  await expect(
+    page.locator('.run-row').filter({ hasText: 'Make every asset of the game, reviewed.' }),
+  ).toContainText('Completed');
 });

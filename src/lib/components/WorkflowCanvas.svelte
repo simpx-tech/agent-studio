@@ -12,6 +12,7 @@
   import '@xyflow/svelte/dist/base.css';
   import { untrack } from 'svelte';
   import WorkflowCard from './WorkflowCard.svelte';
+  import WorkflowEdge from './WorkflowEdge.svelte';
   import WorkflowFit from './WorkflowFit.svelte';
   import WorkflowFlowBridge from './WorkflowFlowBridge.svelte';
   import { appearance } from '$lib/appearance.svelte';
@@ -73,6 +74,7 @@
     known = count;
   });
   const nodeTypes = { card: WorkflowCard };
+  const edgeTypes = { flow: WorkflowEdge };
   let nodes = $state.raw<Node[]>([]);
   let edges = $state.raw<Edge[]>([]);
   // Where the reader dragged cards of a run, which its live updates keep.
@@ -156,6 +158,7 @@
     bind:nodes
     bind:edges
     {nodeTypes}
+    {edgeTypes}
     minZoom={0.15}
     maxZoom={1.75}
     colorMode={appearance.resolved}
@@ -176,7 +179,7 @@
       if (editable) moved?.(targetNode.id, targetNode.position);
       else dragged.set(targetNode.id, targetNode.position);
     }}
-    defaultEdgeOptions={{ type: 'smoothstep' }}
+    defaultEdgeOptions={{ type: 'flow' }}
   >
     <WorkflowFit token={fit + grown} {width} {height} />
     <WorkflowFlowBridge ready={(api) => (toFlow = api.toFlow)} />

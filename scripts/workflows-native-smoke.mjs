@@ -254,16 +254,21 @@ try {
       await sleep(2000);
     }
   };
-  // The Workflows button lists them (and opens a new workflow chat); a row opens its workflow's
+  // The sidebar's Workflows row opens the Workflows page; a workflow or run there opens in its
   // chat with the graph beside it.
   const openWorkflow = async (title) => {
-    await page.click('.workflows-button');
+    await page.click('.sidebar-nav-row');
     await page.waitFor(
-      (title) => [...document.querySelectorAll('.workflow-row')].some((row) => row.title === title),
+      (title) =>
+        [...document.querySelectorAll('.workflow-tile, .run-row')].some(
+          (item) => item.querySelector('.tile-title, .row-title')?.textContent.trim() === title,
+        ),
       title,
     );
     await page.evaluate((title) => {
-      [...document.querySelectorAll('.workflow-row')].find((row) => row.title === title).click();
+      [...document.querySelectorAll('.workflow-tile, .run-row')]
+        .find((item) => item.querySelector('.tile-title, .row-title')?.textContent.trim() === title)
+        .click();
     }, title);
     await page.waitFor(() => document.querySelectorAll('.workflow-card').length > 0);
     await sleep(800);

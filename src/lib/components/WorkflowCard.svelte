@@ -20,7 +20,12 @@
     data: CardData & { openChat?: (conversationId: string) => void; editable?: boolean };
     selected?: boolean;
   } = $props();
-  const outputs = $derived(data.ports);
+  // Steps flow downwards: what follows a step leaves from the bottom of its card, in its ports'
+  // order, and its error port leaves from its side, shown once a connection leaves it, or while
+  // the step is being edited.
+  const outputs = $derived(data.ports.filter((p) => p.id !== 'error'));
+  const failure = $derived(data.ports.some((p) => p.id === 'error'));
+  const failureUsed = $derived(!!data.connected?.includes('error'));
   const labelled = $derived(outputs.some((p) => p.label));
 </script>
 
@@ -37,12 +42,15 @@
 <div
   class="workflow-card status-{data.status} kind-{data.kind}"
   class:selected
+  class:editable={data.editable}
   class:issue={!!data.issue}
   title={data.issue ?? data.statusText}
 >
-  {#if data.input}<Handle type="target" position={Position.Left} class="workflow-handle" />{/if}
+  {#if data.input}<Handle type="target" position={Position.Top} class="workflow-handle" />{/if}
   <header>
-    <span class="card-icon type-{data.type}"><WorkflowIcon type={data.icon ?? data.type} size={14} /></span>
+    <span class="card-icon type-{data.type}"
+      ><WorkflowIcon type={data.icon ?? data.type} size={14} /></span
+    >
     <span class="card-title">{data.title}</span>
     {#if data.count}<span class="card-count">{data.count}</span>{/if}
     <span class="card-status" aria-label={data.statusText || undefined}
@@ -86,14 +94,23 @@
   {#each outputs as port, index (port.id)}
     <Handle
       type="source"
-      position={Position.Right}
+      position={Position.Bottom}
       id={port.id}
       class="workflow-handle port-{port.id}"
-      style={outputs.length > 1 ? `top: ${((index + 1) / (outputs.length + 1)) * 100}%` : undefined}
+      style={outputs.length > 1
+        ? `left: ${((index + 1) / (outputs.length + 1)) * 100}%`
+        : undefined}
     >
       {#if labelled && port.label}<span class="port-label">{port.label}</span>{/if}
     </Handle>
   {/each}
+  {#if failure}<Handle
+      type="source"
+      position={Position.Right}
+      id="error"
+      class={`workflow-handle port-error${failureUsed ? '' : ' unused'}`}
+      ><span class="port-label">Error</span></Handle
+    >{/if}
 </div>
 
 <style>
@@ -153,6 +170,18 @@
   .card-icon.type-orchestrator {
     color: var(--accent-text);
     background: var(--accent-soft);
+  }
+  .card-icon.type-agent,
+  .card-icon.type-screen,
+  .card-icon.type-task {
+    color: var(--info);
+    background: var(--info-soft);
+  }
+  .card-icon.type-ask,
+  .card-icon.type-confirm,
+  .card-icon.type-notify {
+    color: var(--warning);
+    background: var(--warning-soft);
   }
   .card-title {
     flex: 1;
@@ -287,15 +316,25 @@
   :global(.workflow-handle.port-error) {
     background: var(--danger) !important;
   }
+  :global(.workflow-handle.port-error.unused) {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-fast);
+  }
+  .workflow-card.editable:hover :global(.workflow-handle.port-error.unused),
+  .workflow-card.editable.selected :global(.workflow-handle.port-error.unused) {
+    opacity: 1;
+    pointer-events: auto;
+  }
   :global(.workflow-handle.port-true),
   :global(.workflow-handle.port-each) {
     background: var(--accent-strong) !important;
   }
   .port-label {
     position: absolute;
-    left: 12px;
-    top: 50%;
-    transform: translateY(-50%);
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
     padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--surface-1);
@@ -303,5 +342,11 @@
     font-size: var(--text-2xs);
     white-space: nowrap;
     pointer-events: none;
+  }
+  :global(.workflow-handle.port-error) .port-label {
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--danger);
   }
 </style>
