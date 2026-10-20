@@ -93,6 +93,8 @@
     Zap,
     Workflow,
     Target,
+    History as HistoryIcon,
+    SearchX,
   } from '@lucide/svelte';
   import {
     abandonedReplyError,
@@ -386,6 +388,7 @@
   import QuotaBars from '$lib/components/QuotaBars.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import BrandMark from '$lib/components/BrandMark.svelte';
+  import SidebarEmpty from '$lib/components/SidebarEmpty.svelte';
   import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
@@ -6819,8 +6822,11 @@
                       aria-hidden="true">{toolElapsed(Math.max(0, clock.now - started))}</span
                     >{/if}{/if}</button
               >
-            </li>{:else}<li class="sidebar-empty">
-              {query ? 'No matches.' : 'No workflows yet.'}
+            </li>{:else}<li>
+              <SidebarEmpty
+                icon={query ? SearchX : Workflow}
+                title={query ? 'No matches' : 'No workflows'}
+              />
             </li>{/each}
       </ul>
     </div>{:else}<div
@@ -7162,15 +7168,14 @@
                   </div>
                 {/each}{/if}
             </div>
-          {:else}{#if group.id !== 'active' || (!listedSnoozes.length && !listedRuns.length)}<p
-                class="sidebar-empty"
-              >
-                {query
-                  ? `No matches in ${group.name.toLowerCase()}.`
+          {:else}{#if group.id !== 'active' || (!listedSnoozes.length && !listedRuns.length)}<SidebarEmpty
+                icon={query ? SearchX : group.id === 'active' ? MessageSquare : HistoryIcon}
+                title={query
+                  ? 'No matches'
                   : group.id === 'active'
-                    ? 'No active conversations yet.'
-                    : 'No conversations in history.'}
-              </p>{/if}{/each}
+                    ? 'No active conversations'
+                    : 'No conversations in History'}
+              />{/if}{/each}
         </div>
       {/each}
       <div
@@ -7227,13 +7232,10 @@
                 {/each}
               </div>{/if}
           </div>
-        {:else}<p class="sidebar-empty">
-            {screensLoading
-              ? 'Reading screens…'
-              : query
-                ? 'No matching screens.'
-                : 'No screens yet.'}
-          </p>{/each}
+        {:else}{#if screensLoading}<p class="sidebar-empty">Reading screens…</p>{:else}<SidebarEmpty
+              icon={query ? SearchX : LayoutDashboard}
+              title={query ? 'No matches' : 'No screens'}
+            />{/if}{/each}
         {#each screenProblems as problem (problem.host)}<p class="sidebar-empty screen-problem">
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}

@@ -2032,7 +2032,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   await screensTab.press('ArrowLeft');
   await expect(historyTab).toBeFocused();
   await expect(history).toBeVisible();
-  await expect(history).toContainText('No conversations in history.');
+  await expect(history).toContainText('No conversations in History');
   await historyTab.press('ArrowLeft');
   await expect(activeTab).toBeFocused();
   await activeTab.press('ArrowLeft');
@@ -2136,7 +2136,7 @@ test('computer then folder scopes CLI choices and groups active and history with
   await page.getByLabel('Search conversations').fill('C:\\Projects');
   await expect(activeTab).toHaveText('Active1');
   await expect(historyTab).toHaveText('History0');
-  await expect(history).toContainText('No matches in history.');
+  await expect(history).toContainText('No matches');
   await activeTab.click();
   await expect(active.locator('.conversation-item')).toHaveCount(1);
   await expect(history.locator('.conversation-item')).toHaveCount(0);

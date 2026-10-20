@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## Empty lists in the sidebar — 2026-10-20
+
+Requested 2026-10-20: "Can you improve the no active conversations/workflow yet message as well?"
+
+- An empty sidebar list centres a quiet icon tile above one short line (`SidebarEmpty.svelte`): No active conversations, No conversations in History, No screens and No workflows, each with its list's icon, and No matches with a search icon while a search finds nothing. Reading screens… stays a plain line. No action was added: the + sits above, and the chat or workflow area already shows a new one.
+- Browser: `tests/screens.spec.ts`, `tests/snooze.spec.ts`, `tests/workflows.spec.ts` and `tests/workspace.spec.ts` read the new lines. Screenshots of the empty Active, History, Screens and Workflows lists and of a search without matches, in the dark and light themes.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,442 files), 858 Vitest tests, the build, and all 443 browser tests in three shards with the sockets drained. The second shard ran whole twice more: once after a reload in `tests/remembered-agent.spec.ts` took longer than its 5 seconds (it passed 3 of 3 alone), and once after the sub-agent update budget in `tests/performance.spec.ts` ran over beside the shard's other workers (alone it averaged 16 to 20 ms against 25). No Rust changed.
+
 ## The mode tabs share their line — 2026-10-20
 
 Requested 2026-10-20: "It's better but I don't like that on my screen it's aligned to left with a lot of empty space"

@@ -175,7 +175,7 @@ test('a chat saves a screen that runs only allowed actions, keeps values and sta
     .getByRole('dialog', { name: 'Delete screen' })
     .getByRole('button', { name: 'Delete screen', exact: true })
     .click();
-  await expect(page.getByText(/^No screens yet/)).toBeVisible();
+  await expect(page.getByText('No screens', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('test-screens')!))).toEqual([]);
 });
 

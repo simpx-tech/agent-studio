@@ -115,7 +115,7 @@ test('a snoozed chat waits in History until the app starts again, then atop Acti
   expect(Math.max(...line) - Math.min(...line)).toBeLessThanOrEqual(1);
   const panel = page.locator('#conversation-panel-active');
   await expect(panel.locator(':scope > :first-child')).toHaveClass(/snoozed-chats/);
-  await expect(panel.locator('.sidebar-empty')).toHaveCount(0);
+  await expect(panel.locator('.sidebar-empty-state')).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/snooze/due.png', animations: 'disabled' });
   // History and Screens do not show it; search keeps it only while it matches.
   await tab(page, 'History').click();
@@ -124,10 +124,10 @@ test('a snoozed chat waits in History until the app starts again, then atop Acti
   await expect(snoozed(page)).toBeVisible();
   await page.getByLabel('Search conversations').fill('working');
   await expect(snoozed(page)).toHaveCount(0);
-  await expect(panel.locator('.sidebar-empty')).toHaveText('No matches in active.');
+  await expect(panel.locator('.sidebar-empty-state')).toHaveText('No matches');
   await page.getByLabel('Search conversations').fill('release');
   await expect(card(page, 'Plan the release')).toBeVisible();
-  await expect(panel.locator('.sidebar-empty')).toHaveCount(0);
+  await expect(panel.locator('.sidebar-empty-state')).toHaveCount(0);
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   // Snooze again: gone until the next start, and still snoozed in History.
   await card(page, 'Plan the release').getByRole('button', { name: 'Snooze again' }).click();

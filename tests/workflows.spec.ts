@@ -108,7 +108,7 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
   await expect(agentMode(page)).toHaveAttribute('aria-selected', 'true');
   await workflowMode(page).click();
   await expect(workflowMode(page)).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('list', { name: 'Workflows' })).toContainText('No workflows yet.');
+  await expect(page.getByRole('list', { name: 'Workflows' })).toContainText('No workflows');
   await expect(page.getByRole('tab', { name: /^Active/ })).toHaveCount(0);
   await expect(page.getByLabel('Search workflows')).toHaveAttribute(
     'placeholder',

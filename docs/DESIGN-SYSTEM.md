@@ -122,6 +122,9 @@ mark in the script and `BrandMark.svelte` together.
   Model context's categories, is text tabs over a hairline with a 2px `--accent-strong` line
   under the chosen one; a filter of one list, such as Active, History and Screens, is a segmented
   control on `--hover` with `--radius-md` corners. Neither is a pill.
+- **Empty lists:** a sidebar list with nothing to show centres a 36px `--surface-1` tile with a
+  muted icon of what it lists above one short line in `--text-secondary`, such as No workflows or,
+  while searching, No matches (`SidebarEmpty.svelte`); a list still loading keeps a plain line.
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
   accent bar at its left edge.
 - **Day divisions:** where a chat continues on another day, the day's name in `--text-muted` at
