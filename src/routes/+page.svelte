@@ -7231,6 +7231,7 @@
         class="chat-workspace card-layout"
         class:card-chat={appearance.chatCard === 'chat'}
         class:card-header={appearance.chatCard === 'header'}
+        class:card-whole={appearance.chatCard === 'whole'}
         class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
         class:graph-first={graphFirst}
         class:chat-open={graphFirst && workflowChatShown}

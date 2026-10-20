@@ -1449,8 +1449,9 @@ pre {
 }
 /* An ordinary chat shows one part as a card on the workspace, chosen in Settings → Appearance
    (requested 2026-10-19, to choose between): the conversation below a toolbar on the workspace,
-   or the toolbar above a conversation on the workspace. Docked side panels are cards beside it,
-   and the gap between them resizes the panel. */
+   the toolbar above a conversation on the workspace, or the whole chat, its toolbar's own border
+   dividing it from the conversation (requested 2026-10-20); the window's title stays above it.
+   Docked side panels are cards beside it, and the gap between them resizes the panel. */
 @media (min-width: 761px) {
   .chat-workspace.card-layout:not(.graph-first) {
     padding: 4px 12px 12px;
@@ -1460,6 +1461,7 @@ pre {
   }
   .card-chat:not(.graph-first) > .chat-layout > .chat-body,
   .card-header:not(.graph-first) > .chat-layout > .chat-toolbar,
+  .card-whole:not(.graph-first) > .chat-layout,
   .chat-workspace.card-layout > dialog.docked {
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
@@ -1467,6 +1469,7 @@ pre {
     box-shadow: var(--shadow-md);
   }
   .card-chat:not(.graph-first) > .chat-layout > .chat-body,
+  .card-whole:not(.graph-first) > .chat-layout,
   .chat-workspace.card-layout > dialog.docked {
     overflow: hidden;
   }

@@ -4,9 +4,11 @@ export type ThemePreference = 'dark' | 'light' | 'system';
 export type ResolvedTheme = 'dark' | 'light';
 /**
  * Which part of an ordinary chat is a card on the workspace (requested 2026-10-19, to choose
- * between): its toolbar, or its conversation below a toolbar on the workspace.
+ * between): its toolbar, its conversation below a toolbar on the workspace, or the whole chat,
+ * its toolbar divided from its conversation (requested 2026-10-20).
  */
-export type ChatCard = 'header' | 'chat';
+export type ChatCard = 'header' | 'chat' | 'whole';
+const chatCards: ChatCard[] = ['header', 'chat', 'whole'];
 
 const storageKey = 'agent-studio.theme';
 const chatCardKey = 'agent-studio.chat-card';
@@ -44,7 +46,7 @@ export function initAppearance() {
     const saved = localStorage.getItem(storageKey);
     if (saved === 'dark' || saved === 'light' || saved === 'system') appearance.preference = saved;
     const card = localStorage.getItem(chatCardKey);
-    if (card === 'header' || card === 'chat') appearance.chatCard = card;
+    if (chatCards.includes(card as ChatCard)) appearance.chatCard = card as ChatCard;
   } catch {
     // Storage can be unavailable in private windows; the default theme still applies.
   }

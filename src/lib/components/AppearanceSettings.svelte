@@ -17,6 +17,7 @@
   const cards: { id: ChatCard; name: string }[] = [
     { id: 'header', name: 'Toolbar' },
     { id: 'chat', name: 'Conversation' },
+    { id: 'whole', name: 'Whole chat' },
   ];
   let group = $state<HTMLDivElement>();
   let cardGroup = $state<HTMLDivElement>();
@@ -30,7 +31,9 @@
         ? 0
         : event.key === 'End'
           ? cards.length - 1
-          : (current + (event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1) + 2) %
+          : (current +
+              (event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1) +
+              cards.length) %
             cards.length;
     setChatCard(cards[index].id);
     cardGroup?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[index]?.focus();
@@ -75,7 +78,7 @@
   </div>
   <h3 id="chat-card-heading">Chat card</h3>
   <div
-    class="theme-options card-options"
+    class="theme-options"
     role="radiogroup"
     aria-labelledby="chat-card-heading"
     bind:this={cardGroup}
@@ -218,10 +221,6 @@
     font-weight: 600;
     color: var(--text-secondary);
   }
-  .card-options {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-width: 346px;
-  }
   /* The part that is a card has its own outline in the preview. */
   .card-preview {
     display: flex;
@@ -247,9 +246,22 @@
     justify-content: flex-end;
   }
   .card-preview.header .preview-bar,
-  .card-preview.chat .preview-body {
+  .card-preview.chat .preview-body,
+  .card-preview.whole .preview-bar,
+  .card-preview.whole .preview-body {
     border-color: var(--border-strong);
     background: var(--surface-2);
+  }
+  /* The whole chat is one card, a divider between its toolbar and its conversation. */
+  .card-preview.whole {
+    gap: 0;
+  }
+  .card-preview.whole .preview-bar {
+    border-radius: 4px 4px 0 0;
+  }
+  .card-preview.whole .preview-body {
+    border-top: 0;
+    border-radius: 0 0 4px 4px;
   }
   .card-preview i,
   .card-preview b {

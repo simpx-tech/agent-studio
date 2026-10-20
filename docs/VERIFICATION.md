@@ -18,6 +18,15 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## A third chat card: the whole chat — 2026-10-20
+
+Requested 2026-10-20: "Can you make an additional variant where the entire chat including the header is inside the card with a divider between the chat and the header? Don't include the title on the card"
+
+- Settings → Appearance → Chat card offers Whole chat beside Toolbar and Conversation (`card-whole`): `.chat-layout` is the card, the toolbar's own bottom border divides it from the conversation, and the window's title stays above the card. The arrow keys go round all three options (the step had wrapped by a fixed 2).
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit) covers the keys round the three options and a chat that opens with Whole chat saved: the card's radius on `.chat-layout` alone, the line under the toolbar, the title above the card and the checked option.
+- Screenshots of the three variants, plain, with an artifact panel docked and in the light theme, and of the settings previews in both themes, in Edge at 1380px.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,441 files), 858 Vitest tests, the build, and all 443 browser tests in three shards with the sockets drained; the second shard ran again whole after two timing budgets in `tests/performance.spec.ts` ran over under load (both passed alone, then with their shard). No Rust changed since the last full Rust run.
+
 ## Gap handles, a resizable workflow side panel and two chat card variants — 2026-10-19
 
 - The gap between two panels is now the handle that resizes them, invisible but for its cursor and a keyboard focus line (`PanelResize` `gutter`): between a workflow's chat card and its graph, between the graph and the panel at its right (step settings, workflow settings and run history share one remembered width), and between an ordinary chat and a docked artifact or sub-agent panel (rendered by those panels before their dialog). Ordinary chats show either the conversation (`.chat-body`, a new wrapper of everything below the toolbar) or the toolbar as the card, chosen in Settings → Appearance → Chat card.
