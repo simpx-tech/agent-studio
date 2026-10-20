@@ -715,14 +715,8 @@ test('sidebar divider resizes with pointer and keyboard, remembers width, and ke
   await expect.poll(width).toBe(340);
   await page.setViewportSize({ width: 880, height: 720 });
   await expect.poll(width).toBe(280);
-  // The card and the margin it keeps from the window's edge.
   expect(
-    await page
-      .locator('.main-area')
-      .evaluate(
-        (element) =>
-          element.getBoundingClientRect().width + parseFloat(getComputedStyle(element).marginRight),
-      ),
+    await page.locator('.main-area').evaluate((element) => element.getBoundingClientRect().width),
   ).toBeGreaterThanOrEqual(600);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'artifacts/sidebar-resize-compact.png', animations: 'disabled' });

@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## The title on the window's surface, the chat and its side panel two cards — 2026-10-20
+
+Requested 2026-10-20: "Make the title be out of the right card, same for the top navbar buttons, also split the chat and the artifact/right sidebar like we had before (two separated cards)"
+
+- The sidebar keeps the window's own surface without an edge, and the window's title and its buttons now lie on it too, without a line, at the window's top and right edges. Below them the chat is a card again (`.card-layout`, 12px from the window's sides and bottom), a docked artifact or sub-agent panel a second `--bg` card beside it with the 12px gap between them as its resize handle, and Settings and Connections one card (`.page-card`). The one big card of the round before, its line handle and the frame's drag margins are gone.
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit), as before the big card plus checks that the sidebar has no edge, the main area is no card and the title sits at the window's top; `tests/window-scroll.spec.ts`, the sidebar test and the side-panel tests back to their earlier expectations. Screenshots of a new chat, a chat with a docked artifact (dark and light), Connections, a workflow and the phone.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,442 files), 858 Vitest tests, the build, and all 445 browser tests in three shards with the sockets drained; the second shard ran whole twice more, after two timing budgets in `tests/performance.spec.ts` and a reload in `tests/reload-keeps-replies.spec.ts` (9 of 9 alone) ran late in a slow run, then after `tests/notifications.spec.ts:376` missed its wait for a phone alert while the sockets would not drain. No Rust changed.
+
 ## A Linear-style frame: the sidebar on the window, the rest one card — 2026-10-20
 
 Requested 2026-10-20: "Now can you update the general layout for it to be more similar to linear app where the left sidebar is part of the entire part and the right part is a “card”" (with a screenshot of Linear).

@@ -3,8 +3,7 @@
 
   // The divider of a panel, which remembers its width on this device: the left edge of a panel on
   // the right, or the right edge of one on the left, such as a workflow's chat. As a gutter it is
-  // the gap between the two panels itself, invisible but for its cursor (requested 2026-10-19);
-  // a gutter of no width lies on the line between two panes, 4px over each of them.
+  // the gap between the two panels itself, invisible but for its cursor (requested 2026-10-19).
   let {
     availableWidth,
     share: defaultShare,
@@ -146,9 +145,8 @@
   class="panel-resizer"
   class:right={side === 'right'}
   class:gutter={gutter !== undefined}
-  class:line={gutter === 0}
   class:dragging={!!drag}
-  style:flex-basis={gutter !== undefined ? `${gutter || 8}px` : undefined}
+  style:flex-basis={gutter !== undefined ? `${gutter}px` : undefined}
   role="separator"
   tabindex="0"
   aria-label={label}
@@ -205,9 +203,6 @@
   .panel-resizer.gutter::after {
     inset: 0 auto 0 50%;
     transform: translateX(-50%);
-  }
-  .panel-resizer.line {
-    margin-inline: -4px;
   }
   /* Invisible but for its cursor; a keyboard's focus still shows where it is. */
   .panel-resizer:focus-visible::after {

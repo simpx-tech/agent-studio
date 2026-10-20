@@ -1324,8 +1324,9 @@ pre {
   height: 100dvh;
   background: var(--bg);
 }
-/* As in Linear (requested 2026-10-20): the sidebar lies on the window's own surface, and
-   everything beside it, the window's title included, is one card inset from the window's edges. */
+/* As in Linear (requested 2026-10-20), the sidebar lies on the window's own surface, and so do the
+   window's title and its buttons, above the cards of what is shown: a chat, a side panel docked
+   beside it, Settings or Connections. */
 @media (min-width: 761px) {
   .app-shell {
     background: var(--bg-sidebar);
@@ -1334,11 +1335,10 @@ pre {
     border-right: 0;
   }
   .main-area {
-    height: auto;
-    margin: 8px 8px 8px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xl);
-    overflow: hidden;
+    background: transparent;
+  }
+  .main-area > .topbar {
+    border-bottom-color: transparent;
   }
 }
 .topbar {
@@ -1389,6 +1389,25 @@ pre {
 
 /* ── Pages ────────────────────────────────────────────────────────────── */
 
+/* Settings and Connections are a card below the window's title, as a chat is (requested
+   2026-10-20). */
+.page-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+@media (min-width: 761px) {
+  .page-card {
+    margin: 0 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--bg);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+  }
+}
 .page-scroll {
   overflow: auto;
   flex: 1;
@@ -1457,6 +1476,22 @@ pre {
 @media (min-width: 761px) {
   .chat-layout {
     container: chat-area / inline-size;
+  }
+}
+/* An ordinary chat is a card below the window's title, the toolbar's own line dividing it from
+   the conversation, and a side panel docked beside it is a card of its own; the gap between them
+   resizes the panel (requested 2026-10-20). */
+@media (min-width: 761px) {
+  .chat-workspace.card-layout:not(.graph-first) {
+    padding: 0 12px 12px;
+  }
+  .chat-workspace.card-layout:not(.graph-first) > .chat-layout,
+  .chat-workspace.card-layout > dialog.docked {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--bg);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
   }
 }
 /* A workflow fills the chat's place with its graph; its chat is a card at the graph's left that

@@ -152,10 +152,12 @@ mark in the script and `BrandMark.svelte` together.
   all at once. Chat disclosures render their contents on first expansion (`revealedDisclosures`
   in `src/lib/disclosures.ts`) and keep them afterwards.
 - **Frame:** in a window wider than 760px, as in Linear, the sidebar lies on the window's own
-  surface (`--bg-sidebar`, without an edge of its own) and everything beside it, the window's title
-  included, is one card: `--bg` inside a `--border` line with `--radius-xl` corners, 8px from the
-  window's edges (`.main-area`). Panes within it, such as a docked side panel, are divided by a
-  `--border` line rather than set apart as cards. Phones keep the page edge to edge.
+  surface (`--bg-sidebar`, without an edge of its own), and so do the window's title and its
+  buttons. Below them what is shown is a card: `--bg` inside a `--border` line with `--radius-xl`
+  corners and `--shadow-md`, 12px from the window's sides and bottom; a chat (`.card-layout`) and
+  a side panel docked beside it are two such cards, the gap between them the handle that resizes
+  the panel, and Settings and Connections are one (`.page-card`). Phones keep the page edge to
+  edge.
 - **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
   them; inside the frame, avoid nesting more than one card level.
 - **Code blocks:** `--code-bg` with a hairline border. Copy and Run are small text controls with
