@@ -151,7 +151,7 @@
 <svelte:window bind:innerWidth={viewportWidth} />
 <!-- Docked, the gap between the chat and the panel resizes it. -->
 {#if docked}<PanelResize
-    gutter={12}
+    gutter={0}
     availableWidth={workspaceWidth}
     onresize={(width) => (panelWidth = width)}
     storageKey="agent-studio.subagent-panel-width"

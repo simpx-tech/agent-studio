@@ -6677,6 +6677,7 @@
   class:drawer-dragging={drawerDrag !== undefined}
   class:drawer-settling={drawerSettling}
   data-console={consoles || undefined}
+  data-tauri-drag-region={desktop() || undefined}
   style:--sidebar-width={sidebarWidth ? `${sidebarWidth}px` : undefined}
   style:--drawer-progress={drawerDrag}
 >
@@ -7313,7 +7314,7 @@
 
     {#if view === 'chat'}
       <div
-        class="chat-workspace card-layout"
+        class="chat-workspace"
         class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
         class:graph-first={graphFirst}
         class:chat-open={graphFirst && workflowChatShown}
@@ -8093,7 +8094,6 @@
         <FileViewer viewer={shownFiles} />
       </div>
     {:else if view === 'connections'}
-      <div class="page-card">
       {#key workspaceSession}
         <FleetManager
           bind:workspace
@@ -8132,9 +8132,7 @@
           highlight={connectionsHighlight}
         />
       {/key}
-      </div>
     {:else if view === 'settings'}
-      <div class="page-card">
       {#key workspaceSession}
         <SettingsPage
           {paired}
@@ -8156,7 +8154,6 @@
           importChats={desktop() ? openImport : undefined}
         />
       {/key}
-      </div>
     {:else if view === 'screen' && openedScreen}
       {@const screen = openedScreen}
       {@const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId)}

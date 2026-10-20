@@ -18,6 +18,16 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## A Linear-style frame: the sidebar on the window, the rest one card — 2026-10-20
+
+Requested 2026-10-20: "Now can you update the general layout for it to be more similar to linear app where the left sidebar is part of the entire part and the right part is a \"card\"" (with a screenshot of Linear).
+
+- In a window wider than 760px the window's surface is the sidebar's (`--bg-sidebar`), the sidebar loses its edge, and `.main-area`, the window's title with whatever it shows, is one card: `--bg` inside a `--border` line with `--radius-xl` corners, 8px from the window's top, right and bottom. The frame's margins drag the window (`data-tauri-drag-region` on `.app-shell`). The chat's own card and the Settings and Connections card of the day before are gone; a chat's toolbar line still divides it from the conversation, and Settings and Connections keep the title bar's line. Phones keep the page edge to edge.
+- Docked artifact and sub-agent panels are panes of the card behind their own `--border` line again, resized from an invisible 8px handle centred on that line (`PanelResize` with a `gutter` of 0, which takes no room). The workflow chat card stays a card of its own beside the graph.
+- Found by the browser suite: a handle of no width read as hidden and missed drags 4px from the line, so it is 8px wide with -4px margins; `tests/window-scroll.spec.ts` measures the title bar from the card's top, and the sidebar test counts the card's margin from the window's edge in the 600px it keeps for the main area.
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit) covers the frame (no sidebar edge, the card's corners, the title inside it, no card within it), a docked panel's line and its centred handle by keys and pointer, and Settings and Connections in the card. Screenshots of a new chat, a chat with a docked artifact (dark and light), Settings, Connections, a workflow and the phone.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,442 files), 858 Vitest tests, the build, and all 445 browser tests in three shards with the sockets drained; the second shard ran whole again after `tests/notifications.spec.ts:376` missed its wait for a phone alert. No Rust changed.
+
 ## Settings and Connections in the chat’s card — 2026-10-20
 
 Requested 2026-10-20: "Can you also update the settings and connections to this new layout?"

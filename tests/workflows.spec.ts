@@ -101,7 +101,7 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
   // An ordinary chat is a card on the workspace.
   expect(
-    await page.locator('.chat-layout').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
+    await page.locator('.main-area').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
   ).not.toBe('0px');
   // The sidebar starts in Agent mode. Workflow shows the workflows in the chats' place and, with
   // none shown before, a new one to start; Agent goes back to the chats.

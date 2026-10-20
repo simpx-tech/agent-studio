@@ -22,7 +22,15 @@ test('a short window never scrolls the whole app', async ({ page }) => {
     expect(
       await page.evaluate(() => ({
         scrollTop: (document.scrollingElement as HTMLElement).scrollTop,
-        topbar: document.querySelector('.topbar')!.getBoundingClientRect().top,
+        // The title bar stays at the top of the card that holds it.
+        topbar: (() => {
+          const card = document.querySelector('.main-area')!;
+          return (
+            document.querySelector('.topbar')!.getBoundingClientRect().top -
+            card.getBoundingClientRect().top -
+            card.clientTop
+          );
+        })(),
       })),
     ).toEqual({ scrollTop: 0, topbar: 0 });
     // The composer stays reachable instead of being clipped by the shell.

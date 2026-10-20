@@ -151,12 +151,13 @@ mark in the script and `BrandMark.svelte` together.
   rather than Chromium's `content-visibility: hidden`, which a text selection across it restyles
   all at once. Chat disclosures render their contents on first expansion (`revealedDisclosures`
   in `src/lib/disclosures.ts`) and keep them afterwards.
-- **Frames:** in a window wider than 760px, a chat, Settings and Connections each sit in one frame
-  on the workspace, below the window's title: `--bg` inside a `--border` line, `--radius-xl`
-  corners and `--shadow-md`, 12px from the window's edges (`.card-layout`, `.page-card`). Phones
-  keep the page edge to edge.
+- **Frame:** in a window wider than 760px, as in Linear, the sidebar lies on the window's own
+  surface (`--bg-sidebar`, without an edge of its own) and everything beside it, the window's title
+  included, is one card: `--bg` inside a `--border` line with `--radius-xl` corners, 8px from the
+  window's edges (`.main-area`). Panes within it, such as a docked side panel, are divided by a
+  `--border` line rather than set apart as cards. Phones keep the page edge to edge.
 - **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
-  them; inside a frame, avoid nesting more than one card level.
+  them; inside the frame, avoid nesting more than one card level.
 - **Code blocks:** `--code-bg` with a hairline border. Copy and Run are small text controls with
   a 13px icon that fill the block's top right corner in the block's own surface, so a long first
   line ends cleanly under them. They appear on hover or focus and are always shown, in a row above
