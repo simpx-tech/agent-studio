@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## The whole chat is the card — 2026-10-20
+
+Requested 2026-10-20: "Let's go ahead with the whole chat"
+
+- Ordinary chats wider than 760px are one card, toolbar and conversation, with the toolbar's line between them and the window's title above (`.chat-workspace.card-layout:not(.graph-first) > .chat-layout`). Settings → Appearance → Chat card is gone, with the Toolbar and Conversation cards, `appearance.chatCard` and the `.chat-body` wrapper they needed; a choice saved under `agent-studio.chat-card` is no longer read.
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit) covers the card on `.chat-layout`, the line under the toolbar, the title above the card, and a docked panel's card and its gap handle by keys and pointer; `tests/workflows.spec.ts` checks the card on `.chat-layout`.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,441 files), 858 Vitest tests, the build, and all 441 browser tests in three shards with the sockets drained. The second shard ran whole a third time: once the sub-agent update budget in `tests/performance.spec.ts` ran over under load (alone it averages 18 ms against 25 with this change and without it), then a page lost a module to `ERR_NO_BUFFER_SPACE`. No Rust changed.
+
 ## A third chat card: the whole chat — 2026-10-20
 
 Requested 2026-10-20: "Can you make an additional variant where the entire chat including the header is inside the card with a divider between the chat and the header? Don't include the title on the card"

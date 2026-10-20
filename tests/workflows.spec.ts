@@ -96,9 +96,9 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
-  // An ordinary chat's conversation is a card on the workspace.
+  // An ordinary chat is a card on the workspace.
   expect(
-    await page.locator('.chat-body').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
+    await page.locator('.chat-layout').evaluate((e) => getComputedStyle(e).borderTopLeftRadius),
   ).not.toBe('0px');
   // The sidebar's Workflows row is folded at first; unfolded, its list takes the chats' place.
   const row = page.getByRole('button', { name: /^Workflows/ });

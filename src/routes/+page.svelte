@@ -390,7 +390,7 @@
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
   import '$lib/styles.css';
-  import { appearance, initAppearance } from '$lib/appearance.svelte';
+  import { initAppearance } from '$lib/appearance.svelte';
 
   initAppearance();
 
@@ -7229,9 +7229,6 @@
     {#if view === 'chat'}
       <div
         class="chat-workspace card-layout"
-        class:card-chat={appearance.chatCard === 'chat'}
-        class:card-header={appearance.chatCard === 'header'}
-        class:card-whole={appearance.chatCard === 'whole'}
         class:has-side-panel={artifactView?.mode === 'panel' || subagentShown}
         class:graph-first={graphFirst}
         class:chat-open={graphFirst && workflowChatShown}
@@ -7533,9 +7530,6 @@
                 ><X size={16} /></button
               >{/if}
           </div>
-          <!-- What lies below the toolbar, a card of its own when ordinary chats show the
-            conversation as the card. -->
-          <div class="chat-body">
           {#if accountSwitchPending || nextReplyChanged}
             <p class="next-reply-settings" role="status">
               Next message: {#if accountSwitchPending}<span
@@ -7963,7 +7957,6 @@
               accountName={workspace.fleet.accounts.find(a => a.id === workspace.fleet.connections.find(c => c.id === selectedSettings.connectionId)?.accountId)?.name}
               accountUnavailable={!canQueryConnection(selectedSettings.connectionId, selectedSettings.provider)}
             />{/if}
-          </div>
           </div>
         </section>
         <!-- The gap between a workflow's chat card and its graph resizes the card. -->

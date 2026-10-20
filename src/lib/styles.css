@@ -1438,43 +1438,21 @@ pre {
     container: chat-area / inline-size;
   }
 }
-/* What lies below a chat's toolbar: the conversation and its composer. */
-.chat-body {
-  position: relative;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-}
-/* An ordinary chat shows one part as a card on the workspace, chosen in Settings → Appearance
-   (requested 2026-10-19, to choose between): the conversation below a toolbar on the workspace,
-   the toolbar above a conversation on the workspace, or the whole chat, its toolbar's own border
-   dividing it from the conversation (requested 2026-10-20); the window's title stays above it.
-   Docked side panels are cards beside it, and the gap between them resizes the panel. */
+/* An ordinary chat is a card on the workspace, the toolbar's own line dividing it from the
+   conversation and the window's title above it (requested 2026-10-19; chosen 2026-10-20 over
+   only the toolbar or only the conversation as the card). Docked side panels are cards beside
+   it, and the gap between them resizes the panel. */
 @media (min-width: 761px) {
   .chat-workspace.card-layout:not(.graph-first) {
     padding: 4px 12px 12px;
   }
-  .card-chat:not(.graph-first) > .chat-layout > .chat-toolbar {
-    border-bottom-color: transparent;
-  }
-  .card-chat:not(.graph-first) > .chat-layout > .chat-body,
-  .card-header:not(.graph-first) > .chat-layout > .chat-toolbar,
-  .card-whole:not(.graph-first) > .chat-layout,
+  .chat-workspace.card-layout:not(.graph-first) > .chat-layout,
   .chat-workspace.card-layout > dialog.docked {
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     background: var(--bg);
     box-shadow: var(--shadow-md);
-  }
-  .card-chat:not(.graph-first) > .chat-layout > .chat-body,
-  .card-whole:not(.graph-first) > .chat-layout,
-  .chat-workspace.card-layout > dialog.docked {
     overflow: hidden;
-  }
-  .card-header:not(.graph-first) > .chat-layout > .chat-toolbar {
-    margin-bottom: 6px;
   }
   .chat-workspace.card-layout > dialog.docked {
     background: var(--bg-sidebar);

@@ -2,26 +2,13 @@
 // design tokens through the root data-theme attribute (see theme.css).
 export type ThemePreference = 'dark' | 'light' | 'system';
 export type ResolvedTheme = 'dark' | 'light';
-/**
- * Which part of an ordinary chat is a card on the workspace (requested 2026-10-19, to choose
- * between): its toolbar, its conversation below a toolbar on the workspace, or the whole chat,
- * its toolbar divided from its conversation (requested 2026-10-20).
- */
-export type ChatCard = 'header' | 'chat' | 'whole';
-const chatCards: ChatCard[] = ['header', 'chat', 'whole'];
 
 const storageKey = 'agent-studio.theme';
-const chatCardKey = 'agent-studio.chat-card';
 const chromeColors: Record<ResolvedTheme, string> = { dark: '#111113', light: '#ffffff' };
 
-export const appearance = $state<{
-  preference: ThemePreference;
-  resolved: ResolvedTheme;
-  chatCard: ChatCard;
-}>({
+export const appearance = $state<{ preference: ThemePreference; resolved: ResolvedTheme }>({
   preference: 'dark',
   resolved: 'dark',
-  chatCard: 'chat',
 });
 
 let systemLight: MediaQueryList | undefined;
@@ -45,8 +32,6 @@ export function initAppearance() {
   try {
     const saved = localStorage.getItem(storageKey);
     if (saved === 'dark' || saved === 'light' || saved === 'system') appearance.preference = saved;
-    const card = localStorage.getItem(chatCardKey);
-    if (chatCards.includes(card as ChatCard)) appearance.chatCard = card as ChatCard;
   } catch {
     // Storage can be unavailable in private windows; the default theme still applies.
   }
@@ -57,15 +42,6 @@ export function initAppearance() {
     });
   }
   apply();
-}
-
-export function setChatCard(card: ChatCard) {
-  appearance.chatCard = card;
-  try {
-    localStorage.setItem(chatCardKey, card);
-  } catch {
-    // The choice still applies for this session.
-  }
 }
 
 export function setThemePreference(preference: ThemePreference) {
