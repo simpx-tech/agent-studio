@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## Settings and Connections in the chat’s card — 2026-10-20
+
+Requested 2026-10-20: "Can you also update the settings and connections to this new layout?"
+
+- In a window wider than 760px, Settings and Connections sit in the same card as a chat (`.page-card`: the `--border` line, `--radius-xl` corners and `--shadow-md`, 4px below the window's title and 12px from its edges), the title bar's line goes as it does above a chat, and the page scrolls inside the card; phones keep the page edge to edge. `docs/DESIGN-SYSTEM.md` names these frames.
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit) checks that Settings and Connections each show their heading in a rounded card below the window's title. Screenshots of both pages before and after, Connections in the light theme and at phone width.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,442 files), 858 Vitest tests, the build, and all 445 browser tests in three shards with the sockets drained, each shard whole on its first run. No Rust changed.
+
 ## Empty lists in the sidebar — 2026-10-20
 
 Requested 2026-10-20: "Can you improve the no active conversations/workflow yet message as well?"

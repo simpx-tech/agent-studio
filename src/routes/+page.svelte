@@ -8093,6 +8093,7 @@
         <FileViewer viewer={shownFiles} />
       </div>
     {:else if view === 'connections'}
+      <div class="page-card">
       {#key workspaceSession}
         <FleetManager
           bind:workspace
@@ -8131,7 +8132,9 @@
           highlight={connectionsHighlight}
         />
       {/key}
+      </div>
     {:else if view === 'settings'}
+      <div class="page-card">
       {#key workspaceSession}
         <SettingsPage
           {paired}
@@ -8153,6 +8156,7 @@
           importChats={desktop() ? openImport : undefined}
         />
       {/key}
+      </div>
     {:else if view === 'screen' && openedScreen}
       {@const screen = openedScreen}
       {@const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId)}

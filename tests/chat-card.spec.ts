@@ -81,3 +81,22 @@ test('the whole chat is a card below its title, and the gap beside a side panel 
     .poll(async () => (await panel.boundingBox())!.width)
     .toBeGreaterThan(side!.width + 50);
 });
+
+test('Settings and Connections sit in the same card, below the window title @webkit', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  for (const view of ['Settings', 'Connections']) {
+    await page.getByRole('button', { name: view, exact: true }).click();
+    const card = page.locator('.page-card');
+    await expect(card.getByRole('heading', { name: view, level: 1 })).toBeVisible();
+    expect(await radius(page, '.page-card')).not.toBe('0px');
+    const [title, box] = await Promise.all([
+      page.locator('.topbar').boundingBox(),
+      card.boundingBox(),
+    ]);
+    expect(box!.y).toBeGreaterThanOrEqual(title!.y + title!.height);
+  }
+});

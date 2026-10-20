@@ -1334,7 +1334,7 @@ pre {
   padding: 0 20px;
   gap: 16px;
 }
-.main-area:has(> .chat-workspace) > .topbar {
+.main-area:has(> :is(.chat-workspace, .page-card)) > .topbar {
   border-bottom-color: transparent;
 }
 .topbar.native-titlebar {
@@ -1372,6 +1372,25 @@ pre {
 
 /* ── Pages ────────────────────────────────────────────────────────────── */
 
+/* Settings and Connections are a card on the workspace, as a chat is, below the window's title
+   (requested 2026-10-20). */
+.page-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+@media (min-width: 761px) {
+  .page-card {
+    margin: 4px 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--bg);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+  }
+}
 .page-scroll {
   overflow: auto;
   flex: 1;
