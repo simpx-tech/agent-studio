@@ -741,6 +741,43 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   await expect(page.locator('.workflow-run-item')).toHaveCount(0);
 });
 
+test('a graph too wide to read whole starts at its orchestrator, beside its chat', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await newWorkflowChat(page);
+  await page.getByRole('radio', { name: 'Dynamic' }).click();
+  await send(page, 'Make every asset of the game, reviewed.');
+  await expect.poll(async () => (await requests(page)).length).toBe(1);
+  const [orchestrator] = await requests(page);
+  const panel = page.locator('.workflow-main');
+  await expect(page.locator('.workflow-chat-card')).toBeVisible();
+  // Twelve tasks side by side below the orchestrator make the graph too wide to read whole.
+  const plan = await call(page, orchestrator, 'dynamic_plan', {
+    tasks: Array.from({ length: 12 }, (_, i) => ({ id: `asset-${i + 1}`, title: `Asset ${i + 1}` })),
+  });
+  expect(plan.error).toBe(false);
+  await expect(panel.locator('.workflow-card').filter({ hasText: 'Asset 12' })).toHaveCount(1);
+  // It shows its first row, the orchestrator, in the view, its last task past the edge.
+  const seen = () =>
+    page.evaluate(() => {
+      const canvas = document.querySelector('.workflow-main .workflow-canvas')!;
+      const view = canvas.getBoundingClientRect();
+      const box = (card: Element) => card.getBoundingClientRect();
+      const cards = [...canvas.querySelectorAll('.workflow-card')];
+      const top = box(cards.find((c) => c.classList.contains('kind-orchestrator'))!);
+      const last = box(cards.find((c) => c.textContent?.includes('Asset 12'))!);
+      return {
+        orchestrator: top.left >= view.left && top.right <= view.right,
+        cut: last.right > view.right,
+      };
+    });
+  await expect.poll(seen).toEqual({ orchestrator: true, cut: true });
+  await reply(page, orchestrator.runId, 'Planned.');
+});
+
 test('a chat of yours becomes a static or dynamic workflow from its toolbar', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.goto('/');

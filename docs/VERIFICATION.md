@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## A wide graph starts at its first row — 2026-10-20
+
+Found while checking the dynamic workflow's open chat in the preview: beside the chat, a dynamic workflow whose plan spread wider than the graph's view showed its left edge at 65%, its orchestrator past the right edge.
+
+- A graph too big to read whole still shows its top at 65%, now centred on its first row, the trigger or orchestrator it starts from, while the view stays over the graph (`WorkflowFit.svelte`); a graph narrower than the view stays centred as before.
+- Browser: a new test in `tests/workflows.spec.ts` plans twelve tasks under a dynamic workflow's orchestrator beside its open chat and finds the orchestrator inside the view with the last task past its edge; it failed on the earlier fit (orchestrator out of view) and passes with this one.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,443 files), 858 Vitest tests, the build, and all 446 browser tests in three shards with the sockets drained. `tests/notifications.spec.ts:376`, a phone alert shown by the service worker within 5 seconds, failed in the second shard twice and once in four runs alone while other programs held the CPU at 73%; it touches no workflow code, failed the same way before this change, and the second shard then passed whole. No Rust changed.
+
 ## A dynamic workflow opens with its chat — 2026-10-20
 
 Requested 2026-10-20: "For dynamic workflow, it should show the chat open by default"

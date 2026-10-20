@@ -2,7 +2,9 @@
   import { useNodesInitialized, useSvelteFlow } from '@xyflow/svelte';
   // Fits the graph into view once its cards are measured and whenever `token` changes, as after a
   // step is added or the canvas changes size. A graph too big to read whole shows its start at a
-  // readable size instead: its top, centred while it is narrower than the view.
+  // readable size instead: its top, centred while it is narrower than the view and otherwise on its
+  // first row, the trigger or orchestrator it starts from (2026-10-20: shown from its left edge, a
+  // wide graph beside a dynamic workflow's open chat hid its orchestrator).
   let {
     token,
     width,
@@ -40,12 +42,21 @@
       size * readable < room - start - pad
         ? (room - size * readable) / 2 - from * readable
         : start - from * readable;
+    // Its first row's middle in the view's, the view staying over the graph.
+    const first = nodes.reduce((y, node) => Math.min(y, node.position.y), Infinity);
+    const row = flow.getNodesBounds(nodes.filter((node) => node.position.y < first + 1));
+    const across =
+      bounds.width * readable < width - 2 * pad
+        ? place(bounds.width, width, bounds.x, pad)
+        : Math.min(
+            pad - bounds.x * readable,
+            Math.max(
+              width - pad - (bounds.x + bounds.width) * readable,
+              width / 2 - (row.x + row.width / 2) * readable,
+            ),
+          );
     void flow.setViewport(
-      {
-        x: place(bounds.width, width, bounds.x, pad),
-        y: place(bounds.height, height, bounds.y, top),
-        zoom: readable,
-      },
+      { x: across, y: place(bounds.height, height, bounds.y, top), zoom: readable },
       { duration },
     );
   }
