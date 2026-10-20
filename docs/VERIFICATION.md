@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## A dynamic workflow opens with its chat — 2026-10-20
+
+Requested 2026-10-20: "For dynamic workflow, it should show the chat open by default"
+
+- A workflow's chat card is open as you left it, else as its kind shows it (`chatCardOpen` in `+page.svelte`): a static workflow's closed until you open it, a dynamic workflow's orchestrator open. Opening a workflow from the list, an alert or a chat's Workflow banner sets it back to its kind's, so a dynamic workflow opens beside its orchestrator's chat even after its × closed it, while the Workflow tab returns to a workflow with its chat as it was left; the graph's Chat button toggles from what is shown.
+- Browser: `tests/workflows.spec.ts` closes a dynamic workflow's chat, leaves for a new chat, comes back through the Workflow tab with the chat still closed, and opens it from the list with its chat open and Chat pressed; a saved static workflow still opens from the list with its chat closed.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,443 files), 858 Vitest tests, the build, and all 445 browser tests in three shards at the first attempt. No Rust changed.
+
 ## A new workflow shows its graph beside its chat — 2026-10-20
 
 Requested 2026-10-20: "On a new workflow it should already show the graph on the right always, keep the rule that if we open an already created static workflow it doesn't show the chat by default"

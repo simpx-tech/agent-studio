@@ -720,6 +720,21 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   // it left once it ended.
   await expect(item).toHaveAttribute('aria-current', 'page');
   await expect(item.locator('.conversation-running')).toHaveCount(0);
+  // Opened from the list, a dynamic workflow shows its orchestrator's chat beside its graph,
+  // however it was left; going back to it leaves the chat as it was.
+  const card = page.locator('.workflow-chat-card');
+  const chatButton = panel.getByRole('button', { name: 'Chat', exact: true });
+  await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Close the chat' }).click();
+  await expect(card).toBeHidden();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
+  await page.keyboard.press('Control+n');
+  await expect(panel).toHaveCount(0);
+  await workflowMode(page).click();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
+  await item.click();
+  await expect(card).toBeVisible();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
   await agentMode(page).click();
   await expect(page.getByRole('tab', { name: /^Active/ })).toBeVisible();
   await expect(page.locator('#conversation-panel-active .conversation-item')).toHaveCount(0);

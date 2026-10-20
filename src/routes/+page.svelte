@@ -512,8 +512,8 @@
   let openedWorkflowRun = $state<string>();
   let panelRuns = $state<Record<string, string | undefined>>({});
   // Whether a workflow shows its chat beside its graph, by workflow; window memory only. It opens
-  // while the workflow is made and when you open a chat of it, and is closed when the workflow is
-  // opened again (requested 2026-10-19).
+  // while the workflow is made and when you open a chat of it, and opening the workflow again
+  // leaves it to the workflow's kind (`chatCardOpen`; requested 2026-10-19 and 2026-10-20).
   let workflowChatOpen = $state<Record<string, boolean>>({});
   // The chat card's width beside a workflow's graph, which its right edge resizes, and the space
   // it shares.
@@ -2091,8 +2091,15 @@
     view === 'chat' && !active && !!currentScratch?.workflow && !currentScratch.workflow.id,
   );
   const graphFirst = $derived(view === 'chat' && (!!chatWorkflow || workflowDraft));
+  /**
+   * Whether a workflow's chat card is open: as you left it, else as its kind shows it, a static
+   * workflow's closed until you open it and a dynamic one's orchestrator open (requested
+   * 2026-10-20).
+   */
+  const chatCardOpen = (id: string) =>
+    workflowChatOpen[id] ?? workflows.summaries.get(id)?.mode === 'dynamic';
   const workflowChatShown = $derived(
-    graphFirst && (workflowDraft || (!!chatWorkflow && !!workflowChatOpen[chatWorkflow])),
+    graphFirst && (workflowDraft || (!!chatWorkflow && chatCardOpen(chatWorkflow))),
   );
   // The chat a workflow's own chats lead back to: its assistant, or the orchestrator of a dynamic
   // workflow you started.
@@ -2228,13 +2235,13 @@
     // A dynamic workflow another run started has no chat of yours: it opens as a page.
     if (chat && (target?.kind === 'definition' || (target?.mode === 'dynamic' && !target.parent))) {
       panelRuns[target.id] = owner ? id : undefined;
-      // A workflow opens on its graph; its chat waits until you open it.
-      workflowChatOpen[target.id] = false;
+      // A workflow opens on its graph, its chat as its kind shows it.
+      delete workflowChatOpen[target.id];
       openConversation(chat);
       return;
     }
     if (target?.kind === 'definition') {
-      workflowChatOpen[target.id] = false;
+      delete workflowChatOpen[target.id];
       panelRuns[target.id] = owner ? id : undefined;
       newWorkflowChat('workflow', target.id);
       return;
@@ -2341,7 +2348,7 @@
    * it, or a dynamic workflow's orchestrator.
    */
   function toggleWorkflowChat(workflowId: string) {
-    if (workflowChatOpen[workflowId] && view === 'chat') {
+    if (chatCardOpen(workflowId) && view === 'chat') {
       workflowChatOpen[workflowId] = false;
       return;
     }
