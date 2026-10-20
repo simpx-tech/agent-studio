@@ -118,6 +118,10 @@ mark in the script and `BrandMark.svelte` together.
   stop's name under it at `--text-xs` in `--text-muted`, the chosen one in `--text`. The thumb and
   fill glide over `--duration-slow` with `--ease-out`, through transforms only, and follow a drag
   at once. The popover widens with the stops (`sliderWidth`).
+- **Tabs:** a switch between whole sections, such as the sidebar's Agent and Workflow modes or
+  Model context's categories, is text tabs over a hairline with a 2px `--accent-strong` line
+  under the chosen one; a filter of one list, such as Active, History and Screens, is a segmented
+  control on `--hover` with `--radius-md` corners. Neither is a pill.
 - **Selected rows:** the open chat or draft in the sidebar has the selected background and an
   accent bar at its left edge.
 - **Day divisions:** where a chat continues on another day, the day's name in `--text-muted` at

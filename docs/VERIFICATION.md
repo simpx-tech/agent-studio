@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## The modes as tabs over a hairline, with room around them — 2026-10-20
+
+Requested 2026-10-20: "I don't like the rounded layout, it doesn't fit the rest of the app, also everything seems to be cluttered together"
+
+- The Agent and Workflow switch is text tabs over a hairline with a 2px `--accent-strong` line under the chosen mode, as Model context's categories, and the + sits at the line's end; the pill is gone. The search stands 12px below the line, the chat tabs 10px below the search and 8px above their list, and the workflow list 10px below the search. `docs/DESIGN-SYSTEM.md` now names the two tab styles: underline tabs for switching sections, a segmented control for filtering one list, neither a pill.
+- Screenshots of both modes in the dark and light themes, close up at twice the scale, and in the phone drawer, in Edge.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,441 files), 858 Vitest tests, the build, and all 443 browser tests in three shards with the sockets drained, each shard whole on its first run. No Rust changed.
+
 ## Agent and Workflow modes in the sidebar — 2026-10-20
 
 Requested 2026-10-20: "Can you add a tab switch button so I can switch between agent and workflow mode?"
