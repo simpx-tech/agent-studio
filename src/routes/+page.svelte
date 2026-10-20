@@ -6725,7 +6725,8 @@
           disabled={!loaded}
           onclick={() => void switchMode('agent')}
           onkeydown={modeKey}
-          ><Bot size={15} aria-hidden="true" /><span>Agent</span>{#if pendingChats > 0}<span
+          ><Bot size={15} aria-hidden="true" /><span class="mode-label">Agent</span
+          >{#if pendingChats > 0}<span
               class="pending-chat-count"
               title="Pending chats"
               aria-hidden="true">{pendingChats}</span
@@ -6739,7 +6740,7 @@
           disabled={!loaded}
           onclick={() => void switchMode('workflow')}
           onkeydown={modeKey}
-          ><Workflow size={15} aria-hidden="true" /><span>Workflow</span
+          ><Workflow size={15} aria-hidden="true" /><span class="mode-label">Workflow</span
           >{#if workflowsInProgress}<span
               class="nav-count"
               class:attention={workflowsWaiting}

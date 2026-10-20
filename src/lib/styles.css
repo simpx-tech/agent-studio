@@ -482,8 +482,10 @@ pre {
   user-select: none;
 }
 /* The sidebar's two modes, Agent and Workflow: tabs over a hairline, as Model context's
-   categories, with the + for a new chat or workflow at the end of the line. */
+   categories, sharing the line with the + for a new chat or workflow at its end. A narrow
+   sidebar leaves out their icons, and then shortens their names. */
 .sidebar-modes {
+  container: sidebar-modes / inline-size;
   display: flex;
   align-items: stretch;
   gap: 4px;
@@ -493,17 +495,18 @@ pre {
 .sidebar-modes > .icon-button {
   flex-shrink: 0;
   align-self: center;
-  margin-left: auto;
   width: var(--control-sm);
   height: var(--control-sm);
 }
 .mode-switch {
   display: flex;
+  flex: 1;
   align-items: flex-end;
   gap: 4px;
   min-width: 0;
 }
 .mode-switch [role='tab'] {
+  flex: 1 1 0;
   gap: 7px;
   min-width: 0;
   margin-bottom: -1px;
@@ -514,12 +517,36 @@ pre {
   font-size: var(--text-sm);
   font-weight: 500;
 }
-.mode-switch [role='tab'] > svg {
+.mode-switch [role='tab'] > :not(.mode-label) {
   flex-shrink: 0;
+}
+.mode-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mode-switch [aria-selected='true'] {
   color: var(--text);
   border-bottom-color: var(--accent-strong);
+}
+@container sidebar-modes (max-width: 250px) {
+  .mode-switch [role='tab'] {
+    gap: 6px;
+    padding-inline: 4px;
+  }
+  .mode-switch [role='tab'] > svg {
+    display: none;
+  }
+}
+@container sidebar-modes (max-width: 200px) {
+  .mode-switch {
+    gap: 2px;
+  }
+  .mode-switch [role='tab'] {
+    gap: 4px;
+    padding-inline: 2px;
+  }
 }
 .pending-chats-status {
   position: absolute;

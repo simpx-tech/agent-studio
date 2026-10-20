@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## The mode tabs share their line — 2026-10-20
+
+Requested 2026-10-20: "It's better but I don't like that on my screen it's aligned to left with a lot of empty space"
+
+- The Agent and Workflow tabs take equal shares of their line beside the +, their names centred and the chosen one's underline across its share. A narrow sidebar leaves out their icons (a line of 250px or less, `@container sidebar-modes`) and, at 200px or less, tightens their spacing; a name shortens with an ellipsis only when it still cannot fit.
+- Measured in Edge at sidebar widths from 180 to 480px, with and without a running count on Workflow: no name is cut except Workflow beside a running count in a sidebar of 210px or less; icons show in a sidebar wider than 270px. Screenshots at 180, 236 and 360px.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,441 files), 858 Vitest tests, the build, and all 443 browser tests in three shards with the sockets drained. The suites waited for another program's full CPU load to end, after two Vitest runs each lost a different timed test to it. The second shard ran whole twice more after `tests/notifications.spec.ts:376` missed its 5-second wait for a phone alert while the sockets would not drain; it failed once in 15 runs alone with this change and passed 5 of 5 before it, which changes only the tabs' widths. No Rust changed.
+
 ## The modes as tabs over a hairline, with room around them — 2026-10-20
 
 Requested 2026-10-20: "I don't like the rounded layout, it doesn't fit the rest of the app, also everything seems to be cluttered together"
