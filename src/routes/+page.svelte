@@ -525,6 +525,9 @@
   let workflowViewModule: Promise<typeof import('$lib/components/WorkflowView.svelte')> | undefined;
   const workflowView = () =>
     (workflowViewModule ??= import('$lib/components/WorkflowView.svelte'));
+  let workflowDraftModule: Promise<typeof import('$lib/components/WorkflowDraft.svelte')> | undefined;
+  const workflowDraftView = () =>
+    (workflowDraftModule ??= import('$lib/components/WorkflowDraft.svelte'));
   // Definitions and runs, and the runs this desktop drives.
   const workflows = new WorkflowClient({
     host: () => (loaded && installation ? workflowHost : undefined),
@@ -2082,9 +2085,15 @@
       : run.id;
   });
   // A workflow, static or dynamic, shows its graph in the chat's place, and its chat as a card at
-  // the graph's left on demand (requested 2026-10-19).
-  const graphFirst = $derived(view === 'chat' && !!chatWorkflow);
-  const workflowChatShown = $derived(graphFirst && !!chatWorkflow && !!workflowChatOpen[chatWorkflow]);
+  // the graph's left on demand (requested 2026-10-19). A new one shows the graph it starts with
+  // beside its chat, open, until its first message makes it (requested 2026-10-20).
+  const workflowDraft = $derived(
+    view === 'chat' && !active && !!currentScratch?.workflow && !currentScratch.workflow.id,
+  );
+  const graphFirst = $derived(view === 'chat' && (!!chatWorkflow || workflowDraft));
+  const workflowChatShown = $derived(
+    graphFirst && (workflowDraft || (!!chatWorkflow && !!workflowChatOpen[chatWorkflow])),
+  );
   // The chat a workflow's own chats lead back to: its assistant, or the orchestrator of a dynamic
   // workflow you started.
   const workflowHome = $derived.by(() => {
@@ -2715,6 +2724,17 @@
             ?.id ??
           ''),
   });
+  // Where a new dynamic workflow's orchestrator will run, and on which account, as its card says.
+  const draftOrchestrator = $derived(
+    workflowDraft && currentScratch?.workflow?.mode === 'mission'
+      ? [
+          computerNameOf(missionDriver?.preferred ?? workflowPickers.defaultDriver),
+          accountNameOf(selectedSettings.connectionId),
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : '',
+  );
 
   let relayRestorePending = $state(true);
   let notificationTarget = $state<string>();
@@ -7607,7 +7627,7 @@
                 aria-label="Chat instructions"><SlidersHorizontal size={16} /></button
               >
             </ToolbarActions>{/key}
-            {#if graphFirst}<button
+            {#if graphFirst && chatWorkflow}<button
                 class="icon-button card-close"
                 title="Close"
                 aria-label="Close the chat"
@@ -8079,7 +8099,12 @@
                   bind:run={panelRuns[workflowId]}
                   {webhookUrl}
                 />
-              </div>{/key}{/await}{/if}
+              </div>{/key}{/await}{:else if workflowDraft && currentScratch?.workflow}{@const mode =
+            currentScratch.workflow.mode}{#await workflowDraftView() then { default: WorkflowDraft }}<div
+              class="workflow-main"
+            >
+              <WorkflowDraft {mode} orchestrator={draftOrchestrator} />
+            </div>{/await}{/if}
         {#if subagentShown && subagentReply && subagentView && panelChat}{@const chat = panelChat}{#key chat}<SubagentPanel
               message={subagentReply}
               agentId={subagentView.agentId}

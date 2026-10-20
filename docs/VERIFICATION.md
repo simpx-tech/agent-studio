@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## A new workflow shows its graph beside its chat — 2026-10-20
+
+Requested 2026-10-20: "On a new workflow it should already show the graph on the right always, keep the rule that if we open an already created static workflow it doesn't show the chat by default"
+
+- A new workflow chat (the Workflow mode's +, its tab with nothing to return to) is laid out as a workflow from the start: its chat card on the left, open and without its ×, and on the right the graph the workflow starts with (`WorkflowDraft.svelte`, shown while `workflowDraft`): a static workflow's Manual trigger, or a dynamic one's orchestrator naming the computer and account it will run on from Runs on and the Agent picker, switching with the welcome's Static and Dynamic. The first message puts the workflow's own graph in its place, its canvas exactly where the new one's was (the draft's name takes the height of a saved workflow's name field). A saved workflow opened from the list still shows its graph with its chat closed.
+- Browser: `tests/workflows.spec.ts` checks the new static workflow's Manual card beside the open chat without Close the chat, the switch to the orchestrator and back, the canvas staying in place when the workflow is made, the dynamic draft's Desktop · Claude CLI login line and its canvas staying in place too, and, as before, a saved workflow opening from the list with its chat closed. Screenshots of both new kinds, of each just made, and of a phone, where the chat covers the graph before and after the first message alike.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,443 files), 858 Vitest tests, the build, and all 445 browser tests in three shards with the sockets drained; the second shard ran whole once more after `tests/notifications.spec.ts:376` missed its wait for a phone alert. No Rust changed.
+
 ## The title on the window's surface, the chat and its side panel two cards — 2026-10-20
 
 Requested 2026-10-20: "Make the title be out of the right card, same for the top navbar buttons, also split the chat and the artifact/right sidebar like we had before (two separated cards)"

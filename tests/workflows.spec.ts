@@ -132,6 +132,18 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
     'Describe the workflow…',
   );
   await expect(page.getByRole('radio', { name: 'Static' })).toHaveAttribute('aria-checked', 'true');
+  // Before its first message, the graph it starts with shows beside its chat, which stays open.
+  const graph = page.locator('.workflow-main');
+  const card = page.locator('.workflow-chat-card');
+  await expect(graph.locator('.workflow-card')).toHaveText(/Manual/);
+  await expect(card).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Close the chat' })).toHaveCount(0);
+  await page.getByRole('radio', { name: 'Dynamic' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveClass(/kind-orchestrator/);
+  await page.getByRole('radio', { name: 'Static' }).click();
+  await expect(graph.locator('.workflow-card')).toHaveText(/Manual/);
+  const canvasTop = async () => (await graph.locator('.workflow-canvas').boundingBox())!.y;
+  const drafted = await canvasTop();
   await send(page, 'Write about swords every morning.');
   // The chat becomes the workflow's assistant: Claude at its maximum reasoning, told which
   // workflow it changes.
@@ -143,10 +155,11 @@ test('a static workflow starts from a chat and shows its graph, its chat beside 
   const workflowId = assistant.agent.instructions.match(/workflow ([0-9a-f-]{36})/)?.[1];
   expect(workflowId).toBeTruthy();
   expect(assistant.messages.at(-1)?.text).toBe('Write about swords every morning.');
-  // The graph takes the chat's place, and the chat shows as a card at its left, with its toolbar.
-  const graph = page.locator('.workflow-main');
-  const card = page.locator('.workflow-chat-card');
+  // The graph takes the chat's place, where the new one was, and the chat shows as a card at its
+  // left, with its toolbar.
+  await expect(graph.getByLabel('Workflow name')).toBeVisible();
   await expect(graph.locator('.workflow-card')).toHaveCount(1);
+  expect(await canvasTop()).toBe(drafted);
   await expect(card.getByRole('combobox', { name: 'Agent' })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Close the chat' })).toBeVisible();
   // The assistant saves a workflow, which the graph shows at once, from top to bottom.
@@ -580,6 +593,13 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   await page.getByRole('radio', { name: 'Dynamic' }).click();
   await expect(page.getByRole('heading', { name: /the goal\?/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /^Runs on/ })).toBeVisible();
+  // Its graph starts with its orchestrator, beside the chat, saying where it will run and on
+  // which account.
+  const panel = page.locator('.workflow-main');
+  await expect(panel.locator('.workflow-card')).toHaveClass(/kind-orchestrator/);
+  await expect(panel.locator('.workflow-card')).toContainText('Desktop · Claude CLI login');
+  const canvasTop = async () => (await panel.locator('.workflow-canvas').boundingBox())!.y;
+  const drafted = await canvasTop();
   await send(page, 'Make every asset of the game, reviewed.');
   // The chat is its orchestrator: your words are its first message, its role its instructions.
   await expect.poll(async () => (await requests(page)).length).toBe(1);
@@ -589,10 +609,11 @@ test('a dynamic workflow starts from a chat and its orchestrator works in it', a
   expect(orchestrator.agent.instructions).toMatch(
     /orchestrator of an Agent Studio dynamic workflow/,
   );
-  // Its graph takes the chat's place, the orchestrator's chat a card at its left that keeps its
-  // share of the space as the window grows and shrinks.
-  const panel = page.locator('.workflow-main');
+  // Its graph takes the chat's place, where the new one was, the orchestrator's chat a card at its
+  // left that keeps its share of the space as the window grows and shrinks.
+  await expect(panel.locator('.run-status')).toHaveText('Running');
   await expect(panel.locator('.workflow-card.kind-orchestrator')).toBeVisible();
+  expect(await canvasTop()).toBe(drafted);
   const share = () =>
     page.evaluate(() => {
       const card = document.querySelector('.workflow-chat-card')!;
