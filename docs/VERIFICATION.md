@@ -18,6 +18,16 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## Agent and Workflow modes in the sidebar — 2026-10-20
+
+Requested 2026-10-20: "Can you add a tab switch button so I can switch between agent and workflow mode?"
+
+- The sidebar's **Agent** and **Workflow** tabs under the wordmark replace the Conversations header and the foldable Workflows row (`sidebarMode`, `.mode-switch`): Agent shows the chat tabs and lists with the pending chats badge, Workflow the list of workflows with the count of what runs. The mode follows what is on screen, and a tab returns to what its mode showed last (`places`, `returnTo`), else to a new chat or workflow chat. The + beside the tabs starts a chat or a workflow by mode; the phone's drawer stays open on the mode it switched to; the arrow keys switch and keep the focus on the tabs; a row whose chat belongs to the other mode hands its focus to that mode's tab. The status region that announces pending chats sits beside the tabs, outside the tab's name.
+- Found while testing: four focus fallbacks looked for any selected tab in the sidebar and now found the Agent tab first; they look in the chat tabs (`.conversation-tabs`).
+- Browser: `tests/workflows.spec.ts` covers the switch both ways with its list, search and new workflow, the arrow keys and Home, returning to a workflow as it was, Ctrl+N's Agent mode, a running workflow opened from the Active list by keyboard (its tab focused), the Active checks through Agent, and a phone drawer that stays open on the mode it switched to (Edge and WebKit); `tests/workspace.spec.ts` checks the two mode tabs above the chat tabs. Screenshots of both modes, dark and light, on the desktop and in the phone drawer.
+- Native: `scripts/workflows-native-smoke.mjs`, which now switches modes for the chats and the workflows, built and ran a static workflow (GREETING NATIVE) and completed a dynamic one with its worker through real Codex in an isolated QA build.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,441 files), 858 Vitest tests, the build, and all 443 browser tests in three shards with the sockets drained; the second shard ran whole again after two relay-backed phone tests failed under load (both passed alone, then with their shard). No Rust changed.
+
 ## The whole chat is the card — 2026-10-20
 
 Requested 2026-10-20: "Let's go ahead with the whole chat"

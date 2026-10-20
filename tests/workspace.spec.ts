@@ -2018,11 +2018,14 @@ test('computer then folder scopes CLI choices and groups active and history with
   const historyTab = page.getByRole('tab', { name: /^History/ });
   await expect(activeTab).toHaveAttribute('aria-selected', 'true');
   await expect(history).toBeHidden();
-  // The tabs go Active, History and Screens, and the arrows wrap around them; Workflows is a
-  // button of its own above them.
+  // The tabs go Active, History and Screens, and the arrows wrap around them; the Agent and
+  // Workflow modes are tabs of their own above them.
   const screensTab = page.getByRole('tab', { name: /^Screens/ });
   await expect(page.getByRole('tab', { name: /^Workflows/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /^Workflows/ })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Mode' }).getByRole('tab')).toHaveText([
+    /^Agent/,
+    /^Workflow/,
+  ]);
   await activeTab.press('End');
   await expect(screensTab).toBeFocused();
   await expect(page.locator('#conversation-panel-screens')).toBeVisible();

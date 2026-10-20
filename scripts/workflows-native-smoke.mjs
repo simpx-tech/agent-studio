@@ -146,19 +146,19 @@ try {
     },
     messages: [],
   });
-  // The Workflows row's list, unfolded (as an earlier run may have left it), takes the chat
-  // lists' place: fold it to reach the chats.
+  // The sidebar's Workflow mode lists the workflows in the chat lists' place: the Agent mode
+  // shows the chats.
   const showChats = () =>
     page.evaluate(() => {
-      const row = document.querySelector('.workflows-row .sidebar-nav-row');
-      if (row?.getAttribute('aria-expanded') === 'true') row.click();
+      const tab = document.querySelector('#mode-agent');
+      if (tab?.getAttribute('aria-selected') !== 'true') tab?.click();
     });
   // A save the app started during startup detection can land after this one, so seed again
   // until the reloaded app lists the chat.
   const listed = () =>
     page.evaluate(async (title) => {
-      const row = document.querySelector('.workflows-row .sidebar-nav-row');
-      if (row?.getAttribute('aria-expanded') === 'true') row.click();
+      const tab = document.querySelector('#mode-agent');
+      if (tab?.getAttribute('aria-selected') !== 'true') tab?.click();
       await new Promise((resolve) => setTimeout(resolve, 100));
       document.querySelector('#conversation-tab-history')?.click();
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -265,12 +265,12 @@ try {
       await sleep(2000);
     }
   };
-  // The sidebar lists the workflows under its Workflows row: a static workflow opens on its
-  // graph, a dynamic one in its orchestrator's chat with the graph beside it.
+  // The sidebar's Workflow mode lists the workflows: a static workflow opens on its graph, a
+  // dynamic one in its orchestrator's chat with the graph beside it.
   const openWorkflow = async (title) => {
     await page.evaluate(() => {
-      const row = document.querySelector('.workflows-row .sidebar-nav-row');
-      if (row?.getAttribute('aria-expanded') !== 'true') row?.click();
+      const tab = document.querySelector('#mode-workflow');
+      if (tab?.getAttribute('aria-selected') !== 'true') tab?.click();
     });
     await page.waitFor(
       (title) =>

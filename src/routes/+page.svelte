@@ -2100,20 +2100,82 @@
   const workflowsWaiting = $derived(
     [...workflows.summaries.values()].some((s) => s.kind === 'run' && s.questions > 0),
   );
-  // The sidebar's Workflows row unfolds the list of workflows in place of the chats (requested
-  // 2026-10-19, in place of a page of them): each saved workflow and each dynamic workflow you
-  // started, the newest first, folded until opened and then as last left on this device.
-  let workflowsExpanded = $state(
-    typeof localStorage !== 'undefined' &&
-      localStorage.getItem('agent-studio.workflows-expanded') === 'true',
-  );
-  function toggleWorkflowsList() {
-    workflowsExpanded = !workflowsExpanded;
-    try {
-      localStorage.setItem('agent-studio.workflows-expanded', String(workflowsExpanded));
-    } catch {
-      // A browser without storage keeps the choice for this page.
+  // The sidebar switches between two modes (requested 2026-10-20, in place of a Workflows row that
+  // unfolded the list): Agent, the chats, and Workflow, the list of workflows, each saved workflow
+  // and each dynamic workflow you started, the newest first. The mode follows what is on screen,
+  // and switching returns to what that mode showed last, else to a new chat or workflow.
+  type SidebarMode = 'agent' | 'workflow';
+  type Place = { chat: string } | { scratch: string } | { page: string; run?: string };
+  let sidebarMode = $state<SidebarMode>('agent');
+  const places: Partial<Record<SidebarMode, Place>> = {};
+  $effect(() => {
+    let mode: SidebarMode;
+    if (view === 'workflow' && openedWorkflow) {
+      mode = 'workflow';
+      places.workflow = { page: openedWorkflow, run: openedWorkflowRun };
+    } else if (view === 'chat') {
+      mode = workflowChat ? 'workflow' : 'agent';
+      places[mode] = activeId ? { chat: activeId } : { scratch: scratchId };
+    } else return;
+    if (mode === untrack(() => sidebarMode)) return;
+    // A row that opened the other mode's chat or workflow leaves with its list: its mode's tab
+    // keeps the focus.
+    const focused = document.activeElement?.closest('#sidebar-agent, #sidebar-workflow');
+    sidebarMode = mode;
+    if (focused)
+      void tick().then(() => {
+        if (document.activeElement === document.body)
+          document.getElementById(`mode-${mode}`)?.focus();
+      });
+  });
+  /** Whether a chat shows a workflow: its assistant or orchestrator, or a chat its run started. */
+  const showsWorkflow = (id: string) =>
+    !!workflows.workflowOf(id) || (workflows.readOnly(id) && !!workflows.runOf(id));
+  /** Shows what a mode showed last, while it is still there and still of that mode. */
+  function returnTo(mode: SidebarMode) {
+    const place = places[mode];
+    if (!place) return false;
+    if ('page' in place) {
+      if (!workflows.summaries.has(place.page)) return false;
+      expandWorkflow(place.page, place.run);
+      return true;
     }
+    if ('scratch' in place) {
+      const scratch = scratches.find((s) => s.id === place.scratch);
+      if (!scratch || !!scratch.workflow !== (mode === 'workflow')) return false;
+      openScratch(scratch, false);
+      return true;
+    }
+    const chat = workspace.conversations.find((c) => c.id === place.chat);
+    if (!chat || showsWorkflow(chat.id) !== (mode === 'workflow')) return false;
+    openConversation(chat);
+    return true;
+  }
+  async function switchMode(mode: SidebarMode, refocus?: HTMLElement) {
+    if (!loaded || (mode === sidebarMode && (view === 'chat' || view === 'workflow'))) return;
+    // The phone's drawer stays open on the mode's list.
+    const drawer = sidebarOpen;
+    if (!returnTo(mode)) {
+      if (mode === 'agent') newChat();
+      else newWorkflowChat();
+    }
+    sidebarOpen = drawer;
+    if (!refocus) return;
+    await tick();
+    refocus.parentElement?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+  }
+  function modeKey(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next =
+      event.key === 'Home'
+        ? 'agent'
+        : event.key === 'End'
+          ? 'workflow'
+          : sidebarMode === 'agent'
+            ? 'workflow'
+            : 'agent';
+    void switchMode(next, event.currentTarget as HTMLElement);
   }
   const listedWorkflows = $derived.by(() => {
     const search = query.trim().toLowerCase();
@@ -4762,7 +4824,7 @@
         listed[index] ||
         listed[index - 1];
       (
-        row || sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+        row || sidebarElement?.querySelector<HTMLElement>('.conversation-tabs [aria-selected="true"]')
       )?.focus();
     });
   }
@@ -4808,7 +4870,7 @@
         ? trigger
         : (listed[index] ??
           listed[index - 1] ??
-          sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))
+          sidebarElement?.querySelector<HTMLElement>('.conversation-tabs [aria-selected="true"]'))
       )?.focus({ preventScroll: true });
     });
   }
@@ -4834,7 +4896,7 @@
         sidebarElement?.querySelector<HTMLElement>(
           '#conversation-panel-active :is(.conversation-item, .scratch-item)',
         ) ??
-        sidebarElement?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+        sidebarElement?.querySelector<HTMLElement>('.conversation-tabs [aria-selected="true"]')
       )?.focus();
     });
   }
@@ -5120,7 +5182,7 @@
             trigger.focus({ preventScroll: true });
           else if (mobile && sidebarOpen)
             sidebarElement
-              ?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+              ?.querySelector<HTMLElement>('.conversation-tabs [aria-selected="true"]')
               ?.focus();
           else composerInput?.focus();
         });
@@ -6652,29 +6714,65 @@
       <span>agent<span class="brand-light">studio</span></span>
       {#if !desktop()}<span class="viewer-label">Viewer</span>{/if}
     </button>
-    <div class="sidebar-section">
-      <span class="sidebar-section-label"
-        >Conversations
-        <span role="status" aria-live="polite" aria-label={`${pendingChats} pending chats`}>
-          {#if pendingChats > 0}<span
+    <div class="sidebar-modes">
+      <div class="mode-switch" role="tablist" aria-label="Mode">
+        <button
+          id="mode-agent"
+          role="tab"
+          aria-selected={sidebarMode === 'agent'}
+          aria-controls={sidebarMode === 'agent' ? 'sidebar-agent' : undefined}
+          tabindex={sidebarMode === 'agent' ? 0 : -1}
+          disabled={!loaded}
+          onclick={() => void switchMode('agent')}
+          onkeydown={modeKey}
+          ><Bot size={15} aria-hidden="true" /><span>Agent</span>{#if pendingChats > 0}<span
               class="pending-chat-count"
               title="Pending chats"
-              >{pendingChats}</span
-            >{/if}
-        </span>
-      </span><button
-        class="icon-button"
-        onclick={() => newChat()}
-        aria-label="New conversation"
-        title="New conversation (Ctrl+N)"
-        aria-keyshortcuts="Control+N Meta+N"
-        disabled={!loaded}><Plus size={15} /></button
+              aria-hidden="true">{pendingChats}</span
+            >{/if}</button
+        ><button
+          id="mode-workflow"
+          role="tab"
+          aria-selected={sidebarMode === 'workflow'}
+          aria-controls={sidebarMode === 'workflow' ? 'sidebar-workflow' : undefined}
+          tabindex={sidebarMode === 'workflow' ? 0 : -1}
+          disabled={!loaded}
+          onclick={() => void switchMode('workflow')}
+          onkeydown={modeKey}
+          ><Workflow size={15} aria-hidden="true" /><span>Workflow</span
+          >{#if workflowsInProgress}<span
+              class="nav-count"
+              class:attention={workflowsWaiting}
+              title={workflowsWaiting ? 'Waiting for you' : 'In progress'}
+              aria-label={`${workflowsInProgress} in progress`}>{workflowsInProgress}</span
+            >{/if}</button
+        >
+      </div>
+      <span
+        class="pending-chats-status"
+        role="status"
+        aria-live="polite"
+        aria-label={`${pendingChats} pending chats`}>{pendingChats || ''}</span
       >
+      {#if sidebarMode === 'workflow'}<button
+          class="icon-button"
+          onclick={() => newWorkflowChat()}
+          aria-label="New workflow"
+          title="New workflow"
+          disabled={!loaded}><Plus size={15} /></button
+        >{:else}<button
+          class="icon-button"
+          onclick={() => newChat()}
+          aria-label="New conversation"
+          title="New conversation (Ctrl+N)"
+          aria-keyshortcuts="Control+N Meta+N"
+          disabled={!loaded}><Plus size={15} /></button
+        >{/if}
     </div>
     <label class="search"
       ><Search size={14} /><input
-        aria-label="Search conversations"
-        placeholder={workflowsExpanded
+        aria-label={sidebarMode === 'workflow' ? 'Search workflows' : 'Search conversations'}
+        placeholder={sidebarMode === 'workflow'
           ? 'Search workflows'
           : conversationScope === 'screens'
             ? 'Search screens'
@@ -6686,36 +6784,13 @@
           aria-label="Clear search"><X size={12} /></button
         >{/if}</label
     >
-    <div class="workflows-section">
-      <div class="workflows-row">
-        <button
-          class="sidebar-nav-row"
-          aria-expanded={workflowsExpanded}
-          aria-controls="sidebar-workflows"
-          disabled={!loaded}
-          onclick={toggleWorkflowsList}
-          ><Workflow size={16} aria-hidden="true" /><span>Workflows</span>{#if workflowsInProgress}<span
-              class="nav-count"
-              class:attention={workflowsWaiting}
-              title={workflowsWaiting ? 'Waiting for you' : 'In progress'}
-              aria-label={`${workflowsInProgress} in progress`}>{workflowsInProgress}</span
-            >{/if}<ChevronRight
-            size={12}
-            class={workflowsExpanded ? 'expanded-chevron' : ''}
-            aria-hidden="true"
-          /></button
-        ><button
-          class="icon-button workflows-new"
-          title="New workflow"
-          aria-label="New workflow"
-          disabled={!loaded}
-          onclick={() => newWorkflowChat()}><Plus size={14} /></button
-        >
-      </div>
-    </div>
-    <!-- Unfolded, the workflows take the list's place, however many there are (requested
-      2026-10-19); folding them shows the chats again. -->
-    {#if workflowsExpanded}<div class="conversation-list workflow-browser">
+    <!-- Each mode's list fills the sidebar, however many chats or workflows there are. -->
+    {#if sidebarMode === 'workflow'}<div
+        id="sidebar-workflow"
+        class="conversation-list workflow-browser"
+        role="tabpanel"
+        aria-labelledby="mode-workflow"
+      >
       <ul id="sidebar-workflows" class="workflow-list" aria-label="Workflows">
           {#each listedWorkflows as { summary, run } (summary.id)}{@const shown = workflowOnScreen(
               summary.id,
@@ -6747,7 +6822,13 @@
               {query ? 'No matches.' : 'No workflows yet.'}
             </li>{/each}
       </ul>
-    </div>{:else}<div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
+    </div>{:else}<div
+        id="sidebar-agent"
+        class="sidebar-panel"
+        role="tabpanel"
+        aria-labelledby="mode-agent"
+      >
+    <div class="conversation-tabs" role="tablist" aria-label="Conversations and screens">
       {#each conversationGroups as group}
         <button
           id={`conversation-tab-${group.id}`}
@@ -7156,6 +7237,7 @@
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}
       </div>
+    </div>
     </div>{/if}
     <div class="sidebar-tools">
       {#if appUpdate?.phase === 'ready' || appUpdate?.phase === 'installing'}<button

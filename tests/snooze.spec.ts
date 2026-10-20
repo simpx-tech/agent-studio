@@ -18,7 +18,7 @@ const row = (page: Page, panel: 'active' | 'history', name: string) =>
   rows(page, panel).filter({ has: page.getByText(name, { exact: true }) });
 // The sidebar's New conversation, enabled once the workspace loaded, also in a closed drawer.
 const loaded = (page: Page) =>
-  page.locator('.sidebar-section button[aria-label="New conversation"]');
+  page.locator('.sidebar-modes button[aria-label="New conversation"]');
 const saved = (page: Page) =>
   page.evaluate(() => JSON.parse(localStorage.getItem('test-workspace')!));
 

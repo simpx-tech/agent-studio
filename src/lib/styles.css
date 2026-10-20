@@ -481,26 +481,60 @@ pre {
   cursor: default;
   user-select: none;
 }
-.sidebar-section {
+/* The sidebar's two modes, Agent and Workflow, beside the + for a new chat or workflow. */
+.sidebar-modes {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  min-height: 32px;
-  padding: 0 2px 0 8px;
-  margin-top: 4px;
+  gap: 4px;
+  margin-top: 2px;
+}
+.sidebar-modes > .icon-button {
+  flex-shrink: 0;
+  width: var(--control-sm);
+  height: var(--control-sm);
+}
+.mode-switch {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--hover);
+}
+.mode-switch [role='tab'] {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  gap: 7px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
   color: var(--text-muted);
   font-size: var(--text-sm);
   font-weight: 500;
 }
-.sidebar-section .icon-button {
-  width: var(--control-sm);
-  height: var(--control-sm);
+.mode-switch [role='tab'] > svg {
+  flex-shrink: 0;
 }
-.sidebar-section-label {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
+.mode-switch [aria-selected='true'] {
+  background: var(--surface-3);
+  color: var(--text);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 0 0 1px var(--border);
+}
+.mode-switch [aria-selected='true'] > svg {
+  color: var(--accent-text);
+}
+.pending-chats-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .pending-chat-count {
   display: inline-flex;
@@ -646,70 +680,12 @@ pre {
   width: 24px;
   height: 24px;
 }
-/* Workflows, above the chat tabs: a section of the sidebar of its own. */
-/* A page of its own the sidebar opens, as a quiet row like a chat's, above the tabs. */
-.sidebar-nav-row {
+/* The Agent mode's panel: the chat tabs above the list they show. */
+.sidebar-panel {
   display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 9px;
-  flex-shrink: 0;
-  width: 100%;
-  min-height: 32px;
-  margin-top: 8px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--text-secondary);
-  font-size: var(--text-base);
-  font-weight: 400;
-}
-.sidebar-nav-row:hover:not(:disabled) {
-  background: var(--hover);
-  color: var(--text);
-}
-.sidebar-nav-row.current {
-  background: var(--selected);
-  color: var(--text);
-}
-.sidebar-nav-row > svg {
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
-.sidebar-nav-row.current > svg,
-.sidebar-nav-row:hover:not(:disabled) > svg {
-  color: var(--accent-text);
-}
-.sidebar-nav-row > span:first-of-type {
   flex: 1;
-  text-align: left;
-}
-.sidebar-nav-row > .expanded-chevron {
-  transform: rotate(90deg);
-}
-/* The Workflows row unfolds the list of workflows in the chats' place, with a + for a new one. */
-.workflows-section {
-  display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-}
-.workflows-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-top: 8px;
-}
-.workflows-row > .sidebar-nav-row {
-  flex: 1;
-  min-width: 0;
-  margin-top: 0;
-}
-.workflows-new {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  color: var(--text-muted);
+  min-height: 0;
 }
 .workflow-list {
   display: flex;
@@ -3183,7 +3159,8 @@ pre {
   .sidebar .search {
     min-height: 44px;
   }
-  .sidebar .conversation-tabs button {
+  .sidebar .conversation-tabs button,
+  .sidebar .mode-switch button {
     min-height: 40px;
   }
   .sidebar .icon-button,
