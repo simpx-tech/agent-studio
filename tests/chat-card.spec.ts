@@ -91,7 +91,7 @@ test('the whole chat is a card below its title, and the gap beside a side panel 
     .toBeGreaterThan(side!.width + 50);
 });
 
-test('Settings and Connections sit in the same card, below the window title @webkit', async ({
+test('Settings and Connections sit in a card below the window title, which alone names them @webkit', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
@@ -100,7 +100,11 @@ test('Settings and Connections sit in the same card, below the window title @web
   for (const view of ['Settings', 'Connections']) {
     await page.getByRole('button', { name: view, exact: true }).click();
     const card = page.locator('.page-card');
-    await expect(card.getByRole('heading', { name: view, level: 1 })).toBeVisible();
+    await expect(page.locator('.page-title')).toHaveText(view);
+    // The page keeps its heading for assistive technology without showing the name again.
+    const heading = card.getByRole('heading', { name: view, level: 1 });
+    await expect(heading).toHaveCount(1);
+    expect((await heading.boundingBox())!.width).toBeLessThanOrEqual(1);
     expect(await radius(page, '.page-card')).not.toBe('0px');
     const [title, box] = await Promise.all([
       page.locator('.topbar').boundingBox(),
@@ -108,4 +112,10 @@ test('Settings and Connections sit in the same card, below the window title @web
     ]);
     expect(box!.y).toBeGreaterThanOrEqual(title!.y + title!.height);
   }
+  // Connections refreshes from the row of its computers' heading.
+  await expect(
+    page
+      .locator('.computers-section .section-heading')
+      .getByRole('button', { name: 'Refresh connections', exact: true }),
+  ).toBeVisible();
 });

@@ -156,8 +156,9 @@ mark in the script and `BrandMark.svelte` together.
   buttons. Below them what is shown is a card: `--bg` inside a `--border` line with `--radius-xl`
   corners and `--shadow-md`, 12px from the window's sides and bottom; a chat (`.card-layout`) and
   a side panel docked beside it are two such cards, the gap between them the handle that resizes
-  the panel, and Settings and Connections are one (`.page-card`). Phones keep the page edge to
-  edge.
+  the panel, and Settings and Connections are one (`.page-card`). The window's title names a
+  page once: Settings and Connections keep their `h1` for assistive technology alone
+  (`.page-name`). Phones keep the page edge to edge.
 - **Cards:** `--surface-1`, `--border`, `--radius-xl`. Settings sections and provider groups use
   them; inside the frame, avoid nesting more than one card level.
 - **Code blocks:** `--code-bg` with a hairline border. Copy and Run are small text controls with

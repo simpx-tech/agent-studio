@@ -67,11 +67,8 @@
 
 <div class="page-scroll">
   <div class="page-content settings-page">
-    <section class="page-heading">
-      <div>
-        <h1>Settings</h1>
-      </div>
-    </section>
+    <!-- The window's title names the page. -->
+    <h1 class="page-name">Settings</h1>
     {#if error}<div class="error-banner" role="alert">{error}</div>{/if}
     <div class="settings-sections">
       <AppearanceSettings />

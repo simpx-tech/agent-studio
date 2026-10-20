@@ -911,35 +911,32 @@
 
 <div class="page-scroll" bind:this={page}>
   <div class="page-content fleet-page">
-    <section class="page-heading">
-      <div>
-        <h1>Connections</h1>
-      </div>
-      <button
-        class="secondary refresh-connections"
-        disabled={busy}
-        aria-busy={refreshingConnections}
-        onclick={() =>
-          action(async () => {
-            refreshingConnections = true;
-            try {
-              await refresh();
-            } finally {
-              refreshingConnections = false;
-            }
-          })}
-        ><RefreshCw size={15} class={refreshingConnections ? 'spinning' : undefined} />Refresh
-        connections</button
-      >
-    </section>
+    <!-- The window's title names the page. -->
+    <h1 class="page-name">Connections</h1>
     {#if error && !dialog}<div class="error-banner" role="alert">{error}</div>{/if}
     <section class="computers-section" aria-labelledby="computers-heading">
       <div class="section-heading">
         <div>
           <h2 id="computers-heading">Your computers</h2>
+          <span class="computer-count"
+            >{computers.length} {computers.length === 1 ? 'computer' : 'computers'}</span
+          >
         </div>
-        <span class="computer-count"
-          >{computers.length} {computers.length === 1 ? 'computer' : 'computers'}</span
+        <button
+          class="secondary refresh-connections"
+          disabled={busy}
+          aria-busy={refreshingConnections}
+          onclick={() =>
+            action(async () => {
+              refreshingConnections = true;
+              try {
+                await refresh();
+              } finally {
+                refreshingConnections = false;
+              }
+            })}
+          ><RefreshCw size={15} class={refreshingConnections ? 'spinning' : undefined} />Refresh
+          connections</button
         >
       </div>
       <div class="fleet-computers">
@@ -1678,12 +1675,12 @@
     padding-bottom: 32px;
   }
   .section-heading {
-    align-items: flex-end;
+    flex-wrap: wrap;
     margin: 0 0 18px;
     gap: 14px;
   }
   .section-heading > div {
-    display: block;
+    gap: 10px;
   }
   .section-heading h2 {
     margin: 0;
@@ -2095,9 +2092,6 @@
     }
   }
   @media (max-width: 1000px) {
-    .page-heading {
-      flex-wrap: wrap;
-    }
     .fleet-relay {
       grid-template-columns: 1fr auto;
     }

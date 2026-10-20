@@ -18,6 +18,14 @@ Requested 2026-10-19: "I don't like the "missions" label, I would still prefer t
 - Not exercised: relay pushes against a released relay (unit-tested), a dynamic child started by a Run workflow step with real CLIs (unit- and mock-tested), the Viewer, and Claude as orchestrator in the QA app (its Claude login is signed out).
 - Choices of mine, not confirmed: an agent's question stays answerable in its read-only chat as well as in the run; the chat you started a dynamic workflow in and a static workflow's assistant stay writable; runs another run started are not listed in Active; the history oldest first and following its end; a step's entries filtered by choosing its card; notes folded under the result; balancing off keeps Least used for steps without an account.
 
+## Settings and Connections named once — 2026-10-20
+
+Requested 2026-10-20: "I think for settings and connections it shouldn't repeat the title twice" (a screenshot of Settings named both in the window's title and as the page's large heading).
+
+- The window's title names the page; Settings and Connections keep their `h1` for assistive technology alone (`.page-name`, which shares the visually hidden rule of the Agent tab's pending count), and the unused `.page-heading` rules are gone. Settings now opens on Appearance. Connections' Refresh connections moved into the Your computers row, the count of computers beside that heading, and wraps below it on a phone.
+- Browser: `tests/chat-card.spec.ts` (Edge and WebKit) checks that each page's window title is its name, its own `h1` remains but takes no room, and Refresh connections sits in the Your computers row. Screenshots at 1380, 900 and 390px wide. Tests that find the pages by their heading still do, since the hidden heading keeps a box.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,443 files), 858 Vitest tests, the build, and all 446 browser tests in three shards with the sockets drained, while other programs held the CPU at about 70% and the shards ran up to twice as long: the first shard passed at once; the third at its second run, after the WebKit page of `tests/chat-card.spec.ts` did not finish loading (both of its tests then passed alone in WebKit); the second at its third, after `tests/private-workspaces.spec.ts:370` read a response its page had already left and `tests/notifications.spec.ts:376` missed its 5-second wait for a phone alert. No Rust changed.
+
 ## A wide graph starts at its first row — 2026-10-20
 
 Found while checking the dynamic workflow's open chat in the preview: beside the chat, a dynamic workflow whose plan spread wider than the graph's view showed its left edge at 65%, its orchestrator past the right edge.

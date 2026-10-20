@@ -548,7 +548,10 @@ pre {
     padding-inline: 2px;
   }
 }
-.pending-chats-status {
+/* Read by assistive technology alone: the pending chats beside the Agent tab, and the name of a
+   page the window's title already shows (requested 2026-10-20). */
+.pending-chats-status,
+.page-name {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1417,21 +1420,6 @@ pre {
   max-width: var(--page-width);
   margin: 0 auto;
   padding: 40px 40px 32px;
-}
-.page-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  margin: 0 0 32px;
-}
-.page-heading h1 {
-  margin: 0 0 6px;
-  font-size: var(--text-2xl);
-}
-.page-heading p {
-  font-size: var(--text-base);
-  color: var(--text-muted);
 }
 .section-heading {
   display: flex;
@@ -3066,10 +3054,6 @@ pre {
   }
   .page-content {
     padding: 28px 22px 20px;
-  }
-  .page-heading {
-    flex-direction: column;
-    align-items: flex-start;
   }
   .usage-strip {
     gap: 4px;
