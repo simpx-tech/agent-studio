@@ -1,5 +1,7 @@
 // Device-local appearance. Dark is the default; Light and System select the same
 // design tokens through the root data-theme attribute (see theme.css).
+import { tick } from 'svelte';
+
 export type ThemePreference = 'dark' | 'light' | 'system';
 export type ResolvedTheme = 'dark' | 'light';
 
@@ -13,18 +15,43 @@ export const appearance = $state<{ preference: ThemePreference; resolved: Resolv
 
 let systemLight: MediaQueryList | undefined;
 
+function resolve(): ResolvedTheme {
+  return appearance.preference === 'system'
+    ? systemLight?.matches
+      ? 'light'
+      : 'dark'
+    : appearance.preference;
+}
+
 function apply() {
-  const resolved: ResolvedTheme =
-    appearance.preference === 'system'
-      ? systemLight?.matches
-        ? 'light'
-        : 'dark'
-      : appearance.preference;
+  const resolved = resolve();
   appearance.resolved = resolved;
   document.documentElement.dataset.theme = resolved;
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute('content', chromeColors[resolved]);
+}
+
+// A theme chosen later, or the system's changing under System, crosses over from the old
+// colours instead of flashing (styles.css times it). It applies at once when the colours stay,
+// in a hidden window, under reduced motion and in engines without view transitions.
+function change() {
+  if (
+    resolve() === document.documentElement.dataset.theme ||
+    typeof document.startViewTransition !== 'function' ||
+    document.visibilityState !== 'visible' ||
+    matchMedia('(prefers-reduced-motion: reduce)').matches
+  )
+    return apply();
+  document
+    .startViewTransition(() => {
+      apply();
+      // Components reading the theme update before the new colours are captured.
+      return tick();
+    })
+    .ready.catch(() => {
+      // A transition the browser skips still applies the theme.
+    });
 }
 
 export function initAppearance() {
@@ -38,7 +65,7 @@ export function initAppearance() {
   if (!systemLight) {
     systemLight = window.matchMedia('(prefers-color-scheme: light)');
     systemLight.addEventListener('change', () => {
-      if (appearance.preference === 'system') apply();
+      if (appearance.preference === 'system') change();
     });
   }
   apply();
@@ -51,5 +78,5 @@ export function setThemePreference(preference: ThemePreference) {
   } catch {
     // The choice still applies for this session.
   }
-  apply();
+  change();
 }

@@ -227,6 +227,11 @@
     margin: 16px 0;
     min-width: 0;
   }
+  /* A question Claude starts writing fades in where it will wait. The recorded question
+     replaces it there in the same event, so that one shows at once. */
+  .question-card.writing {
+    animation: fade-in var(--duration) var(--ease-out);
+  }
   /* A question waiting for your answer asks for attention in orange. */
   .question-card.active {
     border-color: var(--warning);

@@ -231,6 +231,7 @@
   dialog[open] {
     display: flex;
     flex-direction: column;
+    animation: fade-in var(--duration) ease;
   }
   dialog::backdrop {
     background: var(--backdrop);

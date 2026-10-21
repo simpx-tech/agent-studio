@@ -154,6 +154,13 @@
       : '';
   };
   const sent = $derived(clock(message.createdAt));
+  // What was written a moment ago fades in: a message just sent, the reply it starts, a steer
+  // the reply just took. What a chat already holds when it opens shows at once, and so does a
+  // message from a computer whose clock is far from this one's.
+  const fresh = (time?: string) => {
+    const age = time ? Date.now() - Date.parse(time) : NaN;
+    return Math.abs(age) < 1500;
+  };
   // A message a workflow wrote: an update's first event, without the chat ids written for the
   // orchestrator, and how many more it lists (one a line, before the agents' replies), or else
   // its first line of substance. Updates written before 2026-10-19 begin [Mission update].
@@ -426,6 +433,7 @@
 <article
   class="message"
   class:user={message.role === 'user'}
+  class:entering={fresh(message.createdAt)}
   data-testid="message"
   data-message-id={message.id}
   data-status={message.status}
@@ -474,9 +482,10 @@
          as a message of the user's own, and the reply goes on below it under its own heading. -->
     {#each parts as part, index (part.steer?.id ?? '')}
       {@const last = index === parts.length - 1}
+      {@const entering = fresh(part.steer?.at)}
       {#if part.steer}
         {@const confirmed = clock(part.steer.at)}
-        <div class="steer-message" role="group" aria-label="Steering message">
+        <div class="steer-message" class:entering role="group" aria-label="Steering message">
           <span class="steer-sender">You{confirmed ? ` ${confirmed}` : ''}</span>
           <span class="steer-mark"><ShipWheel size={13} aria-hidden="true" />Steer</span>
           <div class="user-text">{part.steer.text}</div>
@@ -485,8 +494,8 @@
       <!-- A part without work shows only as the steer that began it, unless the reply ends there. -->
       {#if last || part.entries.length}
         {@const began = part.steer ? clock(part.steer.at) : sent}
-        <div class="message-avatar model"><ModelMark {mark} variant="tile" /></div>
-        <div class="message-content">
+        <div class="message-avatar model" class:entering><ModelMark {mark} variant="tile" /></div>
+        <div class="message-content" class:entering>
           <div class="message-heading">
             <strong>{replyModelName(message)}</strong>{#if began}<span>{began}</span
               >{/if}{#if last && message.status === 'running'}{@render liveLabel()}{/if}
@@ -517,6 +526,11 @@
 </article>
 
 <style>
+  /* Opacity only: the chat measures what it holds to keep its place, and a send already
+     glides the conversation to the new message. */
+  .entering {
+    animation: fade-in var(--duration) var(--ease-out);
+  }
   /* Quiet below your bubble until hovered or focused; always shown on touch screens. */
   .user-actions {
     margin-top: 4px;

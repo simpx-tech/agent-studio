@@ -1173,6 +1173,7 @@
     padding: 12px 20px 16px;
     gap: 10px;
     container-type: inline-size;
+    animation: fade-in var(--duration) ease;
   }
   .workflow-page.panel {
     padding: 10px 12px 12px;
@@ -1324,6 +1325,7 @@
     border-radius: var(--radius-lg);
     background: var(--surface-overlay);
     box-shadow: var(--shadow-lg);
+    animation: fade-in var(--duration-fast) ease;
   }
   .drop-menu {
     position: fixed;

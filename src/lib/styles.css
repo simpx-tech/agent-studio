@@ -48,7 +48,8 @@ button {
     border-color var(--duration-fast) ease,
     color var(--duration-fast) ease,
     box-shadow var(--duration-fast) ease,
-    opacity var(--duration-fast) ease;
+    opacity var(--duration-fast) ease,
+    scale var(--duration-fast) var(--ease-out);
 }
 button:disabled {
   cursor: not-allowed;
@@ -248,6 +249,23 @@ pre {
   border-color: var(--danger-solid-hover);
   color: var(--on-solid);
 }
+/* A compact button gives a little under the pointer or key pressing it, through the scale
+   property so a transform of its own stays. Menu items, rows and the cards that open
+   artifacts and screens stay still. */
+@media (prefers-reduced-motion: no-preference) {
+  :is(.icon-button, .send-button, .attach-button):not(:disabled):active {
+    scale: 0.93;
+  }
+  :is(.primary, .danger, .secondary, .stop-button, .steer-button):not(
+      :disabled,
+      [role='menuitem'],
+      .artifact-open,
+      .artifact-side,
+      .screen-open
+    ):active {
+    scale: 0.97;
+  }
+}
 .text-button {
   padding: 3px 2px;
   gap: 5px;
@@ -407,6 +425,7 @@ pre {
   line-height: var(--leading-snug);
   flex-shrink: 0;
   overflow-wrap: anywhere;
+  animation: fade-in var(--duration) ease;
 }
 .notice {
   justify-content: space-between;
@@ -887,6 +906,7 @@ pre {
   border-radius: var(--radius-lg);
   background: var(--surface-overlay);
   box-shadow: var(--shadow-lg);
+  animation: fade-in var(--duration-fast) ease;
 }
 .workflow-from-menu button {
   justify-content: flex-start;
@@ -942,6 +962,12 @@ pre {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+/* The list a sidebar tab or mode shows fades in when it is chosen. Rows are reused in place as
+   chats reorder, so they never animate on their own. */
+.conversation-section,
+.workflow-browser {
+  animation: fade-in var(--duration-fast) ease;
 }
 .conversation-computer + .conversation-computer,
 .conversation-session + .conversation-session {
@@ -1400,6 +1426,7 @@ pre {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  animation: fade-in var(--duration) ease;
 }
 @media (min-width: 761px) {
   .page-card {
@@ -1445,11 +1472,14 @@ pre {
 
 /* ── Chat layout ──────────────────────────────────────────────────────── */
 
+/* Like Settings and Connections, the chat fades in when the window returns to it; another chat
+   opens in place. */
 .chat-workspace {
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+  animation: fade-in var(--duration) ease;
 }
 .chat-layout {
   position: relative;
@@ -1563,6 +1593,7 @@ pre {
   color: var(--text);
   pointer-events: none;
   text-align: center;
+  animation: fade-in var(--duration-fast) ease;
 }
 .image-drop-overlay > div {
   display: flex;
@@ -1652,6 +1683,7 @@ pre {
   padding: 6px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
+  animation: fade-in var(--duration) ease;
 }
 .reply-switch {
   grid-column: 1 / -1;
@@ -1731,6 +1763,7 @@ pre {
 .chat-empty {
   text-align: center;
   padding: 16px 0;
+  animation: rise-in var(--duration-slow) var(--ease-out);
 }
 .large-provider {
   width: 52px;
@@ -2453,6 +2486,7 @@ pre {
   margin: 8px 0 0;
   font-size: var(--text-sm);
   color: var(--warning);
+  animation: fade-in var(--duration) ease;
 }
 .image-attachments {
   display: flex;
@@ -2464,6 +2498,10 @@ pre {
   position: relative;
   width: 104px;
   min-width: 0;
+}
+/* An image attached to the draft settles into place; a sent message's images show at once. */
+.composer .image-attachment {
+  animation: pop-in var(--duration) var(--ease-out);
 }
 .image-thumbnail {
   display: flex;
@@ -2510,6 +2548,9 @@ pre {
   color: var(--text);
   box-shadow: var(--shadow-xl);
 }
+.image-preview[open] {
+  animation: fade-in var(--duration) ease;
+}
 .image-preview::backdrop {
   background: var(--backdrop);
   backdrop-filter: blur(4px);
@@ -2549,6 +2590,7 @@ pre {
   color: var(--text-faint);
   box-shadow: none;
 }
+/* They show while a reply runs, fading in beside the send button. */
 .stop-button,
 .steer-button {
   height: var(--control-md);
@@ -2560,6 +2602,7 @@ pre {
   color: var(--text);
   font-size: var(--text-sm);
   font-weight: 500;
+  animation: fade-in var(--duration) ease;
 }
 .stop-button:not(:disabled):hover,
 .steer-button:not(:disabled):hover {
@@ -2584,6 +2627,7 @@ pre {
   background: var(--hover);
   font-size: var(--text-sm);
   color: var(--text-secondary);
+  animation: fade-in var(--duration) var(--ease-out);
 }
 .queued-badge {
   flex: none;
@@ -2632,6 +2676,7 @@ pre {
   font-size: var(--text-sm);
   line-height: var(--leading-snug);
   text-align: left;
+  animation: fade-in var(--duration) ease;
 }
 .setup-hint > svg {
   color: var(--warning);
@@ -3026,6 +3071,37 @@ pre {
   from {
     opacity: 0;
   }
+}
+/* For what nothing measures while it enters, such as a new chat's welcome. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+/* Every dialog's backdrop fades in with it, and an opened disclosure's content fades in
+   below its summary. The closed rule above takes that content out of rendering, so the
+   fade starts each time the disclosure opens. The reduced-motion rule below reaches
+   elements and their ::before and ::after only, so these pseudo-elements animate only
+   when motion is welcome. */
+@media (prefers-reduced-motion: no-preference) {
+  dialog[open]::backdrop {
+    animation: fade-in var(--duration) ease;
+  }
+  details[open]::details-content {
+    animation: fade-in var(--duration-fast) ease;
+  }
+}
+/* A theme change crosses over from the old colours (appearance.svelte.ts). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--duration-slow);
 }
 
 /* ── Responsive ───────────────────────────────────────────────────────── */

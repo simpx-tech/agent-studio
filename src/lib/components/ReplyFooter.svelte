@@ -370,6 +370,10 @@
     color: var(--text-muted);
     font-size: 11px;
   }
+  /* A panel fades in each time its toggle shows it, as a disclosure's content does. */
+  .reply-footer > [role='region'] {
+    animation: fade-in var(--duration-fast) ease;
+  }
   .footer-controls {
     display: flex;
     flex-wrap: wrap;

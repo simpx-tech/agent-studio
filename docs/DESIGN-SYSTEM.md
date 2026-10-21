@@ -15,13 +15,24 @@ named colors, so every surface follows the selected theme.
   only for counts and badges. No uppercase letter-spaced labels.
 - **Consistent geometry.** A 4px spacing rhythm, radii from `--radius-xs` to `--radius-2xl`, and
   32px default controls (44px touch targets on phones).
-- **Motion is feedback.** Hover and state transitions use `--duration-fast`; overlays fade in
-  with opacity only, so measured layout never moves during an animation. A running reply's
-  calls enter, fold into their group and slide into place with `--duration-slow`, animating
-  only opacity and transforms: layout changes at once and the animation plays over it. Sending
-  a message from the end of a chat glides the conversation to it, while following streamed
-  output stays instant. The global reduced-motion rule stops CSS animations; script animations,
-  that glide included, check it themselves.
+- **Motion is feedback.** Hover and state transitions use `--duration-fast`; overlays (dialogs
+  and their backdrops, popovers, menus, docked panels) fade in with opacity only, so measured
+  layout never moves during an animation. What appears in a chat fades in with opacity only too,
+  since the chat measures its content to keep its place: a message, the reply it starts or a
+  steer written in the last 1.5 seconds (`fresh` in `MessageView.svelte`, so a chat's messages
+  show at once when it opens), a question as Claude writes it, an opened disclosure's content
+  and a reply footer panel. A page, sidebar tab or mode fades its view in when chosen, and a new
+  chat's welcome rises 6px; sidebar rows never animate on their own, since they are reused in
+  place as chats reorder. Compact buttons give a little while pressed, through the `scale`
+  property so their own transforms stay (0.93 for icon buttons, 0.97 for text buttons; never
+  rows, menu items or cards). A theme change crosses over through a view transition. A running
+  reply's calls enter, fold into their group and slide into place with `--duration-slow`,
+  animating only opacity and transforms: layout changes at once and the animation plays over
+  it. Sending a message from the end of a chat glides the conversation to it, while following
+  streamed output stays instant. The global reduced-motion rule stops CSS animations of
+  elements and their `::before` and `::after`; other pseudo-elements (`::backdrop`,
+  `::details-content`) animate only under `prefers-reduced-motion: no-preference`, and script
+  animations, that glide and the theme crossfade included, check it themselves.
 - **Cheap selectors.** Every hover change and transition frame restyles elements, so never pair
   `:has()` with a universal selector such as `.app-shell:has(…) *`: Chromium would search the
   whole app again on each recalculation. Mark app-wide states, such as the resize cursor while a

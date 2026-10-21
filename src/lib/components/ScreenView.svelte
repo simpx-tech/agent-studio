@@ -375,6 +375,7 @@
     min-width: 0;
     padding: 12px 20px 16px;
     gap: 10px;
+    animation: fade-in var(--duration) ease;
   }
   .screen-toolbar {
     display: flex;

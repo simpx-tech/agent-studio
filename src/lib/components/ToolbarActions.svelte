@@ -62,6 +62,7 @@
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-xl);
       box-shadow: var(--shadow-lg);
+      animation: fade-in var(--duration-fast) ease;
     }
   }
   @media (max-width: 650px) {
@@ -86,6 +87,7 @@
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-xl);
       box-shadow: var(--shadow-lg);
+      animation: fade-in var(--duration-fast) ease;
     }
     .action-items :global(.icon-button) {
       width: 44px;

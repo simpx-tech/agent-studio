@@ -141,6 +141,9 @@
     background: var(--surface-overlay);
     box-shadow: var(--shadow-lg);
   }
+  .conversation-context-menu:popover-open {
+    animation: fade-in var(--duration-fast) ease;
+  }
   button {
     width: 100%;
     min-height: 32px;
