@@ -1,4 +1,4 @@
-# Freezes between the window and the app
+# Freezes and crashes
 
 The desktop app is two halves: the page, which draws the window's contents and runs in WebView2,
 and the native app, which runs replies, saves the workspace and owns the window itself. The page
@@ -103,6 +103,42 @@ kept: Send the image bytes**. Restarting the app cleared both.
   `webviewProcess` report, with its kind, reason, exit code and description, such as
   *Network Service*.
 
+## What happened on 2026-10-20
+
+The app (v0.11.0, running for eight hours) closed at 17:35:15 in the middle of a reply, which
+showed **This response was interrupted when the app closed.** once the app started again.
+
+- Windows logged exception 0xc0000409 (`FAST_FAIL_FATAL_APP_EXIT`) in `agent-studio.exe` and
+  kept a minidump in `%LOCALAPPDATA%\CrashDumps`. The crashed thread, of the blocking pool, was
+  in Rust's handler for a refused allocation, which prints `memory allocation of 268435456 bytes
+  failed` and aborts. Its caller encoded the workspace for a save: `serde_json::to_vec` growing
+  its buffer to 256 MiB for the 175 MB file.
+- Windows had run out of commit. The dump's system counters show 87.24 GB promised of an
+  87.68 GB limit: 61 GB of memory and a page file Windows was still growing, since the limit had
+  been 86.68 GB 27 seconds earlier, in the dump of an Explorer crash. RustDesk, another Rust
+  program, ended with the same exception a second after the app. The app held 1.9 GB itself; the
+  dumps do not name what held the rest.
+- A save of one conversation cost the app far more memory than the file. The host kept its last
+  write as a `serde_json::Value` tree (820 MB for a 167 MB workspace), copied every unchanged
+  conversation of it into the next tree (another 800 MB and 0.6 seconds in a release build), and
+  encoded the whole file into one buffer of up to twice its size, every few seconds while a reply
+  ran.
+
+What the app does now:
+
+- **A refused allocation waits for memory.** On Windows the app's allocator
+  (`src-tauri/src/memory.rs`, installed by `main.rs`) asks again after pauses growing from 5 ms
+  to a second, for up to a minute, while Windows grows its page file or another program lets
+  memory go, and only then lets the refusal stand. A request larger than all the memory Windows
+  can promise fails at once. Each wait is kept as a `memoryWait` report once it ends.
+- **Saves no longer take memory in proportion to the workspace.** The host keeps the
+  conversations of its last write as their JSON text (`StorageState.saved` in `lib.rs`), moves
+  them into the next file rather than copying them, and writes the file straight to disk, as it
+  does the sync checkpoint (`src-tauri/src/sync_state.rs`). A conversation the page sent is
+  checked as a whole parse would check it (`readable`: read as raw JSON, text lets a lone
+  surrogate escape through, which the next start of the app would refuse) and written as it
+  came. The file is the same, byte for byte.
+
 ## Reports and dumps
 
 Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
@@ -115,10 +151,13 @@ Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
 | `windowCalls`    | The page's list of calls it waited on, from its own check.                        |
 | `ipcFallback`    | Tauri moved the page's calls to `postMessage`: the failure, the calls sent again. |
 | `webviewProcess` | A WebView2 process failed: its kind, reason, exit code and description.           |
+| `memoryWait`     | Allocations waited for memory: how many, the longest wait, the largest request.   |
 
 Reports hold the time, how long the app had waited, the app version and process id, whether the
 page last said it was shown, the dump's file name or why none was saved, and
-`recoveredAfterMs` once the freeze ended. Only the minidump holds memory: thread stacks, handles
+`recoveredAfterMs` once the freeze ended. A `memoryWait` report's `memory` also gives the waits
+that ended still refused and the memory Windows had promised, and could promise, when the latest
+began. Only the minidump holds memory: thread stacks, handles
 and module lists, no heap. The app keeps the newest 30 reports and 3 dumps. Nothing in
 `diagnostics/` is synced, exported or sent anywhere.
 
@@ -171,6 +210,21 @@ thread waits in.
   through `postMessage`. On 2026-10-11 both ways passed with Codex. The same driver on the build
   before this change failed the reply with **This conversation is already responding**, and
   storing an image after the move failed with **Send the image bytes**.
+- `src-tauri/src/memory.rs` tests: a refused allocation is asked again until granted, the refusal
+  stands once its patience runs out, every wait since the last report is counted, a request past
+  all the memory Windows can promise never waits, and blocks are the system allocator's. A
+  scratch program compiled with `memory.rs` inside a job object limited to 512 MB recreated the
+  crash: holding 400 MB, a 256 MiB request ended it with `memory allocation of 268435456 bytes
+  failed`; with the app's allocator the request waited 2.4 seconds, until a thread let the 400 MB
+  go, and the program went on with one wait reported. `watchdog.rs` writes the `memoryWait`
+  report.
+- `lib.rs` `workspace_patch_tests`: a whole workspace is written byte for byte as `serde_json`
+  wrote it, conversations stay the text they came as through later patches, a refused patch keeps
+  the last write, a failed write leaves the next patch nothing to fill in, a version 2 file is
+  backed up once, and the check of a sent conversation refuses exactly what a `Value` parse
+  refuses. On a copy of the 175 MB workspace a whole save and three saves of its largest
+  conversation (9.8 MB) wrote the file `serde_json` would; in a debug build the saves took
+  0.3 seconds each, against 5.9 seconds for the copy and encoding they replace.
 - `tests/window-answers.spec.ts`: the banner appears and clears and the stall is recorded; a reply
   starts while its save goes unanswered and the save warning clears; Close closes while the draft
   save goes unanswered.

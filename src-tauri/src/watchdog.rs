@@ -6,8 +6,9 @@
 //! the computer was awake, it writes a report to app data `diagnostics/` and, on Windows, has a
 //! helper process (`--write-minidump`) save where every thread of this process was; the report
 //! then records when the freeze ended. A page that found this process not answering leaves its
-//! own record of the calls it waited on (`record_window_stall`). Nothing here leaves this
-//! computer: not the workspace, sync, exports or prompts. See docs/DIAGNOSTICS.md.
+//! own record of the calls it waited on (`record_window_stall`), and allocations that had to
+//! wait for memory are reported once they got it (memory.rs). Nothing here leaves this computer:
+//! not the workspace, sync, exports or prompts. See docs/DIAGNOSTICS.md.
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -113,6 +114,7 @@ pub async fn record_window_stall(app: AppHandle, stall: WindowStall) -> Result<(
             calls: stall.calls,
             error: None,
             process: None,
+            memory: None,
         };
         report.write(&folder, &stamp(stall.noticed_at))
     })
@@ -160,6 +162,7 @@ pub async fn record_ipc_fallback(
             calls: fallback.calls,
             error: Some(fallback.error.chars().take(500).collect()),
             process: None,
+            memory: None,
         };
         report.write(&folder, &stamp(fallback.noticed_at))
     })
@@ -296,9 +299,44 @@ fn record_process_failure(app: &AppHandle, failure: ProcessFailure) {
                 calls: vec![],
                 error: None,
                 process: Some(failure),
+                memory: None,
             };
             let _ = report.write(&folder, &stamp(at));
         });
+}
+
+/// Writes a `memoryWait` report of the allocations that waited for memory since the last one.
+fn report_memory(app: &AppHandle, visible: bool) {
+    let Some(waits) = crate::memory::take_waits() else {
+        return;
+    };
+    let Ok(folder) = folder(app) else { return };
+    let at = now_ms();
+    let _ = memory_report(waits, at, visible).write(&folder, &stamp(at));
+}
+
+fn memory_report(waits: crate::memory::WaitReport, at: u64, visible: bool) -> Report {
+    Report {
+        kind: "memoryWait",
+        detected_at: rfc3339(at),
+        after_ms: waits.longest_ms,
+        version: version(),
+        process_id: std::process::id(),
+        visible,
+        dump: None,
+        dump_error: None,
+        recovered_after_ms: None,
+        calls: vec![],
+        error: None,
+        process: None,
+        memory: Some(MemoryWaits {
+            waits: waits.waits,
+            refused: waits.refused,
+            largest_bytes: waits.largest_bytes,
+            committed_bytes: waits.commit.committed,
+            commit_limit_bytes: waits.commit.limit,
+        }),
+    }
 }
 
 /// Starts the watch. It runs until the window thread stops taking tasks for good, as the app
@@ -321,6 +359,7 @@ fn watch(app: &AppHandle) {
         if watchdog.ending.load(Ordering::SeqCst) {
             return;
         }
+        report_memory(app, watchdog.visible.load(Ordering::SeqCst));
         let (answer, answered) = mpsc::channel::<()>();
         if app
             .run_on_main_thread(move || {
@@ -476,8 +515,8 @@ impl Silence {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
-    /// `windowThread`, `windowQueue`, `windowSilent`, `windowCalls`, `ipcFallback` or
-    /// `webviewProcess`.
+    /// `windowThread`, `windowQueue`, `windowSilent`, `windowCalls`, `ipcFallback`,
+    /// `webviewProcess` or `memoryWait`.
     kind: &'static str,
     detected_at: String,
     after_ms: u64,
@@ -497,6 +536,21 @@ struct Report {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     process: Option<ProcessFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<MemoryWaits>,
+}
+
+/// Allocations Windows refused that waited for memory (memory.rs), for `memoryWait`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryWaits {
+    waits: u64,
+    /// Waits that ended still refused, after a minute.
+    refused: u64,
+    largest_bytes: u64,
+    /// What Windows had promised, and could promise, when the latest wait began.
+    committed_bytes: u64,
+    commit_limit_bytes: u64,
 }
 
 impl Report {
@@ -538,6 +592,7 @@ fn freeze(
         calls: vec![],
         error: None,
         process: None,
+        memory: None,
     };
     // The report first, in case saving the dump is what fails to finish.
     let _ = report.write(&folder, &stamp);
@@ -821,6 +876,7 @@ mod tests {
                 calls: vec![],
                 error: None,
                 process: None,
+                memory: None,
             };
             report.write(folder.path(), &stamp(second * 1000)).unwrap();
         }
@@ -907,6 +963,7 @@ mod tests {
                 description: "Network Service".into(),
                 module: String::new(),
             }),
+            memory: None,
         };
         report.write(folder.path(), &stamp(0)).unwrap();
         let written: serde_json::Value = serde_json::from_slice(
@@ -928,6 +985,45 @@ mod tests {
             })
         );
         assert!(written.get("error").is_none());
+    }
+
+    #[test]
+    fn memory_reports_say_how_long_allocations_waited() {
+        let folder = tempfile::tempdir().unwrap();
+        let waits = crate::memory::WaitReport {
+            waits: 3,
+            refused: 0,
+            longest_ms: 2_400,
+            largest_bytes: 268_435_456,
+            commit: crate::memory::Commit {
+                committed: 93_670_000_000,
+                limit: 94_150_000_000,
+            },
+        };
+        memory_report(waits, 0, true)
+            .write(folder.path(), &stamp(0))
+            .unwrap();
+        let written: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                folder
+                    .path()
+                    .join("1970-01-01T00-00-00-000Z-memoryWait.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["afterMs"], 2_400);
+        assert_eq!(
+            written["memory"],
+            serde_json::json!({
+                "waits": 3,
+                "refused": 0,
+                "largestBytes": 268_435_456,
+                "committedBytes": 93_670_000_000_u64,
+                "commitLimitBytes": 94_150_000_000_u64
+            })
+        );
+        assert!(written.get("process").is_none() && written.get("dump").is_none());
     }
 
     #[cfg(windows)]

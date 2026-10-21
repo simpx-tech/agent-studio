@@ -7,7 +7,8 @@
 //! A write now carries the conversations that changed since the last one, as bytes (sent.rs),
 //! and names every conversation in order; the rest are copied from the file as they are, without
 //! being parsed into values. A conversation neither sent nor in the file fails the write with
-//! `NEEDS_WHOLE`, and the window then sends everything, as it does the first time.
+//! `NEEDS_WHOLE`, and the window then sends everything, as it does the first time. The file is
+//! written to disk as it is put together, never first into a buffer of its whole size.
 use crate::sent::Sent;
 use serde::Deserialize;
 use serde_json::{value::RawValue, Value};
@@ -46,8 +47,9 @@ pub fn save(root: &Path, sent: Sent) -> Result<(), String> {
 
 /// Writes a whole checkpoint.
 pub fn write(root: &Path, value: &Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "Cannot encode sync checkpoint")?;
-    replace(root, &bytes)
+    replace(root, |out| {
+        serde_json::to_writer(out, value).map_err(Into::into)
+    })
 }
 
 /// A conversation's id, read without building the conversation.
@@ -106,52 +108,60 @@ fn patch(root: &Path, value: Value, order: &[String], upsert: &[&RawValue]) -> R
     if sent.keys().any(|id| !order.iter().any(|named| named == id)) {
         return Err(NEEDS_WHOLE.into());
     }
-    let size = upsert.iter().map(|c| c.get().len()).sum::<usize>() + existing.len();
-    let mut out = Vec::with_capacity(size + 4096);
-    let failed = |_| "Cannot encode sync checkpoint".to_string();
-    let field = |out: &mut Vec<u8>, first: &mut bool, name: &str| {
-        if !std::mem::take(first) {
-            out.push(b',');
+    if order
+        .iter()
+        .any(|id| !sent.contains_key(id.as_str()) && !kept.contains_key(id.as_str()))
+    {
+        return Err(NEEDS_WHOLE.into());
+    }
+    replace(root, |out| {
+        let field = |out: &mut dyn Write, first: &mut bool, name: &str| {
+            if !std::mem::take(first) {
+                out.write_all(b",")?;
+            }
+            serde_json::to_writer(&mut *out, name)?;
+            out.write_all(b":")
+        };
+        out.write_all(b"{")?;
+        let mut first = true;
+        for (name, item) in &value {
+            field(out, &mut first, name)?;
+            serde_json::to_writer(&mut *out, item)?;
         }
-        serde_json::to_writer(&mut *out, name)?;
-        out.push(b':');
-        Ok::<(), serde_json::Error>(())
-    };
-    out.push(b'{');
-    let mut first = true;
-    for (name, item) in &value {
-        field(&mut out, &mut first, name).map_err(failed)?;
-        serde_json::to_writer(&mut out, item).map_err(failed)?;
-    }
-    field(&mut out, &mut first, "base").map_err(failed)?;
-    out.push(b'{');
-    let mut first = true;
-    for (name, item) in base.iter().filter(|(name, _)| *name != "conversations") {
-        field(&mut out, &mut first, name).map_err(failed)?;
-        serde_json::to_writer(&mut out, item).map_err(failed)?;
-    }
-    field(&mut out, &mut first, "conversations").map_err(failed)?;
-    out.push(b'[');
-    for (index, id) in order.iter().enumerate() {
-        if index > 0 {
-            out.push(b',');
+        field(out, &mut first, "base")?;
+        out.write_all(b"{")?;
+        let mut first = true;
+        for (name, item) in base.iter().filter(|(name, _)| *name != "conversations") {
+            field(out, &mut first, name)?;
+            serde_json::to_writer(&mut *out, item)?;
         }
-        let conversation = sent
-            .get(id.as_str())
-            .or_else(|| kept.get(id.as_str()))
-            .ok_or(NEEDS_WHOLE)?;
-        out.extend_from_slice(conversation.get().as_bytes());
-    }
-    out.extend_from_slice(b"]}}");
-    replace(root, &out)
+        field(out, &mut first, "conversations")?;
+        out.write_all(b"[")?;
+        for (index, id) in order.iter().enumerate() {
+            if index > 0 {
+                out.write_all(b",")?;
+            }
+            // Every conversation named was found above.
+            if let Some(conversation) = sent.get(id.as_str()).or_else(|| kept.get(id.as_str())) {
+                out.write_all(conversation.get().as_bytes())?;
+            }
+        }
+        out.write_all(b"]}}")
+    })
 }
 
-/// Replaces the file with these bytes, written and flushed beside it first.
-fn replace(root: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Replaces the file with what `write` writes, written to disk beside it and flushed first.
+fn replace(
+    root: &Path,
+    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<(), String> {
     let mut file =
         tempfile::NamedTempFile::new_in(root).map_err(|_| "Cannot prepare sync checkpoint")?;
-    file.write_all(bytes)
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file.as_file_mut());
+    write(&mut out)
+        .and_then(|()| out.flush())
         .map_err(|_| "Cannot write sync checkpoint")?;
+    drop(out);
     file.as_file()
         .sync_all()
         .map_err(|_| "Cannot flush sync checkpoint")?;

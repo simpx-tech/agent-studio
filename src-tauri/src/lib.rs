@@ -15,6 +15,7 @@ mod lending;
 mod linking;
 mod live_usage;
 mod mcp;
+pub mod memory;
 mod mentions;
 mod models;
 mod native_instructions;
@@ -63,10 +64,14 @@ struct StorageState {
     /// Whether `workspace.json` is known to be current, which spares later saves a check for a
     /// pre-migration file to back up.
     current: bool,
-    /// The workspace of the last write. A reply that changes one conversation sends that
-    /// conversation alone and this fills in the rest, so the page never serializes every
-    /// conversation to save one. Cleared whenever the file is written another way.
-    saved: Option<serde_json::Value>,
+    /// The conversations of the last write by id, each the JSON text it was written as. A reply
+    /// that changes one conversation sends that conversation alone and these fill in the rest,
+    /// copied into the file as they are: neither the page nor this process encodes every
+    /// conversation to save one. Held as values, the 167 MB workspace of 2026-10-20 took 820 MB,
+    /// and each save copied them all and encoded the file into one 256 MiB buffer, which is what
+    /// Windows refused when the app closed (docs/DIAGNOSTICS.md). Cleared whenever the file is
+    /// written another way, or a write fails.
+    saved: Option<std::collections::HashMap<String, Box<serde_json::value::RawValue>>>,
 }
 
 #[tauri::command]
@@ -810,9 +815,10 @@ fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, S
                     std::fs::write(&backup, &bytes)
                         .map_err(|_| "Cannot keep the workspace before moving its images")?;
                 }
+                let workspace = WorkspaceFile::of(value.clone())?;
                 let storage = app.state::<Storage>();
                 let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
-                write_workspace(app, &mut state, value.clone())?;
+                write_workspace(app, &mut state, workspace)?;
             }
             Ok(Some(value))
         }
@@ -823,6 +829,7 @@ fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, S
 #[tauri::command]
 async fn save_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let workspace = WorkspaceFile::of(workspace)?;
         let storage = app.state::<Storage>();
         let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
         write_workspace(&app, &mut state, workspace)
@@ -845,7 +852,7 @@ async fn save_workspace_patch(
     #[derive(serde::Deserialize)]
     struct Patch {
         index: serde_json::Value,
-        upsert: Vec<serde_json::Value>,
+        upsert: Vec<Box<serde_json::value::RawValue>>,
         order: Vec<String>,
     }
     let sent = sent::Sent::of(request.body());
@@ -855,6 +862,9 @@ async fn save_workspace_patch(
             upsert,
             order,
         } = sent.read().map_err(|_| "Invalid workspace")?;
+        for conversation in &upsert {
+            readable(conversation)?;
+        }
         let storage = app.state::<Storage>();
         let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
         let workspace = patched_workspace(&mut state, index, upsert, order)?;
@@ -863,70 +873,229 @@ async fn save_workspace_patch(
     .await
     .map_err(|_| "Cannot save the workspace")?
 }
-fn patched_workspace(
-    state: &mut StorageState,
-    mut index: serde_json::Value,
-    upsert: Vec<serde_json::Value>,
-    order: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    if !index.is_object() {
-        return Err("Invalid workspace".into());
-    }
-    let mut sent = std::collections::HashMap::new();
-    for conversation in upsert {
-        let Some(id) = conversation["id"].as_str().map(str::to_owned) else {
+/// A workspace to write: everything but its conversations, then those in order, each the JSON
+/// text it came as, with its id when it has one.
+struct WorkspaceFile {
+    index: serde_json::Map<String, serde_json::Value>,
+    conversations: Vec<(Option<String>, Box<serde_json::value::RawValue>)>,
+}
+impl WorkspaceFile {
+    /// A whole workspace as the page sends it. Each conversation's values go as it becomes text.
+    fn of(workspace: serde_json::Value) -> Result<Self, String> {
+        let serde_json::Value::Object(mut index) = workspace else {
             return Err("Invalid workspace".into());
         };
+        let Some(serde_json::Value::Array(list)) = index.remove("conversations") else {
+            return Err("Invalid workspace".into());
+        };
+        let index = workspace_index(serde_json::Value::Object(index))?;
+        let conversations = list
+            .into_iter()
+            .map(|conversation| {
+                let id = conversation["id"].as_str().map(str::to_owned);
+                serde_json::value::to_raw_value(&conversation).map(|text| (id, text))
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|_| "Cannot serialize workspace")?;
+        Ok(Self {
+            index,
+            conversations,
+        })
+    }
+    /// Writes the workspace as JSON, with the fields in the order the index keeps them and the
+    /// conversations where theirs falls among them, as `serde_json` wrote the whole file before.
+    fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
+        fn field(out: &mut impl Write, first: &mut bool, name: &str) -> std::io::Result<()> {
+            if !std::mem::take(first) {
+                out.write_all(b",")?;
+            }
+            serde_json::to_writer(&mut *out, name)?;
+            out.write_all(b":")
+        }
+        fn list(
+            out: &mut impl Write,
+            first: &mut bool,
+            file: &WorkspaceFile,
+        ) -> std::io::Result<()> {
+            field(out, first, "conversations")?;
+            out.write_all(b"[")?;
+            for (index, (_, conversation)) in file.conversations.iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b",")?;
+                }
+                out.write_all(conversation.get().as_bytes())?;
+            }
+            out.write_all(b"]")
+        }
+        out.write_all(b"{")?;
+        let mut first = true;
+        let mut listed = false;
+        for (name, value) in &self.index {
+            if !listed && name.as_str() > "conversations" {
+                list(out, &mut first, self)?;
+                listed = true;
+            }
+            field(out, &mut first, name)?;
+            serde_json::to_writer(&mut *out, value)?;
+        }
+        if !listed {
+            list(out, &mut first, self)?;
+        }
+        out.write_all(b"}")
+    }
+    /// The conversations kept for the next patch to fill in from.
+    fn kept(self) -> std::collections::HashMap<String, Box<serde_json::value::RawValue>> {
+        self.conversations
+            .into_iter()
+            .filter_map(|(id, conversation)| Some((id?, conversation)))
+            .collect()
+    }
+}
+/// Everything a workspace holds but its conversations, checked as a version 3 workspace.
+fn workspace_index(
+    index: serde_json::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let serde_json::Value::Object(mut index) = index else {
+        return Err("Invalid workspace".into());
+    };
+    if index.get("version").and_then(serde_json::Value::as_i64) != Some(3)
+        || !index
+            .get("preferences")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("Invalid workspace".into());
+    }
+    index.remove("conversations");
+    Ok(index)
+}
+/// Refuses JSON text a `serde_json::Value` parse would refuse, without building the value. A
+/// conversation saved as the text the page sent must be one the next start of the app reads,
+/// and reading text as raw JSON checks less: it lets a lone surrogate escape through.
+fn readable(conversation: &serde_json::value::RawValue) -> Result<(), String> {
+    struct Read;
+    impl<'de> serde::Deserialize<'de> for Read {
+        fn deserialize<D: serde::Deserializer<'de>>(json: D) -> Result<Self, D::Error> {
+            json.deserialize_any(Read)
+        }
+    }
+    impl<'de> serde::de::Visitor<'de> for Read {
+        type Value = Read;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("JSON")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_unit<E>(self) -> Result<Read, E> {
+            Ok(Read)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Read, A::Error> {
+            while list.next_element::<Read>()?.is_some() {}
+            Ok(Read)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Read, A::Error> {
+            while map.next_entry::<Read, Read>()?.is_some() {}
+            Ok(Read)
+        }
+    }
+    serde_json::from_str::<Read>(conversation.get())
+        .map(|_| ())
+        .map_err(|_| "Invalid workspace".into())
+}
+/// A conversation's id, read without building the conversation.
+fn conversation_id(conversation: &serde_json::value::RawValue) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Named<'a> {
+        #[serde(borrow)]
+        id: std::borrow::Cow<'a, str>,
+    }
+    serde_json::from_str::<Named>(conversation.get())
+        .ok()
+        .map(|named| named.id.into_owned())
+}
+/// The workspace a patch describes: its index, and the conversations `order` names, each the
+/// one sent or else the one the last write kept, moved rather than copied.
+fn patched_workspace(
+    state: &mut StorageState,
+    index: serde_json::Value,
+    upsert: Vec<Box<serde_json::value::RawValue>>,
+    order: Vec<String>,
+) -> Result<WorkspaceFile, String> {
+    let index = workspace_index(index)?;
+    let mut sent = std::collections::HashMap::with_capacity(upsert.len());
+    for conversation in upsert {
+        let id = conversation_id(&conversation).ok_or("Invalid workspace")?;
         sent.insert(id, conversation);
     }
-    let kept: std::collections::HashMap<&str, &serde_json::Value> = state
-        .saved
-        .as_ref()
-        .and_then(|saved| saved["conversations"].as_array())
-        .map(|list| {
-            list.iter()
-                .filter_map(|c| c["id"].as_str().map(|id| (id, c)))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut conversations = Vec::with_capacity(order.len());
+    // Checked before the last write's conversations move, which a refusal keeps.
+    let kept = state.saved.as_ref();
+    let mut named = std::collections::HashSet::with_capacity(order.len());
     for id in &order {
-        if let Some(conversation) = sent.remove(id) {
-            conversations.push(conversation);
-        } else if let Some(conversation) = kept.get(id.as_str()) {
-            conversations.push((*conversation).clone());
-        } else {
+        let known = sent.contains_key(id) || kept.is_some_and(|kept| kept.contains_key(id));
+        if !known || !named.insert(id.as_str()) {
             return Err(NEEDS_WHOLE_WORKSPACE.into());
         }
     }
     // A conversation sent but left out of the order would be silently discarded.
-    if !sent.is_empty() {
+    if sent.keys().any(|id| !named.contains(id.as_str())) {
         return Err(NEEDS_WHOLE_WORKSPACE.into());
     }
-    index["conversations"] = serde_json::Value::Array(conversations);
-    Ok(index)
+    drop(named);
+    let mut kept = state.saved.take().unwrap_or_default();
+    let conversations = order
+        .into_iter()
+        .filter_map(|id| {
+            let conversation = sent.remove(&id).or_else(|| kept.remove(&id))?;
+            Some((Some(id), conversation))
+        })
+        .collect();
+    Ok(WorkspaceFile {
+        index,
+        conversations,
+    })
 }
 fn write_workspace(
     app: &tauri::AppHandle,
     state: &mut StorageState,
-    workspace: serde_json::Value,
+    workspace: WorkspaceFile,
 ) -> Result<(), String> {
-    if workspace["version"] != 3
-        || !workspace["preferences"].is_object()
-        || !workspace["conversations"].is_array()
-    {
-        return Err("Invalid workspace".into());
-    }
-    let bytes = serde_json::to_vec(&workspace).map_err(|_| "Cannot serialize workspace")?;
     let root = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    std::fs::create_dir_all(&root).map_err(|_| "Cannot create app data directory")?;
+    write_workspace_file(&root, state, workspace)
+}
+/// Writes the workspace file in `root` straight to disk, where encoding the whole file in
+/// memory first took a buffer of up to twice its size, and keeps its conversations for the next
+/// patch.
+fn write_workspace_file(
+    root: &std::path::Path,
+    state: &mut StorageState,
+    workspace: WorkspaceFile,
+) -> Result<(), String> {
+    // Until this write ends, the conversations kept no longer describe the file.
+    state.saved = None;
+    std::fs::create_dir_all(root).map_err(|_| "Cannot create app data directory")?;
     let mut file =
-        tempfile::NamedTempFile::new_in(&root).map_err(|_| "Cannot prepare workspace save")?;
-    file.write_all(&bytes)
+        tempfile::NamedTempFile::new_in(root).map_err(|_| "Cannot prepare workspace save")?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file.as_file_mut());
+    workspace
+        .write(&mut out)
+        .and_then(|()| out.flush())
         .map_err(|_| "Cannot write workspace")?;
+    drop(out);
     file.as_file()
         .sync_all()
         .map_err(|_| "Cannot flush workspace")?;
@@ -935,13 +1104,18 @@ fn write_workspace(
     // file found at launch can be older, since this app writes the current version.
     if !state.current && path.is_file() {
         if let Ok(old) = std::fs::read(&path) {
-            if let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&old) {
-                if let Some(version @ (1 | 2)) = previous["version"].as_u64() {
-                    let backup = root.join(format!("workspace-v{version}-backup.json"));
-                    if !backup.exists() {
-                        std::fs::write(&backup, old)
-                            .map_err(|_| "Cannot back up the previous workspace")?;
-                    }
+            #[derive(serde::Deserialize)]
+            struct Versioned {
+                version: Option<u64>,
+            }
+            if let Ok(Versioned {
+                version: Some(version @ (1 | 2)),
+            }) = serde_json::from_slice(&old)
+            {
+                let backup = root.join(format!("workspace-v{version}-backup.json"));
+                if !backup.exists() {
+                    std::fs::write(&backup, old)
+                        .map_err(|_| "Cannot back up the previous workspace")?;
                 }
             }
         }
@@ -949,7 +1123,7 @@ fn write_workspace(
     replace_workspace(file, &path)
         .map_err(|_| "Cannot finish workspace save. The previous file was preserved.")?;
     state.current = true;
-    state.saved = Some(workspace);
+    state.saved = Some(workspace.kept());
     Ok(())
 }
 /// Replaces the saved workspace with a written and flushed file from the same folder. Commands
@@ -1331,8 +1505,12 @@ async fn undo(
             let mut file = tempfile::NamedTempFile::new_in(&root).map_err(|_| {
                 "Files were undone, but their status could not be saved. Retry Undo."
             })?;
-            file.write_all(&serde_json::to_vec(&workspace).map_err(|_| "Cannot encode workspace")?)
+            let mut out = std::io::BufWriter::with_capacity(1 << 20, file.as_file_mut());
+            serde_json::to_writer(&mut out, &workspace)
+                .map_err(std::io::Error::from)
+                .and_then(|()| out.flush())
                 .map_err(|_| "Cannot save Undo status")?;
+            drop(out);
             file.as_file()
                 .sync_all()
                 .map_err(|_| "Cannot flush Undo status")?;
@@ -1971,29 +2149,55 @@ pub fn run() {
 
 #[cfg(test)]
 mod workspace_patch_tests {
-    use super::{patched_workspace, StorageState, NEEDS_WHOLE_WORKSPACE};
-    use serde_json::json;
+    use super::{
+        patched_workspace, readable, write_workspace_file, StorageState, WorkspaceFile,
+        NEEDS_WHOLE_WORKSPACE,
+    };
+    use serde_json::{json, value::RawValue, Value};
 
-    fn chat(id: &str, title: &str) -> serde_json::Value {
+    fn chat(id: &str, title: &str) -> Value {
         json!({"id": id, "title": title, "messages": []})
     }
-    fn state(chats: Vec<serde_json::Value>) -> StorageState {
+    fn text(conversation: Value) -> Box<RawValue> {
+        serde_json::value::to_raw_value(&conversation).unwrap()
+    }
+    fn index() -> Value {
+        json!({"version": 3, "preferences": {}})
+    }
+    fn whole(chats: Vec<Value>) -> WorkspaceFile {
+        WorkspaceFile::of(json!({"version": 3, "preferences": {}, "conversations": chats})).unwrap()
+    }
+    fn state(chats: Vec<Value>) -> StorageState {
         StorageState {
             current: true,
-            saved: Some(json!({"version": 3, "conversations": chats})),
+            saved: Some(whole(chats).kept()),
         }
+    }
+    /// What a workspace writes.
+    fn bytes(workspace: &WorkspaceFile) -> Vec<u8> {
+        let mut out = Vec::new();
+        workspace.write(&mut out).unwrap();
+        out
+    }
+    fn patch(
+        state: &mut StorageState,
+        index: Value,
+        upsert: Vec<Value>,
+        order: &[&str],
+    ) -> Result<Value, String> {
+        patched_workspace(
+            state,
+            index,
+            upsert.into_iter().map(text).collect(),
+            order.iter().map(|id| id.to_string()).collect(),
+        )
+        .map(|workspace| serde_json::from_slice(&bytes(&workspace)).unwrap())
     }
 
     #[test]
     fn fills_unsent_conversations_from_the_last_write() {
         let mut saved = state(vec![chat("a", "First"), chat("b", "Second")]);
-        let patched = patched_workspace(
-            &mut saved,
-            json!({"version": 3, "preferences": {}}),
-            vec![chat("b", "Renamed")],
-            vec!["a".into(), "b".into()],
-        )
-        .unwrap();
+        let patched = patch(&mut saved, index(), vec![chat("b", "Renamed")], &["a", "b"]).unwrap();
         let chats = patched["conversations"].as_array().unwrap();
         assert_eq!(chats.len(), 2);
         assert_eq!(chats[0]["title"], "First");
@@ -2004,13 +2208,7 @@ mod workspace_patch_tests {
     #[test]
     fn order_adds_removes_and_reorders_without_sending_every_conversation() {
         let mut saved = state(vec![chat("a", "First"), chat("b", "Second")]);
-        let patched = patched_workspace(
-            &mut saved,
-            json!({"version": 3, "preferences": {}}),
-            vec![chat("c", "New")],
-            vec!["c".into(), "b".into()],
-        )
-        .unwrap();
+        let patched = patch(&mut saved, index(), vec![chat("c", "New")], &["c", "b"]).unwrap();
         let titles: Vec<&str> = patched["conversations"]
             .as_array()
             .unwrap()
@@ -2025,40 +2223,161 @@ mod workspace_patch_tests {
         // Nothing was written yet, so the conversations left out cannot be filled in.
         let mut empty = StorageState::default();
         assert_eq!(
-            patched_workspace(
-                &mut empty,
-                json!({"version": 3, "preferences": {}}),
-                vec![chat("a", "First")],
-                vec!["a".into(), "b".into()],
-            )
-            .unwrap_err(),
+            patch(&mut empty, index(), vec![chat("a", "First")], &["a", "b"]).unwrap_err(),
             NEEDS_WHOLE_WORKSPACE
         );
         // A conversation sent but missing from the order would be discarded.
         let mut saved = state(vec![chat("a", "First")]);
         assert_eq!(
-            patched_workspace(
-                &mut saved,
-                json!({"version": 3, "preferences": {}}),
-                vec![chat("b", "Second")],
-                vec!["a".into()],
-            )
-            .unwrap_err(),
+            patch(&mut saved, index(), vec![chat("b", "Second")], &["a"]).unwrap_err(),
             NEEDS_WHOLE_WORKSPACE
         );
+        // One named twice would be written twice.
+        assert_eq!(
+            patch(&mut saved, index(), vec![], &["a", "a"]).unwrap_err(),
+            NEEDS_WHOLE_WORKSPACE
+        );
+        // A refusal leaves the last write's conversations to the next patch.
+        let patched = patch(&mut saved, index(), vec![], &["a"]).unwrap();
+        assert_eq!(patched["conversations"], json!([chat("a", "First")]));
     }
 
     #[test]
     fn rejects_an_index_that_is_not_a_workspace() {
         let mut saved = state(vec![chat("a", "First")]);
-        assert!(patched_workspace(&mut saved, json!([]), vec![], vec![]).is_err());
-        assert!(patched_workspace(
+        for index in [
+            json!([]),
+            json!({"preferences": {}}),
+            json!({"version": 2, "preferences": {}}),
+            json!({"version": 3}),
+        ] {
+            assert_eq!(
+                patch(&mut saved, index, vec![], &["a"]).unwrap_err(),
+                "Invalid workspace"
+            );
+        }
+        assert_eq!(
+            patch(&mut saved, index(), vec![json!({"title": "No id"})], &["a"]).unwrap_err(),
+            "Invalid workspace"
+        );
+        assert!(WorkspaceFile::of(json!({"version": 3, "preferences": {}})).is_err());
+        // Each refusal kept the last write.
+        assert!(patch(&mut saved, index(), vec![], &["a"]).is_ok());
+    }
+
+    #[test]
+    fn writes_a_whole_workspace_as_serde_json_wrote_it() {
+        // Fields on either side of the conversations, which their name sorts between.
+        for workspace in [
+            json!({
+                "accountColors": [{"accountId": "x", "color": "lime"}],
+                "appSessions": [],
+                "conversations": [chat("a", "First \u{e9}\" \u{1F600}"), {"title": "No id"}],
+                "fleet": {"computers": [{"id": "c"}]},
+                "preferences": {"theme": "dark"},
+                "version": 3
+            }),
+            json!({"appSessions": [], "conversations": [], "preferences": {}, "version": 3}),
+            json!({"conversations": [chat("a", "A")], "preferences": {}, "version": 3}),
+        ] {
+            let file = WorkspaceFile::of(workspace.clone()).unwrap();
+            assert_eq!(bytes(&file), serde_json::to_vec(&workspace).unwrap());
+            // Only conversations with an id can be filled in later.
+            assert_eq!(
+                file.kept().len(),
+                workspace["conversations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["id"].is_string())
+                    .count()
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_each_conversation_as_the_text_it_came_as() {
+        // Text a parser and a writer could change: key order, escapes, a long number.
+        let odd = r#"{"title":"\u00e9\/","id":"a","n":1.0000000000000000000001,"messages":[]}"#;
+        let mut saved = StorageState::default();
+        let workspace = patched_workspace(
             &mut saved,
-            json!({"version": 3, "preferences": {}}),
-            vec![json!({"title": "No id"})],
-            vec![],
+            index(),
+            vec![RawValue::from_string(odd.into()).unwrap()],
+            vec!["a".into()],
         )
-        .is_err());
+        .unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        write_workspace_file(folder.path(), &mut saved, workspace).unwrap();
+        // A later save that sends another conversation copies this one as it was.
+        let workspace = patched_workspace(
+            &mut saved,
+            index(),
+            vec![text(chat("b", "Second"))],
+            vec!["b".into(), "a".into()],
+        )
+        .unwrap();
+        write_workspace_file(folder.path(), &mut saved, workspace).unwrap();
+        let file = std::fs::read_to_string(folder.path().join("workspace.json")).unwrap();
+        assert_eq!(
+            file,
+            format!(
+                r#"{{"conversations":[{},{odd}],"preferences":{{}},"version":3}}"#,
+                serde_json::to_string(&chat("b", "Second")).unwrap()
+            )
+        );
+        assert!(saved.current && saved.saved.as_ref().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_next_patch_nothing_to_fill_in() {
+        let folder = tempfile::tempdir().unwrap();
+        // A file where the app data folder should be.
+        let root = folder.path().join("data");
+        std::fs::write(&root, b"").unwrap();
+        let mut saved = state(vec![chat("a", "First")]);
+        let workspace = patched_workspace(&mut saved, index(), vec![], vec!["a".into()]).unwrap();
+        assert!(write_workspace_file(&root, &mut saved, workspace).is_err());
+        assert!(saved.saved.is_none());
+        assert_eq!(
+            patch(&mut saved, index(), vec![], &["a"]).unwrap_err(),
+            NEEDS_WHOLE_WORKSPACE
+        );
+    }
+
+    #[test]
+    fn backs_up_a_workspace_of_an_earlier_version_once() {
+        let folder = tempfile::tempdir().unwrap();
+        let old = br#"{"version":2,"conversations":[{"id":"a"}]}"#;
+        std::fs::write(folder.path().join("workspace.json"), old).unwrap();
+        let mut saved = StorageState::default();
+        write_workspace_file(folder.path(), &mut saved, whole(vec![chat("a", "A")])).unwrap();
+        let backup = folder.path().join("workspace-v2-backup.json");
+        assert_eq!(std::fs::read(&backup).unwrap(), old);
+        // A current file is never backed up.
+        std::fs::remove_file(&backup).unwrap();
+        write_workspace_file(folder.path(), &mut StorageState::default(), whole(vec![])).unwrap();
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn refuses_text_a_value_parse_refuses() {
+        for (conversation, accepted) in [
+            (r#"{"id":"a","text":"\ud83d\ude00 \u00e9"}"#, true),
+            (r#"{"id":"a","text":"\ud83d"}"#, false),
+            (r#"{"id":"a","text":"\ude00"}"#, false),
+            (r#"{"id":"a","\ud800":1}"#, false),
+            (r#"{"id":"a","n":1e400}"#, false),
+            (r#"{"id":"a","n":[1,-2,3.5,true,null,{}]}"#, true),
+        ] {
+            let raw = RawValue::from_string(conversation.into()).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(conversation).is_ok(),
+                accepted,
+                "{conversation}"
+            );
+            assert_eq!(readable(&raw).is_ok(), accepted, "{conversation}");
+        }
     }
 }
 
