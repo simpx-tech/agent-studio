@@ -14,6 +14,9 @@
   import ToolResultImage from './ToolResultImage.svelte';
   import ModelView from './ModelView.svelte';
   import CompareView from './CompareView.svelte';
+  import TableView from './TableView.svelte';
+  import DocumentView from './DocumentView.svelte';
+  import VideoView from './VideoView.svelte';
   import FileViewer from './FileViewer.svelte';
 
   let {
@@ -46,7 +49,7 @@
   const frame = 5;
   const itemKey = ({ group, file }: ShownFile) => `${group.id}:${file.index}`;
   const runKey = (run: FileRun) =>
-    run.kind === 'model' ? `model:${itemKey(run.item)}` : `image:${itemKey(run.items[0])}`;
+    run.kind === 'images' ? `image:${itemKey(run.items[0])}` : `${run.kind}:${itemKey(run.item)}`;
 
   function viewed({ group, file }: ShownFile): ViewedImage {
     const info = imageInfo(file);
@@ -96,9 +99,36 @@
         caption={run.item.group.caption}
         {viewer}
       />
-    {:else if run.items.length === 1}
+    {:else if run.kind === 'table'}
+      <TableView
+        runId={run.item.group.runId}
+        toolId={run.item.group.toolId}
+        {connectionId}
+        file={run.item.file}
+        caption={run.item.group.caption}
+        {viewer}
+      />
+    {:else if run.kind === 'document'}
+      <DocumentView
+        runId={run.item.group.runId}
+        toolId={run.item.group.toolId}
+        {connectionId}
+        file={run.item.file}
+        caption={run.item.group.caption}
+        {viewer}
+      />
+    {:else if run.kind === 'video'}
+      <VideoView
+        runId={run.item.group.runId}
+        toolId={run.item.group.toolId}
+        {connectionId}
+        file={run.item.file}
+        caption={run.item.group.caption}
+        {viewer}
+      />
+    {:else if run.kind === 'images' && run.items.length === 1}
       {@const item = run.items[0]}
-      <div class="sent-image" {@attach viewer.attach(viewed(item))}>
+      <div class="sent-image" {@attach viewer.attach(() => viewed(item))}>
         <ToolResultImage
           runId={item.group.runId}
           toolId={item.group.toolId}
@@ -108,7 +138,7 @@
           open={(from) => viewer.open(from)}
         />
       </div>
-    {:else}
+    {:else if run.kind === 'images'}
       {@const layout = gallery(run.items)}
       <div
         class="sent-gallery"
@@ -122,7 +152,7 @@
               <div
                 class="gallery-tile"
                 style:flex-grow={item.aspect}
-                {@attach viewer.attach(viewed(item))}
+                {@attach viewer.attach(() => viewed(item))}
               >
                 <div class="gallery-image" style:aspect-ratio={item.aspect}>
                   <ToolResultImage

@@ -269,6 +269,27 @@ test('an opened image zooms where the wheel turns, pans when dragged, and fits a
   await page.keyboard.press('0');
   await expect.poll(() => percent(level)).toBe(fit);
 
+  // A corner zooms as closely as the middle, far past eight times its pixels: the point under
+  // the pointer stays there however deep, where the image used to be pushed back to the edges.
+  const picture = (await image.boundingBox())!;
+  // Wheel events carry whole pixels, which so deep a zoom would magnify.
+  const corner = { x: Math.round(picture.x + 6), y: Math.round(picture.y + 6) };
+  const whole = await transform(image);
+  const pixel = {
+    x: (corner.x - stage.x - whole.x) / whole.scale,
+    y: (corner.y - stage.y - whole.y) / whole.scale,
+  };
+  await page.mouse.move(corner.x, corner.y);
+  for (let notch = 0; notch < 8; notch++) await page.mouse.wheel(0, -500);
+  await expect.poll(async () => (await transform(image)).scale).toBeGreaterThan(64);
+  const deep = await transform(image);
+  expect(Math.abs(stage.x + deep.x + pixel.x * deep.scale - corner.x)).toBeLessThan(1.5);
+  expect(Math.abs(stage.y + deep.y + pixel.y * deep.scale - corner.y)).toBeLessThan(1.5);
+  // Past ten times its pixels the level reads as a multiple.
+  await expect(level).toHaveText(/^[\d,]+×$/);
+  await page.keyboard.press('0');
+  await expect.poll(() => percent(level)).toBe(fit);
+
   // At the whole image, a swipe steps to the next file.
   await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height / 2);
   await page.mouse.down();
@@ -325,7 +346,7 @@ test('single images sent one call at a time join one gallery, each keeping its c
   await expect(viewer.locator('.file-viewer-caption')).toHaveText('Settings');
 });
 
-test('a click on the backdrop closes the viewer, and a drag across its edge never does @webkit', async ({
+test('the viewer covers the window, and a click around the file closes it while a drag never does @webkit', async ({
   page,
 }) => {
   await mockDesktop(page, 'capabilities');
@@ -342,44 +363,74 @@ test('a click on the backdrop closes the viewer, and a drag across its edge neve
   await reply(
     page,
     'Show me both',
-    [{ id: 'pair', toolId: 'toolu_pair', files: screens(2) }],
+    [{ id: 'pair', toolId: 'toolu_pair', caption: 'Both screens', files: screens(2) }],
     'Both screens:\n\n<!-- files:pair -->',
     1,
   );
-  const answer = page.getByTestId('message').filter({ hasText: 'Both screens' });
+  const answer = page.getByTestId('message').filter({ hasText: 'Both screens:' });
   const tile = answer.getByRole('button', { name: /^Open image 1/ });
   // Opened from the keyboard, since WebKit never focuses a clicked button, which leaves focus
   // nothing to return to.
   await tile.focus();
   await page.keyboard.press('Enter');
   const viewer = page.getByRole('dialog', { name: 'Image preview' });
-  await expect(viewer.getByAltText('Full size screen-0.png')).toBeVisible();
-  const box = (await viewer.boundingBox())!;
-  const stage = (await viewer.locator('.zoom-stage').boundingBox())!;
-  const image = { x: stage.x + stage.width / 2, y: stage.y + stage.height / 2 };
-  const backdrop = { x: box.x / 2, y: box.y + box.height / 2 };
-  expect(backdrop.x).toBeGreaterThan(4);
+  const image = viewer.getByAltText('Full size screen-0.png');
+  await expect(image).toBeVisible();
+  // The whole window, with the file's name and caption above the picture.
+  const window = page.viewportSize()!;
+  expect(await viewer.boundingBox()).toEqual({
+    x: 0,
+    y: 0,
+    width: window.width,
+    height: window.height,
+  });
+  const heading = (await viewer.locator('.file-viewer-heading').boundingBox())!;
+  const picture = (await image.boundingBox())!;
+  expect(picture.y).toBeGreaterThan(heading.y + heading.height - 1);
+  expect(picture.width).toBeGreaterThan(window.width * 0.75);
+  const middle = { x: picture.x + picture.width / 2, y: picture.y + picture.height / 2 };
+  // The scrim below the picture, clear of the zoom controls in the middle.
+  const scrim = { x: picture.x + 24, y: (picture.y + picture.height + window.height) / 2 };
+  expect(scrim.y).toBeGreaterThan(picture.y + picture.height + 2);
 
-  // A drag from the image or across the file's name out onto the backdrop keeps the viewer
-  // open, and so does a press on the backdrop released over the image.
-  await page.mouse.move(image.x, image.y);
+  // A drag from the picture out onto the scrim keeps the viewer open, and so do a press on the
+  // scrim released over the picture and a click on the picture itself.
+  await page.mouse.move(middle.x, middle.y);
   await page.mouse.down();
-  await page.mouse.move(image.x, box.y / 2, { steps: 6 });
+  await page.mouse.move(scrim.x, scrim.y, { steps: 6 });
   await page.mouse.up();
-  const name = (await viewer.locator('.file-viewer-name').boundingBox())!;
-  await page.mouse.move(name.x + name.width / 2, name.y + name.height / 2);
+  await page.mouse.move(scrim.x, scrim.y);
   await page.mouse.down();
-  await page.mouse.move(backdrop.x, name.y + name.height / 2, { steps: 6 });
+  await page.mouse.move(middle.x, middle.y, { steps: 6 });
   await page.mouse.up();
+  await page.mouse.click(middle.x, middle.y);
   await expect(viewer).toBeVisible();
-  await page.mouse.move(backdrop.x, backdrop.y);
-  await page.mouse.down();
-  await page.mouse.move(image.x, image.y, { steps: 6 });
-  await page.mouse.up();
   await expect(viewer).toContainText('1 of 2');
 
-  // A click on the backdrop closes it, returning focus to the image that opened it.
-  await page.mouse.click(backdrop.x, backdrop.y);
+  // A click on the scrim closes it, returning focus to the image that opened it.
+  await page.mouse.click(scrim.x, scrim.y);
   await expect(viewer).toBeHidden();
   await expect(tile).toBeFocused();
+
+  // So does one in the heading's empty middle, over the scrim, and Close.
+  await tile.focus();
+  await page.keyboard.press('Enter');
+  await expect(image).toBeVisible();
+  await page.mouse.click(window.width / 2, heading.y + heading.height / 2);
+  await expect(viewer).toBeHidden();
+  await tile.focus();
+  await page.keyboard.press('Enter');
+  await viewer.getByRole('button', { name: 'Close image preview' }).click();
+  await expect(viewer).toBeHidden();
+
+  // Zoomed in, the picture reaches under the controls to the window's edges, and a click on it
+  // there never closes the viewer.
+  await tile.focus();
+  await page.keyboard.press('Enter');
+  await expect(image).toBeVisible();
+  await page.mouse.move(middle.x, middle.y);
+  await page.mouse.wheel(0, -1200);
+  await expect.poll(async () => (await image.boundingBox())!.y).toBeLessThan(0);
+  await page.mouse.click(scrim.x, scrim.y);
+  await expect(viewer).toBeVisible();
 });

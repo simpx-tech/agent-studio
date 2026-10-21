@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import {
+  fileKind,
   fileRuns,
   galleryRows,
   imageAspect,
@@ -7,6 +8,7 @@ import {
   isComparison,
   isModel,
   mergeSentFiles,
+  messageFiles,
   paneLabel,
   sentFileGroupsSchema,
   sentFilesSchema,
@@ -15,6 +17,7 @@ import {
 import { modelBytes, modelFormats } from './tool-output';
 import { applyRunEvent, retainRunEvent } from './activity';
 import { replyContent } from './markdown';
+import { restoreMessage } from './light-chats';
 import {
   historyFor,
   initialWorkspace,
@@ -332,4 +335,123 @@ it('places a comparison at its marker on its own, never in a gallery', () => {
   // A comparison of single images placed one after another still stands alone.
   const pair = { ...comparison, files: [image(0), image(1)] };
   expect(ids(replyContent('', [], [a, pair]))).toEqual([['a'], ['before-after']]);
+});
+
+const table = { index: 0, name: 'sales.csv', mediaType: 'text/csv' as const, bytes: 40 };
+const notes = { index: 1, name: 'notes.md', mediaType: 'text/markdown' as const, bytes: 90 };
+const clip = {
+  index: 2,
+  name: 'clip.mp4',
+  mediaType: 'video/mp4' as const,
+  bytes: 4000,
+  width: 1920,
+  height: 1080,
+};
+/** What releases before tables, documents and videos accept in a reply's sentFiles. */
+const earlierReleaseReads = (groups: SentFiles[] = []) =>
+  groups.every((g) => g.files.every((f) => /^(image|model)\//.test(f.mediaType)));
+
+it('keeps groups with a table, a document or a video where earlier releases never meet them', () => {
+  const message = reply();
+  const mixed = { ...group, id: 'mixed', files: [group.files[0], table, notes, clip] };
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: group });
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: mixed });
+  expect(message.sentFiles?.map((g) => g.id)).toEqual(['renders']);
+  expect(message.extraSentFiles?.map((g) => g.id)).toEqual(['mixed']);
+  expect(earlierReleaseReads(message.sentFiles)).toBe(true);
+  expect(messageFiles(message).map((g) => g.id)).toEqual(['renders', 'mixed']);
+  // The other files are numbered apart from the images, each kind from 0.
+  expect(sentFilesSchema.safeParse({ ...group, files: [group.files[0], table] }).success).toBe(
+    true,
+  );
+  expect(
+    sentFilesSchema.safeParse({ ...group, files: [table, { ...notes, index: 0 }] }).success,
+  ).toBe(false);
+  // The reply's own field for images and models refuses the others; theirs takes them.
+  expect(messageSchema.safeParse({ ...reply(), sentFiles: [mixed] }).success).toBe(false);
+  expect(messageSchema.safeParse({ ...reply(), extraSentFiles: [mixed] }).success).toBe(true);
+  expect(
+    messageSchema.safeParse({ ...reply(), runId: crypto.randomUUID(), extraSentFiles: [mixed] })
+      .success,
+  ).toBe(false);
+  // Saved and restored, both fields stay as they were.
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Report',
+    settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
+    createdAt: message.createdAt,
+    updatedAt: message.createdAt,
+    messages: [message],
+  });
+  const restored = restoreWorkspace(JSON.parse(JSON.stringify(workspace)));
+  expect(restored.conversations[0].messages[0].extraSentFiles).toEqual([mixed]);
+  // Sent again under its id with images alone, the group moves to the field every release reads.
+  applyRunEvent(message, {
+    kind: 'sentfiles',
+    sentFiles: { ...mixed, revision: 2, files: [group.files[0]] },
+  });
+  expect(message.sentFiles?.map((g) => `${g.id}:${g.revision}`)).toEqual(['renders:1', 'mixed:2']);
+  expect(message.extraSentFiles).toEqual([]);
+  // An older revision arriving late changes nothing, in either field.
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: mixed });
+  expect(messageFiles(message).map((g) => `${g.id}:${g.revision}`)).toEqual([
+    'renders:1',
+    'mixed:2',
+  ]);
+});
+
+it('merges both fields of a reply, and an earlier release dropping one deletes nothing', () => {
+  const message = reply();
+  const report = { ...group, id: 'report', files: [table] };
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: group });
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: report });
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Report',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    createdAt: message.createdAt,
+    updatedAt: message.createdAt,
+    messages: [message],
+  });
+  const base = sharedWorkspace(workspace),
+    local = structuredClone(base),
+    remote = structuredClone(base);
+  // A device on an earlier release saves the reply without the field it does not know, which the
+  // relay puts back as it puts back the work a light upload leaves out.
+  const stripped = structuredClone(remote.conversations[0].messages[0]);
+  delete stripped.extraSentFiles;
+  expect(restoreMessage(stripped, base.conversations[0].messages[0]).extraSentFiles).toEqual([
+    report,
+  ]);
+  // Edited on both sides, a reply merges its groups from both copies, wherever each was kept.
+  delete remote.conversations[0].messages[0].extraSentFiles;
+  remote.conversations[0].messages[0].blocks = [{ type: 'markdown', text: 'Edited elsewhere' }];
+  applyRunEvent(local.conversations[0].messages[0], {
+    kind: 'sentfiles',
+    sentFiles: { ...report, id: 'clip', files: [clip] },
+  });
+  const merged = mergeShared(base, local, remote).conversations[0].messages[0];
+  expect(merged.extraSentFiles?.map((g) => g.id)).toEqual(['report', 'clip']);
+  expect(merged.sentFiles?.map((g) => g.id)).toEqual(['renders']);
+  // A later revision on one side moves the group across, whichever field it left.
+  const moved = { ...report, revision: 2, files: [group.files[0]] };
+  remote.conversations[0].messages[0].sentFiles = [group, moved];
+  const again = mergeShared(base, local, remote).conversations[0].messages[0];
+  expect(again.sentFiles?.map((g) => `${g.id}:${g.revision}`)).toEqual(['renders:1', 'report:2']);
+  expect(again.extraSentFiles?.map((g) => g.id)).toEqual(['clip']);
+});
+
+it('gives each table, document and video a place of its own, and never compares them', () => {
+  const runs = fileRuns([shown('mixed', [image(0), table, image(1), notes, clip])]);
+  expect(runs.map((run) => (run.kind === 'images' ? run.items.length : run.kind))).toEqual([
+    1,
+    'table',
+    1,
+    'document',
+    'video',
+  ]);
+  expect(fileKind(clip)).toBe('video');
+  expect(isComparison({ ...comparison, files: [comparison.files[0], table] })).toBe(false);
 });

@@ -21,6 +21,8 @@ use std::{
 };
 use tauri::Manager;
 
+pub mod files;
+
 const DIRECTORY: &str = "tool-output";
 /// Runs not yet saved in the workspace keep their results this long.
 const UNSAVED_GRACE: Duration = Duration::from_secs(60 * 60);
@@ -65,6 +67,15 @@ struct ModelMeta {
     format: String,
     bytes: u64,
 }
+/// A table, a document or a video a reply shows, kept whole beside the call's images. Its file's
+/// extension names its format (`files::FORMATS`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OtherMeta {
+    file: String,
+    media_type: String,
+    bytes: u64,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Meta {
@@ -83,6 +94,9 @@ struct Meta {
     images_omitted: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     models: Vec<ModelMeta>,
+    /// Tables, documents and videos a reply shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    others: Vec<OtherMeta>,
     /// The complete command or input, which earlier releases kept here when the activity
     /// record showed a shortened one.
     #[serde(default)]
@@ -589,6 +603,21 @@ fn copy_model(path: &Path, directory: &Path, index: usize) -> Option<ModelMeta> 
         bytes,
     })
 }
+/// Copies a table, a document or a video the conversation offered, whole, as the format it was
+/// recognized as when offered.
+fn copy_other(path: &Path, directory: &Path, index: usize) -> Option<OtherMeta> {
+    let shown = files::inspect(path, &path.to_string_lossy()).ok()?;
+    let file = format!("file-{index}.{}", shown.format);
+    let mut source = std::fs::File::open(path).ok()?;
+    let mut target = tempfile::NamedTempFile::new_in(directory).ok()?;
+    let bytes = std::io::copy(&mut source, &mut target).ok()?;
+    target.persist(directory.join(&file)).ok()?;
+    Some(OtherMeta {
+        file,
+        media_type: shown.media_type.into(),
+        bytes,
+    })
+}
 /// Copies an image file a provider reported viewing or a reply shows, whole: a regular file
 /// of a supported type.
 fn copy_image(path: &Path, directory: &Path, index: usize) -> Option<ImageMeta> {
@@ -624,6 +653,7 @@ fn write_call(
     output: &CapturedOutput,
     files: &[Option<PathBuf>],
     models: &[Option<PathBuf>],
+    others: &[Option<PathBuf>],
 ) -> Result<u64, String> {
     let _ = std::fs::remove_dir_all(directory);
     std::fs::create_dir_all(directory).map_err(|_| "Cannot create the tool output folder")?;
@@ -691,6 +721,24 @@ fn write_call(
             }),
         }
     }
+    // As with models, a file that cannot be kept keeps its place, and so its number.
+    let mut kept_others = vec![];
+    for path in others {
+        match path
+            .as_deref()
+            .and_then(|path| copy_other(path, directory, kept_others.len()))
+        {
+            Some(other) => {
+                written += other.bytes;
+                kept_others.push(other);
+            }
+            None => kept_others.push(OtherMeta {
+                file: String::new(),
+                media_type: String::new(),
+                bytes: 0,
+            }),
+        }
+    }
     let meta = Meta {
         version: 2,
         tool_id: output.tool_id.clone(),
@@ -700,6 +748,7 @@ fn write_call(
         images,
         images_omitted: omitted,
         models: kept,
+        others: kept_others,
         command: None,
         input: None,
     };
@@ -805,7 +854,12 @@ impl Worker {
                     for path in &output.models {
                         models.push(self.image_path(path).await);
                     }
-                    self.write(output, files, models, &slot_key, &slot).await;
+                    let mut others = vec![];
+                    for path in &output.others {
+                        others.push(self.image_path(path).await);
+                    }
+                    self.write(output, [files, models, others], &slot_key, &slot)
+                        .await;
                 }
             }
         }
@@ -834,11 +888,11 @@ impl Worker {
                 .join(name),
         )
     }
+    /// Writes a result with the paths of its images, models and other files on this computer.
     async fn write(
         &mut self,
         output: Box<CapturedOutput>,
-        files: Vec<Option<PathBuf>>,
-        models: Vec<Option<PathBuf>>,
+        [files, models, others]: [Vec<Option<PathBuf>>; 3],
         slot_key: &str,
         slot: &Arc<Slot>,
     ) {
@@ -848,7 +902,7 @@ impl Worker {
         let created_at = self.created_at;
         let previous = self.bytes;
         let written = tauri::async_runtime::spawn_blocking(move || {
-            let bytes = write_call(&directory, &output, &files, &models)?;
+            let bytes = write_call(&directory, &output, &files, &models, &others)?;
             write_json(
                 &run.join("run.json"),
                 &Manifest {
@@ -1043,6 +1097,218 @@ pub async fn read_model_file(
     })
     .await
     .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// A kept table, document or video of a call, and the path of its file.
+fn kept_other(
+    directory: &Path,
+    tool_id: &str,
+    index: usize,
+) -> Result<(OtherMeta, PathBuf), String> {
+    let meta = read_meta(directory, tool_id)?;
+    let other = meta.others.into_iter().nth(index).ok_or(NOT_KEPT)?;
+    // Stored names only; a name never reaches outside the call's folder.
+    if other.file.contains(['/', '\\']) || !other.file.starts_with("file-") {
+        return Err(NOT_KEPT.to_string());
+    }
+    let path = directory.join(&other.file);
+    std::fs::metadata(&path).map_err(|_| NOT_KEPT)?;
+    Ok((other, path))
+}
+
+/// Rows of a kept table, `count` of them from `start` in sheet `sheet`, parsed here once and kept
+/// for the next page while windows read it.
+#[allow(clippy::too_many_arguments)]
+pub async fn read_table(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    tables: Arc<files::Tables>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    sheet: usize,
+    start: usize,
+    count: usize,
+) -> Result<files::TablePage, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (other, path) = kept_other(&directory, &tool_id, index)?;
+        let (format, _, kind) = files::format(&other.file).ok_or(NOT_KEPT)?;
+        if kind != files::Kind::Table {
+            return Err("This file is not a table.".to_string());
+        }
+        let cache = format!("{run_id}/{tool_id}/{index}");
+        let table = tables.get(&cache, || files::parse_table(&path, format, &other.file))?;
+        table.page(sheet, start, count)
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// A kept document's text: whole, or its first `head` bytes up to a line's end.
+pub async fn read_document(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    head: Option<u64>,
+) -> Result<files::DocumentText, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (other, path) = kept_other(&directory, &tool_id, index)?;
+        if files::format(&other.file).map(|(_, _, kind)| kind) != Some(files::Kind::Document) {
+            return Err("This file is not a document.".to_string());
+        }
+        files::read_document(&path, head)
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// One kept table, document or video whole, however large, as base64 for a window on another
+/// device, which plays a video from it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileData {
+    pub media_type: String,
+    pub data: String,
+    pub bytes: u64,
+}
+pub async fn read_other(
+    root: PathBuf,
+    pending: Arc<Pending>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<FileData, String> {
+    valid_request(&run_id, &tool_id)?;
+    written(&pending, &run_id, &tool_id).await;
+    let directory = root.join(&run_id).join(key(&tool_id));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (other, path) = kept_other(&directory, &tool_id, index)?;
+        let bytes = std::fs::read(&path).map_err(|_| NOT_KEPT)?;
+        Ok(FileData {
+            media_type: other.media_type,
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            bytes: bytes.len() as u64,
+        })
+    })
+    .await
+    .map_err(|_| "Cannot read the tool output".to_string())?
+}
+
+/// Percent-decodes a path a window requested, as `convertFileSrc` encodes it.
+fn decoded_path(path: &str) -> Option<String> {
+    let bytes = path.trim_start_matches('/').as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A kept video for this computer's window, which plays it as it streams: the part of the file
+/// the player asks for (`files::requested_range`), from a path that names the run, the file's
+/// place among the call's other files and the call, in that order.
+pub async fn serve_other(
+    app: &tauri::AppHandle,
+    path: &str,
+    range: Option<String>,
+) -> tauri::http::Response<Vec<u8>> {
+    let Ok(root) = root(app) else {
+        return refused(500, "Cannot locate the app data directory");
+    };
+    let pending = app
+        .try_state::<Arc<Pending>>()
+        .map(|state| state.inner().clone());
+    stream_other(root, pending, path, range).await
+}
+/// A request the stream refuses, with its reason.
+fn refused(status: u16, message: &str) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .body(message.as_bytes().to_vec())
+        .expect("static response")
+}
+/// The part of a kept file a window's player asks for, by the path the protocol received.
+async fn stream_other(
+    root: PathBuf,
+    pending: Option<Arc<Pending>>,
+    path: &str,
+    range: Option<String>,
+) -> tauri::http::Response<Vec<u8>> {
+    let Some(request) = decoded_path(path) else {
+        return refused(400, "Invalid file request");
+    };
+    let mut parts = request.splitn(3, '/');
+    let (Some(run_id), Some(index), Some(tool_id)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return refused(400, "Invalid file request");
+    };
+    let (Ok(index), Ok(())) = (index.parse::<usize>(), valid_request(run_id, tool_id)) else {
+        return refused(400, "Invalid file request");
+    };
+    if let Some(pending) = pending {
+        written(&pending, run_id, tool_id).await;
+    }
+    let directory = root.join(run_id).join(key(tool_id));
+    let tool_id = tool_id.to_string();
+    let answer = tauri::async_runtime::spawn_blocking(move || {
+        let (other, path) = kept_other(&directory, &tool_id, index)?;
+        let mut file = std::fs::File::open(&path).map_err(|_| NOT_KEPT.to_string())?;
+        let size = file.metadata().map_err(|_| NOT_KEPT.to_string())?.len();
+        let Some((start, end)) = files::requested_range(range.as_deref(), size) else {
+            return Ok(tauri::http::Response::builder()
+                .status(416)
+                .header("Content-Range", format!("bytes */{size}"))
+                .body(vec![])
+                .expect("static response"));
+        };
+        let mut body = Vec::with_capacity((end + 1 - start) as usize);
+        file.seek(SeekFrom::Start(start))
+            .map_err(|_| NOT_KEPT.to_string())?;
+        file.take(end + 1 - start)
+            .read_to_end(&mut body)
+            .map_err(|_| NOT_KEPT.to_string())?;
+        // A QuickTime movie plays as the MP4 it is built like.
+        let media_type = match other.media_type.as_str() {
+            "video/quicktime" => "video/mp4",
+            media_type => media_type,
+        };
+        Ok::<_, String>(
+            tauri::http::Response::builder()
+                .status(206)
+                .header("Content-Type", media_type)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Range", format!("bytes {start}-{end}/{size}"))
+                .header("Content-Length", body.len().to_string())
+                .header("Cache-Control", "no-store")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(body)
+                .expect("static response"),
+        )
+    })
+    .await;
+    match answer {
+        Ok(Ok(response)) => response,
+        Ok(Err(message)) => refused(404, &message),
+        Err(_) => refused(500, "Cannot read the tool output"),
+    }
 }
 
 /// The file listing a model's kept views, written after them.
@@ -1269,6 +1535,7 @@ mod tests {
             start_line: None,
             images: vec![],
             models: vec![],
+            others: vec![],
             sent: false,
         };
         output.images = [PNG, b"<svg/>".as_slice()]
@@ -1533,6 +1800,7 @@ mod tests {
             &captured,
             &[],
             &[Some(dir.path().join("missing.glb")), Some(model)],
+            &[],
         )
         .unwrap();
         let data = read_model(
@@ -1568,6 +1836,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tables_documents_and_videos_are_kept_and_read_where_their_reply_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(DIRECTORY);
+        let pending = Arc::new(Pending::default());
+        let mut captured = output("claude:others");
+        captured.images.clear();
+        let table = dir.path().join("sales.csv");
+        std::fs::write(&table, "Region;Sales\nNorth;12\nSouth;7\n").unwrap();
+        let document = dir.path().join("notes.md");
+        std::fs::write(&document, "# Notes\nFirst line\nSecond line\n").unwrap();
+        let video = dir.path().join("clip.mp4");
+        let movie = files::tests::mp4(320, 240);
+        std::fs::write(&video, &movie).unwrap();
+        let directory = root.join(RUN).join(key("claude:others"));
+        write_call(
+            &directory,
+            &captured,
+            &[],
+            &[],
+            &[
+                Some(table),
+                Some(dir.path().join("gone.csv")),
+                Some(document),
+                Some(video),
+            ],
+        )
+        .unwrap();
+        let tool = || "claude:others".to_string();
+        let tables = Arc::new(files::Tables::default());
+        let page = |index, start, count| {
+            read_table(
+                root.clone(),
+                pending.clone(),
+                tables.clone(),
+                RUN.into(),
+                tool(),
+                index,
+                0,
+                start,
+                count,
+            )
+        };
+        // A table comes a page at a time, with its sheet's size, parsed with its own separator.
+        let first = page(0, 0, 2).await.unwrap();
+        assert_eq!(first.rows, [["Region", "Sales"], ["North", "12"]]);
+        assert_eq!((first.sheets[0].rows, first.sheets[0].columns), (3, 2));
+        assert_eq!(page(0, 2, 10).await.unwrap().rows, [["South", "7"]]);
+        // A file that could not be kept keeps its place, and so the numbers after it.
+        assert!(page(1, 0, 1).await.is_err());
+        assert!(page(2, 0, 1).await.unwrap_err().contains("not a table"));
+        let read = |index, head| {
+            read_document(
+                root.clone(),
+                pending.clone(),
+                RUN.into(),
+                tool(),
+                index,
+                head,
+            )
+        };
+        let whole = read(2, None).await.unwrap();
+        assert_eq!(whole.text, "# Notes\nFirst line\nSecond line\n");
+        assert!(whole.complete);
+        let start = read(2, Some(12)).await.unwrap();
+        assert_eq!((start.text.as_str(), start.complete), ("# Notes\n", false));
+        assert!(read(3, None).await.unwrap_err().contains("not a document"));
+        // Another device reads any of them whole.
+        let data = read_other(root.clone(), pending.clone(), RUN.into(), tool(), 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            (data.media_type.as_str(), data.bytes),
+            ("video/mp4", movie.len() as u64)
+        );
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&data.data)
+                .unwrap(),
+            movie
+        );
+        // This computer's window streams a video the part its player asks for, by a path naming
+        // the run, the file's place and the call, encoded as one segment.
+        let path = format!("/{RUN}%2F3%2Fclaude%3Aothers");
+        let stream =
+            |range: Option<&str>| stream_other(root.clone(), None, &path, range.map(String::from));
+        let part = stream(Some("bytes=8-15")).await;
+        assert_eq!(part.status(), 206);
+        assert_eq!(part.body().as_slice(), &movie[8..16]);
+        assert_eq!(
+            part.headers()["content-range"],
+            format!("bytes 8-15/{}", movie.len()).as_str()
+        );
+        assert_eq!(part.headers()["content-type"], "video/mp4");
+        let all = stream(None).await;
+        assert_eq!(all.body().as_slice(), movie.as_slice());
+        assert_eq!(stream(Some("bytes=999999-")).await.status(), 416);
+        for refused in [
+            format!("/{RUN}%2F9%2Fclaude%3Aothers"),
+            format!("/{RUN}%2Fx%2Fclaude%3Aothers"),
+            "/not-a-run%2F3%2Fclaude%3Aothers".to_string(),
+            "/%ZZ".to_string(),
+        ] {
+            let answer = stream_other(root.clone(), None, &refused, None).await;
+            assert!(
+                answer.status() == 400 || answer.status() == 404,
+                "{refused}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_model_of_any_size_is_read_whole_on_every_device() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
@@ -1585,7 +1964,7 @@ mod tests {
         );
         captured.models = vec![model.to_string_lossy().into()];
         let directory = root.join(RUN).join(key("claude:large"));
-        write_call(&directory, &captured, &[], &[Some(model)]).unwrap();
+        write_call(&directory, &captured, &[], &[Some(model)], &[]).unwrap();
         // This computer's window reads the raw bytes.
         let raw = read_model_file(
             root.clone(),
@@ -1637,6 +2016,7 @@ mod tests {
             &captured,
             &[],
             &[Some(model), Some(dir.path().join("gone.glb"))],
+            &[],
         )
         .unwrap();
         let read = |index| {
@@ -1700,7 +2080,7 @@ mod tests {
         assert!(read(0).await.unwrap().views.is_empty());
         // Views go with the call's result when it is recorded again.
         store(0, vec![png.clone(); 8]).await.unwrap();
-        write_call(&directory, &captured, &[], &[]).unwrap();
+        write_call(&directory, &captured, &[], &[], &[]).unwrap();
         assert!(read(0).await.is_err());
     }
 
@@ -1715,7 +2095,7 @@ mod tests {
         std::fs::write(&file, PNG).unwrap();
         let files = [Some(dir.path().join("gone.png")), Some(file)];
         let directory = root.join(RUN).join(key("claude:sent"));
-        write_call(&directory, &captured, &files, &[]).unwrap();
+        write_call(&directory, &captured, &files, &[], &[]).unwrap();
         let view = read(
             root.clone(),
             pending.clone(),
@@ -1757,7 +2137,7 @@ mod tests {
         });
         let files = [Some(file), Some(dir.path().join("missing.png"))];
         let directory = root.join(RUN).join(key("claude:one"));
-        write_call(&directory, &captured, &files, &[]).unwrap();
+        write_call(&directory, &captured, &files, &[], &[]).unwrap();
         let view = read(
             root.clone(),
             pending.clone(),
@@ -1805,7 +2185,14 @@ mod tests {
         let mut long = CapturedOutput::new("claude:long");
         long.stdout = (0..900_000).map(|i| format!("line {i} é\n")).collect();
         assert!(long.stdout.len() > 9 * 1024 * 1024);
-        write_call(&root.join(RUN).join(key("claude:long")), &long, &[], &[]).unwrap();
+        write_call(
+            &root.join(RUN).join(key("claude:long")),
+            &long,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
         let whole = read(
             root.clone(),
             pending.clone(),
@@ -1858,6 +2245,7 @@ mod tests {
         write_call(
             &root.join(RUN).join(key("claude:one")),
             &output("claude:one"),
+            &[],
             &[],
             &[],
         )

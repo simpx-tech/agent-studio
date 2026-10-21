@@ -112,6 +112,14 @@ function expectSameRegion(
   expect(Math.abs(a.zoom - b.zoom)).toBeLessThan(0.01);
 }
 
+/** A touchpad pinch outward at a point, which the browser reports as a wheel with Ctrl held. */
+async function pinch(page: Page, x: number, y: number) {
+  await page.mouse.move(x, y);
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -100);
+  await page.keyboard.up('Control');
+}
+
 test('compared images sit side by side at their marker and zoom and pan together until freed @webkit', async ({
   page,
 }) => {
@@ -135,14 +143,14 @@ test('compared images sit side by side at their marker and zoom and pan together
   expectSameRegion(await region(before), { x: 0.5, y: 0.5, zoom: 1 });
   expectSameRegion(await region(after), { x: 0.5, y: 0.5, zoom: 1 });
 
-  // Synced: a double click on the red quarter of the small picture shows the large one's red
-  // quarter too, at the same size.
+  // Synced: a pinch on the red quarter of the small picture shows the large one's red quarter
+  // too, at the same size.
   const views = reply.getByRole('radiogroup', { name: 'Views' });
   await expect(views.getByRole('radio', { name: 'Synced' })).toHaveAttribute(
     'aria-checked',
     'true',
   );
-  await before.dblclick({ position: { x: left.width * 0.25, y: left.height * 0.25 } });
+  await pinch(page, left.x + left.width * 0.25, left.y + left.height * 0.25);
   const zoomed = await region(before);
   expect(zoomed.zoom).toBeGreaterThan(1.5);
   expect(zoomed.x).toBeLessThan(0.45);
@@ -197,10 +205,21 @@ test('a comparison opens whole in the file viewer, which shares its mode @webkit
   await showImages(page);
   const reply = page.locator('.message:not(.user)');
   await expect(reply.getByRole('img', { name: 'Image 2, After' })).toBeVisible();
+  const preview = page.getByRole('dialog', { name: 'Comparison preview' });
+  // A click on a picture opens the comparison, as a single picture opens, and so does Enter on
+  // a picture with focus.
+  await reply.getByRole('img', { name: 'Image 2, After' }).click();
+  await expect(preview).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(preview).toBeHidden();
+  await reply.getByRole('img', { name: 'Image 1, Before' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(preview).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(preview).toBeHidden();
   const expand = reply.getByRole('button', { name: 'Expand comparison' });
   await expand.focus();
   await page.keyboard.press('Enter');
-  const preview = page.getByRole('dialog', { name: 'Comparison preview' });
   await expect(preview).toBeVisible();
   await expect(preview.getByText('Before vs After')).toBeVisible();
   await expect(preview.getByText('2 images')).toBeVisible();
@@ -253,7 +272,7 @@ test('an image that arrives after the other was zoomed shows what the other show
   await expect(before).toBeVisible();
   await expect(reply.getByText('Loading image…')).toBeVisible();
   const box = (await before.boundingBox())!;
-  await before.dblclick({ position: { x: box.width * 0.7, y: box.height * 0.3 } });
+  await pinch(page, box.x + box.width * 0.7, box.y + box.height * 0.3);
   const zoomed = await region(before);
   expect(zoomed.zoom).toBeGreaterThan(1.5);
   await page.evaluate(() => {
@@ -323,9 +342,9 @@ test('four compared images take two rows of two, and all four stay synced @webki
   // Half the comparison's width each, where four in one row left a quarter.
   const width = (await reply.locator('.compare-view').boundingBox())!.width;
   expect(first.width).toBeGreaterThan(width * 0.45);
-  // A double click on one zooms all four to the same region, whatever their sizes.
+  // A pinch on one zooms all four to the same region, whatever their sizes.
   const third = (await panes[2].boundingBox())!;
-  await panes[2].dblclick({ position: { x: third.width * 0.3, y: third.height * 0.7 } });
+  await pinch(page, third.x + third.width * 0.3, third.y + third.height * 0.7);
   const zoomed = await region(panes[2]);
   expect(zoomed.zoom).toBeGreaterThan(1.5);
   for (const pane of [panes[0], panes[1], panes[3]]) expectSameRegion(await region(pane), zoomed);

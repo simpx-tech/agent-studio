@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { closeOnBackdrop } from './dialog-backdrop';
+import { closeOnBackdrop, closeOnScrim } from './dialog-backdrop';
 
 /** A dialog at 100–300 × 100–200 that keeps its listeners, so a test can send events from anywhere. */
 function dialogAt() {
@@ -61,4 +61,53 @@ it('lets go of the dialog when detached', () => {
   expect([...listeners.keys()].sort()).toEqual(['click', 'mousedown', 'pointerdown']);
   detach();
   expect(listeners.size).toBe(0);
+});
+
+/** A dialog covering the window, whose marked elements are its scrim. */
+function windowDialog() {
+  const listeners = new Map<string, (event: unknown) => void>();
+  const dialog = {
+    open: true,
+    close: () => (dialog.open = false),
+    addEventListener: (type: string, listener: (event: unknown) => void) =>
+      listeners.set(type, listener),
+    removeEventListener: (type: string) => listeners.delete(type),
+  };
+  const detach = closeOnScrim(dialog as unknown as HTMLDialogElement);
+  const send = (type: string, target: unknown, button = 0) =>
+    listeners.get(type)?.({ type, target, button });
+  return { dialog, listeners, detach, send };
+}
+const element = (scrim: boolean) => ({
+  hasAttribute: (name: string) => scrim && name === 'data-scrim',
+});
+
+it('closes a window-wide dialog on a click on its scrim that began there', () => {
+  for (const target of ['dialog', 'room']) {
+    const { dialog, send } = windowDialog();
+    const on = target === 'dialog' ? dialog : element(true);
+    send('pointerdown', on);
+    send('click', on);
+    expect(dialog.open).toBe(false);
+  }
+});
+
+it('keeps a window-wide dialog open for what it shows, drags off it and other buttons', () => {
+  const { dialog, send } = windowDialog();
+  const picture = element(false);
+  const room = element(true);
+  // A click on what the dialog shows, or on one of its controls.
+  send('pointerdown', picture);
+  send('click', picture);
+  // A drag from the picture out onto the scrim, and a press on the scrim released on it.
+  send('pointerdown', picture);
+  send('click', room);
+  send('pointerdown', room);
+  send('click', picture);
+  // The middle or right button.
+  send('pointerdown', room, 1);
+  send('click', room, 1);
+  send('mousedown', room, 2);
+  send('click', room, 2);
+  expect(dialog.open).toBe(true);
 });

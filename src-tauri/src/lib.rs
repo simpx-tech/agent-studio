@@ -231,6 +231,60 @@ async fn store_tool_output_model_views(
     )
     .await
 }
+/// Rows of a table a finished tool call kept, a page at a time, with every sheet's size.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn read_tool_output_table(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    tables: State<'_, std::sync::Arc<tool_output::files::Tables>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    sheet: usize,
+    start: usize,
+    count: usize,
+) -> Result<tool_output::files::TablePage, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_table(
+        root,
+        pending.inner().clone(),
+        tables.inner().clone(),
+        run_id,
+        tool_id,
+        index,
+        sheet,
+        start,
+        count,
+    )
+    .await
+}
+/// The text of a document a finished tool call kept: whole, or its beginning for a card.
+#[tauri::command]
+async fn read_tool_output_document(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+    head: Option<u64>,
+) -> Result<tool_output::files::DocumentText, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_document(root, pending.inner().clone(), run_id, tool_id, index, head).await
+}
+/// A table, document or video a finished tool call kept, whole and however large, as base64 for
+/// a viewer on another device.
+#[tauri::command]
+async fn read_tool_output_file(
+    app: tauri::AppHandle,
+    pending: State<'_, std::sync::Arc<tool_output::Pending>>,
+    run_id: String,
+    tool_id: String,
+    index: usize,
+) -> Result<tool_output::FileData, String> {
+    let root = tool_output::root(&app)?;
+    tool_output::read_other(root, pending.inner().clone(), run_id, tool_id, index).await
+}
 /// One image of a finished tool call's result.
 #[tauri::command]
 async fn read_tool_output_image(
@@ -1897,6 +1951,19 @@ pub fn run() {
                 responder.respond(chat_images::serve(&app, &path).await);
             });
         })
+        // Videos replies show, streamed to this computer's window a part at a time as they play.
+        .register_asynchronous_uri_scheme_protocol("studio-file", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let path = request.uri().path().to_string();
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok())
+                .map(String::from);
+            tauri::async_runtime::spawn(async move {
+                responder.respond(tool_output::serve_other(&app, &path, range).await);
+            });
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::Updates::new(version))
@@ -1917,6 +1984,7 @@ pub fn run() {
         .manage(live_usage::LiveUsage::default())
         .manage(background_work::Registry::default())
         .manage(std::sync::Arc::new(tool_output::Pending::default()))
+        .manage(std::sync::Arc::new(tool_output::files::Tables::default()))
         .manage(tray::Tray::default())
         .manage(imports::Catalog::default())
         .manage(std::sync::Arc::new(screens::Screens::default()))
@@ -2083,6 +2151,9 @@ pub fn run() {
             import_chat,
             read_tool_output,
             read_tool_output_image,
+            read_tool_output_table,
+            read_tool_output_document,
+            read_tool_output_file,
             read_tool_output_model,
             read_tool_output_model_file,
             read_tool_output_model_views,

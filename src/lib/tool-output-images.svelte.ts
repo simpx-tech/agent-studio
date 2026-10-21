@@ -13,9 +13,10 @@ export type KeptImageSource = {
   index: number;
   connectionId?: string;
 };
+const imageKey = ({ runId, toolId, index }: KeptImageSource) => `${runId}\n${toolId}\n${index}`;
 
 export function readKeptImage(source: KeptImageSource): Promise<ToolOutputImage> {
-  return images.get(`${source.runId}\n${source.toolId}\n${source.index}`, () =>
+  return images.get(imageKey(source), () =>
     readToolOutputImage(source.runId, source.toolId, source.index, source.connectionId),
   );
 }
@@ -27,11 +28,11 @@ export class KeptImage {
   #attempt = $state(0);
 
   constructor(source: () => KeptImageSource) {
+    // An image this window already read shows at once, as the file viewer opens it from the
+    // chat's thumbnail, rather than a moment later.
+    this.image = images.peek(imageKey(source()));
     // Only the image's identity selects it; relay updates of the call do not reload it.
-    const key = $derived.by(() => {
-      const { runId, toolId, index } = source();
-      return `${runId}\n${toolId}\n${index}`;
-    });
+    const key = $derived.by(() => imageKey(source()));
     $effect(() => {
       void key;
       void this.#attempt;

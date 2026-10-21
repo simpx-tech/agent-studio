@@ -64,6 +64,12 @@ import {
   toolOutputImageSchema,
   toolOutputModelSchema,
   toolOutputSchema,
+  tablePageSchema,
+  documentTextSchema,
+  toolOutputFileSchema,
+  base64Bytes,
+  type TablePage,
+  type DocumentText,
   type ModelViews,
   type ToolOutput,
   type ToolOutputImage,
@@ -722,6 +728,9 @@ function workspaceNoticeRead(method: RelayJob['method'], args: Record<string, un
     method === 'toolOutputImage' ||
     method === 'toolOutputModel' ||
     method === 'toolOutputModelViews' ||
+    method === 'toolOutputTable' ||
+    method === 'toolOutputDocument' ||
+    method === 'toolOutputFile' ||
     // A screen's request ends with its page; a disconnect drops its answer.
     method === 'screens' ||
     // A sign-in waits on its computer until it ends there, however this device leaves it.
@@ -2451,6 +2460,9 @@ async function localCall(
     toolOutput: 'read_tool_output',
     toolOutputImage: 'read_tool_output_image',
     toolOutputModel: 'read_tool_output_model',
+    toolOutputTable: 'read_tool_output_table',
+    toolOutputDocument: 'read_tool_output_document',
+    toolOutputFile: 'read_tool_output_file',
     answer: 'answer_question',
     elicitation: 'manage_elicitation',
     steer: 'steer_run',
@@ -2973,6 +2985,67 @@ async function keptOrRenderedViews(request: {
     }).catch(() => {});
     return { views };
   });
+}
+/**
+ * Rows of a table a finished tool call kept, `count` of them from `start` in sheet `sheet`,
+ * parsed by the computer that keeps it, which keeps it parsed for the next page.
+ */
+export async function readToolOutputTable(
+  source: { runId: string; toolId: string; index: number; connectionId?: string },
+  sheet: number,
+  start: number,
+  count: number,
+): Promise<TablePage> {
+  const { runId, toolId, index, connectionId } = source;
+  return tablePageSchema.parse(
+    await largeRead(connectionId, () =>
+      routed(
+        'toolOutputTable',
+        { runId, toolId, index, sheet, start, count, connectionId },
+        connectionId,
+      ),
+    ),
+  );
+}
+/** A document a finished tool call kept: whole, or its first `head` bytes for a card. */
+export async function readToolOutputDocument(
+  source: { runId: string; toolId: string; index: number; connectionId?: string },
+  head?: number,
+): Promise<DocumentText> {
+  const { runId, toolId, index, connectionId } = source;
+  return documentTextSchema.parse(
+    await largeRead(connectionId, () =>
+      routed(
+        'toolOutputDocument',
+        { runId, toolId, index, ...(head ? { head } : {}), connectionId },
+        connectionId,
+      ),
+    ),
+  );
+}
+/**
+ * Where a window plays a video a finished tool call kept: this computer's window streams it from
+ * its own store as it plays, and another device reads it whole through the relay, whatever its
+ * size, and plays it from memory until `release`.
+ */
+export async function toolOutputVideo(source: {
+  runId: string;
+  toolId: string;
+  index: number;
+  connectionId?: string;
+}): Promise<{ url: string; release(): void }> {
+  const { runId, toolId, index, connectionId } = source;
+  if (desktop() && !remoteTarget(connectionId))
+    return { url: convertFileSrc(`${runId}/${index}/${toolId}`, 'studio-file'), release() {} };
+  const file = toolOutputFileSchema.parse(
+    await largeRead(connectionId, () =>
+      routed('toolOutputFile', { runId, toolId, index, connectionId }, connectionId),
+    ),
+  );
+  // A QuickTime movie plays as the MP4 it is built like.
+  const type = file.mediaType === 'video/quicktime' ? 'video/mp4' : file.mediaType;
+  const url = URL.createObjectURL(new Blob([await base64Bytes(file.data)], { type }));
+  return { url, release: () => URL.revokeObjectURL(url) };
 }
 /** One image of a finished tool call's result, read like `readToolOutput`. */
 export async function readToolOutputImage(

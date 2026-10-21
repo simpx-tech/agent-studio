@@ -70,6 +70,9 @@ const jobInput = z
       'toolOutputImage',
       'toolOutputModel',
       'toolOutputModelViews',
+      'toolOutputTable',
+      'toolOutputDocument',
+      'toolOutputFile',
       'mcp',
       'plugins',
       'undoFiles',
@@ -214,6 +217,32 @@ const jobInput = z
         .safeParse(job.args).success
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid tool output model request' });
+    // A table's page, a document's text and a whole file a reply showed, by the call that kept it.
+    const shown = {
+      runId: uuid,
+      toolId,
+      index: z.number().int().nonnegative(),
+      connectionId: uuid,
+    };
+    const position = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+    if (
+      job.method === 'toolOutputTable' &&
+      !z
+        .object({ ...shown, sheet: position, start: position, count: position })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output table request' });
+    if (
+      job.method === 'toolOutputDocument' &&
+      !z
+        .object({ ...shown, head: z.number().int().positive().optional() })
+        .strict()
+        .safeParse(job.args).success
+    )
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output document request' });
+    if (job.method === 'toolOutputFile' && !z.object(shown).strict().safeParse(job.args).success)
+      ctx.addIssue({ code: 'custom', message: 'Invalid tool output file request' });
     if (
       job.method === 'answer' &&
       !z
@@ -298,7 +327,10 @@ const resultRead = (method: string) =>
   method === 'toolOutput' ||
   method === 'toolOutputImage' ||
   method === 'toolOutputModel' ||
-  method === 'toolOutputModelViews';
+  method === 'toolOutputModelViews' ||
+  method === 'toolOutputTable' ||
+  method === 'toolOutputDocument' ||
+  method === 'toolOutputFile';
 export function createRelay({
   token,
   directory,

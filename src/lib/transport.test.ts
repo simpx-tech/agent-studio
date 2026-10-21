@@ -287,6 +287,42 @@ it('ends a read whose result the relay refuses with the reason, not an expiry', 
   await transport.disconnectRelay();
 });
 
+it('answers reads of the tables, documents and videos it keeps for other devices from its store', async () => {
+  const connectionId = crypto.randomUUID();
+  const shown = { runId: crypto.randomUUID(), toolId: 'codex:call_01', index: 0, connectionId };
+  const answers: Record<string, unknown> = {
+    read_tool_output_table: {
+      sheets: [{ name: 'Sales', rows: 5001, columns: 4, firstRow: 0, firstColumn: 0 }],
+      sheet: 0,
+      lengths: [6, 7, 9, 6],
+      start: 200,
+      rows: [['North', 'Q1', '27500,00', '8%']],
+    },
+    read_tool_output_document: { text: '# Quarterly report\n', bytes: 2582, complete: false },
+    read_tool_output_file: { mediaType: 'video/mp4', data: 'AAAA', bytes: 3 },
+  };
+  for (const [method, command, args] of [
+    ['toolOutputTable', 'read_tool_output_table', { ...shown, sheet: 0, start: 200, count: 200 }],
+    ['toolOutputDocument', 'read_tool_output_document', { ...shown, head: 16_384 }],
+    ['toolOutputFile', 'read_tool_output_file', shown],
+  ] as const) {
+    const job = { id: crypto.randomUUID(), method, args };
+    const { transport, updates } = await hostOf(job);
+    const original = native.invoke.getMockImplementation()!;
+    native.invoke.mockImplementation(async (name, sent) =>
+      name in answers ? answers[name] : original(name, sent),
+    );
+    await transport.pollRelay();
+    await vi.waitFor(() => expect(updates.at(-1)?.status).toBe('complete'));
+    expect(updates.at(-1).result).toEqual(answers[command]);
+    // The computer reads the file its own call kept, named by the request's call alone.
+    expect(native.invoke.mock.calls.filter(([name]) => name in answers)).toEqual([[command, args]]);
+    await transport.disconnectRelay();
+    native.invoke.mockReset();
+    vi.resetModules();
+  }
+});
+
 it('draws the views of a model it keeps once for other devices, and answers later requests with them', async () => {
   const connectionId = crypto.randomUUID();
   const runId = crypto.randomUUID();

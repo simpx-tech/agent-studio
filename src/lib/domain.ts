@@ -16,7 +16,7 @@ import {
   publishedHistory,
   type PublishedArtifact,
 } from './published-artifacts.ts';
-import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
+import { extraSentFileGroupsSchema, sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema } from './reasoning.ts';
@@ -229,6 +229,9 @@ export const messageSchema = z
     // The claude.ai artifacts the reply published or opened, which their cards open there.
     publishedArtifacts: publishedArtifactsSchema.optional(),
     sentFiles: sentFileGroupsSchema.optional(),
+    // Groups showing a table, a document or a video, which releases before them cannot read:
+    // apart from sentFiles, which those releases validate strictly, so they drop these alone.
+    extraSentFiles: extraSentFileGroupsSchema.optional(),
     // The screens the reply saved, which their cards open from the computer that keeps them.
     screens: screenCardsSchema.optional(),
     questions: questionsSchema.optional(),
@@ -278,6 +281,13 @@ export const messageSchema = z
       !message.sentFiles?.length ||
       (message.role === 'assistant' &&
         message.sentFiles.every((group) => group.runId === message.runId)),
+    { message: 'Shown files do not match their response run' },
+  )
+  .refine(
+    (message) =>
+      !message.extraSentFiles?.length ||
+      (message.role === 'assistant' &&
+        message.extraSentFiles.every((group) => group.runId === message.runId)),
     { message: 'Shown files do not match their response run' },
   );
 export type Message = z.infer<typeof messageSchema>;

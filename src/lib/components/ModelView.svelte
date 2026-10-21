@@ -171,7 +171,7 @@
   </div>
 {/snippet}
 
-<figure class="model-view" {@attach viewer.attach(viewed)}>
+<figure class="model-view" {@attach viewer.attach(() => viewed)}>
   <ModelStage {pane} place="inline" />
   {#if pane.viewsOnly}
     {@render turntableBar('inline')}
@@ -254,14 +254,20 @@
     color: var(--text-muted);
     font-size: var(--text-xs);
   }
-  /* In the file viewer the stage takes the room its controls leave. */
+  /* In the file viewer the model stands on a surface of its own over the scrim, its stage
+     taking the room its controls leave. */
   .model-expanded {
     display: flex;
     flex: 1;
     flex-direction: column;
     min-height: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
     color: var(--text-muted);
     font-size: var(--text-2xs);
+    box-shadow: var(--shadow-xl);
+    overflow: hidden;
   }
   .model-expanded .model-bar {
     padding: 6px 10px;

@@ -1187,6 +1187,68 @@ describe('real HTTP relay', () => {
     expect((await f.call('GET', `jobs/${views.id}`)).body.result).toEqual(drawn);
     expect((await f.call('GET', `jobs/${views.id}`)).status).toBe(404);
   });
+  it('routes reads of the tables, documents and videos a reply showed by their call alone', async () => {
+    const f = await fixture();
+    await f.call(
+      'POST',
+      'heartbeat',
+      { environmentId: f.target, connections: [], running: [] },
+      f.target,
+    );
+    const shown = {
+      runId: crypto.randomUUID(),
+      toolId: 'codex:call_01',
+      index: 0,
+      connectionId: crypto.randomUUID(),
+    };
+    const job = (method: string, args: Record<string, unknown>) => ({
+      id: crypto.randomUUID(),
+      source: f.source,
+      target: f.target,
+      method,
+      args,
+    });
+    const page = { sheet: 1, start: 200, count: 200 };
+    for (const [method, invalid] of [
+      ['toolOutputTable', shown],
+      ['toolOutputTable', { ...shown, ...page, start: -1 }],
+      ['toolOutputTable', { ...shown, ...page, count: 1.5 }],
+      ['toolOutputTable', { ...shown, ...page, index: -1 }],
+      ['toolOutputTable', { ...shown, ...page, runId: '../run' }],
+      ['toolOutputTable', { ...shown, ...page, path: '/elsewhere/sales.csv' }],
+      ['toolOutputDocument', { ...shown, head: 0 }],
+      ['toolOutputDocument', { ...shown, head: 1.5 }],
+      ['toolOutputDocument', { ...shown, file: 'file-0.md' }],
+      ['toolOutputFile', { ...shown, index: undefined }],
+      ['toolOutputFile', { ...shown, toolId: 'a\nb' }],
+      ['toolOutputFile', { ...shown, range: 'bytes=0-' }],
+    ] as const)
+      expect((await f.call('POST', 'jobs', job(method, invalid))).status).toBe(400);
+    const accepted = [
+      job('toolOutputTable', { ...shown, ...page }),
+      job('toolOutputDocument', shown),
+      job('toolOutputDocument', { ...shown, head: 16_384 }),
+      job('toolOutputFile', { ...shown, index: 2_000_000 }),
+    ];
+    for (const read of accepted) expect((await f.call('POST', 'jobs', read)).status).toBe(200);
+    await f.call('GET', 'jobs', undefined, f.target);
+    // A whole file goes back as it is kept, whatever its size, and leaves once it is read.
+    const file = { mediaType: 'video/mp4', data: 'A'.repeat(3_000_000), bytes: 2_250_000 };
+    const [, , , video] = accepted;
+    expect(
+      (
+        await f.call(
+          'PUT',
+          `jobs/${video.id}`,
+          { status: 'complete', events: [], result: file },
+          f.target,
+        )
+      ).status,
+    ).toBe(200);
+    expect((await f.call('GET', `jobs/${video.id}`)).body.result).toEqual(file);
+    expect((await f.call('GET', `jobs/${video.id}`)).status).toBe(404);
+    expect(JSON.stringify((await f.call('GET', 'workspace')).body)).not.toContain('AAAAAAAA');
+  });
   it('keeps read results of any size, however many at once, only until they are read', async () => {
     const f = await fixture();
     await f.call(

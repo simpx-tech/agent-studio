@@ -39,6 +39,7 @@
   import { replyTools, runningSubagents, type RunningSubagent } from '$lib/subagents';
   import VisualizationView from './VisualizationView.svelte';
   import SentFilesView from './SentFilesView.svelte';
+  import { messageFiles } from '$lib/sent-files';
   import QuestionForm from './QuestionForm.svelte';
   import PlanApproval from './PlanApproval.svelte';
   import ProposedPlan from './ProposedPlan.svelte';
@@ -203,7 +204,7 @@
     replyContent(
       structured ? '' : text,
       message.visualizations,
-      message.sentFiles,
+      messageFiles(message),
       message.status === 'running',
       message.artifacts,
     ),

@@ -1,11 +1,14 @@
 import { expect, it } from 'vitest';
 import {
+  DEEPEST,
   clampView,
   fitScale,
   fitView,
   isZoomed,
   panBy,
+  shareView,
   imageZoom,
+  onImage,
   scaleLimits,
   toggleZoom,
   wheelFactor,
@@ -45,25 +48,93 @@ it('zooms around the point under the pointer and stops at its limits', () => {
   expect(after.x).toBeCloseTo(before.x);
   expect(after.y).toBeCloseTo(before.y);
   expect(isZoomed(zoomed, screenshot, stage)).toBe(true);
-  // Never smaller than the whole image, never past eight times its pixels.
+  // Never smaller than the whole image; deeper than any of its pixels, a thousand times the
+  // whole image, where one pixel of this screenshot covers more than half the stage.
   expect(zoomAt(view, 0.1, at, screenshot, stage)).toEqual(view);
-  expect(zoomAt(view, 1000, at, screenshot, stage).scale).toBe(8);
+  const deepest = zoomAt(view, 1e9, at, screenshot, stage);
+  expect(deepest.scale).toBeCloseTo(view.scale * DEEPEST);
+  expect(deepest.scale).toBeGreaterThan(stage.height / 2);
+  // However deep, the point under the pointer stays under it.
+  expect((at.x - deepest.x) / deepest.scale).toBeCloseTo(before.x);
+  expect((at.y - deepest.y) / deepest.scale).toBeCloseTo(before.y);
   expect(zoomTo(view, 1, at, screenshot, stage).scale).toBeCloseTo(1);
 });
 
-it('pans only as far as the image reaches, and centers an axis it does not fill', () => {
+it('pans a zoomed image until any of its points stands at the centre, and none past it', () => {
+  // At its own pixels the screenshot is nearly twice the stage's width: zoomed in for good.
   const zoomed = clampView({ scale: 1, x: 0, y: 0 }, screenshot, stage);
-  const left = panBy(zoomed, 10_000, 10_000, screenshot, stage);
-  expect(left).toMatchObject({ x: 0, y: 0 });
-  const right = panBy(zoomed, -10_000, -10_000, screenshot, stage);
-  expect(right).toMatchObject({ x: 1000 - 1920, y: 600 - 1080 });
+  expect(zoomed).toMatchObject({ x: 0, y: 0 });
+  // Its top left corner comes to the stage's centre, and goes no further.
+  const corner = panBy(zoomed, 10_000, 10_000, screenshot, stage);
+  expect(corner).toMatchObject({ x: 500, y: 300 });
+  // And so does its bottom right corner.
+  const far = panBy(zoomed, -10_000, -10_000, screenshot, stage);
+  expect(far).toMatchObject({ x: 500 - 1920, y: 300 - 1080 });
   // At the fitted scale the width fills the stage and the height is centered.
   const fit = fitView(screenshot, stage);
   expect(panBy(fit, 50, 50, screenshot, stage)).toEqual(fit);
-  // A resized stage keeps a zoomed image covering it.
-  const smaller = clampView(right, screenshot, { width: 1400, height: 900 });
-  expect(smaller.x).toBe(1400 - 1920);
-  expect(smaller.y).toBe(900 - 1080);
+  // A resized stage keeps a view still within bounds as it is, and brings one past them back.
+  expect(clampView(corner, screenshot, { width: 1400, height: 900 })).toMatchObject(corner);
+  expect(clampView(corner, screenshot, { width: 600, height: 400 })).toMatchObject({
+    x: 300,
+    y: 200,
+  });
+});
+
+it('lets a zoomed image go gradually, so zooming in or out never makes it jump', () => {
+  const fit = fitView(screenshot, stage);
+  // Just past the whole image, it still covers the width from edge to edge, nearly.
+  const barely = { scale: fit.scale * 1.02, x: 400, y: 0 };
+  const held = clampView(barely, screenshot, stage);
+  expect(held.x).toBeLessThan(25);
+  // Further in, it gives more way, then lets any point reach the centre.
+  const further = clampView({ ...barely, scale: fit.scale * 1.25 }, screenshot, stage);
+  expect(further.x).toBeGreaterThan(held.x + 50);
+  expect(further.x).toBeLessThan(500);
+  expect(clampView({ ...barely, scale: fit.scale * 1.5, x: 1e6 }, screenshot, stage).x).toBe(500);
+  // Zooming out from a corner brings the image back to the centre step by step.
+  let view = panBy(
+    clampView({ scale: 1, x: 0, y: 0 }, screenshot, stage),
+    1e6,
+    1e6,
+    screenshot,
+    stage,
+  );
+  let previous = view.x;
+  for (let step = 0; step < 40; step++) {
+    view = zoomAt(view, 0.95, { x: 500, y: 300 }, screenshot, stage);
+    expect(Math.abs(view.x - previous)).toBeLessThan(80);
+    previous = view.x;
+  }
+  expect(view).toEqual(fit);
+});
+
+it('fits an image within the room its stage keeps clear, and pans it under that room', () => {
+  const window = { width: 1200, height: 800, top: 50, right: 100, bottom: 100, left: 100 };
+  // The whole image fits the 1000 × 650 room left between the controls, centred there.
+  const fit = fitView(screenshot, window);
+  expect(fit.scale).toBeCloseTo(1000 / 1920);
+  expect(fit.x).toBeCloseTo(100);
+  expect(fit.y).toBeCloseTo(50 + (650 - 1080 * (1000 / 1920)) / 2);
+  const whole = shareView(fit, screenshot, window);
+  expect(whole.x).toBeCloseTo(0.5, 9);
+  expect(whole.y).toBeCloseTo(0.5, 9);
+  // Zoomed in, it reaches the window's edges, under the controls.
+  const zoomed = zoomAt(fit, 4, { x: 600, y: 375 }, screenshot, window);
+  const left = zoomed.x;
+  const right = zoomed.x + screenshot.width * zoomed.scale;
+  expect(left).toBeLessThan(0);
+  expect(right).toBeGreaterThan(1200);
+  // Any point can stand at the room's centre, which is not the window's.
+  expect(panBy(zoomed, 1e6, 1e6, screenshot, window)).toMatchObject({ x: 600, y: 375 });
+});
+
+it('tells a point on the image from the room around it', () => {
+  const fit = fitView(screenshot, stage);
+  expect(onImage(fit, { x: 500, y: 300 }, screenshot)).toBe(true);
+  // The bands above and below the whole screenshot are not the image.
+  expect(onImage(fit, { x: 500, y: 5 }, screenshot)).toBe(false);
+  expect(onImage(fit, { x: 500, y: 595 }, screenshot)).toBe(false);
 });
 
 it('toggles between the whole image and a closer look where the reader double-clicks', () => {
@@ -123,7 +194,16 @@ it('fills a comparison pane with every image, and shares a view whatever its siz
   expect(back.scale).toBeCloseTo(closer.scale, 9);
   expect(back.x).toBeCloseTo(closer.x, 9);
   expect(back.y).toBeCloseTo(closer.y, 9);
-  // Each image stays within its own limits: whole at least, never far past its pixels.
+  // Each image stays within its own limits: whole at least, and as deep as any other pane, so
+  // the panes of a comparison zoom together however far, whatever their images' sizes.
   expect(panes.takeView({ zoom: 0.01, x: 0, y: 0 }, screenshot, stage)).toEqual(fit);
-  expect(panes.takeView({ zoom: 1000, x: 0.5, y: 0.5 }, screenshot, stage).scale).toBe(8);
+  expect(panes.takeView({ zoom: 1e9, x: 0.5, y: 0.5 }, screenshot, stage).scale).toBeCloseTo(
+    fit.scale * DEEPEST,
+  );
+  const deep = { zoom: 900, x: 0.97, y: 0.03 };
+  expect(panes.shareView(panes.takeView(deep, half, stage), half, stage).zoom).toBeCloseTo(900, 6);
+  expect(panes.shareView(panes.takeView(deep, texture, pane), texture, pane).x).toBeCloseTo(
+    0.97,
+    9,
+  );
 });

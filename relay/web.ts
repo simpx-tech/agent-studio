@@ -17,7 +17,7 @@ import {
  * src/lib/model-scene.ts, which refuses every other URL a model file names.
  */
 export const webViewerCsp =
-  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'";
+  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'";
 
 const cookieName = 'agent_studio_session';
 const lifetime = 7 * 24 * 60 * 60 * 1000;

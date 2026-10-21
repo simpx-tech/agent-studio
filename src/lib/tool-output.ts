@@ -55,6 +55,71 @@ export const toolOutputImageSchema = z.object({
 });
 export type ToolOutputImage = z.infer<typeof toolOutputImageSchema>;
 
+/** Tables a reply can show: CSV and TSV files and workbooks, every worksheet of them. */
+export const toolOutputTableTypes = [
+  'text/csv',
+  'text/tab-separated-values',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel.sheet.macroEnabled.12',
+] as const;
+/** Documents a reply can show, rendered. */
+export const toolOutputDocumentTypes = ['text/markdown'] as const;
+/** Videos a reply can show, played. A QuickTime movie plays as the MP4 it is built like. */
+export const toolOutputVideoTypes = ['video/mp4', 'video/webm', 'video/quicktime'] as const;
+/** The name each of those formats goes by, as a card names its file. */
+export const otherFormats: Record<
+  | (typeof toolOutputTableTypes)[number]
+  | (typeof toolOutputDocumentTypes)[number]
+  | (typeof toolOutputVideoTypes)[number],
+  string
+> = {
+  'text/csv': 'CSV',
+  'text/tab-separated-values': 'TSV',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+  'application/vnd.ms-excel.sheet.macroEnabled.12': 'XLSM',
+  'text/markdown': 'Markdown',
+  'video/mp4': 'MP4',
+  'video/webm': 'WebM',
+  'video/quicktime': 'MOV',
+};
+const position = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+/** Rows of one sheet of a kept table, with every sheet's name and size, parsed where it is kept. */
+export const tablePageSchema = z.object({
+  sheets: z.array(
+    z.object({
+      name: z.string(),
+      rows: position,
+      columns: position,
+      /** The row and column of the sheet's first cell, as its workbook numbers them from 1. */
+      firstRow: z.number().int().positive(),
+      firstColumn: z.number().int().positive(),
+    }),
+  ),
+  sheet: position,
+  /**
+   * The longest cell of each column of the sheet, in characters, which sizes its columns from the
+   * first page. Computers before them send none.
+   */
+  lengths: z.array(position).optional(),
+  start: position,
+  rows: z.array(z.array(z.string())),
+});
+export type TablePage = z.infer<typeof tablePageSchema>;
+/** A kept document's text: whole, or its beginning, as a card in the chat asks. */
+export const documentTextSchema = z.object({
+  text: z.string(),
+  bytes: size,
+  complete: z.boolean(),
+});
+export type DocumentText = z.infer<typeof documentTextSchema>;
+/** A kept table, document or video, whole, as another device reads it. */
+export const toolOutputFileSchema = z.object({
+  mediaType: z.enum([...toolOutputTableTypes, ...toolOutputDocumentTypes, ...toolOutputVideoTypes]),
+  data: z.union([z.literal(''), base64]),
+  bytes: size,
+});
+export type ToolOutputFile = z.infer<typeof toolOutputFileSchema>;
+
 /** The 3D formats a reply can show, named by the media type its record keeps. */
 export const toolOutputModelTypes = [
   'model/gltf-binary',
@@ -106,10 +171,13 @@ export const keptModelViewsSchema = z.object({
  * otherwise through a data: URL fetched away from the page.
  */
 export async function modelBytes(model: ToolOutputModel): Promise<ArrayBuffer> {
+  return base64Bytes(model.data);
+}
+/** Bytes a relay read carries as base64, decoded by the engine as `modelBytes` explains. */
+export async function base64Bytes(data: string): Promise<ArrayBuffer> {
   const native = Uint8Array as unknown as { fromBase64?(data: string): Uint8Array };
-  if (typeof native.fromBase64 === 'function')
-    return native.fromBase64(model.data).buffer as ArrayBuffer;
-  const response = await fetch(`data:application/octet-stream;base64,${model.data}`);
+  if (typeof native.fromBase64 === 'function') return native.fromBase64(data).buffer as ArrayBuffer;
+  const response = await fetch(`data:application/octet-stream;base64,${data}`);
   return response.arrayBuffer();
 }
 
@@ -124,7 +192,7 @@ export function createFetchCache<T>(
   size: (value: T) => number,
   limits = { entries: 48, bytes: 48_000_000 },
 ) {
-  const entries = new Map<string, { promise: Promise<T>; bytes: number }>();
+  const entries = new Map<string, { promise: Promise<T>; bytes: number; value?: T }>();
   function trim() {
     let total = [...entries.values()].reduce((sum, entry) => sum + entry.bytes, 0);
     for (const [key, entry] of entries) {
@@ -142,10 +210,14 @@ export function createFetchCache<T>(
         entries.set(key, cached);
         return cached.promise;
       }
-      const entry = { promise: load(), bytes: 0 };
+      const entry: { promise: Promise<T>; bytes: number; value?: T } = {
+        promise: load(),
+        bytes: 0,
+      };
       entries.set(key, entry);
       entry.promise.then(
         (value) => {
+          entry.value = value;
           entry.bytes = size(value);
           trim();
         },
@@ -156,6 +228,10 @@ export function createFetchCache<T>(
       );
       trim();
       return entry.promise;
+    },
+    /** What was read for `key`, once it has arrived, so a view can show it at once. */
+    peek(key: string): T | undefined {
+      return entries.get(key)?.value;
     },
     clear() {
       entries.clear();

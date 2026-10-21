@@ -55,7 +55,9 @@
     },
     moved: (key, place, view) => sync.moved(key, place, view),
     shared: (key, place, kind) => sync.shared(key, place, kind),
+    expand: () => root && viewer.open(root),
   };
+  let root = $state<HTMLElement>();
   // Only a file's identity selects its pane, so a comparison sent again rebuilds what changed.
   const fileKey = (file: SentFile) =>
     `${group.runId}\n${group.toolId}\n${isModel(file) ? 'model' : 'image'}\n${file.index}`;
@@ -227,6 +229,7 @@
 {/snippet}
 
 <div
+  bind:this={root}
   class="compare-view"
   role="group"
   aria-label={`Comparison of ${comparisonName(group.files)}`}
@@ -234,7 +237,7 @@
   style:--columns={layout.wide}
   style:--narrow-columns={layout.narrow}
   style:--rows={layout.rows}
-  {@attach viewer.attach(viewed)}
+  {@attach viewer.attach(() => viewed)}
 >
   <div class="compare-grid">{@render panesOf('inline')}</div>
   {@render bar('inline')}
@@ -269,15 +272,21 @@
       grid-template-columns: repeat(var(--narrow-columns, 2), minmax(0, 1fr));
     }
   }
-  /* In the file viewer the panes share its room, in columns, or in rows on a tall screen. */
+  /* In the file viewer the panes share its room on a surface of their own, in columns, or in
+     rows on a tall screen. */
   .compare-expanded {
     display: flex;
     flex: 1;
     flex-direction: column;
     min-height: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface-overlay);
     container-type: size;
     color: var(--text-muted);
     font-size: var(--text-2xs);
+    box-shadow: var(--shadow-xl);
+    overflow: hidden;
   }
   .compare-grid.expanded {
     flex: 1;

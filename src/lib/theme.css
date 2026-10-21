@@ -147,6 +147,15 @@
   --shadow-xl: 0 28px 90px rgb(0 0 0 / 0.58), 0 4px 16px rgb(0 0 0 / 0.3);
   --shine: inset 0 1px 0 rgb(255 255 255 / 0.25);
   --backdrop: rgb(5 5 7 / 0.62);
+  /* The file viewer covers the window with a dark scrim in every theme, as photographs are
+     viewed, and floats its controls on it; the light theme keeps these. */
+  --viewer-scrim: rgb(8 8 10 / 0.97);
+  --viewer-shade: rgb(8 8 10 / 0.7);
+  --viewer-text: #ececee;
+  --viewer-text-muted: #a3a3ad;
+  --viewer-control: rgb(28 28 32 / 0.82);
+  --viewer-control-hover: rgb(255 255 255 / 0.12);
+  --viewer-border: rgb(255 255 255 / 0.1);
   --scrollbar: rgb(255 255 255 / 0.1);
   --scrollbar-hover: rgb(255 255 255 / 0.2);
 

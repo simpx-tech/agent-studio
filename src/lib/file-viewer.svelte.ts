@@ -40,27 +40,37 @@ export type ViewedComparison = Described & {
   /** Tells the comparison the viewer shows it, so its models give up their scenes meanwhile. */
   shown(showing: boolean): void;
 };
-export type ViewedFile = ViewedImage | ViewedModel | ViewedComparison;
+/** A table, a document or a video, which its card in the chat draws at full size too. */
+export type ViewedPage = Described & {
+  kind: 'table' | 'document' | 'video';
+  /** The file at full size, drawn by its card, which keeps what it already read. */
+  view: Snippet;
+  /** Tells the card the viewer shows its file, so a video in the chat pauses meanwhile. */
+  shown(showing: boolean): void;
+};
+export type ViewedFile = ViewedImage | ViewedModel | ViewedComparison | ViewedPage;
 
 export class FileViewer {
-  readonly #files = new SvelteMap<Element, ViewedFile>();
+  readonly #files = new SvelteMap<Element, () => ViewedFile>();
   /** Where the shown file stands in the chat, while the viewer is open. */
   current = $state<Element>();
 
   /**
-   * An attachment registering `file` where its element stands; the element leaving the page
-   * removes it, and a changed file replaces it in place.
+   * An attachment registering the file `describe` returns where its element stands; the element
+   * leaving the page removes it. The description is read when needed, so a file whose details
+   * change, as a table's do as its rows arrive, stays registered as it was: registering it again
+   * would leave the open viewer without its file for a moment, which closed and reopened it.
    */
-  attach(file: ViewedFile) {
+  attach(describe: () => ViewedFile) {
     return (element: Element) => {
-      this.#files.set(element, file);
+      this.#files.set(element, describe);
       return () => {
-        if (this.#files.get(element) === file) this.#files.delete(element);
+        if (this.#files.get(element) === describe) this.#files.delete(element);
       };
     };
   }
   file(element: Element | undefined): ViewedFile | undefined {
-    return element && this.#files.get(element);
+    return element ? this.#files.get(element)?.() : undefined;
   }
   /** The files in the order the chat shows them. */
   ordered(): Element[] {

@@ -65,6 +65,7 @@
       width={info.width}
       height={info.height}
       pane={place}
+      onopen={place === 'inline' ? link.expand : undefined}
       onmoved={(view) => link.moved(paneKey, place, { kind: 'image', view })}
       initial={() => {
         const shared = link.shared(paneKey, place, 'image');

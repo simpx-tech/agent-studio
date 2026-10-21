@@ -78,7 +78,11 @@ export type CameraView = {
 /** Where the camera was and how far the animation had run, to build the scene again as it was. */
 export type SceneState = CameraView & { time: number };
 export type SceneOptions = {
-  /** Wheel zoom, for the expanded view; the inline view leaves the wheel and swipes to the chat. */
+  /**
+   * Wheel zoom, for the expanded view. The inline view leaves the wheel and vertical swipes to the
+   * chat, zooming only with a pinch: two fingers, or a touchpad's, which arrives as a wheel with
+   * Ctrl held.
+   */
   wheelZoom?: boolean;
   clip?: number;
   playing?: boolean;
@@ -101,6 +105,7 @@ export type ModelScene = {
   setLighting(lighting: Lighting): void;
   /** Out of view the scene draws nothing, keeping its pose and animation time. */
   setVisible(visible: boolean): void;
+  /** Moves the camera closer by `factor` below 1 and away above it, towards the middle of the view. */
   zoom(factor: number): void;
   /** Turns the camera around the model by these angles, in radians. */
   orbit(left: number, up: number): void;
@@ -128,6 +133,21 @@ const modules = () =>
 const FRAME_MS = 1000 / 60 - 1;
 /** Where the camera starts: in front of the model, a little to its right and above it. */
 const START: [number, number, number] = [0.9, 0.65, 1.6];
+/**
+ * How close the camera may come to the point it looks at, in the frame every model is placed in
+ * (its longest side one unit): a hundred-thousandth of the model fills the view, so a detail of
+ * any size can be looked at. Past this the drawing's own precision shows.
+ */
+const CLOSEST = 1e-5;
+/** How far it may go, in the model's reaches: the model is then a speck. */
+const FARTHEST = 100;
+/**
+ * How far the point the view turns around may move from the model's centre, in its reaches, so
+ * the reader can move freely around and beside the model, and Reset always finds it again.
+ */
+const ROAM = 50;
+/** How long a double click takes the view to the point it lands on. */
+const FLIGHT_MS = 360;
 
 /** A renderer drawing on a transparent background with the viewer's tone. */
 function createRenderer(
@@ -465,28 +485,41 @@ export async function createModelScene(
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
-  // The right button, Shift (or Ctrl or Cmd) with the left one, and two fingers move the view.
-  // The point it turns around stays within the model's reach, so the model is never lost.
-  controls.maxTargetRadius = radius;
-  // So does the move the controls still owe as the view glides: a drag past the reach would
-  // otherwise hold the view at the edge through the start of the drag back.
+  // The right button, Shift (or Ctrl or Cmd) with the left one, and two fingers move the view,
+  // far beyond the model if the reader wants, though never so far that Reset cannot find it.
+  const roam = radius * ROAM;
+  controls.maxTargetRadius = roam;
+  controls.minDistance = CLOSEST;
+  controls.maxDistance = radius * FARTHEST;
+  // A pinch, or a drag with the middle button, zooms towards the point it began on. three.js
+  // reads that point of a middle-button drag from the pointer's horizontal place twice.
+  controls.zoomToCursor = true;
+  const zoomStart = controls as unknown as {
+    _handleMouseDownDolly?(event: MouseEvent): void;
+    _updateZoomParameters?(x: number, y: number): void;
+    _dollyStart?: { set(x: number, y: number): void };
+  };
+  if (zoomStart._handleMouseDownDolly && zoomStart._updateZoomParameters && zoomStart._dollyStart)
+    zoomStart._handleMouseDownDolly = (event) => {
+      zoomStart._updateZoomParameters!(event.clientX, event.clientY);
+      zoomStart._dollyStart!.set(event.clientX, event.clientY);
+    };
+  // So does the move the controls still owe as the view glides: a drag past the edge would
+  // otherwise hold the view there through the start of the drag back.
   const owed = (controls as unknown as { _panOffset?: Vector3 })._panOffset;
   const update = controls.update.bind(controls);
   controls.update = (time) => {
     const moved = update(time);
-    owed?.add(controls.target).clampLength(0, radius).sub(controls.target);
+    owed?.add(controls.target).clampLength(0, roam).sub(controls.target);
     return moved;
   };
-  controls.enableZoom = !!options.wheelZoom;
-  if (!options.wheelZoom) {
-    // The controls listen to the wheel without passive scrolling even with zoom off, and ask
-    // for every touch. The inline view gives both back to the chat: the wheel scrolls past the
-    // model, and a vertical swipe scrolls while a horizontal one turns it, or with two fingers
-    // moves it.
-    const wheel = (controls as unknown as { _onMouseWheel?: EventListener })._onMouseWheel;
-    if (wheel) canvas.removeEventListener('wheel', wheel);
-    canvas.style.touchAction = 'pan-y';
-  }
+  // The wheel zooms towards the very point of the model under the pointer (`zoomAbout`), which
+  // the wheel of the controls cannot find, so theirs never listens. The inline view leaves the
+  // wheel and vertical swipes to the chat: a vertical swipe scrolls while a horizontal one turns
+  // the model, and two fingers move and zoom it.
+  const ownWheel = (controls as unknown as { _onMouseWheel?: EventListener })._onMouseWheel;
+  if (ownWheel) canvas.removeEventListener('wheel', ownWheel);
+  if (!options.wheelZoom) canvas.style.touchAction = 'pan-y';
   const direction = new THREE.Vector3(...START).normalize();
   const start = () => {
     // A turn or move still gliding would carry on from the start: without damping, one update
@@ -499,6 +532,162 @@ export async function createModelScene(
     camera.lookAt(0, 0, 0);
     controls.update();
   };
+
+  // The point of the model under a pointer, read from the depth of the one pixel there, which the
+  // GPU draws in a moment however many triangles the model has. Only the model is drawn, so the
+  // unseen floor of the realistic light is never found.
+  const pickTarget = new THREE.WebGLRenderTarget(1, 1);
+  const depthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.RGBDepthPacking,
+    side: THREE.DoubleSide,
+  });
+  const pixel = new Uint8Array(4);
+  const clearColor = new THREE.Color();
+  function pick(clientX: number, clientY: number): Vector3 | undefined {
+    const box = canvas.getBoundingClientRect();
+    const x = clientX - box.left;
+    const y = clientY - box.top;
+    if (!(box.width > 0 && box.height > 0) || x < 0 || y < 0 || x > box.width || y > box.height)
+      return undefined;
+    const hidden = scene.children.filter((child) => child !== object.parent && child.visible);
+    for (const child of hidden) child.visible = false;
+    const shadows = renderer.shadowMap.needsUpdate;
+    renderer.shadowMap.needsUpdate = false;
+    renderer.getClearColor(clearColor);
+    const alpha = renderer.getClearAlpha();
+    scene.overrideMaterial = depthMaterial;
+    camera.setViewOffset(box.width, box.height, x, y, 1, 1);
+    try {
+      renderer.setRenderTarget(pickTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(scene, camera);
+      renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pixel);
+    } finally {
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(clearColor, alpha);
+      camera.clearViewOffset();
+      scene.overrideMaterial = null;
+      renderer.shadowMap.needsUpdate = shadows;
+      for (const child of hidden) child.visible = true;
+    }
+    // Packed as three.js packs it, in 24 bits, and white where nothing was drawn.
+    const depth =
+      (pixel[0] / 255) * (255 / 256) +
+      (pixel[1] / 255) * (255 / 256 / 256) +
+      pixel[2] / 255 / 65536;
+    if (depth >= 1 - 1 / 65536) return undefined;
+    const at = new THREE.Vector3((x / box.width) * 2 - 1, 1 - (y / box.height) * 2, depth * 2 - 1);
+    return at.unproject(camera);
+  }
+  /** Where the pointer's ray meets the plane facing the camera through the point it looks at. */
+  function under(clientX: number, clientY: number): Vector3 {
+    const box = canvas.getBoundingClientRect();
+    const ray = new THREE.Vector3(
+      ((clientX - box.left) / Math.max(1, box.width)) * 2 - 1,
+      1 - ((clientY - box.top) / Math.max(1, box.height)) * 2,
+      0.5,
+    )
+      .unproject(camera)
+      .sub(camera.position)
+      .normalize();
+    const forward = camera.getWorldDirection(new THREE.Vector3());
+    const along = controls.target.clone().sub(camera.position).dot(forward);
+    return camera.position.clone().addScaledVector(ray, along / Math.max(1e-9, ray.dot(forward)));
+  }
+  /**
+   * Moves the camera and the point it turns around towards `point` by `factor` below 1, or away
+   * above it, keeping that point where it is on screen: the detail under the pointer grows where
+   * it stands, as an image does, and the camera never passes through it.
+   */
+  function zoomAbout(point: Vector3, factor: number) {
+    const distance = camera.position.distanceTo(controls.target);
+    const next = THREE.MathUtils.clamp(
+      distance * factor,
+      controls.minDistance,
+      controls.maxDistance,
+    );
+    const scale = next / Math.max(distance, Number.MIN_VALUE);
+    if (scale === 1) return;
+    flight = undefined;
+    const target = controls.target.clone().sub(point).multiplyScalar(scale).add(point);
+    // Past the room the view may roam, it zooms towards the middle of the view instead.
+    const about = target.length() > roam ? controls.target : point;
+    camera.position.sub(about).multiplyScalar(scale).add(about);
+    controls.target.sub(about).multiplyScalar(scale).add(about);
+    controls.update();
+  }
+  // A wheel gesture zooms towards the point under the pointer where it began, found once: the
+  // camera moves towards it, so that point stays where it is while the gesture lasts.
+  let aim: { point: Vector3; x: number; y: number; at: number } | undefined;
+  function wheel(event: WheelEvent) {
+    if (!options.wheelZoom && !event.ctrlKey) return;
+    event.preventDefault();
+    const now = performance.now();
+    if (!aim || now - aim.at > 250 || Math.hypot(event.clientX - aim.x, event.clientY - aim.y) > 4)
+      aim = {
+        point: pick(event.clientX, event.clientY) ?? under(event.clientX, event.clientY),
+        x: event.clientX,
+        y: event.clientY,
+        at: now,
+      };
+    aim.at = now;
+    const page = canvas.clientHeight;
+    const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? page : 1);
+    // A notch of a mouse wheel is about one step of the zoom buttons; a touchpad pinch follows
+    // the fingers.
+    zoomAbout(aim.point, Math.exp(pixels * (event.ctrlKey ? 0.01 : 0.0022)));
+  }
+  canvas.addEventListener('wheel', wheel, { passive: false });
+  // A double click takes the view to the point it lands on, which the view then turns around,
+  // and halves the distance to it.
+  let flight:
+    { from: [Vector3, Vector3]; to: [Vector3, Vector3]; start: number; ms: number } | undefined;
+  const reducedMotion = () =>
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function focus(event: MouseEvent) {
+    const point = pick(event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    const offset = camera.position.clone().sub(controls.target).multiplyScalar(0.5);
+    offset.setLength(
+      THREE.MathUtils.clamp(offset.length(), controls.minDistance, controls.maxDistance),
+    );
+    flight = {
+      from: [camera.position.clone(), controls.target.clone()],
+      to: [point.clone().add(offset), point],
+      start: performance.now(),
+      ms: reducedMotion() ? 0 : FLIGHT_MS,
+    };
+    request();
+  }
+  canvas.addEventListener('dblclick', focus);
+  /** Moves the view along its flight, which the reader taking the view ends. */
+  function fly(now: number) {
+    if (!flight) return false;
+    const t = flight.ms ? Math.min(1, (now - flight.start) / flight.ms) : 1;
+    const eased = 1 - (1 - t) ** 3;
+    camera.position.lerpVectors(flight.from[0], flight.to[0], eased);
+    controls.target.lerpVectors(flight.from[1], flight.to[1], eased);
+    if (t >= 1) flight = undefined;
+    return true;
+  }
+  const grabbed = () => (flight = undefined);
+  controls.addEventListener('start', grabbed);
+  /**
+   * The near and far planes follow the camera: near enough that a detail a hundred-thousandth of
+   * the model stays whole in front of it, and no deeper than the scene, so surfaces never
+   * flicker into one another however close the camera comes.
+   */
+  function fitPlanes() {
+    const distance = camera.position.distanceTo(controls.target);
+    const near = Math.min(0.01, Math.max(distance * 0.005, 1e-8));
+    const far = camera.position.length() + radius * 12 + distance;
+    if (near === camera.near && far === camera.far) return;
+    camera.near = near;
+    camera.far = far;
+    camera.updateProjectionMatrix();
+  }
 
   const clips: AnimationClip[] = object.animations ?? [];
   const mixer: AnimationMixer | null = clips.length ? new THREE.AnimationMixer(object) : null;
@@ -540,7 +729,9 @@ export async function createModelScene(
   function render(now: number) {
     frame = 0;
     if (disposed || !visible || compiling) return;
-    const moving = controls.update();
+    const flying = fly(now);
+    const moving = controls.update() || flying;
+    fitPlanes();
     // The controls report no move smaller than their threshold, so a glide ends a little past the
     // view it last reported: the view it came to rest at is reported once more.
     if (!moving && leading) {
@@ -655,9 +846,7 @@ export async function createModelScene(
       request();
     },
     zoom(factor) {
-      const offset = camera.position.clone().sub(controls.target);
-      offset.multiplyScalar(factor).clampLength(0.35, 12);
-      camera.position.copy(controls.target).add(offset);
+      zoomAbout(controls.target.clone(), factor);
       request();
     },
     orbit(left, up) {
@@ -675,11 +864,12 @@ export async function createModelScene(
       // How tall the view is where the camera looks, as dragging measures it.
       const height = 2 * offset.length() * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
       const move = new THREE.Vector3(right * height * camera.aspect, up * height, 0);
-      controls.target.add(move.applyQuaternion(camera.quaternion)).clampLength(0, radius);
+      controls.target.add(move.applyQuaternion(camera.quaternion)).clampLength(0, roam);
       camera.position.copy(controls.target).add(offset);
       request();
     },
     reset() {
+      flight = undefined;
       start();
       request();
     },
@@ -687,6 +877,7 @@ export async function createModelScene(
     state: () => ({ ...view(), time: action?.time ?? 0 }),
     view,
     setView(next) {
+      flight = undefined;
       following = true;
       // Without damping, one update spends what is left of a glide, which would otherwise carry
       // this view away from the one it follows.
@@ -705,7 +896,12 @@ export async function createModelScene(
       disposed = true;
       if (frame) cancelAnimationFrame(frame);
       controls.removeEventListener('change', changed);
+      controls.removeEventListener('start', grabbed);
+      canvas.removeEventListener('wheel', wheel);
+      canvas.removeEventListener('dblclick', focus);
       controls.dispose();
+      pickTarget.dispose();
+      depthMaterial.dispose();
       mixer?.stopAllAction();
       mixer?.uncacheRoot(object);
       lights.dispose();

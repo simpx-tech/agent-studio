@@ -43,6 +43,8 @@ export type PaneLink = {
   moved(key: string, place: PanePlace, view: PaneView): void;
   /** What a pane drawn after the others moved shows: theirs, while synced. */
   shared(key: string, place: PanePlace, kind: PaneKind): PaneView | undefined;
+  /** Opens the comparison in the file viewer, as a click on an image pane in the chat does. */
+  expand(): void;
 };
 
 export class PaneSync {

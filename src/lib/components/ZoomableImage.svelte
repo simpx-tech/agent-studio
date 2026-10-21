@@ -4,6 +4,8 @@
   import {
     imageZoom,
     wheelFactor,
+    zoomLabel,
+    type Inset,
     type Point,
     type SharedView,
     type Size,
@@ -19,6 +21,9 @@
     pane,
     onmoved,
     initial,
+    inset,
+    onbackdrop,
+    onopen,
   }: {
     src: string;
     alt: string;
@@ -37,6 +42,15 @@
     onmoved?: (view: SharedView) => void;
     /** Asked once the pane is first drawn: what the images beside it show, which it shows too. */
     initial?: () => SharedView | undefined;
+    /**
+     * Room the stage keeps clear around the whole image, such as the file viewer's controls
+     * floating over its edges. Zoomed in, the image pans under them to the stage's edges.
+     */
+    inset?: Inset;
+    /** A click or tap beside the image, where the backdrop shows: the file viewer closes. */
+    onbackdrop?: () => void;
+    /** A click or tap on a pane in the chat, which opens its comparison in the file viewer. */
+    onopen?: () => void;
   } = $props();
 
   const zoom = $derived(imageZoom(!!pane));
@@ -45,7 +59,7 @@
   let stageHeight = $state(0);
   let natural = $state<Size>();
   const image = $derived<Size>(natural ?? { width: width ?? 0, height: height ?? 0 });
-  const room = $derived<Size>({ width: stageWidth, height: stageHeight });
+  const room = $derived({ width: stageWidth, height: stageHeight, ...inset });
   const ready = $derived(image.width > 0 && image.height > 0 && room.width > 0 && room.height > 0);
   let view = $state<ZoomView>({ scale: 1, x: 0, y: 0 });
   // Until the reader zooms, the image stays whole however the stage changes size.
@@ -71,7 +85,11 @@
     shared = zoom.shareView(next, image, room);
     onmoved?.(shared);
   }
-  const center = (): Point => ({ x: room.width / 2, y: room.height / 2 });
+  // The middle of the room left clear of the stage's edges, where the whole image stands.
+  const center = (): Point => ({
+    x: ((inset?.left ?? 0) + room.width - (inset?.right ?? 0)) / 2,
+    y: ((inset?.top ?? 0) + room.height - (inset?.bottom ?? 0)) / 2,
+  });
   let drawn = false;
   $effect(() => {
     if (!ready) return;
@@ -142,8 +160,10 @@
     else gesture = undefined;
     grabbing = gesture?.kind === 'pan' && zoomed;
   }
+  // Presses are followed before the image is drawn too, so a click beside a picture still
+  // arriving closes the viewer; only moving the picture waits for it.
   function down(event: PointerEvent) {
-    if (!ready || !stage || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    if (!stage || (event.pointerType === 'mouse' && event.button !== 0)) return;
     if (!pointers.size) {
       const box = stage.getBoundingClientRect();
       origin = { left: box.left, top: box.top };
@@ -160,6 +180,7 @@
     const point = local(event);
     travel += distance(point, previous);
     pointers.set(event.pointerId, point);
+    if (!ready) return;
     if (gesture.kind === 'pinch') {
       const [a, b] = [...pointers.values()];
       const now = middle(a, b);
@@ -204,8 +225,18 @@
     if (released && !pointers.size && travel < 8) tap(point);
     begin();
   }
-  /** A second tap or click in the same place zooms in there, or back out to the whole image. */
+  /**
+   * A tap on a pane in the chat opens its comparison, and one beside the image closes the
+   * viewer. Otherwise a second tap or click in the same place zooms in there, or back out to the
+   * whole image.
+   */
   function tap(point: Point) {
+    if (onopen) return onopen();
+    if (onbackdrop && (!ready || !zoom.onImage(view, point, image))) {
+      lastTap = undefined;
+      return onbackdrop();
+    }
+    if (!ready) return;
     const now = performance.now();
     if (lastTap && now - lastTap.at < 350 && distance(point, lastTap.point) < 30) {
       lastTap = undefined;
@@ -236,6 +267,11 @@
   // it has focus, so each of its images keeps its own.
   function keys(event: KeyboardEvent) {
     if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    // Enter on a pane in the chat opens its comparison, as a click does.
+    if (event.key === 'Enter' && onopen) {
+      event.preventDefault();
+      return onopen();
+    }
     const step = event.shiftKey ? 0.3 : 0.1;
     const pan = (dx: number, dy: number) =>
       zoomed
@@ -275,7 +311,9 @@
     class:grabbing
     role="img"
     aria-label={alt}
-    aria-keyshortcuts="+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown"
+    aria-keyshortcuts={onopen
+      ? 'Enter + - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown'
+      : '+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown'}
     tabindex="0"
     bind:this={stage}
     bind:clientWidth={stageWidth}
@@ -289,9 +327,10 @@
     {@render picture()}
   </div>
 {:else}
+  <!-- The file viewer's image covers the window; the room around it is the viewer's backdrop. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="zoom-stage"
+    class="zoom-stage window"
     class:zoomed
     class:grabbing
     bind:this={stage}
@@ -311,10 +350,10 @@
       aria-label="Zoom out"
       disabled={!ready || view.scale <= limits.min * 1.001}
       onclick={() => apply(zoom.zoomAt(view, 0.8, center(), image, room))}
-      ><ZoomOut size={13} aria-hidden="true" /></button
+      ><ZoomOut size={15} aria-hidden="true" /></button
     >
     <span class="zoom-level" title="Zoom, as a share of the image's own pixels"
-      >{Math.round(view.scale * 100)}%</span
+      >{zoomLabel(view.scale)}</span
     >
     <button
       type="button"
@@ -322,7 +361,7 @@
       aria-label="Zoom in"
       disabled={!ready || view.scale >= limits.max / 1.001}
       onclick={() => apply(zoom.zoomAt(view, 1.25, center(), image, room))}
-      ><ZoomIn size={13} aria-hidden="true" /></button
+      ><ZoomIn size={15} aria-hidden="true" /></button
     >
     <button
       type="button"
@@ -331,7 +370,7 @@
       title="Fit to window"
       disabled={!ready || fitted}
       onclick={() => apply(zoom.fitView(image, room))}
-      ><Shrink size={13} aria-hidden="true" /></button
+      ><Shrink size={15} aria-hidden="true" /></button
     >
     <button
       type="button"
@@ -383,6 +422,12 @@
     outline: 2px solid var(--focus-ring);
     outline-offset: -2px;
   }
+  /* In the file viewer the image covers the window, under the viewer's controls. */
+  .zoom-stage.window {
+    position: absolute;
+    inset: 0;
+    cursor: default;
+  }
   .zoom-stage.zoomed {
     cursor: grab;
   }
@@ -405,15 +450,24 @@
   img.settling {
     transition: transform var(--duration-fast) ease;
   }
+  /* The zoom controls float at the foot of the window, over the image when it reaches there. */
   .zoom-bar {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    padding: 6px 10px;
-    border-top: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: var(--text-2xs);
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--viewer-border);
+    border-radius: var(--radius-full);
+    background: var(--viewer-control);
+    color: var(--viewer-text-muted);
+    font-size: var(--text-xs);
+    translate: -50% 0;
+    backdrop-filter: blur(12px);
   }
   .zoom-level {
     min-width: 4em;
@@ -424,20 +478,20 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 26px;
-    height: 24px;
-    padding: 0 6px;
+    min-width: 30px;
+    height: 30px;
+    padding: 0 8px;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-full);
     background: transparent;
-    color: var(--text-muted);
+    color: var(--viewer-text-muted);
     font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     cursor: pointer;
   }
   .zoom-action:not(:disabled):hover {
-    background: var(--hover);
-    color: var(--text);
+    background: var(--viewer-control-hover);
+    color: var(--viewer-text);
   }
   .zoom-action:disabled {
     opacity: 0.45;

@@ -302,7 +302,9 @@ test('pausing holds the pose the animation reached, and playing continues from i
   expect(times.resumed).not.toBe(times.hidden);
 });
 
-test('the right button, Shift and two fingers move a model within its reach', async ({ page }) => {
+test('the right button, Shift and two fingers move a model, as far beyond it as the reader goes', async ({
+  page,
+}) => {
   await page.goto('/');
   await page.evaluate(async (data) => {
     const modulePath = '/src/lib/model-scene.ts';
@@ -397,14 +399,13 @@ test('the right button, Shift and two fingers move a model within its reach', as
   expect(length(reset.target)).toBeLessThan(1e-9);
   expect(length(sub(reset.position, start.position))).toBeLessThan(1e-9);
 
-  // The point the view turns around stops at the model's reach, half its diagonal here, and a
-  // drag back moves the view at once.
+  // The point the view turns around goes past the model's reach, half its diagonal here, as
+  // far as the reader drags it, and a drag back moves the view at once.
   await drag([20, 125], [380, 125], 'right');
-  const edge = await settled();
-  expect(length(edge.target)).toBeLessThan(Math.SQRT1_2 + 1e-9);
-  expect(length(edge.target)).toBeGreaterThan(Math.SQRT1_2 - 0.03);
+  const far = await settled();
+  expect(length(far.target)).toBeGreaterThan(Math.SQRT1_2 * 2);
   await drag([300, 125], [260, 125], 'right');
-  [x] = moved(edge, await settled());
+  [x] = moved(far, await settled());
   expect(x).toBeGreaterThan(40 / 250 - 0.03);
 
   // Keys move by a share of the view, a tenth of its width here, and zoom keeps that point.
@@ -415,7 +416,7 @@ test('the right button, Shift and two fingers move a model within its reach', as
     const moved = scene.state();
     scene.zoom(0.8);
     const zoomed = scene.state();
-    scene.pan(10, 0);
+    scene.pan(1000, 0);
     return { moved, zoomed, far: scene.state() };
   });
   [x, y] = moved(start, keyed.moved);
@@ -423,7 +424,125 @@ test('the right button, Shift and two fingers move a model within its reach', as
   expect(y).toBeCloseTo(0, 9);
   expect(length(sub(keyed.zoomed.target, keyed.moved.target))).toBeLessThan(1e-9);
   expect(length(offset(keyed.zoomed)) / length(offset(keyed.moved))).toBeCloseTo(0.8, 9);
-  expect(length(keyed.far.target)).toBeCloseTo(Math.SQRT1_2, 9);
+  // Only so far that Reset can always find the model: fifty times its reach.
+  expect(length(keyed.far.target)).toBeCloseTo(50 * Math.SQRT1_2, 6);
+});
+
+test('the wheel zooms to the very point under the pointer, as deep as any detail, and a double click flies there @webkit', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.evaluate(async (data) => {
+    const modulePath = '/src/lib/model-scene.ts';
+    const { createModelScene } = await import(/* @vite-ignore */ modulePath);
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText =
+      'position: fixed; left: 0; top: 0; width: 400px; height: 250px; z-index: 2147483647';
+    document.body.append(canvas);
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb', {
+      wheelZoom: true,
+    });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }, still);
+  type View = { position: number[]; target: number[] };
+  const sub = (a: number[], b: number[]) => a.map((value, i) => value - b[i]);
+  const add = (a: number[], b: number[]) => a.map((value, i) => value + b[i]);
+  const scale = (a: number[], by: number) => a.map((value) => value * by);
+  const dot = (a: number[], b: number[]) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+  const length = (a: number[]) => Math.hypot(...a);
+  const unit = (a: number[]) => scale(a, 1 / length(a));
+  const cross = (a: number[], b: number[]) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+  // The camera's 45° view on the 400 × 250 canvas, as three.js projects through it.
+  const tangent = Math.tan(Math.PI / 8);
+  const aspect = 400 / 250;
+  const basis = (view: View) => {
+    const forward = unit(sub(view.target, view.position));
+    const right = unit(cross(forward, [0, 1, 0]));
+    return { forward, right, up: cross(right, forward) };
+  };
+  /** Where a point of the scene stands on the canvas, in pixels. */
+  const project = (view: View, point: number[]) => {
+    const { forward, right, up } = basis(view);
+    const v = sub(point, view.position);
+    const depth = dot(v, forward);
+    const x = dot(v, right) / (depth * tangent * aspect);
+    const y = dot(v, up) / (depth * tangent);
+    return [((x + 1) / 2) * 400, ((1 - y) / 2) * 250];
+  };
+  /** The point of the triangle's plane (z = 0) under a canvas pixel. */
+  const under = (view: View, [px, py]: number[]) => {
+    const { forward, right, up } = basis(view);
+    const x = (px / 400) * 2 - 1;
+    const y = 1 - (py / 250) * 2;
+    const ray = add(forward, add(scale(right, x * tangent * aspect), scale(up, y * tangent)));
+    return add(view.position, scale(ray, -view.position[2] / ray[2]));
+  };
+  const wheel = (x: number, y: number, deltaY: number, times = 1) =>
+    page.evaluate(
+      ({ x, y, deltaY, times }) => {
+        const canvas = document.querySelector('canvas')!;
+        for (let i = 0; i < times; i++)
+          canvas.dispatchEvent(
+            new WheelEvent('wheel', {
+              clientX: x,
+              clientY: y,
+              deltaY,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        return (window as any).scene.view() as View;
+      },
+      { x, y, deltaY, times },
+    );
+  const start = (await page.evaluate(() => (window as any).scene.view())) as View;
+  // A point of the triangle, below and left of the middle: its own surface, not the point the
+  // view turns around, stays under the pointer as the wheel zooms in.
+  const pointer = [176, 150];
+  const spot = under(start, pointer);
+  expect(spot[0] + spot[1]).toBeLessThan(0);
+  const closer = await wheel(pointer[0], pointer[1], -300);
+  expect(length(sub(closer.position, closer.target))).toBeCloseTo(
+    length(sub(start.position, start.target)) * Math.exp(-300 * 0.0022),
+    6,
+  );
+  const [x, y] = project(closer, spot);
+  expect(Math.abs(x - pointer[0])).toBeLessThan(1);
+  expect(Math.abs(y - pointer[1])).toBeLessThan(1);
+  // Far deeper than a thousandth of the model, down to a hundred-thousandth, and still there.
+  const deep = await wheel(pointer[0], pointer[1], -300, 40);
+  expect(length(sub(deep.position, deep.target))).toBeLessThan(2e-5);
+  const [dx, dy] = project(deep, spot);
+  expect(Math.abs(dx - pointer[0])).toBeLessThan(2);
+  expect(Math.abs(dy - pointer[1])).toBeLessThan(2);
+  // And out again, until the model is a speck.
+  const away = await wheel(pointer[0], pointer[1], 300, 80);
+  expect(length(sub(away.position, away.target))).toBeGreaterThan(30);
+
+  // A double click on the triangle takes the view there, turning around that point, closer.
+  await page.evaluate(() => (window as any).scene.reset());
+  const point = under(start, pointer);
+  await page.mouse.dblclick(pointer[0], pointer[1]);
+  await expect
+    .poll(async () => {
+      const view = (await page.evaluate(() => (window as any).scene.view())) as View;
+      return length(sub(view.target, point));
+    })
+    .toBeLessThan(0.02);
+  const flown = (await page.evaluate(() => (window as any).scene.view())) as View;
+  expect(length(sub(flown.position, flown.target))).toBeCloseTo(
+    length(sub(start.position, start.target)) / 2,
+    2,
+  );
+  // A double click beside the model leaves the view where it is.
+  await page.mouse.dblclick(390, 10);
+  const unmoved = (await page.evaluate(() => (window as any).scene.view())) as View;
+  expect(length(sub(unmoved.target, flown.target))).toBeLessThan(1e-9);
 });
 
 test('the light chosen on one model lights every model, and stays chosen after a reload', async ({
@@ -690,4 +809,42 @@ test('views of a model start where the viewer starts and turn as dragging right 
     if (front.includes(index)) expect(covered, `view ${index + 1}`).toBeGreaterThan(0.01);
     else expect(covered, `view ${index + 1}`).toBe(0);
   expect(new Set(front.map((index) => result.views[index].data)).size).toBe(4);
+});
+
+test('in the chat the wheel scrolls past a model, and a pinch zooms it', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async (data) => {
+    const modulePath = '/src/lib/model-scene.ts';
+    const { createModelScene } = await import(/* @vite-ignore */ modulePath);
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position: fixed; left: 0; top: 0; width: 400px; height: 250px';
+    document.body.append(canvas);
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    const scene = await createModelScene(canvas, bytes.buffer, 'glb');
+    const distance = () => {
+      const { position, target } = scene.view();
+      return Math.hypot(...position.map((value: number, i: number) => value - target[i]));
+    };
+    const wheel = (ctrlKey: boolean) => {
+      const event = new WheelEvent('wheel', {
+        clientX: 200,
+        clientY: 125,
+        deltaY: -50,
+        ctrlKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      canvas.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const start = distance();
+    const scrolled = wheel(false);
+    const afterWheel = distance();
+    const pinched = wheel(true);
+    return { start, scrolled, afterWheel, pinched, afterPinch: distance() };
+  }, still);
+  expect(result.scrolled).toBe(false);
+  expect(result.afterWheel).toBe(result.start);
+  expect(result.pinched).toBe(true);
+  expect(result.afterPinch).toBeCloseTo(result.start * Math.exp(-0.5), 6);
 });

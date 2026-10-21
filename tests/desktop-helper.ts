@@ -108,6 +108,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
       };
       (window as any).__TAURI_INTERNALS__ = {
         convertFileSrc: (path: string, protocol?: string) => {
+          // A kept video, streamed from the result store: the fixture's bytes.
+          if (protocol === 'studio-file') {
+            const [, index, ...tool] = path.split('/');
+            const other = (window as any).toolOutputs?.[tool.join('/')]?.others?.[Number(index)];
+            return other ? `data:${other.mediaType};base64,${other.data}` : 'data:,';
+          }
           // The artifact renderer, offline or, for artifact pages, with pinned CDNs.
           if (protocol !== 'studio-image')
             return path === 'page' ? '/artifact-page' : '/artifact-preview';
@@ -810,7 +816,10 @@ export async function mockDesktop(page: Page, mode = 'success') {
             command === 'read_tool_output' ||
             command === 'read_tool_output_image' ||
             command === 'read_tool_output_model' ||
-            command === 'read_tool_output_model_file'
+            command === 'read_tool_output_model_file' ||
+            command === 'read_tool_output_table' ||
+            command === 'read_tool_output_document' ||
+            command === 'read_tool_output_file'
           ) {
             const state = window as any;
             (state.toolOutputCalls ??= []).push({ command, ...args });
@@ -830,6 +839,50 @@ export async function mockDesktop(page: Page, mode = 'success') {
               const model = output.models?.[args.index];
               if (!model) throw 'This output was not kept on the computer that ran it.';
               return model;
+            }
+            // Tables, documents and videos: `others` of { mediaType, data } for a whole file,
+            // with `sheets` of { name, rows } for a table and `text` for a document.
+            if (
+              command === 'read_tool_output_table' ||
+              command === 'read_tool_output_document' ||
+              command === 'read_tool_output_file'
+            ) {
+              const other = output.others?.[args.index];
+              if (!other) throw 'This output was not kept on the computer that ran it.';
+              if (command === 'read_tool_output_file')
+                return {
+                  mediaType: other.mediaType,
+                  data: other.data ?? '',
+                  bytes: other.bytes ?? 0,
+                };
+              if (command === 'read_tool_output_document') {
+                const text: string = other.text ?? '';
+                const cut = args.head && args.head < text.length;
+                const end = text.lastIndexOf(String.fromCharCode(10), args.head) + 1;
+                const head = cut ? text.slice(0, end) : text;
+                return { text: head, bytes: text.length, complete: !cut };
+              }
+              const sheets = other.sheets ?? [];
+              const sheet = sheets[args.sheet];
+              if (!sheet) throw 'This table has no such sheet.';
+              return {
+                sheets: sheets.map((s: any) => ({
+                  name: s.name,
+                  rows: s.rows.length,
+                  columns: Math.max(0, ...s.rows.map((r: string[]) => r.length)),
+                  firstRow: s.firstRow ?? 1,
+                  firstColumn: s.firstColumn ?? 1,
+                })),
+                sheet: args.sheet,
+                lengths: sheet.rows.reduce((longest: number[], row: string[]) => {
+                  row.forEach(
+                    (cell, at) => (longest[at] = Math.max(longest[at] ?? 0, cell.length)),
+                  );
+                  return longest;
+                }, []),
+                start: args.start,
+                rows: sheet.rows.slice(args.start, args.start + args.count),
+              };
             }
             // This computer's own window reads a kept model as raw bytes.
             if (command === 'read_tool_output_model_file') {

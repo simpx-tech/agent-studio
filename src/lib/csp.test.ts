@@ -80,3 +80,19 @@ describe.each(policies.filter(([label]) => !label.startsWith('relay/')))('%s', (
     expect(allowed).toContain('http://studio-image.localhost');
   });
 });
+
+// A video a reply shows plays in this computer's window from the result store, streamed through
+// the studio-file protocol (src-tauri/src/tool_output.rs), and on other devices from memory, read
+// whole through the relay.
+describe.each(
+  policies.filter(([label]) => label.startsWith('src-tauri/') || label.startsWith('relay/')),
+)('%s', (label, policy) => {
+  it('lets a video a reply shows play', () => {
+    const allowed = sources(policy, 'media-src');
+    expect(allowed).toContain('blob:');
+    if (label.startsWith('src-tauri/')) {
+      expect(allowed).toContain('studio-file:');
+      expect(allowed).toContain('http://studio-file.localhost');
+    }
+  });
+});

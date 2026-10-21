@@ -74,7 +74,9 @@ export function lightChat(
  * The message with the recorded work another copy of it holds, where it has none of its own: the
  * same blocks when its text is that copy's, and otherwise its own text with that copy's calls and
  * reasoning added, as two copies of a reply merge (`mergeActivityBlocks`). File changes come back
- * whenever the message has none. Returns the message itself when there is nothing to add.
+ * whenever the message has none, and so do the groups of tables, documents and videos it showed
+ * (`extraSentFiles`), which an earlier release leaves out of its uploads. Returns the message
+ * itself when there is nothing to add.
  */
 export function restoreMessage(message: Message, source: Message | undefined): Message {
   if (!source || source.id !== message.id || source === message) return message;
@@ -85,8 +87,21 @@ export function restoreMessage(message: Message, source: Message | undefined): M
         ? source.blocks
         : mergeActivityBlocks(message.blocks, source.blocks);
   const fileChanges = message.fileChanges ?? source.fileChanges;
-  if (blocks === message.blocks && fileChanges === message.fileChanges) return message;
-  return { ...message, blocks, ...(fileChanges ? { fileChanges } : {}) };
+  // A release before tables, documents and videos drops the field holding the groups that show
+  // them, which no later release leaves out once a reply has it.
+  const extraSentFiles = message.extraSentFiles ?? source.extraSentFiles;
+  if (
+    blocks === message.blocks &&
+    fileChanges === message.fileChanges &&
+    extraSentFiles === message.extraSentFiles
+  )
+    return message;
+  return {
+    ...message,
+    blocks,
+    ...(fileChanges ? { fileChanges } : {}),
+    ...(extraSentFiles ? { extraSentFiles } : {}),
+  };
 }
 
 /**

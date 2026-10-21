@@ -5,6 +5,7 @@
 use crate::protocol::activity::{CapturedOutput, ImageSource};
 use crate::protocol::RunEvent;
 use crate::runner::EventSink;
+use crate::tool_output::files;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -18,15 +19,16 @@ pub const COMPARE_NAME: &str = "compare_files";
 /// The longest file name a reply shows.
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image or a 3D model that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram or a model the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images and glTF, GLB, OBJ, STL and FBX models are shown whatever their size, in as many files and groups as the reply needs. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image, a 3D model, a table, a document or a video that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram, a model, a data table, a written report or a recording the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images, glTF, GLB, OBJ, STL and FBX models, CSV, TSV and XLSX tables, Markdown documents (.md) and MP4, WebM and MOV videos are shown whatever their size, in as many files and groups as the reply needs: a table as a sheet the reader scrolls through, every worksheet of a workbook included, a document rendered as formatted text, and a video in a player. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
-pub const COMPARE_GUIDANCE: &str = "To compare images or 3D models side by side, call compare_files (Claude: mcp__agent_studio__compare_files) with a stable id, two or more absolute paths in files in the order to show them, optional labels (one short single-line label per file, in the same order, such as Before and After) and an optional one-line caption; those four field names are exact. Use it for before and after, variants, or a reference beside a result: the reader sees the files as panes side by side, in Free mode, where each pane turns, pans and zooms on its own, or Synced, where the models keep one rotation, position and zoom and the images one zoom and position. Files are checked and shown as send_files shows them, and <!-- files:ID --> places the comparison in your final answer the same way; a comparison and a send_files group share their ids.";
+pub const COMPARE_GUIDANCE: &str = "To compare images or 3D models side by side (not tables, documents or videos, which send_files shows), call compare_files (Claude: mcp__agent_studio__compare_files) with a stable id, two or more absolute paths in files in the order to show them, optional labels (one short single-line label per file, in the same order, such as Before and After) and an optional one-line caption; those four field names are exact. Use it for before and after, variants, or a reference beside a result: the reader sees the files as panes side by side, in Free mode, where each pane turns, pans and zooms on its own, or Synced, where the models keep one rotation, position and zoom and the images one zoom and position. Files are checked and shown as send_files shows them, and <!-- files:ID --> places the comparison in your final answer the same way; a comparison and a send_files group share their ids.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SentFile {
-    /// This image's position in the call's stored result.
+    /// This file's place among the call's images, its models, or its other files (tables,
+    /// documents and videos) in the stored result, each counted from 0.
     pub index: usize,
     pub name: String,
     pub media_type: String,
@@ -61,7 +63,7 @@ pub fn tool() -> Value {
     json!({"name":NAME,"description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{
             "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
-            "files":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, or glTF, GLB, OBJ, STL or FBX models."},
+            "files":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, glTF, GLB, OBJ, STL or FBX models, CSV, TSV or XLSX tables, Markdown documents, or MP4, WebM or MOV videos."},
             "caption":{"type":"string","minLength":1,"description":"Optional single line shown below the files."}
         },"required":["id","files"],"additionalProperties":false}})
 }
@@ -271,35 +273,54 @@ impl Staging {
     }
 }
 
-/// What a checked path turned out to be. A picture is shown as an image; a model opens in
-/// the reply's 3D viewer.
+/// What a checked path turned out to be. A picture is shown as an image, a model opens in the
+/// reply's 3D viewer, and a table, a document or a video in a view of its own.
 enum Checked {
     Image(crate::tool_output::ImageFile),
     Model(crate::tool_output::ModelFile),
+    Other(files::ShownFile),
 }
-/// Recognizes one offered path on this computer, preferring the kind its name suggests for
-/// the explanation when neither matches.
+/// Recognizes one offered path on this computer. Pictures, models, videos and workbooks are
+/// recognized by their own bytes; any text could be a CSV, TSV or Markdown file, so the name
+/// decides those, and a name asking for one of them is checked first, since a few lines of text
+/// can read like an OBJ model. The explanation follows the kind the name suggests.
 async fn inspect(host: PathBuf, reported: &str) -> Result<Checked, String> {
-    let named_model = matches!(
-        extension(reported).as_deref(),
-        Some("glb" | "gltf" | "obj" | "stl" | "fbx")
-    );
+    let reported = reported.to_string();
     tokio::task::spawn_blocking(move || {
         let image = crate::tool_output::inspect_image(&host);
         if let Ok(image) = image.as_ref() {
             return Ok(Checked::Image(image.clone()));
         }
-        match crate::tool_output::inspect_model(&host) {
-            Ok(model) => Ok(Checked::Model(model)),
-            Err(model) => Err(if named_model {
-                model
-            } else {
-                image.expect_err("image check failed")
-            }),
+        let named = extension(&reported);
+        let named_model = matches!(
+            named.as_deref(),
+            Some("glb" | "gltf" | "obj" | "stl" | "fbx")
+        );
+        let named_other = files::named(&reported).is_some();
+        if named_other {
+            return files::inspect(&host, &reported).map(Checked::Other);
         }
+        match crate::tool_output::inspect_model(&host) {
+            Ok(model) => return Ok(Checked::Model(model)),
+            Err(model) if named_model => return Err(model),
+            Err(_) => {}
+        }
+        files::inspect(&host, &reported)
+            .map(Checked::Other)
+            .map_err(|other| {
+                if other == files::NOT_SHOWN && named.as_deref().is_some_and(is_image_name) {
+                    image.expect_err("image check failed")
+                } else {
+                    other
+                }
+            })
     })
     .await
     .unwrap_or_else(|_| Err("could not be checked".into()))
+}
+/// A name that asks for one of the pictures the viewer shows.
+fn is_image_name(extension: &str) -> bool {
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp")
 }
 fn extension(path: &str) -> Option<String> {
     let name = path.rsplit(['/', '\\']).next()?;
@@ -353,9 +374,10 @@ impl FileSender {
                 "This conversation does not keep files on the computer that ran it.".into(),
             );
         };
-        let mut files = vec![];
+        let mut shown = vec![];
         let mut images = vec![];
         let mut models = vec![];
+        let mut others = vec![];
         let mut rejected = vec![];
         for (position, path) in submission.files.iter().enumerate() {
             let check = async {
@@ -375,8 +397,28 @@ impl FileSender {
                 .and_then(|labels| labels.get(position))
                 .cloned();
             match checked {
+                Ok(Checked::Other(other)) if submission.compare => rejected.push(format!(
+                    "  {path}: is {}, which compare_files does not compare; send it with send_files",
+                    match other.kind {
+                        files::Kind::Table => "a table",
+                        files::Kind::Document => "a document",
+                        files::Kind::Video => "a video",
+                    }
+                )),
+                Ok(Checked::Other(other)) => {
+                    shown.push(SentFile {
+                        index: others.len(),
+                        name: file_name(path),
+                        media_type: other.media_type.into(),
+                        bytes: other.bytes,
+                        width: other.width,
+                        height: other.height,
+                        label,
+                    });
+                    others.push(path.clone());
+                }
                 Ok(Checked::Image(image)) => {
-                    files.push(SentFile {
+                    shown.push(SentFile {
                         index: images.len(),
                         name: file_name(path),
                         media_type: image.media_type,
@@ -388,7 +430,7 @@ impl FileSender {
                     images.push(path.clone());
                 }
                 Ok(Checked::Model(model)) => {
-                    files.push(SentFile {
+                    shown.push(SentFile {
                         index: models.len(),
                         name: file_name(path),
                         media_type: model_media_type(&model.format).into(),
@@ -402,13 +444,13 @@ impl FileSender {
                 Err(reason) => rejected.push(format!("  {path}: {reason}")),
             }
         }
-        if files.is_empty() {
+        if shown.is_empty() {
             return Err(format!(
                 "No file could be shown:\n{}\nTell the user, and do not claim the files are visible.",
                 rejected.join("\n")
             ));
         }
-        if submission.compare && files.len() < 2 {
+        if submission.compare && shown.len() < 2 {
             return Err(format!(
                 "Only one file could be shown, and a comparison needs two:\n{}\nTell the user, and do not claim the comparison is visible.",
                 rejected.join("\n")
@@ -420,6 +462,7 @@ impl FileSender {
             .map(|path| ImageSource::File { path })
             .collect();
         output.models = models;
+        output.others = others;
         output.sent = true;
         recorder.record(output);
         let record = SentFiles {
@@ -428,7 +471,7 @@ impl FileSender {
             run_id: staging.run_id.clone(),
             tool_id: tool_id.into(),
             caption: submission.caption,
-            files,
+            files: shown,
             compare: submission.compare,
         };
         let outcome = outcome(&record, &rejected);
@@ -973,6 +1016,75 @@ mod tests {
         assert!(sender.has_files());
     }
 
+    #[tokio::test]
+    async fn tables_documents_and_videos_are_shown_but_never_compared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let image = dir.path().join("chart.png");
+        png(&image);
+        let image = image.to_string_lossy().into_owned();
+        let table = path("sales.csv", b"Region,Sales\nNorth,12\n");
+        let document = path("notes.md", b"# Notes\n");
+        let video = path(
+            "clip.mp4",
+            &crate::tool_output::files::tests::mp4(1280, 720),
+        );
+        let staging = kept();
+        let mut sender = FileSender::default();
+        let input = json!({"id":"mixed","files":[image, table, document, video]});
+        let text = sender
+            .submit(&input, Tool::Send, "call", &staging)
+            .await
+            .unwrap();
+        assert!(text.contains("4 files are shown"), "{text}");
+        let record = sender.latest("mixed").unwrap();
+        let shown: Vec<_> = record
+            .files
+            .iter()
+            .map(|f| (f.media_type.as_str(), f.index))
+            .collect();
+        // Images, models and the other files are each numbered from 0.
+        assert_eq!(
+            shown,
+            [
+                ("image/png", 0),
+                ("text/csv", 0),
+                ("text/markdown", 1),
+                ("video/mp4", 2)
+            ]
+        );
+        assert_eq!(
+            (record.files[3].width, record.files[3].height),
+            (Some(1280), Some(720))
+        );
+        // A comparison takes images and models alone, and says where the others belong.
+        let input = json!({"id":"pair","files":[table, video]});
+        let error = sender
+            .submit(&input, Tool::Compare, "call2", &staging)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("is a table, which compare_files does not compare"),
+            "{error}"
+        );
+        assert!(error.contains("is a video"), "{error}");
+        // A name asking for text is checked as text, even when its lines read like a model's.
+        let lines = path("faces.md", b"v 1 2 3\nv 4 5 6\nf 1 2 3\n");
+        let input = json!({"id":"lines","files":[lines]});
+        sender
+            .submit(&input, Tool::Send, "call3", &staging)
+            .await
+            .unwrap();
+        assert_eq!(
+            sender.latest("lines").unwrap().files[0].media_type,
+            "text/markdown"
+        );
+    }
+
     #[test]
     fn both_tools_are_offered_with_their_own_schema() {
         assert_eq!(compare_tool()["name"], COMPARE_NAME);
@@ -1035,7 +1147,7 @@ mod tests {
             .await
             .err()
             .unwrap()
-            .contains("is not a PNG, JPEG, GIF or WebP image"));
+            .contains("is not a file a reply can show"));
     }
 
     #[test]

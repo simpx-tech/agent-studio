@@ -328,7 +328,7 @@
             {#if output.images.length}
               <div class="result-images">
                 {#each output.images as info (info.index)}
-                  <div class="result-image-place" {@attach images.attach(viewed(info))}>
+                  <div class="result-image-place" {@attach images.attach(() => viewed(info))}>
                     <ToolResultImage
                       runId={runId!}
                       toolId={tool.id}

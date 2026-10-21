@@ -12,7 +12,7 @@ import { emptyFleet } from './fleet.ts';
 import { mergeActivityBlocks } from './activity.ts';
 import { mergeVisualizations } from './visualizations.ts';
 import { mergeArtifactRecords } from './artifact-records.ts';
-import { mergeSentFiles } from './sent-files.ts';
+import { mergeMessageFiles } from './sent-files.ts';
 import { mergeScreenCards } from './screens.ts';
 import { mergeQuestions } from './questions.ts';
 import { mergeElicitations } from './elicitations.ts';
@@ -391,8 +391,8 @@ function sameRun(
       ...(a.artifacts || b.artifacts
         ? { artifacts: mergeArtifactRecords(a.artifacts, b.artifacts) }
         : {}),
-      ...(a.sentFiles || b.sentFiles
-        ? { sentFiles: mergeSentFiles(a.sentFiles, b.sentFiles) }
+      ...(a.sentFiles || b.sentFiles || a.extraSentFiles || b.extraSentFiles
+        ? mergeMessageFiles(a, b)
         : {}),
       ...(a.screens || b.screens ? { screens: mergeScreenCards(a.screens, b.screens) } : {}),
       workflow:
@@ -728,6 +728,9 @@ export type RelayJob = {
     | 'toolOutputImage'
     | 'toolOutputModel'
     | 'toolOutputModelViews'
+    | 'toolOutputTable'
+    | 'toolOutputDocument'
+    | 'toolOutputFile'
     | 'mcp'
     | 'plugins'
     | 'undoFiles'

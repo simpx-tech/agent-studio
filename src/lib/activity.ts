@@ -8,7 +8,7 @@ import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { artifactRecordSchema, mergeArtifactRecords } from './artifact-records.ts';
 import { mergePublishedArtifacts, publishedArtifactSchema } from './published-artifacts.ts';
-import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
+import { sentFilesSchema, placeSentFiles } from './sent-files.ts';
 import { screenCardSchema, mergeScreenCards } from './screens.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
 import { applyQuestionDraft } from './question-drafts.ts';
@@ -323,7 +323,7 @@ export function applyRunEvent(message: Message, event: RunEvent): 'clock' | void
     const parsed = sentFilesSchema.safeParse(event.sentFiles);
     // Files belong to the reply's own run on the computer that kept them.
     if (message.role === 'assistant' && parsed.success && message.runId === parsed.data.runId)
-      message.sentFiles = mergeSentFiles(message.sentFiles, [parsed.data]);
+      placeSentFiles(message, parsed.data);
   } else if (event.kind === 'screen') {
     const parsed = screenCardSchema.safeParse(event.screen);
     if (message.role === 'assistant' && parsed.success)
