@@ -11,6 +11,7 @@
     type Size,
     type ZoomView,
   } from '$lib/image-zoom';
+  import { scrollsOn } from '$lib/wheel-latch';
 
   let {
     src,
@@ -35,7 +36,8 @@
     /**
      * A pane of a comparison, in the chat or in the file viewer: the image fills it however
      * small, the comparison holds the controls, and keys act on the pane that has focus. In the
-     * chat the wheel and vertical swipes scroll past it until it is zoomed in.
+     * chat vertical swipes scroll past it until it is zoomed in, and a wheel that carries on a
+     * scroll of the conversation scrolls on (`scrollsOn`).
      */
     pane?: 'inline' | 'expanded';
     /** The reader moved the image, which shows what `view` shows on any image beside it. */
@@ -245,13 +247,12 @@
   }
 
   // The wheel zooms where the pointer is; a sideways scroll pans a zoomed image. In the chat a
-  // pane leaves the wheel to the conversation, zooming only with a touchpad pinch, which the
-  // browser reports as a wheel with Ctrl held.
+  // pane lets a scroll of the conversation that reaches it carry on.
   $effect(() => {
     const element = stage;
     if (!element) return;
     const wheel = (event: WheelEvent) => {
-      if (!ready || (pane === 'inline' && !event.ctrlKey)) return;
+      if (!ready || (pane === 'inline' && scrollsOn(event))) return;
       event.preventDefault();
       const box = element.getBoundingClientRect();
       origin = { left: box.left, top: box.top };

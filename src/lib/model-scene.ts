@@ -23,6 +23,7 @@ import type {
   WebGLRenderer,
 } from 'three';
 import { blobBase64 } from './images';
+import { scrollsOn } from './wheel-latch';
 
 export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'stl' | 'fbx';
 
@@ -79,11 +80,10 @@ export type CameraView = {
 export type SceneState = CameraView & { time: number };
 export type SceneOptions = {
   /**
-   * Wheel zoom, for the expanded view. The inline view leaves the wheel and vertical swipes to the
-   * chat, zooming only with a pinch: two fingers, or a touchpad's, which arrives as a wheel with
-   * Ctrl held.
+   * The view stands in the chat: vertical swipes scroll the conversation, and a wheel that
+   * carries on a scroll of the conversation scrolls it on (`scrollsOn`) rather than zooming.
    */
-  wheelZoom?: boolean;
+  chat?: boolean;
   clip?: number;
   playing?: boolean;
   lighting?: Lighting;
@@ -514,12 +514,12 @@ export async function createModelScene(
     return moved;
   };
   // The wheel zooms towards the very point of the model under the pointer (`zoomAbout`), which
-  // the wheel of the controls cannot find, so theirs never listens. The inline view leaves the
-  // wheel and vertical swipes to the chat: a vertical swipe scrolls while a horizontal one turns
+  // the wheel of the controls cannot find, so theirs never listens. The view in the chat leaves
+  // vertical swipes to the conversation: a vertical swipe scrolls while a horizontal one turns
   // the model, and two fingers move and zoom it.
   const ownWheel = (controls as unknown as { _onMouseWheel?: EventListener })._onMouseWheel;
   if (ownWheel) canvas.removeEventListener('wheel', ownWheel);
-  if (!options.wheelZoom) canvas.style.touchAction = 'pan-y';
+  if (options.chat) canvas.style.touchAction = 'pan-y';
   const direction = new THREE.Vector3(...START).normalize();
   const start = () => {
     // A turn or move still gliding would carry on from the start: without damping, one update
@@ -621,7 +621,7 @@ export async function createModelScene(
   // camera moves towards it, so that point stays where it is while the gesture lasts.
   let aim: { point: Vector3; x: number; y: number; at: number } | undefined;
   function wheel(event: WheelEvent) {
-    if (!options.wheelZoom && !event.ctrlKey) return;
+    if (options.chat && scrollsOn(event)) return;
     event.preventDefault();
     const now = performance.now();
     if (!aim || now - aim.at > 250 || Math.hypot(event.clientX - aim.x, event.clientY - aim.y) > 4)

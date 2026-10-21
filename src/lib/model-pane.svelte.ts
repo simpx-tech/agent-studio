@@ -213,7 +213,7 @@ export class ModelPane {
       label: `3D model ${this.name}`,
       load: this.load,
       readAhead: this.kept,
-      wheelZoom: place === 'expanded',
+      chat: place === 'inline',
       clip: () => this.clip,
       playing: () => this.playing,
       lighting: () => modelLighting.value,

@@ -31,7 +31,8 @@ const report = [
 
 /**
  * A short video recorded in the page, as WebM where the engine records it. A recording made while
- * the computer is busy can come out without a frame, so it is recorded again until it plays.
+ * the computer is busy can come out without a frame, or with only its first few, so it is
+ * recorded again until it plays and reaches 0.4 seconds in.
  */
 async function recordVideo(page: Page) {
   return page.evaluate(async () => {
@@ -62,7 +63,11 @@ async function recordVideo(page: Page) {
           URL.revokeObjectURL(url);
           resolve(ok);
         };
-        video.onloadedmetadata = () => done(video.videoWidth > 0);
+        video.onloadedmetadata = () => {
+          if (!(video.videoWidth > 0)) return done(false);
+          video.onseeked = () => done(video.currentTime > 0.35);
+          video.currentTime = 0.4;
+        };
         video.onerror = () => done(false);
         setTimeout(() => done(false), 3000);
         video.src = url;

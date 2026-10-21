@@ -191,7 +191,7 @@ test('a model that cannot be drawn names why, and Retry draws it', async ({ page
   await expect(failure).toHaveCount(0);
 });
 
-test('the inline model leaves vertical swipes and the wheel to the chat', async ({ page }) => {
+test('the inline model leaves vertical swipes to the chat', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.addInitScript((data) => {
     (window as any).toolOutputs = { toolu_touch: { models: [{ format: 'glb', data, bytes: 1 }] } };
@@ -315,7 +315,7 @@ test('the right button, Shift and two fingers move a model, as far beyond it as 
       'position: fixed; left: 0; top: 0; width: 400px; height: 250px; z-index: 2147483647';
     document.body.append(canvas);
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
-    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb');
+    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb', { chat: true });
   }, still);
   type State = { position: number[]; target: number[] };
   /**
@@ -440,9 +440,7 @@ test('the wheel zooms to the very point under the pointer, as deep as any detail
       'position: fixed; left: 0; top: 0; width: 400px; height: 250px; z-index: 2147483647';
     document.body.append(canvas);
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
-    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb', {
-      wheelZoom: true,
-    });
+    (window as any).scene = await createModelScene(canvas, bytes.buffer, 'glb');
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   }, still);
   type View = { position: number[]; target: number[] };
@@ -811,7 +809,9 @@ test('views of a model start where the viewer starts and turn as dragging right 
   expect(new Set(front.map((index) => result.views[index].data)).size).toBe(4);
 });
 
-test('in the chat the wheel scrolls past a model, and a pinch zooms it', async ({ page }) => {
+test('in the chat the wheel zooms a model, while a scroll of the chat that reaches it carries on', async ({
+  page,
+}) => {
   await page.goto('/');
   const result = await page.evaluate(async (data) => {
     const modulePath = '/src/lib/model-scene.ts';
@@ -820,31 +820,53 @@ test('in the chat the wheel scrolls past a model, and a pinch zooms it', async (
     canvas.style.cssText = 'position: fixed; left: 0; top: 0; width: 400px; height: 250px';
     document.body.append(canvas);
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
-    const scene = await createModelScene(canvas, bytes.buffer, 'glb');
+    const scene = await createModelScene(canvas, bytes.buffer, 'glb', { chat: true });
     const distance = () => {
       const { position, target } = scene.view();
       return Math.hypot(...position.map((value: number, i: number) => value - target[i]));
     };
-    const wheel = (ctrlKey: boolean) => {
+    // A wheel over `target` at `x`: over the body it scrolls the page, as nothing takes it.
+    const wheel = (target: EventTarget, x = 200, ctrlKey = false, cancelable = true) => {
       const event = new WheelEvent('wheel', {
-        clientX: 200,
+        clientX: x,
         clientY: 125,
         deltaY: -50,
         ctrlKey,
         bubbles: true,
-        cancelable: true,
+        cancelable,
       });
-      canvas.dispatchEvent(event);
-      return event.defaultPrevented;
+      target.dispatchEvent(event);
+      return { taken: event.defaultPrevented, distance: distance() };
     };
     const start = distance();
-    const scrolled = wheel(false);
-    const afterWheel = distance();
-    const pinched = wheel(true);
-    return { start, scrolled, afterWheel, pinched, afterPinch: distance() };
+    // A wheel the browser already scrolled the page with arrives uncancelable: it belongs to
+    // the scroll, wherever the scroll left the pointer.
+    const scrolledBy = wheel(canvas, 200, false, false);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    const zoomed = wheel(canvas);
+    // The page scrolled the model under the pointer, which has not moved: the scroll carries on.
+    wheel(document.body);
+    const carried = wheel(canvas);
+    // The pointer moving onto the model aims at it, and the wheel zooms it.
+    const aimed = wheel(canvas, 220);
+    // So it does once the scroll paused.
+    wheel(document.body);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    const paused = wheel(canvas);
+    // A pinch zooms even in the middle of a scroll.
+    wheel(document.body);
+    const pinched = wheel(canvas, 200, true);
+    return { start, scrolledBy, zoomed, carried, aimed, paused, pinched };
   }, still);
-  expect(result.scrolled).toBe(false);
-  expect(result.afterWheel).toBe(result.start);
-  expect(result.pinched).toBe(true);
-  expect(result.afterPinch).toBeCloseTo(result.start * Math.exp(-0.5), 6);
+  const step = Math.exp(-50 * 0.0022);
+  expect(result.scrolledBy).toEqual({ taken: false, distance: result.start });
+  expect(result.zoomed.taken).toBe(true);
+  expect(result.zoomed.distance).toBeCloseTo(result.start * step, 6);
+  expect(result.carried).toEqual({ taken: false, distance: result.zoomed.distance });
+  expect(result.aimed.taken).toBe(true);
+  expect(result.aimed.distance).toBeCloseTo(result.start * step ** 2, 6);
+  expect(result.paused.taken).toBe(true);
+  expect(result.paused.distance).toBeCloseTo(result.start * step ** 3, 6);
+  expect(result.pinched.taken).toBe(true);
+  expect(result.pinched.distance).toBeCloseTo(result.start * step ** 3 * Math.exp(-0.5), 6);
 });

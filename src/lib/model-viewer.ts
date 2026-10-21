@@ -159,7 +159,8 @@ export function createModelViewer(
      * keep between reads is read only when its scene is built.
      */
     readAhead: boolean;
-    wheelZoom: boolean;
+    /** The stage stands in the chat (`SceneOptions.chat`). */
+    chat: boolean;
     clip(): number;
     playing(): boolean;
     lighting(): Lighting;
@@ -231,7 +232,7 @@ export function createModelViewer(
     let created: ModelScene;
     try {
       created = await createModelScene(element, model.bytes, model.format, {
-        wheelZoom: options.wheelZoom,
+        chat: options.chat,
         clip: options.clip(),
         playing: options.playing(),
         lighting: options.lighting(),
