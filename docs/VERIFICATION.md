@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## In the chat a 3D view or comparison takes the wheel once clicked — 2026-10-21
+
+Requested 2026-10-21, after trying the wheel zoom: "Can you do a focus system where if I click on the 3D view it focus on it and allow to scroll to zoom and if click elsewhere it focus on the chat and the scroll scrolls the chat".
+
+- In the chat the wheel zooms a model, a comparison's model panes and its image panes only while focus is within their card (`takesWheel` and `engaged` in `src/lib/wheel-focus.ts`, the cards marked `data-wheel-scope`); otherwise it scrolls the chat. A click on the model or one of the card's controls gives the card focus, and its border takes the focus colour; a click anywhere else takes focus back. A pinch, or Ctrl with the wheel, zooms the view under it either way, and a wheel the browser already scrolled the chat with, which arrives uncancelable, never zooms. This replaces the timing rule of the entry below (`wheel-latch.ts`, removed). The file viewer's wheel is unchanged.
+- Found while testing: WebKit gives a clicked button no focus (the macOS convention), so a click on a comparison's controls left focus on the page and the card never took the wheel; the cards now take focus themselves (`tabindex="-1"`, outside the Tab order) where a click lands on nothing that does.
+- Tests: `wheel-focus.test.ts`; `model-viewer.spec.ts` (a scene in a card zooms only while the model or a control in the card has focus, with a pinch whatever has focus and never with an uncancelable wheel; with the real mouse, the wheel over an inline model scrolls the chat until a click on the model, which marks its card, then zooms it without moving the chat, and scrolls the chat again after a click beside the messages, Edge and WebKit; it fails when the scene ignores focus); `compare-files.spec.ts` (with focus in the comparison the wheel zooms both panes and the chat stays; after a click on the reply's text it leaves them as they are, Edge and WebKit). In the preview app, with real input on the user's own comparison of two spheres: the wheel scrolled the chat, a click on a model pane turned the card's border to the focus colour and the wheel then zoomed both spheres without moving the chat, and after a click beside the messages the wheel scrolled the chat again.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,456 files), 882 Vitest tests in 108 files, the build, and all 455 browser tests in three shards with the sockets drained, each at its first run; after formatting, the build and both affected specs again. No Rust changed.
+- Choices of mine, not confirmed: the whole card counts, so a click on its controls or caption also gives it the wheel; image panes in a comparison follow the same rule, though a click on one still opens the viewer; a pinch zooms a view that does not have focus; no hint is shown on an unfocused view, only the border of a focused one.
+
 ## In the chat the wheel zooms a 3D view or a comparison — 2026-10-21
 
 Requested 2026-10-21, after trying the preview: "One small adjustment, when scrolling on the 3D view /comparison it should zoom instead of scrolling the page".

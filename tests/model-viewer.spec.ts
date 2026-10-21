@@ -191,6 +191,79 @@ test('a model that cannot be drawn names why, and Retry draws it', async ({ page
   await expect(failure).toHaveCount(0);
 });
 
+test('the wheel zooms an inline model after a click on it, and scrolls the chat again after a click elsewhere @webkit', async ({
+  page,
+}) => {
+  // A short window, so the chat scrolls.
+  await page.setViewportSize({ width: 1380, height: 600 });
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript((data) => {
+    const w = window as any;
+    w.toolOutputs = { toolu_focus: { models: [{ format: 'glb', data, bytes: 1 }] } };
+    // What took each wheel: one nothing took scrolls the chat.
+    window.addEventListener('wheel', (event) => (w.lastWheel = { taken: event.defaultPrevented }), {
+      passive: true,
+    });
+  }, still);
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await reply(
+    page,
+    [{ id: 'focus', toolId: 'toolu_focus', count: 1 }],
+    'Here it is.\n\n<!-- files:focus -->\n\nTurn it with the mouse.',
+  );
+  const answer = page.locator('.message:not(.user)');
+  const model = answer.getByLabel('3D model focus-0.glb');
+  const card = answer.locator('.model-view');
+  await expect(model).toBeVisible();
+  const chat = page.locator('.chat-scroll');
+  const top = () => chat.evaluate((el) => el.scrollTop);
+  const taken = () => page.evaluate(() => (window as any).lastWheel?.taken);
+  // A point on the part of the model the chat shows.
+  const onModel = async () => {
+    const [box, view] = [(await model.boundingBox())!, (await chat.boundingBox())!];
+    const [from, to] = [
+      Math.max(box.y, view.y),
+      Math.min(box.y + box.height, view.y + view.height),
+    ];
+    expect(to - from).toBeGreaterThan(40);
+    return [box.x + box.width / 2, (from + to) / 2] as const;
+  };
+  // The chat glides to the reply's end for at most 700ms.
+  await page.waitForTimeout(800);
+  expect(await top()).toBeGreaterThan(150);
+
+  // Until a click on the model, the wheel over it scrolls the chat.
+  let [x, y] = await onModel();
+  await page.mouse.move(x, y);
+  let before = await top();
+  await page.mouse.wheel(0, -100);
+  await expect.poll(top).toBeLessThan(before);
+  expect(await taken()).toBe(false);
+
+  // A click on the model gives it focus, its card says so, and the wheel zooms it.
+  [x, y] = await onModel();
+  const idle = await card.evaluate((element) => getComputedStyle(element).borderColor);
+  await page.mouse.click(x, y);
+  await expect(model).toBeFocused();
+  expect(await card.evaluate((element) => getComputedStyle(element).borderColor)).not.toBe(idle);
+  before = await top();
+  await page.mouse.wheel(0, -100);
+  await expect.poll(taken).toBe(true);
+  await page.waitForTimeout(200);
+  expect(await top()).toBe(before);
+
+  // A click elsewhere in the chat takes focus back, and the wheel scrolls the chat again.
+  const view = (await chat.boundingBox())!;
+  await page.mouse.click(view.x + 16, view.y + view.height / 2);
+  await expect(model).not.toBeFocused();
+  [x, y] = await onModel();
+  await page.mouse.move(x, y);
+  await page.mouse.wheel(0, 100);
+  await expect.poll(top).toBeGreaterThan(before);
+  expect(await taken()).toBe(false);
+});
+
 test('the inline model leaves vertical swipes to the chat', async ({ page }) => {
   await mockDesktop(page, 'capabilities');
   await page.addInitScript((data) => {
@@ -809,64 +882,65 @@ test('views of a model start where the viewer starts and turn as dragging right 
   expect(new Set(front.map((index) => result.views[index].data)).size).toBe(4);
 });
 
-test('in the chat the wheel zooms a model, while a scroll of the chat that reaches it carries on', async ({
+test('in the chat the wheel zooms a model only while focus is within its card', async ({
   page,
 }) => {
   await page.goto('/');
   const result = await page.evaluate(async (data) => {
     const modulePath = '/src/lib/model-scene.ts';
     const { createModelScene } = await import(/* @vite-ignore */ modulePath);
+    // A card as the chat shows one: the model and a control of its own.
+    const card = document.createElement('figure');
+    card.setAttribute('data-wheel-scope', '');
     const canvas = document.createElement('canvas');
+    canvas.tabIndex = 0;
     canvas.style.cssText = 'position: fixed; left: 0; top: 0; width: 400px; height: 250px';
-    document.body.append(canvas);
+    const button = document.createElement('button');
+    card.append(canvas, button);
+    document.body.append(card);
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
     const scene = await createModelScene(canvas, bytes.buffer, 'glb', { chat: true });
     const distance = () => {
       const { position, target } = scene.view();
       return Math.hypot(...position.map((value: number, i: number) => value - target[i]));
     };
-    // A wheel over `target` at `x`: over the body it scrolls the page, as nothing takes it.
-    const wheel = (target: EventTarget, x = 200, ctrlKey = false, cancelable = true) => {
+    const wheel = (ctrlKey = false, cancelable = true) => {
       const event = new WheelEvent('wheel', {
-        clientX: x,
+        clientX: 200,
         clientY: 125,
         deltaY: -50,
         ctrlKey,
         bubbles: true,
         cancelable,
       });
-      target.dispatchEvent(event);
+      canvas.dispatchEvent(event);
       return { taken: event.defaultPrevented, distance: distance() };
     };
     const start = distance();
-    // A wheel the browser already scrolled the page with arrives uncancelable: it belongs to
-    // the scroll, wherever the scroll left the pointer.
-    const scrolledBy = wheel(canvas, 200, false, false);
-    await new Promise((resolve) => setTimeout(resolve, 650));
-    const zoomed = wheel(canvas);
-    // The page scrolled the model under the pointer, which has not moved: the scroll carries on.
-    wheel(document.body);
-    const carried = wheel(canvas);
-    // The pointer moving onto the model aims at it, and the wheel zooms it.
-    const aimed = wheel(canvas, 220);
-    // So it does once the scroll paused.
-    wheel(document.body);
-    await new Promise((resolve) => setTimeout(resolve, 650));
-    const paused = wheel(canvas);
-    // A pinch zooms even in the middle of a scroll.
-    wheel(document.body);
-    const pinched = wheel(canvas, 200, true);
-    return { start, scrolledBy, zoomed, carried, aimed, paused, pinched };
+    // While focus is in the chat the wheel scrolls past the model, and a pinch zooms it.
+    const unfocused = wheel();
+    const pinched = wheel(true);
+    // Focus on the model, as a click gives it, and on one of its controls: the wheel zooms.
+    canvas.focus();
+    const focused = wheel();
+    button.focus();
+    const viaControl = wheel();
+    // A wheel the browser already scrolled the chat with stays the chat's.
+    const uncancelable = wheel(false, false);
+    // Focus back in the chat, as a click elsewhere takes it.
+    button.blur();
+    const blurred = wheel();
+    return { start, unfocused, pinched, focused, viaControl, uncancelable, blurred };
   }, still);
   const step = Math.exp(-50 * 0.0022);
-  expect(result.scrolledBy).toEqual({ taken: false, distance: result.start });
-  expect(result.zoomed.taken).toBe(true);
-  expect(result.zoomed.distance).toBeCloseTo(result.start * step, 6);
-  expect(result.carried).toEqual({ taken: false, distance: result.zoomed.distance });
-  expect(result.aimed.taken).toBe(true);
-  expect(result.aimed.distance).toBeCloseTo(result.start * step ** 2, 6);
-  expect(result.paused.taken).toBe(true);
-  expect(result.paused.distance).toBeCloseTo(result.start * step ** 3, 6);
+  const pinch = Math.exp(-0.5);
+  expect(result.unfocused).toEqual({ taken: false, distance: result.start });
   expect(result.pinched.taken).toBe(true);
-  expect(result.pinched.distance).toBeCloseTo(result.start * step ** 3 * Math.exp(-0.5), 6);
+  expect(result.pinched.distance).toBeCloseTo(result.start * pinch, 6);
+  expect(result.focused.taken).toBe(true);
+  expect(result.focused.distance).toBeCloseTo(result.start * pinch * step, 6);
+  expect(result.viaControl.taken).toBe(true);
+  expect(result.viaControl.distance).toBeCloseTo(result.start * pinch * step ** 2, 6);
+  expect(result.uncancelable).toEqual({ taken: false, distance: result.viaControl.distance });
+  expect(result.blurred).toEqual({ taken: false, distance: result.viaControl.distance });
 });

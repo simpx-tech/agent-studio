@@ -228,9 +228,14 @@
   </div>
 {/snippet}
 
+<!-- The wheel zooms the panes while focus is within the comparison, from a click on a model pane
+     or a control; otherwise it scrolls the chat. The comparison takes focus itself where a click
+     lands on nothing that takes it, as on a button in WebKit. -->
 <div
   bind:this={root}
   class="compare-view"
+  data-wheel-scope
+  tabindex="-1"
   role="group"
   aria-label={`Comparison of ${comparisonName(group.files)}`}
   style:--pane-aspect={aspect}
@@ -258,6 +263,13 @@
   }
   .compare-view:hover {
     border-color: var(--border-hover);
+  }
+  /* The comparison that takes the wheel says so, with its border alone. */
+  .compare-view:focus-within {
+    border-color: var(--focus-ring);
+  }
+  .compare-view:focus {
+    outline: none;
   }
   /* Side by side up to three, two rows of two for four (`chatColumns`), and two to a row in a
      comparison as narrow as a phone's chat. */

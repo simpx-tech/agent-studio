@@ -171,7 +171,10 @@
   </div>
 {/snippet}
 
-<figure class="model-view" {@attach viewer.attach(() => viewed)}>
+<!-- The wheel zooms the model while focus is within the card, from a click on the model or one of
+     its controls; otherwise it scrolls the chat. The card takes focus itself where a click lands
+     on nothing that takes it, as on a button in WebKit. -->
+<figure class="model-view" data-wheel-scope tabindex="-1" {@attach viewer.attach(() => viewed)}>
   <ModelStage {pane} place="inline" />
   {#if pane.viewsOnly}
     {@render turntableBar('inline')}
@@ -195,6 +198,13 @@
   }
   .model-view:hover {
     border-color: var(--border-hover);
+  }
+  /* The card that takes the wheel says so, with its border alone. */
+  .model-view:focus-within {
+    border-color: var(--focus-ring);
+  }
+  .model-view:focus {
+    outline: none;
   }
   .model-turn {
     min-width: 2.5em;

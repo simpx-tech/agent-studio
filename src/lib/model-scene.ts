@@ -23,7 +23,7 @@ import type {
   WebGLRenderer,
 } from 'three';
 import { blobBase64 } from './images';
-import { scrollsOn } from './wheel-latch';
+import { engaged, takesWheel } from './wheel-focus';
 
 export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'stl' | 'fbx';
 
@@ -80,8 +80,8 @@ export type CameraView = {
 export type SceneState = CameraView & { time: number };
 export type SceneOptions = {
   /**
-   * The view stands in the chat: vertical swipes scroll the conversation, and a wheel that
-   * carries on a scroll of the conversation scrolls it on (`scrollsOn`) rather than zooming.
+   * The view stands in the chat: vertical swipes scroll the conversation, and the wheel zooms
+   * only while focus is within the view's card, which a click on the view gives it (`takesWheel`).
    */
   chat?: boolean;
   clip?: number;
@@ -621,7 +621,7 @@ export async function createModelScene(
   // camera moves towards it, so that point stays where it is while the gesture lasts.
   let aim: { point: Vector3; x: number; y: number; at: number } | undefined;
   function wheel(event: WheelEvent) {
-    if (options.chat && scrollsOn(event)) return;
+    if (options.chat && !takesWheel(event, engaged(canvas))) return;
     event.preventDefault();
     const now = performance.now();
     if (!aim || now - aim.at > 250 || Math.hypot(event.clientX - aim.x, event.clientY - aim.y) > 4)

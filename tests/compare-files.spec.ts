@@ -188,7 +188,10 @@ test('compared images sit side by side at their marker and zoom and pan together
   expectSameRegion(await region(before), { x: 0.5, y: 0.5, zoom: 1 });
   expectSameRegion(await region(after), { x: 0.5, y: 0.5, zoom: 1 });
 
-  // The wheel zooms them in the chat too, together, and the chat stays where it is.
+  // With focus within the comparison, from the controls used above, the wheel zooms the panes
+  // in the chat too, together, and the chat stays where it is.
+  const comparison = reply.locator('.compare-view');
+  expect(await comparison.evaluate((element) => element.matches(':focus-within'))).toBe(true);
   const chat = page.locator('.chat-scroll');
   const top = await chat.evaluate((el) => el.scrollTop);
   await page.mouse.move(right.x + right.width / 2, right.y + right.height / 2);
@@ -197,6 +200,13 @@ test('compared images sit side by side at their marker and zoom and pan together
   expectSameRegion(await region(before), await region(after));
   expect(await chat.evaluate((el) => el.scrollTop)).toBe(top);
   await reply.getByRole('button', { name: 'Reset views' }).click();
+  // A click elsewhere in the chat takes focus back, and the wheel leaves the panes as they are.
+  await prose.filter({ hasText: 'side by side' }).click();
+  expect(await comparison.evaluate((element) => element.matches(':focus-within'))).toBe(false);
+  await page.mouse.move(right.x + right.width / 2, right.y + right.height / 2);
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(200);
+  expectSameRegion(await region(after), { x: 0.5, y: 0.5, zoom: 1 });
 
   // On a phone the panes stay side by side.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -204,45 +214,6 @@ test('compared images sit side by side at their marker and zoom and pan together
   const [narrowLeft, narrowRight] = [(await before.boundingBox())!, (await after.boundingBox())!];
   expect(Math.abs(narrowLeft.y - narrowRight.y)).toBeLessThan(1);
   expect(narrowLeft.width).toBeGreaterThan(120);
-});
-
-test('a scroll of the chat that reaches a comparison carries on past it, and the next wheel zooms it @webkit', async ({
-  page,
-}) => {
-  // A short window, so the chat scrolls past the comparison.
-  await page.setViewportSize({ width: 1380, height: 600 });
-  await showImages(page);
-  const reply = page.locator('.message:not(.user)');
-  const after = reply.getByRole('img', { name: 'Image 2, After' });
-  await expect(after).toBeVisible();
-  const chat = page.locator('.chat-scroll');
-  const top = () => chat.evaluate((el) => el.scrollTop);
-  // The chat glides to the reply's end for at most 700ms; then it starts from its top.
-  await page.waitForTimeout(800);
-  expect(await chat.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(150);
-  await chat.evaluate((el) => el.scrollTo({ top: 0, behavior: 'instant' }));
-  await page.waitForTimeout(100);
-  expect(await top()).toBe(0);
-  // The pointer rests on the reply just above the pane, and the wheel scrolls the chat down
-  // until the pane lies under it.
-  const pane = (await after.boundingBox())!;
-  const [x, y] = [pane.x + pane.width / 2, pane.y - 12];
-  await page.mouse.move(x, y);
-  await page.mouse.wheel(0, 80);
-  await expect
-    .poll(async () => (await after.boundingBox())!.y, { intervals: [16] })
-    .toBeLessThan(y - 20);
-  // The scroll goes on past the pane, which stays as it was.
-  const reached = await top();
-  await page.mouse.wheel(0, 40);
-  await expect.poll(top, { intervals: [16] }).toBeGreaterThan(reached);
-  expectSameRegion(await region(after), { x: 0.5, y: 0.5, zoom: 1 });
-  // Once the scroll has paused, the wheel zooms the pane and the chat stays where it is.
-  await page.waitForTimeout(700);
-  const held = await top();
-  await page.mouse.wheel(0, -120);
-  await expect.poll(async () => (await region(after)).zoom).toBeGreaterThan(1.05);
-  expect(await top()).toBe(held);
 });
 
 test('a comparison opens whole in the file viewer, which shares its mode @webkit', async ({
