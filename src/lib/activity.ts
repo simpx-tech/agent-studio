@@ -7,6 +7,7 @@ import { planSchema } from './plans.ts';
 import { proposedPlanSchema, mergeProposedPlans } from './proposed-plans.ts';
 import { visualizationSchema, mergeVisualizations } from './visualizations.ts';
 import { artifactRecordSchema, mergeArtifactRecords } from './artifact-records.ts';
+import { mergePublishedArtifacts, publishedArtifactSchema } from './published-artifacts.ts';
 import { sentFilesSchema, mergeSentFiles } from './sent-files.ts';
 import { screenCardSchema, mergeScreenCards } from './screens.ts';
 import { questionRequestSchema, mergeQuestions } from './questions.ts';
@@ -182,6 +183,7 @@ export function savesAtOnce(event: Pick<RunEvent, 'kind'>): boolean {
     'proposedplan',
     'visualization',
     'artifact',
+    'publishedartifact',
     'sentfiles',
     'screen',
     'filechanges',
@@ -311,6 +313,12 @@ export function applyRunEvent(message: Message, event: RunEvent): 'clock' | void
     const parsed = artifactRecordSchema.safeParse(event.artifact);
     if (message.role === 'assistant' && parsed.success)
       message.artifacts = mergeArtifactRecords(message.artifacts, [parsed.data]);
+  } else if (event.kind === 'publishedartifact') {
+    const parsed = publishedArtifactSchema.safeParse(event.publishedArtifact);
+    if (message.role === 'assistant' && parsed.success)
+      message.publishedArtifacts = mergePublishedArtifacts(message.publishedArtifacts, [
+        parsed.data,
+      ]);
   } else if (event.kind === 'sentfiles') {
     const parsed = sentFilesSchema.safeParse(event.sentFiles);
     // Files belong to the reply's own run on the computer that kept them.
@@ -639,6 +647,19 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
     const index = events.findIndex((e) => e.kind === 'screen' && e.screen?.id === parsed.data.id);
     if (index >= 0) {
       if (parsed.data.revision > (events[index].screen?.revision ?? -1)) events[index] = event;
+    } else events.push(event);
+    return;
+  }
+  // Each claude.ai artifact the reply published or opened, at its latest revision.
+  if (event.kind === 'publishedartifact') {
+    const parsed = publishedArtifactSchema.safeParse(event.publishedArtifact);
+    if (!parsed.success) return;
+    const index = events.findIndex(
+      (e) => e.kind === 'publishedartifact' && e.publishedArtifact?.id === parsed.data.id,
+    );
+    if (index >= 0) {
+      if (parsed.data.revision > (events[index].publishedArtifact?.revision ?? -1))
+        events[index] = event;
     } else events.push(event);
     return;
   }

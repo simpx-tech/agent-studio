@@ -775,7 +775,7 @@ async fn stream_turn(
         ),
     );
     let mut sender = crate::providers::sent_files::FileSender::default();
-    let mut shower = crate::providers::artifact_tool::ArtifactShower::default();
+    let mut published = crate::providers::published_artifacts::PublishedArtifacts::default();
     let mut screen_tools = crate::screens::tools::Agent::default();
     let screen_context = channel.and_then(EventSink::screens);
     // Files this reply shows are checked and kept where the conversation runs.
@@ -1015,7 +1015,7 @@ async fn stream_turn(
                             }
                             for event in visualizer.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             for event in sender.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
-                            for event in shower.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
+                            for event in published.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             for event in screen_tools.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if let Some(q) = &mut questions { q.workflow.observe_claude(&value); }
                             if value["type"] == "control_request" {
@@ -1050,10 +1050,6 @@ async fn stream_turn(
                                     continue;
                                 }
                                 if let Some(response) = sender.claude(&value, &staging).await {
-                                    process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
-                                    continue;
-                                }
-                                if let Some(response) = shower.claude(&value, &staging).await {
                                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
                                     continue;
                                 }
@@ -1112,7 +1108,7 @@ async fn stream_turn(
                     }
                     if request.agent.provider == "gemini" && !decoder.completed { break Err("Antigravity ended before confirming the response. Try again.".into()); }
                     if claude_visualizer && stdin_open { break Err("Claude exited before confirming the final reply. Partial output has been kept.".into()); }
-                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !shower.has_artifacts() && !screen_tools.has_screens() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
+                    if decoder.text.trim().is_empty() && !visualizer.has_visuals() && !sender.has_files() && !published.has_artifacts() && !screen_tools.has_screens() { break Err("The CLI exited without a text response. Check Connections or try another model.".into()); }
                     break Ok(("complete".to_string(), decoder.text));
                 }
             },
@@ -1195,7 +1191,7 @@ async fn stream_turn(
                 if decoder.text.trim().is_empty()
                     && !visualizer.has_visuals()
                     && !sender.has_files()
-                    && !shower.has_artifacts()
+                    && !published.has_artifacts()
                 {
                     process.healthy = false;
                     break Err("The CLI finished without a text response. Check Connections or try another model.".into());

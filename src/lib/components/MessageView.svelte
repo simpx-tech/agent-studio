@@ -10,6 +10,7 @@
     Hourglass,
     MessageCircleQuestionMark,
     LayoutDashboard,
+    AppWindow,
     ShipWheel,
     Workflow,
   } from '@lucide/svelte';
@@ -341,7 +342,23 @@
   {#if message.status === 'cancelled' && !message.error}<p class="muted small">
       Response stopped.
     </p>{/if}
-  {#if artifacts.length || message.screens?.length}<div class="response-extras">
+  {#if artifacts.length || message.screens?.length || message.publishedArtifacts?.length}<div
+      class="response-extras"
+    >
+      {#if message.publishedArtifacts?.length}<div
+          class="response-screens"
+          aria-label="Artifacts on claude.ai"
+        >
+          <!-- Claude Code published or opened these on claude.ai, where they open. -->
+          {#each message.publishedArtifacts as card (card.id)}<button
+              class="secondary screen-open"
+              onclick={() =>
+                void openLink(card.url).catch(() => (linkError = 'Could not open this link.'))}
+              ><AppWindow size={16} aria-hidden="true" /><span>{card.title}</span><small
+                >Open on claude.ai</small
+              ></button
+            >{/each}
+        </div>{/if}
       {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
           {#each message.screens as card (card.id)}<button
               class="secondary screen-open"

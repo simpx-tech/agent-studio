@@ -33,6 +33,7 @@ COPY src/lib/tool-output.ts ./src/lib/
 COPY src/lib/usage-limits.ts ./src/lib/
 COPY src/lib/question-drafts.ts ./src/lib/
 COPY src/lib/screens.ts ./src/lib/
+COPY src/lib/published-artifacts.ts ./src/lib/
 COPY src/lib/light-chats.ts ./src/lib/
 COPY src/lib/json-equal.ts ./src/lib/
 COPY src/lib/workflow-model.ts ./src/lib/

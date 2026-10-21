@@ -11,6 +11,11 @@ import { planSchema, type Plan } from './plans.ts';
 import { proposedPlansSchema, proposedPlanHistory, type ProposedPlan } from './proposed-plans.ts';
 import { visualizationsSchema, type Visualization } from './visualizations.ts';
 import { artifactRecordsSchema, type ArtifactRecord } from './artifact-records.ts';
+import {
+  publishedArtifactsSchema,
+  publishedHistory,
+  type PublishedArtifact,
+} from './published-artifacts.ts';
 import { sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
 import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
@@ -221,6 +226,8 @@ export const messageSchema = z
     visualizations: visualizationsSchema.optional(),
     // The artifact pages the reply showed with its show_artifact tool, with their source.
     artifacts: artifactRecordsSchema.optional(),
+    // The claude.ai artifacts the reply published or opened, which their cards open there.
+    publishedArtifacts: publishedArtifactsSchema.optional(),
     sentFiles: sentFileGroupsSchema.optional(),
     // The screens the reply saved, which their cards open from the computer that keeps them.
     screens: screenCardsSchema.optional(),
@@ -347,6 +354,7 @@ export type RunEvent = TokenUsage & {
     | 'filechanges'
     | 'visualization'
     | 'artifact'
+    | 'publishedartifact'
     | 'sentfiles'
     | 'screen'
     | 'question'
@@ -371,6 +379,9 @@ export type RunEvent = TokenUsage & {
   proposedPlan?: ProposedPlan;
   visualization?: Visualization;
   artifact?: ArtifactRecord;
+  publishedArtifact?: PublishedArtifact;
+  // A claude.ai artifact the reply created or opened, which the window that runs it opens.
+  open?: boolean;
   sentFiles?: SentFiles;
   screen?: ScreenCard;
   question?: QuestionRequest;
@@ -452,7 +463,9 @@ export function historyFor(conversation: Conversation): RunRequest['messages'] {
         (m.role === 'assistant'
           ? questionHistory(m.questions) +
             steeringHistory(m.steering) +
-            (m.status === 'complete' ? proposedPlanHistory(m.proposedPlans) : '')
+            (m.status === 'complete'
+              ? proposedPlanHistory(m.proposedPlans) + publishedHistory(m.publishedArtifacts)
+              : '')
           : ''),
       ...(m.role === 'user' && m.images?.length ? { images: m.images } : {}),
       ...(m.role === 'user' && m.skills?.length ? { skills: m.skills } : {}),

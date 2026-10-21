@@ -1087,41 +1087,33 @@ async fn installed_claude_saves_a_screen_whose_action_runs_once_allowed() {
     );
 }
 
-/// A chat shows a page it wrote through the CLI's own call of show_artifact, which reads the file
-/// where the chat runs and answers with the page as the viewer renders it: the agent reads the
-/// problems the preview found (a page too wide for a phone here) and places the card.
+/// A chat has Claude Code's own Artifact tools, which a headless CLI offers only when its launch
+/// asks (requested 2026-10-21): a read-only listing of the account's claude.ai artifacts goes
+/// through the CLI's own login and comes back as a labelled call, publishing nothing.
 #[tokio::test]
-#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity, a model's tool choice and Edge or Chrome."]
-async fn installed_claude_shows_an_artifact_and_reads_its_preview() {
-    let folder = tempfile::tempdir().unwrap();
-    let page = folder.path().join("probe.html");
-    let text = format!("This is an Agent Studio integration test. Write this exact page to {}: <!doctype html><html><head><title>Probe page</title><style>body{{margin:0;background:#fff;color:#111;font:16px system-ui}}.wide{{width:700px;height:40px;background:#c4e88c}}</style></head><body><h1>Probe page</h1><div class=\"wide\"></div></body></html>. Then call mcp__agent_studio__show_artifact once with id probe, title Probe page and that path. Do not change the page or call the tool again. Reply with one sentence naming the problems the preview reported, followed by <!-- artifact:probe --> on its own line.", page.display());
-    let (result, events, _) = run(&text, false).await;
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity, a model's tool choice and the account's claude.ai artifacts."]
+async fn installed_claude_lists_its_claude_ai_artifacts() {
+    let text = "This is an Agent Studio integration test. Call the Artifact tool exactly once with {\"action\":\"list\",\"limit\":1}. Publish nothing and call no other tool. Reply with one short sentence saying how many artifacts the listing reports in all.";
+    let (result, events, _) = run(text, false).await;
     for line in outline(&events) {
         eprintln!("{line}");
     }
     let (status, answer) = result.expect("Installed CLI failed");
     assert_eq!(status, "complete");
-    let artifact = events
+    let listed = events
         .iter()
-        .find_map(|event| match event {
-            RunEvent::Artifact { artifact } => Some(artifact.clone()),
+        .filter_map(|event| match event {
+            RunEvent::Tool { tool } => Some(serde_json::to_value(tool).unwrap()),
             _ => None,
         })
-        .expect("Claude showed no artifact");
-    assert_eq!(artifact.id, "probe");
-    assert_eq!(artifact.language, "html");
-    assert!(
-        artifact.source.contains("<h1>Probe page</h1>"),
-        "{}",
-        artifact.source
-    );
-    assert!(answer.contains("<!-- artifact:probe -->"), "{answer}");
-    let told = answer.to_lowercase();
-    assert!(
-        told.contains("sideways") || told.contains("scroll") || told.contains("wide"),
-        "{answer}"
-    );
+        .rfind(|tool| tool["name"] == "Artifact")
+        .expect("Claude never called its Artifact tool");
+    assert_eq!(listed["operation"], "artifact:list", "{listed}");
+    assert_eq!(listed["status"], "complete", "{listed}");
+    // Listing makes no card.
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, RunEvent::PublishedArtifact { .. })));
     eprintln!("Answer: {answer}");
 }
 

@@ -506,6 +506,41 @@ function classify(command: string): CommandKind {
 }
 
 /** The server and tool of a connected (MCP) tool call, if it is one. */
+// What a call of Claude Code's own Artifact tools does, by the action it reported.
+const artifactActions: Record<string, string> = {
+  publish: 'Publish artifact',
+  list: 'List artifacts',
+  read: 'Read artifact',
+  open: 'Open artifact',
+  delete: 'Delete artifact',
+  pin: 'Pin artifact',
+  unpin: 'Unpin artifact',
+  list_files: 'List artifact files',
+  read_file: 'Read artifact file',
+  list_types: 'List artifact types',
+  describe_type: 'Read artifact type',
+  quickstart: 'Choose artifact type',
+  comments: 'Read comments',
+  reply: 'Reply to comment',
+  resolve: 'Resolve comment',
+  read_db: 'Read artifact data',
+  write_db: 'Write artifact data',
+};
+const artifactTools: Record<string, string> = {
+  Artifact: 'Artifact',
+  ArtifactComments: 'Artifact comments',
+  ArtifactData: 'Artifact data',
+};
+/** The title of a call of Claude Code's own Artifact tools, which act on claude.ai. */
+export function claudeAiArtifactTitle(
+  tool: Pick<ToolActivity, 'name' | 'operation'>,
+): string | undefined {
+  const name = Object.hasOwn(artifactTools, tool.name) ? artifactTools[tool.name] : undefined;
+  if (!name) return;
+  const action = tool.operation?.startsWith('artifact:') ? tool.operation.slice(9) : '';
+  return Object.hasOwn(artifactActions, action) ? artifactActions[action] : name;
+}
+
 export function connectedTool(tool: ToolActivity): { server?: string; name: string } | undefined {
   const claude = tool.name.match(/^mcp__(.+?)__(.+)$/);
   if (claude) return { server: claude[1], name: claude[2] };
@@ -875,6 +910,9 @@ export function toolVisual(
   // The page a show_artifact call shows, by its title.
   if (['show_artifact', 'mcp__agent_studio__show_artifact'].includes(tool.name))
     return { icon: 'artifact', title: 'Show artifact', detail: tool.detail };
+  // Claude Code's own Artifact tools act on claude.ai, by their action.
+  const claudeAi = claudeAiArtifactTitle(tool);
+  if (claudeAi) return { icon: 'artifact', title: claudeAi, detail: tool.detail };
   // A saved screen's title is the one input its call shows.
   const screenTool = {
     save_screen: 'Save screen',

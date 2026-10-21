@@ -209,6 +209,7 @@ const kindIcons: Record<keyof typeof phrases, ToolIconKey> = {
   directory: 'directory',
   skill: 'skill',
   image: 'image',
+  artifact: 'artifact',
   tool: 'tool',
 };
 
@@ -261,6 +262,7 @@ function action(tool: ToolActivity): keyof typeof phrases {
   if (tool.operation === 'listAgents') return 'directory';
   if (tool.category === 'skill') return 'skill';
   if (['View image', 'view_image'].includes(tool.name)) return 'image';
+  if (tool.name === 'Artifact' && tool.operation === 'artifact:publish') return 'artifact';
   return 'tool';
 }
 
@@ -288,12 +290,21 @@ const phrases = {
   directory: ['agent list', 'agent lists', 'checked #', 'checking #', '#'],
   skill: ['skill', 'skills', 'used #', 'using #', '#'],
   image: ['image', 'images', 'viewed #', 'viewing #', '#'],
+  // Claude Code's own Artifact tool publishing to claude.ai.
+  artifact: ['artifact', 'artifacts', 'published #', 'publishing #', 'publishes of #'],
   tool: ['tool', 'tools', 'used #', 'using #', '#'],
 } as const;
 
-// A file counts once however often it was read or edited, and a resumed sub-agent counts once.
-// Every other call counts once.
+// A file counts once however often it was read or edited, a resumed sub-agent once, and an
+// artifact once however often it was published. Every other call counts once.
 function count(kind: keyof typeof phrases, tools: ToolActivity[]) {
+  if (kind === 'artifact')
+    return new Set(
+      tools.map(
+        (tool) =>
+          tool.facts?.find((fact) => fact.label === 'Link')?.value ?? tool.detail ?? tool.id,
+      ),
+    ).size;
   if (kind === 'agent' || kind === 'backgroundAgent')
     return new Set(
       tools.flatMap((tool) =>
@@ -542,7 +553,31 @@ const liveForms: Record<keyof typeof phrases, Forms> = {
   directory: ['Listing agents', 'Listed agents', 'Agent list'],
   skill: ['Using skill', 'Used skill', 'Skill'],
   image: ['Viewing', 'Viewed', 'Image'],
+  artifact: ['Publishing', 'Published', 'Publish of'],
   tool: ['Using', 'Used', ''],
+};
+// Claude Code's other artifact actions, by their call's title, naming the artifact they act on.
+const artifactForms: Record<string, Forms> = {
+  'List artifacts': ['Listing artifacts', 'Listed artifacts', 'Artifact list'],
+  'List artifact types': ['Listing artifact types', 'Listed artifact types', 'Artifact type list'],
+  'Read artifact type': ['Reading artifact type', 'Read artifact type', 'Artifact type'],
+  'Choose artifact type': [
+    'Choosing an artifact type',
+    'Chose an artifact type',
+    'Artifact type choice',
+  ],
+  'List artifact files': ['Listing the files of', 'Listed the files of', 'File list of'],
+  'Read artifact file': ['Reading a file of', 'Read a file of', 'File read of'],
+  'Open artifact': ['Opening', 'Opened', 'Open of'],
+  'Read artifact': ['Reading', 'Read', 'Read of'],
+  'Delete artifact': ['Deleting', 'Deleted', 'Delete of'],
+  'Pin artifact': ['Pinning', 'Pinned', 'Pin of'],
+  'Unpin artifact': ['Unpinning', 'Unpinned', 'Unpin of'],
+  'Read comments': ['Reading comments on', 'Read comments on', 'Comments on'],
+  'Reply to comment': ['Replying to a comment on', 'Replied to a comment on', 'Reply on'],
+  'Resolve comment': ['Resolving a comment on', 'Resolved a comment on', 'Resolve on'],
+  'Read artifact data': ['Reading the data of', 'Read the data of', 'Data of'],
+  'Write artifact data': ['Writing the data of', 'Wrote the data of', 'Data write to'],
 };
 const namedForms: Record<string, Forms> = {
   Write: ['Writing', 'Wrote', 'Write to'],
@@ -565,6 +600,11 @@ const iconForms: Partial<Record<ToolIconKey, Forms>> = {
   toolSearch: ['Searching tools for', 'Searched tools for', 'Tool search for'],
 };
 
+const artifactForm = (visual: ToolVisual) =>
+  visual.icon === 'artifact' && Object.hasOwn(artifactForms, visual.title)
+    ? artifactForms[visual.title]
+    : undefined;
+
 /** A call's live row, from its reported metadata only. */
 export function liveAction(
   tool: ToolActivity,
@@ -581,6 +621,7 @@ export function liveAction(
       ? liveForms[kind]
       : (namedForms[tool.name] ??
         (visual.icon === 'newFile' ? namedForms.Write : undefined) ??
+        (kind === 'tool' ? artifactForm(visual) : undefined) ??
         (kind === 'tool' || visual.icon === 'monitor' ? iconForms[visual.icon] : undefined) ??
         liveForms[kind]);
   const form =
@@ -632,10 +673,12 @@ function liveTarget(
       return { target: tool.name };
     case 'hookContext':
       return { target: visual.detail, code: true };
+    case 'artifact':
+      return { target: visual.detail };
     case 'tool': {
       const connected = connectedTool(tool);
       if (connected) return { target: connected.name, hint: connected.server };
-      if (visual.icon === 'workflow') return { target: tool.detail };
+      if (visual.icon === 'workflow' || artifactForm(visual)) return { target: tool.detail };
       if (visual.icon === 'toolSearch') return { target: tool.query };
       return iconForms[visual.icon] || namedForms[tool.name] ? {} : { target: visual.title };
     }

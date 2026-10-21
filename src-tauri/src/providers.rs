@@ -16,6 +16,7 @@ pub mod elicitation;
 mod elicitation_schema;
 #[cfg(windows)]
 mod login_console;
+pub mod published_artifacts;
 pub mod questions;
 pub mod sent_files;
 pub mod sessions;
@@ -920,10 +921,16 @@ impl RunRequest {
     }
     fn capabilities(&self, studio_tools: bool) -> String {
         let tools = if self.tools_enabled() {
-            // Agent Studio's own tools show an artifact from a file; without them, a fence does.
-            let artifact_tool =
-                studio_tools && (self.uses_codex_server() || self.uses_claude_visualizer());
-            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::guidance(artifact_tool))
+            // A Codex chat with Agent Studio's tools shows an artifact from a file, a Claude chat
+            // publishes one to claude.ai when asked, and otherwise a fence holds it.
+            let delivery = if self.uses_claude_visualizer() {
+                crate::artifacts::Delivery::ClaudeAi
+            } else if studio_tools && self.uses_codex_server() {
+                crate::artifacts::Delivery::Tool
+            } else {
+                crate::artifacts::Delivery::Fence
+            };
+            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::guidance(delivery))
         } else {
             "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
@@ -1323,6 +1330,10 @@ pub async fn chat_command(
                     "env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"},
                     "permissions": {"ask": ["EnterPlanMode", "ExitPlanMode"]}
                 });
+                // Claude Code's own Artifact tools, which publish to claude.ai.
+                for (name, value) in published_artifacts::ENV {
+                    settings["env"][name] = value.into();
+                }
                 if let Some(fast) = request.agent.fast_mode {
                     settings["fastMode"] = fast.into();
                 }
@@ -1960,11 +1971,21 @@ mod tests {
             r.agent.provider = provider.into();
             assert!(r.prompt().contains("Tools are enabled"));
             assert!(!r.prompt().contains("Do not use tools"));
-            // Every chat agent learns how to deliver an artifact, with show_artifact where Agent
-            // Studio's tools are; background work never does.
-            let artifacts = crate::artifacts::guidance(provider != "gemini");
+            // Every chat agent learns how to deliver an artifact: Codex with show_artifact, Claude
+            // as a fence or on claude.ai when asked, others as a fence; background work never does.
+            let delivery = match provider {
+                "codex" => crate::artifacts::Delivery::Tool,
+                "claude" => crate::artifacts::Delivery::ClaudeAi,
+                _ => crate::artifacts::Delivery::Fence,
+            };
+            let artifacts = crate::artifacts::guidance(delivery);
             assert!(r.prompt().contains(&artifacts));
-            assert_eq!(r.prompt().contains("show_artifact"), provider != "gemini");
+            assert_eq!(r.prompt().contains("show_artifact"), provider == "codex");
+            assert_eq!(
+                r.prompt()
+                    .contains("only when the user asks for an artifact there"),
+                provider == "claude"
+            );
             // So do the tools that show files, singly and side by side.
             for guidance in [sent_files::GUIDANCE, sent_files::COMPARE_GUIDANCE] {
                 assert_eq!(r.prompt().contains(guidance), provider != "gemini");
@@ -2067,10 +2088,15 @@ mod tests {
                     assert!(args.iter().any(|a| a == "--include-hook-events"));
                     assert!(args.iter().any(|a| a == "--forward-subagent-text"));
                     assert!(args_contain("--tools", "default"));
-                    assert!(args_contain(
-                        "--settings",
-                        r#"{"cleanupPeriodDays":3650,"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}}"#
-                    ));
+                    let settings: serde_json::Value = serde_json::from_str(
+                        &args.windows(2).find(|a| a[0] == "--settings").unwrap()[1],
+                    )
+                    .unwrap();
+                    // Claude Code's own Artifact tools, without automatic comment replies.
+                    assert_eq!(
+                        settings,
+                        serde_json::json!({"cleanupPeriodDays":3650,"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1","CLAUDE_CODE_ARTIFACT":"1","CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT":"0"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}})
+                    );
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| matches!(
                         a.as_ref(),

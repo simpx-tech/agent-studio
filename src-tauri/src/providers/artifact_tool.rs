@@ -1,16 +1,16 @@
-//! Pages a reply shows as artifacts (requested 2026-10-14). The agent writes a page to a file and
-//! names it in its show_artifact call, the conversation's own registered call alone (Claude's
-//! parent tool use, Codex's parent thread without a namespace). The computer running the
-//! conversation reads the file whole, the reply keeps its source as a revision of the id, shown
-//! as a card at its <!-- artifact:ID --> marker, and the call's result shows the agent the page
-//! as the viewer renders it (`page_preview.rs`): a screenshot of each view with the problems
-//! found, so it can fix the file and show the page again under the same id. The path is read and
-//! never kept.
+//! Pages a Codex reply shows as artifacts (requested 2026-10-14; Claude chats publish to
+//! claude.ai instead since 2026-10-21, `published_artifacts.rs`). The agent writes a page to a
+//! file and names it in its show_artifact call, the conversation's own call alone (its parent
+//! thread without a namespace). The computer running the conversation reads the file whole, the
+//! reply keeps its source as a revision of the id, shown as a card at its <!-- artifact:ID -->
+//! marker, and the call's result shows the agent the page as the viewer renders it
+//! (`page_preview.rs`): a screenshot of each view with the problems found, so it can fix the file
+//! and show the page again under the same id. The path is read and never kept.
 use super::sent_files::Staging;
 use crate::protocol::RunEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub const NAME: &str = "show_artifact";
 
@@ -47,26 +47,19 @@ pub fn valid_history(items: &[ArtifactRecord]) -> bool {
 }
 
 const DESCRIPTION: &str = "Show the user a page you wrote to a file as an artifact: a card in your reply that opens the page in Agent Studio's sandboxed viewer. Pass a stable id (call again with it to replace the page), a short title, and the file's absolute path on this computer: an .html page, or an .svg drawing. The result shows you the page as the viewer renders it, a screenshot of each view's first screen at 1100px and 390px wide in light and dark themes, with the problems found: sideways scrolling, content cut off or running past the edge, a missing background, low contrast, errors the page reported, and loads that were blocked or failed. Fix what they show in the file and call again with the same id, which updates the card. Then place <!-- artifact:ID --> in your final answer where the page belongs.";
-
-pub fn tool() -> Value {
-    json!({"name":NAME,"description":DESCRIPTION,"inputSchema":{
-        "type":"object","properties":{
-            "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse it to replace this artifact within the current reply."},
-            "title":{"type":"string","minLength":1,"description":"A short name, shown on the card and above the page."},
-            "path":{"type":"string","minLength":1,"description":"The page's absolute path on the computer running this conversation: an .html file, or an .svg file."}
-        },"required":["id","title","path"],"additionalProperties":false}})
-}
 /// How a Codex script reads the result: its code mode hands a dynamic tool's result to the
 /// script as one string, the text with each screenshot inlined as a data URL, and the model sees
 /// only what the script passes to text() and image() (checked with Codex 0.162 on 2026-10-14).
 const CODEX_SCRIPT: &str = " Called from an exec script, it returns one string: the report, then each view's label and screenshot as a data:image/png URL. Print the report without the image data and show every screenshot, as in: const r = await tools.show_artifact({id, title, path}); const shots = /data:image\\/png;base64,[A-Za-z0-9+\\/=]+/g; text(r.replace(shots, '')); for (const m of r.matchAll(shots)) image(m[0]);";
 
+/// The Codex dynamic tool.
 pub fn codex_tool() -> Value {
-    let mut tool = tool();
-    tool["type"] = json!("function");
-    tool["deferLoading"] = json!(false);
-    tool["description"] = json!(format!("{DESCRIPTION}{CODEX_SCRIPT}"));
-    tool
+    json!({"type":"function","name":NAME,"description":format!("{DESCRIPTION}{CODEX_SCRIPT}"),"deferLoading":false,"inputSchema":{
+        "type":"object","properties":{
+            "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse it to replace this artifact within the current reply."},
+            "title":{"type":"string","minLength":1,"description":"A short name, shown on the card and above the page."},
+            "path":{"type":"string","minLength":1,"description":"The page's absolute path on the computer running this conversation: an .html file, or an .svg file."}
+        },"required":["id","title","path"],"additionalProperties":false}})
 }
 
 const INVALID: &str = "Provide id (letters, digits, _ or -), title (one line) and path (the page's absolute path on this computer). No other fields are accepted.";
@@ -178,9 +171,6 @@ struct Outcome {
 pub struct ArtifactShower {
     shown: Vec<ArtifactRecord>,
     published: bool,
-    /// Only the parent assistant's actual tool calls can show a page (Claude).
-    pending: HashMap<String, Value>,
-    accepted: HashMap<String, ArtifactRecord>,
 }
 impl ArtifactShower {
     async fn submit(&mut self, args: &Value, staging: &Staging) -> Result<Outcome, String> {
@@ -250,85 +240,6 @@ impl ArtifactShower {
         let response =
             json!({"id":value["id"],"result":{"success":event.is_some(),"contentItems":items}});
         Some((response, event))
-    }
-    /// Claude reports its parent tool calls before the SDK asks this server to run them, and
-    /// their results when they finish. A page is published only with its result.
-    pub fn observe_claude(&mut self, value: &Value) -> Vec<RunEvent> {
-        let mut events = vec![];
-        if !value["parent_tool_use_id"].is_null() {
-            return events;
-        }
-        let Some(blocks) = value["message"]["content"].as_array() else {
-            return events;
-        };
-        for block in blocks {
-            if value["type"] == "assistant"
-                && block["type"] == "tool_use"
-                && block["name"] == format!("mcp__agent_studio__{NAME}")
-            {
-                if let Some(id) = block["id"].as_str() {
-                    if parse(&block["input"]).is_ok() {
-                        self.pending.insert(id.into(), block["input"].clone());
-                    }
-                }
-            }
-            if value["type"] == "user" && block["type"] == "tool_result" {
-                if let Some(id) = block["tool_use_id"].as_str() {
-                    self.pending.remove(id);
-                    if let Some(artifact) = self.accepted.remove(id) {
-                        if block["is_error"] != true {
-                            self.published = true;
-                            events.push(RunEvent::Artifact { artifact });
-                        }
-                    }
-                }
-            }
-        }
-        events
-    }
-    /// A Claude SDK tool call showing a page. Other requests of the agent_studio server are left
-    /// to their own handlers.
-    pub async fn claude(&mut self, value: &Value, staging: &Staging) -> Option<Value> {
-        let r = &value["request"];
-        let m = &r["message"];
-        if r["subtype"] != "mcp_message"
-            || r["server_name"] != "agent_studio"
-            || m["method"] != "tools/call"
-            || m["params"]["name"] != NAME
-        {
-            return None;
-        }
-        let args = &m["params"]["arguments"];
-        let parent = self
-            .pending
-            .iter()
-            .find(|(id, input)| *input == args && !self.accepted.contains_key(*id))
-            .map(|(id, _)| id.clone());
-        let result = match parent {
-            Some(id) => self.submit(args, staging).await.inspect(|outcome| {
-                self.accepted.insert(id, outcome.record.clone());
-            }),
-            // A call registers only when its arguments parse, so name the fault the caller can
-            // act on before an unregistered caller.
-            None => Err(parse(args).err().unwrap_or_else(|| {
-                format!("Only a registered parent-conversation {NAME} call can show a page.")
-            })),
-        };
-        let content = match &result {
-            Ok(outcome) => {
-                let mut content = vec![json!({"type":"text","text":text(outcome)})];
-                for (label, png) in views(outcome) {
-                    content.push(json!({"type":"text","text":label}));
-                    content.push(json!({"type":"image","data":png,"mimeType":"image/png"}));
-                }
-                content
-            }
-            Err(error) => vec![json!({"type":"text","text":error})],
-        };
-        let response = json!({"jsonrpc":"2.0","id":m["id"],"result":{"isError":result.is_err(),"content":content}});
-        Some(
-            json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"mcp_response":response}}}),
-        )
     }
 }
 
@@ -423,7 +334,11 @@ mod tests {
             "{told}"
         );
         assert_eq!(codex["type"], "function");
-        assert!(!tool()["description"].as_str().unwrap().contains("matchAll"));
+        assert_eq!(codex["name"], NAME);
+        assert_eq!(
+            codex["inputSchema"]["required"],
+            json!(["id", "title", "path"])
+        );
     }
 
     #[test]
@@ -511,28 +426,6 @@ mod tests {
             .unwrap()
             .contains("Nothing was shown"));
         assert!(!shower.has_artifacts());
-
-        let control = json!({"type":"control_request","request_id":"r","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":NAME,"arguments":args("/tmp/missing.html")}}}});
-        let refusal = |answer: &Value| {
-            answer["response"]["response"]["mcp_response"]["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        };
-        let refused = shower.claude(&control, &staging).await.unwrap();
-        assert!(refusal(&refused).contains("registered parent-conversation"));
-        // A sub-agent's call never registers a parent call.
-        shower.observe_claude(&json!({"type":"assistant","parent_tool_use_id":"child","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__agent_studio__show_artifact","input":args("/tmp/missing.html")}]}}));
-        assert!(refusal(&shower.claude(&control, &staging).await.unwrap())
-            .contains("registered parent-conversation"));
-        shower.observe_claude(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__agent_studio__show_artifact","input":args("/tmp/missing.html")}]}}));
-        assert!(refusal(&shower.claude(&control, &staging).await.unwrap())
-            .contains("Nothing was shown"));
-        // Other requests of the server belong to their own handlers.
-        assert!(shower
-            .claude(&json!({"request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"method":"tools/list"}}}), &staging)
-            .await
-            .is_none());
     }
 
     #[test]

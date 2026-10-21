@@ -217,6 +217,7 @@
   } from '$lib/transport';
   import { notificationWorkflow } from '$lib/notifications';
   import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
+  import type { PublishedArtifact } from '$lib/published-artifacts';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import InputTemplates from '$lib/components/InputTemplates.svelte';
   import {
@@ -1982,6 +1983,32 @@
   function screenSaved(environmentId: string) {
     const host = screenHost(environmentId);
     if (host) refreshScreens([host], true);
+  }
+  /**
+   * A claude.ai artifact that a reply sent from this window created or opened opens in the
+   * browser, as Claude Code's terminal opens it: once per artifact in this window, while its chat
+   * is on screen in the focused desktop window. Its card opens it any time.
+   */
+  function openPublished(conversationId: string, artifact: PublishedArtifact) {
+    if (
+      !desktop() ||
+      activeId !== conversationId ||
+      view !== 'chat' ||
+      document.visibilityState !== 'visible' ||
+      !document.hasFocus()
+    )
+      return;
+    const key = 'agent-studio.opened-artifacts';
+    let opened: unknown;
+    try {
+      opened = JSON.parse(sessionStorage.getItem(key) ?? '[]');
+    } catch {
+      opened = [];
+    }
+    const ids = Array.isArray(opened) ? opened.filter((id) => typeof id === 'string') : [];
+    if (ids.includes(artifact.id)) return;
+    sessionStorage.setItem(key, JSON.stringify([...ids, artifact.id]));
+    void openLink(artifact.url).catch(() => {});
   }
   /** What a screen's computer last reported of it, kept in its list. */
   function noteScreen(detail: ScreenDetail) {
@@ -6325,6 +6352,8 @@
       const hadQuestion = questionTool && requestsAttention(m);
       const clock = applyRunEvent(m, event) === 'clock';
       if (event.kind === 'screen' && event.screen) screenSaved(event.screen.environmentId);
+      if (event.kind === 'publishedartifact' && event.open && event.publishedArtifact)
+        openPublished(conversation.id, event.publishedArtifact);
       localChanges++;
       // Every event goes out with the next sync, so other devices follow the text and
       // tool calls as they stream; saving to disk keeps its own, slower rate. Each changes this

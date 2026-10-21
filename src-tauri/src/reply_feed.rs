@@ -85,6 +85,9 @@ fn place(event: &RunEvent) -> Place {
         RunEvent::Compaction { compaction } => format!("compaction:{}", compaction.id),
         RunEvent::ProposedPlan { proposed_plan } => format!("proposedplan:{}", proposed_plan.id),
         RunEvent::Steering { steering, .. } => format!("steering:{}", steering.id),
+        RunEvent::PublishedArtifact {
+            published_artifact, ..
+        } => format!("publishedartifact:{}", published_artifact.id),
         RunEvent::Visualization { .. }
         | RunEvent::Artifact { .. }
         | RunEvent::SentFiles { .. }

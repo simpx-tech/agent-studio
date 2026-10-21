@@ -251,3 +251,61 @@ test('a page shown with show_artifact sits at its marker and the viewer follows 
     '<!doctype html><title>Q3</title><h1>Final</h1>',
   );
 });
+
+// An artifact a Claude reply published to claude.ai with Claude Code's own Artifact tool
+// (requested 2026-10-21): its card opens it there, a new artifact opens once in the window that
+// sent the message, as the CLI's terminal opens it, and saved history keeps the card.
+test('a claude.ai artifact shows as a card that opens it there', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await page.addInitScript(() => {
+    const w = window as any,
+      original = w.__TAURI_INTERNALS__.invoke;
+    w.openedPages = [];
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:opener|open_url') {
+        w.openedPages.push(args.url);
+        return;
+      }
+      return original(command, args);
+    };
+  });
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await ask(page, 'Publish the quarterly page on claude.ai');
+  const reply = page.locator('.message').last();
+  const url = 'https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax';
+  const published = (revision: number, open: boolean) => ({
+    kind: 'publishedartifact',
+    publishedArtifact: {
+      id: '61f14ff2-c402-429d-ad1b-42de9c796ca9',
+      revision,
+      url,
+      title: 'Quarterly report',
+    },
+    ...(open ? { open } : {}),
+  });
+  const opened = () => page.evaluate(() => (window as any).openedPages as string[]);
+  await emit(page, published(1, true));
+  const card = reply.getByRole('button', {
+    name: 'Quarterly report Open on claude.ai',
+    exact: true,
+  });
+  await expect(card).toBeVisible();
+  await expect.poll(opened).toEqual([url]);
+  // Republishing it updates the card, and opening it again opens nothing more by itself.
+  await emit(page, published(2, false));
+  await emit(page, published(3, true));
+  await emit(page, { kind: 'text', text: 'Published it.' });
+  await finish(page, 'complete');
+  await expect(card).toHaveCount(1);
+  expect(await opened()).toEqual([url]);
+  await card.click();
+  await expect.poll(opened).toEqual([url, url]);
+  // Saved history keeps the card.
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: /Publish the quarterly page/ }).click();
+  await expect(
+    page.getByRole('button', { name: 'Quarterly report Open on claude.ai', exact: true }),
+  ).toBeVisible();
+});

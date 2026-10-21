@@ -1,19 +1,37 @@
 use std::io::Write;
 use tauri::Manager;
 
-/// How a chat agent with Agent Studio's tools delivers an artifact: a page it writes to a file
-/// and shows with show_artifact, which previews it (`providers/artifact_tool.rs`).
-const TOOL: &str = "When a request calls for a page the user opens beside the chat, such as a document, report, explainer, diagram, dashboard, prototype or small tool, make it an artifact with the show_artifact tool (Claude: mcp__agent_studio__show_artifact): write the complete page to an .html file (an .svg file for a standalone drawing) in a temporary folder, outside the project unless the user wants it there, and call show_artifact with a stable id, a short title and the file's absolute path. Agent Studio shows it in your reply as a card that opens the page in a sandboxed viewer, and the result returns screenshots of the page at the viewer's widths in light and dark themes with the problems found. Fix what they show in the file and call show_artifact again with the same id until the page looks finished, then place <!-- artifact:ID --> on its own line between blank lines in your final answer, where the page belongs, introduced in a sentence or two; never paste its source or a fenced copy. Use visualize for a visual that sits among your explanation instead. Do not create an artifact unless it serves the user's request.";
+/// How a Codex chat delivers an artifact: a page it writes to a file and shows with
+/// show_artifact, which previews it (`providers/artifact_tool.rs`).
+const TOOL: &str = "When a request calls for a page the user opens beside the chat, such as a document, report, explainer, diagram, dashboard, prototype or small tool, make it an artifact with the show_artifact tool: write the complete page to an .html file (an .svg file for a standalone drawing) in a temporary folder, outside the project unless the user wants it there, and call show_artifact with a stable id, a short title and the file's absolute path. Agent Studio shows it in your reply as a card that opens the page in a sandboxed viewer, and the result returns screenshots of the page at the viewer's widths in light and dark themes with the problems found. Fix what they show in the file and call show_artifact again with the same id until the page looks finished, then place <!-- artifact:ID --> on its own line between blank lines in your final answer, where the page belongs, introduced in a sentence or two; never paste its source or a fenced copy. Use visualize for a visual that sits among your explanation instead. Do not create an artifact unless it serves the user's request.";
 /// How any other chat agent delivers one: a named html or svg fence, which the window shows as a
 /// card that opens it (`src/lib/artifacts.ts`).
 const FENCE: &str = "When a request calls for a page the user opens beside the chat, such as a document, report, explainer, diagram, dashboard, prototype or small tool, deliver it as an artifact: one fenced html block (svg for a standalone drawing) holding the complete page, its opening fence naming it after the language, as in ```html Release dashboard. Agent Studio shows that block as a card that opens the page in a sandboxed viewer, never as code, so introduce it in a sentence or two rather than repeating or summarizing its source. Do not create an artifact unless it serves the user's request.";
+/// What a Claude chat adds (requested 2026-10-21): Claude Code's own Artifact tools publish to
+/// claude.ai, only when the user asks (`providers/published_artifacts.rs`).
+const CLAUDE_AI: &str = "The Artifact tools publish to claude.ai: use them only when the user asks for an artifact there, such as to publish a page on claude.ai, update or open one there, or read its comments, and never publish on your own initiative; any other page is a fenced block as above. Agent Studio shows each artifact you publish or open as a card that opens it on claude.ai, so name it in a sentence with its link rather than describing the page again.";
+
+/// How a chat agent delivers an artifact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Delivery {
+    /// A Codex chat's show_artifact tool.
+    Tool,
+    /// A named fence, for agents without Agent Studio's tools.
+    Fence,
+    /// A named fence, or Claude Code's own Artifact tools when the user asks for claude.ai.
+    ClaudeAi,
+}
 /// What makes a page good in the sandboxed viewer that renders it (the constant
 /// `artifact-preview.html` under `PAGE_CSP` below).
 const PAGE_RULES: &str = "Make it a finished, polished page. Libraries and fonts: scripts load only from https://cdnjs.cloudflare.com, https://cdn.jsdelivr.net/npm/ and https://unpkg.com, pinned to an exact version (react@18.3.1, never a range or @latest) and placed before the inline script that uses them; stylesheets and fonts may come from those CDNs and from Google Fonts (fonts.googleapis.com and fonts.gstatic.com), with a system font stack as fallback. Everything else is blocked without an error: other hosts, images that are not inline SVG or data: URIs, and every fetch, XHR or WebSocket, a library's own included, so inline the data the page shows. Theme-aware: define the palette as CSS custom properties on :root, redefine them under @media (prefers-color-scheme: dark), give body an explicit background and text color, and keep contrast readable in both themes. Responsive: it opens in a wide dialog or in a side panel or phone about 390px wide, so let rows wrap or stack, never let the page scroll sideways, and give wide tables and code their own overflow-x: auto container. Designed: a clear title and hierarchy, a consistent spacing scale, a comfortable line length for prose, restrained color with one accent, and tabular figures; organize long material with a contents list, sections or tabs. Code: show it in pre blocks with line numbers where they help, highlighted with highlight.js or Prism from cdnjs, and keep long lines scrollable rather than cut off. Give the page a <title> matching its name.";
 
-/// The artifact guidance of a chat agent, with the show_artifact tool or without it.
-pub fn guidance(tool: bool) -> String {
-    format!("{} {PAGE_RULES}", if tool { TOOL } else { FENCE })
+/// The artifact guidance of a chat agent.
+pub fn guidance(delivery: Delivery) -> String {
+    match delivery {
+        Delivery::Tool => format!("{TOOL} {PAGE_RULES}"),
+        Delivery::Fence => format!("{FENCE} {PAGE_RULES}"),
+        Delivery::ClaudeAi => format!("{FENCE} {CLAUDE_AI} {PAGE_RULES}"),
+    }
 }
 
 #[tauri::command]

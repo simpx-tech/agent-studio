@@ -82,6 +82,14 @@ pub enum RunEvent {
     Artifact {
         artifact: crate::providers::artifact_tool::ArtifactRecord,
     },
+    /// A claude.ai artifact this reply published or opened, at its latest revision; `open` asks
+    /// the window running the reply to open it.
+    PublishedArtifact {
+        #[serde(rename = "publishedArtifact")]
+        published_artifact: crate::providers::published_artifacts::PublishedArtifact,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        open: bool,
+    },
     SentFiles {
         #[serde(rename = "sentFiles")]
         sent_files: crate::providers::sent_files::SentFiles,

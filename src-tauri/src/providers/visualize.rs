@@ -182,7 +182,6 @@ impl Visualizer {
                     super::questions::tool(),
                     super::sent_files::tool(),
                     super::sent_files::compare_tool(),
-                    super::artifact_tool::tool(),
                     super::background::tool(),
                 ];
                 tools.extend(crate::screens::tools::tools());

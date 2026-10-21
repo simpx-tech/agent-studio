@@ -959,6 +959,33 @@ impl ToolDecoder {
             "mcp__agent_studio__save_screen" | "mcp__agent_studio__show_artifact" => {
                 tool.detail = screen_title(name, input)
             }
+            // Claude Code's own Artifact tools, which act on claude.ai: their action and what it
+            // acts on, with their input but the page text its edits and documents carry.
+            "Artifact" | "ArtifactComments" | "ArtifactData" => {
+                let action = field(input, "action")
+                    .or_else(|| (name == "Artifact").then(|| "publish".into()));
+                if let Some(action) = action.filter(|a| {
+                    a.len() <= 40
+                        && a.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b"_-".contains(&b))
+                }) {
+                    tool.operation = Some(format!("artifact:{action}"));
+                }
+                tool.detail = field(input, "title")
+                    .or_else(|| {
+                        field(input, "file_path").map(|path| {
+                            path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string()
+                        })
+                    })
+                    .or_else(|| field(input, "url"));
+                let mut shown = input.clone();
+                if let Some(fields) = shown.as_object_mut() {
+                    for key in ["edits", "data", "writes", "old_str", "new_str"] {
+                        fields.remove(key);
+                    }
+                }
+                self.set_input(&mut tool, &shown);
+            }
             // Connected (MCP) and unrecognized tools show the arguments they were sent.
             _ if !claude_builtin(name) && !studio_tool(name) => self.set_input(&mut tool, input),
             _ => {}
@@ -1221,6 +1248,19 @@ impl ToolDecoder {
                                         .collect::<Vec<_>>();
                                     if !names.is_empty() {
                                         fact(&mut tool, "Tools found", names.join("\n"));
+                                    }
+                                }
+                                // An artifact's call names it by its title, with its link.
+                                Some(operation)
+                                    if operation.starts_with("artifact:") && !failed =>
+                                {
+                                    if let Some(title) = field(result, "title") {
+                                        tool.detail = Some(title.replace(['\n', '\t'], " "));
+                                    }
+                                    if let Some(url) = result["url"].as_str().filter(|url| {
+                                        crate::providers::published_artifacts::valid_url(url)
+                                    }) {
+                                        fact(&mut tool, "Link", url);
                                     }
                                 }
                                 _ => {}
@@ -1779,6 +1819,37 @@ mod tests {
         assert!(!serde_json::to_string(&events)
             .unwrap()
             .contains("PRIVATE_SKILL_BODY"));
+    }
+    #[test]
+    fn claude_ai_artifact_calls_name_their_action_and_artifact() {
+        let mut d = ToolDecoder::default();
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"publish","name":"Artifact","input":{"file_path":"C:\\Temp\\report\\test-page.html","icon":"chart","edits":[{"old_str":"PRIVATE_OLD","new_str":"PRIVATE_NEW"}]}}]}}));
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"reply","name":"ArtifactComments","input":{"action":"reply","url":"https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax","thread_id":"t1","text":"Done"}}]}}));
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"write","name":"ArtifactData","input":{"action":"write_db","db_op":"set","data":{"secret":"PRIVATE_DOCUMENT"}}}]}}));
+        let publish = &d.tools[0];
+        assert_eq!(publish.operation.as_deref(), Some("artifact:publish"));
+        assert_eq!(publish.detail.as_deref(), Some("test-page.html"));
+        // Its input is shown without the page text its edits and documents carry.
+        let input = publish.input.as_deref().unwrap();
+        assert!(input.contains("test-page.html") && !input.contains("PRIVATE_"));
+        assert_eq!(d.tools[1].operation.as_deref(), Some("artifact:reply"));
+        assert_eq!(
+            d.tools[1].detail.as_deref(),
+            Some("https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax")
+        );
+        assert_eq!(d.tools[2].operation.as_deref(), Some("artifact:write_db"));
+        assert!(!d.tools[2].input.as_deref().unwrap().contains("PRIVATE_"));
+        // The finished publish takes the artifact's title and link from its structured answer.
+        let done = d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"publish","content":"Published C:\\Temp\\report\\test-page.html at https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax (Version 1)"}]},"tool_use_result":{"url":"https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax","artifact_id":"61f14ff2-c402-429d-ad1b-42de9c796ca9","title":"Quarterly report","updated":false}}));
+        assert_eq!(done[0].status, "complete");
+        assert_eq!(done[0].detail.as_deref(), Some("Quarterly report"));
+        assert!(done[0]
+            .facts
+            .iter()
+            .any(|f| f.label == "Link"
+                && f.value == "https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax"));
+        // Its result stays on this computer, as other calls' results do.
+        assert_eq!(d.take_outputs()[0].tool_id, "claude:publish");
     }
     #[test]
     fn every_call_is_recorded_and_earlier_ones_keep_updating() {
