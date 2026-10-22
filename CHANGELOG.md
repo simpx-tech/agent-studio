@@ -5,6 +5,59 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.0.0 - 2026-10-22
+
+Agent Studio 1.0 adds workflows: static ones, graphs of steps that you and your agents draw, and
+dynamic ones, where an orchestrator agent pursues a goal across chats, accounts, computers and
+days. The window gets a new frame too, with the sidebar on the window itself and each page a card
+beside it.
+
+### Added
+
+- Build static workflows from agent, message, condition, loop, wait, question, approval,
+  notification, screen and workflow steps, and run them by hand, on a schedule, from a webhook, or
+  when a chat's reply or another run ends, a computer comes online or a usage limit resets
+- Give a dynamic workflow a goal: its orchestrator plans the work, starts agents on your computers
+  and accounts, asks you when it needs to, and waits for usage limits to reset instead of stopping
+- Follow each run in a live graph beside a numbered history of its steps, answer its questions
+  there, and let another computer continue it when its own goes offline
+- Switch between chats and workflows with the Agent and Workflow tabs in the sidebar; a new
+  workflow starts as a chat with the agent that builds or runs it, Make a workflow turns a chat
+  into one, and agents in any chat can list, edit and run workflows too
+- Let screens call the MCP tools you allow, through the account of the chat that made them
+- Open files in a viewer that covers the window, zoom images up to 1,024 times and 3D models
+  towards the point under the pointer, and expand a comparison of images with a click
+- Show the CSV and TSV tables, Excel workbooks, Markdown documents and MP4, MOV and WebM videos
+  agents send, in the chat and in the viewer
+- Zoom a 3D model or comparison in the chat with the wheel once you click it; a click elsewhere
+  gives the wheel back to the chat
+- Publish artifacts to claude.ai from Claude chats when you ask, with Claude Code's own Artifact
+  tools, and open them from the reply
+- Let a chat that a usage limit stopped continue by itself once the limit resets; its card says
+  when, with Cancel
+- Fade in new messages, pages and panels, give buttons a slight press, and cross-fade theme changes
+
+### Changed
+
+- Put the sidebar on the window, as in Linear, with the window's title and buttons beside it, and
+  show chats, their side panels, Settings and Connections as cards, resized from the gap between
+  them
+- Make Start on the least used account prefer the account with the least of its week used while
+  the accounts have room on their 5-hour limits
+- Offer Run on more code blocks, now that chat agents name the shell of each command they give
+
+### Fixed
+
+- Keep replies running when the window reloads, which stopped every running reply and moved all
+  chats to History; F5 and Ctrl+R no longer reload the window on Windows
+- Stop Agent Studio from closing mid-reply when Windows runs short of memory: it now waits for
+  memory, and saves large workspaces without copying them whole
+- Answer the first message of a Claude chat after a restart, which failed when its CLI had left
+  commands running, and stop Claude renewing a login in another chat from blocking Send and Retry
+- Stop showing a notice each time a sign-in connects; the one asking you to finish signing in now
+  leaves by itself
+- Centre the usage limit card's words beside Switch account
+
 ## 0.11.0 - 2026-10-16
 
 ### Added
