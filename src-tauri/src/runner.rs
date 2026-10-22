@@ -794,9 +794,13 @@ async fn stream_turn(
     if let Some(carried) = process.carried.take() {
         input_lifetime.inherit(carried);
     }
-    // That work may start a turn before the CLI takes this reply's message, which it replays
-    // when it does: only a result after the replay can end such a reply.
-    let mut prompt_replayed = !took_over;
+    // That work may start a turn before the CLI takes this reply's message, and so does a resumed
+    // session whose earlier CLI ended with commands still running: it reports them stopped and
+    // ends that notice's turn without a request first. The CLI replays each message it takes
+    // (--replay-user-messages), so only a result after the replay can end a reply; the first
+    // reply after a restart otherwise ended at the notice without an answer, its message unread.
+    // A compaction ends at its own result.
+    let mut prompt_replayed = !claude_visualizer || request.compact;
     // The idle stretch this reply waits in, by number: its turn ended while background work it
     // waits for continues, and no turn has started since. The next message may take over here.
     let mut waiting: Option<u64> = None;
@@ -1061,8 +1065,9 @@ async fn stream_turn(
                             // A turn the CLI began for taken-over work before this reply's
                             // message never ends the reply.
                             turn_ended = input_lifetime.ended(&value) && prompt_replayed;
-                            // A zero-turn acknowledgement of injected history is not a reply.
-                            if context_result { continue; }
+                            // A zero-turn acknowledgement of injected history is not a reply, nor
+                            // is the empty turn of a notice before the CLI takes the message.
+                            if context_result || (!prompt_replayed && !took_over && crate::providers::visualize::empty_result(&value)) { continue; }
                             let result = value["type"] == "result" && value["parent_tool_use_id"].is_null();
                             // A failed result can carry a zeroed total; it never lowers the baseline.
                             if let Some(total) = value["total_cost_usd"].as_f64().filter(|total| result && total.is_finite() && *total >= 0.0) {
@@ -1076,7 +1081,7 @@ async fn stream_turn(
                                     if stopping.remove(id) && id.starts_with("studio-stop-") && value["response"]["subtype"] != "success" { process.healthy = false; }
                                     if stopping.is_empty() && !input_lifetime.awaited.turn_active() { turn_ended = true; stopped_idle = true; }
                                 }
-                            } else if result && !turn_ended {
+                            } else if result && !turn_ended && (prompt_replayed || took_over) {
                                 if let Some(channel) = channel { let _ = channel.send(RunEvent::Activity { text: "Waiting for background work to finish".into() }); }
                                 // The CLI is idle until the work reports: the next message may
                                 // take over this reply from here.
@@ -1214,6 +1219,12 @@ fn provider_error(diagnostic: &str) -> &'static str {
     }
     if diagnostic.contains("no conversation found") || diagnostic.contains("session not found") {
         "Claude could not resume this conversation's native session. Its saved history was preserved. Check the selected CLI profile, or start a new conversation; no message was replayed."
+    } else if diagnostic.contains("another claude code process is refreshing") {
+        // Several of the account's CLIs renewed an expired login at once, as when the app
+        // starts after a night: the login itself is fine, so the account stays signed in.
+        "Another Claude Code process was renewing this account's login. Try again in a moment."
+    } else if diagnostic.contains("prompt is too long") {
+        "The conversation is too long for the model's context. Try again, or compact it first."
     } else if diagnostic.contains("selected folder is unavailable") {
         "The selected folder is unavailable. Choose an existing folder before sending."
     } else if diagnostic.contains("unsupported_client")
@@ -1449,5 +1460,11 @@ mod tests {
             provider_error("bash: cd: permission denied\nSelected folder is unavailable")
                 .contains("Choose an existing folder")
         );
+        // Claude Code's own lines when another of its processes held the renewal, and when it
+        // refused a conversation too long for the model: neither is a signed-out account.
+        let renewing = provider_error(" success Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh. This is usually transient; retry in a minute, and if it persists close other Claude Code processes or sign in again");
+        assert!(renewing.contains("Try again in a moment"));
+        assert!(!renewing.contains("login needs attention"));
+        assert!(provider_error(" success Prompt is too long").contains("compact it first"));
     }
 }

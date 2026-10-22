@@ -228,6 +228,18 @@ fn placement(id: &str) -> String {
     format!("Visualization accepted. Place <!-- visualize:{id} --> on its own line between blank lines in your final answer, between the paragraphs it helps explain. Do not repeat the HTML or add a separate attachment heading.")
 }
 
+/// A parent turn that ended without a request or an answer: the acknowledgement of injected
+/// history, or the notice a resumed session gives about commands its earlier CLI left running.
+pub fn empty_result(value: &Value) -> bool {
+    value["type"] == "result"
+        && value["parent_tool_use_id"].is_null()
+        && value["subtype"] == "success"
+        && value["is_error"] != true
+        && value["num_turns"] == 0
+        && value["result"] == ""
+        && value.get("structured_output").is_none()
+}
+
 /// Background work a Claude reply waited for when it handed its process to the next reply.
 pub struct Carried {
     tasks: HashSet<String>,
@@ -258,14 +270,7 @@ impl ClaudeInputLifetime {
         }
     }
     pub fn is_context_result(&self, value: &Value) -> bool {
-        self.context_pending
-            && value["type"] == "result"
-            && value["parent_tool_use_id"].is_null()
-            && value["subtype"] == "success"
-            && value["is_error"] != true
-            && value["num_turns"] == 0
-            && value["result"] == ""
-            && value.get("structured_output").is_none()
+        self.context_pending && empty_result(value)
     }
     pub fn ended(&mut self, value: &Value) -> bool {
         // The non-human shouldQuery=false history message emits a zero-turn

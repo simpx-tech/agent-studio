@@ -81,7 +81,17 @@ for await (const line of createInterface({ input: process.stdin })) {
         type: 'control_response',
         response: { subtype: 'success', request_id: v.request_id, response: {} },
       });
-    else if (v.type === 'user') ask();
+    else if (v.type === 'user') {
+      // Like --replay-user-messages, the CLI replays the message it takes before answering it.
+      emit({
+        type: 'user',
+        uuid: v.uuid,
+        parent_tool_use_id: null,
+        isReplay: true,
+        message: v.message,
+      });
+      ask();
+    }
     else if (v.type === 'control_response') {
       assert.equal(v.response.subtype, 'success');
       assert.equal(v.response.request_id, 'elicit');

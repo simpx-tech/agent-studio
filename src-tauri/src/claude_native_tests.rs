@@ -1576,6 +1576,99 @@ async fn installed_claude_continues_a_chat_whose_transcript_was_cleaned_up() {
     std::fs::remove_dir_all(continued.parent().unwrap()).unwrap();
 }
 
+/// A chat whose CLI ended with a command still running, as when the app closes or crashes,
+/// answers its next message the first time: the resumed session reports that command stopped and
+/// ends the notice's turn before it takes the message.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_answers_the_first_message_after_a_command_was_left_running() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let profile = crate::context::native_profile_root("claude").await.unwrap();
+    let cwd = folder.path().to_string_lossy().into_owned();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let (computer, environment) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let request = |messages: &serde_json::Value| -> RunRequest {
+        let mut request: RunRequest = serde_json::from_value(
+            json!({"runId":uuid::Uuid::new_v4(),"conversationId":conversation,
+            "location":{"computerId":computer,"environmentId":environment,"path":cwd},
+            "agent":{"provider":"claude","model":"haiku","instructions":""},"messages":messages}),
+        )
+        .unwrap();
+        request.native_session =
+            crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+        request
+    };
+    // Each reply starts a CLI of its own and kills it with what it runs, as quitting does.
+    let reply = |request: RunRequest| {
+        let (exe, runtime) = (exe.clone(), runtime.clone());
+        async move {
+            let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+                .await
+                .unwrap();
+            let id = request.native_session.as_ref().unwrap().id().to_string();
+            let mut process =
+                crate::pool::Process::new(exe, command.spawn().unwrap(), "left".into(), id)
+                    .unwrap();
+            let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let channel = EventSink::new(move |event| {
+                let _ = tx.send(event);
+                Ok(())
+            });
+            let mut questions = Questions::default()
+                .open(&request.run_id, None, channel.clone())
+                .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(300),
+                stream_turn(
+                    &mut process,
+                    &request,
+                    Some(&channel),
+                    CancellationToken::new(),
+                    Some(&mut questions),
+                    false,
+                ),
+            )
+            .await
+            .expect("Installed CLI test timed out");
+            process.kill().await;
+            drop(channel);
+            while received.try_recv().is_ok() {}
+            (
+                request.native_session.as_ref().unwrap().id().to_string(),
+                result,
+            )
+        }
+    };
+    let mut messages = json!([{"role":"user","text":"Use the Bash tool with run_in_background set to true to run exactly: sleep 300. Do not wait for it. Then reply only STARTED."}]);
+    let (session, first) = reply(request(&messages)).await;
+    let (status, text) = first.expect("The first reply failed");
+    assert_eq!(status, "complete");
+    messages.as_array_mut().unwrap().extend([
+        json!({"role":"assistant","text":text}),
+        json!({"role":"user","text":"What is 2+2? Reply with the number only."}),
+    ]);
+    let next = request(&messages);
+    assert!(next.native_session.as_ref().unwrap().resumed);
+    let (_, second) = reply(next).await;
+    let transcript = crate::native_instructions::find_record(&profile, "claude", &session)
+        .unwrap()
+        .expect("The replies saved their transcript");
+    let held = std::fs::read_to_string(&transcript).unwrap();
+    // The project folder named after the throwaway folder holds only this test's files.
+    std::fs::remove_dir_all(transcript.parent().unwrap()).unwrap();
+    assert!(
+        held.contains("didn't finish before the previous session ended"),
+        "The resumed session reported the command left running"
+    );
+    let (status, text) = second.expect("The first message after the restart failed");
+    assert_eq!(status, "complete");
+    assert!(text.contains('4'), "{text}");
+}
+
 /// An orchestrator's reply reaches the workflow tools through the SDK server: each call goes to
 /// this computer's window, here a stand-in answering it, and the window's answer reaches the CLI.
 #[tokio::test]

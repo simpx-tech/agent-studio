@@ -69,12 +69,24 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}')
             continue
         }
+        $mode = $value.message.content[0].text
+        if ($mode -like 'Stale*') {
+            # A resumed session whose earlier CLI ended with a command still running reports it
+            # stopped and ends that notice's turn before it takes the message.
+            [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"old-shell","tool_use_id":"old-call","status":"stopped","summary":"Background shell command didn''t finish before the previous session ended"}')
+            [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+            if ($mode -eq 'Stale answered') {
+                [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"notice","model":"fixture-model","content":[{"type":"text","text":"The old build stopped."}],"usage":{"input_tokens":3,"output_tokens":1}}}')
+                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"The old build stopped.","usage":{"input_tokens":3,"output_tokens":1}}')
+            } else {
+                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}')
+            }
+        }
         [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
-        if ($value.uuid -and (Test-Path -LiteralPath (Join-Path (Split-Path $PSCommandPath) 'replay-prompts'))) {
+        if ($value.uuid) {
             # Like --replay-user-messages, the CLI replays the human message it takes.
             [Console]::WriteLine('{"type":"user","uuid":"' + $value.uuid + '","parent_tool_use_id":null,"isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Replayed"}]}}')
         }
-        $mode = $value.message.content[0].text
         if ($mode -eq 'Limit') {
             # The API refuses a request at the account's limit: the CLI answers with a synthetic
             # message of its own and ends the turn with an error result.
@@ -238,6 +250,49 @@ async fn a_usage_limit_ends_the_reply_with_claude_codes_own_line() {
         RunEvent::Progress { text, .. } | RunEvent::Text { text } if text.contains("hit your"))));
     assert!(events.iter().any(|e| matches!(e, RunEvent::Usage { usage }
         if usage.model.as_deref() == Some("fixture-model") && usage.context_input == Some(100))));
+}
+
+#[tokio::test]
+async fn a_resumed_session_answers_after_its_notice_about_commands_left_running() {
+    // The CLI of the first reply ends with a command still running, as when the app closes. The
+    // next one reports the command stopped and ends that notice's turn, with or without a
+    // request, before it takes the message.
+    for mode in ["Stale", "Stale answered"] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let first = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"}]),
+        );
+        let session = first.native_session.as_ref().unwrap().id().to_string();
+        let mut process = fixture(root.path(), &session, false, false);
+        let (result, _) = turn(&mut process, &first, CancellationToken::new(), false, false).await;
+        assert!(result.is_ok(), "{mode}");
+        process.kill().await;
+        drop(first);
+        let next = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":"First"},{"role":"assistant","text":"Turn 1"},{"role":"user","text":mode}]),
+        );
+        assert!(next.native_session.as_ref().unwrap().resumed, "{mode}");
+        let mut process = fixture(root.path(), &session, false, false);
+        let (result, events) =
+            turn(&mut process, &next, CancellationToken::new(), false, false).await;
+        assert_eq!(
+            result.unwrap(),
+            ("complete".into(), "Turn 1".into()),
+            "{mode}"
+        );
+        assert!(process.alive() && process.healthy, "{mode}");
+        assert!(
+            !events.iter().any(|e| matches!(e,
+                RunEvent::Activity { text } if text == "Waiting for background work to finish")),
+            "{mode}"
+        );
+        process.kill().await;
+    }
 }
 
 #[tokio::test]
@@ -439,7 +494,6 @@ async fn stop_while_waiting_stops_only_declared_work_and_keeps_the_process() {
 #[tokio::test]
 async fn a_steer_while_the_reply_waits_follows_the_answer_it_was_sent_after() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("replay-prompts"), "on").unwrap();
     let conversation = uuid::Uuid::new_v4().to_string();
     let request = request(
         root.path(),
@@ -529,7 +583,6 @@ async fn a_steer_while_the_reply_waits_follows_the_answer_it_was_sent_after() {
 async fn a_message_takes_over_a_reply_that_only_waits_for_a_background_agent() {
     use crate::background_work::{Event, Watch};
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("replay-prompts"), "on").unwrap();
     let conversation = uuid::Uuid::new_v4().to_string();
     let first = request(
         root.path(),
