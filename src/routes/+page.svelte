@@ -293,6 +293,13 @@
     withSnooze,
     withoutSnooze,
   } from '$lib/snoozes';
+  import {
+    continueStep,
+    continueText,
+    limitedReply,
+    startedPlan,
+    waitingPlan,
+  } from '$lib/auto-continue';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
   import { accountActivity, balanceableAccounts, balancedAccount } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
@@ -2997,6 +3004,8 @@
     }, 5 * 60_000);
     // Nothing reports a reply this computer runs without its run, so it is looked for.
     const abandonPoll = setInterval(() => void endAbandonedReplies(), 10_000);
+    // A chat a usage limit stopped goes on once the limit resets, from the computer running it.
+    const continuePoll = setInterval(continueLimitedChats, 15_000);
     // Replies other devices asked for that ran on through a reload wait this long for the relay
     // to take their requests up again, then end here on their own.
     let jobResumeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3165,6 +3174,7 @@
                 delete heardWaits[request.runId];
                 delete questionDrafts[request.runId];
                 conversation.updatedAt = new Date().toISOString();
+                planContinue(conversation, message);
                 noteFinishedChats();
                 if (activeId === conversation.id) void scrollToEnd();
                 await persistChat(conversation.id);
@@ -3321,6 +3331,7 @@
       clearInterval(wslPoll);
       clearInterval(serverPoll);
       clearInterval(abandonPoll);
+      clearInterval(continuePoll);
       clearTimeout(jobResumeTimer);
       window.removeEventListener('focus', onReturn);
       window.removeEventListener('online', onReturn);
@@ -5093,6 +5104,16 @@
       if (session === workspaceSession) forking = false;
     }
   }
+  /** When the chat goes on after the usage limit that stopped its last reply, for that card. */
+  function continuationOf(conversation: Conversation, reply: Message) {
+    const at = waitingPlan(conversation);
+    return at
+      ? {
+          at,
+          ...(readOnlyChat ? {} : { cancel: () => cancelContinue(conversation.id, reply.id) }),
+        }
+      : undefined;
+  }
   function revealConversation(c: Conversation) {
     conversationScope = c.archived ? 'history' : 'active';
     const location = conversationLocation(c, workspace.fleet, installation);
@@ -6034,16 +6055,23 @@
     conversation: Conversation,
     input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & {
       images: StoredImage[];
-      sentBy?: 'workflow';
+      sentBy?: Message['sentBy'];
     },
     now: string,
   ) {
+    // The chat goes on now, so the plan to go on after the limit that stopped it is used up, and
+    // a rewind back to that reply leaves it waiting for the user.
+    const limited = limitedReply(conversation);
+    if (limited?.autoContinue && !limited.autoContinue.off) {
+      limited.autoContinue = { ...limited.autoContinue, off: true, changedAt: now };
+      marks.chat(conversation.id, limited.id);
+    }
     conversation.messages.push(userMessage(input, now));
   }
   function userMessage(
     input: Pick<QueuedMessage, 'text' | 'skills' | 'mentions'> & {
       images: StoredImage[];
-      sentBy?: 'workflow';
+      sentBy?: Message['sentBy'];
     },
     now: string,
   ): Message {
@@ -6313,6 +6341,7 @@
     } finally {
       if (session === workspaceSession && joined) {
         message().durationMs = message().accountUsage?.runDurationMs ?? elapsed();
+        if (publishes) planContinue(conversation, message());
         delete message().backgroundWait;
         delete heardWaits[runId];
         delete questionDrafts[runId];
@@ -6481,6 +6510,111 @@
     } catch {
       // The folder keeps the folder mark until a chat there after a reload tries again.
     }
+  }
+  /**
+   * A reply this computer ran that a usage limit stopped: its chat goes on by itself once the
+   * limit resets (src/lib/auto-continue.ts). A workflow's chats are left to the workflow, which
+   * waits for resets itself, and a /compact reply to the next /compact.
+   */
+  function planContinue(conversation: Conversation, reply: Message) {
+    if (
+      reply.autoContinue ||
+      reply.compact ||
+      limitedReply(conversation)?.id !== reply.id ||
+      hiddenChats.has(conversation.id)
+    )
+      return;
+    reply.autoContinue = startedPlan(Date.now());
+    // Its time is often known at once, from the provider's line or the reading.
+    setTimeout(continueLimitedChats);
+  }
+  /** Whether this computer runs a chat's next reply, and so makes it go on after a limit. */
+  function drivesContinue(conversation: Conversation) {
+    const { settings, location } = conversation;
+    if (!desktop() || hiddenChats.has(conversation.id)) return false;
+    if (settings.connectionId) return runsHere(settings.connectionId);
+    return (
+      !!location &&
+      executionHost(workspace.fleet, location.executionEnvironmentId ?? location.environmentId) ===
+        installation?.id
+    );
+  }
+  // Chats on their way to going on after a usage limit, and when each last asked for a reading.
+  const continuing = new Set<string>();
+  const continueReads = new Map<string, number>();
+  /** Takes the next step for each chat a usage limit stopped that this computer runs. */
+  function continueLimitedChats() {
+    if (!loaded || !desktop() || !installation) return;
+    for (const conversation of workspace.conversations) {
+      const plan = limitedReply(conversation)?.autoContinue;
+      if (!plan || plan.off || continuing.has(conversation.id) || !drivesContinue(conversation))
+        continue;
+      const id = conversation.id;
+      continuing.add(id);
+      void continueChat(id)
+        .catch(() => {})
+        .finally(() => continuing.delete(id));
+    }
+  }
+  async function continueChat(id: string) {
+    const session = workspaceSession;
+    const waiting = () => {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      const reply = conversation && limitedReply(conversation);
+      return conversation && reply?.autoContinue && !reply.autoContinue.off
+        ? { conversation, reply }
+        : undefined;
+    };
+    let found = waiting();
+    if (!found) return;
+    // The usage of the account the chat's next message goes to.
+    const { provider, connectionId } = found.conversation.settings;
+    const account = { provider, model: '', connectionId };
+    const reading = () => snapshotFor(usageSnapshots, account);
+    let step = continueStep(found.conversation, reading(), Date.now());
+    if (step.kind === 'read') {
+      // A reading under way, or one asked for a moment ago, decides at the next look.
+      if (usageLoading[usageKey(account)] || Date.now() - (continueReads.get(id) ?? 0) < 60_000)
+        return;
+      continueReads.set(id, Date.now());
+      await refreshUsage(account, true);
+      found = session === workspaceSession ? waiting() : undefined;
+      if (!found || found.conversation.settings.connectionId !== connectionId) return;
+      step = continueStep(found.conversation, reading(), Date.now(), true);
+    }
+    const { conversation, reply } = found;
+    if (step.kind === 'plan') {
+      reply.autoContinue = step.plan;
+      saveSoon(conversation.id, reply.id);
+    } else if (step.kind === 'send' && canSendQueued(conversation) && !takingOver[conversation.id])
+      continueAfterLimit(conversation);
+  }
+  /** Sends a chat a usage limit stopped its next message, once the limit reset. */
+  function continueAfterLimit(conversation: Conversation) {
+    const now = new Date().toISOString();
+    if (conversation.archived) {
+      conversation.archived = false;
+      if (activeId === conversation.id) revealConversation(conversation);
+    }
+    delete conversation.rewind;
+    rewoundDrafts.delete(conversation.id);
+    addUserMessage(conversation, { text: continueText, images: [], sentBy: 'limit' }, now);
+    const { provider, model } = conversation.settings;
+    const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
+    void startReply(conversation, {
+      now,
+      modelName: selectedModelName(model, modelChoices(catalog, provider, model)),
+    });
+  }
+  /** Keeps a chat from going on by itself after the usage limit that stopped its last reply. */
+  function cancelContinue(conversationId: string, messageId: string) {
+    const conversation = workspace.conversations.find((c) => c.id === conversationId);
+    const reply = conversation && limitedReply(conversation);
+    if (!reply || reply.id !== messageId || !reply.autoContinue || reply.autoContinue.off) return;
+    reply.autoContinue = { ...reply.autoContinue, off: true, changedAt: new Date().toISOString() };
+    saveSoon(conversationId, messageId);
+    // The computer running the chat may be about to send it.
+    if (paired) void syncNow(true);
   }
   /**
    * Ends the replies saved as running that this computer runs without holding their run, here and
@@ -7724,6 +7858,9 @@
                     switchableConnections.length &&
                     !activeRunning
                       ? () => agentPicker?.showPicker()
+                      : undefined}
+                    continuation={i === active.messages.length - 1
+                      ? continuationOf(active, m)
                       : undefined}
                     rewind={m.role === 'user' && !readOnlyChat ? () => openRewind(m.id) : undefined}
                     undoEdits={!readOnlyChat && m.runId && m.fileChanges?.edits.length

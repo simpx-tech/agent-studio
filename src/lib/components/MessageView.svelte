@@ -12,6 +12,7 @@
     LayoutDashboard,
     AppWindow,
     ShipWheel,
+    TimerReset,
     Workflow,
   } from '@lucide/svelte';
   import { messageText, providers, type Message, type ChatSettings } from '$lib/domain';
@@ -26,6 +27,8 @@
     type ReplyTimeTotal,
   } from '$lib/replies';
   import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
+  import { continueLabel } from '$lib/auto-continue';
+  import { clock as ticks } from '$lib/clock';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
   import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
@@ -71,6 +74,7 @@
     openedSubagent,
     idle = false,
     switchAccount,
+    continuation,
     openScreen,
   }: {
     message: Message;
@@ -106,6 +110,11 @@
     idle?: boolean;
     /** Opens the Agent picker to choose another account for the next message. */
     switchAccount?: () => void;
+    /**
+     * The chat goes on by itself once the usage limit that stopped this reply resets: when, and
+     * what cancels it.
+     */
+    continuation?: { at: string; cancel?: () => void };
     /** Opens a screen this reply saved, from the computer that keeps it. */
     openScreen?: (card: ScreenCard) => void;
   } = $props();
@@ -340,6 +349,14 @@
         <Hourglass size={15} aria-hidden="true" />
         <div class="usage-limit-text">
           <p>{limit.text}</p>
+          {#if continuation}<p class="usage-limit-continue">
+              <span>{continueLabel(continuation.at, ticks.now)}</span>{#if continuation.cancel}<button
+                  type="button"
+                  class="text-button"
+                  aria-label="Cancel continuing"
+                  onclick={continuation.cancel}>Cancel</button
+                >{/if}
+            </p>{/if}
         </div>
       </div>
       {#if switchAccount}<button type="button" class="secondary" onclick={switchAccount}
@@ -434,7 +451,8 @@
 
 <article
   class="message"
-  class:user={message.role === 'user'}
+  class:user={message.role === 'user' && message.sentBy !== 'limit'}
+  class:continued={message.sentBy === 'limit'}
   class:entering={fresh(message.createdAt)}
   data-testid="message"
   data-message-id={message.id}
@@ -454,7 +472,12 @@
         >{:else}{switchNotice}{/if}
     </p>
   {/if}
-  {#if message.role === 'user' && message.sentBy === 'workflow'}
+  {#if message.role === 'user' && message.sentBy === 'limit'}
+    <!-- The message Agent Studio sent once the usage limit that stopped the chat reset. -->
+    <p class="reply-switch">
+      <TimerReset size={13} aria-hidden="true" />Continued after the usage limit reset
+    </p>
+  {:else if message.role === 'user' && message.sentBy === 'workflow'}
     <div class="message-avatar workflow-avatar"><Workflow size={15} aria-hidden="true" /></div>
     <div class="message-content">
       <div class="message-heading">
@@ -657,8 +680,24 @@
     color: var(--text);
     font-weight: 500;
   }
+  .usage-limit-text .usage-limit-continue {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 10px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
   .usage-limit > button {
     margin-left: auto;
+  }
+  /* The message sent once a usage limit reset stands just above the reply it starts. */
+  .message.continued {
+    padding: 14px 0 0;
+    margin-bottom: -6px;
+  }
+  .message.continued .reply-switch {
+    margin: 0;
   }
   .response-extras {
     display: flex;

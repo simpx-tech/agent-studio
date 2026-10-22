@@ -11,7 +11,7 @@ async function pick(page: Page, label: string, name: string) {
 }
 
 // A reply that reads a file between two comments, then stops at the account's session limit.
-async function limitedReply(page: Page) {
+async function limitedReply(page: Page, limit = line) {
   await page.getByLabel('Message', { exact: true }).fill('Update the generator');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
@@ -32,15 +32,33 @@ async function limitedReply(page: Page) {
     },
   });
   await emit({ kind: 'progress', id: 'msg_2', revision: 1, text: lastComment });
-  await emit({ kind: 'usagelimit', usageLimit: { revision: 1, text: line } });
-  const reply = page.locator('[data-testid="message"]').last();
+  await emit({ kind: 'usagelimit', usageLimit: { revision: 1, text: limit } });
+  const last = page.locator('[data-testid="message"]').last();
+  // The reply keeps its place as the chat goes on after it.
+  const reply = page.locator(`[data-message-id="${await last.getAttribute('data-message-id')}"]`);
   // The limit shows at once, while the reply still runs.
-  await expect(reply.locator('.usage-limit')).toContainText(line);
+  await expect(reply.locator('.usage-limit')).toContainText(limit);
   await expect(reply.locator('.usage-limit')).not.toContainText('Send a message');
-  await page.evaluate((error) => (window as any).failCapabilities(error), line);
+  await page.evaluate((error) => (window as any).failCapabilities(error), limit);
   await expect(reply).toHaveAttribute('data-status', 'error');
   return reply;
 }
+
+// Claude Code's line for a session limit that resets this many minutes from now on the page's
+// clock, written as Claude Code writes it, in the zone it names.
+const resettingIn = (page: Page, minutes: number) =>
+  page.evaluate((minutes) => {
+    const time = new Date(Date.now() + minutes * 60_000)
+      .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })
+      .replace(/\s([AP]M)/i, (_, meridiem: string) => meridiem.toLowerCase());
+    return `You've hit your session limit · resets ${time} (UTC)`;
+  }, minutes);
+const runRequests = (page: Page) =>
+  page.evaluate(() => ((window as any).runRequests ?? []) as { messages: unknown[] }[]);
+const savedReplies = (page: Page) =>
+  page.evaluate(
+    () => JSON.parse(localStorage.getItem('test-workspace')!).conversations[0].messages as any[],
+  );
 
 async function expectStoppedAtLimit(reply: ReturnType<Page['locator']>) {
   const history = reply.locator('.activity-summary');
@@ -66,6 +84,8 @@ async function expectStoppedAtLimit(reply: ReturnType<Page['locator']>) {
 test('a reply stopped at a usage limit keeps its history open and shows the limit as a card', async ({
   page,
 }) => {
+  // Noon in São Paulo, well before the 1:50pm reset the line names, when the chat goes on.
+  await page.clock.install({ time: new Date('2026-10-22T12:00:00-03:00') });
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   // A second account of the same agent can take the next message.
@@ -156,4 +176,134 @@ test('the usage limit card fits a phone', async ({ page }) => {
   const column = await reply.locator('.message-content').boundingBox();
   expect(card!.x + card!.width).toBeLessThanOrEqual(column!.x + column!.width + 0.5);
   await page.screenshot({ path: 'artifacts/usage-limit-mobile.png' });
+});
+
+test('a chat a usage limit stopped goes on by itself once the limit resets', async ({ page }) => {
+  await page.clock.install();
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  const reply = await limitedReply(page, await resettingIn(page, 30));
+  // The computer running the chat plans to go on a minute past the reset the line names.
+  const plan = reply.locator('.usage-limit-continue');
+  await expect(plan).toHaveText(/^Continues at .+Cancel$/);
+  await expect(plan.getByRole('button', { name: 'Cancel continuing' })).toBeVisible();
+  await expect.poll(async () => (await savedReplies(page))[1].autoContinue?.at).toBeTruthy();
+  const at = Date.parse((await savedReplies(page))[1].autoContinue.at);
+  const now = await page.evaluate(() => Date.now());
+  expect(at - now).toBeGreaterThan(29 * 60_000);
+  expect(at - now).toBeLessThanOrEqual(31 * 60_000);
+  await page.screenshot({ path: 'artifacts/usage-limit-continues.png' });
+
+  await page.clock.fastForward(20 * 60_000);
+  await expect(plan).toContainText('Continues at');
+  expect(await runRequests(page)).toHaveLength(1);
+  // Its time came: with room on the account again, the chat is sent its next message.
+  await page.clock.fastForward(12 * 60_000);
+  await expect.poll(() => runRequests(page).then((requests) => requests.length)).toBe(2);
+  expect((await runRequests(page))[1].messages.at(-1)).toEqual({
+    role: 'user',
+    text: 'Continue where you left off.',
+  });
+  const note = page.locator('.message.continued');
+  await expect(note).toHaveText('Continued after the usage limit reset');
+  await expect(reply.locator('.usage-limit')).toContainText('resets');
+  await expect(plan).toHaveCount(0);
+  await page.evaluate(() => {
+    (window as any).emitCapability({ kind: 'text', text: 'The map is wider now.' });
+    (window as any).finishCapabilities('complete');
+  });
+  const next = page.locator('[data-testid="message"]').last();
+  await expect(next).toHaveAttribute('data-status', 'complete');
+  await expect(next).toContainText('The map is wider now.');
+  // The note reads as Agent Studio's, never as a message of the user's own.
+  await expect(note.getByRole('button', { name: 'Rewind here' })).toHaveCount(0);
+  await expect(page.locator('.message.user')).toHaveCount(1);
+  const saved = await savedReplies(page);
+  expect(saved.map((m) => m.sentBy ?? m.role)).toEqual(['user', 'assistant', 'limit', 'assistant']);
+  // The plan was used, so nothing brings it back.
+  expect(saved[1].autoContinue.off).toBe(true);
+  await page.screenshot({ path: 'artifacts/usage-limit-continued.png' });
+});
+
+test('Cancel keeps a chat a usage limit stopped waiting for you', async ({ page }) => {
+  await page.clock.install();
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  const reply = await limitedReply(page, await resettingIn(page, 10));
+  const plan = reply.locator('.usage-limit-continue');
+  await expect(plan).toContainText('Continues at');
+  await plan.getByRole('button', { name: 'Cancel continuing' }).click();
+  await expect(plan).toHaveCount(0);
+  await expect(reply.locator('.usage-limit')).toBeVisible();
+  await expect.poll(async () => (await savedReplies(page))[1].autoContinue?.off).toBe(true);
+  await page.clock.fastForward(30 * 60_000);
+  await page.waitForTimeout(500);
+  expect(await runRequests(page)).toHaveLength(1);
+  await expect(page.locator('.message.continued')).toHaveCount(0);
+});
+
+test('a message of your own uses the plan up, so a rewind back to the limit waits for you', async ({
+  page,
+}) => {
+  await page.clock.install();
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  const reply = await limitedReply(page, await resettingIn(page, 10));
+  const plan = reply.locator('.usage-limit-continue');
+  await expect(plan).toContainText('Continues at');
+  await page.getByLabel('Message', { exact: true }).fill('Widen the map instead');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => runRequests(page).then((requests) => requests.length)).toBe(2);
+  await expect(plan).toHaveCount(0);
+  await expect.poll(async () => (await savedReplies(page))[1].autoContinue?.off).toBe(true);
+  await page.evaluate(() => {
+    (window as any).emitCapability({ kind: 'text', text: 'Widened.' });
+    (window as any).finishCapabilities('complete');
+  });
+  await expect(page.locator('[data-testid="message"]').last()).toHaveAttribute(
+    'data-status',
+    'complete',
+  );
+  // Back to before that message: the limited reply ends the chat again, and waits for you.
+  await page.getByRole('button', { name: 'Rewind here' }).last().click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Widen the map instead');
+  await expect(page.locator('[data-testid="message"]').last()).toHaveAttribute(
+    'data-message-id',
+    (await reply.getAttribute('data-message-id'))!,
+  );
+  await expect(plan).toHaveCount(0);
+  await page.clock.fastForward(30 * 60_000);
+  await page.waitForTimeout(500);
+  expect(await runRequests(page)).toHaveLength(2);
+});
+
+test('a chat waiting to go on after a usage limit still does once the app starts again', async ({
+  page,
+}) => {
+  await page.clock.install();
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await pick(page, 'Agent', 'Claude');
+  const reply = await limitedReply(page, await resettingIn(page, 10));
+  await expect(reply.locator('.usage-limit-continue')).toContainText('Continues at');
+  await expect.poll(async () => (await savedReplies(page))[1].autoContinue?.at).toBeTruthy();
+  await page.reload();
+  // The app started again and put its chats in History, the plan with them.
+  await expect(page.getByRole('tab', { name: /^History/ })).toHaveText(/1/);
+  await page.clock.fastForward(12 * 60_000);
+  await expect.poll(() => runRequests(page).then((requests) => requests.length)).toBe(1);
+  expect((await runRequests(page))[0].messages.at(-1)).toEqual({
+    role: 'user',
+    text: 'Continue where you left off.',
+  });
+  // Going on brings it back to Active.
+  await expect(page.getByRole('tab', { name: /^Active/ })).toHaveText(/1/);
+  await expect.poll(async () => (await savedReplies(page)).at(-2).sentBy).toBe('limit');
 });

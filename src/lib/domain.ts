@@ -29,7 +29,7 @@ import {
   steeringHistory,
   type SteeringReceipt,
 } from './steering.ts';
-import { usageLimitSchema, type UsageLimit } from './usage-limits.ts';
+import { autoContinueSchema, usageLimitSchema, type UsageLimit } from './usage-limits.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
@@ -254,8 +254,11 @@ export const messageSchema = z
     tookOver: z.string().uuid().optional(),
     // The usage limit that stopped the reply, in the provider's words; never replayed.
     usageLimit: usageLimitSchema.optional(),
-    // A message a workflow wrote in the chat, such as a mission's update, not the user's own.
-    sentBy: z.literal('workflow').optional(),
+    // When the chat goes on by itself once that limit resets, or that it no longer will.
+    autoContinue: autoContinueSchema.optional(),
+    // A message the user did not write: a workflow's, such as a mission's update, or the one
+    // Agent Studio sends once a usage limit that stopped the chat resets (`limit`).
+    sentBy: z.enum(['workflow', 'limit']).optional(),
   })
   .refine(
     (message) =>

@@ -29,6 +29,8 @@ export function forkConversation(source: Conversation, messageId?: string): Conv
       if (earlier) message.tookOver = earlier;
       else delete message.tookOver;
     }
+    // A fork sends nothing by itself, also once a usage limit that stopped its source resets.
+    delete message.autoContinue;
     for (const receipt of message.elicitations ?? [])
       if (receipt.status === 'pending') {
         receipt.status = 'cancelled';

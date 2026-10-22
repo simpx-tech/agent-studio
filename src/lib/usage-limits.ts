@@ -18,6 +18,30 @@ export function latestUsageLimit(left?: UsageLimit, right?: UsageLimit): UsageLi
   return right.revision > left.revision ? right : left;
 }
 
+/**
+ * The chat going on by itself once the limit that stopped this reply resets
+ * (src/lib/auto-continue.ts), as the computer running the chat plans it: when it sends the chat's
+ * next message (`at`), or that it no longer will (`off`), because the user cancelled it or
+ * nothing names a reset to wait for. A plan without either is still being made. Every field is
+ * optional, so a later release can add to it without this one refusing the chat.
+ */
+export const autoContinueSchema = z.object({
+  at: z.string().optional(),
+  off: z.boolean().optional(),
+  changedAt: z.string().optional(),
+});
+export type AutoContinue = z.infer<typeof autoContinueSchema>;
+
+/** The later of two records of a reply's continuation: one turned off stays off. */
+export function mergeAutoContinue(
+  left?: AutoContinue,
+  right?: AutoContinue,
+): AutoContinue | undefined {
+  if (!left || !right) return left ?? right;
+  if (!!left.off !== !!right.off) return left.off ? left : right;
+  return (right.changedAt ?? '') > (left.changedAt ?? '') ? right : left;
+}
+
 /** Claude Code's model name for the messages it writes itself: they ran no request. */
 export const syntheticModel = '<synthetic>';
 

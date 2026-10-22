@@ -21,7 +21,7 @@ import { mergeCompactions } from './compaction.ts';
 import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
-import { latestUsageLimit } from './usage-limits.ts';
+import { latestUsageLimit, mergeAutoContinue } from './usage-limits.ts';
 import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
 import { mergeFolderIcons, sameFolderIcons } from './folder-icons.ts';
@@ -176,6 +176,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !previous.filesUndone &&
         !previous.accountUsage &&
         !previous.usageLimit &&
+        !previous.autoContinue &&
         !previous.tookOver &&
         previous.usage?.revision == null)
     )
@@ -221,6 +222,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         : {}),
       ...(message.usageLimit || previous.usageLimit
         ? { usageLimit: latestUsageLimit(message.usageLimit, previous.usageLimit) }
+        : {}),
+      ...(message.autoContinue || previous.autoContinue
+        ? { autoContinue: mergeAutoContinue(message.autoContinue, previous.autoContinue) }
         : {}),
     };
     // A message that gained nothing stays the object it is, so the copies made after this one
@@ -374,6 +378,9 @@ function sameRun(
       ...(a.usageLimit || b.usageLimit
         ? { usageLimit: latestUsageLimit(a.usageLimit, b.usageLimit) }
         : {}),
+      ...(a.autoContinue || b.autoContinue
+        ? { autoContinue: mergeAutoContinue(a.autoContinue, b.autoContinue) }
+        : {}),
       ...(a.questions || b.questions
         ? { questions: mergeQuestions(a.questions, b.questions) }
         : {}),
@@ -472,8 +479,13 @@ function conflictCopy(conversation: Conversation): Conversation {
     title: `${conversation.title} (conflict copy)`,
     titleStatus: 'fallback',
     messages: conversation.messages.map((message) => {
-      if (message.status !== 'running') return message;
-      const copy: Message = { ...message, status: 'cancelled', error: copiedReplyError };
+      if (message.status !== 'running' && !message.autoContinue) return message;
+      const copy: Message = { ...message };
+      // The original goes on by itself after a usage limit, so the copy does not.
+      delete copy.autoContinue;
+      if (message.status !== 'running') return copy;
+      copy.status = 'cancelled';
+      copy.error = copiedReplyError;
       delete copy.backgroundWait;
       return copy;
     }),
