@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## A finished sign-in shows no notice — 2026-10-22
+
+Requested 2026-10-22: "You can remove this banner/alert: "Claude · Edvisor is connected. You're ready to chat."".
+
+- `noteSignIn` in `src/routes/+page.svelte` set that notice once a followed account reported ready, a line kept from the first commit; it now sets none, and the account's row in Connections says it is connected.
+- The notice Open sign-in shows (Finish signing in to Claude in your browser., the device-code line, or Finish signing in through Gemini. for Antigravity's terminal) was replaced by that line and would otherwise have stayed after the account connected. `login` records it as `signInPrompt`, with the key its sign-in is followed under, and it leaves once that sign-in no longer waits: when its CLI reports it connected, ended or cancelled, when Cancel is pressed, or, for Antigravity, when the account reads ready. A notice shown since then stays. `login` records it before applying the sign-in's first update, so one that ends at once keeps its reason.
+- Tests: seven browser tests that waited for the line now check that the sign-in's notice shows while it waits and that no notice is left once the account reads connected (`account-sign-in.spec.ts`, four of them, one also after Cancel; `workspace.spec.ts`, two for Antigravity's terminal sign-in; `federation.spec.ts`, the account whose own login is followed); all seven fail on the previous page.
+- Pipeline: `npm run check` (0 errors and 0 warnings in 5,460 files), 895 Vitest tests in 109 files, the build, and all 466 browser tests in three shards with the sockets drained, each at its first run. No Rust changed.
+- Choices of mine, not confirmed: the notice Open sign-in shows stays, though a waiting sign-in's row says the same; Cancel takes it away too.
+
 ## Balanced new chats prefer the account with the least of its week used — 2026-10-22
 
 Requested 2026-10-22: "Not sure if that's already what happens today but when two accounts have space for the 5h limit try to prioritize the one with less weekly limit".

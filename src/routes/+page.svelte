@@ -466,6 +466,10 @@
   // Sign-ins this computer runs without a terminal, by the connection (or provider login) they
   // sign in to: waiting for the browser, or ended with a reason to show.
   let signIns = $state<Record<string, SignInView>>({});
+  // The notice that asked to finish the latest sign-in opened here, by the key it is followed
+  // under. It leaves once that sign-in no longer waits; one that connects adds no notice, since
+  // its account reads connected.
+  let signInPrompt: { key: string; text: string } | undefined;
   let activeId = $state<string | null>(null);
   let historyAction = $state<{
     kind: 'rewind' | 'files';
@@ -4000,10 +4004,13 @@
         : statuses.find((s) => s.id === pending.provider);
       if (status?.auth !== 'ready') continue;
       pendingSignIns.delete(key);
-      const connection = workspace.fleet.connections.find((c) => c.id === pending.connectionId);
-      const account = workspace.fleet.accounts.find((a) => a.id === connection?.accountId);
-      notice = `${providers[pending.provider].name}${account ? ` · ${account.name}` : ''} is connected. You're ready to chat.`;
+      endSignInPrompt(key);
     }
+  }
+  function endSignInPrompt(key: string) {
+    if (signInPrompt?.key !== key) return;
+    if (notice === signInPrompt.text) notice = '';
+    signInPrompt = undefined;
   }
   async function refreshWsl() {
     if (installation?.platform !== 'windows' || wslRefreshing) return;
@@ -6674,10 +6681,11 @@
       // One opened on another computer goes on reporting to this window until it ends.
       const view = await signIn(id, connectionId, applySignIn);
       if (view) {
-        applySignIn(view);
         notice = view.userCode
           ? `Open the sign-in page and enter ${view.userCode} to sign in to ${providers[id].name}.`
           : `Finish signing in to ${providers[id].name} in your browser.`;
+        signInPrompt = { key: signInKey(view), text: notice };
+        applySignIn(view);
         return;
       }
       // Antigravity signs in in a terminal of its own, so its account is followed instead.
@@ -6687,6 +6695,7 @@
         until: Date.now() + 10 * 60_000,
       });
       notice = `Finish signing in through ${providers[id].name}.`;
+      signInPrompt = { key: connectionId ?? id, text: notice };
       void refresh();
     } catch (e) {
       notice = String(e);
@@ -6701,6 +6710,7 @@
     if (update === 'ignore') return;
     if (update === 'show' || update === 'ended') signIns[key] = view;
     else delete signIns[key];
+    if (update !== 'show') endSignInPrompt(key);
     if (update === 'connected') {
       pendingSignIns.set(key, {
         provider: view.provider,
@@ -6716,7 +6726,10 @@
   }
   async function stopSignIn(view: SignInView) {
     const key = signInKey(view);
-    if (signIns[key]?.id === view.id) delete signIns[key];
+    if (signIns[key]?.id === view.id) {
+      delete signIns[key];
+      endSignInPrompt(key);
+    }
     await cancelSignIn(view.id);
   }
   async function sendSignInCode(view: SignInView, code: string) {

@@ -975,24 +975,19 @@ test('account creation shows progress, retries the same connection, and tracks i
   const calls = await page.evaluate(() => (window as any).signInCalls);
   expect(calls).toHaveLength(2);
   expect(calls[0]).toEqual(calls[1]);
+  // The notice that asked to finish signing in stays until this account, not another profile,
+  // reads connected, and no notice replaces it.
   await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
-  await expect(
-    page.getByText("Claude · Second Claude is connected. You're ready to chat.", {
-      exact: true,
-    }),
-  ).toHaveCount(0);
+  const notice = page.locator('.notice[role="status"]');
   const account = computer.locator('.fleet-account').filter({ hasText: 'Second Claude' });
   await expect(account).toContainText('Sign-in needed');
+  await expect(notice).toHaveText('Finish signing in through Claude.');
   await page.evaluate(() => {
     localStorage.removeItem('fixture-pending-auth');
     window.dispatchEvent(new Event('focus'));
   });
-  await expect(
-    page.getByText("Claude · Second Claude is connected. You're ready to chat.", {
-      exact: true,
-    }),
-  ).toBeVisible();
   await expect(account).not.toContainText('Sign-in needed');
+  await expect(notice).toHaveCount(0);
 });
 
 test('the additional-account modal offers supported providers without login choices', async ({

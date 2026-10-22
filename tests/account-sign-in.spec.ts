@@ -100,13 +100,17 @@ test('the Agent picker shows an account whose login lapsed, and choosing it open
   await expect(button).toBeFocused();
   await button.click();
   expect(await page.evaluate(() => localStorage.getItem('test-sign-in-connection'))).toBe(second);
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    'Finish signing in to Claude in your browser.',
+  );
 
-  // Once the account reports ready it is no longer marked, and the message can go.
+  // Once the account reports ready it is no longer marked, and the message can go. The notice
+  // that asked to finish signing in leaves without another.
   await signIn(page, second);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await expect(page.locator('.notice[role="status"]')).toContainText('Claude is connected');
   await expect(card).not.toHaveClass(/highlighted/);
   await expect(card).not.toContainText('Sign-in needed');
+  await expect(page.locator('.notice[role="status"]')).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.locator('.setup-hint')).toHaveCount(0);
   await expect(message).toHaveValue('Keep this draft');
@@ -163,12 +167,15 @@ test('accounts can be signed in to while replies run in other chats', async ({ p
   await card.getByRole('button', { name: 'Open sign-in', exact: true }).click();
   expect(await page.evaluate(() => localStorage.getItem('test-sign-in-connection'))).toBe(second);
 
-  // The sign-in finishes while the reply runs, and the account is checked until it is ready.
+  // The sign-in finishes while the reply runs, and the account is checked until it is ready. It
+  // then reads connected, and the notice that asked to finish signing in leaves without another.
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    'Finish signing in to Claude in your browser.',
+  );
   await signIn(page, second);
-  await expect(page.locator('.notice[role="status"]')).toContainText('Claude is connected', {
-    timeout: 8000,
-  });
-  await expect(card).not.toContainText('Sign-in needed');
+  await expect(card).not.toContainText('Sign-in needed', { timeout: 8000 });
+  await expect(card.locator('.connection-hint')).toHaveCount(0);
+  await expect(page.locator('.notice[role="status"]')).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Stop response' })).toBeVisible();
 });
@@ -198,9 +205,9 @@ test('Open sign-in waits for no account check, and says why when it cannot open'
     for (const request of state.pendingCli.splice(0)) request.resolve();
   });
   await signIn(page, second);
-  await expect(page.locator('.notice[role="status"]')).toContainText(
-    "Claude · Second Claude is connected. You're ready to chat.",
-  );
+  await expect(card.getByRole('group', { name: 'Claude sign-in' })).toHaveCount(0);
+  await expect(card.locator('.connection-hint')).toHaveCount(0);
+  await expect(page.locator('.notice[role="status"]')).toHaveCount(0);
 
   // A check that fails says so instead of asking for the CLI, and keeps sign-in available.
   await page.evaluate(
@@ -217,10 +224,15 @@ test('Open sign-in waits for no account check, and says why when it cannot open'
   await expect
     .poll(() => page.evaluate(() => (window as any).signInCalls))
     .toEqual([second, second]);
-  // While it waits for the browser, the sign-in offers Cancel in place of Open sign-in.
+  // While it waits for the browser, the sign-in offers Cancel in place of Open sign-in, and
+  // Cancel takes the notice that asked to finish it away.
   await expect(button).toHaveCount(0);
+  await expect(page.locator('.notice[role="status"]')).toContainText(
+    'Finish signing in to Claude in your browser.',
+  );
   await card.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(button).toBeEnabled();
+  await expect(page.locator('.notice[role="status"]')).toHaveCount(0);
 
   // Only a check that finds no CLI keeps sign-in closed, and the button says why.
   await page.evaluate((id) => {
@@ -415,13 +427,15 @@ test('Claude signs in through its page alone, takes the code the page shows, and
   await expect(open).toBeEnabled();
   expect(await page.evaluate(() => (window as any).cancelledSignIns)).toHaveLength(1);
 
-  // A sign-in the CLI finishes connects the account at once.
+  // A sign-in the CLI finishes connects the account at once, and the notice that asked to
+  // finish it leaves without another.
   await open.click();
   await expect(progress.getByRole('status')).toBeVisible();
-  await signIn(page, second);
   await expect(page.locator('.notice[role="status"]')).toContainText(
-    "Claude · Second Claude is connected. You're ready to chat.",
+    'Finish signing in to Claude in your browser.',
   );
+  await signIn(page, second);
   await expect(progress).toHaveCount(0);
   await expect(row).not.toContainText('Sign-in needed');
+  await expect(page.locator('.notice[role="status"]')).toHaveCount(0);
 });

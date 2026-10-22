@@ -514,14 +514,15 @@ test('external Google sign-in updates on focus and survives reload without a cha
   await expect(card).toContainText('Sign-in needed');
   await card.getByRole('button', { name: 'Open sign-in' }).click();
   await expect(card).toContainText('Sign-in needed');
+  const notice = page.locator('.notice[role="status"]');
+  await expect(notice).toHaveText('Finish signing in through Gemini.');
   await page.evaluate(() => {
     localStorage.setItem('test-google-login', 'ready');
     window.dispatchEvent(new Event('focus'));
   });
   await expect(card).not.toContainText('Sign-in needed');
-  await expect(page.locator('.notice[role="status"]')).toContainText(
-    'Gemini · Gemini CLI login is connected',
-  );
+  // The account reads connected, and no notice replaces the one that asked to sign in.
+  await expect(notice).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
   await page.reload();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
@@ -540,13 +541,13 @@ test('sign-in completion is polled while the external console remains open', asy
     .locator('.connection-card')
     .filter({ has: page.getByRole('heading', { name: 'Gemini' }) });
   await card.getByRole('button', { name: 'Open sign-in' }).click();
+  const notice = page.locator('.notice[role="status"]');
+  await expect(notice).toHaveText('Finish signing in through Gemini.');
   await page.evaluate(() => localStorage.setItem('test-google-login', 'ready'));
   await expect(card).not.toContainText('Sign-in needed', {
     timeout: 8000,
   });
-  await expect(page.locator('.notice[role="status"]')).toContainText(
-    'Gemini · Gemini CLI login is connected',
-  );
+  await expect(notice).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('test-last-request'))).toBeNull();
 });
 
