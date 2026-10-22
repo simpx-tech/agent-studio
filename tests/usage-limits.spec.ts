@@ -82,6 +82,15 @@ test('a reply stopped at a usage limit keeps its history open and shows the limi
   await pick(page, 'Agent', 'Claude · Claude CLI login');
   const reply = await limitedReply(page);
   await expectStoppedAtLimit(reply);
+  // The limit's words are centred beside Switch account, the icon by their first line.
+  const box = (selector: string) => reply.locator(selector).first().boundingBox();
+  const middle = (b: { y: number; height: number } | null) => b!.y + b!.height / 2;
+  expect(
+    Math.abs(middle(await box('.usage-limit-text')) - middle(await box('.usage-limit > button'))),
+  ).toBeLessThan(1);
+  expect(
+    Math.abs(middle(await box('.usage-limit-line > svg')) - middle(await box('.usage-limit-text p'))),
+  ).toBeLessThan(1.5);
   await page.screenshot({ path: 'artifacts/usage-limit-desktop.png' });
 
   // The reader can still fold the history; the limit stays in view.

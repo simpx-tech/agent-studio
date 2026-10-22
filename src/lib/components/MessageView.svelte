@@ -336,9 +336,11 @@
       <span></span><span></span><span></span>
     </div>{/if}
   {#if limit}<div class="usage-limit" role="status">
-      <Hourglass size={15} aria-hidden="true" />
-      <div class="usage-limit-text">
-        <p>{limit.text}</p>
+      <div class="usage-limit-line">
+        <Hourglass size={15} aria-hidden="true" />
+        <div class="usage-limit-text">
+          <p>{limit.text}</p>
+        </div>
       </div>
       {#if switchAccount}<button type="button" class="secondary" onclick={switchAccount}
           ><ArrowRightLeft size={14} aria-hidden="true" />Switch account</button
@@ -617,12 +619,13 @@
       max-width: 92%;
     }
   }
-  /* The usage limit that stopped a reply follows its open Work history, in place of an error. */
+  /* The usage limit that stopped a reply follows its open Work history, in place of an error.
+     Its words are centred with the button beside them, and its icon stays by their first line. */
   .usage-limit {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 8px 10px;
+    align-items: center;
+    gap: 8px 12px;
     margin: 12px 0 4px;
     padding: 10px 13px;
     border: 1px solid var(--warning-border);
@@ -631,13 +634,21 @@
     font-size: var(--text-sm);
     line-height: var(--leading-normal);
   }
-  .usage-limit > :global(svg) {
+  .usage-limit-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex: 1 1 220px;
+    min-width: 0;
+  }
+  /* A 12px line at this leading is 19.2px tall, so the 15px icon sits 2px down. */
+  .usage-limit-line > :global(svg) {
     flex-shrink: 0;
     margin-top: 2px;
     color: var(--warning);
   }
   .usage-limit-text {
-    flex: 1 1 220px;
+    flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -646,9 +657,8 @@
     color: var(--text);
     font-weight: 500;
   }
-  .usage-limit button {
+  .usage-limit > button {
     margin-left: auto;
-    align-self: center;
   }
   .response-extras {
     display: flex;
