@@ -4,6 +4,7 @@ import {
   balanceableAccounts,
   balancedAccount,
   levelPoints,
+  nearlyFull,
   type BalanceCandidate,
 } from './account-balance';
 import type { Message } from './domain';
@@ -55,22 +56,25 @@ const sonnet = { provider: 'claude' as const, model: 'sonnet' };
 const gpt = { provider: 'codex' as const, model: '' };
 
 describe('balancing new chats between accounts', () => {
-  it('starts on the account that used the least of its 5-hour limit', () => {
+  it('starts on the account that used the least of its weekly limit', () => {
     const accounts = [
-      account('a', claude(62, 4)),
+      account('a', claude(62, 41)),
       account('b', claude(15, 79)),
-      account('c', claude(32, 90)),
+      account('c', claude(32, 9)),
     ];
-    // The weekly limit does not decide while the 5-hour ones differ.
-    expect(balancedAccount(accounts, sonnet, now)).toBe('b');
+    // The 5-hour limit, which comes back within hours, does not decide while each has room on it.
+    expect(balancedAccount(accounts, sonnet, now)).toBe('c');
     expect(balancedAccount([], sonnet, now)).toBeUndefined();
     expect(balancedAccount([account('only')], sonnet, now)).toBe('only');
-  });
-
-  it('compares by the weekly limit when no 5-hour limit is reported', () => {
-    const accounts = [account('a', codex(70)), account('b', codex(26)), account('c', codex(41))];
-    expect(balancedAccount(accounts, gpt, now)).toBe('b');
-    // A Claude 5-hour limit without a reported share is no limit to compare by either.
+    // Codex as this app reads most accounts, without a 5-hour limit.
+    expect(
+      balancedAccount(
+        [account('a', codex(70)), account('b', codex(26)), account('c', codex(41))],
+        gpt,
+        now,
+      ),
+    ).toBe('b');
+    // A Claude 5-hour limit without a reported share is no reason to look past the weekly one.
     expect(
       balancedAccount(
         [account('a', claude(null, 50)), account('b', claude(null, 20))],
@@ -78,18 +82,45 @@ describe('balancing new chats between accounts', () => {
         now,
       ),
     ).toBe('b');
-    // An account that reports one compares by it, another by its weekly limit.
+  });
+
+  it('compares by the 5-hour limit once an account is nearly out of it', () => {
+    expect(nearlyFull).toBe(80);
+    // It leaves the rest to the replies running there, however little of its week it used.
     expect(
-      balancedAccount([account('a', claude(40, 5)), account('b', claude(null, 20))], sonnet, now),
+      balancedAccount([account('a', claude(80, 4)), account('b', claude(79, 60))], sonnet, now),
+    ).toBe('b');
+    // With every account nearly out of it, the one with the most room left, the weekly limit
+    // deciding between accounts level on it.
+    expect(
+      balancedAccount([account('a', claude(95, 4)), account('b', claude(84, 60))], sonnet, now),
+    ).toBe('b');
+    expect(
+      balancedAccount(
+        [account('a', claude(82, 60)), account('b', claude(86, 4)), account('c', claude(90, 1))],
+        sonnet,
+        now,
+      ),
+    ).toBe('b');
+    // An account that reports no weekly limit compares by its 5-hour one.
+    expect(
+      balancedAccount(
+        [account('a', claude(30, null)), account('b', claude(10, null))],
+        sonnet,
+        now,
+      ),
+    ).toBe('b');
+    expect(
+      balancedAccount([account('a', claude(40, null)), account('b', claude(10, 20))], sonnet, now),
     ).toBe('b');
   });
 
   it('counts accounts within the tolerance as level and gives them turns', () => {
     expect(levelPoints).toBe(5);
     const level = (rest: Record<string, Partial<BalanceCandidate>> = {}) => [
-      account('a', claude(4, 50), rest.a),
-      account('b', claude(0, 50), rest.b),
-      account('c', claude(5, 50), rest.c),
+      account('a', claude(50, 4), rest.a),
+      account('b', claude(50, 0), rest.b),
+      account('c', claude(50, 5), rest.c),
     ];
     // Nothing else tells them apart: the picker's order.
     expect(balancedAccount(level(), sonnet, now)).toBe('a');
@@ -122,18 +153,18 @@ describe('balancing new chats between accounts', () => {
       ),
     ).toBe('b');
     // One point past the tolerance is not level, however busy the least used account is.
-    const apart = [account('a', claude(6, 0)), account('b', claude(0, 99), { running: 3 })];
+    const apart = [account('a', claude(0, 6)), account('b', claude(50, 0), { running: 3 })];
     expect(balancedAccount(apart, sonnet, now)).toBe('b');
   });
 
-  it('lets the weekly limit decide between accounts level on the 5-hour one', () => {
+  it('lets the 5-hour limit decide between accounts level on the weekly one', () => {
     const accounts = [
-      account('a', claude(0, 92)),
-      account('b', claude(3, 13)),
-      account('c', claude(5, 40)),
+      account('a', claude(70, 0)),
+      account('b', claude(13, 3)),
+      account('c', claude(40, 5)),
     ];
     expect(balancedAccount(accounts, sonnet, now)).toBe('b');
-    // Running replies count before it, since they use the 5-hour limit that comes first.
+    // Running replies count before it, since their usage does not show in the readings yet.
     expect(
       balancedAccount(
         accounts.map((a) => (a.connectionId === 'b' ? { ...a, running: 1 } : a)),
@@ -141,21 +172,23 @@ describe('balancing new chats between accounts', () => {
         now,
       ),
     ).toBe('c');
-    // An unreported weekly limit comes after any reported one.
+    // An unreported 5-hour limit comes after any reported one.
     expect(
-      balancedAccount([account('a', claude(0, null)), account('b', claude(2, 99))], sonnet, now),
+      balancedAccount([account('a', claude(null, 0)), account('b', claude(79, 2))], sonnet, now),
     ).toBe('b');
   });
 
   it('leaves an account whose limit is used up for last', () => {
-    // The 5-hour limit, and the weekly one of an account whose 5-hour usage is the lowest.
+    // The 5-hour limit, and the weekly one of an account with the most room on its 5-hour one.
     expect(
       balancedAccount([account('a', claude(100, 10)), account('b', claude(96, 10))], sonnet, now),
     ).toBe('b');
     expect(
       balancedAccount([account('a', claude(0, 100)), account('b', claude(80, 95))], sonnet, now),
     ).toBe('b');
-    // An account without a reading may have room; one with room is known to.
+    // An account without a reading may have room; one with room is known to, also once nearly
+    // out of its 5-hour limit.
+    expect(balancedAccount([account('a'), account('b', claude(50, 90))], sonnet, now)).toBe('b');
     expect(balancedAccount([account('a'), account('b', claude(90, 90))], sonnet, now)).toBe('b');
     expect(balancedAccount([account('a', claude(100, 10)), account('b')], sonnet, now)).toBe('b');
     expect(
@@ -193,18 +226,27 @@ describe('balancing new chats between accounts', () => {
     expect(balancedAccount([account('a', claude(20, 30)), account('b', idle)], sonnet, now)).toBe(
       'b',
     );
-    // A week that began again leaves the 5-hour limit as it was.
-    const week = reading([limit(300, 50), limit(10080, 100, seconds(now - 1000))]);
-    expect(balancedAccount([account('a', week), account('b', claude(70, 10))], sonnet, now)).toBe(
-      'a',
-    );
+    // A week that began again counts as unused, and leaves the 5-hour limit as it was.
+    const week = (fiveHour: number) =>
+      reading([limit(300, fiveHour), limit(10080, 100, seconds(now - 1000))]);
+    expect(
+      balancedAccount([account('a', week(50)), account('b', claude(20, 10))], sonnet, now),
+    ).toBe('a');
+    expect(
+      balancedAccount([account('a', week(85)), account('b', claude(20, 10))], sonnet, now),
+    ).toBe('b');
   });
 
   it('counts a model’s own limit only for a chat with that model', () => {
-    const fable = reading([limit(300, 0), limit(10080, 10), limit(10080, 100, undefined, 'fable')]);
-    const accounts = [account('a', fable), account('b', claude(40, 60))];
+    const fable = (own: number) =>
+      reading([limit(300, 0), limit(10080, 10), limit(10080, own, undefined, 'fable')]);
+    const accounts = [account('a', fable(100)), account('b', claude(40, 60))];
     expect(balancedAccount(accounts, sonnet, now)).toBe('a');
     expect(balancedAccount(accounts, { provider: 'claude', model: 'fable' }, now)).toBe('b');
+    // A Fable chat compares by the more used of the account's weekly limit and Fable's own.
+    const used = [account('a', fable(70)), account('b', claude(40, 60))];
+    expect(balancedAccount(used, sonnet, now)).toBe('a');
+    expect(balancedAccount(used, { provider: 'claude', model: 'fable' }, now)).toBe('b');
   });
 
   it('believes Claude when it refuses replies over an account-wide limit', () => {
@@ -239,12 +281,15 @@ describe('balancing new chats between accounts', () => {
   });
 
   it('keeps the account a chat has while no other is better by more than the tolerance', () => {
-    const accounts = [account('a', claude(0, 10)), account('b', claude(5, 90), { running: 4 })];
+    const accounts = [account('a', claude(10, 0)), account('b', claude(60, 5), { running: 4 })];
     expect(balancedAccount(accounts, sonnet, now)).toBe('a');
     expect(balancedAccount(accounts, sonnet, now, 'b')).toBe('b');
-    // It moves once the difference is more than that, its limit is used up, or it is gone.
-    const apart = [account('a', claude(0, 10)), account('b', claude(6, 10))];
+    // It moves once the difference is more than that, it is nearly out of its 5-hour limit while
+    // another account has room, its limit is used up, or it is gone.
+    const apart = [account('a', claude(10, 0)), account('b', claude(10, 6))];
     expect(balancedAccount(apart, sonnet, now, 'b')).toBe('a');
+    const nearly = [account('a', claude(10, 60)), account('b', claude(85, 0))];
+    expect(balancedAccount(nearly, sonnet, now, 'b')).toBe('a');
     const spent = [account('a', claude(99, 10)), account('b', claude(100, 10))];
     expect(balancedAccount(spent, sonnet, now, 'b')).toBe('a');
     expect(balancedAccount(accounts, sonnet, now, 'removed')).toBe('a');

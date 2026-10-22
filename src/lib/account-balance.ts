@@ -4,8 +4,9 @@ import { resetTime, visibleLimits, type UsageSnapshot } from './usage';
 
 // Balancing new chats between accounts (Settings → New chats, off unless turned on): a new chat
 // starts on the account of its agent, on its computer, that has used the least, so several
-// accounts are used evenly instead of one until its limit. Accounts compare by the share used
-// of their 5-hour limit, or of their weekly limit when they report no 5-hour one.
+// accounts are used evenly instead of one until its limit. Accounts with room on their 5-hour
+// limit compare by the share used of their weekly limit, which takes a week to come back where
+// the 5-hour one returns within hours.
 
 /**
  * Accounts whose usage differs by no more than this many percentage points count as level, as
@@ -13,6 +14,13 @@ import { resetTime, visibleLimits, type UsageSnapshot } from './usage';
  * so chats started together spread over them before their readings show any of it.
  */
 export const levelPoints = 5;
+
+/**
+ * The share of its 5-hour limit, in percent, from which an account is nearly out of it: the rest
+ * is left to the replies already running there, and new chats start on accounts with more room
+ * while there are any.
+ */
+export const nearlyFull = 80;
 
 export type BalanceCandidate = {
   connectionId: string;
@@ -26,11 +34,18 @@ export type BalanceCandidate = {
 
 type Standing = BalanceCandidate & {
   order: number;
-  /** 0 has room, 1 reports no usage to compare, 2 has used a limit up. */
-  group: 0 | 1 | 2;
-  /** The share accounts compare by: of the 5-hour limit, or of the weekly one without it. */
+  /**
+   * 0 has room, 1 is nearly out of its 5-hour limit, 2 reports no usage to compare, 3 has used a
+   * limit up.
+   */
+  group: 0 | 1 | 2 | 3;
+  /**
+   * The share accounts compare by: of the weekly limit, or of the 5-hour one when nearly out of it
+   * or without a weekly limit.
+   */
   used: number;
-  weekly: number;
+  /** The share of the other limit, which decides between level accounts. */
+  other: number;
   /** When a limit that is used up begins again. */
   resumes: number;
 };
@@ -54,10 +69,12 @@ function standing(
       window.usedPercent == null ? null : reset != null && reset <= now ? 0 : window.usedPercent;
     return { minutes: window.windowMinutes, used, reset };
   });
-  const share = (minutes: number) =>
-    limits.find((limit) => limit.minutes === minutes)?.used ?? null;
-  const fiveHour = share(300);
-  const weekly = share(10080);
+  const fiveHour = limits.find((limit) => limit.minutes === 300)?.used ?? null;
+  // The weekly limit the chat would run out of first: a Claude Fable chat also has Fable's own.
+  const weeks = limits.flatMap((limit) =>
+    limit.minutes === 10080 && limit.used != null ? [limit.used] : [],
+  );
+  const weekly = weeks.length ? Math.max(...weeks) : null;
   const spent = limits.filter((limit) => limit.used != null && limit.used >= 100);
   // Claude also says so itself when it refuses a reply over an account-wide limit.
   const refused = candidate.snapshot?.live?.limitStatus;
@@ -68,13 +85,17 @@ function standing(
     refused.resetsAt * 1000 > now
       ? refused.resetsAt * 1000
       : null;
-  const used = fiveHour ?? weekly;
+  const nearlyOut = fiveHour != null && fiveHour >= nearlyFull;
+  // An account compares by its weekly limit while it has room on its 5-hour one, and by the
+  // 5-hour limit once nearly out of it or when it reports no weekly limit.
+  const byFiveHour = nearlyOut || weekly == null;
+  const used = byFiveHour ? fiveHour : weekly;
   return {
     ...candidate,
     order,
-    group: spent.length || refusedUntil != null ? 2 : used == null ? 1 : 0,
+    group: spent.length || refusedUntil != null ? 3 : nearlyOut ? 1 : used == null ? 2 : 0,
     used: used ?? Infinity,
-    weekly: weekly ?? Infinity,
+    other: (byFiveHour ? weekly : fiveHour) ?? Infinity,
     resumes: Math.max(refusedUntil ?? 0, ...spent.map((limit) => limit.reset ?? Infinity)),
   };
 }
@@ -93,10 +114,11 @@ function first(standings: Standing[], ...keys: ((standing: Standing) => number)[
 
 /**
  * The account a new chat starts on, of those its agent has on its computer (`candidates`, in the
- * order the Agent picker lists them). Accounts with room come first, then those without a
- * reading, then those with a limit used up. Among accounts with room, those within
- * `levelPoints` of the least used are level, and the chat goes to the one with the fewest
- * replies running, then the lowest weekly usage, then the one used longest ago.
+ * order the Agent picker lists them). Accounts with room come first, compared by their weekly
+ * limit, then those nearly out of their 5-hour limit, compared by it, then those without a
+ * reading, then those with a limit used up. Accounts within `levelPoints` of the least used of
+ * their group are level, and the chat goes to the one with the fewest replies running, then the
+ * lowest usage of the other limit, then the one used longest ago.
  *
  * Given the account the chat already has (`current`), it keeps that one while no other account
  * is better by more than the tolerance, so a chosen account does not move with every reading.
@@ -112,15 +134,15 @@ export function balancedAccount(
   const group = Math.min(...standings.map((s) => s.group));
   const best = standings.filter((s) => s.group === group);
   const lowest = Math.min(...best.map((s) => s.used));
-  const level = group === 0 ? best.filter((s) => s.used <= lowest + levelPoints) : best;
+  const level = group < 2 ? best.filter((s) => s.used <= lowest + levelPoints) : best;
   if (current !== undefined && level.some((s) => s.connectionId === current)) return current;
   return (
-    group === 2
+    group === 3
       ? first(level, (s) => s.resumes)
       : first(
           level,
           (s) => s.running,
-          (s) => s.weekly,
+          (s) => s.other,
           (s) => s.lastUsed,
         )
   ).connectionId;
