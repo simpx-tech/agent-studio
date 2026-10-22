@@ -1264,6 +1264,8 @@ mod tests {
         let context = r.native_context().unwrap();
         assert!(context.contains("began in Codex"));
         assert!(!context.contains(super::super::visualize::GUIDANCE));
+        // Naming a fence's shell needs no tool, so the thread learns it too.
+        assert!(context.contains(crate::console::GUIDANCE));
         // A rewind before the first reply replaced the history the imported session holds.
         let mut rewound = request();
         imported(root.path(), &rewound, "claude");

@@ -13,6 +13,11 @@ use tauri::Manager;
 #[cfg(windows)]
 pub(crate) mod window;
 
+/// What chat agents learn about fences (requested 2026-10-22): the window offers Run only on a
+/// block whose opening fence names a shell (`consoleShell` in `src/lib/code-blocks.ts`), so the
+/// commands an agent gives name theirs, and output names a language that only copies.
+pub const GUIDANCE: &str = "Name the language of every fenced code block on its opening fence: for commands you give the user to run, the shell they are written for (bash, powershell or cmd), which lets Agent Studio offer to run them in a console in the working directory; for output or a terminal transcript, text or console, which it never runs.";
+
 /// A family of console languages, as the window names the block it runs.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { consoleShell, consoleShells, fenceClosed } from './code-blocks';
 import {
@@ -55,6 +56,17 @@ describe('console languages', () => {
     // An object's own members are not languages.
     expect(consoleShell('constructor')).toBeUndefined();
     expect(consoleShell('toString')).toBeUndefined();
+  });
+
+  // Chat agents are asked to name these on their fences (GUIDANCE in src-tauri/src/console.rs).
+  it('runs every shell agents name for commands and nothing they name for output', () => {
+    const rust = readFileSync('src-tauri/src/console.rs', 'utf8');
+    const guidance = /pub const GUIDANCE: &str = "([^"]*)";/.exec(rust)?.[1] ?? '';
+    const commands = /\(([^)]*)\)/.exec(guidance)?.[1].split(/, | or /) ?? [];
+    const output = /transcript, (\w+) or (\w+),/.exec(guidance)?.slice(1) ?? [];
+    expect(new Set(commands.map(consoleShell))).toEqual(new Set(['posix', 'powershell', 'cmd']));
+    expect(output).toHaveLength(2);
+    for (const label of output) expect(consoleShell(label)).toBeUndefined();
   });
 });
 

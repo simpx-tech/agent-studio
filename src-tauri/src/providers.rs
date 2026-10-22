@@ -921,8 +921,9 @@ impl RunRequest {
     }
     fn capabilities(&self, studio_tools: bool) -> String {
         let tools = if self.tools_enabled() {
-            // A Codex chat with Agent Studio's tools shows an artifact from a file, a Claude chat
-            // publishes one to claude.ai when asked, and otherwise a fence holds it.
+            // Every chat agent names its fences' languages, so the commands it gives can run in
+            // a console. A Codex chat with Agent Studio's tools shows an artifact from a file, a
+            // Claude chat publishes one to claude.ai when asked, and otherwise a fence holds it.
             let delivery = if self.uses_claude_visualizer() {
                 crate::artifacts::Delivery::ClaudeAi
             } else if studio_tools && self.uses_codex_server() {
@@ -930,7 +931,7 @@ impl RunRequest {
             } else {
                 crate::artifacts::Delivery::Fence
             };
-            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {}", crate::artifacts::guidance(delivery))
+            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {} {}", crate::console::GUIDANCE, crate::artifacts::guidance(delivery))
         } else {
             "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
@@ -1990,7 +1991,10 @@ mod tests {
             for guidance in [sent_files::GUIDANCE, sent_files::COMPARE_GUIDANCE] {
                 assert_eq!(r.prompt().contains(guidance), provider != "gemini");
             }
+            // And to name a fence's language, so the commands it gives can run in a console.
+            assert!(r.prompt().contains(crate::console::GUIDANCE));
             r.conversation_only = true;
+            assert!(!r.prompt().contains(crate::console::GUIDANCE));
             assert!(!r.prompt().contains(sent_files::COMPARE_GUIDANCE));
             assert!(r.prompt().contains("Do not use tools"));
             assert!(!r.prompt().contains("Make it a finished, polished page"));
