@@ -5,6 +5,14 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.0.2 - 2026-10-23
+
+### Added
+
+- Play the audio files agents show you (MP3, M4A, AAC, WAV, FLAC, Ogg and WebM) in a player of
+  the app's own, in the reply and larger in the file viewer, which keeps it playing as it opens
+  and closes. A file that holds only sound, such as an MP4 without a picture, plays as audio
+
 ## 1.0.1 - 2026-10-23
 
 ### Fixed
