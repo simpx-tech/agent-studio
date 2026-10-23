@@ -5,6 +5,16 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.0.1 - 2026-10-23
+
+### Fixed
+
+- Bring the window back by itself when the engine that draws it (WebView2) fails, as it did when
+  Windows ran out of memory: a window that went blank is built again at once, and one that kept
+  showing the chat while saying Agent Studio stopped answering it is built again within a minute.
+  Running replies carry on in the new window
+- Keep the answer of a reply that finished while the window could not show it
+
 ## 1.0.0 - 2026-10-22
 
 Agent Studio 1.0 adds workflows: static ones, graphs of steps that you and your agents draw, and
