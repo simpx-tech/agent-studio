@@ -83,6 +83,35 @@ async function recordVideo(page: Page) {
   });
 }
 
+/** A tone of `seconds` as 16-bit mono WAV, written in the page as the host would keep it. */
+async function tone(page: Page, seconds: number) {
+  return page.evaluate((seconds) => {
+    const rate = 8000;
+    const samples = rate * seconds;
+    const view = new DataView(new ArrayBuffer(44 + samples * 2));
+    const text = (at: number, value: string) =>
+      [...value].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+    text(0, 'RIFF');
+    view.setUint32(4, 36 + samples * 2, true);
+    text(8, 'WAVEfmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    text(36, 'data');
+    view.setUint32(40, samples * 2, true);
+    for (let i = 0; i < samples; i++) view.setInt16(44 + i * 2, Math.sin(i / 4) * 2000, true);
+    const bytes = new Uint8Array(view.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000)
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return { mediaType: 'audio/wav', data: btoa(binary), bytes: bytes.length };
+  }, seconds);
+}
+
 /** Answers a message with one group of files, kept by the mock host as `others`. */
 async function show(page: Page, files: unknown[], others: unknown[]) {
   await page.evaluate((others) => {
@@ -243,5 +272,131 @@ test('a video plays in the reply, and the viewer takes it up where it stood', as
   expect(Math.abs(box.width / box.height - 16 / 9)).toBeLessThan(0.02);
   // A click on the scrim beside it closes the viewer.
   await page.mouse.click(box.x / 2, box.y + box.height / 2);
+  await expect(viewer).toBeHidden();
+});
+
+// Playwright's WebKit on Windows plays no audio, so playback runs in Edge alone.
+test('a sound plays in its card, and the viewer shows the same player', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  const [narration, chime] = [await tone(page, 12), await tone(page, 3)];
+  await show(
+    page,
+    [
+      { index: 0, name: 'narration.wav', mediaType: 'audio/wav', bytes: narration.bytes },
+      { index: 1, name: 'chime.wav', mediaType: 'audio/wav', bytes: chime.bytes },
+      // A kind a later release shows, which this one names without opening.
+      { index: 0, name: 'plan.pdf', mediaType: 'application/pdf', bytes: 2048 },
+    ],
+    [narration, chime],
+  );
+  const answer = page.getByTestId('message').filter({ hasText: 'The report:' });
+  // Its length comes from the file before it plays, and the slider waits for it.
+  await expect(answer.getByText('WAV · 0:12 · 188 KB')).toBeVisible();
+  const position = answer.getByRole('slider', { name: 'Position in narration.wav' });
+  await expect(position).toHaveAttribute('aria-valuetext', '0:00 of 0:12');
+  // The keys move along the sound, five seconds at a time.
+  await position.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(position).toHaveAttribute('aria-valuetext', '0:05 of 0:12');
+  await page.keyboard.press('Home');
+  await expect(position).toHaveAttribute('aria-valuetext', '0:00 of 0:12');
+  // Space plays from the slider, and the place moves on as it plays.
+  await page.keyboard.press(' ');
+  const pause = answer.getByRole('button', { name: 'Pause narration.wav' });
+  await expect(pause).toBeVisible();
+  await expect(position).toHaveAttribute('aria-valuetext', /^0:0[1-9] of 0:12$/, {
+    timeout: 5000,
+  });
+
+  // The viewer shows the same player, still playing, and closing it changes nothing.
+  await answer.getByRole('button', { name: 'Expand narration.wav' }).click();
+  const viewer = page.getByRole('dialog', { name: 'Audio preview' });
+  await expect(viewer).toContainText('1 of 2');
+  await expect(viewer.getByRole('button', { name: 'Pause narration.wav' })).toBeVisible();
+  await viewer.getByRole('button', { name: 'Mute narration.wav' }).click();
+  await expect(viewer.getByRole('button', { name: 'Unmute narration.wav' })).toBeVisible();
+  // The arrow keys move along the sound while its slider has focus, not to the next file.
+  const inViewer = viewer.getByRole('slider', { name: 'Position in narration.wav' });
+  await inViewer.focus();
+  await page.keyboard.press('End');
+  await expect(viewer).toContainText('1 of 2');
+  await page.keyboard.press('Escape');
+  await expect(viewer).toBeHidden();
+  await expect(answer.getByRole('button', { name: 'Unmute narration.wav' })).toBeVisible();
+  // At the end of the sound its thumb stays within the bar, and the chat never scrolls sideways.
+  await expect(position).toHaveAttribute('aria-valuetext', '0:12 of 0:12');
+  const thumb = (await answer.locator('.audio-thumb').first().boundingBox())!;
+  const bar = (await answer.locator('.audio-track').first().boundingBox())!;
+  expect(thumb.x + thumb.width).toBeLessThanOrEqual(bar.x + bar.width + 1.5);
+  expect(thumb.x + thumb.width).toBeGreaterThan(bar.x + bar.width - 3);
+  expect(
+    await page.evaluate(() => {
+      const chat = document.querySelector('.chat-scroll')!;
+      return chat.scrollWidth - chat.clientWidth;
+    }),
+  ).toBeLessThanOrEqual(0);
+
+  // One sound plays at a time.
+  await page.keyboard.press('Home');
+  await answer.getByRole('button', { name: 'Play narration.wav' }).click();
+  await expect(pause).toBeVisible();
+  await answer.getByRole('button', { name: 'Play chime.wav' }).click();
+  await expect(answer.getByRole('button', { name: 'Pause chime.wav' })).toBeVisible();
+  await expect(answer.getByRole('button', { name: 'Play narration.wav' })).toBeVisible();
+  await answer.getByRole('button', { name: 'Pause chime.wav' }).click();
+  await expect(answer.getByRole('button', { name: 'Play chime.wav' })).toBeVisible();
+
+  await expect(answer.getByText('Needs a newer Agent Studio')).toBeVisible();
+  // Saved where releases before audio never read it, and never its bytes.
+  const saved = await page.evaluate(() => localStorage.getItem('test-workspace') ?? '');
+  const message = JSON.parse(saved)
+    .conversations.flatMap((c: any) => c.messages)
+    .find((m: any) => m.role === 'assistant');
+  expect(message.laterSentFiles.map((g: any) => g.id)).toEqual(['report']);
+  expect(message.extraSentFiles ?? []).toEqual([]);
+  expect(saved).not.toContain(chime.data.slice(0, 64));
+});
+
+test('a sound that cannot play says so, and its player fits a phone @webkit', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  const broken = { mediaType: 'audio/mpeg', data: btoa('not a sound at all'), bytes: 18 };
+  await show(
+    page,
+    [
+      {
+        index: 0,
+        name: 'a-rather-long-narration-name-for-a-phone.mp3',
+        mediaType: 'audio/mpeg',
+        bytes: 18,
+      },
+    ],
+    [broken],
+  );
+  const answer = page.getByTestId('message').filter({ hasText: 'The report:' });
+  const name = 'a-rather-long-narration-name-for-a-phone.mp3';
+  await expect(answer.getByText('This file cannot be played here.')).toBeVisible();
+  await expect(answer.getByRole('slider', { name: `Position in ${name}` })).toBeDisabled();
+  // Nothing in the card reaches past the chat's width.
+  const overflow = await answer.evaluate((element) => {
+    const card = element.querySelector('.file-card')!;
+    return card.scrollWidth - card.clientWidth;
+  });
+  expect(overflow).toBeLessThanOrEqual(0);
+  // Retry reads it again, and it fails again with the same line.
+  await answer.getByRole('button', { name: 'Retry' }).click();
+  await expect(answer.getByText('This file cannot be played here.')).toBeVisible();
+  await expect(answer.getByRole('button', { name: `Play ${name}` })).toBeVisible();
+  // The viewer shows the same player, inside the window.
+  await answer.getByRole('button', { name: `Expand ${name}` }).click();
+  const viewer = page.getByRole('dialog', { name: 'Audio preview' });
+  const play = viewer.getByRole('button', { name: `Play ${name}` });
+  await expect(play).toBeVisible();
+  const box = (await viewer.locator('.audio-panel').boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  await page.keyboard.press('Escape');
   await expect(viewer).toBeHidden();
 });

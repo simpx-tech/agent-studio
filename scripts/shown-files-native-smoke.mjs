@@ -1,8 +1,8 @@
 // Opt-in: a real Codex reply (SHOWN_FILES_QA_PROVIDER, Codex by default) in an isolated native app
-// sends a table, a workbook, a document and a video with send_files, and the app's own window
-// shows each: the table's pages parsed where it is kept, every sheet of the workbook, the
-// document whole, and the video streamed through the studio-file protocol, seeking past its first
-// part. Build with scripts/native-shown-files.tauri.json (after `npm run build`), then run this
+// sends a table, a workbook, a document, a video and a sound with send_files, and the app's own
+// window shows each: the table's pages parsed where it is kept, every sheet of the workbook, the
+// document whole, and the video and the sound streamed through the studio-file protocol, each
+// played past its first part. The sound plays muted. Build with scripts/native-shown-files.tauri.json (after `npm run build`), then run this
 // with the built executable (SHOWN_FILES_QA_EXECUTABLE). No credentials are copied.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -126,6 +126,31 @@ await browser.close();
 const video = join(folder, recorded.type === 'video/mp4' ? 'clip.mp4' : 'clip.webm');
 await writeFile(video, Buffer.from(recorded.data, 'base64'));
 console.log(`video: ${recorded.type}, ${(recorded.data.length * 0.75) / 1024 ** 2} MB`);
+
+// Thirty seconds of a tone as WAV, larger than one streamed part, so playing near its end asks
+// for more than the first.
+const rate = 44100;
+const samples = rate * 30;
+const wave = Buffer.alloc(44 + samples * 4);
+wave.write('RIFF', 0);
+wave.writeUInt32LE(36 + samples * 4, 4);
+wave.write('WAVEfmt ', 8);
+wave.writeUInt32LE(16, 16);
+wave.writeUInt16LE(1, 20);
+wave.writeUInt16LE(2, 22);
+wave.writeUInt32LE(rate, 24);
+wave.writeUInt32LE(rate * 4, 28);
+wave.writeUInt16LE(4, 32);
+wave.writeUInt16LE(16, 34);
+wave.write('data', 36);
+wave.writeUInt32LE(samples * 4, 40);
+for (let i = 0; i < samples; i++) {
+  const value = Math.round(Math.sin((2 * Math.PI * 220 * i) / rate) * 3000);
+  wave.writeInt16LE(value, 44 + i * 4);
+  wave.writeInt16LE(value, 46 + i * 4);
+}
+const sound = join(folder, 'tone.wav');
+await writeFile(sound, wave);
 
 function launch() {
   execFileSync(
@@ -257,7 +282,7 @@ try {
         .click(),
     chat.title,
   );
-  const files = [csv, workbook, markdown, video];
+  const files = [csv, workbook, markdown, video, sound];
   await page.evaluate(
     (text) => {
       const input = document.querySelector('[aria-label="Message"]');
@@ -282,9 +307,11 @@ try {
     'The reply',
   );
   assert(!reply.failed, `The reply failed: ${reply.failed?.error}`);
-  const group = reply.extraSentFiles?.find((g) => g.id === 'qa');
+  // A group with a sound is kept apart from the fields releases before audio read.
+  const group = reply.laterSentFiles?.find((g) => g.id === 'qa');
   assert(group, 'The reply keeps its group with the files earlier releases cannot show');
   assert.equal(reply.sentFiles?.length ?? 0, 0);
+  assert.equal(reply.extraSentFiles?.length ?? 0, 0);
   report.files = group.files.map((f) => ({ name: f.name, type: f.mediaType, bytes: f.bytes }));
   assert.deepEqual(
     group.files.map((f) => f.mediaType),
@@ -293,6 +320,7 @@ try {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'text/markdown',
       recorded.type,
+      'audio/wav',
     ],
   );
   const source = { runId: group.runId, toolId: group.toolId };
@@ -365,6 +393,31 @@ try {
   assert(played.src.startsWith('http://studio-file.localhost/'), played.src);
   assert(played.to > played.from, 'The video plays from where it was sought');
   assert.equal(played.width, 1280);
+  // The sound reads its length from the stream before it plays, and plays near its end.
+  await page.waitFor(() =>
+    [...document.querySelectorAll('.message')].some((m) => m.textContent.includes('WAV · 0:30')),
+  );
+  const heard = await page.evaluate(async () => {
+    const control = (name) =>
+      [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === name);
+    const slider = document.querySelector('input[aria-label="Position in tone.wav"]');
+    slider.focus();
+    for (const key of ['End', 'ArrowLeft'])
+      slider.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const from = slider.getAttribute('aria-valuetext');
+    control('Mute tone.wav').click();
+    control('Play tone.wav').click();
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const playing = !!control('Pause tone.wav');
+    const to = slider.getAttribute('aria-valuetext');
+    control('Pause tone.wav')?.click();
+    return { from, to, playing, muted: !!control('Unmute tone.wav') };
+  });
+  report.audio = heard;
+  assert.equal(heard.from, '0:25 of 0:30');
+  assert(heard.playing && heard.muted, 'The sound plays, muted');
+  assert.match(heard.to, /^0:2[6-9] of 0:30$/);
   await page.evaluate(() =>
     document.querySelector('.message .file-card')?.scrollIntoView({ block: 'start' }),
   );
@@ -402,6 +455,12 @@ try {
   await page.waitFor(() => document.querySelector('dialog video')?.readyState >= 2);
   await sleep(300);
   await capture('video');
+  await page.button('Next file');
+  await page.waitFor(
+    () => !!document.querySelector('dialog[aria-label="Audio preview"] .audio-panel'),
+  );
+  await sleep(300);
+  await capture('audio');
   report.errors = page.errors;
   report.passed = true;
 } finally {

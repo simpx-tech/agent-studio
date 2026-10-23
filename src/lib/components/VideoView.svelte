@@ -2,7 +2,7 @@
   import { Film, Play, RotateCcw } from '@lucide/svelte';
   import { formatBytes } from '$lib/tool-output';
   import type { SentFile } from '$lib/sent-files';
-  import { KeptVideo, formatName } from '$lib/shown-files.svelte';
+  import { KeptMedia, formatName } from '$lib/shown-files.svelte';
   import type { FileViewer, ViewedPage } from '$lib/file-viewer.svelte';
   import FileCard from './FileCard.svelte';
 
@@ -26,7 +26,7 @@
 
   // This computer streams its own videos as they play; another computer's is read whole, which
   // waits for the reader to ask for it.
-  const video = new KeptVideo(() => ({ runId, toolId, index: file.index, connectionId }));
+  const video = new KeptMedia(() => ({ runId, toolId, index: file.index, connectionId }));
   $effect(() => {
     if (!video.remote) void video.load();
     return () => video.dispose();

@@ -17,6 +17,8 @@
   import TableView from './TableView.svelte';
   import DocumentView from './DocumentView.svelte';
   import VideoView from './VideoView.svelte';
+  import AudioView from './AudioView.svelte';
+  import UnknownFile from './UnknownFile.svelte';
   import FileViewer from './FileViewer.svelte';
 
   let {
@@ -126,6 +128,17 @@
         caption={run.item.group.caption}
         {viewer}
       />
+    {:else if run.kind === 'audio'}
+      <AudioView
+        runId={run.item.group.runId}
+        toolId={run.item.group.toolId}
+        {connectionId}
+        file={run.item.file}
+        caption={run.item.group.caption}
+        {viewer}
+      />
+    {:else if run.kind === 'unknown'}
+      <UnknownFile file={run.item.file} />
     {:else if run.kind === 'images' && run.items.length === 1}
       {@const item = run.items[0]}
       <div class="sent-image" {@attach viewer.attach(() => viewed(item))}>

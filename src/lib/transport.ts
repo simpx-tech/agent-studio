@@ -3024,11 +3024,11 @@ export async function readToolOutputDocument(
   );
 }
 /**
- * Where a window plays a video a finished tool call kept: this computer's window streams it from
- * its own store as it plays, and another device reads it whole through the relay, whatever its
- * size, and plays it from memory until `release`.
+ * Where a window plays a video or a sound a finished tool call kept: this computer's window streams
+ * it from its own store as it plays, and another device reads it whole through the relay, whatever
+ * its size, and plays it from memory until `release`.
  */
-export async function toolOutputVideo(source: {
+export async function toolOutputMedia(source: {
   runId: string;
   toolId: string;
   index: number;

@@ -1,8 +1,8 @@
 /**
- * Tables, documents and videos a reply shows (send_files), read from the computer that keeps them
- * while their card lives: a table a page of rows at a time, as its views reach them, a document's
- * beginning for its card and its whole text for the viewer, and a video as it plays. The card in
- * the chat and the file viewer share one reading.
+ * Tables, documents, videos and audio a reply shows (send_files), read from the computer that keeps
+ * them while their card lives: a table a page of rows at a time, as its views reach them, a
+ * document's beginning for its card and its whole text for the viewer, and a video or a sound as
+ * it plays. The card in the chat and the file viewer share one reading.
  */
 import { SvelteMap } from 'svelte/reactivity';
 import { formatBytes, otherFormats, type DocumentText, type TablePage } from './tool-output';
@@ -10,7 +10,7 @@ import {
   modelFromAnotherComputer,
   readToolOutputDocument,
   readToolOutputTable,
-  toolOutputVideo,
+  toolOutputMedia,
 } from './transport';
 import type { SentFile } from './sent-files';
 
@@ -147,16 +147,16 @@ export class KeptDocument {
 export const DOCUMENT_HEAD = 16 * 1024;
 
 /**
- * One kept video, where the window plays it from: streamed by this computer, or read whole from
- * another one, only once the reader asks to play it there, since it may be large.
+ * One kept video or sound, where the window plays it from: streamed by this computer, or read whole
+ * from another one, only once the reader asks to play it there, since it may be large.
  */
-export class KeptVideo {
+export class KeptMedia {
   readonly #source: () => KeptSource;
   url = $state<string>();
   error = $state('');
   loading = $state(false);
   #release?: () => void;
-  /** Whether the video comes from another computer, read whole before it plays. */
+  /** Whether the file comes from another computer, read whole before it plays. */
   readonly remote: boolean;
 
   constructor(source: () => KeptSource) {
@@ -168,7 +168,7 @@ export class KeptVideo {
     if (this.loading) return Promise.resolve(undefined);
     this.loading = true;
     this.error = '';
-    return toolOutputVideo(this.#source()).then(
+    return toolOutputMedia(this.#source()).then(
       ({ url, release }) => {
         this.loading = false;
         this.#release = release;

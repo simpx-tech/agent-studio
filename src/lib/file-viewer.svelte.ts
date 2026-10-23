@@ -40,9 +40,9 @@ export type ViewedComparison = Described & {
   /** Tells the comparison the viewer shows it, so its models give up their scenes meanwhile. */
   shown(showing: boolean): void;
 };
-/** A table, a document or a video, which its card in the chat draws at full size too. */
+/** A table, a document, a video or a sound, which its card in the chat draws at full size too. */
 export type ViewedPage = Described & {
-  kind: 'table' | 'document' | 'video';
+  kind: 'table' | 'document' | 'video' | 'audio';
   /** The file at full size, drawn by its card, which keeps what it already read. */
   view: Snippet;
   /** Tells the card the viewer shows its file, so a video in the chat pauses meanwhile. */

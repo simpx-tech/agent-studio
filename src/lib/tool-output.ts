@@ -66,11 +66,22 @@ export const toolOutputTableTypes = [
 export const toolOutputDocumentTypes = ['text/markdown'] as const;
 /** Videos a reply can show, played. A QuickTime movie plays as the MP4 it is built like. */
 export const toolOutputVideoTypes = ['video/mp4', 'video/webm', 'video/quicktime'] as const;
+/** Audio a reply can show, played: M4A is AAC in MP4, AAC alone its raw frames. */
+export const toolOutputAudioTypes = [
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/aac',
+  'audio/wav',
+  'audio/flac',
+  'audio/ogg',
+  'audio/webm',
+] as const;
 /** The name each of those formats goes by, as a card names its file. */
 export const otherFormats: Record<
   | (typeof toolOutputTableTypes)[number]
   | (typeof toolOutputDocumentTypes)[number]
-  | (typeof toolOutputVideoTypes)[number],
+  | (typeof toolOutputVideoTypes)[number]
+  | (typeof toolOutputAudioTypes)[number],
   string
 > = {
   'text/csv': 'CSV',
@@ -81,6 +92,13 @@ export const otherFormats: Record<
   'video/mp4': 'MP4',
   'video/webm': 'WebM',
   'video/quicktime': 'MOV',
+  'audio/mpeg': 'MP3',
+  'audio/mp4': 'M4A',
+  'audio/aac': 'AAC',
+  'audio/wav': 'WAV',
+  'audio/flac': 'FLAC',
+  'audio/ogg': 'Ogg',
+  'audio/webm': 'WebM',
 };
 const position = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 /** Rows of one sheet of a kept table, with every sheet's name and size, parsed where it is kept. */
@@ -112,9 +130,14 @@ export const documentTextSchema = z.object({
   complete: z.boolean(),
 });
 export type DocumentText = z.infer<typeof documentTextSchema>;
-/** A kept table, document or video, whole, as another device reads it. */
+/** A kept table, document, video or sound, whole, as another device reads it. */
 export const toolOutputFileSchema = z.object({
-  mediaType: z.enum([...toolOutputTableTypes, ...toolOutputDocumentTypes, ...toolOutputVideoTypes]),
+  mediaType: z.enum([
+    ...toolOutputTableTypes,
+    ...toolOutputDocumentTypes,
+    ...toolOutputVideoTypes,
+    ...toolOutputAudioTypes,
+  ]),
   data: z.union([z.literal(''), base64]),
   bytes: size,
 });

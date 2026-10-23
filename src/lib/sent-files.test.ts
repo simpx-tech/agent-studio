@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import {
+  extraSentFileGroupsSchema,
   fileKind,
   fileRuns,
   galleryRows,
@@ -7,6 +8,7 @@ import {
   imageInfo,
   isComparison,
   isModel,
+  laterSentFileGroupsSchema,
   mergeSentFiles,
   messageFiles,
   paneLabel,
@@ -14,7 +16,15 @@ import {
   sentFilesSchema,
   type SentFiles,
 } from './sent-files';
-import { modelBytes, modelFormats } from './tool-output';
+import {
+  modelBytes,
+  modelFormats,
+  toolOutputDocumentTypes,
+  toolOutputImageTypes,
+  toolOutputModelTypes,
+  toolOutputTableTypes,
+  toolOutputVideoTypes,
+} from './tool-output';
 import { applyRunEvent, retainRunEvent } from './activity';
 import { replyContent } from './markdown';
 import { restoreMessage } from './light-chats';
@@ -92,15 +102,23 @@ it('keeps shown files with their reply through checkpoints, storage and a confli
   expect(merged.conversations[0].messages[0].sentFiles?.map((g) => g.revision)).toEqual([3, 2]);
 });
 
-it('rejects foreign runs, duplicates, unsupported types and user messages', () => {
+it('rejects foreign runs, duplicates, kinds a field does not hold and user messages', () => {
   expect(sentFilesSchema.safeParse({ ...group, runId: 'not-a-run' }).success).toBe(false);
   expect(sentFilesSchema.safeParse({ ...group, files: [] }).success).toBe(false);
-  expect(
-    sentFilesSchema.safeParse({
-      ...group,
-      files: [{ index: 0, name: 'doc.pdf', mediaType: 'application/pdf', bytes: 10 }],
-    }).success,
-  ).toBe(false);
+  // A kind this release cannot open is a later release's, which only the field for them holds;
+  // what is no media type at all is refused.
+  const later = {
+    ...group,
+    files: [{ index: 0, name: 'doc.pdf', mediaType: 'application/pdf', bytes: 10 }],
+  };
+  expect(sentFilesSchema.safeParse(later).success).toBe(true);
+  expect(sentFileGroupsSchema.safeParse([later]).success).toBe(false);
+  expect(extraSentFileGroupsSchema.safeParse([later]).success).toBe(false);
+  expect(laterSentFileGroupsSchema.safeParse([later]).success).toBe(true);
+  for (const mediaType of ['pdf', 'application/', 'application/pdf; charset=x', ''])
+    expect(
+      sentFilesSchema.safeParse({ ...later, files: [{ ...later.files[0], mediaType }] }).success,
+    ).toBe(false);
   expect(
     sentFilesSchema.safeParse({ ...group, files: [group.files[0], group.files[0]] }).success,
   ).toBe(false);
@@ -443,15 +461,127 @@ it('merges both fields of a reply, and an earlier release dropping one deletes n
   expect(again.extraSentFiles?.map((g) => g.id)).toEqual(['clip']);
 });
 
-it('gives each table, document and video a place of its own, and never compares them', () => {
-  const runs = fileRuns([shown('mixed', [image(0), table, image(1), notes, clip])]);
+it('gives each table, document, video and sound a place of its own, and never compares them', () => {
+  const runs = fileRuns([shown('mixed', [image(0), table, image(1), notes, clip, voice])]);
   expect(runs.map((run) => (run.kind === 'images' ? run.items.length : run.kind))).toEqual([
     1,
     'table',
     1,
     'document',
     'video',
+    'audio',
   ]);
   expect(fileKind(clip)).toBe('video');
+  expect(fileKind(voice)).toBe('audio');
   expect(isComparison({ ...comparison, files: [comparison.files[0], table] })).toBe(false);
+  expect(isComparison({ ...comparison, files: [comparison.files[0], voice] })).toBe(false);
+  // Sounds are numbered with the other files.
+  expect(sentFilesSchema.safeParse(shown('pair', [table, { ...voice, index: 0 }])).success).toBe(
+    false,
+  );
+});
+
+const voice = { index: 3, name: 'voice.mp3', mediaType: 'audio/mpeg' as const, bytes: 48_000 };
+const future = { index: 0, name: 'plan.pdf', mediaType: 'application/pdf', bytes: 10 };
+/** What releases before audio accept in a reply's extraSentFiles. */
+const kindsBeforeAudio: string[] = [
+  ...toolOutputImageTypes,
+  ...toolOutputModelTypes,
+  ...toolOutputTableTypes,
+  ...toolOutputDocumentTypes,
+  ...toolOutputVideoTypes,
+];
+const releaseBeforeAudioReads = (groups: SentFiles[] = []) =>
+  groups.every((g) => g.files.every((f) => kindsBeforeAudio.includes(f.mediaType)));
+
+it('keeps groups with audio, and kinds a later release adds, where earlier releases never meet them', () => {
+  const message = reply();
+  const report = { ...group, id: 'report', files: [table] };
+  const spoken = { ...group, id: 'spoken', files: [group.files[0], table, voice] };
+  for (const sentFiles of [group, report, spoken])
+    applyRunEvent(message, { kind: 'sentfiles', sentFiles });
+  expect(message.sentFiles?.map((g) => g.id)).toEqual(['renders']);
+  expect(message.extraSentFiles?.map((g) => g.id)).toEqual(['report']);
+  expect(message.laterSentFiles?.map((g) => g.id)).toEqual(['spoken']);
+  expect(releaseBeforeAudioReads(message.extraSentFiles)).toBe(true);
+  expect(messageFiles(message).map((g) => g.id)).toEqual(['renders', 'report', 'spoken']);
+  // The field releases before audio read refuses it; the field for it takes it, from its run.
+  expect(messageSchema.safeParse({ ...reply(), extraSentFiles: [spoken] }).success).toBe(false);
+  expect(messageSchema.safeParse({ ...reply(), laterSentFiles: [spoken] }).success).toBe(true);
+  expect(
+    messageSchema.safeParse({ ...reply(), runId: crypto.randomUUID(), laterSentFiles: [spoken] })
+      .success,
+  ).toBe(false);
+  // A kind this release does not know arrives there too, and shows as a file it cannot open.
+  const later = { ...group, id: 'later', files: [future] };
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: later });
+  expect(message.laterSentFiles?.map((g) => g.id)).toEqual(['spoken', 'later']);
+  expect(fileRuns([later]).map((run) => run.kind)).toEqual(['unknown']);
+  // Saved and restored, every field stays as it was.
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Narration',
+    settings: { provider: 'claude', model: '', reasoning: '', instructions: '' },
+    createdAt: message.createdAt,
+    updatedAt: message.createdAt,
+    messages: [message],
+  });
+  const restored = restoreWorkspace(JSON.parse(JSON.stringify(workspace)));
+  expect(restored.conversations[0].messages[0].laterSentFiles).toEqual([spoken, later]);
+  // Sent again without its sound, a group moves to the field releases before audio read.
+  applyRunEvent(message, {
+    kind: 'sentfiles',
+    sentFiles: { ...spoken, revision: 2, files: [table] },
+  });
+  expect(message.laterSentFiles?.map((g) => g.id)).toEqual(['later']);
+  expect(message.extraSentFiles?.map((g) => `${g.id}:${g.revision}`)).toEqual([
+    'report:1',
+    'spoken:2',
+  ]);
+});
+
+it('merges the field for audio, and a release before it dropping the field deletes nothing', () => {
+  const message = reply();
+  const spoken = { ...group, id: 'spoken', files: [voice] };
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: group });
+  applyRunEvent(message, { kind: 'sentfiles', sentFiles: spoken });
+  const workspace = initialWorkspace();
+  workspace.conversations.push({
+    id: crypto.randomUUID(),
+    title: 'Narration',
+    settings: { provider: 'codex', model: '', reasoning: '', instructions: '' },
+    createdAt: message.createdAt,
+    updatedAt: message.createdAt,
+    messages: [message],
+  });
+  const base = sharedWorkspace(workspace),
+    local = structuredClone(base),
+    remote = structuredClone(base);
+  // A device on a release before audio saves the reply without the field, which the relay puts
+  // back as it puts back the work a light upload leaves out.
+  const stripped = structuredClone(remote.conversations[0].messages[0]);
+  delete stripped.laterSentFiles;
+  expect(restoreMessage(stripped, base.conversations[0].messages[0]).laterSentFiles).toEqual([
+    spoken,
+  ]);
+  // Edited on both sides, a reply merges its groups from both copies, whichever field held them.
+  delete remote.conversations[0].messages[0].laterSentFiles;
+  remote.conversations[0].messages[0].blocks = [{ type: 'markdown', text: 'Edited elsewhere' }];
+  applyRunEvent(local.conversations[0].messages[0], {
+    kind: 'sentfiles',
+    sentFiles: { ...spoken, id: 'take', files: [{ ...voice, index: 0 }] },
+  });
+  const merged = mergeShared(base, local, remote).conversations[0].messages[0];
+  expect(merged.laterSentFiles?.map((g) => g.id)).toEqual(['spoken', 'take']);
+  expect(merged.sentFiles?.map((g) => g.id)).toEqual(['renders']);
+  // A reply without audio gains no field for it, merged or not.
+  const none = reply();
+  applyRunEvent(none, { kind: 'sentfiles', sentFiles: group });
+  expect(none).not.toHaveProperty('laterSentFiles');
+  const copy = structuredClone(base);
+  copy.conversations[0].messages[0] = none;
+  expect(mergeShared(copy, copy, copy).conversations[0].messages[0]).not.toHaveProperty(
+    'laterSentFiles',
+  );
 });

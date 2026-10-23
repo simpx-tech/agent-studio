@@ -5,8 +5,11 @@ import {
   keptModelViewsSchema,
   modelViewCount,
   modelViewsSchema,
+  otherFormats,
   outputLines,
   outputSize,
+  toolOutputAudioTypes,
+  toolOutputFileSchema,
   toolOutputImageSchema,
   toolOutputSchema,
   type ToolOutput,
@@ -112,5 +115,19 @@ describe('tool output', () => {
     expect(formatBytes(300 * 1024)).toBe('300 KB');
     expect(formatBytes(5.5 * 1024 * 1024)).toBe('5.5 MB');
     expect(formatBytes(3 * 1024 ** 3)).toBe('3.0 GB');
+  });
+
+  it('reads a kept sound whole from another device, named by its format', () => {
+    const file = { data: 'SUQzBA==', bytes: 5 };
+    for (const mediaType of toolOutputAudioTypes) {
+      expect(toolOutputFileSchema.safeParse({ ...file, mediaType }).success).toBe(true);
+      expect(otherFormats[mediaType]).toBeTruthy();
+    }
+    expect(otherFormats['audio/mpeg']).toBe('MP3');
+    expect(otherFormats['audio/mp4']).toBe('M4A');
+    // Only the kinds a reply shows.
+    expect(toolOutputFileSchema.safeParse({ ...file, mediaType: 'audio/aiff' }).success).toBe(
+      false,
+    );
   });
 });

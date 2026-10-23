@@ -16,7 +16,12 @@ import {
   publishedHistory,
   type PublishedArtifact,
 } from './published-artifacts.ts';
-import { extraSentFileGroupsSchema, sentFileGroupsSchema, type SentFiles } from './sent-files.ts';
+import {
+  extraSentFileGroupsSchema,
+  laterSentFileGroupsSchema,
+  sentFileGroupsSchema,
+  type SentFiles,
+} from './sent-files.ts';
 import { screenCardsSchema, type ScreenCard } from './screens.ts';
 import { fileChangesSchema, type FileChanges } from './file-changes.ts';
 import { reasoningBlockSchema } from './reasoning.ts';
@@ -232,6 +237,9 @@ export const messageSchema = z
     // Groups showing a table, a document or a video, which releases before them cannot read:
     // apart from sentFiles, which those releases validate strictly, so they drop these alone.
     extraSentFiles: extraSentFileGroupsSchema.optional(),
+    // Groups showing audio, or any kind a later release adds, apart from extraSentFiles for the
+    // same reason; this field takes every kind, so no later one makes a release refuse it.
+    laterSentFiles: laterSentFileGroupsSchema.optional(),
     // The screens the reply saved, which their cards open from the computer that keeps them.
     screens: screenCardsSchema.optional(),
     questions: questionsSchema.optional(),
@@ -291,6 +299,13 @@ export const messageSchema = z
       !message.extraSentFiles?.length ||
       (message.role === 'assistant' &&
         message.extraSentFiles.every((group) => group.runId === message.runId)),
+    { message: 'Shown files do not match their response run' },
+  )
+  .refine(
+    (message) =>
+      !message.laterSentFiles?.length ||
+      (message.role === 'assistant' &&
+        message.laterSentFiles.every((group) => group.runId === message.runId)),
     { message: 'Shown files do not match their response run' },
   );
 export type Message = z.infer<typeof messageSchema>;

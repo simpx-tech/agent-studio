@@ -398,7 +398,12 @@ function sameRun(
       ...(a.artifacts || b.artifacts
         ? { artifacts: mergeArtifactRecords(a.artifacts, b.artifacts) }
         : {}),
-      ...(a.sentFiles || b.sentFiles || a.extraSentFiles || b.extraSentFiles
+      ...(a.sentFiles ||
+      b.sentFiles ||
+      a.extraSentFiles ||
+      b.extraSentFiles ||
+      a.laterSentFiles ||
+      b.laterSentFiles
         ? mergeMessageFiles(a, b)
         : {}),
       ...(a.screens || b.screens ? { screens: mergeScreenCards(a.screens, b.screens) } : {}),

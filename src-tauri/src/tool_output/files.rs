@@ -1,8 +1,8 @@
-//! Tables, documents and videos a reply shows beside its images and models (send_files). Each is
-//! recognized here, on the computer that runs the conversation, by its own content (a video or a
-//! workbook) or by its name and readable text (CSV, TSV and Markdown, which any text could be),
-//! kept whole with the call's other results, and read on demand: a table a page of rows at a
-//! time, parsed here, a document as its text, a video as it plays.
+//! Tables, documents, videos and audio a reply shows beside its images and models (send_files).
+//! Each is recognized here, on the computer that runs the conversation, by its own content (a
+//! video, a sound or a workbook) or by its name and readable text (CSV, TSV and Markdown, which any
+//! text could be), kept whole with the call's other results, and read on demand: a table a page of
+//! rows at a time, parsed here, a document as its text, a video or a sound as it plays.
 use serde::Serialize;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -15,6 +15,7 @@ pub enum Kind {
     Table,
     Document,
     Video,
+    Audio,
 }
 
 /// A recognized file, as the reply records it.
@@ -31,7 +32,7 @@ pub struct ShownFile {
 }
 
 /// Each format a reply shows beyond images and models, with its media type and kind.
-pub const FORMATS: [(&str, &str, Kind); 8] = [
+pub const FORMATS: [(&str, &str, Kind); 15] = [
     ("csv", "text/csv", Kind::Table),
     ("tsv", "text/tab-separated-values", Kind::Table),
     (
@@ -48,6 +49,13 @@ pub const FORMATS: [(&str, &str, Kind); 8] = [
     ("mp4", "video/mp4", Kind::Video),
     ("webm", "video/webm", Kind::Video),
     ("mov", "video/quicktime", Kind::Video),
+    ("mp3", "audio/mpeg", Kind::Audio),
+    ("m4a", "audio/mp4", Kind::Audio),
+    ("aac", "audio/aac", Kind::Audio),
+    ("wav", "audio/wav", Kind::Audio),
+    ("flac", "audio/flac", Kind::Audio),
+    ("ogg", "audio/ogg", Kind::Audio),
+    ("weba", "audio/webm", Kind::Audio),
 ];
 /// The format a kept copy's extension names.
 pub fn format(name: &str) -> Option<(&'static str, &'static str, Kind)> {
@@ -59,7 +67,7 @@ pub fn format(name: &str) -> Option<(&'static str, &'static str, Kind)> {
 }
 
 /// Every kind a reply can show, for a file that is none of them.
-pub const NOT_SHOWN: &str = "is not a file a reply can show: a PNG, JPEG, GIF or WebP image, a glTF, GLB, OBJ, STL or FBX model, a CSV, TSV or XLSX table, a Markdown document, or an MP4, WebM or MOV video";
+pub const NOT_SHOWN: &str = "is not a file a reply can show: a PNG, JPEG, GIF or WebP image, a glTF, GLB, OBJ, STL or FBX model, a CSV, TSV or XLSX table, a Markdown document, an MP4, WebM or MOV video, or MP3, M4A, AAC, WAV, FLAC, Ogg or WebM audio";
 
 /// The format a file's name asks for, among those recognized by name or content here.
 pub fn named(reported: &str) -> Option<&'static str> {
@@ -74,6 +82,13 @@ pub fn named(reported: &str) -> Option<&'static str> {
         "mp4" | "m4v" => "mp4",
         "webm" => "webm",
         "mov" | "qt" => "mov",
+        "mp3" => "mp3",
+        "m4a" | "m4b" => "m4a",
+        "aac" => "aac",
+        "wav" | "wave" => "wav",
+        "flac" => "flac",
+        "ogg" | "oga" | "opus" => "ogg",
+        "weba" => "weba",
         _ => return None,
     })
 }
@@ -81,9 +96,12 @@ pub fn named(reported: &str) -> Option<&'static str> {
 /// Bytes read to recognize a file: enough for a video's header and a text's first lines.
 const HEAD: u64 = 64 * 1024;
 
-/// Recognizes a table, a document or a video a conversation offers to show, with the reason when
-/// it is none of them. `reported` is the path the conversation gave, whose name decides the
-/// formats any text could be.
+/// A video's picture size, when its file says.
+type Size = Option<(u32, u32)>;
+
+/// Recognizes a table, a document, a video or a sound a conversation offers to show, with the
+/// reason when it is none of them. `reported` is the path the conversation gave, whose name
+/// decides the formats any text could be.
 pub fn inspect(path: &Path, reported: &str) -> Result<ShownFile, String> {
     let metadata = super::offered_file(path)?;
     let bytes = metadata.len();
@@ -109,13 +127,8 @@ pub fn inspect(path: &Path, reported: &str) -> Result<ShownFile, String> {
             height,
         }
     };
-    if let Some(video) = video_format(&head) {
-        let format = video?;
-        let size = if format == "webm" {
-            None
-        } else {
-            mp4_size(&mut file, bytes)
-        };
+    if let Some(media) = media(&head, &mut file, bytes) {
+        let (format, size) = media?;
         return Ok(found(format, size.map(|s| s.0), size.map(|s| s.1)));
     }
     if head.starts_with(b"PK\x03\x04") {
@@ -140,69 +153,298 @@ pub fn inspect(path: &Path, reported: &str) -> Result<ShownFile, String> {
         Some("csv" | "tsv") => Err("is not a text file, so it cannot be shown as a table".into()),
         Some("md") => Err("is not a text file, so it cannot be shown as a document".into()),
         Some("xlsx" | "xlsm") => Err("is not a readable XLSX workbook".into()),
+        Some(format) if kind_of(format) == Some(Kind::Audio) => Err(
+            "is not MP3, M4A, AAC, WAV, FLAC, Ogg or WebM audio, or its content does not match its name"
+                .into(),
+        ),
         Some(_) => {
             Err("is not an MP4, WebM or MOV video, or its content does not match its name".into())
         }
         None => Err(NOT_SHOWN.into()),
     }
 }
+/// The kind of a format `named` returns.
+fn kind_of(format: &str) -> Option<Kind> {
+    FORMATS
+        .iter()
+        .find(|(name, _, _)| *name == format)
+        .map(|(_, _, kind)| *kind)
+}
 
-/// The video a file's first bytes report, or why it cannot be shown although it looks like one:
-/// MP4 and MOV start with a `ftyp` box naming their brand, WebM with an EBML header naming it.
-fn video_format(head: &[u8]) -> Option<Result<&'static str, String>> {
+/// What a file's tracks hold.
+#[derive(Default)]
+struct Tracks {
+    video: bool,
+    sound: bool,
+    /// The picture size of the first track that has one.
+    size: Size,
+}
+impl Tracks {
+    /// Sound without a picture, which plays as audio rather than as a video.
+    fn sound_alone(&self) -> bool {
+        self.sound && !self.video
+    }
+}
+
+/// The video or the sound a file's first bytes report, with a video's picture size, or why it
+/// cannot be shown although it looks like one: MP4 and MOV start with a `ftyp` box naming their
+/// brand, WebM with an EBML header naming it, and either is audio when its tracks hold sound
+/// alone.
+fn media(head: &[u8], file: &mut File, bytes: u64) -> Option<Result<(&'static str, Size), String>> {
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
         return Some(match &head[8..12] {
-            b"qt  " => Ok("mov"),
-            b"M4A " | b"M4B " | b"M4P " | b"F4A " | b"F4B " => {
-                Err("is sound without a picture; send a video".into())
-            }
+            b"M4A " | b"M4B " | b"M4P " | b"F4A " | b"F4B " => Ok(("m4a", None)),
             // HEIF and AVIF pictures take the same box.
             b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
             | b"mif1" | b"msf1" | b"avif" | b"avis" => Err(
                 "is a HEIF or AVIF picture, which the viewer cannot show; send a PNG, JPEG or WebP image"
                     .into(),
             ),
-            _ => Ok("mp4"),
+            brand => {
+                let tracks = mp4_tracks(file, bytes);
+                if tracks.sound_alone() {
+                    Ok(("m4a", None))
+                } else {
+                    let format = if brand == b"qt  " { "mov" } else { "mp4" };
+                    Ok((format, tracks.size))
+                }
+            }
         });
     }
     if head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
         let header = &head[..head.len().min(64)];
         let names = |word: &[u8]| header.windows(word.len()).any(|w| w == word);
+        let sound = ebml_tracks(head).is_some_and(|tracks| tracks.sound_alone());
         if names(b"webm") {
-            return Some(Ok("webm"));
+            return Some(Ok((if sound { "weba" } else { "webm" }, None)));
         }
         if names(b"matroska") {
-            return Some(Err(
-                "is a Matroska video, which the viewer cannot play; send it as MP4 or WebM".into(),
-            ));
+            return Some(Err(if sound {
+                "is Matroska audio, which the player cannot play; send it as MP3, M4A, Ogg, FLAC or WAV".into()
+            } else {
+                "is a Matroska video, which the viewer cannot play; send it as MP4 or WebM".into()
+            }));
         }
     }
-    None
+    sound(head, file)
 }
 
-/// The picture size an MP4 or MOV file gives its first video track: the last eight bytes of the
-/// track header (`moov`, `trak`, `tkhd`) hold its width and height in 16.16 fixed point.
-fn mp4_size(file: &mut File, size: u64) -> Option<(u32, u32)> {
-    let (start, end) = find_box(file, 0, size, b"moov")?;
+/// What an MP4 or MOV file's tracks hold: each track's media handler (`moov`, `trak`, `mdia`,
+/// `hdlr`) names it a picture (`vide`) or sound (`soun`), and the last eight bytes of its header
+/// (`tkhd`) hold its width and height in 16.16 fixed point.
+fn mp4_tracks(file: &mut File, size: u64) -> Tracks {
+    let mut tracks = Tracks::default();
+    let Some((start, end)) = find_box(file, 0, size, b"moov") else {
+        return tracks;
+    };
     let mut at = start;
     while let Some((kind, content, next)) = next_box(file, at, end) {
         if &kind == b"trak" {
-            if let Some((header, header_end)) = find_box(file, content, next, b"tkhd") {
-                if header_end >= header + 8 {
-                    file.seek(SeekFrom::Start(header_end - 8)).ok()?;
-                    let mut words = [0u8; 8];
-                    file.read_exact(&mut words).ok()?;
-                    let width = u32::from_be_bytes(words[..4].try_into().ok()?) >> 16;
-                    let height = u32::from_be_bytes(words[4..].try_into().ok()?) >> 16;
-                    if width > 0 && height > 0 {
-                        return Some((width, height));
-                    }
-                }
+            match handler(file, content, next) {
+                Some(kind) if &kind == b"vide" => tracks.video = true,
+                Some(kind) if &kind == b"soun" => tracks.sound = true,
+                _ => {}
+            }
+            if tracks.size.is_none() {
+                tracks.size = track_size(file, content, next);
             }
         }
         at = next;
     }
+    tracks
+}
+/// The handler type of a track's media: after the handler box's version and flags and a word
+/// left as zero.
+fn handler(file: &mut File, track: u64, end: u64) -> Option<[u8; 4]> {
+    let (media, media_end) = find_box(file, track, end, b"mdia")?;
+    let (handler, handler_end) = find_box(file, media, media_end, b"hdlr")?;
+    if handler_end < handler + 12 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(handler + 8)).ok()?;
+    let mut kind = [0u8; 4];
+    file.read_exact(&mut kind).ok()?;
+    Some(kind)
+}
+/// The picture size a track's header gives, when it has one.
+fn track_size(file: &mut File, track: u64, end: u64) -> Size {
+    let (header, header_end) = find_box(file, track, end, b"tkhd")?;
+    if header_end < header + 8 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(header_end - 8)).ok()?;
+    let mut words = [0u8; 8];
+    file.read_exact(&mut words).ok()?;
+    let width = u32::from_be_bytes(words[..4].try_into().ok()?) >> 16;
+    let height = u32::from_be_bytes(words[4..].try_into().ok()?) >> 16;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// What a WebM or Matroska file's tracks hold, as its first bytes list them: the segment's
+/// `Tracks` element comes before its first cluster and gives each track its type, 1 for a picture
+/// and 2 for sound. Nothing is known when the list lies past those bytes.
+fn ebml_tracks(head: &[u8]) -> Option<Tracks> {
+    const SEGMENT: u32 = 0x1853_8067;
+    const TRACKS: u32 = 0x1654_ae6b;
+    const CLUSTER: u32 = 0x1f43_b675;
+    const TRACK_ENTRY: u32 = 0xae;
+    const TRACK_TYPE: u32 = 0x83;
+    let after =
+        |content: usize, size: Option<u64>| content.checked_add(usize::try_from(size?).ok()?);
+    // The EBML header, then the segment, whose elements follow one another.
+    let (_, size, content) = ebml_element(head, 0)?;
+    let (id, _, mut at) = ebml_element(head, after(content, size)?)?;
+    if id != SEGMENT {
+        return None;
+    }
+    loop {
+        let (id, size, content) = ebml_element(head, at)?;
+        if id == CLUSTER {
+            return None;
+        }
+        if id == TRACKS {
+            let mut tracks = Tracks::default();
+            let end = after(content, size).map_or(head.len(), |end| end.min(head.len()));
+            let mut entry = content;
+            while entry < end {
+                let (id, size, fields) = ebml_element(head, entry)?;
+                let entry_end = after(fields, size)?;
+                if id == TRACK_ENTRY {
+                    let mut field = fields;
+                    while field < entry_end {
+                        let (id, size, value) = ebml_element(head, field)?;
+                        if id == TRACK_TYPE && size == Some(1) {
+                            match head.get(value)? {
+                                1 => tracks.video = true,
+                                2 => tracks.sound = true,
+                                _ => {}
+                            }
+                        }
+                        field = after(value, size)?;
+                    }
+                }
+                entry = entry_end;
+            }
+            return Some(tracks);
+        }
+        at = after(content, size)?;
+    }
+}
+/// The EBML element at `at`: its ID, its size (none when unknown, as a live recording leaves its
+/// segment's), and where its content starts. An ID takes one to four bytes and a size one to
+/// eight, each giving its length by the zeros before the first set bit of its first byte.
+fn ebml_element(bytes: &[u8], at: usize) -> Option<(u32, Option<u64>, usize)> {
+    let length = |byte: u8, most: u32| {
+        let zeros = byte.leading_zeros();
+        (zeros < most).then_some(zeros as usize + 1)
+    };
+    let id_length = length(*bytes.get(at)?, 4)?;
+    let id = bytes
+        .get(at..at + id_length)?
+        .iter()
+        .fold(0u32, |id, &byte| id << 8 | u32::from(byte));
+    let size_at = at + id_length;
+    let first = *bytes.get(size_at)?;
+    let size_length = length(first, 8)?;
+    // The bits after the length's marker, then each byte after the first.
+    let mut size = u64::from(first) & (0xff >> size_length);
+    for &byte in bytes.get(size_at + 1..size_at + size_length)? {
+        size = size << 8 | u64::from(byte);
+    }
+    // Every bit set says the size is unknown.
+    let unknown = size == (1u64 << (7 * size_length)) - 1;
+    Some((id, (!unknown).then_some(size), size_at + size_length))
+}
+
+/// The sound a file's first bytes report, or why the player cannot play it although it is sound:
+/// MP3 or AAC frames, after an ID3 tag or not, and WAV, FLAC and Ogg files.
+fn sound(head: &[u8], file: &mut File) -> Option<Result<(&'static str, Size), String>> {
+    let found = |format| Some(Ok((format, None)));
+    // An ID3 tag comes before MP3 frames, and now and then before AAC frames or a FLAC stream.
+    if let Some(end) = id3_end(head) {
+        let mut next = [0u8; 4];
+        if file.seek(SeekFrom::Start(end)).is_ok() && file.read_exact(&mut next).is_ok() {
+            if &next == b"fLaC" {
+                return found("flac");
+            }
+            if adts(&next) {
+                return found("aac");
+            }
+        }
+        return found("mp3");
+    }
+    if mp3_frame(head) {
+        return found("mp3");
+    }
+    if adts(head) {
+        return found("aac");
+    }
+    if head.starts_with(b"fLaC") {
+        return found("flac");
+    }
+    if head.starts_with(b"RIFF") && matches!(head.get(8..12), Some(b"WAVE")) {
+        return found("wav");
+    }
+    if head.starts_with(b"OggS\0") {
+        // The first page's first packet names its codec, after the page's segment count (at 26)
+        // and that many lacing values.
+        let packet = head
+            .get(27 + usize::from(*head.get(26)?)..)
+            .unwrap_or_default();
+        return Some(if packet.starts_with(b"\x80theora") {
+            Err(
+                "is an Ogg Theora video, which the viewer cannot play; send it as MP4 or WebM"
+                    .into(),
+            )
+        } else {
+            Ok(("ogg", None))
+        });
+    }
+    if head.starts_with(b"FORM") && matches!(head.get(8..12), Some(b"AIFF" | b"AIFC")) {
+        return Some(Err(
+            "is AIFF audio, which the player cannot play; send it as WAV, M4A, MP3 or FLAC".into(),
+        ));
+    }
+    if head.starts_with(b"MThd\0\0\0\x06") {
+        return Some(Err(
+            "is a MIDI file, which holds notes rather than sound; render it to WAV, MP3 or M4A"
+                .into(),
+        ));
+    }
     None
+}
+/// Where an ID3v2 tag at the start of a file ends: its ten-byte header (a major version from 2 to
+/// 4), the size it gives in four bytes of seven bits each, and a ten-byte footer when its flags
+/// say so.
+fn id3_end(head: &[u8]) -> Option<u64> {
+    if !head.starts_with(b"ID3") || head.len() < 10 || !(2..=4).contains(&head[3]) {
+        return None;
+    }
+    let size = head[6..10].iter().try_fold(0u64, |size, &byte| {
+        (byte < 0x80).then_some(size << 7 | u64::from(byte))
+    })?;
+    let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+    Some(10 + size + footer)
+}
+/// An MPEG audio frame header of layer III, as each frame of an MP3 begins: eleven bits set, a
+/// known version, layer III, and a bit rate and a sample rate a frame can have.
+fn mp3_frame(head: &[u8]) -> bool {
+    let &[0xff, version, rates, ..] = head else {
+        return false;
+    };
+    version & 0xe0 == 0xe0
+        && (version >> 3) & 3 != 1
+        && (version >> 1) & 3 == 1
+        && !matches!(rates >> 4, 0 | 15)
+        && (rates >> 2) & 3 != 3
+}
+/// An AAC frame header in ADTS, as a raw AAC stream's frames begin: twelve bits set, layer 0, and
+/// a sample rate it can have.
+fn adts(head: &[u8]) -> bool {
+    let &[0xff, layer, rates, ..] = head else {
+        return false;
+    };
+    layer & 0xf6 == 0xf0 && (rates >> 2) & 0xf < 13
 }
 /// The first box of `kind` between `at` and `end`: where its content starts and where it ends.
 fn find_box(file: &mut File, mut at: u64, end: u64, kind: &[u8; 4]) -> Option<(u64, u64)> {
@@ -627,24 +869,72 @@ pub(crate) mod tests {
 
     /// An MP4 header with a movie box holding one video track of `width` × `height`.
     pub(crate) fn mp4(width: u32, height: u32) -> Vec<u8> {
-        let boxed = |kind: &[u8], content: &[u8]| {
+        movie(b"isom", &[(b"vide", width, height)])
+    }
+    /// An MP4 header of `brand` with a movie box holding a track for each of `tracks`: its media
+    /// handler (`vide` or `soun`) and its picture size.
+    pub(crate) fn movie(brand: &[u8; 4], tracks: &[(&[u8; 4], u32, u32)]) -> Vec<u8> {
+        fn boxed(kind: &[u8], content: &[u8]) -> Vec<u8> {
             let mut out = ((content.len() + 8) as u32).to_be_bytes().to_vec();
             out.extend(kind);
             out.extend(content);
             out
-        };
-        let mut header = vec![0u8; 84];
-        header[76..80].copy_from_slice(&(width << 16).to_be_bytes());
-        header[80..84].copy_from_slice(&(height << 16).to_be_bytes());
-        let track = boxed(b"trak", &boxed(b"tkhd", &header));
-        let movie = boxed(b"moov", &[boxed(b"mvhd", &[0u8; 100]), track].concat());
+        }
+        let tracks: Vec<u8> = tracks
+            .iter()
+            .flat_map(|(handler, width, height)| {
+                let mut header = vec![0u8; 84];
+                header[76..80].copy_from_slice(&(width << 16).to_be_bytes());
+                header[80..84].copy_from_slice(&(height << 16).to_be_bytes());
+                // Version and flags, a word left as zero, the handler type, three reserved words
+                // and an empty name.
+                let mut kind = vec![0u8; 8];
+                kind.extend(*handler);
+                kind.extend([0u8; 13]);
+                let media = boxed(b"mdia", &boxed(b"hdlr", &kind));
+                boxed(b"trak", &[boxed(b"tkhd", &header), media].concat())
+            })
+            .collect();
+        let movie = boxed(b"moov", &[boxed(b"mvhd", &[0u8; 100]), tracks].concat());
+        let mut types = brand.to_vec();
+        types.extend(b"\0\0\x02\0isomiso2avc1mp41");
         [
-            boxed(b"ftyp", b"isom\0\0\x02\0isomiso2avc1mp41"),
+            boxed(b"ftyp", &types),
             boxed(b"free", b""),
             movie,
             boxed(b"mdat", &[0u8; 32]),
         ]
         .concat()
+    }
+    /// The start of a WebM or Matroska file (`doc_type`): its EBML header, then a segment of unknown
+    /// size, as a recording leaves it, whose tracks have `types` (1 a picture, 2 sound), and the
+    /// start of its first cluster.
+    pub(crate) fn ebml_file(doc_type: &[u8], types: &[u8]) -> Vec<u8> {
+        // Each element's size in one byte.
+        let element = |id: &[u8], content: &[u8]| {
+            let mut out = id.to_vec();
+            out.push(0x80 | content.len() as u8);
+            out.extend(content);
+            out
+        };
+        let header = element(&[0x1a, 0x45, 0xdf, 0xa3], &element(&[0x42, 0x82], doc_type));
+        let info = element(
+            &[0x15, 0x49, 0xa9, 0x66],
+            &element(&[0x2a, 0xd7, 0xb1], &[0x0f, 0x42, 0x40]),
+        );
+        let entries: Vec<u8> = types
+            .iter()
+            .zip(1u8..)
+            .flat_map(|(kind, number)| {
+                let fields = [element(&[0xd7], &[number]), element(&[0x83], &[*kind])].concat();
+                element(&[0xae], &fields)
+            })
+            .collect();
+        let tracks = element(&[0x16, 0x54, 0xae, 0x6b], &entries);
+        let cluster = element(&[0x1f, 0x43, 0xb6, 0x75], &[0xe7, 0x81, 0x00]);
+        let mut segment = vec![0x18, 0x53, 0x80, 0x67, 0x01];
+        segment.extend([0xff; 7]);
+        [header, segment, info, tracks, cluster].concat()
     }
 
     /// A workbook of two sheets: sales figures from B2, and notes.
@@ -734,17 +1024,107 @@ pub(crate) mod tests {
         assert!(reason("q3.xlsx", b"PK\x03\x04 not a workbook").contains("XLSX workbook"));
         assert!(reason("q3.xlsx", b"just text").contains("XLSX workbook"));
         assert!(reason("clip.mp4", b"no video here").contains("MP4, WebM or MOV"));
-        let mut audio = mp4(0, 0);
-        audio[8..12].copy_from_slice(b"M4A ");
-        assert!(reason("song.m4a", &audio).contains("sound without a picture"));
+        assert!(reason("song.mp3", b"no sound here").contains("MP3, M4A, AAC, WAV, FLAC, Ogg"));
         let mut picture = mp4(0, 0);
         picture[8..12].copy_from_slice(b"avif");
         assert!(reason("photo.avif", &picture).contains("HEIF or AVIF"));
         let mut matroska = vec![0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x82, 0x88];
         matroska.extend(b"matroska");
-        assert!(reason("film.mkv", &matroska).contains("Matroska"));
+        assert!(reason("film.mkv", &matroska).contains("Matroska video"));
+        // Sound the player cannot play says what to send instead.
+        let refused = reason("song.mka", &ebml_file(b"matroska", &[2]));
+        assert!(refused.contains("Matroska audio"), "{refused}");
+        assert!(refused.contains("MP3, M4A, Ogg, FLAC or WAV"), "{refused}");
+        let refused = reason("speech.aiff", b"FORM\0\0\0\x04AIFF");
+        assert!(
+            refused.contains("AIFF audio") && refused.contains("WAV"),
+            "{refused}"
+        );
+        assert!(reason("tune.mid", b"MThd\0\0\0\x06\0\x01").contains("render it to WAV"));
+        let mut theora = b"OggS\0\x02".to_vec();
+        theora.extend([0u8; 20]);
+        theora.extend([1, 7]);
+        theora.extend(b"\x80theora");
+        assert!(reason("film.ogv", &theora).contains("Ogg Theora video"));
         // A folder is not a file.
         assert!(check(dir.path()).unwrap_err().contains("not a file"));
+    }
+
+    #[test]
+    fn recognizes_audio_by_its_bytes_and_videos_that_hold_sound_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let shown = |name: &str, bytes: &[u8]| {
+            let shown = check(&write(dir.path(), name, bytes)).unwrap();
+            (shown.kind, shown.format, shown.media_type)
+        };
+        let audio = |format, media_type| (Kind::Audio, format, media_type);
+        // MP3 frames, after the ID3 tag encoders write before them or alone, whatever the name.
+        let frame = [0xff, 0xfb, 0x90, 0x64];
+        let mut tagged = b"ID3\x04\0\0\0\0\0\x05".to_vec();
+        tagged.extend([0u8; 5]);
+        tagged.extend(frame);
+        assert_eq!(shown("voice.mp3", &tagged), audio("mp3", "audio/mpeg"));
+        assert_eq!(shown("speech", &frame), audio("mp3", "audio/mpeg"));
+        // AAC: frames in ADTS, after a tag or not, and AAC in MP4 by its brand or by its tracks.
+        let adts = [0xff, 0xf1, 0x50, 0x80];
+        assert_eq!(shown("speech.aac", &adts), audio("aac", "audio/aac"));
+        let mut tagged = b"ID3\x04\0\0\0\0\0\0".to_vec();
+        tagged.extend(adts);
+        assert_eq!(shown("tagged.aac", &tagged).1, "aac");
+        let song = movie(b"M4A ", &[(b"soun", 0, 0)]);
+        assert_eq!(shown("song.m4a", &song), audio("m4a", "audio/mp4"));
+        let narration = movie(b"isom", &[(b"soun", 0, 0)]);
+        assert_eq!(
+            shown("narration.mp4", &narration),
+            audio("m4a", "audio/mp4")
+        );
+        // A video keeps its soundtrack and stays a video, its picture's size read from its track.
+        let film = check(&write(
+            dir.path(),
+            "film.mp4",
+            &movie(b"isom", &[(b"soun", 0, 0), (b"vide", 1280, 720)]),
+        ))
+        .unwrap();
+        assert_eq!(
+            (film.kind, film.format, film.width, film.height),
+            (Kind::Video, "mp4", Some(1280), Some(720))
+        );
+        // WAV, FLAC, and Ogg with Vorbis or Opus.
+        let wave = b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0";
+        assert_eq!(shown("tone.wav", wave), audio("wav", "audio/wav"));
+        assert_eq!(
+            shown("take.flac", b"fLaC\0\0\0\x22"),
+            audio("flac", "audio/flac")
+        );
+        let ogg = |packet: &[u8]| {
+            let mut page = b"OggS\0\x02".to_vec();
+            page.extend([0u8; 20]);
+            page.extend([1, packet.len() as u8]);
+            page.extend(packet);
+            page
+        };
+        assert_eq!(
+            shown("voice.opus", &ogg(b"OpusHead\x01\x02")),
+            audio("ogg", "audio/ogg")
+        );
+        assert_eq!(shown("theme.ogg", &ogg(b"\x01vorbis\0\0")).1, "ogg");
+        // WebM holding sound alone is audio, as a browser records a voice.
+        assert_eq!(
+            shown("voice.webm", &ebml_file(b"webm", &[2])),
+            audio("weba", "audio/webm")
+        );
+        assert_eq!(
+            shown("screen.webm", &ebml_file(b"webm", &[1, 2])),
+            (Kind::Video, "webm", "video/webm")
+        );
+        // Kept as the format it was recognized as, which names its kind again.
+        assert_eq!(
+            format("file-3.weba"),
+            Some(("weba", "audio/webm", Kind::Audio))
+        );
+        // Text that merely begins like a tag is still the text its name asks for.
+        let table = shown("tags.csv", b"ID3 tag,Artist\nTIT2,Song\n");
+        assert_eq!(table.0, Kind::Table);
     }
 
     #[test]

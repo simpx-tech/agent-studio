@@ -67,8 +67,8 @@ struct ModelMeta {
     format: String,
     bytes: u64,
 }
-/// A table, a document or a video a reply shows, kept whole beside the call's images. Its file's
-/// extension names its format (`files::FORMATS`).
+/// A table, a document, a video or a sound a reply shows, kept whole beside the call's images. Its
+/// file's extension names its format (`files::FORMATS`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OtherMeta {
@@ -94,7 +94,7 @@ struct Meta {
     images_omitted: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     models: Vec<ModelMeta>,
-    /// Tables, documents and videos a reply shows.
+    /// Tables, documents, videos and audio a reply shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     others: Vec<OtherMeta>,
     /// The complete command or input, which earlier releases kept here when the activity
@@ -603,8 +603,8 @@ fn copy_model(path: &Path, directory: &Path, index: usize) -> Option<ModelMeta> 
         bytes,
     })
 }
-/// Copies a table, a document or a video the conversation offered, whole, as the format it was
-/// recognized as when offered.
+/// Copies a table, a document, a video or a sound the conversation offered, whole, as the format
+/// it was recognized as when offered.
 fn copy_other(path: &Path, directory: &Path, index: usize) -> Option<OtherMeta> {
     let shown = files::inspect(path, &path.to_string_lossy()).ok()?;
     let file = format!("file-{index}.{}", shown.format);
@@ -1099,7 +1099,7 @@ pub async fn read_model_file(
     .map_err(|_| "Cannot read the tool output".to_string())?
 }
 
-/// A kept table, document or video of a call, and the path of its file.
+/// A kept table, document, video or sound of a call, and the path of its file.
 fn kept_other(
     directory: &Path,
     tool_id: &str,
@@ -1170,8 +1170,8 @@ pub async fn read_document(
     .map_err(|_| "Cannot read the tool output".to_string())?
 }
 
-/// One kept table, document or video whole, however large, as base64 for a window on another
-/// device, which plays a video from it.
+/// One kept table, document, video or sound whole, however large, as base64 for a window on
+/// another device, which plays a video or a sound from it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileData {
@@ -1220,9 +1220,9 @@ fn decoded_path(path: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// A kept video for this computer's window, which plays it as it streams: the part of the file
-/// the player asks for (`files::requested_range`), from a path that names the run, the file's
-/// place among the call's other files and the call, in that order.
+/// A kept video or sound for this computer's window, which plays it as it streams: the part of
+/// the file the player asks for (`files::requested_range`), from a path that names the run, the
+/// file's place among the call's other files and the call, in that order.
 pub async fn serve_other(
     app: &tauri::AppHandle,
     path: &str,
@@ -1836,7 +1836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tables_documents_and_videos_are_kept_and_read_where_their_reply_ran() {
+    async fn tables_documents_videos_and_audio_are_kept_and_read_where_their_reply_ran() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(DIRECTORY);
         let pending = Arc::new(Pending::default());
@@ -1849,6 +1849,8 @@ mod tests {
         let video = dir.path().join("clip.mp4");
         let movie = files::tests::mp4(320, 240);
         std::fs::write(&video, &movie).unwrap();
+        let sound = dir.path().join("voice.mp3");
+        std::fs::write(&sound, [0xff, 0xfb, 0x90, 0x64, 0, 0, 0, 0]).unwrap();
         let directory = root.join(RUN).join(key("claude:others"));
         write_call(
             &directory,
@@ -1860,6 +1862,7 @@ mod tests {
                 Some(dir.path().join("gone.csv")),
                 Some(document),
                 Some(video),
+                Some(sound),
             ],
         )
         .unwrap();
@@ -1932,6 +1935,12 @@ mod tests {
         let all = stream(None).await;
         assert_eq!(all.body().as_slice(), movie.as_slice());
         assert_eq!(stream(Some("bytes=999999-")).await.status(), 416);
+        // A sound streams the same way, as the type it was recognized as.
+        let path = format!("/{RUN}%2F4%2Fclaude%3Aothers");
+        let sound = stream_other(root.clone(), None, &path, Some("bytes=0-1".into())).await;
+        assert_eq!(sound.headers()["content-type"], "audio/mpeg");
+        assert_eq!(sound.body().as_slice(), [0xff, 0xfb]);
+        assert!(directory.join("file-4.mp3").is_file());
         for refused in [
             format!("/{RUN}%2F9%2Fclaude%3Aothers"),
             format!("/{RUN}%2Fx%2Fclaude%3Aothers"),

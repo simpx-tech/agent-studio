@@ -19,16 +19,16 @@ pub const COMPARE_NAME: &str = "compare_files";
 /// The longest file name a reply shows.
 const MAX_NAME: usize = 120;
 
-pub const GUIDANCE: &str = "To show the user an image, a 3D model, a table, a document or a video that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram, a model, a data table, a written report or a recording the user should see now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images, glTF, GLB, OBJ, STL and FBX models, CSV, TSV and XLSX tables, Markdown documents (.md) and MP4, WebM and MOV videos are shown whatever their size, in as many files and groups as the reply needs: a table as a sheet the reader scrolls through, every worksheet of a workbook included, a document rendered as formatted text, and a video in a player. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
+pub const GUIDANCE: &str = "To show the user an image, a 3D model, a table, a document, a video or audio that exists on the computer running this conversation, call the send_files tool (Claude: mcp__agent_studio__send_files) with a stable id, the absolute paths in files, and an optional one-line caption. Those three field names are exact: a call that renames one is refused. Use it for a render, a screenshot, a chart, a diagram, a model, a data table, a written report, a recording or a sound the user should see or hear now, instead of only naming its path; skip routine working files. After a successful call, put <!-- files:ID --> on its own line between blank lines where the files belong in your final answer, replacing ID with the submitted id; each group appears once, and reusing an id replaces that group. PNG, JPEG, GIF and WebP images, glTF, GLB, OBJ, STL and FBX models, CSV, TSV and XLSX tables, Markdown documents (.md), MP4, WebM and MOV videos, and MP3, M4A, AAC, WAV, FLAC, Ogg (Vorbis or Opus) and WebM audio are shown whatever their size, in as many files and groups as the reply needs: a table as a sheet the reader scrolls through, every worksheet of a workbook included, a document rendered as formatted text, and a video or audio in a player. A model opens in a viewer the reader can turn and zoom, and animations inside it play there; a device that cannot load a model shows eight views rendered from it. Send a model at its full detail: never decimate, simplify, shrink its textures or compress it for the viewer, whatever its size. Send a self-contained file: a .glb rather than a .gltf that loads separate buffers, without Draco, meshopt or Basis compression, which the viewer cannot decode (export an uncompressed copy of a model that uses one), and expect OBJ, STL and FBX to appear untextured when their textures are separate files beside them. Paths must be absolute on that computer; other files, unreadable paths and Markdown image links are not displayed. The reader's window loads each file from that computer when it opens the reply.";
 
-pub const COMPARE_GUIDANCE: &str = "To compare images or 3D models side by side (not tables, documents or videos, which send_files shows), call compare_files (Claude: mcp__agent_studio__compare_files) with a stable id, two or more absolute paths in files in the order to show them, optional labels (one short single-line label per file, in the same order, such as Before and After) and an optional one-line caption; those four field names are exact. Use it for before and after, variants, or a reference beside a result: the reader sees the files as panes side by side, in Free mode, where each pane turns, pans and zooms on its own, or Synced, where the models keep one rotation, position and zoom and the images one zoom and position. Files are checked and shown as send_files shows them, and <!-- files:ID --> places the comparison in your final answer the same way; a comparison and a send_files group share their ids.";
+pub const COMPARE_GUIDANCE: &str = "To compare images or 3D models side by side (not tables, documents, videos or audio, which send_files shows), call compare_files (Claude: mcp__agent_studio__compare_files) with a stable id, two or more absolute paths in files in the order to show them, optional labels (one short single-line label per file, in the same order, such as Before and After) and an optional one-line caption; those four field names are exact. Use it for before and after, variants, or a reference beside a result: the reader sees the files as panes side by side, in Free mode, where each pane turns, pans and zooms on its own, or Synced, where the models keep one rotation, position and zoom and the images one zoom and position. Files are checked and shown as send_files shows them, and <!-- files:ID --> places the comparison in your final answer the same way; a comparison and a send_files group share their ids.";
 
 /// One shown file, as the saved reply records it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SentFile {
     /// This file's place among the call's images, its models, or its other files (tables,
-    /// documents and videos) in the stored result, each counted from 0.
+    /// documents, videos and audio) in the stored result, each counted from 0.
     pub index: usize,
     pub name: String,
     pub media_type: String,
@@ -63,7 +63,7 @@ pub fn tool() -> Value {
     json!({"name":NAME,"description":GUIDANCE,"inputSchema":{
         "type":"object","properties":{
             "id":{"type":"string","minLength":1,"pattern":"^[a-zA-Z0-9_-]+$","description":"Stable identifier; reuse to replace this group within the current reply."},
-            "files":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, glTF, GLB, OBJ, STL or FBX models, CSV, TSV or XLSX tables, Markdown documents, or MP4, WebM or MOV videos."},
+            "files":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"Absolute paths on the computer running this conversation: PNG, JPEG, GIF or WebP images, glTF, GLB, OBJ, STL or FBX models, CSV, TSV or XLSX tables, Markdown documents, MP4, WebM or MOV videos, or MP3, M4A, AAC, WAV, FLAC, Ogg or WebM audio."},
             "caption":{"type":"string","minLength":1,"description":"Optional single line shown below the files."}
         },"required":["id","files"],"additionalProperties":false}})
 }
@@ -274,14 +274,14 @@ impl Staging {
 }
 
 /// What a checked path turned out to be. A picture is shown as an image, a model opens in the
-/// reply's 3D viewer, and a table, a document or a video in a view of its own.
+/// reply's 3D viewer, and a table, a document, a video or a sound in a view of its own.
 enum Checked {
     Image(crate::tool_output::ImageFile),
     Model(crate::tool_output::ModelFile),
     Other(files::ShownFile),
 }
-/// Recognizes one offered path on this computer. Pictures, models, videos and workbooks are
-/// recognized by their own bytes; any text could be a CSV, TSV or Markdown file, so the name
+/// Recognizes one offered path on this computer. Pictures, models, videos, sound and workbooks
+/// are recognized by their own bytes; any text could be a CSV, TSV or Markdown file, so the name
 /// decides those, and a name asking for one of them is checked first, since a few lines of text
 /// can read like an OBJ model. The explanation follows the kind the name suggests.
 async fn inspect(host: PathBuf, reported: &str) -> Result<Checked, String> {
@@ -403,6 +403,7 @@ impl FileSender {
                         files::Kind::Table => "a table",
                         files::Kind::Document => "a document",
                         files::Kind::Video => "a video",
+                        files::Kind::Audio => "audio",
                     }
                 )),
                 Ok(Checked::Other(other)) => {
@@ -1017,7 +1018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tables_documents_and_videos_are_shown_but_never_compared() {
+    async fn tables_documents_videos_and_audio_are_shown_but_never_compared() {
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str, bytes: &[u8]| {
             let path = dir.path().join(name);
@@ -1033,14 +1034,15 @@ mod tests {
             "clip.mp4",
             &crate::tool_output::files::tests::mp4(1280, 720),
         );
+        let sound = path("voice.wav", b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0");
         let staging = kept();
         let mut sender = FileSender::default();
-        let input = json!({"id":"mixed","files":[image, table, document, video]});
+        let input = json!({"id":"mixed","files":[image, table, document, video, sound]});
         let text = sender
             .submit(&input, Tool::Send, "call", &staging)
             .await
             .unwrap();
-        assert!(text.contains("4 files are shown"), "{text}");
+        assert!(text.contains("5 files are shown"), "{text}");
         let record = sender.latest("mixed").unwrap();
         let shown: Vec<_> = record
             .files
@@ -1054,7 +1056,8 @@ mod tests {
                 ("image/png", 0),
                 ("text/csv", 0),
                 ("text/markdown", 1),
-                ("video/mp4", 2)
+                ("video/mp4", 2),
+                ("audio/wav", 3)
             ]
         );
         assert_eq!(
@@ -1062,7 +1065,7 @@ mod tests {
             (Some(1280), Some(720))
         );
         // A comparison takes images and models alone, and says where the others belong.
-        let input = json!({"id":"pair","files":[table, video]});
+        let input = json!({"id":"pair","files":[table, video, sound]});
         let error = sender
             .submit(&input, Tool::Compare, "call2", &staging)
             .await
@@ -1072,6 +1075,10 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("is a video"), "{error}");
+        assert!(
+            error.contains("voice.wav: is audio, which compare_files does not compare; send it with send_files"),
+            "{error}"
+        );
         // A name asking for text is checked as text, even when its lines read like a model's.
         let lines = path("faces.md", b"v 1 2 3\nv 4 5 6\nf 1 2 3\n");
         let input = json!({"id":"lines","files":[lines]});

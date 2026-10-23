@@ -49,7 +49,7 @@ pub struct CapturedOutput {
     pub images: Vec<ImageSource>,
     /// Paths of 3D models a reply shows, reported by Agent Studio's own tool alone.
     pub models: Vec<String>,
-    /// Paths of the tables, documents and videos a reply shows, reported the same way.
+    /// Paths of the tables, documents, videos and audio a reply shows, reported the same way.
     pub others: Vec<String>,
     /// Files a reply shows: kept in the places the reply numbered them.
     pub sent: bool,

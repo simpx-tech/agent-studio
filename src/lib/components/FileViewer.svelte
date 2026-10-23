@@ -26,6 +26,7 @@
     table: 'Table preview',
     document: 'Document preview',
     video: 'Video preview',
+    audio: 'Audio preview',
   };
   // The room the controls floating on the window keep clear of the whole file: the heading
   // above, the arrows at the sides and an image's zoom controls below. A zoomed image pans

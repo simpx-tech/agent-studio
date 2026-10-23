@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  toolOutputAudioTypes,
   toolOutputDocumentTypes,
   toolOutputImageTypes,
   toolOutputModelTypes,
@@ -19,13 +20,11 @@ export const sentFileSchema = z.object({
   /** This file's place among the call's images, its models, or its other files, from 0. */
   index: z.number().int().nonnegative(),
   name: z.string().min(1),
-  mediaType: z.enum([
-    ...toolOutputImageTypes,
-    ...toolOutputModelTypes,
-    ...toolOutputTableTypes,
-    ...toolOutputDocumentTypes,
-    ...toolOutputVideoTypes,
-  ]),
+  /**
+   * Any media type: a kind of file a later release adds reaches this one in `laterSentFiles`, and
+   * shows as a file it cannot open. The fields that earlier releases read take their kinds alone.
+   */
+  mediaType: z.string().regex(/^[a-z]+\/[a-z0-9][a-z0-9.+-]*$/i),
   bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
@@ -33,25 +32,30 @@ export const sentFileSchema = z.object({
   label: oneLine.optional(),
 });
 export type SentFile = z.infer<typeof sentFileSchema>;
-/** What a shown file is, which decides how the reply shows it. */
-export type FileKind = 'image' | 'model' | 'table' | 'document' | 'video';
+/**
+ * What a shown file is, which decides how the reply shows it: `unknown` is a kind a later release
+ * added, which this one cannot open.
+ */
+export type FileKind = 'image' | 'model' | 'table' | 'document' | 'video' | 'audio' | 'unknown';
 const kinds = new Map<string, FileKind>([
   ...toolOutputImageTypes.map((type) => [type, 'image'] as const),
   ...toolOutputModelTypes.map((type) => [type, 'model'] as const),
   ...toolOutputTableTypes.map((type) => [type, 'table'] as const),
   ...toolOutputDocumentTypes.map((type) => [type, 'document'] as const),
   ...toolOutputVideoTypes.map((type) => [type, 'video'] as const),
+  ...toolOutputAudioTypes.map((type) => [type, 'audio'] as const),
 ]);
-export const fileKind = (file: SentFile): FileKind => kinds.get(file.mediaType) ?? 'image';
+export const fileKind = (file: SentFile): FileKind => kinds.get(file.mediaType) ?? 'unknown';
 /** A 3D model opens in the reply's 3D viewer. */
 export const isModel = (file: SentFile): boolean => fileKind(file) === 'model';
 /**
- * Images, models and the call's other files (tables, documents and videos) are each numbered
- * from 0 in the call's kept result.
+ * Images, models and the call's other files (tables, documents, videos and audio) are each
+ * numbered from 0 in the call's kept result. A kind a later release added is numbered as that
+ * release does, which this one cannot tell.
  */
 const numbering = (file: SentFile) => {
   const kind = fileKind(file);
-  return kind === 'image' || kind === 'model' ? kind : 'other';
+  return kind === 'image' || kind === 'model' || kind === 'unknown' ? kind : 'other';
 };
 /** A shown image as the result reader describes one, so both read the same way. */
 export const imageInfo = (file: SentFile): ToolOutputImageInfo => ({
@@ -132,10 +136,10 @@ export const sentFilesSchema = z.object({
     .array(sentFileSchema)
     .min(1)
     // Images, models and other files are numbered within their own kind, each from zero.
-    .refine(
-      (files) =>
-        new Set(files.map((file) => `${numbering(file)}:${file.index}`)).size === files.length,
-    ),
+    .refine((files) => {
+      const known = files.filter((file) => numbering(file) !== 'unknown');
+      return new Set(known.map((file) => `${numbering(file)}:${file.index}`)).size === known.length;
+    }),
   /**
    * Shown side by side for comparison (compare_files), each pane turned, panned and zoomed on
    * its own or with the others. A release that does not know it shows the files as a group.
@@ -144,30 +148,47 @@ export const sentFilesSchema = z.object({
 });
 export type SentFiles = z.infer<typeof sentFilesSchema>;
 
+const isPicture = (kind: FileKind) => kind === 'image' || kind === 'model';
 /** A comparison shows its images and models side by side, which needs two of them. */
 export const isComparison = (group: SentFiles) =>
   !!group.compare &&
   group.files.length > 1 &&
-  group.files.every((file) => numbering(file) !== 'other');
+  group.files.every((file) => isPicture(fileKind(file)));
 
 /** The name a comparison shows for one of its files: its label, else its file name. */
 export const paneLabel = (file: SentFile) => file.label ?? file.name;
 
+/** The fields of a reply that keep the groups of files it showed, from the oldest. */
+export const filesFields = ['sentFiles', 'extraSentFiles', 'laterSentFiles'] as const;
+export type FilesField = (typeof filesFields)[number];
+/** The kinds before audio, which `extraSentFiles` holds: releases since then read it. */
+const extraKinds = new Set<FileKind>(['image', 'model', 'table', 'document', 'video']);
 /**
- * Whether releases before tables, documents and videos can read a group: they validate a reply's
- * `sentFiles` with images and models alone, and refuse the whole conversation for any other
- * file, so groups that show another kind are kept apart in `extraSentFiles`, which they drop.
+ * The field that keeps a group: the oldest that every release reading it can read. Releases before
+ * tables, documents and videos validate a reply's `sentFiles` with images and models alone, and
+ * releases before audio its `extraSentFiles` with those three as well; each refuses the whole
+ * conversation over another kind, and drops a field it does not know. `laterSentFiles` takes every
+ * kind, those a later release adds included, so a release meets them there and shows each as a
+ * file it cannot open.
  */
-export const everyReleaseReads = (group: SentFiles) =>
-  group.files.every((file) => numbering(file) !== 'other');
+export function filesField(group: SentFiles): FilesField {
+  const kinds = group.files.map(fileKind);
+  if (kinds.every(isPicture)) return 'sentFiles';
+  if (kinds.every((kind) => extraKinds.has(kind))) return 'extraSentFiles';
+  return 'laterSentFiles';
+}
 
 const uniqueIds = (groups: SentFiles[]) => new Set(groups.map((g) => g.id)).size === groups.length;
 /** A reply's `sentFiles`: groups of images and models, which every release reads. */
 export const sentFileGroupsSchema = z
-  .array(sentFilesSchema.refine(everyReleaseReads))
+  .array(sentFilesSchema.refine((group) => filesField(group) === 'sentFiles'))
   .refine(uniqueIds);
 /** A reply's `extraSentFiles`: groups that show a table, a document or a video. */
-export const extraSentFileGroupsSchema = z.array(sentFilesSchema).refine(uniqueIds);
+export const extraSentFileGroupsSchema = z
+  .array(sentFilesSchema.refine((group) => filesField(group) !== 'laterSentFiles'))
+  .refine(uniqueIds);
+/** A reply's `laterSentFiles`: groups that show audio, or a kind a later release adds. */
+export const laterSentFileGroupsSchema = z.array(sentFilesSchema).refine(uniqueIds);
 
 export function mergeSentFiles(left: SentFiles[] = [], right: SentFiles[] = []) {
   const result = [...left];
@@ -177,19 +198,19 @@ export function mergeSentFiles(left: SentFiles[] = [], right: SentFiles[] = []) 
     const next = [...result];
     if (index >= 0) next[index] = group;
     else next.push(group);
-    if (extraSentFileGroupsSchema.safeParse(next).success) result.splice(0, result.length, ...next);
+    if (laterSentFileGroupsSchema.safeParse(next).success) result.splice(0, result.length, ...next);
   }
   return result;
 }
 
 /** Where a reply keeps the groups of files it showed. */
-export type FilesHolder = { sentFiles?: SentFiles[]; extraSentFiles?: SentFiles[] };
-/** Every group a reply showed, from both fields, each once, at its latest revision. */
+export type FilesHolder = Partial<Record<FilesField, SentFiles[]>>;
+/** Every group a reply showed, from all its fields, each once, at its latest revision. */
 export function messageFiles(message: FilesHolder): SentFiles[] {
-  const { sentFiles = [], extraSentFiles } = message;
-  if (!extraSentFiles?.length) return sentFiles;
+  const { sentFiles = [], extraSentFiles, laterSentFiles } = message;
+  if (!extraSentFiles?.length && !laterSentFiles?.length) return sentFiles;
   const groups = [...sentFiles];
-  for (const group of extraSentFiles) {
+  for (const group of [...(extraSentFiles ?? []), ...(laterSentFiles ?? [])]) {
     const index = groups.findIndex((g) => g.id === group.id);
     if (index < 0) groups.push(group);
     else if (group.revision > groups[index].revision) groups[index] = group;
@@ -202,11 +223,10 @@ export function messageFiles(message: FilesHolder): SentFiles[] {
  */
 export function placeSentFiles(message: FilesHolder, group: SentFiles) {
   if (messageFiles(message).some((g) => g.id === group.id && g.revision >= group.revision)) return;
-  const [into, from] = everyReleaseReads(group)
-    ? (['sentFiles', 'extraSentFiles'] as const)
-    : (['extraSentFiles', 'sentFiles'] as const);
-  if (message[from]?.some((g) => g.id === group.id))
-    message[from] = message[from].filter((g) => g.id !== group.id);
+  const into = filesField(group);
+  for (const field of filesFields)
+    if (field !== into && message[field]?.some((g) => g.id === group.id))
+      message[field] = message[field].filter((g) => g.id !== group.id);
   message[into] = mergeSentFiles(message[into], [group]);
 }
 /**
@@ -215,10 +235,10 @@ export function placeSentFiles(message: FilesHolder, group: SentFiles) {
  */
 export function mergeMessageFiles(a: FilesHolder, b: FilesHolder): FilesHolder {
   const groups = mergeSentFiles(messageFiles(a), messageFiles(b));
-  const sent = groups.filter(everyReleaseReads);
-  const extra = groups.filter((group) => !everyReleaseReads(group));
-  return {
-    ...(a.sentFiles || b.sentFiles || sent.length ? { sentFiles: sent } : {}),
-    ...(a.extraSentFiles || b.extraSentFiles || extra.length ? { extraSentFiles: extra } : {}),
-  };
+  const merged: FilesHolder = {};
+  for (const field of filesFields) {
+    const kept = groups.filter((group) => filesField(group) === field);
+    if (a[field] || b[field] || kept.length) merged[field] = kept;
+  }
+  return merged;
 }
