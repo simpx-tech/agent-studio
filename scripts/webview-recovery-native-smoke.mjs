@@ -4,7 +4,11 @@
 // closes the webview for good: the app builds the window again, maximized as it was, the new page
 // follows the reply to its end, and the chat stays in Active. Ending the page's renderer instead
 // shows WebView2's error page, which the app replaces by loading the page again. Each failure is
-// kept as a `webviewProcess` report with its repair and when it was done.
+// kept as a `webviewProcess` report with its repair and when it was done. Last, the browser
+// process is suspended, which leaves every WebView2 process alive with nothing passing between
+// the page and the app, as at 13:08 that day: a minute on, the app ends it and builds the window
+// again, the new page takes the end of a reply that ended meanwhile, and the `windowSilent`
+// report keeps the repair.
 //
 //   npm run build
 //   npx tauri build --debug --no-bundle --config scripts/native-webview-recovery.tauri.json
@@ -63,13 +67,16 @@ const webviewChildren = (all, parent) =>
   all.filter(
     (p) => p.ParentProcessId === parent && /msedgewebview2\.exe$/i.test(p.ExecutablePath ?? ''),
   );
-function browserProcess() {
-  const all = processes();
+// The QA app and its WebView2 browser process, while it has one.
+function browserOf(all = processes()) {
   const app = all.find((p) => p.ExecutablePath?.toLowerCase() === executable.toLowerCase());
+  const browser =
+    app && webviewChildren(all, app.ProcessId).find((p) => !/--type=/.test(p.CommandLine ?? ''));
+  return { app, browser, all };
+}
+function browserProcess() {
+  const { app, browser, all } = browserOf();
   assert(app, 'The QA app is not running');
-  const browser = webviewChildren(all, app.ProcessId).find(
-    (p) => !/--type=/.test(p.CommandLine ?? ''),
-  );
   assert(browser, 'The QA app has no WebView2 browser process');
   return {
     app,
@@ -81,6 +88,25 @@ function browserProcess() {
 }
 const end = (pid) =>
   execFileSync('taskkill.exe', ['/F', '/PID', String(pid)], { windowsHide: true });
+// Stops every thread of a process where it is, without ending it.
+function suspend(pid) {
+  const script = `Add-Type -Namespace Qa -Name Nt -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr process); [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int access, bool inherit, int id); [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);'
+$process = [Qa.Nt]::OpenProcess(0x0800, $false, ${Number(pid)})
+if ($process -eq [IntPtr]::Zero) { throw 'Cannot open the process' }
+$status = [Qa.Nt]::NtSuspendProcess($process)
+[void][Qa.Nt]::CloseHandle($process)
+if ($status -ne 0) { throw "NtSuspendProcess failed: $status" }`;
+  execFileSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64'),
+    ],
+    { windowsHide: true },
+  );
+}
 
 const ready = () => document.querySelector('[aria-label="New conversation"]')?.disabled === false;
 // Connects to the app's page, once it answers and shows the chat.
@@ -102,10 +128,15 @@ async function connect(condition = ready, timeout = 120_000) {
 }
 async function reports(kind, repair) {
   const found = [];
+  for (const report of await written('webviewProcess'))
+    if (report.process?.kind === kind && report.repair === repair) found.push(report);
+  return found;
+}
+async function written(kind) {
+  const found = [];
   for (const name of await readdir(diagnostics).catch(() => [])) {
-    if (!name.endsWith('-webviewProcess.json')) continue;
-    const report = JSON.parse(await readFile(join(diagnostics, name), 'utf8'));
-    if (report.process?.kind === kind && report.repair === repair) found.push({ name, ...report });
+    if (!name.endsWith(`-${kind}.json`)) continue;
+    found.push({ name, ...JSON.parse(await readFile(join(diagnostics, name), 'utf8')) });
   }
   return found;
 }
@@ -191,7 +222,8 @@ try {
         document.querySelector(tab)?.click();
         await new Promise((resolve) => setTimeout(resolve, 100));
         for (const row of document.querySelectorAll('.conversation-item'))
-          titles.push({ title: row.title, tab });
+          // A row's title adds notes, such as New reply, after the chat's name.
+          titles.push({ title: row.title.split(' · ')[0], tab });
       }
       return titles;
     });
@@ -229,13 +261,15 @@ try {
         document.querySelector(tab)?.click();
         await new Promise((resolve) => setTimeout(resolve, 100));
         const row = [...document.querySelectorAll('.conversation-item')].find(
-          (e) => e.title === title,
+          (e) => e.title.split(' · ')[0] === title,
         );
         if (row) return row.click();
       }
     }, chat.title);
     await page.waitFor(
-      (title) => document.querySelector('.conversation-item[aria-current="page"]')?.title === title,
+      (title) =>
+        document.querySelector('.conversation-item[aria-current="page"]')?.title.split(' · ')[0] ===
+        title,
       chat.title,
     );
   };
@@ -373,6 +407,96 @@ try {
   assert.equal(browserProcess().browser.ProcessId, after.browser.ProcessId, 'the browser ran on');
   report.pageReport = await repaired('renderProcessExited', 'page', rendererEnded - 1000);
   await capture('after-page-reloaded');
+
+  // Every WebView2 process lives on while nothing passes between the page and the app: the
+  // browser process is suspended as a reply runs a command. A minute on, the app ends it and
+  // builds the window again, and the new page takes the end of the reply, which ended meanwhile.
+  await openChat();
+  report.silentPageShown = await page.evaluate(() => document.visibilityState);
+  assert.equal(report.silentPageShown, 'visible', 'Only a shown page owes the app its calls');
+  await page.evaluate((text) => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, 'Run exactly one shell command in the foreground and allow it up to 120 seconds: `Start-Sleep -Seconds 15`. When it has finished, reply exactly: SILENT COMMAND DONE');
+  await page.waitFor(
+    () => document.querySelector('[aria-label="Send message"]')?.disabled === false,
+  );
+  await page.button('Send message');
+  const silentSent = Date.now();
+  while (
+    !(await page.evaluate(() =>
+      [...document.querySelectorAll('.message:not(.user)')]
+        .at(-1)
+        ?.textContent.includes('Start-Sleep -Seconds 15'),
+    ))
+  ) {
+    assert(Date.now() - silentSent < 180_000, 'the second command did not start');
+    await sleep(250);
+  }
+  const silent = await reply();
+  assert.equal(silent.status, 'running', silent.error);
+  assert.notEqual(silent.runId, chat.runId);
+  chat.runId = silent.runId;
+  const quiet = browserProcess();
+  page.close();
+  const suspendedAt = Date.now();
+  suspend(quiet.browser.ProcessId);
+  // The suspended browser process holds the debugging port: wait for the one that follows it.
+  for (;;) {
+    const next = browserOf().browser;
+    if (next && next.ProcessId !== quiet.browser.ProcessId) break;
+    assert(Date.now() - suspendedAt < 240_000, 'the silent page was not repaired');
+    await sleep(1000);
+  }
+  report.silentBrowserReplacedAfterMs = Date.now() - suspendedAt;
+  page = await connect();
+  report.silentWindowBackAfterMs = Date.now() - suspendedAt;
+  await sleep(2000);
+  await noBanner();
+  assert.equal(browserProcess().app.ProcessId, before.app.ProcessId, 'the app itself ran on');
+  assert.equal(await windowCall('is_visible'), true);
+  // The suspended browser process went, and its own processes with it.
+  report.silentLeftBehind = processes().filter(
+    (p) =>
+      p.ProcessId === quiet.browser.ProcessId ||
+      webviewChildren([p], quiet.browser.ProcessId).length > 0,
+  );
+  assert.deepEqual(report.silentLeftBehind, []);
+  const silentDeadline = Date.now() + 240_000;
+  let silentDone;
+  for (;;) {
+    silentDone = await reply();
+    if (silentDone.runId === silent.runId && silentDone.status !== 'running') break;
+    assert(Date.now() < silentDeadline, 'the reply did not end in the new page');
+    await sleep(500);
+  }
+  report.silentReply = {
+    status: silentDone.status,
+    error: silentDone.error ?? null,
+    answer: answer(silentDone),
+  };
+  assert.equal(silentDone.status, 'complete', silentDone.error);
+  assert.match(answer(silentDone), /SILENT COMMAND DONE/);
+  await openChat();
+  await capture('after-silent-page');
+  // The silence is reported with its repair and when the new page called, and what WebView2
+  // said of the browser process the app ended asks for no repair of its own.
+  const reportDeadline = Date.now() + 60_000;
+  for (;;) {
+    report.silenceReport = (await written('windowSilent')).find(
+      (r) => Date.parse(r.detectedAt) >= suspendedAt && r.recoveredAfterMs != null,
+    );
+    if (report.silenceReport) break;
+    assert(Date.now() < reportDeadline, 'No windowSilent report heard again');
+    await sleep(500);
+  }
+  assert.equal(report.silenceReport.repair, 'window');
+  assert.equal(report.silenceReport.error, undefined);
+  report.endedBrowserReports = (await written('webviewProcess')).filter(
+    (r) => Date.parse(r.detectedAt) >= suspendedAt,
+  );
+  assert(report.endedBrowserReports.every((r) => r.repair === undefined));
 
   report.liveAtEnd = await page.invoke('live_runs');
   assert.deepEqual(report.liveAtEnd, []);

@@ -18,8 +18,10 @@ pub type Window = Arc<dyn Fn(RunEvent) -> Result<(), String> + Send + Sync>;
 pub type End = Result<String, String>;
 
 /// How long a reply's events stay after its end reached the window that started it, for a reload
-/// that comes before that window saved the end.
-const KEPT_AFTER_END: Duration = Duration::from_secs(60);
+/// that comes before that window saved the end. A page whose calls stopped arriving took ends it
+/// could not save, and its window is built again only once its silence has been found and the
+/// repair has had its turn (watchdog.rs, window_recovery.rs), which this outlasts.
+const KEPT_AFTER_END: Duration = Duration::from_secs(300);
 
 /// The replies this app runs, by run.
 #[derive(Default)]
@@ -418,6 +420,18 @@ mod tests {
         assert_eq!(feeds.live().len(), 1, "a reload may still take it");
         tokio::time::sleep(KEPT_AFTER_END).await;
         assert!(feeds.live().is_empty());
+    }
+
+    #[test]
+    fn an_end_outlasts_the_repair_of_a_page_that_went_silent_as_it_arrived() {
+        // A minute to find the silence, the dump, the check of the app's own work, the browser
+        // process ending, and the longest pause before a repair.
+        let repair = crate::watchdog::SILENCE
+            + crate::watchdog::DUMP_TIME
+            + crate::window_recovery::ANSWER
+            + crate::window_recovery::ENDING
+            + crate::window_recovery::LONGEST;
+        assert!(KEPT_AFTER_END > repair, "{KEPT_AFTER_END:?} <= {repair:?}");
     }
 
     #[test]

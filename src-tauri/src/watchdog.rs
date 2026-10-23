@@ -8,14 +8,15 @@
 //! then records when the freeze ended. A page that found this process not answering leaves its
 //! own record of the calls it waited on (`record_window_stall`), allocations that had to wait
 //! for memory are reported once they got it (memory.rs), and WebView2 processes that fail are
-//! reported with the window's repair (window_recovery.rs). Nothing here leaves this computer:
-//! not the workspace, sync, exports or prompts. See docs/DIAGNOSTICS.md.
+//! reported with the window's repair (window_recovery.rs). A silent page's window is built again
+//! too, on Windows. Nothing here leaves this computer: not the workspace, sync, exports or
+//! prompts. See docs/DIAGNOSTICS.md.
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex, PoisonError,
     },
     time::{Duration, Instant},
 };
@@ -23,8 +24,12 @@ use tauri::{AppHandle, Manager, State};
 
 /// How long the window thread may leave a posted task waiting.
 const STALL: Duration = Duration::from_secs(10);
-/// How long a shown page may go without calling.
-const SILENCE: Duration = Duration::from_secs(60);
+/// How long a shown page may go without calling before it is reported, and on Windows its window
+/// built again.
+pub(crate) const SILENCE: Duration = Duration::from_secs(60);
+/// How long the helper may take to save a dump.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const DUMP_TIME: Duration = Duration::from_secs(60);
 /// How long a server's page may go without calling, or its window thread without answering,
 /// before the server ends so its service starts it again: no one is at its window, and the work
 /// it runs for other devices stops with its page (`server`).
@@ -276,7 +281,9 @@ pub fn watch_webview(window: &tauri::WebviewWindow, number: u64) {
                     }
                 }
             }
-            let repair = crate::window_recovery::needed(kind.0);
+            // A silent page's repair ended this window's browser process, and builds it again.
+            let repair = crate::window_recovery::needed(kind.0)
+                .filter(|_| !crate::window_recovery::ended(&app, number));
             record_process_failure(&app, failure, repair, number);
             Ok(())
         }));
@@ -452,7 +459,9 @@ fn watch(app: &AppHandle) {
             last_step = Instant::now();
         } else {
             let beats = watchdog.beats.load(Ordering::SeqCst);
-            let visible = watchdog.visible.load(Ordering::SeqCst);
+            // A window in front shows its page, which then calls at once, even when it last
+            // told this app it was hidden before its calls stopped arriving.
+            let visible = watchdog.visible.load(Ordering::SeqCst) || in_front(app);
             let took = std::mem::replace(&mut last_step, Instant::now()).elapsed();
             if crate::server::active()
                 && unanswered.step(beats, awake(took)) >= SERVER_SILENCE
@@ -462,10 +471,13 @@ fn watch(app: &AppHandle) {
             }
             match silence.step(beats, visible, awake(took)) {
                 Step::Quiet => {}
-                Step::Silent(after) => silence.report = freeze(app, "windowSilent", after, true),
+                Step::Silent(after) => {
+                    silence.report = freeze(app, "windowSilent", after, true).map(Open::new);
+                    repair_silence(app, silence.report.clone());
+                }
                 Step::Heard(after) => {
-                    if let Some((folder, stamp, report)) = silence.report.take() {
-                        report.recovered(&folder, &stamp, after);
+                    if let Some(report) = silence.report.take() {
+                        report.update(|report| report.recovered_after_ms = Some(millis(after)));
                     }
                 }
             }
@@ -473,6 +485,41 @@ fn watch(app: &AppHandle) {
         std::thread::sleep(SLICE);
     }
 }
+
+#[cfg(windows)]
+fn in_front(app: &AppHandle) -> bool {
+    crate::window_recovery::in_front(app)
+}
+
+#[cfg(not(windows))]
+fn in_front(_app: &AppHandle) -> bool {
+    false
+}
+
+/// Builds a silent page's window again, off this thread, keeping how it went in the page's
+/// report (window_recovery.rs). A server's page has its own remedy (`SERVER_SILENCE`).
+#[cfg(windows)]
+fn repair_silence(app: &AppHandle, report: Option<Open>) {
+    if crate::server::active() {
+        return;
+    }
+    if let Some(report) = &report {
+        report.update(|report| report.repair = Some(crate::window_recovery::Repair::Window));
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("silent-page-repair".into())
+        .spawn(move || {
+            crate::window_recovery::repair_silence(&app, &mut |error| {
+                if let Some(report) = &report {
+                    report.update(|report| report.error = Some(error.chars().take(500).collect()));
+                }
+            });
+        });
+}
+
+#[cfg(not(windows))]
+fn repair_silence(_app: &AppHandle, _report: Option<Open>) {}
 
 /// Time a wait took, unless the computer slept through it.
 fn awake(took: Duration) -> Duration {
@@ -509,7 +556,7 @@ struct Silence {
     beats: u64,
     quiet: Duration,
     silent: bool,
-    report: Option<(PathBuf, String, Report)>,
+    report: Option<Open>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -570,17 +617,36 @@ struct Report {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     calls: Vec<WaitingCall>,
     /// Why a call's fetch failed, for `ipcFallback`, or why the latest attempt to repair the
-    /// window failed, for `webviewProcess`.
+    /// window failed, for `webviewProcess` and `windowSilent`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     process: Option<ProcessFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory: Option<MemoryWaits>,
-    /// How a `webviewProcess` failure that left the window empty is repaired; its
-    /// `recoveredAfterMs` says when it was.
+    /// How a `webviewProcess` failure that left the window empty, or a `windowSilent` page, is
+    /// repaired; its `recoveredAfterMs` says when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     repair: Option<crate::window_recovery::Repair>,
+}
+
+/// A report completed later, from more than one thread: a silent page's is completed by its
+/// repair and by the page calling again.
+#[derive(Clone)]
+struct Open(Arc<Mutex<(PathBuf, String, Report)>>);
+
+impl Open {
+    fn new(report: (PathBuf, String, Report)) -> Self {
+        Self(Arc::new(Mutex::new(report)))
+    }
+
+    /// Changes the report and writes it again.
+    fn update(&self, change: impl FnOnce(&mut Report)) {
+        let mut open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (folder, stamp, report) = &mut *open;
+        change(report);
+        let _ = report.write(folder, stamp);
+    }
 }
 
 /// Allocations Windows refused that waited for memory (memory.rs), for `memoryWait`.
@@ -720,7 +786,7 @@ fn dump(folder: &Path, name: &str) -> Result<String, String> {
         .creation_flags(0x0800_0000)
         .spawn()
         .map_err(|_| "Cannot start the minidump helper")?;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + DUMP_TIME;
     loop {
         match helper.try_wait() {
             Ok(Some(status)) if status.success() => break,
@@ -1033,6 +1099,50 @@ mod tests {
         assert!(written.get("error").is_none());
         // The window whose webview closed is built again, and the report says so.
         assert_eq!(written["repair"], "window");
+    }
+
+    #[test]
+    fn a_silent_pages_report_keeps_its_repair_and_when_the_page_called_again() {
+        let folder = tempfile::tempdir().unwrap();
+        let report = Report {
+            kind: "windowSilent",
+            detected_at: rfc3339(0),
+            after_ms: 60_059,
+            version: version(),
+            process_id: 1,
+            visible: true,
+            dump: Some("1970-01-01T00-00-00-000Z-windowSilent.dmp".into()),
+            dump_error: None,
+            recovered_after_ms: None,
+            calls: vec![],
+            error: None,
+            process: None,
+            memory: None,
+            repair: None,
+        };
+        let open = Open::new((folder.path().to_path_buf(), stamp(0), report));
+        // The repair writes from its own thread, and the watch once the page calls again.
+        let repair = open.clone();
+        std::thread::spawn(move || {
+            repair.update(|report| report.repair = Some(crate::window_recovery::Repair::Window));
+            repair.update(|report| report.error = Some("Cannot build the window: busy".into()));
+        })
+        .join()
+        .unwrap();
+        open.update(|report| report.recovered_after_ms = Some(64_210));
+        let written: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                folder
+                    .path()
+                    .join("1970-01-01T00-00-00-000Z-windowSilent.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["repair"], "window");
+        assert_eq!(written["error"], "Cannot build the window: busy");
+        assert_eq!(written["recoveredAfterMs"], 64_210);
+        assert_eq!(written["dump"], "1970-01-01T00-00-00-000Z-windowSilent.dmp");
     }
 
     #[test]

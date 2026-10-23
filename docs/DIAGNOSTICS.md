@@ -183,6 +183,51 @@ What the app does now:
   utility and frame processes, which WebView2 starts again by itself, and a renderer that stopped
   answering, which may answer again, are only reported.
 
+## What happened at 13:08 the same day
+
+The app started again at 12:39:56 (v1.0.0). At 13:08:37 its window stopped getting answers: the
+page warned **Agent Studio stopped answering this window.** and **Changes are not being saved.**,
+four replies were running, and the user quit and started the app again at 13:44:08, 35 minutes
+later. The app had not crashed and the page had not gone empty: it drew and counted on.
+
+- The page's last call to arrive was the heartbeat of 13:08:32, and it was answered; the next, at
+  13:08:37, never arrived. The app wrote `windowSilent` with a dump at 13:09:32, and the page's
+  own record of the calls left waiting (the heartbeat, a workspace save, relay polls and the four
+  replies' `run_agent`) arrived as `windowCalls` with the next start.
+- In the dump the app waited for work that never came: the window thread idle in `GetMessageW`,
+  every async worker parked, the I/O driver waiting for completions. No WebView2 process ended or
+  reported a failure: no `webviewProcess` report, no crash report in `EBWebView\Crashpad`.
+- What the replies reported after 13:08 never showed: a chat's reply took its background agent's
+  result at 13:16 and went on working, while the page still showed it waiting at 13:29.
+- Windows had run out of commit again. At 13:05 it had promised 52.7 GB of a 75.9 GB limit; the
+  dump's counters show 77.2 GB promised of 84.2 GB, the page file grown under the pressure, with
+  7.3 GB of memory free. Between 13:07 and 13:09 other chats ran two Unreal Editors for a
+  networked test, six headless 4K renders of a game engine and a Blockbench build.
+
+What broke inside WebView2 is not known: every process stayed alive, and none reported anything.
+Reload window was unlikely to help, since a page loads its own files through the same kind of
+request as its calls, and the repair added that morning waits for a WebView2 process to end.
+
+What the app does now:
+
+- **A silent page's window is built again** (`repair_silence` in
+  `src-tauri/src/window_recovery.rs`). When a shown page has not called for a minute while the
+  window thread runs its tasks, the watch writes `windowSilent` with its dump as before, then
+  checks that the async runtime the page's calls run on takes a task within 10 seconds, ends the
+  window's WebView2 browser process, held open since `prepare` so that its id names no other
+  process, and builds the window again as after an ended browser process. Ending the browser
+  process takes the page with it, and the new window starts a new one. What WebView2 reports of
+  the old window afterwards asks for no repair of its own (`ended`). The report keeps the repair,
+  why an attempt failed, and `recoveredAfterMs` once the new page calls.
+- A window in front and not minimized counts as shown even when its page last said it was hidden,
+  so a page whose calls stopped while its window was minimized or in the tray is repaired once the
+  window comes back.
+- A reply's events stay five minutes after its end, not one (`KEPT_AFTER_END` in
+  `src-tauri/src/reply_feed.rs`): a page that went silent as a reply ended could not save that
+  end, and finding and repairing it takes longer than a minute.
+- A server's page is not repaired this way (its server restarts after five silent minutes), nor a
+  page whose async runtime does not answer, which the report names as the error.
+
 ## Reports and dumps
 
 Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
@@ -190,7 +235,7 @@ Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
 | Kind             | Meaning                                                                           |
 | ---------------- | --------------------------------------------------------------------------------- |
 | `windowThread`   | A task posted to the window thread waited 10 seconds.                             |
-| `windowSilent`   | A shown page stopped calling for 60 seconds while the window thread answered.     |
+| `windowSilent`   | A shown page stopped calling for 60 seconds; on Windows its window is rebuilt.    |
 | `windowQueue`    | Tasks could not be posted to the window thread three times in a row.              |
 | `windowCalls`    | The page's list of calls it waited on, from its own check.                        |
 | `ipcFallback`    | Tauri moved the page's calls to `postMessage`: the failure, the calls sent again. |
@@ -203,7 +248,8 @@ page last said it was shown, the dump's file name or why none was saved, and
 that ended still refused and the memory Windows had promised, and could promise, when the latest
 began. A `webviewProcess` report whose failure left the window empty names its `repair`
 (`window` or `page`), keeps why the latest attempt failed in `error`, and has `recoveredAfterMs`
-once the window or page is back. Only the minidump holds memory: thread stacks, handles
+once the window or page is back. On Windows a `windowSilent` report names `window` as its repair
+too, with any `error`, and its `recoveredAfterMs` says when the page, or the new window's, called. Only the minidump holds memory: thread stacks, handles
 and module lists, no heap. The app keeps the newest 30 reports and 3 dumps. Nothing in
 `diagnostics/` is synced, exported or sent anywhere.
 
@@ -274,8 +320,13 @@ thread waits in.
 - `src-tauri/src/window_recovery.rs` tests: only an ended browser process or page renderer needs
   a repair, pauses double while failures keep coming and start over after five quiet minutes, and
   the new window shows as the old one did (one hidden in the tray stays hidden, a maximized one is
-  maximized before it shows and a minimized one minimized after). `badges.rs` tests: a window
-  built again gets the count on its own taskbar button. `watchdog.rs` tests write the `repair`.
+  maximized before it shows and a minimized one minimized after), a silent page's repair ends the
+  browser process of its own window and of no other (a stand-in process, ended with Chromium's
+  exit code 1, and no failure when it had ended already), and a free async runtime answers the
+  check. `badges.rs` tests: a window built again gets the count on its own taskbar button.
+  `watchdog.rs` tests write the `repair`, and keep a silent page's repair, error and recovery,
+  written from two threads, in one report. A `reply_feed.rs` test keeps an ended reply's events
+  longer than the longest search for and repair of a silent page.
 - `scripts/webview-recovery-native-smoke.mjs` drives an isolated build of
   `scripts/native-webview-recovery.tauri.json` (CDP 19891) with a real Codex reply running
   `Start-Sleep -Seconds 30` in a disposable folder, in a maximized window. Ending the app's
@@ -285,7 +336,12 @@ thread waits in.
   renderer then loads the page again. Each failure leaves a `webviewProcess` report with its
   repair and `recoveredAfterMs`. On 2026-10-23 it passed: the window was back 1.8 seconds after
   its browser process ended (1,423 ms in the report) and the page 2.4 seconds after its renderer
-  ended (2,005 ms).
+  ended (2,005 ms). It then suspends the browser process as a reply runs
+  `Start-Sleep -Seconds 15`, which leaves every WebView2 process alive and the page drawing with
+  nothing passing, as at 13:08. The same day the window was back 64.4 seconds later, drawn by a
+  new browser process with none of the old one's left behind; the reply, which ended meanwhile,
+  showed its answer in the new page; the `windowSilent` report (60,024 ms) had `repair: window`
+  and `recoveredAfterMs` 65,234, and WebView2's report of the ended browser process no repair.
 - `tests/window-answers.spec.ts`: the banner appears and clears and the stall is recorded; a reply
   starts while its save goes unanswered and the save warning clears; Close closes while the draft
   save goes unanswered.
