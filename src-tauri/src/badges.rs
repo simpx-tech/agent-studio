@@ -6,7 +6,10 @@
 //! (docs/DIAGNOSTICS.md). A thread of its own sets the newest count; a count asked for while one
 //! is being set waits for that call, and the counts in between are skipped.
 #[cfg(any(windows, test))]
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{
+    atomic::{AtomicIsize, Ordering},
+    Arc, Mutex, MutexGuard, PoisonError,
+};
 use tauri::Manager;
 
 #[tauri::command]
@@ -29,8 +32,9 @@ pub async fn set_pending_chat_badge(app: tauri::AppHandle, count: u32) -> Result
 /// The main window's taskbar overlay, set by a thread of its own.
 #[cfg(any(windows, test))]
 pub struct Overlay {
-    /// The main window's handle, known once the window exists.
-    window: OnceLock<isize>,
+    /// The main window's handle once the window exists, or 0. A window built again after
+    /// WebView2 ended under the last one has a handle of its own (window_recovery.rs).
+    window: AtomicIsize,
     state: Mutex<OverlayState>,
     /// Shows a count on the window's taskbar button, returning whether it did.
     apply: fn(isize, u32) -> bool,
@@ -55,7 +59,7 @@ impl Overlay {
     }
     fn with(apply: fn(isize, u32) -> bool) -> Arc<Self> {
         Arc::new(Self {
-            window: OnceLock::new(),
+            window: AtomicIsize::new(0),
             state: Mutex::default(),
             apply,
         })
@@ -63,12 +67,18 @@ impl Overlay {
     fn lock(&self) -> MutexGuard<'_, OverlayState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    /// The window whose taskbar button carries the count, once it exists.
+    /// The window whose taskbar button carries the count, once it exists. A new window's button
+    /// shows no count yet, so the next count is set even when it is the same.
     pub fn attach(&self, window: isize) {
-        let _ = self.window.set(window);
+        let mut state = self.lock();
+        if self.window.swap(window, Ordering::SeqCst) != window {
+            state.shown = None;
+        }
     }
     pub fn show(self: &Arc<Self>, count: u32) -> Result<(), String> {
-        let window = *self.window.get().ok_or("Application window unavailable")?;
+        if self.window.load(Ordering::SeqCst) == 0 {
+            return Err("Application window unavailable".into());
+        }
         {
             let mut state = self.lock();
             state.wanted = Some(count);
@@ -80,21 +90,23 @@ impl Overlay {
         let overlay = Arc::clone(self);
         std::thread::Builder::new()
             .name("taskbar-overlay".into())
-            .spawn(move || overlay.work(window))
+            .spawn(move || overlay.work())
             .map(drop)
             .map_err(|_| {
                 self.lock().busy = false;
                 "Could not update the pending chat badge".into()
             })
     }
-    fn work(&self, window: isize) {
+    fn work(&self) {
         #[cfg(windows)]
         let _com = taskbar::Apartment::enter();
         loop {
-            let count = {
+            let (count, window) = {
                 let mut state = self.lock();
                 match state.wanted.take() {
-                    Some(count) if state.shown != Some(count) => count,
+                    Some(count) if state.shown != Some(count) => {
+                        (count, self.window.load(Ordering::SeqCst))
+                    }
                     _ => {
                         state.busy = false;
                         return;
@@ -102,8 +114,12 @@ impl Overlay {
                 }
             };
             let shown = (self.apply)(window, count);
-            // A count that failed is set again when it is asked for next.
-            self.lock().shown = shown.then_some(count);
+            // A count that failed is set again when it is asked for next, and one set on a
+            // window built again since was set on the button of a window that is gone.
+            let mut state = self.lock();
+            if self.window.load(Ordering::SeqCst) == window {
+                state.shown = shown.then_some(count);
+            }
         }
     }
 }
@@ -355,6 +371,31 @@ mod tests {
     }
     fn calls() -> Vec<(isize, u32)> {
         CALLS.lock().unwrap().clone()
+    }
+
+    // The taskbar calls of the test below, which return at once.
+    static RECORDED: StdMutex<Vec<(isize, u32)>> = StdMutex::new(Vec::new());
+    fn recorded(window: isize, count: u32) -> bool {
+        RECORDED.lock().unwrap().push((window, count));
+        true
+    }
+
+    #[test]
+    fn a_window_built_again_gets_the_count_on_its_own_taskbar_button() {
+        let overlay = Overlay::with(recorded);
+        overlay.attach(7);
+        overlay.show(2).unwrap();
+        idle(&overlay);
+        // The same window keeps the count it shows.
+        overlay.attach(7);
+        overlay.show(2).unwrap();
+        idle(&overlay);
+        assert_eq!(*RECORDED.lock().unwrap(), vec![(7, 2)]);
+        // A window built again after WebView2 ended shows none yet, so the same count is set.
+        overlay.attach(9);
+        overlay.show(2).unwrap();
+        idle(&overlay);
+        assert_eq!(*RECORDED.lock().unwrap(), vec![(7, 2), (9, 2)]);
     }
 
     #[test]

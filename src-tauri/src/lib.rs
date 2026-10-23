@@ -50,6 +50,7 @@ mod undo;
 mod updates;
 mod usage;
 mod watchdog;
+mod window_recovery;
 mod workflow_files;
 mod wsl;
 use std::io::Write;
@@ -1990,25 +1991,18 @@ pub fn run() {
         .manage(std::sync::Arc::new(screens::Screens::default()))
         .manage(sign_in::SignIns::default())
         .manage(watchdog::Watchdog::default())
+        .manage(window_recovery::Recovery::default())
         .setup(|app| {
             tray::setup(app.handle());
             // The taskbar overlay is set off the window thread, on the window's own handle.
             #[cfg(windows)]
-            {
-                let overlay = badges::Overlay::new();
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(hwnd) = window.hwnd() {
-                        overlay.attach(hwnd.0 as isize);
-                    }
-                }
-                app.manage(overlay);
-            }
+            app.manage(badges::Overlay::new());
             watchdog::start(app.handle());
+            // The taskbar count, WebView2's failures recorded and repaired, and F5, Ctrl+R and
+            // the menu's Reload no longer reloading the window.
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
-                watchdog::watch_webview(&window);
-                // F5, Ctrl+R and the menu's Reload no longer reload the window.
-                page_guard::guard(&window);
+                window_recovery::prepare(app.handle(), &window, 0);
             }
             // When a Claude profile's two shared files need Windows' permission, ask once for
             // every account that needs it.
@@ -2203,6 +2197,16 @@ pub fn run() {
         // The window thread stops taking tasks on purpose now; that is no freeze.
         if let tauri::RunEvent::Exit = event {
             watchdog::stop(handle);
+        }
+        // The window is built again after WebView2 ended under it, and closing the old one
+        // left none for a moment (window_recovery.rs).
+        if let tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } = &event
+        {
+            if window_recovery::rebuilding(handle) {
+                api.prevent_exit();
+            }
         }
         // The Dock icon brings back a window kept running in the menu bar.
         #[cfg(target_os = "macos")]

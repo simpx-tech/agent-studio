@@ -90,6 +90,12 @@ pub fn hides_on_close(app: &AppHandle) -> bool {
     )
 }
 
+/// Whether Quit was chosen, so the app is ending.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn quitting(app: &AppHandle) -> bool {
+    app.state::<Tray>().quitting.load(Ordering::SeqCst)
+}
+
 /// Shows the window from the tray, a second launch, a notification or the macOS Dock.
 pub fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {

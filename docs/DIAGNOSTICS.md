@@ -139,6 +139,50 @@ What the app does now:
   surrogate escape through, which the next start of the app would refuse) and written as it
   came. The file is the same, byte for byte.
 
+## What happened on 2026-10-23
+
+The window (v1.0.0) went empty at 12:00:44, showing only its background colour, and stayed so
+until the app was quit and started again at 12:39:56. The three replies running then went on
+unseen (175 of their calls ended in those 39 minutes) and were saved as **This response was
+interrupted when the app closed.** when the app quit.
+
+- Windows had run out of commit again. Volume Shadow Copy could not get paged memory at 12:00:36
+  and 12:00:43, a test program another chat was running (`bluevox_render`, a debug build of a
+  renderer's tests) had reached 17.3 GB of private memory when it crashed in Direct3D's shader
+  compiler at 12:00:43, and the GPU driver reset at 12:00:47 (`LiveKernelEvent` 141).
+- WebView2's browser process, which draws the page and owns WebView2's other processes, ended at
+  12:00:44 with `0x80000003`, a deliberate crash. Its own crash report
+  (`EBWebView\Crashpad\reports`) gives the reason as a crash key,
+  `SharedMemoryRegionCreationFailure = create-file-mapping|1455`: Windows refused it shared memory
+  with `ERROR_COMMITMENT_LIMIT`. The report's counters show 71.7 GB promised of a 79.2 GB limit
+  and 4.3 GB of memory free once it was written.
+- The app itself ran on, and its allocator never had to wait. It kept the failure as a
+  `webviewProcess` report (`browserProcessExited`, `unexpected`) and the page's silence a minute
+  later as `windowSilent` with a dump. But WebView2 closes a webview for good when its browser
+  process ends, and nothing made another, so the window showed its own background. The page's
+  warning, **Agent Studio stopped answering this window.**, belonged to the page that was gone.
+
+What the app does now:
+
+- **The window comes back by itself** (`src-tauri/src/window_recovery.rs`). When WebView2's
+  browser process ends, the app builds the main window again from its configuration, in the same
+  process. The new window starts hidden, takes the old one's place (`GetWindowPlacement`,
+  `SetWindowPlacement`) and is maximized, shown, minimized and focused as the old one was through
+  the window's own calls, so that it knows how it shows; a window hidden in the tray stays hidden.
+  The app stays running while no window exists, unless it is quitting, installing an update or
+  Windows is ending. The taskbar count, the process watch and the browser-key guard attach to the
+  new window (`prepare`). The replies are detached from the page that ended (`Runs::reloaded`),
+  so the new page follows them as after a reload (`reply_feed.rs`), with every event they
+  reported meanwhile.
+- **A page whose renderer ended loads again.** WebView2 shows its own error page then, in place
+  of the whole window, title bar included.
+- Repairs run one at a time and skip a failure an earlier window reported. The first waits a
+  second, for the ended processes to go, and one that follows a failure within five minutes waits
+  twice as long as the last, up to a minute. A window that cannot be built yet, as when WebView2
+  cannot start while memory is short, is tried again with the same pauses. None gives up. GPU,
+  utility and frame processes, which WebView2 starts again by itself, and a renderer that stopped
+  answering, which may answer again, are only reported.
+
 ## Reports and dumps
 
 Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
@@ -150,14 +194,16 @@ Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
 | `windowQueue`    | Tasks could not be posted to the window thread three times in a row.              |
 | `windowCalls`    | The page's list of calls it waited on, from its own check.                        |
 | `ipcFallback`    | Tauri moved the page's calls to `postMessage`: the failure, the calls sent again. |
-| `webviewProcess` | A WebView2 process failed: its kind, reason, exit code and description.           |
+| `webviewProcess` | A WebView2 process failed: its kind, reason, exit code, description and repair.   |
 | `memoryWait`     | Allocations waited for memory: how many, the longest wait, the largest request.   |
 
 Reports hold the time, how long the app had waited, the app version and process id, whether the
 page last said it was shown, the dump's file name or why none was saved, and
 `recoveredAfterMs` once the freeze ended. A `memoryWait` report's `memory` also gives the waits
 that ended still refused and the memory Windows had promised, and could promise, when the latest
-began. Only the minidump holds memory: thread stacks, handles
+began. A `webviewProcess` report whose failure left the window empty names its `repair`
+(`window` or `page`), keeps why the latest attempt failed in `error`, and has `recoveredAfterMs`
+once the window or page is back. Only the minidump holds memory: thread stacks, handles
 and module lists, no heap. The app keeps the newest 30 reports and 3 dumps. Nothing in
 `diagnostics/` is synced, exported or sent anywhere.
 
@@ -225,6 +271,21 @@ thread waits in.
   refuses. On a copy of the 175 MB workspace a whole save and three saves of its largest
   conversation (9.8 MB) wrote the file `serde_json` would; in a debug build the saves took
   0.3 seconds each, against 5.9 seconds for the copy and encoding they replace.
+- `src-tauri/src/window_recovery.rs` tests: only an ended browser process or page renderer needs
+  a repair, pauses double while failures keep coming and start over after five quiet minutes, and
+  the new window shows as the old one did (one hidden in the tray stays hidden, a maximized one is
+  maximized before it shows and a minimized one minimized after). `badges.rs` tests: a window
+  built again gets the count on its own taskbar button. `watchdog.rs` tests write the `repair`.
+- `scripts/webview-recovery-native-smoke.mjs` drives an isolated build of
+  `scripts/native-webview-recovery.tauri.json` (CDP 19891) with a real Codex reply running
+  `Start-Sleep -Seconds 30` in a disposable folder, in a maximized window. Ending the app's
+  WebView2 browser process brings the window back maximized, drawn by a new browser process of the
+  same app process; the reply, still running and its chat in Active, ends in the new page with its
+  answer and calls, and the window restores to its earlier place and size. Ending the page's
+  renderer then loads the page again. Each failure leaves a `webviewProcess` report with its
+  repair and `recoveredAfterMs`. On 2026-10-23 it passed: the window was back 1.8 seconds after
+  its browser process ended (1,423 ms in the report) and the page 2.4 seconds after its renderer
+  ended (2,005 ms).
 - `tests/window-answers.spec.ts`: the banner appears and clears and the stall is recorded; a reply
   starts while its save goes unanswered and the save warning clears; Close closes while the draft
   save goes unanswered.

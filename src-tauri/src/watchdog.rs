@@ -6,8 +6,9 @@
 //! the computer was awake, it writes a report to app data `diagnostics/` and, on Windows, has a
 //! helper process (`--write-minidump`) save where every thread of this process was; the report
 //! then records when the freeze ended. A page that found this process not answering leaves its
-//! own record of the calls it waited on (`record_window_stall`), and allocations that had to
-//! wait for memory are reported once they got it (memory.rs). Nothing here leaves this computer:
+//! own record of the calls it waited on (`record_window_stall`), allocations that had to wait
+//! for memory are reported once they got it (memory.rs), and WebView2 processes that fail are
+//! reported with the window's repair (window_recovery.rs). Nothing here leaves this computer:
 //! not the workspace, sync, exports or prompts. See docs/DIAGNOSTICS.md.
 use serde::{Deserialize, Serialize};
 use std::{
@@ -56,6 +57,13 @@ pub fn stop(app: &AppHandle) {
     if let Some(watchdog) = app.try_state::<Watchdog>() {
         watchdog.ending.store(true, Ordering::SeqCst);
     }
+}
+
+/// Whether the app is ending.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn ending(app: &AppHandle) -> bool {
+    app.try_state::<Watchdog>()
+        .is_some_and(|watchdog| watchdog.ending.load(Ordering::SeqCst))
 }
 
 #[tauri::command]
@@ -115,6 +123,7 @@ pub async fn record_window_stall(app: AppHandle, stall: WindowStall) -> Result<(
             error: None,
             process: None,
             memory: None,
+            repair: None,
         };
         report.write(&folder, &stamp(stall.noticed_at))
     })
@@ -163,6 +172,7 @@ pub async fn record_ipc_fallback(
             error: Some(fallback.error.chars().take(500).collect()),
             process: None,
             memory: None,
+            repair: None,
         };
         report.write(&folder, &stamp(fallback.noticed_at))
     })
@@ -222,8 +232,10 @@ fn failed_reason(reason: i32) -> &'static str {
 
 /// Keeps each WebView2 process that fails as a `webviewProcess` report: a restarted network
 /// service, for one, fails every call in flight and moves the page to `postMessage` (calls.rs).
+/// A failure that leaves the window empty is repaired (window_recovery.rs), and the report says
+/// how and when. `number` is the window's, which a window built again replaces.
 #[cfg(windows)]
-pub fn watch_webview(window: &tauri::WebviewWindow) {
+pub fn watch_webview(window: &tauri::WebviewWindow, number: u64) {
     let app = window.app_handle().clone();
     let _ = window.with_webview(move |platform| {
         use webview2_com::{
@@ -237,10 +249,10 @@ pub fn watch_webview(window: &tauri::WebviewWindow) {
         let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
             let mut failure = ProcessFailure::default();
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
             // SAFETY: WebView2 calls this on the window thread with live event arguments, and
             // each string it returns is freed by `take_pwstr`.
             unsafe {
-                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
                 let _ = args.ProcessFailedKind(&mut kind);
                 failure.kind = failed_kind(kind.0);
                 if let Ok(more) = args.cast::<ICoreWebView2ProcessFailedEventArgs2>() {
@@ -264,7 +276,8 @@ pub fn watch_webview(window: &tauri::WebviewWindow) {
                     }
                 }
             }
-            record_process_failure(&app, failure);
+            let repair = crate::window_recovery::needed(kind.0);
+            record_process_failure(&app, failure, repair, number);
             Ok(())
         }));
         let mut token = 0;
@@ -277,16 +290,24 @@ pub fn watch_webview(window: &tauri::WebviewWindow) {
     });
 }
 
-/// Writes a failed process's report off the window thread, which WebView2 tells it on.
+/// Writes a failed process's report and repairs the window off the window thread, which WebView2
+/// tells it on and which building a window waits for.
 #[cfg(windows)]
-fn record_process_failure(app: &AppHandle, failure: ProcessFailure) {
-    let Ok(folder) = folder(app) else { return };
+fn record_process_failure(
+    app: &AppHandle,
+    failure: ProcessFailure,
+    repair: Option<crate::window_recovery::Repair>,
+    number: u64,
+) {
+    let folder = folder(app);
     let visible = app.state::<Watchdog>().visible.load(Ordering::SeqCst);
     let at = now_ms();
+    let failed_at = Instant::now();
+    let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("webview-process-report".into())
         .spawn(move || {
-            let report = Report {
+            let mut report = Report {
                 kind: "webviewProcess",
                 detected_at: rfc3339(at),
                 after_ms: 0,
@@ -300,8 +321,24 @@ fn record_process_failure(app: &AppHandle, failure: ProcessFailure) {
                 error: None,
                 process: Some(failure),
                 memory: None,
+                repair,
             };
-            let _ = report.write(&folder, &stamp(at));
+            // The window is repaired even when no report can be kept.
+            let write = |report: &Report| {
+                if let Ok(folder) = &folder {
+                    let _ = report.write(folder, &stamp(at));
+                }
+            };
+            write(&report);
+            let Some(repair) = repair else { return };
+            let repaired = crate::window_recovery::repair(&app, number, repair, &mut |error| {
+                report.error = Some(error.chars().take(500).collect());
+                write(&report);
+            });
+            if repaired {
+                report.recovered_after_ms = Some(millis(failed_at.elapsed()));
+                write(&report);
+            }
         });
 }
 
@@ -336,6 +373,7 @@ fn memory_report(waits: crate::memory::WaitReport, at: u64, visible: bool) -> Re
             committed_bytes: waits.commit.committed,
             commit_limit_bytes: waits.commit.limit,
         }),
+        repair: None,
     }
 }
 
@@ -531,13 +569,18 @@ struct Report {
     recovered_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     calls: Vec<WaitingCall>,
-    /// Why a call's fetch failed, for `ipcFallback`.
+    /// Why a call's fetch failed, for `ipcFallback`, or why the latest attempt to repair the
+    /// window failed, for `webviewProcess`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     process: Option<ProcessFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory: Option<MemoryWaits>,
+    /// How a `webviewProcess` failure that left the window empty is repaired; its
+    /// `recoveredAfterMs` says when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair: Option<crate::window_recovery::Repair>,
 }
 
 /// Allocations Windows refused that waited for memory (memory.rs), for `memoryWait`.
@@ -593,6 +636,7 @@ fn freeze(
         error: None,
         process: None,
         memory: None,
+        repair: None,
     };
     // The report first, in case saving the dump is what fails to finish.
     let _ = report.write(&folder, &stamp);
@@ -877,6 +921,7 @@ mod tests {
                 error: None,
                 process: None,
                 memory: None,
+                repair: None,
             };
             report.write(folder.path(), &stamp(second * 1000)).unwrap();
         }
@@ -964,6 +1009,7 @@ mod tests {
                 module: String::new(),
             }),
             memory: None,
+            repair: Some(crate::window_recovery::Repair::Window),
         };
         report.write(folder.path(), &stamp(0)).unwrap();
         let written: serde_json::Value = serde_json::from_slice(
@@ -985,6 +1031,8 @@ mod tests {
             })
         );
         assert!(written.get("error").is_none());
+        // The window whose webview closed is built again, and the report says so.
+        assert_eq!(written["repair"], "window");
     }
 
     #[test]
@@ -1023,7 +1071,11 @@ mod tests {
                 "commitLimitBytes": 94_150_000_000_u64
             })
         );
-        assert!(written.get("process").is_none() && written.get("dump").is_none());
+        assert!(
+            written.get("process").is_none()
+                && written.get("dump").is_none()
+                && written.get("repair").is_none()
+        );
     }
 
     #[cfg(windows)]
