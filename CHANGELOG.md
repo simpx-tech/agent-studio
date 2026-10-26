@@ -5,6 +5,16 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.0.3 - 2026-10-26
+
+### Fixed
+
+- Stop Start on the least used account from piling new chats onto one account until its 5-hour
+  limit stops them all: each new chat now goes where it has the most of the 5-hour limit left,
+  shared with the replies already running on each account, and the weekly limit decides only
+  between accounts with about as much room, as before 1.0.0. Workflow steps and dynamic workflow
+  agents without an account choose the same way
+
 ## 1.0.2 - 2026-10-23
 
 ### Added
