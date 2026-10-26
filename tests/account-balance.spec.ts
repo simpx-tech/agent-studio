@@ -5,8 +5,8 @@ import { chooseTestFolder } from './folder-helper';
 type Usage = { '5-hour'?: number | null; Weekly?: number | null };
 
 // Each account reports the usage a test gives it, read again whenever the app asks.
-async function prepare(page: Page) {
-  await mockDesktop(page);
+async function prepare(page: Page, mode?: string) {
+  await mockDesktop(page, mode);
   await page.addInitScript(() => {
     const native = (window as any).__TAURI_INTERNALS__;
     const invoke = native.invoke;
@@ -87,6 +87,12 @@ async function send(page: Page, text: string) {
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('[data-testid="message"][data-status="complete"]')).toHaveCount(2);
 }
+// Sends a message whose reply goes on running, as the desktop mock's `slow` replies do.
+async function start(page: Page, text: string) {
+  await message(page).fill(text);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('[data-testid="message"][data-status="running"]')).toHaveCount(1);
+}
 async function balance(page: Page, enabled = true) {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const option = page.getByRole('checkbox', { name: 'Start on the least used account' });
@@ -119,8 +125,8 @@ async function inSettings(page: Page, act: () => Promise<void>) {
 }
 
 // Two Claude accounts with the usage given, in a folder, with Claude as the agent of new chats.
-async function twoClaudeAccounts(page: Page, login: Usage, second: Usage) {
-  await prepare(page);
+async function twoClaudeAccounts(page: Page, login: Usage, second: Usage, mode?: string) {
+  await prepare(page, mode);
   const ids = {
     second: await addAccount(page, 'Claude', 'Second Claude'),
     login: await connectionOf(page, 'Claude CLI login'),
@@ -136,16 +142,15 @@ async function twoClaudeAccounts(page: Page, login: Usage, second: Usage) {
 test('new chats start on the least used account once Settings turns that on', async ({ page }) => {
   const ids = await twoClaudeAccounts(
     page,
-    { '5-hour': 20, Weekly: 80 },
     { '5-hour': 60, Weekly: 10 },
+    { '5-hour': 20, Weekly: 80 },
   );
   // Off unless turned on: a new chat starts with the account last chosen.
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
   expect((await saved(page)).balanceAccounts).toBeUndefined();
 
-  // The new chat that is open follows the option at once: with room on both 5-hour limits, the
-  // weekly ones decide.
+  // The new chat that is open follows the option at once, by the 5-hour limit before the weekly.
   await balance(page);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
   await expect(agent(page)).toHaveAttribute('title', /^Account chosen by usage\. /);
@@ -156,9 +161,8 @@ test('new chats start on the least used account once Settings turns that on', as
   await expect(page.locator('.welcome-account')).toBeVisible();
   await expect(page.getByText('A conversation with Claude · Second Claude')).toBeVisible();
 
-  // Each new chat reads the accounts again, so it follows what they used meanwhile: nearly out
-  // of its 5-hour limit, an account gives way to one with room.
-  await setUsage(page, ids.second, { '5-hour': 90, Weekly: 10 });
+  // Each new chat reads the accounts again, so it follows what they used meanwhile.
+  await setUsage(page, ids.second, { '5-hour': 90, Weekly: 80 });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
 
@@ -183,8 +187,8 @@ test('an account chosen by hand stays, and a draft keeps the account it was writ
 }) => {
   const ids = await twoClaudeAccounts(
     page,
-    { '5-hour': 20, Weekly: 80 },
     { '5-hour': 60, Weekly: 10 },
+    { '5-hour': 20, Weekly: 80 },
   );
   await balance(page);
   await newChat(page);
@@ -203,7 +207,7 @@ test('an account chosen by hand stays, and a draft keeps the account it was writ
 
   // An account does not change under a draft, even once another has far more room.
   await message(page).fill('A draft written under the second account');
-  await setUsage(page, ids.second, { '5-hour': 95, Weekly: 10 });
+  await setUsage(page, ids.second, { '5-hour': 95, Weekly: 80 });
   await returnToWindow(page, ids.second);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
   // Empty again, the new chat moves to the account with room.
@@ -223,14 +227,14 @@ test('an account chosen by hand stays, and a draft keeps the account it was writ
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
 });
 
-test('level accounts take turns, then their 5-hour limits decide', async ({ page }) => {
+test('level accounts take turns, then their weekly limits decide', async ({ page }) => {
   const ids = await twoClaudeAccounts(
     page,
     { '5-hour': 30, Weekly: 50 },
-    { '5-hour': 30, Weekly: 53 },
+    { '5-hour': 33, Weekly: 50 },
   );
   await balance(page);
-  // Three weekly points apart is level, and neither account has answered: the first one listed.
+  // Three points apart is level, and neither account has answered: the first one listed.
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
   await send(page, 'First chat');
@@ -243,15 +247,14 @@ test('level accounts take turns, then their 5-hour limits decide', async ({ page
   const requests = await page.evaluate(() => localStorage.getItem('test-last-request'));
   expect(JSON.parse(requests!).agent.connectionId).toBe(ids.second);
 
-  // Between level accounts the 5-hour limit decides before whose turn it is.
-  await setUsage(page, ids.login, { '5-hour': 40, Weekly: 50 });
+  // Between level accounts the weekly limit decides before whose turn it is.
+  await setUsage(page, ids.login, { '5-hour': 30, Weekly: 90 });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
 
-  // `/new` goes on with the same agent, on the account balancing chooses: the one that used the
-  // least of its weekly limit, though more of its 5-hour one.
-  await setUsage(page, ids.login, { '5-hour': 60, Weekly: 20 });
-  await setUsage(page, ids.second, { '5-hour': 10, Weekly: 50 });
+  // `/new` goes on with the same agent, on the account balancing chooses.
+  await setUsage(page, ids.login, { '5-hour': 2, Weekly: 90 });
+  await setUsage(page, ids.second, { '5-hour': 40, Weekly: 50 });
   await message(page).fill('/new Another idea');
   await message(page).press('Enter');
   await expect(message(page)).toHaveValue('Another idea');
@@ -261,6 +264,28 @@ test('level accounts take turns, then their 5-hour limits decide', async ({ page
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
   expect((await saved(page)).connectionByProvider.claude).toBe(ids.login);
+});
+
+test('replies running on an account leave the next new chats to another', async ({ page }) => {
+  // Replies go on until stopped, as long ones do, and the readings stay as they are.
+  await twoClaudeAccounts(
+    page,
+    { '5-hour': 10, Weekly: 50 },
+    { '5-hour': 40, Weekly: 10 },
+    'slow',
+  );
+  await balance(page);
+  // The 5-hour limit decides, however little of its week the other account used.
+  await newChat(page);
+  await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
+  await start(page, 'A long task');
+  // The reply running there shares what is left of that account with a new chat, which goes
+  // where it has more room of its own.
+  await newChat(page);
+  await expect(agent(page)).toHaveText(/Claude · Second Claude/);
+  await start(page, 'Another long task');
+  await newChat(page);
+  await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
 });
 
 test('an account without room or to sign in to is left out', async ({ page }) => {
@@ -276,7 +301,6 @@ test('an account without room or to sign in to is left out', async ({ page }) =>
   await setUsage(page, ids.second, { '5-hour': 0, Weekly: 100 });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
-  // Nearly out of its 5-hour limit, an account comes after one with room, whatever their weeks.
   await setUsage(page, ids.second, { '5-hour': 0, Weekly: 99 });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
@@ -314,15 +338,11 @@ test('accounts without a 5-hour limit are balanced by their weekly one', async (
   await newChat(page);
   await expect(agent(page)).toHaveText(/Codex · Codex CLI login/);
 
-  // Where they report a 5-hour limit, the weekly one decides until an account is nearly out of
-  // the 5-hour limit.
-  await setUsage(page, login, { '5-hour': 85, Weekly: 5 });
+  // Where they report a 5-hour limit, it comes first.
+  await setUsage(page, login, { '5-hour': 50, Weekly: 5 });
   await setUsage(page, second, { '5-hour': 10, Weekly: 90 });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Codex · Second Codex/);
-  await setUsage(page, login, { '5-hour': 50, Weekly: 5 });
-  await newChat(page);
-  await expect(agent(page)).toHaveText(/Codex · Codex CLI login/);
 });
 
 test('an account left out in Settings takes new chats only when chosen', async ({ page }) => {
