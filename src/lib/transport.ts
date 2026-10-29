@@ -368,7 +368,7 @@ function foregroundConversation(): string | undefined {
   if (serverHost()) return undefined;
   return typeof document !== 'undefined' &&
     document.visibilityState === 'visible' &&
-    document.hasFocus()
+    windowFocused()
     ? notificationConversationId()
     : undefined;
 }
@@ -3951,6 +3951,71 @@ export async function openLink(url: string) {
     await openUrl(url);
   } else window.open(url, '_blank', 'noopener,noreferrer');
 }
+
+// ---- claude.ai artifacts inside the window (src-tauri/src/claude_pages.rs) --------------------
+
+/** Where a view's slot is in the window, in CSS pixels. */
+export type PagePlace = { x: number; y: number; width: number; height: number };
+/** What a view asks of the claude.ai pane of its account: the artifact, and where it shows. */
+export type PageRequest = {
+  view: string;
+  account: string;
+  url: string;
+  load: string;
+  /** None while the view is hidden or something covers its slot. */
+  bounds?: PagePlace;
+  dark: boolean;
+};
+/**
+ * Whether this window shows claude.ai artifacts inside itself, in a WebView2 of their own over
+ * the panel holding them; elsewhere they open in the browser.
+ */
+export const claudePagesInApp = (): boolean =>
+  desktop() && runtime?.installation.platform === 'windows' && !serverHost();
+let pageRequests = 0;
+export async function showClaudePage(request: PageRequest): Promise<void> {
+  watchPageFocus();
+  await invoke('claude_page', {
+    request: { ...request, bounds: request.bounds ?? null, seq: ++pageRequests },
+  });
+}
+/** Closes the claude.ai sessions of every account but `keep`, whose artifacts chats still show. */
+export async function closeClaudePages(keep: string[]): Promise<void> {
+  if (claudePagesInApp()) await invoke('close_claude_pages', { keep });
+}
+// Whether a claude.ai pane has keyboard focus, which this window then still has, and when one
+// last gave it back.
+const pageFocus = { focused: false, left: 0 };
+let pageFocusWatched = false;
+function watchPageFocus() {
+  if (pageFocusWatched || !desktop()) return;
+  pageFocusWatched = true;
+  void listen<unknown>('studio-claude-page-focus', ({ payload }) => {
+    const focused = payload === true;
+    if (pageFocus.focused && !focused) pageFocus.left = Date.now();
+    pageFocus.focused = focused;
+    // The chat beside the pane is still the one read.
+    void publishNotificationView();
+  });
+}
+const pageEnds = new Set<(account: string) => void>();
+let pageEndsWatched = false;
+/** Hears of the claude.ai panes that ended with their browser process, which Reload builds again. */
+export function onClaudePageEnded(listener: (account: string) => void): () => void {
+  if (!pageEndsWatched && desktop()) {
+    pageEndsWatched = true;
+    void listen<unknown>('studio-claude-page-ended', ({ payload }) => {
+      if (typeof payload === 'string') for (const heard of pageEnds) heard(payload);
+    });
+  }
+  pageEnds.add(listener);
+  return () => void pageEnds.delete(listener);
+}
+/** Whether keyboard focus is in this window: in its page, or in a claude.ai pane over it. */
+export const windowFocused = () =>
+  typeof document !== 'undefined' && (document.hasFocus() || pageFocus.focused);
+/** Whether the page took focus back from a claude.ai pane just now, rather than from another app. */
+export const backFromClaudePage = () => pageFocus.focused || Date.now() - pageFocus.left < 1000;
 
 // ---- Workflows (docs/WORKFLOWS.md) ------------------------------------------------------------
 

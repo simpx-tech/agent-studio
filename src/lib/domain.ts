@@ -231,7 +231,8 @@ export const messageSchema = z
     visualizations: visualizationsSchema.optional(),
     // The artifact pages the reply showed with its show_artifact tool, with their source.
     artifacts: artifactRecordsSchema.optional(),
-    // The claude.ai artifacts the reply published or opened, which their cards open there.
+    // The claude.ai artifacts the reply published or opened, which their cards open beside the
+    // chat in the account's own claude.ai session on Windows, and in the browser elsewhere.
     publishedArtifacts: publishedArtifactsSchema.optional(),
     sentFiles: sentFileGroupsSchema.optional(),
     // Groups showing a table, a document or a video, which releases before them cannot read:

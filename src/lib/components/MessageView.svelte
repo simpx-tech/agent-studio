@@ -11,6 +11,7 @@
     MessageCircleQuestionMark,
     LayoutDashboard,
     AppWindow,
+    ExternalLink,
     ShipWheel,
     TimerReset,
     Workflow,
@@ -49,6 +50,7 @@
   import ElicitationForm from './ElicitationForm.svelte';
   import { artifactKey, messageArtifacts, recordArtifact, type Artifact } from '$lib/artifacts';
   import type { ScreenCard } from '$lib/screens';
+  import type { PublishedArtifact } from '$lib/published-artifacts';
   let {
     message,
     questionDrafts,
@@ -76,6 +78,7 @@
     switchAccount,
     continuation,
     openScreen,
+    openPage,
   }: {
     message: Message;
     /** Questions Claude is still writing in this reply, which this window heard. */
@@ -117,6 +120,8 @@
     continuation?: { at: string; cancel?: () => void };
     /** Opens a screen this reply saved, from the computer that keeps it. */
     openScreen?: (card: ScreenCard) => void;
+    /** Opens a claude.ai artifact inside the window; without it, the browser opens it. */
+    openPage?: (artifact: PublishedArtifact) => void;
   } = $props();
   const responseChanges = $derived(separateMemory(summarizeFileChanges([message])));
   const allChanges = $derived(chatChanges ?? responseChanges);
@@ -376,15 +381,29 @@
           class="response-screens"
           aria-label="Artifacts on claude.ai"
         >
-          <!-- Claude Code published or opened these on claude.ai, where they open. -->
-          {#each message.publishedArtifacts as card (card.id)}<button
-              class="secondary screen-open"
-              onclick={() =>
-                void openLink(card.url).catch(() => (linkError = 'Could not open this link.'))}
-              ><AppWindow size={16} aria-hidden="true" /><span>{card.title}</span><small
-                >Open on claude.ai</small
-              ></button
-            >{/each}
+          <!-- Claude Code published or opened these on claude.ai: they open beside the chat, in
+               the window's own claude.ai session, or else in the browser. -->
+          {#each message.publishedArtifacts as card (card.id)}{#if openPage}<div class="published-card">
+                <button class="secondary screen-open" onclick={() => openPage(card)}
+                  ><AppWindow size={16} aria-hidden="true" /><span>{card.title}</span><small
+                    >claude.ai</small
+                  ></button
+                ><button
+                  class="secondary published-browser"
+                  aria-label={`Open ${card.title} in browser`}
+                  title="Open in browser"
+                  onclick={() =>
+                    void openLink(card.url).catch(() => (linkError = 'Could not open this link.'))}
+                  ><ExternalLink size={15} aria-hidden="true" /></button
+                >
+              </div>{:else}<button
+                class="secondary screen-open"
+                onclick={() =>
+                  void openLink(card.url).catch(() => (linkError = 'Could not open this link.'))}
+                ><AppWindow size={16} aria-hidden="true" /><span>{card.title}</span><small
+                  >Open on claude.ai</small
+                ></button
+              >{/if}{/each}
         </div>{/if}
       {#if message.screens?.length}<div class="response-screens" aria-label="Saved screens">
           {#each message.screens as card (card.id)}<button
@@ -728,6 +747,23 @@
   .screen-open span {
     overflow-wrap: anywhere;
     min-width: 0;
+  }
+  /* A claude.ai artifact opens beside the chat, and from its end in the browser. */
+  .published-card {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .published-card > .screen-open {
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  }
+  .published-browser {
+    flex-shrink: 0;
+    margin-left: -1px;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    padding-inline: 10px;
+    color: var(--text-muted);
   }
   .response-artifacts .artifact-card {
     flex: 1 1 auto;

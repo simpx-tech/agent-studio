@@ -148,6 +148,10 @@
     signIn,
     runInConsole,
     openLink,
+    claudePagesInApp,
+    closeClaudePages,
+    windowFocused,
+    backFromClaudePage,
     getInstallation,
     appSession,
     discoverWsl,
@@ -346,7 +350,8 @@
   import FileViewer from '$lib/components/FileViewer.svelte';
   import { provideFileViewer } from '$lib/file-viewer.svelte';
   import { carriedSubagents, findSubagent, replyTools } from '$lib/subagents';
-  import { leaveChats, type ArtifactView, type SubagentView } from '$lib/side-panels';
+  import ClaudePageViewer from '$lib/components/ClaudePageViewer.svelte';
+  import { leaveChats, type ShownArtifact, type SubagentView } from '$lib/side-panels';
   import { codeBlockAction, consoleShells, performCodeBlockAction } from '$lib/code-blocks';
   import { artifactCardAction, recordArtifact, type Artifact } from '$lib/artifacts';
   import ImageAttachments from '$lib/components/ImageAttachments.svelte';
@@ -546,7 +551,7 @@
     drives: desktop(),
     alert: (summary, alert) => {
       // A run on screen needs no alert of its own.
-      if (runShown(summary.id) && document.hasFocus()) return;
+      if (runShown(summary.id) && windowFocused()) return;
       void notifyWorkflow(summary.id, alert);
     },
   });
@@ -739,7 +744,7 @@
   const shownFiles = provideFileViewer();
   // The artifact and the sub-agent each chat shows, by conversation. A side panel stays with its
   // chat while another chat, Connections or Settings is shown (`src/lib/side-panels.ts`).
-  let artifactViews = $state<Record<string, ArtifactView>>({});
+  let artifactViews = $state<Record<string, ShownArtifact>>({});
   let subagentViews = $state<Record<string, SubagentView>>({});
   // The chat on screen, whose panel shows.
   const panelChat = $derived(view === 'chat' ? activeId : null);
@@ -753,6 +758,17 @@
   $effect(() => {
     const opened = artifactView;
     if (!opened) return;
+    // A claude.ai artifact published again loads again, whichever device ran the reply.
+    if ('page' in opened) {
+      for (const message of active?.messages ?? []) {
+        const latest = message.publishedArtifacts?.find((a) => a.id === opened.page.id);
+        if (latest && latest.revision > opened.page.revision) {
+          opened.page = { ...latest };
+          opened.load = crypto.randomUUID();
+        }
+      }
+      return;
+    }
     for (const message of active?.messages ?? []) {
       const latest = opened.artifact.visualization
         ? message.visualizations?.find((v) => `${message.id}:visual:${v.id}` === opened.artifact.id)
@@ -772,6 +788,47 @@
     // One panel at a time sits beside the chat.
     if (mode === 'panel') delete subagentViews[activeId];
   }
+  /**
+   * Opens a claude.ai artifact inside the window, in the claude.ai session of the account whose
+   * reply published it (`src-tauri/src/claude_pages.rs`); elsewhere it opens in the browser.
+   * The artifact a chat already shows stays as the reader left it.
+   */
+  function openPage(
+    chat: string,
+    page: PublishedArtifact,
+    connectionId: string | undefined,
+    focus = true,
+  ) {
+    const account = workspace.fleet.connections.find((c) => c.id === connectionId)?.accountId;
+    if (!account || !claudePagesInApp()) {
+      void openLink(page.url).catch(() => {});
+      return;
+    }
+    const shown = artifactViews[chat];
+    if (shown && 'page' in shown && shown.page.id === page.id) {
+      shown.focus = focus;
+      return;
+    }
+    artifactViews[chat] = { page, account, load: crypto.randomUUID(), mode: 'panel', focus };
+    delete subagentViews[chat];
+  }
+  // The claude.ai sessions of accounts whose artifacts no chat shows close.
+  const pageAccounts = $derived(
+    [
+      ...new Set(
+        Object.values(artifactViews).flatMap((shown) => ('page' in shown ? [shown.account] : [])),
+      ),
+    ]
+      .sort()
+      .join(' '),
+  );
+  let pagesShown = false;
+  $effect(() => {
+    const keep = pageAccounts ? pageAccounts.split(' ') : [];
+    if (keep.length) pagesShown = true;
+    else if (!pagesShown) return;
+    untrack(() => void closeClaudePages(keep).catch(() => {}));
+  });
   function showArtifactAs(chat: string, mode: 'modal' | 'panel') {
     const opened = artifactViews[chat];
     if (!opened) return;
@@ -1996,17 +2053,22 @@
     if (host) refreshScreens([host], true);
   }
   /**
-   * A claude.ai artifact that a reply sent from this window created or opened opens in the
-   * browser, as Claude Code's terminal opens it: once per artifact in this window, while its chat
-   * is on screen in the focused desktop window. Its card opens it any time.
+   * A claude.ai artifact that a reply sent from this window created or opened opens beside its
+   * chat, or in the browser where the window shows none, as Claude Code's terminal opens it: once
+   * per artifact in this window, while its chat is on screen in the focused desktop window. Its
+   * card opens it any time.
    */
-  function openPublished(conversationId: string, artifact: PublishedArtifact) {
+  function openPublished(
+    conversationId: string,
+    artifact: PublishedArtifact,
+    connectionId: string | undefined,
+  ) {
     if (
       !desktop() ||
       activeId !== conversationId ||
       view !== 'chat' ||
       document.visibilityState !== 'visible' ||
-      !document.hasFocus()
+      !windowFocused()
     )
       return;
     const key = 'agent-studio.opened-artifacts';
@@ -2019,7 +2081,8 @@
     const ids = Array.isArray(opened) ? opened.filter((id) => typeof id === 'string') : [];
     if (ids.includes(artifact.id)) return;
     sessionStorage.setItem(key, JSON.stringify([...ids, artifact.id]));
-    void openLink(artifact.url).catch(() => {});
+    // The reader may be typing: the panel leaves focus where it is.
+    openPage(conversationId, artifact, connectionId, false);
   }
   /** What a screen's computer last reported of it, kept in its list. */
   function noteScreen(detail: ScreenDetail) {
@@ -2957,7 +3020,11 @@
         if (view === 'chat') void refreshUsage();
       }, 250);
     };
-    window.addEventListener('focus', onReturn);
+    // Focus coming back from a claude.ai pane over the page never left the window.
+    const onFocus = () => {
+      if (!backFromClaudePage()) onReturn();
+    };
+    window.addEventListener('focus', onFocus);
     window.addEventListener('online', onReturn);
     document.addEventListener('visibilitychange', onReturn);
     // Save typed drafts right away when the window is left, hidden, or closed.
@@ -3337,7 +3404,7 @@
       clearInterval(abandonPoll);
       clearInterval(continuePoll);
       clearTimeout(jobResumeTimer);
-      window.removeEventListener('focus', onReturn);
+      window.removeEventListener('focus', onFocus);
       window.removeEventListener('online', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
       window.removeEventListener('blur', saveDraftsOnLeave);
@@ -6389,7 +6456,11 @@
       const clock = applyRunEvent(m, event) === 'clock';
       if (event.kind === 'screen' && event.screen) screenSaved(event.screen.environmentId);
       if (event.kind === 'publishedartifact' && event.open && event.publishedArtifact)
-        openPublished(conversation.id, event.publishedArtifact);
+        openPublished(
+          conversation.id,
+          event.publishedArtifact,
+          (m.settings ?? conversation.settings).connectionId,
+        );
       localChanges++;
       // Every event goes out with the next sync, so other devices follow the text and
       // tool calls as they stream; saving to disk keeps its own, slower rate. Each changes this
@@ -7890,6 +7961,11 @@
                     openSubagent={(agentId, messageId = m.id) => openSubagent(messageId, agentId)}
                     openedSubagent={subagentShown ? subagentView : undefined}
                     openScreen={(card) => openScreen(card.environmentId, card.id)}
+                    openPage={claudePagesInApp()
+                      ? (card) =>
+                          active &&
+                          openPage(active.id, card, (m.settings ?? active.settings).connectionId)
+                      : undefined}
                   />{/each}
                 {#if jumpShown}<div class="jump-to-end-rail">
                     <button
@@ -8261,13 +8337,21 @@
             label="Resize chat"
             controls="chat-area"
           />{/if}
-        {#if artifactView && panelChat}{@const chat = panelChat}{#key `${chat}:${artifactView.artifact.id}`}<ArtifactViewer
+        {#if artifactView && panelChat}{@const chat = panelChat}{#if 'page' in artifactView}{@const shown = artifactView}{#key `${chat}:${shown.page.id}`}<ClaudePageViewer
+                view={shown}
+                accountName={workspace.fleet.accounts.find((a) => a.id === shown.account)?.name}
+                accountColor={accountColorValue(colorsByAccount.get(shown.account)?.color)}
+                takeFocus={shown.focus}
+                changeMode={(mode) => showArtifactAs(chat, mode)}
+                reload={() => (shown.load = crypto.randomUUID())}
+                close={() => delete artifactViews[chat]}
+              />{/key}{:else}{#key `${chat}:${artifactView.artifact.id}`}<ArtifactViewer
               artifact={artifactView.artifact}
               mode={artifactView.mode}
               takeFocus={artifactView.focus}
               changeMode={(mode) => showArtifactAs(chat, mode)}
               close={() => delete artifactViews[chat]}
-            />{/key}{/if}
+            />{/key}{/if}{/if}
         {#if graphFirst && chatWorkflow}{@const workflowId = chatWorkflow}{#await workflowView() then { default: WorkflowView }}{#key `${workspaceSession}/${workflowId}`}<div
                 class="workflow-main"
               >

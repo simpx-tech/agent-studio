@@ -261,7 +261,8 @@ pre {
       [role='menuitem'],
       .artifact-open,
       .artifact-side,
-      .screen-open
+      .screen-open,
+      .published-browser
     ):active {
     scale: 0.97;
   }

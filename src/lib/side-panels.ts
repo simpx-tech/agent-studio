@@ -1,4 +1,5 @@
 import type { Artifact } from './artifacts';
+import type { PublishedArtifact } from './published-artifacts';
 
 // What each chat shows beside its conversation, by conversation (requested 2026-10-14): an
 // artifact, in the modal or the side panel, and the sub-agent whose conversation the side panel
@@ -13,6 +14,23 @@ export type ArtifactView = {
   focus: boolean;
 };
 
+/**
+ * A claude.ai artifact a chat shows inside the window (requested 2026-10-29), in the claude.ai
+ * session of the account that published it (`src-tauri/src/claude_pages.rs`).
+ */
+export type PageView = {
+  page: PublishedArtifact;
+  /** The Claude account whose session shows it. */
+  account: string;
+  /** Which loading of the artifact it shows: Reload and a newer revision load it again. */
+  load: string;
+  mode: 'modal' | 'panel';
+  focus: boolean;
+};
+
+/** What a chat shows in the modal or beside it: a page of a reply, or a claude.ai artifact. */
+export type ShownArtifact = ArtifactView | PageView;
+
 /** The sub-agent whose conversation a chat's side panel shows, by the reply that started it. */
 export type SubagentView = { messageId: string; agentId: string; focus: boolean };
 
@@ -21,7 +39,7 @@ export type SubagentView = { messageId: string; agentId: string; focus: boolean 
  * its chat, leaves focus where it is.
  */
 export function leaveChats(
-  artifacts: Record<string, ArtifactView>,
+  artifacts: Record<string, ShownArtifact>,
   subagents: Record<string, SubagentView>,
   shown: string | null,
 ) {

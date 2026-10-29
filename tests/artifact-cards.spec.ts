@@ -253,59 +253,139 @@ test('a page shown with show_artifact sits at its marker and the viewer follows 
 });
 
 // An artifact a Claude reply published to claude.ai with Claude Code's own Artifact tool
-// (requested 2026-10-21): its card opens it there, a new artifact opens once in the window that
-// sent the message, as the CLI's terminal opens it, and saved history keeps the card.
-test('a claude.ai artifact shows as a card that opens it there', async ({ page }) => {
-  await mockDesktop(page, 'capabilities');
-  await page.addInitScript(() => {
+// (requested 2026-10-21): its card opens it, a new artifact opens once in the window that sent
+// the message, as the CLI's terminal opens it, and saved history keeps the card. On Windows it
+// opens beside the chat (requested 2026-10-29), in a WebView2 of its own signed in to the
+// claude.ai session of the reply's account, which the page places over the panel's slot and
+// hides while anything covers it (src-tauri/src/claude_pages.rs).
+const pageUrl = 'https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax';
+const published = (revision: number, open: boolean) => ({
+  kind: 'publishedartifact',
+  publishedArtifact: {
+    id: '61f14ff2-c402-429d-ad1b-42de9c796ca9',
+    revision,
+    url: pageUrl,
+    title: 'Quarterly report',
+  },
+  ...(open ? { open } : {}),
+});
+/** Records the links the browser opens and what the page asks of the claude.ai panes. */
+async function recordPages(page: Page, platform?: string) {
+  await page.addInitScript((platform) => {
     const w = window as any,
       original = w.__TAURI_INTERNALS__.invoke;
     w.openedPages = [];
-    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+    w.pageRequests = [];
+    w.pageCloses = [];
+    w.__TAURI_INTERNALS__.invoke = async (command: string, args: any, options: any) => {
       if (command === 'plugin:opener|open_url') {
         w.openedPages.push(args.url);
         return;
       }
-      return original(command, args);
+      if (command === 'claude_page') {
+        w.pageRequests.push(args.request);
+        return;
+      }
+      if (command === 'close_claude_pages') {
+        w.pageCloses.push(args.keep);
+        return;
+      }
+      const answer = await original(command, args, options);
+      return platform && command === 'get_installation' ? { ...answer, platform } : answer;
     };
-  });
+  }, platform);
+}
+const opened = (page: Page) => page.evaluate(() => (window as any).openedPages as string[]);
+const lastPageRequest = (page: Page) =>
+  page.evaluate(() => (window as any).pageRequests.at(-1) ?? null);
+
+test('a claude.ai artifact opens beside the chat in the claude.ai session of its account', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await recordPages(page);
   await page.goto('/');
   await chooseTestFolder(page);
   await ask(page, 'Publish the quarterly page on claude.ai');
   const reply = page.locator('.message').last();
-  const url = 'https://claude.ai/artifact/D6UUK2MDNtEQ65Mn61b3ax';
-  const published = (revision: number, open: boolean) => ({
-    kind: 'publishedartifact',
-    publishedArtifact: {
-      id: '61f14ff2-c402-429d-ad1b-42de9c796ca9',
-      revision,
-      url,
-      title: 'Quarterly report',
-    },
-    ...(open ? { open } : {}),
+  await emit(page, published(1, true));
+  const card = reply.getByRole('button', { name: 'Quarterly report claude.ai', exact: true });
+  await expect(card).toBeVisible();
+  // A new artifact opens beside the chat, and the pane covers the panel's slot.
+  const viewer = page.locator('#claude-page-viewer');
+  await expect(viewer.getByRole('heading', { name: 'Quarterly report' })).toBeVisible();
+  await expect.poll(async () => (await lastPageRequest(page))?.bounds ?? null).not.toBeNull();
+  const shown = await lastPageRequest(page);
+  expect(shown.url).toBe(pageUrl);
+  expect(shown.account).toMatch(/^[0-9a-f-]{36}$/);
+  const slot = (await viewer.locator('.page-slot').boundingBox())!;
+  for (const side of ['x', 'y', 'width', 'height'] as const)
+    expect(shown.bounds[side]).toBeCloseTo(slot[side], 0);
+  expect(await opened(page)).toEqual([]);
+  // Anything of the page over the slot hides the pane until it goes.
+  await page.evaluate(() => {
+    const cover = document.createElement('div');
+    cover.id = 'test-cover';
+    cover.style.cssText = 'position: fixed; inset: 0; z-index: 100';
+    document.body.append(cover);
+    window.dispatchEvent(new Event('pointerdown'));
   });
-  const opened = () => page.evaluate(() => (window as any).openedPages as string[]);
+  await expect.poll(async () => (await lastPageRequest(page)).bounds).toBeNull();
+  await page.evaluate(() => {
+    document.getElementById('test-cover')!.remove();
+    window.dispatchEvent(new Event('pointerdown'));
+  });
+  await expect.poll(async () => (await lastPageRequest(page)).bounds).not.toBeNull();
+  // Republishing it loads it again; opening it again opens nothing more by itself.
+  const firstLoad = shown.load;
+  await emit(page, published(2, false));
+  await expect.poll(async () => (await lastPageRequest(page)).load).not.toBe(firstLoad);
+  await emit(page, published(3, true));
+  await emit(page, { kind: 'text', text: 'Published it.' });
+  await finish(page, 'complete');
+  await expect(card).toHaveCount(1);
+  const republished = (await lastPageRequest(page)).load;
+  await viewer.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect.poll(async () => (await lastPageRequest(page)).load).not.toBe(republished);
+  // The browser stays one click away, from the panel and from the card.
+  await viewer.getByRole('button', { name: 'Open in browser', exact: true }).click();
+  await reply.getByRole('button', { name: 'Open Quarterly report in browser', exact: true }).click();
+  await expect.poll(() => opened(page)).toEqual([pageUrl, pageUrl]);
+  // Closing it hides the pane and closes the account's session.
+  await viewer.getByRole('button', { name: 'Close artifact', exact: true }).click();
+  await expect(viewer).toHaveCount(0);
+  await expect.poll(async () => (await lastPageRequest(page)).bounds).toBeNull();
+  await expect.poll(() => page.evaluate(() => (window as any).pageCloses.at(-1))).toEqual([]);
+  await card.click();
+  await expect(viewer.getByRole('heading', { name: 'Quarterly report' })).toBeVisible();
+  await expect.poll(async () => (await lastPageRequest(page)).bounds).not.toBeNull();
+  // Saved history keeps the card.
+  await page.reload();
+  await page.getByRole('tab', { name: /History/ }).click();
+  await page.getByRole('button', { name: /Publish the quarterly page/ }).click();
+  await expect(
+    page.getByRole('button', { name: 'Quarterly report claude.ai', exact: true }),
+  ).toBeVisible();
+});
+
+test('a claude.ai artifact opens in the browser where the window shows none', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await recordPages(page, 'linux');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await ask(page, 'Publish the quarterly page on claude.ai');
+  const reply = page.locator('.message').last();
   await emit(page, published(1, true));
   const card = reply.getByRole('button', {
     name: 'Quarterly report Open on claude.ai',
     exact: true,
   });
   await expect(card).toBeVisible();
-  await expect.poll(opened).toEqual([url]);
-  // Republishing it updates the card, and opening it again opens nothing more by itself.
-  await emit(page, published(2, false));
-  await emit(page, published(3, true));
+  await expect.poll(() => opened(page)).toEqual([pageUrl]);
   await emit(page, { kind: 'text', text: 'Published it.' });
   await finish(page, 'complete');
-  await expect(card).toHaveCount(1);
-  expect(await opened()).toEqual([url]);
   await card.click();
-  await expect.poll(opened).toEqual([url, url]);
-  // Saved history keeps the card.
-  await page.reload();
-  await page.getByRole('tab', { name: /History/ }).click();
-  await page.getByRole('button', { name: /Publish the quarterly page/ }).click();
-  await expect(
-    page.getByRole('button', { name: 'Quarterly report Open on claude.ai', exact: true }),
-  ).toBeVisible();
+  await expect.poll(() => opened(page)).toEqual([pageUrl, pageUrl]);
+  await expect(page.locator('#claude-page-viewer')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).pageRequests)).toEqual([]);
 });

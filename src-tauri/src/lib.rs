@@ -3,6 +3,7 @@ mod background_work;
 mod badges;
 mod calls;
 mod chat_images;
+mod claude_pages;
 mod cli_queries;
 mod cli_updates;
 mod console;
@@ -2054,6 +2055,8 @@ pub fn run() {
             {
                 // Replies run on through a reload, and the new document follows them again.
                 webview.state::<runner::Runs>().reloaded();
+                // The claude.ai panes belonged to the old document's panels.
+                claude_pages::page_loaded(webview.app_handle());
                 for token in plugins::active_tokens() {
                     token.cancel();
                 }
@@ -2064,6 +2067,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Moved(_) = event {
+                claude_pages::window_moved();
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle().clone();
                 // Restart to update is already stopping work; its installer ends the app.
@@ -2114,6 +2120,8 @@ pub fn run() {
             cli_updates::check_cli_updates,
             cli_updates::install_cli,
             artifacts::save_artifact,
+            claude_pages::claude_page,
+            claude_pages::close_claude_pages,
             site_icons::site_icon,
             app_session,
             get_installation,

@@ -43,6 +43,7 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
  "winreg",
+ "wry",
  "zip 9.0.5",
 ]
 
