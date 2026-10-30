@@ -5,6 +5,26 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.1.0 - 2026-10-30
+
+### Added
+
+- Open claude.ai artifacts inside the window on Windows, beside the chat or in the viewer, as the
+  Claude app shows them, each Claude account in a claude.ai session of its own that you sign in
+  to once
+- Let screens run what they ask for at once: no approval to give, any MCP tool of the account's
+  servers whether the screen declares it or not, and commands the page writes itself
+- Keep a screen's context: a screen you opened stays loaded while you look at another chat,
+  screen or page, and every action it runs is a job that goes on, shows its output as it arrives
+  and keeps it, so a page that opens again after a reload, a restart or on your phone finds it.
+  The screen's Jobs button shows each job's output, with Stop
+- Reach WSL from a screen of a Windows chat, and Windows from one of a WSL chat: actions,
+  commands and MCP calls can name where they run, so a screen calls the MCP servers signed in
+  inside WSL, such as Linear, trying the accounts there until one has the server. Chats can list
+  and try those servers before they build a page
+- Give screens the clipboard, links that open in the browser, a model's answers as the screen's
+  account, their saved values as they open, and chats they can send
+
 ## 1.0.3 - 2026-10-26
 
 ### Fixed
