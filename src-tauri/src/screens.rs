@@ -1,11 +1,13 @@
 //! Screens (docs/SCREENS.md): lasting pages a chat saves in Agent Studio, each with its own HTML
-//! interface and the actions it may run on the computer that keeps it.
+//! interface, the actions it runs and the MCP tools it calls on the computer that keeps it.
 //!
 //! A screen lives on that computer alone, under app data `screens/`, never in the workspace,
-//! exports or relay sync. Windows and other devices read it and run its actions through
-//! transport (`manage_screen`, the `screens` relay job), naming the screen by its id alone. The
-//! host runs only an action the screen declares, once the user allowed exactly the actions it
-//! declares now, in the folder recorded when a chat saved it, with each parameter's value in an
+//! exports or relay sync. Windows and other devices read it, run its actions and commands and
+//! call its tools through transport (`manage_screen`, the `screens` relay job), naming the screen
+//! by its id alone. Nothing waits for an approval (requested 2026-10-30: "forget permissions, it
+//! can do anything"): a page runs what it asks for, each run a job that goes on and keeps its
+//! output when the page closes (`jobs.rs`), in the folder recorded when a chat saved the screen or
+//! in another place of the same computer it names (`places.rs`), with each value in an
 //! environment variable of its own, never in command text.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -15,7 +17,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+pub mod jobs;
 pub mod mcp;
+pub mod places;
 mod run;
 pub mod tools;
 
@@ -57,7 +61,7 @@ pub struct Param {
     pub optional: bool,
 }
 
-/// A command a screen may run, as the user allows it.
+/// A command a screen runs by name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Action {
@@ -71,10 +75,14 @@ pub struct Action {
     /// Seconds the script may run before it is stopped; none lets it run until it ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Where it runs, when not where the screen does: `windows`, `wsl` or a distribution.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
-/// An MCP tool a screen's page may call, as the user allows it: a tool of one of the servers
-/// its account's CLI has, named as that CLI names them (`mcp__<server>__<tool>`).
+/// An MCP tool a screen's page calls: a tool of one of the servers an account's CLI has where it
+/// is called, named as that CLI names them (`mcp__<server>__<tool>`). A page may call tools it
+/// does not declare too; a declaration names what it does, and where and as whom it is called.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpTool {
@@ -82,10 +90,25 @@ pub struct McpTool {
     pub tool: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// Where it is called, when not where the screen runs: `windows`, `wsl` or a distribution.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+    /// The account to call it as first, by the name Connections gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
-/// The account whose CLI calls a screen's MCP tools: the one the chat that created the screen
-/// replied with, on the computer that keeps it. No connection is this computer's own CLI login.
+/// What a page asks a model (`studio.ask`).
+#[derive(Clone, Debug, Default)]
+pub struct Question {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub system: Option<String>,
+}
+
+/// The account whose CLI calls a screen's MCP tools first, and asks its model questions: the
+/// one the chat that created the screen replied with, on the computer that keeps it. No
+/// connection is this computer's own CLI login.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -119,13 +142,8 @@ pub struct Card {
     pub environment_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Approval {
-    pub digest: String,
-    pub at: String,
-}
-
+/// A screen as its computer keeps it. Files written before approvals went keep an `approval`,
+/// which nothing reads now and the next save drops.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Screen {
@@ -149,46 +167,25 @@ pub struct Screen {
     pub run_id: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval: Option<Approval>,
 }
 
 impl Screen {
-    /// What the user allows: the actions and where they run, and the MCP tools with the account
-    /// that calls them. The HTML can only call them. A screen without MCP tools keeps the
-    /// digest it had before them, and with it the approval the user gave.
+    /// A fingerprint of what the screen runs and where. Windows of releases that asked for an
+    /// approval send it back to allow the screen, which they believe it needs.
     pub fn digest(&self) -> String {
-        let canonical = if self.mcp_tools.is_empty() {
-            json!({ "actions": self.actions, "site": self.site })
-        } else {
-            json!({
-                "actions": self.actions,
-                "site": self.site,
-                "mcpTools": self.mcp_tools,
-                "account": self.account,
-            })
-        };
+        let canonical = json!({
+            "actions": self.actions,
+            "site": self.site,
+            "mcpTools": self.mcp_tools,
+            "account": self.account,
+        });
         hex(&Sha256::digest(canonical.to_string().as_bytes()))
     }
-    /// Whether its actions and tools may run: none to allow, or the user allowed exactly these.
-    pub fn allowed(&self) -> bool {
-        (self.actions.is_empty() && self.mcp_tools.is_empty())
-            || self
-                .approval
-                .as_ref()
-                .is_some_and(|approval| approval.digest == self.digest())
-    }
-    /// The declared tool a page calls, once the user allowed the screen's actions and tools.
-    pub fn tool(&self, server: &str, tool: &str) -> Result<&McpTool, String> {
-        let declared = self
-            .mcp_tools
+    /// The declaration of a tool a page calls, if the screen declares it.
+    pub fn tool(&self, server: &str, tool: &str) -> Option<&McpTool> {
+        self.mcp_tools
             .iter()
             .find(|known| known.server == server && known.tool == tool)
-            .ok_or_else(|| format!("This screen declares no MCP tool {tool} of {server}."))?;
-        if !self.allowed() {
-            return Err(NOT_ALLOWED.into());
-        }
-        Ok(declared)
     }
 }
 
@@ -223,11 +220,14 @@ pub struct Summary {
     pub commands: usize,
     /// How many MCP tools it declares.
     pub tools: usize,
+    /// Always true: windows of releases that asked for an approval read it.
     pub allowed: bool,
+    /// How many of its jobs run now.
+    pub running: usize,
 }
 
-impl From<&Screen> for Summary {
-    fn from(screen: &Screen) -> Self {
+impl Summary {
+    fn of(screen: &Screen, running: usize) -> Self {
         Self {
             id: screen.id.clone(),
             revision: screen.revision,
@@ -241,12 +241,13 @@ impl From<&Screen> for Summary {
             updated_at: screen.updated_at.clone(),
             commands: screen.actions.len(),
             tools: screen.mcp_tools.len(),
-            allowed: screen.allowed(),
+            allowed: true,
+            running,
         }
     }
 }
 
-/// A screen as its window renders it and the user reviews its actions.
+/// A screen as its window renders it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
@@ -255,17 +256,17 @@ pub struct Detail {
     pub html: String,
     pub actions: Vec<Action>,
     pub mcp_tools: Vec<McpTool>,
-    /// The account that calls its MCP tools, which the window names by its connection.
+    /// The account that calls its MCP tools first, which the window names by its connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<Account>,
-    /// What allowing these actions names, so a changed screen is never allowed unseen.
+    /// For windows of releases that asked for an approval.
     pub digest: String,
 }
 
-impl From<&Screen> for Detail {
-    fn from(screen: &Screen) -> Self {
+impl Detail {
+    fn of(screen: &Screen, running: usize) -> Self {
         Self {
-            summary: screen.into(),
+            summary: Summary::of(screen, running),
             html: screen.html.clone(),
             actions: screen.actions.clone(),
             mcp_tools: screen.mcp_tools.clone(),
@@ -286,8 +287,8 @@ pub struct Definition {
     pub mcp_tools: Vec<McpTool>,
 }
 
-/// Text the user reads when allowing a screen: on one line, and without characters that hide
-/// or reorder what it says.
+/// Text lists and pages show on one line: line breaks become spaces, and characters that hide
+/// or reorder what it says are left out.
 fn line(value: Option<&Value>, field: &str, required: bool) -> Result<String, String> {
     let text = match value {
         None | Some(Value::Null) if !required => return Ok(String::new()),
@@ -296,6 +297,7 @@ fn line(value: Option<&Value>, field: &str, required: bool) -> Result<String, St
     };
     let text: String = text
         .chars()
+        .filter(|c| !crate::console::hidden(*c) || matches!(c, '\n' | '\r' | '\t'))
         .map(|c| {
             if matches!(c, '\n' | '\r' | '\t') {
                 ' '
@@ -305,12 +307,6 @@ fn line(value: Option<&Value>, field: &str, required: bool) -> Result<String, St
         })
         .collect();
     let text = text.trim();
-    if let Some(c) = text.chars().find(|c| crate::console::hidden(*c)) {
-        return Err(format!(
-            "{field} contains a hidden character (U+{:04X}).",
-            c as u32
-        ));
-    }
     if required && text.is_empty() {
         return Err(format!("{field} must not be empty."));
     }
@@ -343,8 +339,7 @@ fn unexpected(object: &Map<String, Value>, accepted: &[&str]) -> Result<(), Stri
     }
 }
 
-/// A script as its shell will read it: plain line ends, and nothing in it the user could not
-/// see when allowing it.
+/// A script as its shell will read it: plain line ends.
 fn script(value: Option<&Value>) -> Result<String, String> {
     let text = value
         .and_then(Value::as_str)
@@ -354,13 +349,19 @@ fn script(value: Option<&Value>) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("script must not be empty.".into());
     }
-    if let Some(c) = text.chars().find(|c| crate::console::hidden(*c)) {
-        return Err(format!(
-            "script contains a hidden character (U+{:04X}), which the user could not see when allowing it.",
-            c as u32
-        ));
+    if text.contains('\0') {
+        return Err("script must not contain a NUL character.".into());
     }
     Ok(text.into())
+}
+
+/// A place a declaration or a page names, checked.
+fn named_place(value: Option<&Value>) -> Result<Option<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => places::checked(name).map(Some),
+        Some(_) => Err("where must be windows, wsl or the name of a WSL distribution.".into()),
+    }
 }
 
 fn whole(number: f64) -> bool {
@@ -397,23 +398,13 @@ fn param(spec: &Value) -> Result<Param, String> {
         Some(Value::Array(values)) if !values.is_empty() => {
             for value in values {
                 let fits = match kind {
-                    Kind::String => value.as_str().is_some_and(|s| {
-                        !s.chars()
-                            .any(|c| c.is_control() || crate::console::hidden(c))
-                    }),
+                    Kind::String => value.is_string(),
                     Kind::Number => value.as_f64().is_some_and(f64::is_finite),
                     Kind::Integer => value.as_f64().is_some_and(whole),
                     Kind::Boolean => value.is_boolean(),
                 };
                 if !fits {
-                    return Err(format!(
-                        "enum values must each be a {} of this parameter's type.",
-                        if kind == Kind::String {
-                            "line"
-                        } else {
-                            "value"
-                        }
-                    ));
+                    return Err("enum values must each be a value of this parameter's type.".into());
                 }
             }
             Some(values.clone())
@@ -423,16 +414,6 @@ fn param(spec: &Value) -> Result<Param, String> {
     let pattern = match object.get("pattern") {
         None | Some(Value::Null) => None,
         Some(Value::String(pattern)) if kind == Kind::String => {
-            // The user reads it when allowing the action; escape such characters instead.
-            if let Some(c) = pattern
-                .chars()
-                .find(|c| c.is_control() || crate::console::hidden(*c))
-            {
-                return Err(format!(
-                    "pattern contains a hidden character (U+{:04X}); write it as an escape such as \\u{{{:04X}}}.",
-                    c as u32, c as u32
-                ));
-            }
             compile(pattern)?;
             Some(pattern.clone())
         }
@@ -499,6 +480,7 @@ fn action(item: &Value) -> Result<Action, String> {
             "script",
             "params",
             "timeout",
+            "where",
         ],
     )?;
     let name = object
@@ -547,6 +529,7 @@ fn action(item: &Value) -> Result<Action, String> {
                 || named("timeout must be a whole number of seconds, at least 1.".into()),
             )?),
         };
+    let place = named_place(object.get("where")).map_err(named)?;
     Ok(Action {
         name,
         description,
@@ -554,12 +537,13 @@ fn action(item: &Value) -> Result<Action, String> {
         script,
         params,
         timeout,
+        place,
     })
 }
 
-/// A server's or a tool's name, as the user reads it when allowing the tool and the CLI finds
-/// it: one line as written, without control or hidden characters.
-fn tool_name(value: Option<&Value>, field: &str) -> Result<String, String> {
+/// A server's or a tool's name as the CLI finds it: one line as written, without control
+/// characters.
+pub(crate) fn tool_name(value: Option<&Value>, field: &str) -> Result<String, String> {
     let text = value
         .and_then(Value::as_str)
         .ok_or(format!("{field} must be text."))?;
@@ -569,12 +553,9 @@ fn tool_name(value: Option<&Value>, field: &str) -> Result<String, String> {
     if text.trim() != text {
         return Err(format!("{field} must not start or end with spaces."));
     }
-    if let Some(c) = text
-        .chars()
-        .find(|c| c.is_control() || crate::console::hidden(*c))
-    {
+    if let Some(c) = text.chars().find(|c| c.is_control()) {
         return Err(format!(
-            "{field} contains a hidden character (U+{:04X}).",
+            "{field} contains a control character (U+{:04X}).",
             c as u32
         ));
     }
@@ -585,8 +566,11 @@ fn mcp_tool(item: &Value) -> Result<McpTool, String> {
     let object = item.as_object().ok_or(
         "each MCP tool must be an object such as {\"server\":\"linear\",\"tool\":\"list_issues\"}.",
     )?;
-    unexpected(object, &["server", "tool", "description"])
-        .map_err(|error| format!("MCP tool: {error}"))?;
+    unexpected(
+        object,
+        &["server", "tool", "description", "where", "account"],
+    )
+    .map_err(|error| format!("MCP tool: {error}"))?;
     let server = tool_name(object.get("server"), "server")?;
     let tool = tool_name(object.get("tool"), "tool")?;
     let named = |error: String| format!("MCP tool {tool} of {server}: {error}");
@@ -597,10 +581,15 @@ fn mcp_tool(item: &Value) -> Result<McpTool, String> {
         ));
     }
     let description = line(object.get("description"), "description", false).map_err(named)?;
+    let place = named_place(object.get("where")).map_err(named)?;
+    let account = Some(line(object.get("account"), "account", false).map_err(named)?)
+        .filter(|account| !account.is_empty());
     Ok(McpTool {
         server,
         tool,
         description,
+        place,
+        account,
     })
 }
 
@@ -690,19 +679,44 @@ pub fn variable(name: &str) -> String {
     format!("PARAM_{}", name.to_ascii_uppercase())
 }
 
-/// The values a screen passes, checked against what its action declares, as the environment
-/// variables its script reads.
+/// A value a script reads as it is passed: text as it is, anything else as its JSON.
+fn plain(name: &str, value: &Value) -> Result<(String, String), String> {
+    if !identifier(name) {
+        return Err(format!(
+            "The parameter {name} must be named with lowercase letters, digits or _, starting with a letter."
+        ));
+    }
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if text.contains('\0') {
+        return Err(format!("{name} must not contain a NUL character."));
+    }
+    Ok((variable(name), text))
+}
+
+/// The values a page passes a command of its own, as the environment variables it reads.
+pub fn passed(values: &Map<String, Value>) -> Result<Vec<(String, String)>, String> {
+    values
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(name, value)| plain(name, value))
+        .collect()
+}
+
+/// The values a page passes an action, checked against what the action declares, as the
+/// environment variables its script reads. A value it does not declare passes as it is.
 pub fn arguments(
     action: &Action,
     values: &Map<String, Value>,
 ) -> Result<Vec<(String, String)>, String> {
-    if let Some(name) = values
-        .keys()
-        .find(|name| !action.params.contains_key(*name))
-    {
-        return Err(format!("{} takes no parameter named {name}.", action.name));
-    }
     let mut variables = Vec::new();
+    for (name, value) in values {
+        if !action.params.contains_key(name) && !value.is_null() {
+            variables.push(plain(name, value)?);
+        }
+    }
     for (name, param) in &action.params {
         let value = match values.get(name) {
             None | Some(Value::Null) if param.optional => continue,
@@ -872,9 +886,8 @@ fn read_data(root: &Path, id: &str) -> Result<Map<String, Value>, String> {
 }
 
 /// Saves what a chat submitted, as a new screen or a new revision of one this computer keeps.
-/// An update keeps where the screen runs and the account that calls its MCP tools, unless
-/// `usable` finds that account gone, and keeps the user's approval while the actions, the tools
-/// and that account stay the same. `account` is the saving chat's.
+/// An update keeps where the screen runs and the account that calls its MCP tools first, unless
+/// `usable` finds that account gone. `account` is the saving chat's.
 pub(crate) fn store(
     root: &Path,
     definition: Definition,
@@ -896,7 +909,7 @@ pub(crate) fn store(
             })?;
             if previous.site.environment_id != site.environment_id {
                 return Err(format!(
-                    "Screen {id} runs its actions in another environment of this computer ({}). Update it from a chat there.",
+                    "Screen {id} was made in another environment of this computer ({}). Update it from a chat there.",
                     previous.site.folder
                 ));
             }
@@ -919,7 +932,6 @@ pub(crate) fn store(
                     run_id: run_id.into(),
                     created_at: previous.created_at.clone(),
                     updated_at: time,
-                    approval: previous.approval.clone(),
                 },
                 false,
             )
@@ -939,31 +951,38 @@ pub(crate) fn store(
                 run_id: run_id.into(),
                 created_at: time.clone(),
                 updated_at: time,
-                approval: None,
             },
             true,
         ),
     };
-    let mut screen = screen;
-    // An approval of other actions never carries over: it stays only while it names these.
-    if !screen
-        .approval
-        .as_ref()
-        .is_some_and(|approval| approval.digest == screen.digest())
-    {
-        screen.approval = None;
-    }
     write(root, &screen)?;
     Ok((screen, created))
 }
 
-/// This computer's screens and the actions they run, one request at a time for each change.
-/// Actions and MCP calls run side by side, as many at once as they are asked for.
+/// This computer's screens, the jobs they run and the CLIs that answer their MCP calls. Changes
+/// to a screen's files go one at a time; jobs and calls run side by side, as many at once as
+/// they are asked for.
 #[derive(Default)]
 pub struct Screens {
     changes: tokio::sync::Mutex<()>,
-    /// The CLIs that answer the screens' MCP calls.
+    /// The CLIs that answer the screens' MCP calls, and the chats' `call_mcp_tool`.
     pub calls: mcp::Calls,
+    pub jobs: jobs::Jobs,
+    /// This computer and the distributions it manages, as places resolve against them: read
+    /// once, and again when a place does not resolve.
+    computer: std::sync::Mutex<Option<places::Computer>>,
+}
+
+/// A command a page passes to run as it is (`studio.exec`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Command {
+    pub shell: Shell,
+    pub script: String,
+    #[serde(default, rename = "where")]
+    pub place: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// What a window or another device asks of this computer's screens.
@@ -974,23 +993,83 @@ pub enum Request {
     Read {
         id: String,
     },
+    /// Runs an action and answers once it ended, as workflows and windows of earlier releases
+    /// ask.
     Run {
         id: String,
         action: String,
         #[serde(default)]
         params: Map<String, Value>,
     },
-    /// Calls one of the MCP tools the screen declares, with the arguments its page passes.
+    /// Starts one of the screen's actions, or a command the page passes, as a job, and answers
+    /// with it at once. A kept job stays until a page forgets it.
+    Start {
+        id: String,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        command: Option<Command>,
+        #[serde(default)]
+        params: Map<String, Value>,
+        #[serde(default)]
+        keep: bool,
+    },
+    Jobs {
+        id: String,
+    },
+    /// A job's output from a byte of its log, waiting for some when asked to.
+    Output {
+        id: String,
+        job: String,
+        #[serde(default)]
+        after: u64,
+        #[serde(default)]
+        wait: bool,
+        #[serde(default)]
+        peek: bool,
+    },
+    Stop {
+        id: String,
+        job: String,
+    },
+    Forget {
+        id: String,
+        job: String,
+    },
+    /// Calls an MCP tool where the screen runs or the place named, with the arguments its page
+    /// passes.
     Mcp {
         id: String,
         server: String,
         tool: String,
         #[serde(default)]
         arguments: Map<String, Value>,
+        #[serde(default, rename = "where")]
+        place: Option<String>,
+        #[serde(default)]
+        account: Option<String>,
     },
+    /// The MCP servers an account has where the screen runs or the place named.
+    Tools {
+        id: String,
+        #[serde(default, rename = "where")]
+        place: Option<String>,
+        #[serde(default)]
+        account: Option<String>,
+    },
+    /// A model's answer for the page, from the screen's account.
+    Ask {
+        id: String,
+        prompt: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        system: Option<String>,
+    },
+    /// Windows of earlier releases allow and revoke screens, naming a digest; both answer with
+    /// the screen.
     Approve {
         id: String,
-        digest: String,
     },
     Revoke {
         id: String,
@@ -1020,8 +1099,158 @@ fn encode<T: Serialize>(value: &T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|_| "Cannot answer this screen request".to_string())
 }
 
+/// What lists name a command by: its first line.
+fn label(script: &str) -> String {
+    let first = script
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("command");
+    if first.chars().count() > 120 {
+        format!("{}…", first.chars().take(120).collect::<String>())
+    } else {
+        first.into()
+    }
+}
+
+/// The accounts that may call MCP tools in `site`, in the order they are tried. Without a saved
+/// workspace to read accounts from, the screen's own account answers where it runs.
+pub(crate) async fn candidates(
+    data: PathBuf,
+    own: Option<Account>,
+    site: Site,
+    own_place: bool,
+    named: Option<String>,
+) -> Result<Vec<places::Candidate>, String> {
+    blocking(move || {
+        let fleet = crate::saved::fleet(&data, "", "").ok();
+        let local = crate::profiles::installation_in(&data).map(|local| local.id);
+        match (fleet, local) {
+            (Some(fleet), Ok(local)) => Ok(places::candidates(
+                &fleet,
+                &local,
+                &site,
+                own.as_ref(),
+                own_place,
+                named.as_deref(),
+            )),
+            _ => Ok(own
+                .filter(|_| own_place)
+                .map(|account| places::Candidate {
+                    account,
+                    name: "the screen's account".into(),
+                })
+                .into_iter()
+                .collect()),
+        }
+    })
+    .await
+}
+
 impl Screens {
-    /// Answers one request. `launch` starts the CLI that answers a screen's MCP calls.
+    async fn screen(&self, root: &Path, id: &str) -> Result<Screen, String> {
+        let (root, id) = (root.to_path_buf(), id.to_string());
+        blocking(move || read(&root, &id)).await
+    }
+    /// This computer and its distributions, read from `data` once, or again when `again`.
+    async fn computer(&self, data: &Path, again: bool) -> places::Computer {
+        if !again {
+            if let Some(computer) = lock(&self.computer).clone() {
+                return computer;
+            }
+        }
+        let data = data.to_path_buf();
+        let computer = blocking(move || {
+            let local = crate::profiles::installation_in(&data)?.id;
+            let fleet = crate::saved::fleet(&data, "", "").unwrap_or(Value::Null);
+            Ok(places::Computer::from_fleet(&local, &fleet))
+        })
+        .await
+        .unwrap_or_default();
+        *lock(&self.computer) = Some(computer.clone());
+        computer
+    }
+    /// Where a screen's command runs or tool is called: the screen's own place, or the one named.
+    pub(crate) async fn place(
+        &self,
+        data: &Path,
+        site: &Site,
+        place: Option<&str>,
+    ) -> Result<Site, String> {
+        if place.is_none() {
+            return Ok(site.clone());
+        }
+        let computer = self.computer(data, false).await;
+        match places::resolve(site, place, &computer) {
+            Ok(site) => Ok(site),
+            // A distribution added since this computer was read.
+            Err(_) => places::resolve(site, place, &self.computer(data, true).await),
+        }
+    }
+    /// One of the screen's actions as a job runs it, with the values the page passes.
+    async fn action(
+        &self,
+        data: &Path,
+        screen: &Screen,
+        name: &str,
+        params: Map<String, Value>,
+        keep: bool,
+    ) -> Result<jobs::Spec, String> {
+        let declared = screen
+            .actions
+            .iter()
+            .find(|known| known.name == name)
+            .ok_or_else(|| format!("This screen has no action named {name}."))?;
+        let variables = arguments(declared, &params)?;
+        let site = self
+            .place(data, &screen.site, declared.place.as_deref())
+            .await?;
+        Ok(jobs::Spec {
+            action: Some(name.into()),
+            label: name.into(),
+            params,
+            place: declared.place.clone(),
+            site,
+            name: name.into(),
+            shell: declared.shell,
+            script: declared.script.clone(),
+            timeout: declared.timeout,
+            variables,
+            keep,
+        })
+    }
+    /// A command a page passes as a job runs it.
+    async fn command(
+        &self,
+        data: &Path,
+        screen: &Screen,
+        command: Command,
+        params: Map<String, Value>,
+        keep: bool,
+    ) -> Result<jobs::Spec, String> {
+        let text = script(Some(&Value::String(command.script)))?;
+        if command.timeout == Some(0) {
+            return Err("timeout must be a whole number of seconds, at least 1.".into());
+        }
+        let place = command.place.as_deref().map(places::checked).transpose()?;
+        let site = self.place(data, &screen.site, place.as_deref()).await?;
+        Ok(jobs::Spec {
+            action: None,
+            label: label(&text),
+            variables: passed(&params)?,
+            params,
+            place,
+            site,
+            name: "command".into(),
+            shell: command.shell,
+            script: text,
+            timeout: command.timeout,
+            keep,
+        })
+    }
+
+    /// Answers one request. `launch` starts the CLIs that answer a screen's MCP calls and asks
+    /// models for its page.
     pub async fn handle(
         &self,
         root: PathBuf,
@@ -1029,77 +1258,149 @@ impl Screens {
         launch: &dyn mcp::Launch,
         request: Request,
     ) -> Result<Value, String> {
+        let data = root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.clone());
         match request {
             Request::List => {
                 let screens = blocking(move || Ok(all(&root))).await?;
-                let summaries: Vec<Summary> = screens.iter().map(Summary::from).collect();
+                let summaries: Vec<Summary> = screens
+                    .iter()
+                    .map(|screen| Summary::of(screen, self.jobs.running_for(&screen.id)))
+                    .collect();
                 Ok(json!({ "screens": summaries }))
             }
-            Request::Read { id } => {
-                let screen = blocking(move || read(&root, &id)).await?;
-                encode(&Detail::from(&screen))
+            Request::Read { id } | Request::Approve { id } | Request::Revoke { id } => {
+                let screen = self.screen(&root, &id).await?;
+                encode(&Detail::of(&screen, self.jobs.running_for(&screen.id)))
             }
             Request::Run { id, action, params } => {
-                let read_root = root.clone();
-                let screen = blocking(move || read(&read_root, &id)).await?;
-                let declared = screen
-                    .actions
-                    .iter()
-                    .find(|known| known.name == action)
-                    .ok_or_else(|| format!("This screen has no action named {action}."))?;
-                if !screen.allowed() {
-                    return Err(NOT_ALLOWED.into());
-                }
-                let variables = arguments(declared, &params)?;
-                let outcome =
-                    run::execute(&root, &namespace, &screen.site, declared, variables).await?;
-                encode(&outcome)
+                let screen = self.screen(&root, &id).await?;
+                let spec = self.action(&data, &screen, &action, params, false).await?;
+                let job = self.jobs.start(&root, &namespace, &screen.id, spec).await?;
+                self.jobs.outcome(&root, &screen.id, &job.id).await
+            }
+            Request::Start {
+                id,
+                action,
+                command,
+                params,
+                keep,
+            } => {
+                let screen = self.screen(&root, &id).await?;
+                let spec = match (action, command) {
+                    (Some(action), None) => {
+                        self.action(&data, &screen, &action, params, keep).await?
+                    }
+                    (None, Some(command)) => {
+                        self.command(&data, &screen, command, params, keep).await?
+                    }
+                    _ => {
+                        return Err(
+                            "Name one of the screen's actions, or pass a command to run.".into(),
+                        )
+                    }
+                };
+                encode(&self.jobs.start(&root, &namespace, &screen.id, spec).await?)
+            }
+            Request::Jobs { id } => Ok(json!({ "jobs": self.jobs.list(&root, &id).await? })),
+            Request::Output {
+                id,
+                job,
+                after,
+                wait,
+                peek,
+            } => self.jobs.output(&root, &id, &job, after, wait, peek).await,
+            Request::Stop { id, job } => encode(&self.jobs.stop(&root, &id, &job).await?),
+            Request::Forget { id, job } => {
+                self.jobs.forget(&root, &id, &job).await?;
+                Ok(json!({}))
             }
             Request::Mcp {
                 id,
                 server,
                 tool,
                 arguments,
+                place,
+                account,
             } => {
-                let screen = blocking(move || read(&root, &id)).await?;
-                screen.tool(&server, &tool)?;
-                let account = screen.account.clone().ok_or(NO_ACCOUNT)?;
-                self.calls
-                    .call(&screen, &account, launch, &server, &tool, arguments)
-                    .await
+                let screen = self.screen(&root, &id).await?;
+                let declared = screen.tool(&server, &tool).cloned();
+                let place = place.or_else(|| declared.as_ref().and_then(|d| d.place.clone()));
+                let account = account.or_else(|| declared.and_then(|d| d.account));
+                let site = self.place(&data, &screen.site, place.as_deref()).await?;
+                let own = site == screen.site;
+                let candidates = candidates(
+                    data,
+                    screen.account.clone(),
+                    site.clone(),
+                    own,
+                    account.clone(),
+                );
+                let (mut result, answered) = self
+                    .calls
+                    .call(
+                        &screen.id,
+                        &site,
+                        account.is_some(),
+                        candidates,
+                        launch,
+                        &server,
+                        &tool,
+                        arguments,
+                    )
+                    .await?;
+                result["account"] = json!(answered);
+                Ok(result)
             }
-            Request::Approve { id, digest } => {
-                let _change = self.changes.lock().await;
-                let screen = blocking(move || {
-                    let mut screen = read(&root, &id)?;
-                    if screen.digest() != digest {
-                        return Err("This screen's actions changed since they were shown. Review them again.".to_string());
-                    }
-                    screen.approval = Some(Approval { digest, at: now() });
-                    write(&root, &screen)?;
-                    Ok(screen)
-                })
-                .await?;
-                encode(&Detail::from(&screen))
+            Request::Tools { id, place, account } => {
+                let screen = self.screen(&root, &id).await?;
+                let site = self.place(&data, &screen.site, place.as_deref()).await?;
+                let own = site == screen.site;
+                let list =
+                    candidates(data, screen.account.clone(), site.clone(), own, account).await?;
+                let names: Vec<String> = list.iter().map(|c| c.name.clone()).collect();
+                let (asked, servers) = self.calls.servers(&screen.id, &site, list, launch).await?;
+                Ok(json!({ "account": asked.name, "accounts": names, "servers": servers }))
             }
-            Request::Revoke { id } => {
-                let _change = self.changes.lock().await;
-                let screen = blocking(move || {
-                    let mut screen = read(&root, &id)?;
-                    screen.approval = None;
-                    write(&root, &screen)?;
-                    Ok(screen)
-                })
-                .await?;
-                // A screen that may call nothing keeps no CLI for its calls.
-                self.calls.release(&screen.id).await;
-                encode(&Detail::from(&screen))
+            Request::Ask {
+                id,
+                prompt,
+                model,
+                system,
+            } => {
+                if prompt.trim().is_empty() {
+                    return Err("Ask the model something.".into());
+                }
+                let model = model.filter(|model| !model.trim().is_empty());
+                if model
+                    .as_deref()
+                    .is_some_and(|model| model.chars().any(|c| c.is_control() || c == ' '))
+                {
+                    return Err("model must be one model's name, such as haiku or sonnet.".into());
+                }
+                let screen = self.screen(&root, &id).await?;
+                let question = Question {
+                    prompt,
+                    model,
+                    system: system.filter(|system| !system.trim().is_empty()),
+                };
+                let answer = launch
+                    .ask(
+                        screen.account.as_ref(),
+                        question,
+                        self.calls.closing.child_token(),
+                    )
+                    .await?;
+                Ok(json!({ "text": answer }))
             }
             Request::Delete { id } => {
                 let _change = self.changes.lock().await;
+                checked_id(&id)?;
                 self.calls.release(&id).await;
+                self.jobs.forget_screen(&root, &id).await;
                 blocking(move || {
-                    checked_id(&id)?;
                     for path in [file(&root, &id), data_file(&root, &id)] {
                         match std::fs::remove_file(path) {
                             Ok(()) => {}
@@ -1145,12 +1446,14 @@ impl Screens {
     }
 }
 
-pub const NOT_ALLOWED: &str = "The user has not allowed this screen's actions yet. They can review and allow them above the screen.";
-const NO_ACCOUNT: &str =
-    "This screen has no account to call MCP tools with. Ask a chat to save it again.";
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
-/// A window or another device reads this computer's screens, runs one of their actions or
-/// calls one of their MCP tools. `environmentId` only routes the request here.
+/// A window or another device reads this computer's screens, runs their actions and commands
+/// or calls MCP tools for them. `environmentId` only routes the request here.
 #[tauri::command]
 pub async fn manage_screen(
     app: tauri::AppHandle,
@@ -1161,9 +1464,12 @@ pub async fn manage_screen(
     let root = root(&app)?;
     let namespace = app.config().identifier.clone();
     let launch = mcp::Host(app.clone());
-    // An action or a tool runs once, however many copies of its call the window sends
-    // (calls.rs).
-    if matches!(request, Request::Run { .. } | Request::Mcp { .. }) {
+    // What runs a command, calls a tool or asks a model runs once, however many copies of its
+    // call the window sends (calls.rs).
+    if matches!(
+        request,
+        Request::Run { .. } | Request::Start { .. } | Request::Mcp { .. } | Request::Ask { .. }
+    ) {
         return call
             .once(screens.handle(root, namespace, &launch, request))
             .await;
@@ -1211,7 +1517,7 @@ pub(crate) async fn saved(
         )
     })
     .await?;
-    // Its next call starts a CLI that reads the account's servers and sign-ins as they are now.
+    // Its next call starts CLIs that read the accounts' servers and sign-ins as they are now.
     screens.calls.release(&screen.0.id).await;
     Ok(screen)
 }
@@ -1257,12 +1563,20 @@ mod tests {
             Box::pin(async move { Err(format!("No CLI for {named} here.")) })
         }
     }
+    fn shell() -> &'static str {
+        if cfg!(windows) {
+            "powershell"
+        } else {
+            "bash"
+        }
+    }
 
     #[test]
     fn a_screen_declares_the_mcp_tools_its_page_calls() {
         let mut args = submission();
         args["mcpTools"] = json!([
             {"server": "claude.ai Linear", "tool": "list_issues", "description": "Lists my\nissues"},
+            {"server": "linear", "tool": "list_issues", "where": "WSL", "account": " Claude CLI login "},
             {"server": "github", "tool": "search_pull_requests"}
         ]);
         let parsed = definition(&args).unwrap();
@@ -1273,11 +1587,22 @@ mod tests {
                     server: "claude.ai Linear".into(),
                     tool: "list_issues".into(),
                     description: "Lists my issues".into(),
+                    place: None,
+                    account: None,
+                },
+                McpTool {
+                    server: "linear".into(),
+                    tool: "list_issues".into(),
+                    description: String::new(),
+                    place: Some("wsl".into()),
+                    account: Some("Claude CLI login".into()),
                 },
                 McpTool {
                     server: "github".into(),
                     tool: "search_pull_requests".into(),
                     description: String::new(),
+                    place: None,
+                    account: None,
                 },
             ]
         );
@@ -1297,14 +1622,17 @@ mod tests {
             json!([{"server": "linear", "tool": " list"}]),
             "start or end with spaces",
         );
-        refuse(json!([{"server": "line\u{200b}ar", "tool": "x"}]), "U+200B");
         refuse(
             json!([{"server": "linear", "tool": "a\nb"}]),
-            "hidden character",
+            "control character",
         );
         refuse(
             json!([{"server": "linear", "tool": "x", "args": {}}]),
             "unknown field args",
+        );
+        refuse(
+            json!([{"server": "linear", "tool": "x", "where": "Ubuntu 24"}]),
+            "where must be windows, wsl or the name of a WSL distribution",
         );
         refuse(
             json!([{"server": "agent_studio", "tool": "visualize"}]),
@@ -1317,71 +1645,36 @@ mod tests {
     }
 
     #[test]
-    fn the_approval_names_the_tools_and_their_account_and_keeps_earlier_digests() {
-        let mut screen = Screen {
-            id: uuid::Uuid::new_v4().to_string(),
-            revision: 1,
-            title: "x".into(),
-            description: String::new(),
-            html: "x".into(),
-            actions: definition(&json!({"title":"x","html":"x","actions":[{"name":"list","shell":"bash","script":"ls"}]}))
-                .unwrap()
-                .actions,
-            mcp_tools: vec![],
-            site: Site {
-                environment_id: "e".into(),
-                distribution: None,
-                folder: "/w".into(),
-                project: String::new(),
-            },
-            account: Some(account("first")),
-            conversation_id: String::new(),
-            run_id: String::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            approval: None,
-        };
-        // Screens without MCP tools keep the digest earlier releases recorded approvals with,
-        // whatever account they now record.
-        let earlier = r#"{"actions":[{"name":"list","script":"ls","shell":"bash"}],"site":{"environmentId":"e","folder":"/w","project":""}}"#;
-        assert_eq!(screen.digest(), hex(&Sha256::digest(earlier.as_bytes())));
-        screen.approval = Some(Approval {
-            digest: screen.digest(),
-            at: now(),
-        });
-        assert!(screen.allowed());
-        // Declaring a tool, or calling it as another account, needs the user again.
-        screen.mcp_tools = vec![McpTool {
-            server: "linear".into(),
-            tool: "list_issues".into(),
-            description: String::new(),
-        }];
-        assert!(!screen.allowed());
-        assert_eq!(
-            screen.tool("linear", "list_issues").unwrap_err(),
-            NOT_ALLOWED
-        );
-        screen.approval = Some(Approval {
-            digest: screen.digest(),
-            at: now(),
-        });
-        assert!(screen.allowed());
-        assert_eq!(
-            screen.tool("linear", "list_issues").unwrap().tool,
-            "list_issues"
-        );
-        assert!(screen
-            .tool("linear", "delete_issue")
-            .unwrap_err()
-            .contains("declares no MCP tool delete_issue of linear"));
-        screen.account = Some(account("second"));
-        assert!(!screen.allowed());
-        // A screen of tools alone waits for the user too.
-        screen.actions.clear();
-        screen.approval = None;
-        assert!(!screen.allowed());
-        screen.mcp_tools.clear();
-        assert!(screen.allowed());
+    fn screens_saved_with_approvals_read_as_they_are_and_earlier_windows_see_them_allowed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screens");
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            file(&root, &id),
+            json!({
+                "id": id, "revision": 3, "title": "Old", "description": "", "html": "<p></p>",
+                "actions": [{"name": "list", "shell": "bash", "script": "ls"}],
+                "site": {"environmentId": "e", "folder": "/w", "project": ""},
+                "conversationId": "c", "runId": "r", "createdAt": "", "updatedAt": "",
+                "approval": {"digest": "0".repeat(64), "at": "2026-10-02T12:00:00.000Z"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let screen = read(&root, &id).unwrap();
+        assert_eq!(screen.actions[0].name, "list");
+        let detail = serde_json::to_value(Detail::of(&screen, 0)).unwrap();
+        assert_eq!(detail["allowed"], true);
+        assert_eq!(detail["running"], 0);
+        assert!(detail["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64));
+        // The next save drops the approval nothing reads.
+        write(&root, &screen).unwrap();
+        assert!(!std::fs::read_to_string(file(&root, &id))
+            .unwrap()
+            .contains("approval"));
     }
 
     #[test]
@@ -1406,24 +1699,16 @@ mod tests {
         };
         let created = save(&args, "creator", &|_| true);
         assert_eq!(created.account, Some(account("creator")));
-        // Another chat's update keeps it, and with it the user's approval.
-        let mut allowed = created.clone();
-        allowed.approval = Some(Approval {
-            digest: allowed.digest(),
-            at: now(),
-        });
-        write(&root, &allowed).unwrap();
+        // Another chat's update keeps it.
         args["id"] = json!(created.id);
         args["html"] = json!("<p>new</p>");
         let updated = save(&args, "other", &|_| true);
         assert_eq!(updated.account, Some(account("creator")));
-        assert!(updated.allowed());
         // An account no longer connected there gives way to the saving chat's.
         let moved = save(&args, "other", &|kept| {
             kept.connection_id.as_deref() != Some("creator")
         });
         assert_eq!(moved.account, Some(account("other")));
-        assert!(!moved.allowed());
         // A screen saved before MCP tools takes the account of the chat that saves it next.
         let mut older = read(&root, &created.id).unwrap();
         older.account = None;
@@ -1451,10 +1736,6 @@ mod tests {
             "unknown field path",
         );
         refuse(&|a| a["title"] = json!("  "), "title must not be empty");
-        refuse(
-            &|a| a["title"] = json!("safe\u{202e}txt"),
-            "hidden character",
-        );
         refuse(&|a| a["html"] = json!(""), "html must be");
         refuse(&|a| a["html"] = json!("a\u{0}b"), "NUL");
         refuse(&|a| a["id"] = json!("my-screen"), "id must be the id");
@@ -1466,11 +1747,11 @@ mod tests {
             &|a| a["actions"][0]["shell"] = json!("cmd"),
             "powershell or bash",
         );
-        refuse(
-            &|a| a["actions"][0]["script"] = json!("rm\u{200b} -rf x"),
-            "U+200B",
-        );
         refuse(&|a| a["actions"][0]["timeout"] = json!(0), "at least 1");
+        refuse(
+            &|a| a["actions"][0]["where"] = json!("C:\\"),
+            "where must be windows, wsl",
+        );
         refuse(
             &|a| a["actions"][0]["command"] = json!("x"),
             "unknown field command",
@@ -1482,10 +1763,6 @@ mod tests {
         refuse(
             &|a| a["actions"][0]["params"]["since"]["pattern"] = json!("("),
             "not a valid regular",
-        );
-        refuse(
-            &|a| a["actions"][0]["params"]["since"]["pattern"] = json!("^a\u{202e}$"),
-            "pattern contains a hidden character (U+202E)",
         );
         refuse(
             &|a| a["actions"][0]["params"]["Since"] = json!({"type":"string"}),
@@ -1502,6 +1779,17 @@ mod tests {
             },
             "Two actions are named list_prs",
         );
+        // Text nobody reviews passes as written: emoji joined with zero-width joiners in a
+        // script, a bidirectional mark in a pattern. A title loses what it cannot show.
+        let mut written = submission();
+        written["title"] = json!("safe\u{202e}txt");
+        written["actions"][0]["script"] = json!("echo 👨\u{200d}👩\u{200d}👧");
+        written["actions"][0]["params"]["since"]["pattern"] = json!("^a\u{200f}?$");
+        written["actions"][0]["where"] = json!("windows");
+        let parsed = definition(&written).unwrap();
+        assert_eq!(parsed.title, "safetxt");
+        assert!(parsed.actions[0].script.contains('\u{200d}'));
+        assert_eq!(parsed.actions[0].place.as_deref(), Some("windows"));
         // A screen without actions is a page of its own.
         let mut plain = submission();
         plain.as_object_mut().unwrap().remove("actions");
@@ -1535,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn values_reach_scripts_as_checked_environment_variables() {
+    fn values_reach_scripts_as_environment_variables() {
         let parsed = definition(&json!({
             "title": "Tools",
             "html": "<p>x</p>",
@@ -1573,6 +1861,16 @@ mod tests {
         )
         .unwrap();
         assert!(with.contains(&("PARAM_DRAFT".into(), "true".into())));
+        // A value the action does not declare passes as it is, JSON when it is not text.
+        let extra = arguments(
+            action,
+            &values(
+                json!({"query": "a", "limit": 2, "since": "2026-10-01", "filter": {"team": "x"}}),
+            ),
+        )
+        .unwrap();
+        assert!(extra.contains(&("PARAM_SINCE".into(), "2026-10-01".into())));
+        assert!(extra.contains(&("PARAM_FILTER".into(), "{\"team\":\"x\"}".into())));
         for (input, expected) in [
             (json!({"limit": 5}), "needs a value for query"),
             (
@@ -1582,16 +1880,12 @@ mod tests {
             (json!({"query": "a", "limit": 51}), "outside the range"),
             (json!({"query": "x".repeat(21), "limit": 5}), "at most 20"),
             (
-                json!({"query": "a", "limit": 5, "state": "x".repeat(2000)}),
-                "one of the values",
-            ),
-            (
                 json!({"query": "a", "limit": 5, "state": "merged"}),
                 "one of the values",
             ),
             (
-                json!({"query": "a", "limit": 5, "other": 1}),
-                "no parameter named other",
+                json!({"query": "a", "limit": 5, "Other": 1}),
+                "The parameter Other must be named",
             ),
             (json!({"query": "a\u{0}b", "limit": 5}), "NUL"),
             (json!({"query": 4, "limit": 5}), "query must be text"),
@@ -1599,6 +1893,14 @@ mod tests {
             let error = arguments(action, &values(input)).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+        // A command a page passes reads every value the same way.
+        assert_eq!(
+            passed(&values(json!({"count": 3, "skip": null, "name": "x"}))).unwrap(),
+            [
+                ("PARAM_COUNT".to_string(), "3".to_string()),
+                ("PARAM_NAME".to_string(), "x".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -1621,7 +1923,7 @@ mod tests {
     }
 
     #[test]
-    fn the_store_keeps_revisions_and_approval_only_for_the_same_actions() {
+    fn the_store_keeps_revisions_and_the_place_a_screen_was_made() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("screens");
         let conversation = uuid::Uuid::new_v4().to_string();
@@ -1636,17 +1938,9 @@ mod tests {
             &run,
         )
         .unwrap();
-        assert!(created && screen.revision == 1 && !screen.allowed());
+        assert!(created && screen.revision == 1);
         assert_eq!(all(&root).len(), 1);
-        // The user allows exactly what they reviewed.
-        let mut allowed = read(&root, &screen.id).unwrap();
-        allowed.approval = Some(Approval {
-            digest: allowed.digest(),
-            at: now(),
-        });
-        write(&root, &allowed).unwrap();
-        assert!(read(&root, &screen.id).unwrap().allowed());
-        // New HTML keeps the approval; the same id names the screen and its folder stays.
+        // The same id names the screen and its folder stays.
         let mut update = submission();
         update["id"] = json!(screen.id);
         update["html"] = json!("<main>new</main>");
@@ -1662,21 +1956,8 @@ mod tests {
             &run,
         )
         .unwrap();
-        assert!(!created && updated.revision == 2 && updated.allowed());
+        assert!(!created && updated.revision == 2);
         assert_eq!(updated.site.folder, "C:\\Projects\\studio");
-        // A changed script needs the user again.
-        update["actions"][0]["script"] = json!("gh pr list");
-        let (changed, _) = store(
-            &root,
-            definition(&update).unwrap(),
-            site(),
-            None,
-            &|_| true,
-            &conversation,
-            &run,
-        )
-        .unwrap();
-        assert!(changed.revision == 3 && !changed.allowed() && changed.approval.is_none());
         // Another environment of this computer cannot take it over.
         let mut wsl = site();
         wsl.environment_id = "33333333-3333-4333-8333-333333333333".into();
@@ -1711,15 +1992,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_allow_run_save_and_delete_by_id_alone() {
+    async fn requests_run_jobs_save_and_delete_by_id_alone() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("screens");
+        let folder = directory.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
         let screens = Screens::default();
         let conversation = uuid::Uuid::new_v4().to_string();
+        let mut here = site();
+        here.folder = folder.to_string_lossy().into_owned();
+        let script = if cfg!(windows) {
+            "Write-Output \"since $env:PARAM_SINCE\""
+        } else {
+            "echo \"since $PARAM_SINCE\""
+        };
         let (screen, _) = store(
             &root,
-            definition(&submission()).unwrap(),
-            site(),
+            definition(&json!({"title": "Runs", "html": "<p></p>", "actions": [{
+                "name": "list", "shell": shell(), "script": script,
+                "params": {"since": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}}
+            }]}))
+            .unwrap(),
+            here,
             None,
             &|_| true,
             &conversation,
@@ -1743,33 +2037,88 @@ mod tests {
         let listed = ask(json!({"op": "list"})).await.unwrap();
         assert_eq!(listed["screens"][0]["id"], screen.id);
         assert_eq!(listed["screens"][0]["commands"], 1);
-        assert_eq!(listed["screens"][0]["allowed"], false);
+        assert_eq!(listed["screens"][0]["allowed"], true);
         assert!(listed["screens"][0].get("html").is_none());
-        // Nothing runs before the user allows it.
-        let refused = ask(json!({"op": "run", "id": screen.id, "action": "list_prs", "params": {"since": "2026-09-28"}}))
-            .await
-            .unwrap_err();
-        assert_eq!(refused, NOT_ALLOWED);
-        // Allowing needs the digest of the actions the user saw.
+        // It runs at once: nothing waits for an approval, and the requests of windows that
+        // asked for one answer with the screen.
         let detail = ask(json!({"op": "read", "id": screen.id})).await.unwrap();
-        let stale = ask(json!({"op": "approve", "id": screen.id, "digest": "0".repeat(64)}))
-            .await
-            .unwrap_err();
-        assert!(stale.contains("changed since"), "{stale}");
         let approved = ask(json!({"op": "approve", "id": screen.id, "digest": detail["digest"]}))
             .await
             .unwrap();
-        assert_eq!(approved["allowed"], true);
+        assert_eq!(approved["id"], screen.id);
+        assert_eq!(
+            ask(json!({"op": "revoke", "id": screen.id})).await.unwrap()["allowed"],
+            true
+        );
+        let outcome = ask(json!({"op": "run", "id": screen.id, "action": "list", "params": {"since": "2026-09-28"}}))
+            .await
+            .unwrap();
+        assert_eq!(outcome["exitCode"], 0, "{outcome}");
+        assert_eq!(
+            outcome["stdout"].as_str().unwrap().trim(),
+            "since 2026-09-28"
+        );
+        // A run whose page waited for it leaves nothing behind.
+        assert!(
+            ask(json!({"op": "jobs", "id": screen.id})).await.unwrap()["jobs"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let unknown = ask(json!({"op": "run", "id": screen.id, "action": "other"}))
             .await
             .unwrap_err();
         assert!(unknown.contains("no action named other"));
-        let invalid = ask(json!({"op": "run", "id": screen.id, "action": "list_prs", "params": {"since": "yesterday"}}))
+        let invalid = ask(json!({"op": "run", "id": screen.id, "action": "list", "params": {"since": "yesterday"}}))
             .await
             .unwrap_err();
         assert!(invalid.contains("pattern"), "{invalid}");
-        let revoked = ask(json!({"op": "revoke", "id": screen.id})).await.unwrap();
-        assert_eq!(revoked["allowed"], false);
+        // A kept job, and a command the page passes, stay with their output until forgotten.
+        let kept = ask(json!({"op": "start", "id": screen.id, "action": "list", "params": {"since": "2026-10-01"}, "keep": true}))
+            .await
+            .unwrap();
+        assert_eq!(kept["state"], "running");
+        assert_eq!(kept["label"], "list");
+        let command = if cfg!(windows) {
+            "Write-Output \"$env:PARAM_WHO here\""
+        } else {
+            "echo \"$PARAM_WHO here\""
+        };
+        let passed = ask(json!({"op": "start", "id": screen.id, "command": {"shell": shell(), "script": command}, "params": {"who": "me"}, "keep": true}))
+            .await
+            .unwrap();
+        assert_eq!(passed["label"], command);
+        assert!(passed.get("action").is_none());
+        for (job, expected) in [(&kept, "since 2026-10-01"), (&passed, "me here")] {
+            let mut after = 0;
+            let mut text = String::new();
+            loop {
+                let answer = ask(json!({"op": "output", "id": screen.id, "job": job["id"], "after": after, "wait": true}))
+                    .await
+                    .unwrap();
+                for chunk in answer["chunks"].as_array().unwrap() {
+                    text.push_str(chunk["text"].as_str().unwrap());
+                }
+                after = answer["next"].as_u64().unwrap();
+                if answer["job"]["state"] != "running" {
+                    assert_eq!(answer["job"]["exitCode"], 0);
+                    break;
+                }
+            }
+            assert_eq!(text.trim(), expected);
+        }
+        let jobs = ask(json!({"op": "jobs", "id": screen.id})).await.unwrap();
+        assert_eq!(jobs["jobs"].as_array().unwrap().len(), 2);
+        ask(json!({"op": "forget", "id": screen.id, "job": kept["id"]}))
+            .await
+            .unwrap();
+        let refused = ask(json!({"op": "start", "id": screen.id}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("Name one of the screen's actions"),
+            "{refused}"
+        );
         // Saved values stay with the screen, whatever their size.
         ask(json!({"op": "save", "id": screen.id, "key": "filters", "value": {"state": "open"}}))
             .await
@@ -1796,6 +2145,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(path, "Invalid screen id");
+        // Deleting the screen takes its values and jobs with it.
         ask(json!({"op": "delete", "id": screen.id})).await.unwrap();
         assert_eq!(
             ask(json!({"op": "read", "id": screen.id}))
@@ -1804,10 +2154,11 @@ mod tests {
             MISSING
         );
         assert!(!data_file(&root, &screen.id).exists());
+        assert!(!root.join("jobs").join(&screen.id).exists());
     }
 
     #[tokio::test]
-    async fn a_page_calls_only_the_tools_it_declares_once_allowed_as_its_account() {
+    async fn a_page_calls_any_mcp_tool_and_asks_models_as_the_screens_account() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("screens");
         let screens = Screens::default();
@@ -1841,8 +2192,6 @@ mod tests {
         let call = |tool: &str| json!({"op": "mcp", "id": screen.id, "server": "linear", "tool": tool, "arguments": {"team": "x"}});
         let listed = ask(json!({"op": "list"})).await.unwrap();
         assert_eq!(listed["screens"][0]["tools"], 1);
-        assert_eq!(listed["screens"][0]["allowed"], false);
-        assert_eq!(ask(call("list_issues")).await.unwrap_err(), NOT_ALLOWED);
         let detail = ask(json!({"op": "read", "id": screen.id})).await.unwrap();
         assert_eq!(
             detail["mcpTools"],
@@ -1852,26 +2201,50 @@ mod tests {
             detail["account"],
             json!({"provider": "claude", "connectionId": "creator"})
         );
-        ask(json!({"op": "approve", "id": screen.id, "digest": detail["digest"]}))
-            .await
-            .unwrap();
-        assert!(ask(call("delete_issue"))
-            .await
-            .unwrap_err()
-            .contains("declares no MCP tool"));
-        // An allowed tool goes to the CLI of the screen's own account.
+        // A declared tool and one it does not declare go to the CLI of the screen's account.
+        for tool in ["list_issues", "delete_issue"] {
+            assert_eq!(
+                ask(call(tool)).await.unwrap_err(),
+                "No CLI for creator here."
+            );
+        }
         assert_eq!(
-            ask(call("list_issues")).await.unwrap_err(),
-            "No CLI for creator here."
+            ask(json!({"op": "tools", "id": screen.id}))
+                .await
+                .unwrap_err(),
+            "the screen's account: No CLI for creator here."
         );
-        // A screen without an account has none to call with.
+        // Another place of this computer is named as such; this one has no WSL listed.
+        let elsewhere = ask(
+            json!({"op": "mcp", "id": screen.id, "server": "linear", "tool": "x", "where": "wsl"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(elsewhere.contains("WSL"), "{elsewhere}");
+        // A screen without an account and no saved accounts has nothing to call with.
         let mut older = read(&root, &screen.id).unwrap();
         older.account = None;
-        older.approval = Some(Approval {
-            digest: older.digest(),
-            at: now(),
-        });
         write(&root, &older).unwrap();
-        assert_eq!(ask(call("list_issues")).await.unwrap_err(), NO_ACCOUNT);
+        assert!(ask(call("list_issues"))
+            .await
+            .unwrap_err()
+            .contains("No Claude or Codex account"));
+        // A page's question needs one, and a computer that asks models.
+        assert!(ask(json!({"op": "ask", "id": screen.id, "prompt": "  "}))
+            .await
+            .unwrap_err()
+            .contains("Ask the model something"));
+        assert!(
+            ask(json!({"op": "ask", "id": screen.id, "prompt": "Hi", "model": "two words"}))
+                .await
+                .unwrap_err()
+                .contains("one model's name")
+        );
+        assert_eq!(
+            ask(json!({"op": "ask", "id": screen.id, "prompt": "Hi"}))
+                .await
+                .unwrap_err(),
+            "This computer cannot ask a model for screens."
+        );
     }
 }

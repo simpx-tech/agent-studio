@@ -175,6 +175,8 @@ fn studio_tool(name: &str) -> bool {
                 | "save_screen"
                 | "list_screens"
                 | "read_screen"
+                | "list_mcp_tools"
+                | "call_mcp_tool"
         )
 }
 /// The title of the screen a save_screen call saves, or of the page a show_artifact call shows,
@@ -959,6 +961,17 @@ impl ToolDecoder {
             "mcp__agent_studio__save_screen" | "mcp__agent_studio__show_artifact" => {
                 tool.detail = screen_title(name, input)
             }
+            // The tool a chat calls as screens call it, and the place it names.
+            "mcp__agent_studio__call_mcp_tool" => {
+                if let (Some(server), Some(called)) = (field(input, "server"), field(input, "tool"))
+                {
+                    tool.detail = Some(match field(input, "where") {
+                        Some(place) => format!("{called} of {server} in {place}"),
+                        None => format!("{called} of {server}"),
+                    });
+                }
+            }
+            "mcp__agent_studio__list_mcp_tools" => tool.detail = field(input, "where"),
             // Claude Code's own Artifact tools, which act on claude.ai: their action and what it
             // acts on, with their input but the page text its edits and documents carry.
             "Artifact" | "ArtifactComments" | "ArtifactData" => {

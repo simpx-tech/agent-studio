@@ -60,7 +60,7 @@ async fn installed_codex_answers_with_fast_mode_on_and_off() {
 
 #[tokio::test]
 #[ignore = "Opt-in installed Codex CLI test; uses subscription capacity and a model's tool choice."]
-async fn installed_codex_saves_a_screen_whose_action_runs_once_allowed() {
+async fn installed_codex_saves_a_screen_whose_action_runs() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
     std::fs::create_dir_all(&runtime).unwrap();
@@ -142,13 +142,6 @@ async fn installed_codex_saves_a_screen_whose_action_runs_once_allowed() {
     let detail = ask(json!({"op":"read","id":card.id})).await.unwrap();
     assert_eq!(detail["actions"][0]["name"], "count", "{detail}");
     let run = json!({"op":"run","id":card.id,"action":"count","params":{"limit":3}});
-    assert_eq!(
-        ask(run.clone()).await.unwrap_err(),
-        crate::screens::NOT_ALLOWED
-    );
-    ask(json!({"op":"approve","id":card.id,"digest":detail["digest"]}))
-        .await
-        .unwrap();
     let outcome = ask(run).await.unwrap();
     assert_eq!(outcome["exitCode"], 0, "{outcome}");
     let printed: Value = serde_json::from_str(outcome["stdout"].as_str().unwrap().trim()).unwrap();

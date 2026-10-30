@@ -1,32 +1,50 @@
-//! Runs one action of a screen where the screen runs: PowerShell or Git Bash on Windows, bash
-//! inside a WSL distribution this computer manages, bash on macOS and Linux. The script and the
-//! values are data: the script reaches its shell from a file or from stdin, each value from an
-//! environment variable of its own, and the commands around them are constants.
-use super::{Action, Shell, Site};
-use serde::Serialize;
+//! Runs one command of a screen where it runs: PowerShell or Git Bash on Windows, bash inside a
+//! WSL distribution this computer manages, bash on macOS and Linux. The script and the values
+//! are data: the script reaches its shell from a file or from stdin, each value from an
+//! environment variable of its own, and the commands around them are constants. Output goes to
+//! the job that runs it as it arrives (`jobs.rs`), and a job's stop ends the command with
+//! everything it started.
+use super::{Shell, Site};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::sync::CancellationToken;
 
-/// How long output may keep arriving after an action ended, from what it left running.
+/// How long output may keep arriving after a command ended, from what it left running.
 const DRAIN: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Outcome {
-    /// None when the action was stopped, at its time limit or by a signal.
+/// Which of its streams a command printed to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stream {
+    Out,
+    Err,
+}
+
+/// Where a command's output goes as it arrives.
+pub type Chunks = tokio::sync::mpsc::UnboundedSender<(Stream, Vec<u8>)>;
+
+/// What runs: an action's script, or a command a page passes.
+pub struct Script<'a> {
+    /// The action's name, which PowerShell errors name the script by.
+    pub name: &'a str,
+    pub shell: Shell,
+    pub text: &'a str,
+    /// Seconds it may run; none lets it run until it ends.
+    pub timeout: Option<u64>,
+}
+
+/// How a command ended.
+#[derive(Debug, Default)]
+pub struct Ended {
+    /// None when it was stopped, at its time limit, by a stop or by a signal.
     pub exit_code: Option<i32>,
-    /// Each stream whole.
-    pub stdout: String,
-    pub stderr: String,
-    /// Always false: the screen receives everything the action printed.
-    pub truncated: bool,
     pub timed_out: bool,
+    pub stopped: bool,
     pub duration_ms: u64,
 }
 
-/// Variables of an agent's session or of this app's own launches, which an action never sees.
+/// Variables of an agent's session or of this app's own launches, which a command never sees.
 const OWN_VARIABLES: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -35,26 +53,26 @@ const OWN_VARIABLES: &[&str] = &[
     "AGENT_STUDIO_FOLDER",
 ];
 
-/// Whether a screen's site runs this shell, so a chat hears it when it saves the screen.
+/// Whether a place runs this shell, so a chat hears it when it saves the screen.
 pub(super) fn available(site: &Site, shell: Shell) -> Result<(), String> {
     if let Some(distribution) = &site.distribution {
         return match shell {
             Shell::Bash => Ok(()),
             Shell::Powershell => Err(format!(
-                "This chat runs in the WSL distribution {distribution}, where actions use bash."
+                "The WSL distribution {distribution} runs bash; set where to windows to run PowerShell on Windows."
             )),
         };
     }
     match shell {
         Shell::Powershell if cfg!(windows) => Ok(()),
         Shell::Powershell => {
-            Err("PowerShell actions run on Windows; actions on this computer use bash.".into())
+            Err("PowerShell runs on Windows; commands on this computer use bash.".into())
         }
         Shell::Bash => {
             #[cfg(windows)]
             if crate::console::installed_git_bash().is_none() {
                 return Err(
-                    "Git Bash is not installed on this computer, so its actions use powershell."
+                    "Git Bash is not installed on this computer: use powershell, or set where to wsl."
                         .into(),
                 );
             }
@@ -63,17 +81,19 @@ pub(super) fn available(site: &Site, shell: Shell) -> Result<(), String> {
     }
 }
 
-/// Runs one checked action with its checked values and waits for it, within the time limit
-/// it declares, if any.
+/// Runs one command with its checked values, sending its output to `chunks` as it arrives,
+/// until it ends, its time limit, when it has one, is up, or `stop` is cancelled.
 pub(super) async fn execute(
     root: &Path,
     namespace: &str,
     site: &Site,
-    action: &Action,
+    script: &Script<'_>,
     variables: Vec<(String, String)>,
-) -> Result<Outcome, String> {
-    available(site, action.shell)?;
-    let limit = action.timeout.map(Duration::from_secs);
+    chunks: Chunks,
+    stop: &CancellationToken,
+) -> Result<Ended, String> {
+    available(site, script.shell)?;
+    let limit = script.timeout.map(Duration::from_secs);
     let started = Instant::now();
     if let Some(distribution) = &site.distribution {
         #[cfg(windows)]
@@ -81,19 +101,21 @@ pub(super) async fn execute(
             namespace,
             distribution,
             &site.folder,
-            action,
+            script,
             &variables,
             limit,
             started,
+            chunks,
+            stop,
         )
         .await;
         #[cfg(not(windows))]
         {
-            let _ = (namespace, distribution);
-            return Err("A WSL screen runs its actions from its Windows computer.".into());
+            let _ = (namespace, distribution, chunks, stop, started, limit);
+            return Err("A WSL screen runs its commands from its Windows computer.".into());
         }
     }
-    native(root, site, action, variables, limit, started).await
+    native(root, site, script, variables, limit, started, chunks, stop).await
 }
 
 /// Starts bash in a login shell, as an agent runs its commands, then runs the script from its
@@ -101,7 +123,7 @@ pub(super) async fn execute(
 const BASH: &str = r#"studio_folder=$1
 studio_script=$2
 if ! cd -- "$studio_folder" 2>/dev/null; then
-  printf 'Agent Studio did not run this action: its folder is unavailable.\n' >&2
+  printf 'Agent Studio did not run this command: its folder is unavailable.\n' >&2
   exit 126
 fi
 unset studio_folder
@@ -128,7 +150,7 @@ $studioFile = $env:AGENT_STUDIO_SCREEN_SCRIPT
 $studioName = $env:AGENT_STUDIO_SCREEN_ACTION
 Remove-Item Env:AGENT_STUDIO_SCREEN_SCRIPT, Env:AGENT_STUDIO_SCREEN_ACTION -ErrorAction SilentlyContinue
 try { $studioCode = [IO.File]::ReadAllText($studioFile, $studioUtf8) } catch {
-  [Console]::Error.WriteLine('Agent Studio could not read this action.')
+  [Console]::Error.WriteLine('Agent Studio could not read this command.')
   exit 125
 }
 Remove-Item -LiteralPath $studioFile -ErrorAction SilentlyContinue
@@ -164,32 +186,32 @@ fn prune(folder: &Path) {
 }
 
 /// Keeps the script in a private file of this run, which its shell reads.
-fn keep(root: &Path, action: &Action) -> Result<PathBuf, String> {
+fn keep(root: &Path, shell: Shell, text: &str) -> Result<PathBuf, String> {
     let folder = root.join("runs");
-    std::fs::create_dir_all(&folder).map_err(|_| "Cannot prepare this action")?;
+    std::fs::create_dir_all(&folder).map_err(|_| "Cannot prepare this command")?;
     prune(&folder);
-    let extension = match action.shell {
+    let extension = match shell {
         Shell::Powershell => "ps1",
         Shell::Bash => "sh",
     };
     let path = folder.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
-    std::fs::write(&path, action.script.as_bytes()).map_err(|_| "Cannot prepare this action")?;
+    std::fs::write(&path, text.as_bytes()).map_err(|_| "Cannot prepare this command")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| "Cannot prepare this action")?;
+            .map_err(|_| "Cannot prepare this command")?;
     }
     Ok(path)
 }
 
 #[cfg(windows)]
 fn shell_command(
-    action: &Action,
+    script: &Script<'_>,
     folder: &Path,
-    script: &Path,
+    file: &Path,
 ) -> Result<tokio::process::Command, String> {
-    Ok(match action.shell {
+    Ok(match script.shell {
         Shell::Powershell => {
             let powershell =
                 crate::console::installed_powershell().ok_or("Cannot locate PowerShell")?;
@@ -206,8 +228,8 @@ fn shell_command(
                     "-Command",
                     POWERSHELL,
                 ])
-                .env("AGENT_STUDIO_SCREEN_SCRIPT", script)
-                .env("AGENT_STUDIO_SCREEN_ACTION", &action.name);
+                .env("AGENT_STUDIO_SCREEN_SCRIPT", file)
+                .env("AGENT_STUDIO_SCREEN_ACTION", script.name);
             command
         }
         Shell::Bash => {
@@ -218,7 +240,7 @@ fn shell_command(
             command
                 .args(["-l", "-c", BASH, "agent-studio"])
                 .arg(slashes(folder))
-                .arg(slashes(script))
+                .arg(slashes(file))
                 // Git Bash's profile keeps the folder it starts in.
                 .env("CHERE_INVOKING", "1");
             command
@@ -228,32 +250,36 @@ fn shell_command(
 
 #[cfg(not(windows))]
 fn shell_command(
-    action: &Action,
+    script: &Script<'_>,
     folder: &Path,
-    script: &Path,
+    file: &Path,
 ) -> Result<tokio::process::Command, String> {
-    if action.shell != Shell::Bash {
-        return Err("PowerShell actions run on Windows.".into());
+    if script.shell != Shell::Bash {
+        return Err("PowerShell runs on Windows.".into());
     }
     let mut command = tokio::process::Command::new("bash");
     command
         .args(["-l", "-c", BASH, "agent-studio"])
         .arg(folder)
-        .arg(script);
+        .arg(file);
     Ok(command)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn native(
     root: &Path,
     site: &Site,
-    action: &Action,
+    script: &Script<'_>,
     variables: Vec<(String, String)>,
     limit: Option<Duration>,
     started: Instant,
-) -> Result<Outcome, String> {
+    chunks: Chunks,
+    stop: &CancellationToken,
+) -> Result<Ended, String> {
     let folder = PathBuf::from(&site.folder);
-    let prepared = {
-        let (root, folder, action) = (root.to_path_buf(), folder.clone(), action.clone());
+    let file = {
+        let (root, folder) = (root.to_path_buf(), folder.clone());
+        let (shell, text) = (script.shell, script.text.to_string());
         tauri::async_runtime::spawn_blocking(move || {
             if !folder.is_dir() {
                 return Err(format!(
@@ -261,13 +287,12 @@ async fn native(
                     folder.to_string_lossy()
                 ));
             }
-            keep(&root, &action)
+            keep(&root, shell, &text)
         })
         .await
-        .map_err(|_| "Cannot prepare this action".to_string())??
+        .map_err(|_| "Cannot prepare this command".to_string())??
     };
-    let script = prepared;
-    let started_child = shell_command(action, &folder, &script).and_then(|mut command| {
+    let started_child = shell_command(script, &folder, &file).and_then(|mut command| {
         command
             .current_dir(&folder)
             .stdin(Stdio::null())
@@ -285,69 +310,100 @@ async fn native(
         command.process_group(0);
         command
             .spawn()
-            .map_err(|_| "Could not start this action's shell.".to_string())
+            .map_err(|_| "Could not start this command's shell.".to_string())
     });
-    let outcome = match started_child {
+    let ended = match started_child {
         Ok(mut child) => {
-            let collected = collect(&mut child, limit).await;
-            if collected.timed_out || !collected.drained {
+            let mut collected = collect(&mut child, limit, chunks, stop).await;
+            if collected.timed_out || collected.stopped || !collected.drained {
                 // Whatever it left running goes with it.
                 crate::runner::kill_tree(&mut child).await;
             }
-            Ok(collected.outcome(started))
+            collected.finish().await;
+            Ok(collected.ended(started))
         }
         Err(error) => Err(error),
     };
-    let _ = std::fs::remove_file(&script);
-    outcome
+    let _ = std::fs::remove_file(&file);
+    ended
 }
 
 struct Collected {
     status: Option<std::process::ExitStatus>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
     timed_out: bool,
-    /// Both streams ended: nothing the action started still holds them.
+    stopped: bool,
+    /// Both streams ended: nothing the command started still holds them.
     drained: bool,
+    /// The readers of streams that had not closed yet.
+    pumps: Vec<tokio::task::JoinHandle<()>>,
 }
 impl Collected {
-    fn outcome(self, started: Instant) -> Outcome {
-        Outcome {
-            exit_code: self.status.and_then(|status| status.code()),
-            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
-            truncated: false,
+    /// Takes what the streams still hold once the command and what it started were ended, and
+    /// stops reading a stream something it left behind keeps open.
+    async fn finish(&mut self) {
+        for pump in &mut self.pumps {
+            if tokio::time::timeout(Duration::from_secs(1), &mut *pump)
+                .await
+                .is_err()
+            {
+                pump.abort();
+            }
+        }
+        self.pumps.clear();
+    }
+    fn ended(&self, started: Instant) -> Ended {
+        Ended {
+            exit_code: if self.timed_out || self.stopped {
+                None
+            } else {
+                self.status.and_then(|status| status.code())
+            },
             timed_out: self.timed_out,
+            stopped: self.stopped,
             duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         }
     }
 }
 
-async fn read_all(pipe: Option<impl AsyncRead + Unpin>, kept: &mut Vec<u8>) {
-    let Some(mut pipe) = pipe else {
-        return;
-    };
+/// Sends what a stream prints as it arrives, until the stream closes.
+async fn pump(pipe: impl AsyncRead + Unpin, stream: Stream, chunks: Chunks) {
+    let mut pipe = pipe;
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         match pipe.read(&mut buffer).await {
             Ok(0) | Err(_) => return,
-            Ok(read) => kept.extend_from_slice(&buffer[..read]),
+            Ok(read) => {
+                if chunks.send((stream, buffer[..read].to_vec())).is_err() {
+                    return;
+                }
+            }
         }
     }
 }
 
-/// Reads both streams while the action runs, until it ends and they close or its time, when it
-/// declares one, is up.
-async fn collect(child: &mut tokio::process::Child, limit: Option<Duration>) -> Collected {
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+/// Follows both streams while the command runs, until it ends and they close, its time, when it
+/// has one, is up, or it is stopped.
+async fn collect(
+    child: &mut tokio::process::Child,
+    limit: Option<Duration>,
+    chunks: Chunks,
+    stop: &CancellationToken,
+) -> Collected {
+    let mut out = child
+        .stdout
+        .take()
+        .map(|pipe| tokio::spawn(pump(pipe, Stream::Out, chunks.clone())));
+    let mut err = child
+        .stderr
+        .take()
+        .map(|pipe| tokio::spawn(pump(pipe, Stream::Err, chunks.clone())));
+    drop(chunks);
+    let (mut out_done, mut err_done) = (out.is_none(), err.is_none());
     let mut status = None;
     let mut exited = false;
     let mut timed_out = false;
-    let (mut out_done, mut err_done) = (false, false);
+    let mut stopped = false;
     {
-        let reading_out = read_all(child.stdout.take(), &mut stdout);
-        let reading_err = read_all(child.stderr.take(), &mut stderr);
-        tokio::pin!(reading_out, reading_err);
         let deadline = async {
             match limit {
                 Some(limit) => tokio::time::sleep(limit).await,
@@ -355,13 +411,13 @@ async fn collect(child: &mut tokio::process::Child, limit: Option<Duration>) -> 
             }
         };
         tokio::pin!(deadline);
-        // Polled only once the action exited, which sets it.
+        // Polled only once the command exited, which sets it.
         let drain = tokio::time::sleep(DRAIN);
         tokio::pin!(drain);
         while !(exited && out_done && err_done) {
             tokio::select! {
-                _ = &mut reading_out, if !out_done => out_done = true,
-                _ = &mut reading_err, if !err_done => err_done = true,
+                _ = async { if let Some(pump) = out.as_mut() { let _ = pump.await; } }, if !out_done => out_done = true,
+                _ = async { if let Some(pump) = err.as_mut() { let _ = pump.await; } }, if !err_done => err_done = true,
                 result = child.wait(), if !exited => {
                     exited = true;
                     status = result.ok();
@@ -371,16 +427,25 @@ async fn collect(child: &mut tokio::process::Child, limit: Option<Duration>) -> 
                     timed_out = true;
                     break;
                 }
+                _ = stop.cancelled(), if !exited => {
+                    stopped = true;
+                    break;
+                }
                 _ = &mut drain, if exited => break,
             }
         }
     }
+    // A stream that closed has nothing more to give; its reader is done.
+    let pumps = [(out, out_done), (err, err_done)]
+        .into_iter()
+        .filter_map(|(pump, done)| pump.filter(|_| !done))
+        .collect();
     Collected {
         status,
-        stdout,
-        stderr,
         timed_out,
+        stopped,
         drained: out_done && err_done,
+        pumps,
     }
 }
 
@@ -390,21 +455,22 @@ mod distribution {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use tokio::io::AsyncWriteExt;
 
-    /// How much longer than the host's own limit the distribution lets an action run, should
+    /// How much longer than the host's own limit the distribution lets a command run, should
     /// the host be gone before it stops it.
     const BACKSTOP: u64 = 10;
 
     /// What the fixed script reads on stdin: one line each of base64 or digits. The limit line
-    /// is 0 for an action without a time limit, which the distribution then never stops itself.
-    fn input(
+    /// is 0 for a command without a time limit, which the distribution then never stops itself.
+    /// An empty folder is the distribution's home folder.
+    pub(super) fn input(
         folder: &str,
-        action: &Action,
+        script: &str,
         variables: &[(String, String)],
         limit: Option<Duration>,
     ) -> String {
         let mut lines = vec![
             STANDARD.encode(folder),
-            STANDARD.encode(&action.script),
+            STANDARD.encode(script),
             limit
                 .map_or(0, |limit| limit.as_secs().saturating_add(BACKSTOP))
                 .to_string(),
@@ -417,15 +483,18 @@ mod distribution {
         lines.join("\n") + "\n"
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute(
         namespace: &str,
         distribution: &str,
         folder: &str,
-        action: &Action,
+        script: &Script<'_>,
         variables: &[(String, String)],
         limit: Option<Duration>,
         started: Instant,
-    ) -> Result<Outcome, String> {
+        chunks: Chunks,
+        stop: &CancellationToken,
+    ) -> Result<Ended, String> {
         // wsl.exe reads its own options as written, so the name goes there bare.
         if distribution.is_empty()
             || !distribution
@@ -433,7 +502,7 @@ mod distribution {
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
         {
             return Err(format!(
-                "Cannot run an action in a distribution named {distribution}."
+                "Cannot run a command in a distribution named {distribution}."
             ));
         }
         let job = format!("screen-{}", uuid::Uuid::new_v4());
@@ -467,11 +536,11 @@ mod distribution {
         }
         let mut child = command
             .spawn()
-            .map_err(|_| format!("Could not start the action in {distribution}."))?;
+            .map_err(|_| format!("Could not start the command in {distribution}."))?;
         let sent = match child.stdin.take() {
             Some(mut stdin) => {
                 let written = stdin
-                    .write_all(input(folder, action, variables, limit).as_bytes())
+                    .write_all(input(folder, script.text, variables, limit).as_bytes())
                     .await;
                 drop(stdin);
                 written.is_ok()
@@ -480,10 +549,10 @@ mod distribution {
         };
         if !sent {
             crate::runner::kill_tree(&mut child).await;
-            return Err(format!("Could not send the action to {distribution}."));
+            return Err(format!("Could not send the command to {distribution}."));
         }
-        let collected = collect(&mut child, limit).await;
-        if collected.timed_out || !collected.drained {
+        let mut collected = collect(&mut child, limit, chunks, stop).await;
+        if collected.timed_out || collected.stopped || !collected.drained {
             crate::wsl::Launch {
                 distribution: distribution.into(),
                 namespace: namespace.into(),
@@ -494,7 +563,8 @@ mod distribution {
             .await;
             crate::runner::kill_tree(&mut child).await;
         }
-        Ok(collected.outcome(started))
+        collected.finish().await;
+        Ok(collected.ended(started))
     }
 
     #[cfg(test)]
@@ -502,35 +572,30 @@ mod distribution {
         use super::*;
         #[test]
         fn the_distribution_reads_everything_as_lines_of_data() {
-            let action = Action {
-                name: "list".into(),
-                description: String::new(),
-                shell: Shell::Bash,
-                script: "echo \"$PARAM_QUERY\"\nls".into(),
-                params: Default::default(),
-                timeout: Some(30),
-            };
+            let script = "echo \"$PARAM_QUERY\"\nls";
             let text = input(
                 "/home/me/it's here",
-                &action,
+                script,
                 &[("PARAM_QUERY".into(), "a\nb $(x)".into())],
                 Some(Duration::from_secs(30)),
             );
             let lines: Vec<_> = text.lines().collect();
             assert_eq!(lines.len(), 6);
             assert_eq!(STANDARD.decode(lines[0]).unwrap(), b"/home/me/it's here");
-            assert_eq!(STANDARD.decode(lines[1]).unwrap(), action.script.as_bytes());
+            assert_eq!(STANDARD.decode(lines[1]).unwrap(), script.as_bytes());
             assert_eq!(lines[2], "40");
             assert_eq!(lines[3], "1");
             assert_eq!(lines[4], "PARAM_QUERY");
             assert_eq!(STANDARD.decode(lines[5]).unwrap(), b"a\nb $(x)");
             assert!(text.ends_with('\n'));
-            // Without a time limit the distribution leaves the action to end by itself.
-            let unlimited = input("/tmp", &action, &[], None);
+            // Without a time limit the distribution leaves the command to end by itself, and
+            // without a folder it runs in the home folder.
+            let unlimited = input("", script, &[], None);
             assert_eq!(unlimited.lines().nth(2), Some("0"));
+            assert_eq!(unlimited.lines().next(), Some(""));
         }
 
-        fn first_distribution() -> String {
+        pub(crate) fn first_distribution() -> String {
             use std::os::windows::process::CommandExt;
             let listed = std::process::Command::new("wsl.exe")
                 .args(["--list", "--quiet"])
@@ -552,73 +617,92 @@ mod distribution {
                 .to_string()
         }
 
-        #[tokio::test]
-        #[ignore = "Opt-in: runs real actions in the first WSL distribution"]
-        async fn a_real_wsl_action_runs_in_its_folder_and_stops_at_its_limit() {
-            let distribution = first_distribution();
-            let action = |script: &str, timeout: u64| Action {
-                name: "probe".into(),
-                description: String::new(),
+        async fn run(
+            distribution: &str,
+            folder: &str,
+            text: &str,
+            variables: &[(String, String)],
+            timeout: u64,
+        ) -> (Ended, String, String) {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let stop = CancellationToken::new();
+            let script = Script {
+                name: "probe",
                 shell: Shell::Bash,
-                script: script.into(),
-                params: Default::default(),
+                text,
                 timeout: Some(timeout),
             };
-            let outcome = execute(
+            let ended = execute(
                 "agent-studio-test",
+                distribution,
+                folder,
+                &script,
+                variables,
+                Some(Duration::from_secs(timeout)),
+                Instant::now(),
+                sender,
+                &stop,
+            )
+            .await
+            .unwrap();
+            let (mut out, mut err) = (vec![], vec![]);
+            while let Ok((stream, bytes)) = receiver.try_recv() {
+                match stream {
+                    Stream::Out => out.extend(bytes),
+                    Stream::Err => err.extend(bytes),
+                }
+            }
+            (
+                ended,
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        }
+
+        #[tokio::test]
+        #[ignore = "Opt-in: runs real commands in the first WSL distribution"]
+        async fn a_real_wsl_action_runs_in_its_folder_and_stops_at_its_limit() {
+            let distribution = first_distribution();
+            let (ended, stdout, stderr) = run(
                 &distribution,
                 "/tmp",
-                &action(
-                    "printf '%s|%s|%s' \"$PWD\" \"$PARAM_QUERY\" \"$PARAM_EMPTY\"\necho warned >&2\nexit 5",
-                    60,
-                ),
+                "printf '%s|%s|%s' \"$PWD\" \"$PARAM_QUERY\" \"$PARAM_EMPTY\"\necho warned >&2\nexit 5",
                 &[
                     ("PARAM_QUERY".into(), "a 'b' \"c\" $(whoami); ñ\nline".into()),
                     ("PARAM_EMPTY".into(), String::new()),
                 ],
-                Some(Duration::from_secs(60)),
-                Instant::now(),
+                60,
             )
-            .await
-            .unwrap();
-            assert_eq!(outcome.stdout, "/tmp|a 'b' \"c\" $(whoami); ñ\nline|");
-            assert_eq!(outcome.stderr.trim(), "warned");
-            assert_eq!(outcome.exit_code, Some(5));
+            .await;
+            assert_eq!(stdout, "/tmp|a 'b' \"c\" $(whoami); ñ\nline|");
+            assert_eq!(stderr.trim(), "warned");
+            assert_eq!(ended.exit_code, Some(5));
+            // Without a folder it runs at home.
+            let (_, home, _) = run(&distribution, "", "printf '%s' \"$PWD\"", &[], 60).await;
+            assert!(home.starts_with('/') && home != "/tmp", "{home}");
             // A missing folder runs nothing.
-            let missing = execute(
-                "agent-studio-test",
+            let (missing, stdout, stderr) = run(
                 &distribution,
                 "/nonexistent/agent-studio",
-                &action("echo ran", 60),
+                "echo ran",
                 &[],
-                Some(Duration::from_secs(60)),
-                Instant::now(),
+                60,
             )
-            .await
-            .unwrap();
+            .await;
             assert_eq!(missing.exit_code, Some(126));
-            assert!(missing.stderr.contains("folder is unavailable"));
-            assert!(!missing.stdout.contains("ran"));
-            // Past its limit the action and what it started end, with what it printed so far.
+            assert!(stderr.contains("folder is unavailable"));
+            assert!(!stdout.contains("ran"));
+            // Past its limit the command and what it started end, with what it printed so far.
             let marker = format!("agent-studio-test-{}", uuid::Uuid::new_v4());
-            let slow = execute(
-                "agent-studio-test",
+            let (slow, stdout, _) = run(
                 &distribution,
                 "/tmp",
-                &action(
-                    &format!("echo started\nsleep 300 & echo $! > /tmp/{marker}\nwait"),
-                    3,
-                ),
+                &format!("echo started\nsleep 300 & echo $! > /tmp/{marker}\nwait"),
                 &[],
-                Some(Duration::from_secs(3)),
-                Instant::now(),
+                3,
             )
-            .await
-            .unwrap();
-            assert!(
-                slow.timed_out && slow.stdout.contains("started"),
-                "{slow:?}"
-            );
+            .await;
+            assert!(slow.timed_out && stdout.contains("started"), "{slow:?}");
             let inside = |script: &str| {
                 use std::os::windows::process::CommandExt;
                 let output = std::process::Command::new("wsl.exe")
@@ -645,10 +729,10 @@ mod distribution {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn site(folder: &Path) -> Site {
+    pub(crate) fn site(folder: &Path) -> Site {
         Site {
             environment_id: uuid::Uuid::new_v4().to_string(),
             distribution: None,
@@ -656,15 +740,37 @@ mod tests {
             project: String::new(),
         }
     }
-    fn action(shell: Shell, script: &str, timeout: u64) -> Action {
-        Action {
-            name: "probe".into(),
-            description: String::new(),
+
+    /// Runs a command whole, as a test reads it: how it ended and each stream.
+    pub(crate) async fn run_whole(
+        root: &Path,
+        site: &Site,
+        shell: Shell,
+        text: &str,
+        timeout: Option<u64>,
+        variables: Vec<(String, String)>,
+    ) -> Result<(Ended, String, String), String> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stop = CancellationToken::new();
+        let script = Script {
+            name: "probe",
             shell,
-            script: script.into(),
-            params: Default::default(),
-            timeout: Some(timeout),
+            text,
+            timeout,
+        };
+        let ended = execute(root, "test", site, &script, variables, sender, &stop).await?;
+        let (mut out, mut err) = (vec![], vec![]);
+        while let Some((stream, bytes)) = receiver.recv().await {
+            match stream {
+                Stream::Out => out.extend(bytes),
+                Stream::Err => err.extend(bytes),
+            }
         }
+        Ok((
+            ended,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        ))
     }
 
     #[test]
@@ -682,13 +788,13 @@ mod tests {
     }
 
     #[test]
-    fn a_wsl_screen_runs_bash_alone() {
+    fn a_wsl_place_runs_bash_alone() {
         let mut wsl = site(Path::new("/home/me"));
         wsl.distribution = Some("Ubuntu".into());
         assert!(available(&wsl, Shell::Bash).is_ok());
         assert!(available(&wsl, Shell::Powershell)
             .unwrap_err()
-            .contains("use bash"));
+            .contains("set where to windows"));
     }
 
     #[tokio::test]
@@ -700,11 +806,12 @@ mod tests {
         } else {
             Shell::Bash
         };
-        let error = execute(
+        let error = run_whole(
             root.path(),
-            "test",
             &site(&missing),
-            &action(shell, "echo hi", 10),
+            shell,
+            "echo hi",
+            Some(10),
             vec![],
         )
         .await
@@ -719,35 +826,31 @@ mod tests {
         let folder = root.path().join("Project 'quoted' & ñ");
         std::fs::create_dir(&folder).unwrap();
         let script = "$here = (Get-Location).Path\n[pscustomobject]@{ folder = $here; query = $env:PARAM_QUERY; text = 'ñ ✓' } | ConvertTo-Json -Compress\nWrite-Error 'warned' -ErrorAction Continue\ncmd /c exit 3";
-        let outcome = execute(
+        let (ended, stdout, stderr) = run_whole(
             &root.path().join("screens"),
-            "test",
             &site(&folder),
-            &action(Shell::Powershell, script, 60),
+            Shell::Powershell,
+            script,
+            Some(60),
             vec![("PARAM_QUERY".into(), "a \"b\" $(whoami); c".into())],
         )
         .await
         .unwrap();
-        let value: serde_json::Value = serde_json::from_str(outcome.stdout.trim()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
         assert_eq!(
             std::fs::canonicalize(value["folder"].as_str().unwrap()).ok(),
             std::fs::canonicalize(&folder).ok()
         );
         assert_eq!(value["query"], "a \"b\" $(whoami); c");
         assert_eq!(value["text"], "ñ ✓");
-        // Errors read as text naming the action, never as serialized records or the script.
+        // Errors read as text naming the command, never as serialized records or the script.
+        assert!(stderr.contains("probe : warned"), "{stderr}");
         assert!(
-            outcome.stderr.contains("probe : warned"),
-            "{}",
-            outcome.stderr
+            !stderr.contains("CLIXML") && !stderr.contains("ConvertTo-Json"),
+            "{stderr}"
         );
-        assert!(
-            !outcome.stderr.contains("CLIXML") && !outcome.stderr.contains("ConvertTo-Json"),
-            "{}",
-            outcome.stderr
-        );
-        assert_eq!(outcome.exit_code, Some(3));
-        assert!(!outcome.timed_out && !outcome.truncated);
+        assert_eq!(ended.exit_code, Some(3));
+        assert!(!ended.timed_out && !ended.stopped);
         // The script file is gone once it was read.
         let left = std::fs::read_dir(root.path().join("screens").join("runs"))
             .unwrap()
@@ -757,49 +860,74 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn an_action_past_its_time_is_stopped_with_what_it_printed() {
+    async fn a_command_past_its_time_is_stopped_with_what_it_printed() {
         let root = tempfile::tempdir().unwrap();
-        let outcome = execute(
+        let (ended, stdout, _) = run_whole(
             root.path(),
-            "test",
             &site(root.path()),
-            &action(
-                Shell::Powershell,
-                "Write-Output 'started'\nStart-Sleep -Seconds 30\nWrite-Output 'never'",
-                2,
-            ),
+            Shell::Powershell,
+            "Write-Output 'started'\nStart-Sleep -Seconds 30\nWrite-Output 'never'",
+            Some(2),
             vec![],
         )
         .await
         .unwrap();
-        assert!(outcome.timed_out);
-        assert_eq!(outcome.exit_code, None);
-        assert!(outcome.stdout.contains("started") && !outcome.stdout.contains("never"));
-        assert!(outcome.duration_ms < 15_000, "{}", outcome.duration_ms);
+        assert!(ended.timed_out);
+        assert_eq!(ended.exit_code, None);
+        assert!(stdout.contains("started") && !stdout.contains("never"));
+        assert!(ended.duration_ms < 15_000, "{}", ended.duration_ms);
     }
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn an_action_without_a_timeout_runs_until_it_ends_and_keeps_all_it_printed() {
+    async fn a_stopped_command_ends_at_once_with_what_it_printed() {
         let root = tempfile::tempdir().unwrap();
-        let mut whole = action(
-            Shell::Powershell,
-            "Start-Sleep -Seconds 1\n[Console]::Out.Write('x' * 5242880)\nWrite-Output 'done'",
-            1,
-        );
-        whole.timeout = None;
-        let outcome = execute(root.path(), "test", &site(root.path()), &whole, vec![])
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stop = CancellationToken::new();
+        let script = Script {
+            name: "probe",
+            shell: Shell::Powershell,
+            text: "Write-Output 'started'\nStart-Sleep -Seconds 60\nWrite-Output 'never'",
+            timeout: None,
+        };
+        let stopping = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            stopping.cancel();
+        });
+        let site = site(root.path());
+        let ended = execute(root.path(), "test", &site, &script, vec![], sender, &stop)
             .await
             .unwrap();
+        let mut out = vec![];
+        while let Some((_, bytes)) = receiver.recv().await {
+            out.extend(bytes);
+        }
+        assert!(ended.stopped && ended.exit_code.is_none(), "{ended:?}");
+        assert!(ended.duration_ms < 20_000, "{}", ended.duration_ms);
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("started") && !out.contains("never"), "{out}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_without_a_timeout_runs_until_it_ends_and_keeps_all_it_printed() {
+        let root = tempfile::tempdir().unwrap();
+        let (ended, stdout, _) = run_whole(
+            root.path(),
+            &site(root.path()),
+            Shell::Powershell,
+            "Start-Sleep -Seconds 1\n[Console]::Out.Write('x' * 5242880)\nWrite-Output 'done'",
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
         // Past the 4 MB a stream earlier releases kept.
-        assert!(!outcome.timed_out && !outcome.truncated);
-        assert_eq!(outcome.exit_code, Some(0));
-        assert!(
-            outcome.stdout.len() > 5 * 1024 * 1024,
-            "{}",
-            outcome.stdout.len()
-        );
-        assert!(outcome.stdout.trim_end().ends_with("done"));
+        assert!(!ended.timed_out);
+        assert_eq!(ended.exit_code, Some(0));
+        assert!(stdout.len() > 5 * 1024 * 1024, "{}", stdout.len());
+        assert!(stdout.trim_end().ends_with("done"));
     }
 
     #[tokio::test]
@@ -810,20 +938,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("project ñ");
         std::fs::create_dir(&folder).unwrap();
-        let outcome = execute(
+        let (ended, stdout, _) = run_whole(
             &root.path().join("screens"),
-            "test",
             &site(&folder),
-            &action(
-                Shell::Bash,
-                "printf '%s|%s' \"$(basename \"$PWD\")\" \"$PARAM_QUERY\"\nexit 4",
-                60,
-            ),
+            Shell::Bash,
+            "printf '%s|%s' \"$(basename \"$PWD\")\" \"$PARAM_QUERY\"\nexit 4",
+            Some(60),
             vec![("PARAM_QUERY".into(), "x; $(echo no)".into())],
         )
         .await
         .unwrap();
-        assert_eq!(outcome.stdout, "project ñ|x; $(echo no)");
-        assert_eq!(outcome.exit_code, Some(4));
+        assert_eq!(stdout, "project ñ|x; $(echo no)");
+        assert_eq!(ended.exit_code, Some(4));
     }
 }

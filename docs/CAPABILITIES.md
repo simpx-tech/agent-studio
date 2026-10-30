@@ -142,7 +142,7 @@ The tool is offered only to Codex and Claude chats with tools enabled; Gemini, b
 
 ## Screens
 
-A chat can also build a lasting page with its own interface and commands, such as a dashboard of the pull requests you opened this week, with its `save_screen` tool. Screens stay on the computer that runs their commands, open from the reply's card or the sidebar's **Screens** tab, and run only the actions you reviewed and allowed. See [Screens](SCREENS.md).
+A chat can also build a lasting page with its own interface, commands and MCP tool calls, such as a dashboard of the pull requests you opened this week, with its `save_screen` tool. Screens stay on the computer that runs their commands, on Windows and in its WSL distributions alike, open from the reply's card or the sidebar's **Screens** tab, run what they ask for at once as jobs that keep their output, and keep their page while another view shows. See [Screens](SCREENS.md).
 
 ## Slash commands and skills
 

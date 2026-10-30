@@ -919,6 +919,18 @@ export function toolVisual(
     list_screens: 'List screens',
     read_screen: 'Read screen',
   }[tool.name.replace(/^mcp__agent_studio__/, '')];
+  // The MCP servers a chat reaches as screens call them, in another place of its computer.
+  const reached = {
+    list_mcp_tools: 'List MCP tools',
+    call_mcp_tool: 'Call MCP tool',
+  }[tool.name.replace(/^mcp__agent_studio__/, '')];
+  // A Codex dynamic call's detail only says Codex reported it.
+  if (reached)
+    return {
+      icon: 'plug',
+      title: reached,
+      detail: tool.name.startsWith('mcp__agent_studio__') ? tool.detail : undefined,
+    };
   if (screenTool)
     return {
       icon: 'screen',

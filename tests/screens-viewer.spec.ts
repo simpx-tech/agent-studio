@@ -8,9 +8,9 @@ import { signInPwa } from './pwa-helper';
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-// The Viewer reads a screen from the computer that keeps it and runs its actions and MCP tools
-// there, through the relay's `screens` jobs: the phone never holds a screen beyond the window
-// showing it.
+// The Viewer reads a screen from the computer that keeps it, runs its actions there as jobs it
+// follows and calls its MCP tools there, through the relay's `screens` jobs: the phone never
+// holds a screen beyond the window showing it.
 test('the Viewer opens a computer’s screen and runs its actions through the relay', async ({
   page,
 }, testInfo) => {
@@ -100,6 +100,7 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
   };
   // The computer that keeps the screen answers its jobs, as its window would.
   const screenJobs: unknown[] = [];
+  const jobId = crypto.randomUUID();
   let busy = false;
   let workerError = '';
   async function work() {
@@ -130,23 +131,37 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
         }
         screenJobs.push(job.args);
         const request = job.args.request;
+        const record = {
+          id: jobId,
+          action: 'status',
+          label: 'status',
+          keep: false,
+          startedAt: '2026-10-30T12:00:00.000Z',
+        };
+        const printed = JSON.stringify({ passing: 3 });
         const result =
           request.op === 'list'
             ? { screens: [summary] }
             : request.op === 'read'
               ? detail
-              : request.op === 'run'
-                ? {
-                    exitCode: 0,
-                    stdout: JSON.stringify({ passing: 3 }),
-                    stderr: '',
-                    truncated: false,
-                    timedOut: false,
-                    durationMs: 40,
-                  }
-                : request.op === 'mcp'
-                  ? { content: [{ type: 'text', text: JSON.stringify({ open: 2 }) }] }
-                  : {};
+              : request.op === 'load'
+                ? { values: {} }
+                : request.op === 'jobs'
+                  ? { jobs: [] }
+                  : request.op === 'start'
+                    ? { ...record, state: 'running' }
+                    : request.op === 'output'
+                      ? {
+                          chunks: [{ stream: 'stdout', text: printed }],
+                          next: printed.length,
+                          job: { ...record, state: 'done', exitCode: 0, durationMs: 40 },
+                        }
+                      : request.op === 'mcp'
+                        ? {
+                            content: [{ type: 'text', text: JSON.stringify({ open: 2 }) }],
+                            account: 'Codex QA (Codex)',
+                          }
+                        : {};
         await call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result });
       }
     } catch (error) {
@@ -167,6 +182,10 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
       { op: 'mcp', id: screenId, server: '', tool: 'list_pull_requests' },
       { op: 'mcp', id: screenId, server: 'github', tool: 'list_pull_requests', command: 'npx' },
       { op: 'mcp', id: screenId, server: 'github', tool: 'list_pull_requests', arguments: [1] },
+      { op: 'start', id: screenId, action: 'status', command: { shell: 'bash', script: 'ls' } },
+      { op: 'start', id: screenId, command: { shell: 'cmd', script: 'dir' } },
+      { op: 'output', id: screenId, job: '../jobs' },
+      { op: 'mcp', id: screenId, server: 'github', tool: 'x', where: 'C:\\' },
     ])
       await call(
         'POST',
@@ -200,7 +219,14 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
       expect.arrayContaining([
         { environmentId: host, request: { op: 'list' } },
         { environmentId: host, request: { op: 'read', id: screenId } },
-        { environmentId: host, request: { op: 'run', id: screenId, action: 'status', params: {} } },
+        {
+          environmentId: host,
+          request: { op: 'start', id: screenId, action: 'status', params: {}, keep: false },
+        },
+        {
+          environmentId: host,
+          request: { op: 'output', id: screenId, job: jobId, after: 0, wait: true, peek: false },
+        },
         {
           environmentId: host,
           request: {

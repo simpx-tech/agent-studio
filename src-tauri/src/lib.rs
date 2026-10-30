@@ -1859,6 +1859,11 @@ fn has_owned_work(app: &tauri::AppHandle) -> bool {
     !owned_tokens(app).is_empty()
         || app.state::<pool::Pool>().len() > 0
         || app.state::<mcp::Management>().has_work()
+        || app
+            .state::<std::sync::Arc<screens::Screens>>()
+            .jobs
+            .running()
+            > 0
 }
 
 /// Cancel all owned work, release parked CLIs, and wait until owned processes have stopped,
@@ -1868,10 +1873,10 @@ async fn release_owned_work(app: &tauri::AppHandle) {
         token.cancel();
     }
     app.state::<mcp::Management>().sweep(app, true).await;
-    app.state::<std::sync::Arc<screens::Screens>>()
-        .calls
-        .shutdown()
-        .await;
+    let screens = app.state::<std::sync::Arc<screens::Screens>>();
+    screens.calls.shutdown().await;
+    // Screens' jobs keep what they printed, read as stopped.
+    screens.jobs.shutdown().await;
     app.state::<pool::Pool>().shutdown().await;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

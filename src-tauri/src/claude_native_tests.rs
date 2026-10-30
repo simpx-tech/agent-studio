@@ -976,10 +976,10 @@ async fn installed_claude_shows_its_question_while_it_writes_it() {
 }
 
 /// A chat builds a screen through the CLI's own call of save_screen, and the screen's action
-/// runs only once allowed and only with values its declaration accepts, as its page runs it.
+/// runs at once, only with values its declaration accepts, as its page runs it.
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
-async fn installed_claude_saves_a_screen_whose_action_runs_once_allowed() {
+async fn installed_claude_saves_a_screen_whose_action_runs() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
     std::fs::create_dir_all(&runtime).unwrap();
@@ -1044,7 +1044,7 @@ async fn installed_claude_saves_a_screen_whose_action_runs_once_allowed() {
         })
         .expect("Claude saved no screen");
     assert_eq!(card.title, "Probe screen");
-    // A window reads, allows and runs it through the same requests.
+    // A window reads and runs it through the same requests.
     let ask = |request: serde_json::Value| {
         let (screens, root) = (screens.clone(), data.join("screens"));
         async move {
@@ -1065,13 +1065,6 @@ async fn installed_claude_saves_a_screen_whose_action_runs_once_allowed() {
     );
     assert_eq!(detail["actions"][0]["name"], "count", "{detail}");
     let run = json!({"op":"run","id":card.id,"action":"count","params":{"limit":3}});
-    assert_eq!(
-        ask(run.clone()).await.unwrap_err(),
-        crate::screens::NOT_ALLOWED
-    );
-    ask(json!({"op":"approve","id":card.id,"digest":detail["digest"]}))
-        .await
-        .unwrap();
     let outcome = ask(run).await.unwrap();
     assert_eq!(outcome["exitCode"], 0, "{outcome}");
     let printed: serde_json::Value =

@@ -688,22 +688,31 @@ export async function mockDesktop(page: Page, mode = 'success') {
                     : 'PowerShell',
             };
           }
-          // Screens this computer keeps: tests seed `test-screens` with whole screens (with
-          // `allowed`, `digest` and saved `data`), read `screenRequests`, `screenRuns` and
-          // `screenToolCalls`, answer a run with `screenOutputs[action]` and a tool call with
-          // `screenToolResults[tool]` (`{ error }` fails it), and hold runs with `holdScreenRun`.
+          // Screens this computer keeps: tests seed `test-screens` with whole screens (with saved
+          // `data`), read `screenRequests`, `screenRuns` (each action or command started),
+          // `screenToolCalls` and `screenAsks`, answer an action with `screenOutputs[action]`
+          // (a string, a value printed as JSON, or `{ stdout, stderr, exitCode }`), a tool call
+          // with `screenToolResults[tool]` (`{ error }` fails it) and a question with
+          // `screenAnswer`. `holdScreenRun` holds every job until `releaseScreenRun()`, and
+          // `printScreenRun(text)` prints to the jobs still running meanwhile.
           if (command === 'manage_screen') {
             const w = window as any;
             const request = args.request;
             (w.screenRequests ??= []).push(request);
             const screens: any[] = JSON.parse(localStorage.getItem('test-screens') ?? '[]');
             const keep = () => localStorage.setItem('test-screens', JSON.stringify(screens));
+            const jobs: Record<string, any> = (w.screenJobs ??= {});
+            const running = (screen: string) =>
+              Object.values(jobs).filter(
+                (job: any) => job.screen === screen && job.record.state === 'running',
+              ).length;
             const detail = ({ data: _data, ...screen }: any) => ({
               ...screen,
               mcpTools: screen.mcpTools ?? [],
               commands: screen.actions.length,
               tools: screen.mcpTools?.length ?? 0,
-              allowed: (!screen.actions.length && !screen.mcpTools?.length) || !!screen.allowed,
+              allowed: true,
+              running: running(screen.id),
             });
             if (request.op === 'list')
               return {
@@ -721,22 +730,13 @@ export async function mockDesktop(page: Page, mode = 'success') {
               };
             const screen = screens.find((s) => s.id === request.id);
             if (!screen) throw 'This screen is no longer on this computer.';
-            if (request.op === 'read') return detail(screen);
-            if (request.op === 'approve') {
-              if (request.digest !== screen.digest)
-                throw 'This screen’s actions changed since they were shown. Review them again.';
-              screen.allowed = true;
-              keep();
+            if (request.op === 'read' || request.op === 'approve' || request.op === 'revoke')
               return detail(screen);
-            }
-            if (request.op === 'revoke') {
-              screen.allowed = false;
-              keep();
-              return detail(screen);
-            }
             if (request.op === 'delete') {
               screens.splice(screens.indexOf(screen), 1);
               keep();
+              for (const [id, job] of Object.entries(jobs))
+                if ((job as any).screen === screen.id) delete jobs[id];
               return {};
             }
             if (request.op === 'load') return { values: screen.data ?? {} };
@@ -747,40 +747,167 @@ export async function mockDesktop(page: Page, mode = 'success') {
               keep();
               return { bytes: JSON.stringify(screen.data).length };
             }
+            // A job prints what its action's output names, once held jobs are released.
+            const startJob = (start: any) => {
+              const action = start.action
+                ? screen.actions.find((a: any) => a.name === start.action)
+                : undefined;
+              if (start.action && !action) throw `This screen has no action named ${start.action}.`;
+              (w.screenRuns ??= []).push(start);
+              const id = crypto.randomUUID();
+              const job: any = {
+                screen: screen.id,
+                chunks: [] as { stream: string; text: string; end: number }[],
+                length: 0,
+                waiters: [] as (() => void)[],
+                record: {
+                  id,
+                  ...(start.action ? { action: start.action } : {}),
+                  label: start.action ?? String(start.command?.script ?? '').split('\n')[0],
+                  params: start.params ?? {},
+                  ...(start.command?.where ? { where: start.command.where } : {}),
+                  keep: !!start.keep,
+                  state: 'running',
+                  startedAt: new Date().toISOString(),
+                },
+              };
+              const wake = () => job.waiters.splice(0).forEach((resolve: () => void) => resolve());
+              const print = (stream: string, text: string) => {
+                if (!text) return;
+                job.length += text.length;
+                job.chunks.push({ stream, text, end: job.length });
+                wake();
+              };
+              job.stop = () => {
+                if (job.record.state !== 'running') return;
+                Object.assign(job.record, {
+                  state: 'stopped',
+                  exitCode: null,
+                  endedAt: new Date().toISOString(),
+                  durationMs: 5,
+                });
+                wake();
+              };
+              jobs[id] = job;
+              job.print = print;
+              w.printScreenRun = (text: string) => {
+                for (const kept of Object.values(jobs) as any[])
+                  if (kept.record.state === 'running') kept.print('stdout', text);
+              };
+              void (async () => {
+                if (w.holdScreenRun) {
+                  await new Promise<void>((resolve) => {
+                    (w.heldScreenRuns ??= []).push(resolve);
+                    w.releaseScreenRun = () =>
+                      w.heldScreenRuns.splice(0).forEach((release: () => void) => release());
+                  });
+                }
+                if (job.record.state !== 'running') return;
+                const output = w.screenOutputs?.[start.action ?? 'command'];
+                const result =
+                  output && typeof output === 'object' && 'stdout' in output
+                    ? output
+                    : {
+                        stdout:
+                          typeof output === 'string'
+                            ? output
+                            : JSON.stringify(output ?? { ok: true }),
+                        stderr: '',
+                        exitCode: 0,
+                      };
+                print('stdout', result.stdout);
+                print('stderr', result.stderr ?? '');
+                Object.assign(job.record, {
+                  state: 'done',
+                  exitCode: result.exitCode ?? 0,
+                  timedOut: false,
+                  endedAt: new Date().toISOString(),
+                  durationMs: 12,
+                });
+                wake();
+              })();
+              return job;
+            };
+            if (request.op === 'start') return startJob(request).record;
             if (request.op === 'run') {
-              if (screen.actions.length && !screen.allowed)
-                throw 'The user has not allowed this screen’s actions yet. They can review and allow them above the screen.';
-              (w.screenRuns ??= []).push(request);
-              if (w.holdScreenRun)
-                await new Promise<void>((resolve) => (w.releaseScreenRun = resolve));
-              const output = w.screenOutputs?.[request.action];
+              const job = startJob(request);
+              while (job.record.state === 'running')
+                await new Promise<void>((resolve) => job.waiters.push(resolve));
+              delete jobs[job.record.id];
+              const text = (stream: string) =>
+                job.chunks
+                  .filter((c: any) => c.stream === stream)
+                  .map((c: any) => c.text)
+                  .join('');
               return {
-                exitCode: 0,
-                stdout:
-                  typeof output === 'string' ? output : JSON.stringify(output ?? { ok: true }),
-                stderr: '',
+                exitCode: job.record.exitCode,
+                stdout: text('stdout'),
+                stderr: text('stderr'),
                 truncated: false,
                 timedOut: false,
                 durationMs: 12,
+                job: job.record.id,
               };
             }
+            if (request.op === 'jobs')
+              return {
+                jobs: Object.values(jobs)
+                  .filter((job: any) => job.screen === screen.id)
+                  .map((job: any) => ({ ...job.record, bytes: job.length }))
+                  .reverse(),
+              };
+            const job = jobs[request.job];
+            if (['output', 'stop', 'forget'].includes(request.op) && !job) {
+              if (request.op === 'forget') return {};
+              throw 'This job is no longer kept on this computer.';
+            }
+            if (request.op === 'output') {
+              const after = request.after ?? 0;
+              if (request.wait && job.record.state === 'running' && job.length <= after)
+                await new Promise<void>((resolve) => {
+                  job.waiters.push(resolve);
+                  setTimeout(resolve, 20_000);
+                });
+              const chunks = job.chunks
+                .filter((c: any) => c.end > after)
+                .map((c: any) => ({ stream: c.stream, text: c.text }));
+              const ended = job.record.state !== 'running';
+              if (ended && !job.record.keep && !request.peek) delete jobs[request.job];
+              return {
+                chunks,
+                next: job.length,
+                job: { ...job.record, bytes: job.length },
+              };
+            }
+            if (request.op === 'stop') {
+              job.stop();
+              return job.record;
+            }
+            if (request.op === 'forget') {
+              job.stop();
+              delete jobs[request.job];
+              return {};
+            }
             if (request.op === 'mcp') {
-              if (!detail(screen).allowed)
-                throw 'The user has not allowed this screen’s actions yet. They can review and allow them above the screen.';
-              if (
-                !screen.mcpTools?.some(
-                  (t: any) => t.server === request.server && t.tool === request.tool,
-                )
-              )
-                throw `This screen declares no MCP tool ${request.tool} of ${request.server}.`;
               (w.screenToolCalls ??= []).push(request);
               const result = w.screenToolResults?.[request.tool];
               if (result?.error) throw result.error;
-              return (
-                result ?? {
+              return {
+                ...(result ?? {
                   content: [{ type: 'text', text: JSON.stringify(request.arguments ?? {}) }],
-                }
-              );
+                }),
+                account: w.screenToolAccount ?? 'Claude CLI login (Claude)',
+              };
+            }
+            if (request.op === 'tools')
+              return {
+                account: 'Claude CLI login (Claude)',
+                accounts: ['Claude CLI login (Claude)'],
+                servers: w.screenServers ?? [],
+              };
+            if (request.op === 'ask') {
+              (w.screenAsks ??= []).push(request);
+              return { text: w.screenAnswer ?? 'An answer' };
             }
           }
           if (command === 'read_native_instructions') {

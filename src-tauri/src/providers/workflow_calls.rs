@@ -162,7 +162,7 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
             tool("dynamic_wait", "Set a timer that wakes you at a time (until, ISO 8601) or after seconds, for example at a usage reset. End your turn after it.", json!({
                 "until":{"type":"string"},"seconds":{"type":"number","minimum":1},"reason":{"type":"string"}
             }), &[]),
-            tool("dynamic_screen", "Use a screen of a computer: run one of its allowed actions (op run, action, params), or load (op load) or save (op save, key, value) its data. Build screens yourself with save_screen.", json!({
+            tool("dynamic_screen", "Use a screen of a computer: run one of its actions (op run, action, params), or load (op load) or save (op save, key, value) its data. Build screens yourself with save_screen.", json!({
                 "op":{"type":"string","enum":["run","load","save"]},"computer":{"type":"string"},"screen":{"type":"string"},
                 "action":{"type":"string"},"params":{"type":"object"},"key":{"type":"string"},"value":{}
             }), &["op","screen"]),

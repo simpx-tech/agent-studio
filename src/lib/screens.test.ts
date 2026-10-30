@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  jobDuration,
   mergeScreenCards,
   screenCall,
   screenCardsSchema,
   screenDetailSchema,
   screenDocument,
   screenFolderName,
+  screenJobSchema,
+  screenOutputSchema,
   screenReply,
   screenRequestSchema,
   screenSummarySchema,
+  screenTheme,
   screenToolResultSchema,
+  terminalText,
   type ScreenCard,
 } from './screens';
 import { applyRunEvent, retainRunEvent, savesAtOnce } from './activity';
@@ -25,6 +30,7 @@ import { mergeShared, sharedWorkspace } from './sync';
 import { toolVisual } from './tool-presentation';
 
 const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const job = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const environmentId = '11111111-1111-4111-8111-111111111111';
 const card: ScreenCard = { id, revision: 1, title: 'My pull requests', environmentId };
 
@@ -66,11 +72,53 @@ describe('screen requests', () => {
     );
   });
 
-  it('call a declared MCP tool by its server and name, with arguments of any size', () => {
+  it('start actions and commands as jobs, and follow, stop and forget them by id', () => {
+    for (const request of [
+      { op: 'start', id, action: 'build', params: { config: 'Development' }, keep: true },
+      { op: 'start', id, action: 'build' },
+      {
+        op: 'start',
+        id,
+        command: { shell: 'bash', script: 'gh pr list --json number', where: 'wsl' },
+        params: { since: '2026-10-01' },
+      },
+      {
+        op: 'start',
+        id,
+        command: { shell: 'powershell', script: 'x'.repeat(100_000), timeout: 9 },
+      },
+      { op: 'start', id, command: { shell: 'bash', script: 'ls', where: 'Ubuntu-24.04' } },
+      { op: 'jobs', id },
+      { op: 'output', id, job },
+      { op: 'output', id, job, after: 4096, wait: true, peek: true },
+      { op: 'stop', id, job },
+      { op: 'forget', id, job },
+    ])
+      expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
+    for (const request of [
+      { op: 'start', id },
+      { op: 'start', id, action: 'build', command: { shell: 'bash', script: 'ls' } },
+      { op: 'start', id, command: { shell: 'cmd', script: 'dir' } },
+      { op: 'start', id, command: { shell: 'bash', script: '  ' } },
+      { op: 'start', id, command: { shell: 'bash', script: 'ls', where: 'C:\\' } },
+      { op: 'start', id, command: { shell: 'bash', script: 'ls', timeout: 0 } },
+      { op: 'start', id, command: { shell: 'bash', script: 'ls', cwd: '/' } },
+      { op: 'output', id, job: '../x' },
+      { op: 'output', id, job, after: -1 },
+      { op: 'stop', id },
+    ])
+      expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(false);
+  });
+
+  it('call any MCP tool by its server and name, where and as whom the page names', () => {
     for (const request of [
       { op: 'mcp', id, server: 'linear', tool: 'list_issues' },
       { op: 'mcp', id, server: 'claude.ai Linear', tool: 'list_issues', arguments: { a: 1 } },
       { op: 'mcp', id, server: 'linear', tool: 'x', arguments: { text: 'x'.repeat(100_000) } },
+      { op: 'mcp', id, server: 'linear', tool: 'x', where: 'wsl', account: 'Claude CLI login' },
+      { op: 'tools', id },
+      { op: 'tools', id, where: 'windows' },
+      { op: 'ask', id, prompt: 'Summarize this', model: 'sonnet', system: 'Be brief.' },
     ])
       expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
     for (const request of [
@@ -81,6 +129,10 @@ describe('screen requests', () => {
       { op: 'mcp', id, server: 'linear', tool: 'list_issues', command: 'npx' },
       { op: 'mcp', id: '../x', server: 'linear', tool: 'list_issues' },
       { op: 'mcp', id, server: 'linear', tool: 'list_issues', arguments: { big: 1n } },
+      { op: 'mcp', id, server: 'linear', tool: 'x', where: 'two words' },
+      { op: 'mcp', id, server: 'linear', tool: 'x', account: 'a\nb' },
+      { op: 'ask', id, prompt: '  ' },
+      { op: 'ask', id, prompt: 'Hi', model: 'two words' },
     ])
       expect(
         screenRequestSchema.safeParse(request).success,
@@ -88,7 +140,7 @@ describe('screen requests', () => {
       ).toBe(false);
   });
 
-  it('read hosts from before MCP tools as screens without them', () => {
+  it('read hosts from before MCP tools, jobs and places as screens without them', () => {
     const summary = {
       id,
       revision: 1,
@@ -101,7 +153,7 @@ describe('screen requests', () => {
       createdAt: '',
       updatedAt: '',
       commands: 1,
-      allowed: true,
+      allowed: false,
     };
     const older = screenDetailSchema.parse({
       ...summary,
@@ -112,23 +164,61 @@ describe('screen requests', () => {
     expect(older.mcpTools).toEqual([]);
     expect(older.account).toBeUndefined();
     expect(screenSummarySchema.parse(summary).tools).toBeUndefined();
+    expect(screenSummarySchema.parse(summary).running).toBeUndefined();
     const current = screenDetailSchema.parse({
       ...summary,
+      allowed: true,
+      running: 2,
       tools: 1,
       html: '<p></p>',
-      actions: [],
-      mcpTools: [{ server: 'linear', tool: 'list_issues', description: 'Lists issues' }],
+      actions: [{ name: 'build', shell: 'powershell', script: 'x', where: 'windows' }],
+      mcpTools: [{ server: 'linear', tool: 'list_issues', where: 'wsl', account: 'Work' }],
       account: { provider: 'claude', connectionId: environmentId },
       digest: 'a'.repeat(64),
     });
-    expect(current.mcpTools[0].tool).toBe('list_issues');
-    expect(current.account?.connectionId).toBe(environmentId);
+    expect(current.mcpTools[0]).toMatchObject({ where: 'wsl', account: 'Work' });
+    expect(current.actions[0].where).toBe('windows');
+    expect(current.running).toBe(2);
     expect(
       screenToolResultSchema.parse({
         content: [{ type: 'text', text: 'ok' }],
         structuredContent: { ok: true },
-      }).structuredContent,
-    ).toEqual({ ok: true });
+        account: 'Claude CLI login (Claude)',
+      }),
+    ).toMatchObject({ structuredContent: { ok: true }, account: 'Claude CLI login (Claude)' });
+    // A job and its output as the host reports them.
+    const record = {
+      id: job,
+      action: 'build',
+      label: 'build',
+      params: { config: 'Development' },
+      keep: true,
+      state: 'done',
+      startedAt: '2026-10-30T12:00:00.000Z',
+      endedAt: '2026-10-30T12:10:00.000Z',
+      exitCode: 0,
+      timedOut: false,
+      durationMs: 600_000,
+      bytes: 12,
+    };
+    expect(screenJobSchema.parse(record).state).toBe('done');
+    expect(
+      screenOutputSchema.parse({
+        chunks: [
+          { stream: 'stdout', text: 'built\n' },
+          { stream: 'stderr', text: 'warned\n' },
+        ],
+        next: 12,
+        job: record,
+      }).chunks,
+    ).toHaveLength(2);
+    expect(jobDuration(screenJobSchema.parse(record), 0)).toBe('10m 0s');
+    expect(
+      jobDuration(
+        { state: 'running', startedAt: '2026-10-30T12:00:00.000Z' },
+        Date.parse('2026-10-30T13:05:09.000Z'),
+      ),
+    ).toBe('1h 5m');
   });
 });
 
@@ -142,14 +232,38 @@ describe('the bridge of a screen page', () => {
   });
   it('accepts only its own frame’s well-formed calls', () => {
     expect(
-      screenCall(message({ method: 'run', action: 'list_prs', params: { since: 'x' } }), token),
+      screenCall(message({ method: 'start', action: 'build', params: { config: 'x' } }), token),
+    ).toEqual({ id: 1, method: 'start', action: 'build', params: { config: 'x' }, keep: false });
+    expect(
+      screenCall(
+        message({
+          method: 'start',
+          command: { shell: 'bash', script: 'gh pr list', where: 'wsl' },
+          keep: true,
+        }),
+        token,
+      ),
     ).toEqual({
       id: 1,
-      method: 'run',
-      action: 'list_prs',
-      params: { since: 'x' },
+      method: 'start',
+      command: { shell: 'bash', script: 'gh pr list', where: 'wsl' },
+      params: {},
+      keep: true,
     });
-    expect(screenCall(message({ method: 'run', action: 'list_prs' }), token)?.method).toBe('run');
+    expect(screenCall(message({ method: 'jobs' }), token)).toEqual({ id: 1, method: 'jobs' });
+    expect(screenCall(message({ method: 'output', job, after: 10, wait: true }), token)).toEqual({
+      id: 1,
+      method: 'output',
+      job,
+      after: 10,
+      wait: true,
+    });
+    expect(screenCall(message({ method: 'stop', job }), token)).toEqual({
+      id: 1,
+      method: 'stop',
+      job,
+    });
+    expect(screenCall(message({ method: 'forget', job }), token)?.method).toBe('forget');
     expect(screenCall(message({ method: 'load', key: 'filter' }), token)).toEqual({
       id: 1,
       method: 'load',
@@ -162,10 +276,25 @@ describe('the bridge of a screen page', () => {
       key: 'filter',
       value: null,
     });
-    expect(screenCall(message({ method: 'chat', text: 'Review #12' }), token)?.method).toBe('chat');
+    expect(screenCall(message({ method: 'chat', text: 'Review #12' }), token)).toEqual({
+      id: 1,
+      method: 'chat',
+      text: 'Review #12',
+      send: false,
+    });
+    expect(screenCall(message({ method: 'chat', text: 'Go', send: true }), token)).toMatchObject({
+      send: true,
+    });
     expect(
       screenCall(
-        message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: { a: 1 } }),
+        message({
+          method: 'mcp',
+          server: 'linear',
+          tool: 'list_issues',
+          arguments: { a: 1 },
+          where: 'wsl',
+          account: ' Work ',
+        }),
         token,
       ),
     ).toEqual({
@@ -174,20 +303,39 @@ describe('the bridge of a screen page', () => {
       server: 'linear',
       tool: 'list_issues',
       arguments: { a: 1 },
+      where: 'wsl',
+      account: 'Work',
     });
     // Without arguments the tool receives an empty object.
     expect(
       screenCall(message({ method: 'mcp', server: 'linear', tool: 'list_issues' }), token),
     ).toMatchObject({ arguments: {} });
+    expect(screenCall(message({ method: 'servers', where: 'Ubuntu' }), token)).toEqual({
+      id: 1,
+      method: 'servers',
+      where: 'Ubuntu',
+    });
+    expect(screenCall(message({ method: 'ask', prompt: 'Sum up', model: 'haiku' }), token)).toEqual(
+      { id: 1, method: 'ask', prompt: 'Sum up', model: 'haiku', system: undefined },
+    );
+    expect(screenCall(message({ method: 'copy', text: '' }), token)).toEqual({
+      id: 1,
+      method: 'copy',
+      text: '',
+    });
+    expect(
+      screenCall(message({ method: 'open', url: 'https://linear.app/x/issue/A-1' }), token),
+    ).toEqual({ id: 1, method: 'open', url: 'https://linear.app/x/issue/A-1' });
     // Values, keys and messages of any size, and any number of params.
     const params = Object.fromEntries(
       Array.from({ length: 13 }, (_, i) => [`p${i}`, 'x'.repeat(10_000)]),
     );
-    expect(screenCall(message({ method: 'run', action: 'list_prs', params }), token)).toEqual({
+    expect(screenCall(message({ method: 'start', action: 'list_prs', params }), token)).toEqual({
       id: 1,
-      method: 'run',
+      method: 'start',
       action: 'list_prs',
       params,
+      keep: false,
     });
     const value = 'x'.repeat(1_000_000);
     expect(screenCall(message({ method: 'save', key: 'k'.repeat(101), value }), token)).toEqual({
@@ -196,18 +344,22 @@ describe('the bridge of a screen page', () => {
       key: 'k'.repeat(101),
       value,
     });
-    expect(screenCall(message({ method: 'chat', text: 'x'.repeat(8001) }), token)).toEqual({
-      id: 1,
-      method: 'chat',
+    expect(screenCall(message({ method: 'chat', text: 'x'.repeat(8001) }), token)).toMatchObject({
       text: 'x'.repeat(8001),
     });
     for (const call of [
-      message({ method: 'run', action: 'list_prs', token: 'other' }),
-      { ...message({ method: 'run', action: 'list_prs' }), type: 'studio-artifact' },
-      message({ method: 'run', action: 'list_prs', id: -1 }),
-      message({ method: 'run', action: 'list_prs', id: 1.5 }),
-      message({ method: 'run', action: 'Remove-Item' }),
-      message({ method: 'run', action: 'list_prs', params: ['x'] }),
+      message({ method: 'start', action: 'list_prs', token: 'other' }),
+      { ...message({ method: 'start', action: 'list_prs' }), type: 'studio-artifact' },
+      message({ method: 'start', action: 'list_prs', id: -1 }),
+      message({ method: 'start', action: 'list_prs', id: 1.5 }),
+      message({ method: 'start', action: 'Remove-Item' }),
+      message({ method: 'start', action: 'list_prs', params: ['x'] }),
+      message({ method: 'start', action: 'build', command: { shell: 'bash', script: 'ls' } }),
+      message({ method: 'start', command: { shell: 'cmd', script: 'dir' } }),
+      message({ method: 'start' }),
+      message({ method: 'output', job: 'x' }),
+      message({ method: 'output', job, after: -5 }),
+      message({ method: 'stop' }),
       message({ method: 'load', key: '' }),
       message({ method: 'save', key: 'line\nbreak', value: 1 }),
       message({ method: 'chat', text: '   ' }),
@@ -215,7 +367,14 @@ describe('the bridge of a screen page', () => {
       message({ method: 'mcp', server: 'linear', tool: 'list\tissues' }),
       message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: 'x' }),
       message({ method: 'mcp', server: 'linear', tool: 'list_issues', arguments: [] }),
-      message({ method: 'exec', script: 'whoami' }),
+      message({ method: 'mcp', server: 'linear', tool: 'x', where: 'C:\\' }),
+      message({ method: 'servers', account: 'a\nb' }),
+      message({ method: 'ask', prompt: ' ' }),
+      message({ method: 'ask', prompt: 'x', model: 'two words' }),
+      message({ method: 'copy', text: 4 }),
+      message({ method: 'open', url: 'file:///C:/Windows/notepad.exe' }),
+      message({ method: 'open', url: 'javascript:alert(1)' }),
+      message({ method: 'run', action: 'list_prs' }),
       null,
       'studio-screen',
     ])
@@ -229,9 +388,14 @@ describe('the bridge of a screen page', () => {
     });
     // An error goes back whole.
     expect(screenReply(token, 4, { error: 'x'.repeat(5000) }).error).toBe('x'.repeat(5000));
+    expect(screenTheme(token, 'light')).toEqual({
+      type: 'studio-screen-theme',
+      token,
+      theme: 'light',
+    });
   });
 
-  it('starts every page with the bridge, the theme and data that cannot end its script', () => {
+  it('starts every page with the bridge, the theme, its values and data that cannot end its script', () => {
     const page = screenDocument(
       '<h1>Mine</h1>',
       'token</script><script>alert(1)</script>',
@@ -240,19 +404,49 @@ describe('the bridge of a screen page', () => {
         title: 'PRs </script><img src=x onerror=alert(1)>',
       },
       'light',
+      { filter: { state: 'open' }, note: '</script>' },
+      'bash',
     );
     // The bridge's data stays inside its script element.
     expect(page.match(/<\/script>/g)).toHaveLength(1);
     expect(page).toContain('\\u003c/script\\u003e');
     expect(page).toContain("Object.defineProperty(window, 'studio'");
-    expect(page).toContain("ask('mcp', { server, tool, arguments:");
-    expect(page).toContain('async mcpJson(server, tool, args)');
-    expect(page).toContain('color-scheme:light');
+    for (const api of [
+      "ask('start'",
+      "ask('output'",
+      "ask('stop'",
+      "ask('forget'",
+      "ask('jobs'",
+      "ask('mcp'",
+      "ask('servers'",
+      "ask('ask'",
+      "ask('copy'",
+      "ask('open'",
+      "ask('chat'",
+      'async mcpJson(server, tool, args, options)',
+      "addEventListener('abort'",
+      "dispatchEvent(new CustomEvent('studio-theme'",
+    ])
+      expect(page, api).toContain(api);
+    expect(page).toContain('"filter":{"state":"open"}');
+    expect(page).toContain('const own = "bash"');
+    expect(page).toContain('<style id="studio-theme">:root{color-scheme:light');
     expect(page.indexOf('</head><body>')).toBeLessThan(page.indexOf('<h1>Mine</h1>'));
     // The page itself follows as given, fragment or whole document.
     expect(
       screenDocument('<!doctype html><html><body>Whole</body></html>', 't', { id, title: 't' }),
     ).toContain('<body><!doctype html><html><body>Whole</body></html></body>');
+  });
+
+  it('shows what commands print as a terminal leaves it', () => {
+    const escape = String.fromCharCode(27);
+    const bell = String.fromCharCode(7);
+    expect(
+      terminalText(
+        `${escape}[31mred${escape}[0m plain\nprogress 10%\rprogress 100%\r\nnext ${escape}]0;title${bell}end`,
+      ),
+    ).toBe('red plain\nprogress 100%\nnext end');
+    expect(terminalText('C:\\work> dir\r\n')).toBe('C:\\work> dir\n');
   });
 
   it('names where a screen runs as its folder or Standalone', () => {
@@ -362,5 +556,16 @@ describe('a reply’s screen cards', () => {
       detail: undefined,
     });
     expect(tool('mcp__agent_studio__read_screen').title).toBe('Read screen');
+    // A chat reaches another place's MCP servers as screens call them.
+    expect(tool('mcp__agent_studio__call_mcp_tool', 'list_issues of linear in wsl')).toEqual({
+      icon: 'plug',
+      title: 'Call MCP tool',
+      detail: 'list_issues of linear in wsl',
+    });
+    expect(tool('list_mcp_tools', 'Application tool call reported by Codex.')).toEqual({
+      icon: 'plug',
+      title: 'List MCP tools',
+      detail: undefined,
+    });
   });
 });

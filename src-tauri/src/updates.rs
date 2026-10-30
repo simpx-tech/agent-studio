@@ -17,7 +17,8 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const NOT_READY: &str = "No update is ready to install.";
-const REPLY_RUNNING: &str = "Wait for running replies to finish, then restart to update.";
+const REPLY_RUNNING: &str =
+    "Wait for running replies and screen jobs to finish, then restart to update.";
 const INSTALL_FAILED: &str =
     "The update could not be installed. Try again, or download it from GitHub Releases.";
 
@@ -187,12 +188,18 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 
+/// Whether replies, or jobs screens started, run on this computer: an update waits for both.
 fn replies_running(app: &AppHandle) -> bool {
     app.state::<crate::runner::Runs>()
         .0
         .lock()
         .map(|runs| !runs.is_empty())
         .unwrap_or(true)
+        || app
+            .state::<std::sync::Arc<crate::screens::Screens>>()
+            .jobs
+            .running()
+            > 0
 }
 
 fn snapshot(app: &AppHandle) -> Status {

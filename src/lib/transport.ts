@@ -82,12 +82,19 @@ import { steeringInputSchema, type SteeringInput } from './steering';
 import type { ConsoleShell } from './code-blocks';
 import {
   screenDetailSchema,
+  screenJobSchema,
   screenOutcomeSchema,
+  screenOutputSchema,
+  screenServersSchema,
   screenSummarySchema,
   screenToolResultSchema,
+  type ScreenCommand,
   type ScreenDetail,
+  type ScreenJob,
   type ScreenOutcome,
+  type ScreenOutput,
   type ScreenRequest,
+  type ScreenServers,
   type ScreenSummary,
   type ScreenToolResult,
 } from './screens';
@@ -3876,6 +3883,7 @@ export async function listScreens(environmentId: string): Promise<ScreenSummary[
 export async function readScreen(environmentId: string, id: string): Promise<ScreenDetail> {
   return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'read', id }));
 }
+/** Runs one of a screen's actions and waits for its end, as workflow steps run them. */
 export async function runScreenAction(
   environmentId: string,
   id: string,
@@ -3886,30 +3894,88 @@ export async function runScreenAction(
     await screenRequest(environmentId, { op: 'run', id, action, params }),
   );
 }
-/** Calls one of a screen's MCP tools through the CLI of the account it records. */
+/**
+ * Starts one of a screen's actions, or a command its page passes, as a job on its computer. It
+ * goes on whoever follows it; a kept job stays until a page forgets it.
+ */
+export async function startScreenJob(
+  environmentId: string,
+  id: string,
+  start: {
+    action?: string;
+    command?: ScreenCommand;
+    params?: Record<string, unknown>;
+    keep?: boolean;
+  },
+): Promise<ScreenJob> {
+  return screenJobSchema.parse(await screenRequest(environmentId, { op: 'start', id, ...start }));
+}
+/** A screen's jobs on its computer, the newest first. */
+export async function screenJobs(environmentId: string, id: string): Promise<ScreenJob[]> {
+  const answer = (await screenRequest(environmentId, { op: 'jobs', id })) as { jobs?: unknown };
+  return z.array(screenJobSchema).parse(answer?.jobs ?? []);
+}
+/**
+ * A job's output from byte `after` of its log, waiting a while for some when asked to. A page's
+ * read of a job's end lets a job that is not kept go; `peek` reads without that.
+ */
+export async function screenJobOutput(
+  environmentId: string,
+  id: string,
+  job: string,
+  after: number,
+  { wait = false, peek = false }: { wait?: boolean; peek?: boolean } = {},
+): Promise<ScreenOutput> {
+  return screenOutputSchema.parse(
+    await screenRequest(environmentId, { op: 'output', id, job, after, wait, peek }),
+  );
+}
+export async function stopScreenJob(
+  environmentId: string,
+  id: string,
+  job: string,
+): Promise<ScreenJob> {
+  return screenJobSchema.parse(await screenRequest(environmentId, { op: 'stop', id, job }));
+}
+export async function forgetScreenJob(environmentId: string, id: string, job: string) {
+  await screenRequest(environmentId, { op: 'forget', id, job });
+}
+/**
+ * Calls an MCP tool for a screen through the CLI of an account where the screen runs, or in the
+ * place named: the account named first, then the others there until one has the server.
+ */
 export async function callScreenTool(
   environmentId: string,
   id: string,
   server: string,
   tool: string,
   args: Record<string, unknown>,
+  reach: { where?: string; account?: string } = {},
 ): Promise<ScreenToolResult> {
   return screenToolResultSchema.parse(
-    await screenRequest(environmentId, { op: 'mcp', id, server, tool, arguments: args }),
+    await screenRequest(environmentId, { op: 'mcp', id, server, tool, arguments: args, ...reach }),
   );
 }
-/** Allows exactly the actions the user reviewed, named by their digest. */
-export async function allowScreen(
+/** The MCP servers an account has where the screen runs, or in the place named. */
+export async function screenMcpServers(
   environmentId: string,
   id: string,
-  digest: string,
-): Promise<ScreenDetail> {
-  return screenDetailSchema.parse(
-    await screenRequest(environmentId, { op: 'approve', id, digest }),
+  reach: { where?: string; account?: string } = {},
+): Promise<ScreenServers> {
+  return screenServersSchema.parse(
+    await screenRequest(environmentId, { op: 'tools', id, ...reach }),
   );
 }
-export async function revokeScreen(environmentId: string, id: string): Promise<ScreenDetail> {
-  return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'revoke', id }));
+/** A model's answer to a screen's question, from the screen's account without tools. */
+export async function askScreenModel(
+  environmentId: string,
+  id: string,
+  question: { prompt: string; model?: string; system?: string },
+): Promise<string> {
+  const answer = (await screenRequest(environmentId, { op: 'ask', id, ...question })) as {
+    text?: unknown;
+  };
+  return z.string().parse(answer?.text);
 }
 export async function deleteScreen(environmentId: string, id: string): Promise<void> {
   await screenRequest(environmentId, { op: 'delete', id });

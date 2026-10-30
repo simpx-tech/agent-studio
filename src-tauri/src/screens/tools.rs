@@ -1,11 +1,13 @@
-//! The tools a chat saves, lists and reads this computer's screens with: SDK tools of Claude's
-//! agent_studio server and Codex dynamic tools. Only the conversation's own call reaches them:
-//! Claude's registered parent tool use, Codex's parent thread without a namespace. A screen
-//! runs where the conversation that created it runs, and calls its MCP tools as that
-//! conversation's account, which the host decides, never the call.
+//! The tools a chat saves, lists and reads this computer's screens with, and reaches the MCP
+//! servers of this computer's places with: SDK tools of Claude's agent_studio server and Codex
+//! dynamic tools. Only the conversation's own call reaches them: Claude's registered parent tool
+//! use, Codex's parent thread without a namespace. A screen is made where the conversation that
+//! created it runs, and calls MCP tools first as that conversation's account, which the host
+//! decides, never the call.
+use super::places::{self, Candidate};
 use super::{Account, Card, Screen, Site};
 use crate::protocol::RunEvent;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,33 +16,49 @@ use tauri::Manager;
 pub const SAVE: &str = "save_screen";
 pub const LIST: &str = "list_screens";
 pub const READ: &str = "read_screen";
-const NAMES: [&str; 3] = [SAVE, LIST, READ];
+pub const SERVERS: &str = "list_mcp_tools";
+pub const CALL: &str = "call_mcp_tool";
+const NAMES: [&str; 5] = [SAVE, LIST, READ, SERVERS, CALL];
 
-pub const GUIDANCE: &str = "For a page the user keeps and reopens in Agent Studio, such as a dashboard, a tracker, a report to revisit or a small tool with its own interface, commands and MCP tool calls, call save_screen (Claude: mcp__agent_studio__save_screen): it saves a screen on this computer, listed under Screens in the sidebar apart from this chat. Before updating a screen by its id, find it with list_screens and open it with read_screen (Claude: mcp__agent_studio__list_screens, mcp__agent_studio__read_screen). Use visualize for a visual that belongs only in this reply.";
+/// The owner chats' MCP calls share their CLIs under (`mcp::Calls`).
+const CHATS: &str = "chats";
 
-const SAVE_DESCRIPTION: &str = "Save a screen: a lasting page in Agent Studio with its own interface (HTML, CSS and JavaScript) and the actions it may run on this computer. The user reopens saved screens from Screens in the Agent Studio sidebar, apart from this conversation, so build one when the user asks for a dashboard, a tracker, a report to revisit or a small tool. Omit id to create a screen; to change one, pass its id and send the complete screen again.
+pub const GUIDANCE: &str = "For a page the user keeps and reopens in Agent Studio, such as a dashboard, a tracker, a report to revisit or a small tool with its own interface, commands and MCP tool calls, call save_screen (Claude: mcp__agent_studio__save_screen): it saves a screen on this computer, listed under Screens in the sidebar apart from this chat. Before updating a screen by its id, find it with list_screens and open it with read_screen (Claude: mcp__agent_studio__list_screens, mcp__agent_studio__read_screen). list_mcp_tools and call_mcp_tool reach the MCP servers of this computer's other places as screens call them, such as the servers signed in inside its WSL distribution (Claude: mcp__agent_studio__list_mcp_tools, mcp__agent_studio__call_mcp_tool). Use visualize for a visual that belongs only in this reply.";
 
-html: one self-contained page (a fragment or a whole document) with inline CSS and JavaScript. It fills the window's main area and scrolls by itself, on a transparent background in the app's font at 14px. Style it with the host's CSS variables --foreground, --heading, --muted-foreground, --card, --border, --primary, --primary-foreground and --viz-series-1 to --viz-series-6 so it matches the light and dark themes. The page has no network access: remote scripts, styles, fonts, images and fetch are blocked, so its data comes from actions and MCP tools. Its script reaches Agent Studio through the global studio object:
-- await studio.run(name, params) runs one action with an object of parameter values and resolves to {exitCode, stdout, stderr, truncated, timedOut, durationMs}. It rejects when the action cannot run, for example before the user allowed the screen's actions; show that message in the page.
-- await studio.json(name, params) runs an action and returns its stdout parsed as JSON, rejecting with its stderr when it exits with a code other than 0.
-- await studio.mcp(server, tool, args) calls one of the MCP tools the screen declares in mcpTools with an object of arguments, and resolves to {content, structuredContent, text}: the tool's content blocks as its server returned them (text, images as base64 data, resources), its structured result when it has one, and its text blocks joined. It rejects with the tool's own error, or when the tool cannot be called, for example before the user allowed it or while its server needs sign-in; show that message in the page.
-- await studio.mcpJson(server, tool, args) calls a tool and returns its structured result, or else its text parsed as JSON.
-- await studio.load(key) and await studio.save(key, value) keep JSON values for this screen on this computer, for preferences and data the screen owns; save(key, null) removes one.
-- studio.chat(text) opens a new conversation in this screen's folder with text in its message box for the user to send. It works only right after the user clicked or typed in the screen.
+const SAVE_DESCRIPTION: &str = "Save a screen: a lasting page in Agent Studio with its own interface (HTML, CSS and JavaScript) that runs commands and calls MCP tools on this computer, on Windows and in its WSL distributions alike. The user reopens saved screens from Screens in the Agent Studio sidebar, apart from this conversation, so build one when the user asks for a dashboard, a tracker, a report to revisit or a small tool. Omit id to create a screen; to change one, pass its id and send the complete screen again. Nothing asks the user for permission: the page runs its actions, commands and tools as soon as it asks.
+
+html: one self-contained page (a fragment or a whole document) with inline CSS and JavaScript. It fills the window's main area and scrolls by itself, on a transparent background in the app's font at 14px. Style it with the host's CSS variables --foreground, --heading, --muted-foreground, --card, --border, --primary, --primary-foreground and --viz-series-1 to --viz-series-6 so it matches the light and dark themes, which can change while the page is open (the studio-theme event on window). The page has no network access: remote scripts, styles, fonts, images and fetch are blocked, so its data comes from actions, commands and MCP tools. Its script reaches Agent Studio through the global studio object:
+- await studio.run(name, params, {onOutput, signal}) runs one action with an object of parameter values and resolves to {exitCode, stdout, stderr, timedOut, stopped, durationMs, job}; onOutput(text, stream) receives its output as it arrives (stream is 'stdout' or 'stderr'), and aborting signal stops it. It rejects when the action cannot run at all; show that message in the page.
+- await studio.json(name, params, options) runs an action and returns its stdout parsed as JSON, rejecting with its stderr when it exits with a code other than 0.
+- await studio.exec(script, {shell, where, params, timeout, onOutput, signal}) runs a script the page writes, as an action runs (shell 'powershell' or 'bash'; params reach it as PARAM_<NAME> variables), and resolves like run.
+- await studio.start(name, params), or studio.start({script, shell, where, params, timeout}) for a command, starts a job that goes on while the screen is closed and keeps its output until studio.forget(id); it resolves to the job {id, action, label, params, state ('running', 'done', 'stopped', 'interrupted' or 'failed'), exitCode, timedOut, startedAt, endedAt, durationMs, error}.
+- await studio.jobs() lists the screen's jobs, the newest first: those it started, and runs whose page closed before they ended. await studio.follow(id, {onOutput}) replays a job's output from its start, follows it as it arrives and resolves like run once the job ended; await studio.stop(id) stops a running job with everything it started; await studio.forget(id) removes one.
+- await studio.mcp(server, tool, args, {where, account}) calls any MCP tool of the servers an account has where it is called, and resolves to {content, structuredContent, text, account}: the tool's content blocks as its server returned them (text, images as base64 data, resources), its structured result when it has one, its text blocks joined, and the account that answered. It rejects with the tool's own error, or when no account there has the server connected; show that message in the page.
+- await studio.mcpJson(server, tool, args, options) calls a tool and returns its structured result, or else its text parsed as JSON.
+- await studio.mcpServers({where, account}) lists the servers an account has there, each {name, status, tools}.
+- await studio.ask(prompt, {model, system, json}) asks a model as this screen's account, without tools, and resolves to its text, or with json: true to that text parsed as JSON. model names one, such as 'sonnet'; otherwise the provider's small model answers.
+- await studio.load(key) and await studio.save(key, value) keep JSON values for this screen on this computer, for preferences, state and data the screen owns; save(key, null) removes one. studio.values holds every value saved when the page opened.
+- await studio.copy(text) puts text on the clipboard, and await studio.open(url) opens an http or https link in the browser.
+- await studio.chat(text, {send}) opens a new conversation in this screen's folder with the text in its message box, and sends it with send: true.
 - studio.theme is 'dark' or 'light'; studio.screen holds its id and title.
-Write command output into the page as text (textContent or text nodes), never as HTML, since it can hold anything. Show loading, empty and error states, and run actions when the page opens and when the user asks (buttons, filters), never in tight loops.
+The user leaves the screen and comes back, quits the app and opens it again, or opens the screen on another device, and the page must never lose what it showed: keep its state with studio.save as it changes and restore it from studio.values when it opens; run long or important work (builds, deployments, syncs) with studio.start rather than run, and when the page opens call studio.jobs() to show the latest of each and studio.follow the ones still running. Write command output and tool results into the page as text (textContent or text nodes), never as HTML, since they can hold anything. Show loading, empty and error states, and run actions when the page opens and when the user asks (buttons, filters), never in tight loops.
 
-actions: the commands the page may run, each {name, description, shell, script, params, timeout}. name is lowercase letters, digits and _. shell is 'powershell' on Windows (pwsh when installed, otherwise Windows PowerShell 5.1, so write for both) or 'bash' (Git Bash on Windows, bash in WSL, Linux and macOS). The script runs in this conversation's working folder, bash in a login shell, with stdin closed, until it ends; set timeout to a number of seconds to stop it after that long, and whatever it started ends with it. It succeeds with exit code 0, and a PowerShell script ends with its own exit code or that of the last program it ran. params declares each value the page may pass, as {name: {type: 'string' | 'number' | 'integer' | 'boolean', description, enum, pattern, maxLength, minimum, maximum, optional}}; the host refuses values that do not fit before anything runs. Each value reaches the script only as the environment variable PARAM_<NAME> (since becomes PARAM_SINCE), never inside the script's text: quote it as \"$PARAM_SINCE\" in bash, use $env:PARAM_SINCE in PowerShell, and never pass it to eval or Invoke-Expression. Print JSON for studio.json (gh --json, ConvertTo-Json -Depth 6 -Compress, jq). Test each script with your own shell tool first, in this folder and with its PARAM_ variables set.
+where: an action, a command or an MCP call runs where this conversation runs unless it names another place of this computer: 'windows' (this Windows computer itself), 'wsl' (its WSL distribution) or a WSL distribution's name, such as 'Ubuntu'. Elsewhere a command starts in the same folder as that place reaches it (C:\\work is /mnt/c/work in WSL), or in its home folder.
 
-mcpTools: the MCP tools the page may call, each {server, tool, description}, named as your own tool list names them: mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}. The screen calls them through the CLI of the account this conversation replies with, which stays the screen's account, in this conversation's working folder and with the servers and sign-ins that account has there; no model takes part, and a call's result goes to the page alone. Call each tool yourself first to see the arguments it takes and what it returns. Prefer an MCP tool to a script that does the same through a command line.
+actions: the commands the page runs by name, each {name, description, shell, script, params, timeout, where}. name is lowercase letters, digits and _. shell is 'powershell' on Windows (pwsh when installed, otherwise Windows PowerShell 5.1, so write for both) or 'bash' (Git Bash on Windows, bash in WSL, Linux and macOS). The script runs in this conversation's working folder, or where it names, bash in a login shell, with stdin closed, until it ends; set timeout to a number of seconds to stop it after that long, and whatever it started ends with it. It succeeds with exit code 0, and a PowerShell script ends with its own exit code or that of the last program it ran. params declares the values the page passes, as {name: {type: 'string' | 'number' | 'integer' | 'boolean', description, enum, pattern, maxLength, minimum, maximum, optional}}, which the host checks before the script runs; a value the action does not declare passes as it is, as JSON when it is not text. Each value reaches the script only as the environment variable PARAM_<NAME> (since becomes PARAM_SINCE), never inside the script's text: quote it as \"$PARAM_SINCE\" in bash, use $env:PARAM_SINCE in PowerShell, and never pass it to eval or Invoke-Expression. Print JSON for studio.json (gh --json, ConvertTo-Json -Depth 6 -Compress, jq). Test each script with your own shell tool first, in its folder and with its PARAM_ variables set.
 
-The user reviews the actions and MCP tools and must allow them before any runs, and again after they change, so declare only what the page needs and describe what each does; a screen without actions or MCP tools needs no approval.";
+mcpTools: the MCP tools the page calls, each {server, tool, description, where, account}, named as a tool list names them: mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}. A declaration says what the page uses a tool for, and where and as which account (by the name Connections gives it) studio.mcp calls it unless the call names its own. The screen calls tools through the CLI of an account in that place, with the servers and sign-ins it has there: where this conversation runs, its account first; elsewhere, that place's CLI login first; then each other account there until one has the server connected. No model takes part, and a call's result goes to the page alone. Call each tool first, with your own tools or with call_mcp_tool for another place, to see the arguments it takes and what it returns, and list_mcp_tools to see the servers and tools a place has. Prefer an MCP tool to a script doing the same through a command line, and a server already signed in somewhere on this computer, such as Linear in WSL, to asking the user for keys.";
 
-const LIST_DESCRIPTION: &str = "List the screens this computer keeps: id, title, description, the folder their actions run in, their actions and MCP tools with the account that calls those, whether the user allowed them, and whether this conversation can update the screen. Call it before reading or updating a screen.";
+const LIST_DESCRIPTION: &str = "List the screens this computer keeps: id, title, description, the folder their actions run in, their actions and MCP tools with the account that calls those first, how many of their jobs run, and whether this conversation can update the screen. Call it before reading or updating a screen.";
 
-const READ_DESCRIPTION: &str = "Read one saved screen whole: its title, description, html, actions, MCP tools with the account that calls them and the values it saved with studio.save, to change it and save it again with save_screen and the same id.";
+const READ_DESCRIPTION: &str = "Read one saved screen whole: its title, description, html, actions, MCP tools with the account that calls them first, the values it saved with studio.save and its jobs, to change it and save it again with save_screen and the same id.";
+
+const SERVERS_DESCRIPTION: &str = "List the MCP servers an account has in a place of this computer, each with its state and tools (Codex reports each tool's description and input schema, Claude Code its name), as a screen's studio.mcp reaches them. where is 'windows', 'wsl' or a WSL distribution's name; omit it for where this conversation runs. account names the account to ask, by the name Connections gives it; otherwise the account a screen would call first answers. The result names that account and the others there.";
+
+const CALL_DESCRIPTION: &str = "Call an MCP tool in a place of this computer as a screen's studio.mcp calls it, through the CLI of an account there, and return the tool's result: try the tools of servers this conversation does not have, such as those signed in inside WSL, before a screen calls them. where and account as in list_mcp_tools; an account that does not have the server connected gives way to the next one there, and the result names the account that answered.";
 
 pub fn tools() -> Vec<Value> {
+    let place = json!({"type":"string","description":"windows, wsl or a WSL distribution's name. Omit it to run where this conversation runs."});
     vec![
         json!({"name":SAVE,"description":SAVE_DESCRIPTION,"inputSchema":{
             "type":"object","properties":{
@@ -65,19 +83,35 @@ pub fn tools() -> Vec<Value> {
                                 "maximum":{"type":"number"},
                                 "optional":{"type":"boolean"}
                             },"required":["type"],"additionalProperties":false}},
-                        "timeout":{"type":"integer","minimum":1,"description":"Seconds the script may run before it is stopped. Omit it to let the script run until it ends."}
+                        "timeout":{"type":"integer","minimum":1,"description":"Seconds the script may run before it is stopped. Omit it to let the script run until it ends."},
+                        "where":place
                     },"required":["name","shell","script"],"additionalProperties":false}},
                 "mcpTools":{"type":"array","description":"The MCP tools the page calls with studio.mcp.","items":{
                     "type":"object","properties":{
                         "server":{"type":"string","minLength":1,"description":"The MCP server's name: linear in mcp__linear__list_issues."},
                         "tool":{"type":"string","minLength":1,"description":"The tool's name: list_issues in mcp__linear__list_issues."},
-                        "description":{"type":"string","description":"What the page uses it for, which the user reads before allowing it."}
+                        "description":{"type":"string","description":"What the page uses it for."},
+                        "where":place,
+                        "account":{"type":"string","description":"The account to call it as first, by the name Connections gives it."}
                     },"required":["server","tool"],"additionalProperties":false}}
             },"required":["title","html"],"additionalProperties":false}}),
         json!({"name":LIST,"description":LIST_DESCRIPTION,"inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
         json!({"name":READ,"description":READ_DESCRIPTION,"inputSchema":{
             "type":"object","properties":{"id":{"type":"string","description":"A screen id from list_screens."}},
             "required":["id"],"additionalProperties":false}}),
+        json!({"name":SERVERS,"description":SERVERS_DESCRIPTION,"inputSchema":{
+            "type":"object","properties":{
+                "where":place,
+                "account":{"type":"string","description":"The account to ask, by the name Connections gives it."}
+            },"additionalProperties":false}}),
+        json!({"name":CALL,"description":CALL_DESCRIPTION,"inputSchema":{
+            "type":"object","properties":{
+                "server":{"type":"string","minLength":1,"description":"The MCP server's name, as list_mcp_tools names it."},
+                "tool":{"type":"string","minLength":1},
+                "arguments":{"type":"object","description":"The tool's arguments."},
+                "where":place,
+                "account":{"type":"string","description":"The account to call it as first, by the name Connections gives it."}
+            },"required":["server","tool"],"additionalProperties":false}}),
     ]
 }
 pub fn codex_tools() -> Vec<Value> {
@@ -92,10 +126,12 @@ pub fn codex_tools() -> Vec<Value> {
 }
 
 /// The conversation whose reply calls the tools, and what decides where its screens run. It
-/// keeps this computer's app data folder rather than the app itself, so the tools stay plain.
+/// keeps this computer's app data folder rather than the app itself, so the tools stay plain;
+/// `launch` starts the CLIs its MCP calls go through.
 pub struct Context {
     data: PathBuf,
     screens: Arc<super::Screens>,
+    launch: Arc<dyn super::mcp::Launch>,
     conversation_id: String,
     run_id: String,
     provider: String,
@@ -118,6 +154,7 @@ impl Context {
         Some(Self {
             data: app.path().app_local_data_dir().ok()?,
             screens: app.try_state::<Arc<super::Screens>>()?.inner().clone(),
+            launch: Arc::new(super::mcp::Host(app.clone())),
             conversation_id,
             run_id: request.run_id.clone(),
             provider: request.agent.provider.clone(),
@@ -135,6 +172,7 @@ impl Context {
         Self {
             data,
             screens,
+            launch: Arc::new(super::mcp::Unlaunched),
             conversation_id: request.conversation_id.clone().expect("a conversation"),
             run_id: request.run_id.clone(),
             provider: request.agent.provider.clone(),
@@ -170,7 +208,7 @@ impl Context {
         connection_environment(fleet, connection)
             .ok_or_else(|| "This conversation's connection no longer exists.".to_string())
     }
-    /// The account this conversation replies with, which calls a screen's MCP tools.
+    /// The account this conversation replies with, which calls a screen's MCP tools first.
     fn account(&self) -> Account {
         Account {
             provider: self.provider.clone(),
@@ -221,30 +259,6 @@ fn connection_environment(fleet: &Value, connection: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// The account a screen calls its tools as, as the model reads it.
-fn account_name(fleet: &Value, account: &Account) -> String {
-    let provider = match account.provider.as_str() {
-        "claude" => "Claude",
-        "codex" => "Codex",
-        other => other,
-    };
-    let Some(connection) = &account.connection_id else {
-        return format!("this computer's {provider} CLI login");
-    };
-    fleet["connections"]
-        .as_array()
-        .and_then(|list| list.iter().find(|c| c["id"] == connection.as_str()))
-        .and_then(|connection| {
-            fleet["accounts"]
-                .as_array()?
-                .iter()
-                .find(|a| a["id"] == connection["accountId"])?["name"]
-                .as_str()
-                .map(|name| format!("the {provider} account {name}"))
-        })
-        .unwrap_or_else(|| format!("a {provider} account no longer connected here"))
-}
-
 fn card(screen: &Screen) -> Card {
     Card {
         id: screen.id.clone(),
@@ -255,53 +269,28 @@ fn card(screen: &Screen) -> Card {
 }
 
 /// What the model hears once a screen is saved. `caller` names the account the screen calls
-/// its MCP tools as when that is not the saving conversation's own.
-fn saved_text(
-    screen: &Screen,
-    created: bool,
-    previously_allowed: bool,
-    caller: Option<&str>,
-) -> String {
+/// its MCP tools as first when that is not the saving conversation's own.
+fn saved_text(screen: &Screen, caller: Option<&str>) -> String {
     let (actions, tools) = (screen.actions.len(), screen.mcp_tools.len());
-    let declared = if actions + tools == 0 {
-        "It declares no actions or MCP tools, so it needs no approval.".to_string()
-    } else if screen.allowed() {
-        "Its actions and MCP tools are unchanged and stay allowed.".to_string()
-    } else {
-        let mut parts = vec![];
-        match actions {
-            0 => {}
-            1 => parts.push(format!("its action runs in {}", screen.site.folder)),
-            _ => parts.push(format!(
-                "its {actions} actions run in {}",
-                screen.site.folder
-            )),
-        }
-        match tools {
-            0 => {}
-            1 => parts.push("its MCP tool is called".to_string()),
-            _ => parts.push(format!("its {tools} MCP tools are called")),
-        }
-        let pronoun = if actions + tools == 1 { "it" } else { "them" };
-        let mut sentence = parts.join(" and ");
-        sentence[..1].make_ascii_uppercase();
-        format!(
-            "{sentence} on this computer once the user allows {pronoun}: tell the user to open the screen and review {pronoun} first.{}",
-            if !created && previously_allowed {
-                " Its actions or MCP tools changed, so the user must allow them again."
-            } else {
-                ""
-            }
-        )
+    let runs = match actions {
+        0 => String::new(),
+        1 => format!(
+            " Its action runs in {} unless it names another place.",
+            screen.site.folder
+        ),
+        _ => format!(
+            " Its {actions} actions run in {} unless they name another place.",
+            screen.site.folder
+        ),
     };
     let caller = match caller {
         Some(name) if tools > 0 => format!(
-            " It calls its MCP tools as {name}, the account it was created with, not this conversation's account, so declare tools that account has."
+            " It calls MCP tools first as {name}, the account it was created with, not this conversation's account."
         ),
         _ => String::new(),
     };
     format!(
-        "Saved the screen \"{}\" (id {}, revision {}). The user opens it from Screens in Agent Studio's sidebar, and this reply shows a card that opens it. {declared}{caller} To change it later, call save_screen with this id and the complete screen.",
+        "Saved the screen \"{}\" (id {}, revision {}). The user opens it from Screens in Agent Studio's sidebar, and this reply shows a card that opens it; a page already open loads this revision.{runs}{caller} Nothing waits for the user to allow it. To change it later, call save_screen with this id and the complete screen.",
         screen.title, screen.id, screen.revision
     )
 }
@@ -311,18 +300,15 @@ async fn save(context: &Context, args: &Value) -> Result<(String, Card), String>
     let fleet = context.fleet().await?;
     let site = context.site(&fleet).await?;
     for action in &definition.actions {
-        super::run::available(&site, action.shell)
+        let place = context
+            .screens
+            .place(&context.data, &site, action.place.as_deref())
+            .await
+            .map_err(|error| format!("Action {}: {error}", action.name))?;
+        super::run::available(&place, action.shell)
             .map_err(|error| format!("Action {}: {error}", action.name))?;
     }
     let root = context.data.join("screens");
-    let previously_allowed = match &definition.id {
-        Some(id) => super::opened(root.clone(), id.clone())
-            .await
-            .is_ok_and(|(screen, _)| {
-                screen.allowed() && !(screen.actions.is_empty() && screen.mcp_tools.is_empty())
-            }),
-        None => false,
-    };
     // A screen keeps its account while that account stays connected where it runs.
     let usable = {
         let (fleet, environment, distribution) = (
@@ -338,7 +324,7 @@ async fn save(context: &Context, args: &Value) -> Result<(String, Card), String>
         }
     };
     let ours = context.account();
-    let (screen, created) = super::saved(
+    let (screen, _) = super::saved(
         &context.screens,
         root,
         definition,
@@ -353,11 +339,8 @@ async fn save(context: &Context, args: &Value) -> Result<(String, Card), String>
         .account
         .as_ref()
         .filter(|account| **account != ours)
-        .map(|account| account_name(&fleet, account));
-    Ok((
-        saved_text(&screen, created, previously_allowed, caller.as_deref()),
-        card(&screen),
-    ))
+        .map(|account| places::account_name(&fleet, account));
+    Ok((saved_text(&screen, caller.as_deref()), card(&screen)))
 }
 
 async fn list(context: &Context, args: &Value) -> Result<String, String> {
@@ -380,14 +363,14 @@ async fn list(context: &Context, args: &Value) -> Result<String, String> {
                 "folder": screen.site.folder,
                 "revision": screen.revision,
                 "updatedAt": screen.updated_at,
-                "actions": screen.actions.iter().map(|a| json!({"name": a.name, "description": a.description})).collect::<Vec<_>>(),
-                "allowed": screen.allowed(),
+                "actions": screen.actions.iter().map(|a| json!({"name": a.name, "description": a.description, "where": a.place})).collect::<Vec<_>>(),
+                "runningJobs": context.screens.jobs.running_for(&screen.id),
                 "updatableHere": screen.site.environment_id == environment,
             });
             if !screen.mcp_tools.is_empty() {
                 entry["mcpTools"] = json!(screen.mcp_tools);
-                entry["mcpAccount"] = json!(callers(&fleet, screen));
             }
+            entry["mcpAccount"] = json!(callers(&fleet, screen));
             entry
         })
         .collect();
@@ -412,6 +395,8 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
                 error
             }
         })?;
+    let root = context.data.join("screens");
+    let jobs = context.screens.jobs.list(&root, &screen.id).await?;
     let fleet = context.fleet().await?;
     serde_json::to_string_pretty(&json!({
         "id": screen.id,
@@ -419,22 +404,113 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
         "description": screen.description,
         "revision": screen.revision,
         "folder": screen.site.folder,
-        "allowed": screen.allowed(),
         "html": screen.html,
         "actions": screen.actions,
         "mcpTools": screen.mcp_tools,
         "mcpAccount": callers(&fleet, &screen),
         "savedValues": values,
+        "jobs": jobs,
     }))
     .map_err(|_| "Cannot read this screen".into())
 }
 
-/// Who a screen calls its MCP tools as, for the model.
+/// Who a screen calls its MCP tools as first, for the model.
 fn callers(fleet: &Value, screen: &Screen) -> String {
     match &screen.account {
-        Some(account) => account_name(fleet, account),
+        Some(account) => places::account_name(fleet, account),
         None => "the account of the next chat that saves it".into(),
     }
+}
+
+/// The place and account a call of the MCP tools names, checked.
+fn reach(args: &Map<String, Value>) -> Result<(Option<String>, Option<String>), String> {
+    let place = super::named_place(args.get("where"))?;
+    let account = Some(super::line(args.get("account"), "account", false)?)
+        .filter(|account| !account.is_empty());
+    Ok((place, account))
+}
+
+/// Where a chat's MCP call goes, and the accounts that may answer it there.
+async fn reached(
+    context: &Context,
+    place: Option<&str>,
+    account: Option<String>,
+) -> Result<(Site, Vec<Candidate>), String> {
+    let fleet = context.fleet().await?;
+    let own = context.site(&fleet).await?;
+    let site = context.screens.place(&context.data, &own, place).await?;
+    let local = crate::profiles::installation_in(&context.data)?.id;
+    let candidates = places::candidates(
+        &fleet,
+        &local,
+        &site,
+        Some(&context.account()),
+        site == own,
+        account.as_deref(),
+    );
+    Ok((site, candidates))
+}
+
+async fn servers(context: &Context, args: &Value) -> Result<String, String> {
+    let empty = Map::new();
+    let object = match args {
+        Value::Null => &empty,
+        Value::Object(object) => object,
+        _ => return Err("Send where and account, or nothing.".into()),
+    };
+    super::unexpected(object, &["where", "account"])?;
+    let (place, account) = reach(object)?;
+    let (site, candidates) = reached(context, place.as_deref(), account).await?;
+    let names: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
+    let (asked, servers) = context
+        .screens
+        .calls
+        .servers(CHATS, &site, candidates, &*context.launch)
+        .await?;
+    serde_json::to_string_pretty(&json!({
+        "where": place,
+        "folder": site.folder,
+        "account": asked.name,
+        "otherAccounts": names.into_iter().filter(|name| *name != asked.name).collect::<Vec<_>>(),
+        "servers": servers,
+    }))
+    .map_err(|_| "Cannot list these MCP servers".into())
+}
+
+async fn call(context: &Context, args: &Value) -> Result<String, String> {
+    let object = args
+        .as_object()
+        .ok_or("Send server, tool and arguments, with where and account when needed.")?;
+    super::unexpected(object, &["server", "tool", "arguments", "where", "account"])?;
+    let server = super::tool_name(object.get("server"), "server")?;
+    let tool = super::tool_name(object.get("tool"), "tool")?;
+    if server == "agent_studio" {
+        return Err("agent_studio's tools are yours to call directly.".into());
+    }
+    let arguments = match object.get("arguments") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(arguments)) => arguments.clone(),
+        Some(_) => return Err("arguments must be an object of the tool's arguments.".into()),
+    };
+    let (place, account) = reach(object)?;
+    let (site, candidates) = reached(context, place.as_deref(), account.clone()).await?;
+    let (result, answered) = context
+        .screens
+        .calls
+        .call(
+            CHATS,
+            &site,
+            account.is_some(),
+            async move { Ok(candidates) },
+            &*context.launch,
+            &server,
+            &tool,
+            arguments,
+        )
+        .await?;
+    let mut result = result;
+    result["account"] = json!(answered);
+    serde_json::to_string_pretty(&result).map_err(|_| "Cannot read this tool's result".into())
 }
 
 impl Agent {
@@ -456,6 +532,8 @@ impl Agent {
                 .await
                 .map(|(text, card)| (text, Some(card))),
             LIST => list(context, args).await.map(|text| (text, None)),
+            SERVERS => servers(context, args).await.map(|text| (text, None)),
+            CALL => call(context, args).await.map(|text| (text, None)),
             _ => read(context, args).await.map(|text| (text, None)),
         }
     }
@@ -609,16 +687,33 @@ mod tests {
         for api in [
             "studio.run(",
             "studio.json(",
+            "studio.exec(",
+            "studio.start(",
+            "studio.jobs()",
+            "studio.follow(",
+            "studio.stop(",
+            "studio.forget(",
             "studio.mcp(",
             "studio.mcpJson(",
+            "studio.mcpServers(",
+            "studio.ask(",
             "studio.load(",
             "studio.save(",
+            "studio.values",
+            "studio.copy(",
+            "studio.open(",
             "studio.chat(",
             "PARAM_",
+            "'wsl'",
+            "call_mcp_tool",
+            "list_mcp_tools",
             "mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}",
         ] {
             assert!(SAVE_DESCRIPTION.contains(api), "{api}");
         }
+        // Nothing in it asks the user for permission any more.
+        assert!(!SAVE_DESCRIPTION.contains("allow them"));
+        assert!(GUIDANCE.contains("list_mcp_tools") && GUIDANCE.contains("call_mcp_tool"));
         for tool in codex_tools() {
             assert_eq!(tool["type"], "function");
             assert_eq!(tool["deferLoading"], false);
@@ -641,6 +736,14 @@ mod tests {
         let (error, text) = result(&answer);
         assert_eq!(*error, true);
         assert!(text.contains("registered parent-conversation"), "{text}");
+        let answer = agent
+            .claude(
+                &control(CALL, json!({"server": "linear", "tool": "x"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result(&answer).1.contains("registered parent-conversation"));
         // A sub-agent's call never registers.
         agent.observe_claude(&json!({"type":"assistant","parent_tool_use_id":"child","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__agent_studio__list_screens","input":{}}]}}));
         assert!(agent.pending.is_empty());
@@ -661,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn codex_calls_come_from_the_parent_thread_alone() {
         let mut agent = Agent::default();
-        let call = |thread: &str, namespace: Value| json!({"id":9,"method":"item/tool/call","params":{"threadId":thread,"tool":LIST,"namespace":namespace,"arguments":{}}});
+        let call = |thread: &str, namespace: Value| json!({"id":9,"method":"item/tool/call","params":{"threadId":thread,"tool":SERVERS,"namespace":namespace,"arguments":{}}});
         assert!(agent
             .codex(&json!({"id":1,"method":"item/tool/call","params":{"threadId":"root","tool":"visualize"}}), "root", None)
             .await
@@ -687,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_text_tells_the_model_what_the_user_must_do() {
+    fn the_saved_text_tells_the_model_where_the_screen_runs() {
         let mut screen = Screen {
             id: uuid::Uuid::new_v4().to_string(),
             revision: 2,
@@ -707,54 +810,42 @@ mod tests {
             run_id: uuid::Uuid::new_v4().to_string(),
             created_at: super::super::now(),
             updated_at: super::super::now(),
-            approval: None,
         };
-        assert!(saved_text(&screen, true, false, None).contains("needs no approval"));
+        let text = saved_text(&screen, None);
+        assert!(
+            text.contains(&screen.id) && text.contains("Nothing waits for the user"),
+            "{text}"
+        );
         let declared = super::super::definition(&json!({"title":"x","html":"x",
             "actions":[{"name":"list","shell":"powershell","script":"gh pr list"}],
             "mcpTools":[{"server":"linear","tool":"list_issues"}]}))
         .unwrap();
         screen.actions = declared.actions;
-        let text = saved_text(&screen, false, true, None);
-        assert!(
-            text.contains("open the screen and review it") && text.contains("allow them again"),
-            "{text}"
-        );
-        assert!(text.contains(&screen.id) && text.contains("C:\\work"));
-        // Its tools are called as the account it keeps, which the model hears when it differs.
+        assert!(saved_text(&screen, None).contains("Its action runs in C:\\work"));
+        // Its tools are called first as the account it keeps, which the model hears when it
+        // differs from the saving conversation's.
         screen.mcp_tools = declared.mcp_tools;
-        let text = saved_text(&screen, true, false, Some("the Claude account Work"));
+        let text = saved_text(&screen, Some("the Claude account Work"));
         assert!(
-            text.contains("Its action runs in C:\\work and its MCP tool is called on this computer once the user allows them")
-                && text.contains("calls its MCP tools as the Claude account Work"),
+            text.contains("calls MCP tools first as the Claude account Work"),
             "{text}"
         );
-        screen.actions.clear();
-        let text = saved_text(&screen, true, false, None);
-        assert!(
-            text.contains("Its MCP tool is called on this computer once the user allows it"),
-            "{text}"
-        );
-        let fleet = json!({
-            "connections": [{"id": "c1", "accountId": "a1", "environmentId": "e1"}],
-            "accounts": [{"id": "a1", "name": "Work", "provider": "claude"}],
-        });
-        let account = |connection: Option<&str>| Account {
-            provider: "claude".into(),
-            connection_id: connection.map(String::from),
-        };
-        assert_eq!(
-            account_name(&fleet, &account(Some("c1"))),
-            "the Claude account Work"
-        );
-        assert_eq!(
-            account_name(&fleet, &account(Some("gone"))),
-            "a Claude account no longer connected here"
-        );
-        assert_eq!(
-            account_name(&fleet, &account(None)),
-            "this computer's Claude CLI login"
-        );
+        let fleet =
+            json!({"connections": [{"id": "c1", "accountId": "a1", "environmentId": "e1"}]});
         assert_eq!(connection_environment(&fleet, "c1").as_deref(), Some("e1"));
+    }
+
+    #[test]
+    fn calls_of_the_mcp_tools_name_a_place_and_an_account_or_none() {
+        let object = |value: Value| value.as_object().unwrap().clone();
+        assert_eq!(reach(&object(json!({}))).unwrap(), (None, None));
+        assert_eq!(
+            reach(&object(
+                json!({"where": "WSL", "account": " Claude CLI login "})
+            ))
+            .unwrap(),
+            (Some("wsl".into()), Some("Claude CLI login".into()))
+        );
+        assert!(reach(&object(json!({"where": "C:\\"}))).is_err());
     }
 }

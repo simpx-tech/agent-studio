@@ -522,6 +522,10 @@
   };
   let screenShelves = $state<Record<string, ScreenShelf>>({});
   let openedScreen = $state<{ environmentId: string; id: string }>();
+  // Every screen this window opened stays open, shown or not, so its page keeps what it showed
+  // while another chat, screen or page is on screen (requested 2026-10-30); its key names the
+  // workspace session it belongs to. Reload, deletion and a workspace change end one.
+  let keptScreens = $state<{ key: string; environmentId: string; id: string }[]>([]);
   // The workflow or run the main area shows as a page (docs/WORKFLOWS.md).
   let openedWorkflow = $state<string>();
   // The run of it the page shows in its place, and the run each workflow shows beside its chat,
@@ -2103,6 +2107,8 @@
   }
   function openScreen(environmentId: string, id: string) {
     openedScreen = { environmentId, id };
+    const key = `${workspaceSession}/${environmentId}/${id}`;
+    if (!keptScreens.some((kept) => kept.key === key)) keptScreens.push({ key, environmentId, id });
     view = 'screen';
     sidebarOpen = false;
     const host = screenHost(environmentId);
@@ -2114,24 +2120,22 @@
     const shelf = host ? screenShelves[host] : undefined;
     const id = openedScreen.id;
     if (shelf) shelf.screens = shelf.screens.filter((s) => s.id !== id);
+    keptScreens = keptScreens.filter((kept) => kept.id !== id);
     openedScreen = undefined;
     view = 'chat';
   }
-  /** The account that calls a screen's MCP tools, as Connections names it. */
-  function screenAccountName(account: ScreenDetail['account']) {
-    if (!account) return 'the account of the next chat that saves it';
-    const provider =
-      ({ claude: 'Claude', codex: 'Codex' } as Record<string, string>)[account.provider] ??
-      account.provider;
-    if (!account.connectionId) return `this computer’s ${provider} CLI login`;
-    const fleet = workspace.fleet;
-    const connection = fleet.connections.find((c) => c.id === account.connectionId);
-    const name = connection && fleet.accounts.find((a) => a.id === connection.accountId)?.name;
-    if (!name) return `a ${provider} account no longer connected`;
-    return name.toLowerCase().includes(provider.toLowerCase()) ? name : `${name} (${provider})`;
+  /** The shell a screen's page runs commands in unless they name one: bash outside Windows. */
+  function screenShell(environmentId: string): 'powershell' | 'bash' {
+    const environment = workspace.fleet.environments.find((e) => e.id === environmentId);
+    return !environment || (environment.platform === 'windows' && !environment.distribution)
+      ? 'powershell'
+      : 'bash';
   }
-  /** `studio.chat`: a new conversation in the screen's folder, with the text as its draft. */
-  function chatFromScreen(text: string, screen: ScreenDetail) {
+  /**
+   * `studio.chat`: a new conversation in the screen's folder, with the text as its draft, sent
+   * at once when the page asks.
+   */
+  function chatFromScreen(text: string, screen: ScreenDetail, sending = false) {
     const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId);
     if (!environment) {
       notice = 'This screen’s computer is no longer in Connections.';
@@ -2144,7 +2148,10 @@
     });
     prompt = text;
     keepDraft(composerContent());
-    void tick().then(() => composerInput?.focus());
+    void tick().then(() => {
+      composerInput?.focus();
+      if (sending) void send();
+    });
   }
 
   // ---- Workflows (docs/WORKFLOWS.md) -----------------------------------------------------------
@@ -3199,6 +3206,7 @@
               notice = '';
               screenShelves = {};
               openedScreen = undefined;
+              keptScreens = [];
               newChat();
               view = previousView === 'screen' ? 'chat' : previousView;
               if (reason !== undefined) {
@@ -7479,8 +7487,8 @@
             </div>
             {#if !collapsedGroups[groupKey]}<div class="folder-conversations screen-list">
                 {#each group.screens as screen (screen.id)}{@const current =
-                    view === 'screen' && openedScreen?.id === screen.id}{@const waiting =
-                    (screen.commands > 0 || (screen.tools ?? 0) > 0) && !screen.allowed}
+                    view === 'screen' && openedScreen?.id === screen.id}{@const running =
+                    screen.running ?? 0}
                   <div class="conversation-row">
                     <button
                       class="conversation-item screen-item"
@@ -7490,16 +7498,15 @@
                         screen.title,
                         screen.description,
                         screenFolderName(screen),
-                        ...(waiting ? ['Its actions wait for your approval'] : []),
+                        ...(running ? [`${running} running`] : []),
                       ]
                         .filter(Boolean)
                         .join(' · ')}
-                      aria-label={waiting
-                        ? `${screen.title}, its actions wait for your approval`
-                        : undefined}
+                      aria-label={running ? `${screen.title}, ${running} running` : undefined}
                       onclick={() => openScreen(screen.environmentId, screen.id)}
                       ><LayoutDashboard size={13} aria-hidden="true" /><span>{screen.title}</span
-                      >{#if waiting}<small class="screen-waiting" aria-hidden="true">Review</small
+                      >{#if running}<span class="screen-jobs" aria-hidden="true"
+                          ><LoaderCircle size={12} class="spinning" /></span
                         >{/if}</button
                     >
                   </div>
@@ -8453,27 +8460,7 @@
       {/key}
       </div>
     {:else if view === 'screen' && openedScreen}
-      {@const screen = openedScreen}
-      {@const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId)}
-      {@const creator = workspace.conversations.find(
-        (c) => c.id === openedScreenSummary?.conversationId,
-      )}
-      {#key `${workspaceSession}/${screen.environmentId}/${screen.id}`}
-        <ScreenView
-          environmentId={screen.environmentId}
-          id={screen.id}
-          summary={openedScreenSummary}
-          computerName={(environment &&
-            computers.find((c) => c.id === computerViewId(environment))?.name) ??
-            'Its computer'}
-          online={environmentOnline(screen.environmentId)}
-          openConversation={creator ? () => openConversation(creator) : undefined}
-          accountName={screenAccountName}
-          chat={chatFromScreen}
-          changed={noteScreen}
-          deleted={screenDeleted}
-        />
-      {/key}
+      <!-- The screen shows below, among the screens this window keeps open. -->
     {:else if view === 'workflow' && openedWorkflow}
       {#await workflowView() then { default: WorkflowView }}
         {#key `${workspaceSession}/${openedWorkflow}`}
@@ -8503,6 +8490,33 @@
         <p class="error-banner" role="alert">{String(error).replace(/^Error: /, '')}</p>
       {/await}
     {/if}
+    {#each keptScreens as kept (kept.key)}
+      {@const shown = view === 'screen' && openedScreen?.id === kept.id}
+      {@const summary = screenSummary(kept.id)}
+      {@const environment = workspace.fleet.environments.find((e) => e.id === kept.environmentId)}
+      {@const creator = workspace.conversations.find((c) => c.id === summary?.conversationId)}
+      <div class="screen-kept" hidden={!shown}>
+        <ScreenView
+          environmentId={kept.environmentId}
+          id={kept.id}
+          {summary}
+          {shown}
+          shell={screenShell(kept.environmentId)}
+          computerName={(environment &&
+            computers.find((c) => c.id === computerViewId(environment))?.name) ??
+            'Its computer'}
+          online={environmentOnline(kept.environmentId)}
+          openConversation={creator ? () => openConversation(creator) : undefined}
+          chat={chatFromScreen}
+          changed={noteScreen}
+          runningChanged={(count) => {
+            const listed = screenSummary(kept.id);
+            if (listed && (listed.running ?? 0) !== count) listed.running = count;
+          }}
+          deleted={screenDeleted}
+        />
+      </div>
+    {/each}
   </main>
 </div>
 {#if folderBrowserOpen && !active}

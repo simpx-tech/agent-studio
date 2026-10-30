@@ -1,8 +1,9 @@
-# Screens (screens/run.rs): runs one action of a screen inside this distribution. What it runs
-# arrives on stdin as lines of base64 or digits, never on a command line: the folder, the script,
-# the time limit (0 for none), then each parameter's variable and value. The script runs in a
-# process group of its own, in the folder, with stdin closed, and ends when it is done, when its
-# time is up or when Agent Studio stops it (wsl-cancel.sh, through the marker of this job).
+# Screens (screens/run.rs): runs one command of a screen inside this distribution. What it runs
+# arrives on stdin as lines of base64 or digits, never on a command line: the folder (empty for
+# the home folder), the script, the time limit (0 for none), then each parameter's variable and
+# value. The script runs in a process group of its own, in the folder, with stdin closed, and ends
+# when it is done, when its time is up or when Agent Studio stops it (wsl-cancel.sh, through the
+# marker of this job).
 set -u
 namespace=$1
 job=$2
@@ -10,7 +11,7 @@ fail() {
   printf '%s\n' "$1" >&2
   exit 125
 }
-unreadable='Agent Studio could not read this action.'
+unreadable='Agent Studio could not read this command.'
 decode() { printf '%s' "$1" | base64 -d 2>/dev/null; }
 IFS= read -r folder64 || fail "$unreadable"
 IFS= read -r script64 || fail "$unreadable"
@@ -20,6 +21,7 @@ case $limit in '' | *[!0-9]*) fail "$unreadable" ;; esac
 case $count in '' | *[!0-9]*) fail "$unreadable" ;; esac
 folder=$(decode "$folder64"; printf x)
 folder=${folder%x}
+[ -n "$folder" ] || folder=$HOME
 while [ "$count" -gt 0 ]; do
   IFS= read -r name || fail "$unreadable"
   IFS= read -r value64 || fail "$unreadable"
@@ -31,8 +33,8 @@ while [ "$count" -gt 0 ]; do
 done
 umask 077
 root="$HOME/.local/share/$namespace"
-mkdir -p "$root/runs" || fail 'Agent Studio could not prepare this action.'
-script=$(mktemp "${TMPDIR:-/tmp}/agent-studio-screen.XXXXXXXX") || fail 'Agent Studio could not prepare this action.'
+mkdir -p "$root/runs" || fail 'Agent Studio could not prepare this command.'
+script=$(mktemp "${TMPDIR:-/tmp}/agent-studio-screen.XXXXXXXX") || fail 'Agent Studio could not prepare this command.'
 decode "$script64" > "$script"
 marker="$root/runs/$job"
 if ! cd -- "$folder" 2>/dev/null; then

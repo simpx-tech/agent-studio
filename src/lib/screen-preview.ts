@@ -8,10 +8,12 @@ export function screenPreview(
   token: string,
   screen: { id: string; title: string },
   theme: 'dark' | 'light' = 'dark',
+  values: Record<string, unknown> = {},
+  shell: 'powershell' | 'bash' = 'powershell',
 ) {
   return {
     type: 'studio-artifact',
-    source: screenDocument(source, token, screen, theme),
+    source: screenDocument(source, token, screen, theme, values, shell),
     font,
     page: true,
   };
