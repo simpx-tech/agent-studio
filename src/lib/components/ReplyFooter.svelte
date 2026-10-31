@@ -6,7 +6,7 @@
   import { changeBase, type ChangeSummary } from '$lib/file-changes';
   import type { BackgroundRun } from '$lib/background-work';
   import type { RunningSubagent } from '$lib/subagents';
-  import { planProgress } from '$lib/plans';
+  import { planCountText, planProgress } from '$lib/plans';
   import { nativeWorkflowStatus } from '$lib/workflows';
   import FileChanges from './FileChanges.svelte';
   import AccountChanges from './AccountChanges.svelte';
@@ -112,13 +112,13 @@
         id={message.id + '-plan-toggle'}
         aria-expanded={expanded === 'plan'}
         aria-controls={message.id + '-plan'}
-        title={`${plan.complete} of ${plan.total} steps complete${plan.current ? `. In progress: ${plan.current}` : ''}`}
+        title={`${planCountText(plan)}${plan.current ? `: ${plan.current}` : ''}`}
         onclick={() => toggle('plan')}
       >
         <ChevronDown size={13} class="disclosure" aria-hidden="true" />
         <ListChecks size={13} aria-hidden="true" />
         <span class="progress-label">{plan.title}</span><span class="count"
-          >{plan.complete}/{plan.total}</span
+          >{plan.count}/{plan.total}</span
         >{#if plan.current}<span class="current">{plan.current}</span>{/if}
       </button>{/if}
     {#each workflows as run, i (run.id)}<button

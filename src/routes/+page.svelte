@@ -235,7 +235,7 @@
   import ModelContext from '$lib/components/ModelContext.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
   import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
-  import { runningPlanProgress } from '$lib/plans';
+  import { planCountText, runningPlanProgress } from '$lib/plans';
   import { clock } from '$lib/clock';
   import { awaitingAnswer } from '$lib/questions';
   import { applyQuestionDraft, type QuestionDraft } from '$lib/question-drafts';
@@ -1815,11 +1815,11 @@
   function rowNotes(
     finished: boolean,
     monitors: number,
-    plan?: { complete: number; total: number },
+    plan?: { count: number; complete: number; total: number },
     snoozed = false,
   ): string[] {
     return [
-      ...(plan ? [`${plan.complete} of ${plan.total} plan steps complete`] : []),
+      ...(plan ? [planCountText(plan, 'plan step')] : []),
       ...(finished ? ['New reply'] : []),
       ...(monitors === 1 ? ['Monitor still running'] : []),
       ...(monitors > 1 ? [`${monitors} monitors still running`] : []),
@@ -7414,7 +7414,7 @@
                               >{#if finished}<i class="conversation-finished" aria-hidden="true"
                                 ></i>{/if}<span>{c.title}</span
                               >{#if plan}<small class="conversation-plan" aria-hidden="true"
-                                  >{plan.complete}/{plan.total}</small
+                                  >{plan.count}/{plan.total}</small
                                 >{/if}{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
                                   size={14}
                                   class="conversation-waiting"

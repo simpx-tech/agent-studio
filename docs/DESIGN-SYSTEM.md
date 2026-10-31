@@ -147,8 +147,8 @@ mark in the script and `BrandMark.svelte` together.
   its elapsed time instead, in `--accent-text` and the compact form running calls use (12s,
   1m 12s, 1h 7m), counted from the shared clock in `src/lib/clock.ts` that the reply footer's
   elapsed time also reads; a reply whose start cannot be read keeps the spinner there. A reply
-  working through a plan counts its completed steps just before that time (1/3) in `--text-muted`,
-  as the footer's Plan toggle counts them. After the reply ends, a chat whose Monitor watches
+  working through a plan counts its steps just before that time in `--text-muted`, a step from its
+  start (2/3 while the second runs, 5/5 on the last), as the footer's Plan toggle counts them. After the reply ends, a chat whose Monitor watches
   still run ends its row with the accent `Activity` pulse that Work history gives Monitor calls,
   beside any unread dot, until they report their outcome. While a reply waits for your answer to a
   question or form, it asks for attention in orange (`--warning`): its row and heading show

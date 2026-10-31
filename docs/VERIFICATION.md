@@ -1,5 +1,17 @@
 # Verification — 2026-09-08
 
+## A plan step counts from its start — 2026-10-31
+
+Requested 2026-10-31: "On the task progress, can you instruct to mark a task as "done" at the start, so that the last task show as 5/5 instead of 4/5, make a patch release for this", with a screenshot of sidebar rows reading 2/4, 2/5, 2/6 and 0/6.
+
+- `planProgress` (`src/lib/plans.ts`) gains `count`, which the sidebar row (`runningPlanProgress`) and the reply footer's Plan toggle show: while the reply runs, the steps completed plus the step in progress, so the first step in progress reads 1/5 and the last 5/5. A reply that ended, completed, stopped or failed, counts only the steps it completed, as before, since the step it left in progress reads Not confirmed complete, Stopped or Unfinished in its panel. The agents' plans are unchanged: the count reads a step from its start instead of asking agents to mark steps done early, which would make the plan panel call unfinished steps complete.
+- Hover and accessible text follow the count (`planCountText`): Step 2 of 3: Run checks on the footer toggle and Plan step 2 of 3 on the row while a step is in progress, else 1 of 3 steps complete and 1 of 3 plan steps complete.
+- Unit: `work-features.test.ts`: with five steps, the last in progress reads 5 of 5 and the first 1, a plan none of whose steps started 0, between steps and once all are done the steps completed, and a reply that completed, stopped or failed with its last step in progress 4 of 5; the footer summary and the sidebar count carry `count`.
+- Browser: the plan scenario of `tests/work-features.spec.ts`: the row and the footer read 2/2 while the second of two steps runs, then 2/3 with a third step pending; the row's title and accessible name say Plan step 2 of 2 and plan step 2 of 3, the footer's title Step 2 of 2: Run checks; once the reply completes the footer reads 1/3, titled 1 of 3 steps complete.
+- Pipeline, with the 1.1.1 version bump applied: Rust formatting, Clippy, 582 Rust tests at 8 threads, `npm run check` (0 errors and 0 warnings in 5,468 files), 909 Vitest tests in 111 files, the build, and 474 browser tests in three shards of 158 on a dev server on port 1447. The third shard first lost three WebKit tests (`chat-card.spec.ts:24` and `:94`, the composer not shown within 5 s, and `chat-days.spec.ts:155`, the chat not at its end within 5 s) while two Unreal Editor processes of another job used about 8 cores; their four scenarios passed alone, and the shard passed whole on its rerun.
+- Not exercised: a native reply with a real provider's plan; the change is frontend-only.
+- Choices of mine, not confirmed: two steps in progress at once count as two; a reply that ends with its last step never marked complete drops from 5/5 to 4/5, as its panel says Not confirmed complete; the wording of the hover text.
+
 ## Balanced new chats leave an account's room to the replies running there — 2026-10-26
 
 Requested 2026-10-26: "So I just hit my 5h-limit on agent studio which shouldn't had happened, it started 3 sessions at the same account which then lead to it hitting the 5-hour limit, can you prevent that from happening in the future? Even if it means reverting the last change on pick behavior".

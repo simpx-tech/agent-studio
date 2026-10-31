@@ -362,15 +362,17 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
     (window as any).emitCapability({ kind: 'plan', plan: { revision: 1, steps: [] } });
   });
   const summary = page.locator('.reply-footer .progress-toggle', { hasText: /^\s*Plan/ });
-  await expect(summary).toContainText('1/2');
+  // A step counts from its start, so the last step in progress reads 2/2.
+  await expect(summary).toContainText('2/2');
   await expect(summary).toContainText('Run checks');
+  await expect(summary).toHaveAttribute('title', 'Step 2 of 2: Run checks');
   // The chat's sidebar row counts the plan before the reply's elapsed time, as it changes.
   const row = page.locator('.conversation-item').first();
   const count = row.locator('.conversation-plan');
-  await expect(count).toHaveText('1/2');
+  await expect(count).toHaveText('2/2');
   await expect(row.locator('.conversation-plan + .conversation-running')).toBeVisible();
-  await expect(row).toHaveAttribute('title', / · 1 of 2 plan steps complete$/);
-  await expect(row).toHaveAccessibleName(/, 1 of 2 plan steps complete$/);
+  await expect(row).toHaveAttribute('title', / · Plan step 2 of 2$/);
+  await expect(row).toHaveAccessibleName(/, plan step 2 of 2$/);
   await page.evaluate(() => {
     (window as any).emitCapability({
       kind: 'plan',
@@ -384,8 +386,9 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
       },
     });
   });
-  await expect(count).toHaveText('1/3');
-  await expect(row).toHaveAccessibleName(/, 1 of 3 plan steps complete$/);
+  await expect(count).toHaveText('2/3');
+  await expect(row).toHaveAccessibleName(/, plan step 2 of 3$/);
+  await expect(summary).toContainText('2/3');
   await page.locator('.sidebar').screenshot({ path: 'artifacts/sidebar-plan-count.png' });
   await page.evaluate(() => {
     (window as any).emitCapability({ kind: 'text', text: 'I could not run the checks.' });
@@ -393,10 +396,12 @@ test('plan snapshots reject stale revisions and do not fabricate success when th
   });
   // Once the reply ends, its plan is no longer in progress.
   await expect(count).toHaveCount(0);
-  await expect(row).not.toHaveAttribute('title', /plan steps/);
+  await expect(row).not.toHaveAttribute('title', /step/);
   const panel = page.locator('.plan-panel');
-  // A finished reply no longer names a step in progress.
+  // A finished reply no longer names a step in progress, and counts the steps it completed.
   await expect(summary).not.toContainText('Run checks');
+  await expect(summary).toContainText('1/3');
+  await expect(summary).toHaveAttribute('title', '1 of 3 steps complete');
   await summary.click();
   await expect(panel).toContainText('Not confirmed complete');
   await expect(panel).toContainText('Run checks');

@@ -10,7 +10,13 @@ import {
 } from './artifacts';
 import { initialWorkspace, restoreWorkspace, type Message, type RunEvent } from './domain';
 import { applyRunEvent, retainRunEvent } from './activity';
-import { planProgress, planStepLabel, runningPlanProgress } from './plans';
+import {
+  planCountText,
+  planProgress,
+  planStepLabel,
+  runningPlanProgress,
+  type Plan,
+} from './plans';
 import { nativeWorkflowStatus, workflowSchema } from './workflows';
 import { mergeShared, sharedWorkspace } from './sync';
 import { nativeWorkflowFixture } from '../../tests/native-workflow-fixture';
@@ -143,12 +149,15 @@ describe('artifacts and portable progress', () => {
     } as Message;
     expect(planProgress(reply)).toEqual({
       title: 'Plan',
+      count: 2,
       complete: 1,
       total: 3,
       current: 'Building the image',
     });
-    // A finished reply names no step in progress; a legacy sequence keeps its own name.
+    // A finished reply names no step in progress and counts the steps it completed; a legacy
+    // sequence keeps its own name.
     expect(planProgress({ ...reply, status: 'complete' })?.current).toBeUndefined();
+    expect(planProgress({ ...reply, status: 'complete' })).toMatchObject({ count: 1, total: 3 });
     const legacy = {
       ...reply,
       plan: undefined,
@@ -161,6 +170,43 @@ describe('artifacts and portable progress', () => {
     expect(nativeWorkflowStatus('paused', 'complete')).toBe('Unconfirmed');
     expect(nativeWorkflowStatus('error', 'complete')).toBe('Failed');
     expect(nativeWorkflowStatus('arbitrary', 'running')).toBe('Unknown');
+  });
+  it('counts a plan step from its start while its reply runs, so the last step reads 5/5', () => {
+    const status = (i: number, done: number, started: boolean): Plan['steps'][number]['status'] =>
+      i < done ? 'complete' : i === done && started ? 'running' : 'pending';
+    const reply = (state: Message['status'], done: number, started: boolean) =>
+      ({
+        role: 'assistant',
+        status: state,
+        plan: {
+          revision: 1,
+          steps: Array.from({ length: 5 }, (_, i) => ({
+            id: String(i),
+            title: `Step ${i + 1}`,
+            status: status(i, done, started),
+          })),
+        },
+      }) as Message;
+    const last = planProgress(reply('running', 4, true))!;
+    expect(last).toMatchObject({ count: 5, complete: 4, total: 5, current: 'Step 5' });
+    expect(planCountText(last)).toBe('Step 5 of 5');
+    expect(planCountText(last, 'plan step')).toBe('Plan step 5 of 5');
+    // The first step counts once it starts, and a plan none of whose steps started counts none.
+    expect(planProgress(reply('running', 0, true))).toMatchObject({ count: 1, complete: 0 });
+    const unstarted = planProgress(reply('running', 0, false))!;
+    expect(unstarted).toMatchObject({ count: 0, complete: 0 });
+    expect(planCountText(unstarted, 'plan step')).toBe('0 of 5 plan steps complete');
+    // Between steps, and once every step is done, the count is the steps completed.
+    const between = planProgress(reply('running', 2, false))!;
+    expect(between).toMatchObject({ count: 2, complete: 2 });
+    expect(planCountText(between)).toBe('2 of 5 steps complete');
+    expect(planProgress(reply('running', 5, false))).toMatchObject({ count: 5, complete: 5 });
+    // A reply that ended with a step in progress counts only what it completed.
+    for (const state of ['complete', 'cancelled', 'error'] as const) {
+      const ended = planProgress(reply(state, 4, true))!;
+      expect(ended).toMatchObject({ count: 4, complete: 4, total: 5 });
+      expect(planCountText(ended)).toBe('4 of 5 steps complete');
+    }
   });
   it('counts the plan of a running reply for its sidebar row, and none once replies end', () => {
     const steps = [
@@ -175,6 +221,7 @@ describe('artifacts and portable progress', () => {
     expect(runningPlanProgress([ended, reply('running')])).toBeUndefined();
     expect(runningPlanProgress([reply('running', { revision: 1, steps: [] })])).toBeUndefined();
     expect(runningPlanProgress([ended, reply('running', { revision: 1, steps })])).toMatchObject({
+      count: 2,
       complete: 1,
       total: 3,
     });
