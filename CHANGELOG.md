@@ -5,6 +5,14 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.1.1 - 2026-10-31
+
+### Changed
+
+- Count a plan step from its start, so a chat's plan count in the sidebar and in its reply reads
+  5/5 while the last step is in progress instead of 4/5. A finished reply still counts only the
+  steps it completed
+
 ## 1.1.0 - 2026-10-30
 
 ### Added
