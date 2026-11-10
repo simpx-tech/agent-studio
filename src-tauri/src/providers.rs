@@ -326,7 +326,8 @@ fn resolve_in(provider: &str, dirs: &[PathBuf]) -> Result<Executable, String> {
                     {
                         let script = root.join(bin);
                         if script.is_file() {
-                            // npm packages can expose a native binary instead of JavaScript.
+                            // Claude Code's package declares bin/claude.exe from 2.1.113 on: the
+                            // native binary its postinstall puts over a stub, which Node refuses.
                             if script
                                 .extension()
                                 .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))

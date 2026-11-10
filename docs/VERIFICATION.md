@@ -1,5 +1,15 @@
 # Verification — 2026-09-08
 
+## Claude Code installed with npm starts on Windows and reads as installed in WSL — 2026-11-10
+
+Pull request #2 (alecsmatos1), reviewed and merged on request ("if there is anything needed to change or improve merge it and make the changes directly on development branch"), with a follow-up for WSL.
+
+- Cause: Claude Code's npm package declares `bin/claude.exe` from 2.1.113 on (the registry's manifests: `cli.js` until then), a 500-byte stub that its postinstall, `install.cjs`, replaces with the platform package's native binary (read in the published 2.1.322 tarball). On Windows the resolver ran every npm entrypoint with Node, which refuses a `.exe` (`ERR_UNKNOWN_FILE_EXTENSION`), so version detection, sign-in and chats failed for such an installation. In WSL the inventory followed npm's link with `readlink -f` to that `.exe` path, which `valid_linux_binary` refuses as a Windows program's, so Connections showed Claude Code as not installed there, although a chat would have launched it through the link.
+- Fix: the pull request runs a `.exe` entrypoint directly with no prefix, keeps scripts on Node and a native executable beside npm's shim first, and never runs the shim. The follow-up has `wsl-inventory.sh` report the link itself when the file it leads to is an ELF executable named `.exe`, so a Windows program behind a link still reads as none.
+- Tests: `npm_entrypoints_run_native_binaries_directly_and_scripts_with_node`, from the pull request, panics without its fix and passes with it. The opt-in `a_real_wsl_inventory_counts_npms_claude_code_binary_and_still_refuses_windows_ones` builds npm's layout in a throwaway home in the installed distribution (Ubuntu): `/bin/true` as the package's `claude.exe` reads as installed by its link, and a file starting with `MZ` in its place reads as none. It fails with the old script and passes with the new one.
+- Pipeline: `cargo fmt --check`, Clippy with warnings denied and 617 Rust tests (52 ignored), `npm run check` (0 errors and 0 warnings in 5,485 files), 952 Vitest tests in 115 files, the build, and 505 browser tests in three drained shards. Shards 1 and 3 passed first time. Shard 2 lost `notifications.spec.ts:376` (its 5 s wait) and `performance.spec.ts:540` (28.3 ms against 25) at its first run and `performance.spec.ts:540` again (25.7 ms) at its second, while two Unreal Editor processes of another job used about 7 cores; both passed alone, and the shard passed whole at its third run. No frontend file changed.
+- Not exercised: a real npm installation of Claude Code on Windows or in WSL here. The pull request's author reports one on Windows (Node 22.21.1, Claude Code 2.1.322) that showed its version and signed in through the app; `claude update` on such an installation was not run.
+
 ## Balancing takes only checked accounts again, listed per agent and per computer — 2026-11-10
 
 Requested 2026-11-10, after the entry below: "That was my error then, rollback to what is was before (load balancer should consider only what was checked), instead improve the visualization of the load balancer, separate per Agent (claude, gemini and codex) and per PC".

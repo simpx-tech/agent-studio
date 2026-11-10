@@ -435,6 +435,74 @@ mod tests {
         assert!(parse_installations("agent-studio-cli\tcodex\t/bin/codex\n").is_err());
         assert!(parse_installations("unavailable distribution").is_err());
     }
+    /// npm links Claude Code 2.1.113 and later to its package's `bin/claude.exe`, the Linux
+    /// binary its postinstall puts over a stub, so following the link reached a name the
+    /// inventory refuses as a Windows program's.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "Opt-in integration test against an installed WSL distribution; no provider prompts"]
+    async fn a_real_wsl_inventory_counts_npms_claude_code_binary_and_still_refuses_windows_ones() {
+        let distro = list(&["--list", "--quiet"])
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("Install a WSL distribution first");
+        let inventory = embedded_script(&format!(
+            "{}\n{}",
+            include_str!("wsl-env.sh"),
+            include_str!("wsl-inventory.sh")
+        ));
+        // npm's global prefix lives in a throwaway home, so the distribution's own CLIs stay unread.
+        let script = r#"home="$(mktemp -d /tmp/agent-studio-inventory.XXXXXX)" || exit 1
+trap 'rm -rf -- "$home"' EXIT
+package="$home/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin"
+mkdir -p "$package" "$home/.npm-global/bin"
+ln -s ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe "$home/.npm-global/bin/claude"
+cp /bin/true "$package/claude.exe"
+HOME="$home" PATH=/usr/bin:/bin bash -c "$1"
+echo agent-studio-windows-program
+printf 'MZ\220\0' > "$package/claude.exe"
+HOME="$home" PATH=/usr/bin:/bin bash -c "$1"
+"#;
+        let output = std::process::Command::new("wsl.exe")
+            .args([
+                "-d",
+                &distro,
+                "--exec",
+                "bash",
+                "-c",
+                script,
+                "agent-studio",
+                &inventory,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        let (linux, windows) = text.split_once("agent-studio-windows-program").unwrap();
+        let claude = |text: &str| {
+            parse_installations(text)
+                .unwrap()
+                .into_iter()
+                .find(|cli| cli.id == "claude")
+                .unwrap()
+                .path
+        };
+        // Reported by npm's link, which is also what a chat there launches.
+        let path = claude(linux).expect("npm's Claude Code reads as installed");
+        assert!(
+            path.starts_with("/tmp/agent-studio-inventory.")
+                && path.ends_with("/.npm-global/bin/claude"),
+            "{path}"
+        );
+        assert_eq!(claude(windows), None);
+    }
     #[test]
     fn bridge_arguments_are_data_and_windows_shims_are_rejected() {
         assert!(valid_linux_binary("/home/test/.local/bin/claude"));
