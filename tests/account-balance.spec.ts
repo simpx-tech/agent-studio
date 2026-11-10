@@ -4,17 +4,13 @@ import { chooseTestFolder } from './folder-helper';
 
 type Usage = { '5-hour'?: number | null; Weekly?: number | null };
 
-// Each account reports the usage a test gives it, read again whenever the app asks, and held
-// while `holdUsage` is set until `releaseUsage`.
+// Each account reports the usage a test gives it, read again whenever the app asks.
 async function prepare(page: Page, mode?: string) {
   await mockDesktop(page, mode);
   await page.addInitScript(() => {
-    const state = window as any;
-    const native = state.__TAURI_INTERNALS__;
+    const native = (window as any).__TAURI_INTERNALS__;
     const invoke = native.invoke;
     native.invoke = async (command: string, args: any) => {
-      if (command === 'read_usage' && state.holdUsage)
-        await new Promise((resolve) => (state.heldUsage ??= []).push(resolve));
       const result = await invoke(command, args);
       const own = JSON.parse(
         localStorage.getItem(`test-usage-percent-${args?.connectionId}`) ?? 'null',
@@ -474,52 +470,4 @@ test('an account left out in Settings takes new chats only when chosen', async (
   await expect(accounts(page)).toHaveCount(0);
   await expect.poll(async () => (await saved(page)).balanceAccounts).toBeUndefined();
   expect((await saved(page)).balanceExcluded).toHaveLength(3);
-});
-
-test('accounts left out take new chats once every other one has used a limit up', async ({
-  page,
-}) => {
-  await prepare(page);
-  const second = await addAccount(page, 'Claude', 'Second Claude');
-  await addAccount(page, 'Claude', 'Third Claude');
-  // Plans without a 5-hour limit, as Claude's are now.
-  await setUsage(page, await connectionOf(page, 'Claude CLI login'), {
-    '5-hour': null,
-    Weekly: 60,
-  });
-  await setUsage(page, second, { '5-hour': null, Weekly: 100 });
-  await setUsage(page, await connectionOf(page, 'Third Claude'), { '5-hour': null, Weekly: 30 });
-  await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await chooseTestFolder(page);
-  await pick(page, 'Claude · Claude CLI login');
-  await balance(page);
-  await inSettings(page, async () => {
-    await include(page, 'Claude · Claude CLI login', false);
-    await include(page, 'Claude · Third Claude', false);
-  });
-
-  // The one account left in used up its week, so a new chat starts on the least used of the
-  // others rather than on an account that cannot answer it.
-  await newChat(page);
-  await expect(agent(page)).toHaveText(/Claude · Third Claude/);
-  await expect(agent(page)).toHaveAttribute('title', /^Account chosen by usage\. /);
-  // With room again, it takes new chats, however much more the others have.
-  await setUsage(page, second, { '5-hour': null, Weekly: 99 });
-  await newChat(page);
-  await expect(agent(page)).toHaveText(/Claude · Second Claude/);
-
-  // Until the readings arrive, as when the app starts, a new chat keeps the account it has,
-  // also one left out, instead of guessing.
-  await page.addInitScript(() => ((window as any).holdUsage = true));
-  await page.reload();
-  await expect
-    .poll(() => page.evaluate(() => (window as any).heldUsage?.length ?? 0))
-    .toBeGreaterThan(0);
-  await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
-  await page.evaluate(() => {
-    const state = window as any;
-    state.holdUsage = false;
-    for (const release of state.heldUsage.splice(0)) release();
-  });
-  await expect(agent(page)).toHaveText(/Claude · Second Claude/);
 });

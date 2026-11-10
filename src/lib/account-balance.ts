@@ -90,20 +90,6 @@ function standing(
   };
 }
 
-/**
- * Whether the account has used up a limit the chat would run on, or Claude refused it a reply
- * over one, so it cannot answer the chat until that limit resets.
- */
-export function usedUp(
-  snapshot: UsageSnapshot | undefined,
-  chat: { provider: ProviderId; model: string },
-  now: number,
-) {
-  return (
-    standing({ connectionId: '', snapshot, running: 0, lastUsed: 0 }, 0, chat, now).group === 2
-  );
-}
-
 /** The first of `standings` by each of `keys` in turn, lower first. */
 function first(standings: Standing[], ...keys: ((standing: Standing) => number)[]) {
   return [...standings].sort((a, b) => {
@@ -125,27 +111,15 @@ function first(standings: Standing[], ...keys: ((standing: Standing) => number)[
  *
  * Given the account the chat already has (`current`), it keeps that one while no other account
  * is better by more than the tolerance, so a chosen account does not move with every reading.
- *
- * The accounts Settings leaves out (`others`) take part only once every candidate has used a
- * limit up: then the chat goes to the one of them it would choose among those that can answer,
- * so it never starts on an account that cannot while another one here can. Without one, it stays
- * with the candidate that can answer first.
  */
 export function balancedAccount(
   candidates: readonly BalanceCandidate[],
   chat: { provider: ProviderId; model: string },
   now: number,
   current?: string,
-  others: readonly BalanceCandidate[] = [],
 ): string | undefined {
   if (!candidates.length) return undefined;
-  let standings = candidates.map((candidate, order) => standing(candidate, order, chat, now));
-  if (standings.every((s) => s.group === 2)) {
-    const answering = others
-      .map((other, order) => standing(other, candidates.length + order, chat, now))
-      .filter((s) => s.group < 2);
-    if (answering.length) standings = answering;
-  }
+  const standings = candidates.map((candidate, order) => standing(candidate, order, chat, now));
   const group = Math.min(...standings.map((s) => s.group));
   const best = standings.filter((s) => s.group === group);
   const most = Math.max(...best.map((s) => s.room));

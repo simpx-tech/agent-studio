@@ -4,7 +4,6 @@ import {
   balanceableAccounts,
   balancedAccount,
   levelPoints,
-  usedUp,
   type BalanceCandidate,
 } from './account-balance';
 import type { Message } from './domain';
@@ -314,76 +313,6 @@ describe('balancing new chats between accounts', () => {
       'b',
     );
     expect(balancedAccount([account('a'), account('b')], sonnet, now, 'b')).toBe('b');
-  });
-
-  it('leaves new chats to the accounts left out once every other one has used a limit up', () => {
-    // The readings of 2026-11-10: plans without a 5-hour limit, and the one account Settings
-    // left in had used up its week, while the accounts left out had room.
-    const week = (used: number) =>
-      reading([limit(10080, used, '2026-11-15T05:00:00.286517+00:00')]);
-    const leftIn = [account('gamer', week(100), { lastUsed: now - 12 * hour })];
-    const leftOut = [
-      account('portela', week(94)),
-      account('portelab', week(51), { running: 3 }),
-      account('vinporb', week(52), { running: 1 }),
-    ];
-    expect(balancedAccount(leftIn, sonnet, now)).toBe('gamer');
-    expect(balancedAccount(leftIn, sonnet, now, undefined, leftOut)).toBe('vinporb');
-    // Also over the account the chat had, and over Claude's own refusal.
-    expect(balancedAccount(leftIn, sonnet, now, 'gamer', leftOut)).toBe('vinporb');
-    const refused = reading([limit(10080, 90)], 'claude', {
-      accountChanged: 'epoch:1',
-      authMode: null,
-      planType: null,
-      limitStatus: {
-        status: 'rejected',
-        limitType: 'seven_day',
-        resetsAt: seconds(now + hour),
-        usingOverage: false,
-        checkedAt: seconds(now),
-      },
-    });
-    expect(balancedAccount([account('gamer', refused)], sonnet, now, undefined, leftOut)).toBe(
-      'vinporb',
-    );
-    // One left out without a reading may have room, so it comes before the account that has none.
-    expect(balancedAccount(leftIn, sonnet, now, undefined, [account('unread')])).toBe('unread');
-
-    // They stay out while an account left in has room or may have, however much more they have.
-    for (const room of [account('gamer', week(97)), account('gamer')])
-      expect(balancedAccount([room], sonnet, now, undefined, leftOut)).toBe('gamer');
-    expect(
-      balancedAccount([...leftIn, account('second', week(99))], sonnet, now, undefined, leftOut),
-    ).toBe('second');
-    // And when they cannot answer either, the account left in that can answer again first does.
-    const spent = [
-      account('a', reading([limit(10080, 100, seconds(now + 9 * hour))])),
-      account('b', reading([limit(10080, 100, seconds(now + 2 * hour))])),
-    ];
-    const outSpent = [account('c', reading([limit(10080, 100, seconds(now + hour))]))];
-    expect(balancedAccount(spent, sonnet, now, undefined, outSpent)).toBe('b');
-    // A limit only a Fable chat runs on counts only for one.
-    const fable = [
-      account('a', reading([limit(10080, 30), limit(10080, 100, undefined, 'fable')])),
-    ];
-    const other = [account('b', claude(null, 60))];
-    expect(balancedAccount(fable, sonnet, now, undefined, other)).toBe('a');
-    expect(
-      balancedAccount(fable, { provider: 'claude', model: 'fable' }, now, undefined, other),
-    ).toBe('b');
-  });
-
-  it('tells whether an account used up a limit the chat runs on', () => {
-    const fable = { provider: 'claude' as const, model: 'fable' };
-    expect(usedUp(undefined, sonnet, now)).toBe(false);
-    expect(usedUp(claude(null, 100), sonnet, now)).toBe(true);
-    expect(usedUp(claude(100, 3), sonnet, now)).toBe(true);
-    expect(usedUp(claude(99.9, 99.9), sonnet, now)).toBe(false);
-    // A window that ended since its reading began again.
-    expect(usedUp(reading([limit(10080, 100, seconds(now - 1))]), sonnet, now)).toBe(false);
-    const own = reading([limit(10080, 40), limit(10080, 100, undefined, 'fable')]);
-    expect(usedUp(own, sonnet, now)).toBe(false);
-    expect(usedUp(own, fable, now)).toBe(true);
   });
 });
 

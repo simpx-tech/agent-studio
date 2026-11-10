@@ -323,12 +323,7 @@
     waitingPlan,
   } from '$lib/auto-continue';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
-  import {
-    accountActivity,
-    balanceableAccounts,
-    balancedAccount,
-    usedUp,
-  } from '$lib/account-balance';
+  import { accountActivity, balanceableAccounts, balancedAccount } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
@@ -1517,10 +1512,7 @@
   // account of its agent, on its computer, that has used the least, until an account is chosen
   // for it. It is balanced between the accounts that can answer and were not left out there:
   // every one that can be chosen while their checks run, then those reported ready.
-  const balanceCandidates = $derived.by(() => balanceAccounts(false));
-  // Those Settings leaves out, which take part once every other one has used a limit up.
-  const balanceLeftOut = $derived.by(() => balanceAccounts(true));
-  function balanceAccounts(leftOut: boolean) {
+  const balanceCandidates = $derived.by(() => {
     if (!loaded || active || !draftBalanced || !workspace.preferences.balanceAccounts) return [];
     const excluded = new Set(workspace.preferences.balanceExcluded);
     const choosable = locationConnections(
@@ -1528,17 +1520,16 @@
       selectedLocation,
       selectedSettings.provider,
     ).filter(
-      (c) =>
-        excluded.has(c.accountId) === leftOut && canChooseConnection(c.id) && !needsSignIn(c.id),
+      (c) => !excluded.has(c.accountId) && canChooseConnection(c.id) && !needsSignIn(c.id),
     );
     const ready = choosable.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     return ready.length && choosable.every((c) => connectionStatus(c.id)) ? ready : choosable;
-  }
+  });
   // Each of those accounts with its latest reading, and whether its check or first reading is
   // still under way.
-  function balanceReadings(connections = balanceCandidates) {
+  function balanceReadings() {
     const provider = selectedSettings.provider;
-    return connections.map((connection) => {
+    return balanceCandidates.map((connection) => {
       const settings = { provider, model: '', connectionId: connection.id };
       const key = usageKey(settings);
       const snapshot = snapshotFor(usageSnapshots, settings);
@@ -1554,20 +1545,10 @@
       };
     });
   }
-  // The accounts left out, with their readings, once the readings of every account balancing
-  // chooses between show a limit used up, which a new chat could not run on.
-  function balanceFallback(readings: ReturnType<typeof balanceReadings>) {
-    const chat = { provider: selectedSettings.provider, model: selectedSettings.model };
-    const now = Date.now();
-    return readings.length && readings.every((reading) => usedUp(reading.snapshot, chat, now))
-      ? balanceReadings(balanceLeftOut)
-      : [];
-  }
   // Reads the usage of the accounts the open new chat is balanced between. Readings are kept for
   // a minute, so new chats opened one after another read them once.
   function refreshBalance() {
-    const readings = balanceReadings();
-    for (const { readable, settings } of [...readings, ...balanceFallback(readings)])
+    for (const { readable, settings } of balanceReadings())
       if (readable) void refreshUsage(settings);
   }
   // New chats whose account was chosen with a reading of every account in hand. Such a choice
@@ -1582,10 +1563,8 @@
   $effect(() => {
     if (!balanceCandidates.length) return;
     const id = scratchId;
-    // Asked once as the chat opens, and again as its accounts' checks make them readable or the
-    // accounts left out join them.
-    const known = balanceReadings();
-    const read = `${id} ${[...known, ...balanceFallback(known)]
+    // Asked once as the chat opens, and again as its accounts' checks make them readable.
+    const read = `${id} ${balanceReadings()
       .filter((reading) => reading.readable)
       .map((reading) => reading.connection.id)
       .join(' ')}`;
@@ -1596,14 +1575,12 @@
     });
     // Runs again as a check or a reading arrives, the draft empties or the picker closes.
     const readings = balanceReadings();
-    const others = balanceFallback(readings);
     const draft = { picking: agentPickerOpen, filled: draftFilled, mentions: hasComposerMentions };
-    untrack(() => chooseBalanced(id, readings, others, draft));
+    untrack(() => chooseBalanced(id, readings, draft));
   });
   function chooseBalanced(
     id: string,
     readings: ReturnType<typeof balanceReadings>,
-    others: ReturnType<typeof balanceReadings>,
     draft: { picking: boolean; filled: boolean; mentions: boolean },
   ) {
     const settled = balanceSettled.has(id);
@@ -1612,32 +1589,29 @@
     // empty draft; the first one also applies to a draft carried into the chat, short of
     // mentions chosen under its account.
     if (draft.picking || (settled ? draft.filled : draft.mentions)) return;
-    const waiting = [...readings, ...others].some((reading) => reading.waiting);
+    const waiting = readings.some((reading) => reading.waiting);
     // Chosen already, or nothing is known of the accounts yet, as when the app starts: the
-    // readings under way decide, all of them together. Until then the chat keeps its account,
-    // also one Settings leaves out.
+    // readings under way decide, all of them together.
     if (
       waiting &&
       (settled || balanceChosen === id || !readings.some((reading) => reading.snapshot)) &&
-      [...balanceCandidates, ...balanceLeftOut].some((connection) => connection.id === current)
+      readings.some((reading) => reading.connection.id === current)
     )
       return;
     const accounts = new Map(workspace.fleet.connections.map((c) => [c.id, c.accountId]));
     const activity = accountActivity(workspace.conversations, (connectionId) =>
       accounts.get(connectionId),
     );
-    const candidate = ({ connection, snapshot }: (typeof readings)[number]) => ({
-      connectionId: connection.id,
-      snapshot,
-      running: activity.get(connection.accountId)?.running ?? 0,
-      lastUsed: activity.get(connection.accountId)?.lastUsed ?? 0,
-    });
     const choice = balancedAccount(
-      readings.map(candidate),
+      readings.map(({ connection, snapshot }) => ({
+        connectionId: connection.id,
+        snapshot,
+        running: activity.get(connection.accountId)?.running ?? 0,
+        lastUsed: activity.get(connection.accountId)?.lastUsed ?? 0,
+      })),
       { provider: selectedSettings.provider, model: selectedSettings.model },
       Date.now(),
       settled ? current : undefined,
-      others.map(candidate),
     );
     if (waiting) balanceChosen = id;
     else balanceSettled.add(id);
@@ -2831,39 +2805,32 @@
     const usable = locationConnections(workspace.fleet, at, provider).filter(
       (c) => !exclude.includes(c.id) && canChooseConnection(c.id) && !needsSignIn(c.id),
     );
-    // With balancing on, the accounts Settings leaves out take part only when no other can, or
-    // every other one has used a limit up.
+    // With balancing on, the accounts Settings leaves out take part only when no other can.
     const left = workspace.preferences.balanceAccounts
       ? new Set(workspace.preferences.balanceExcluded)
       : new Set<string>();
     const kept = usable.filter((c) => !left.has(c.accountId));
-    const ready = (connections: typeof usable) => {
-      const answering = connections.filter((c) => connectionStatus(c.id)?.auth === 'ready');
-      return answering.length ? answering : connections;
-    };
-    const pool = ready(kept.length ? kept : usable);
+    const candidates = kept.length ? kept : usable;
+    const ready = candidates.filter((c) => connectionStatus(c.id)?.auth === 'ready');
+    const pool = ready.length ? ready : candidates;
     if (!pool.length) return undefined;
     const accounts = new Map(workspace.fleet.connections.map((c) => [c.id, c.accountId]));
     const activity = accountActivity(workspace.conversations, (id) => accounts.get(id));
-    const candidate = (c: (typeof usable)[number]) => {
-      const settings = { provider, model: '', connectionId: c.id };
-      const snapshot = snapshotFor(usageSnapshots, settings);
-      if (!snapshot) void refreshUsage(settings);
-      return {
-        connectionId: c.id,
-        snapshot,
-        running: activity.get(c.accountId)?.running ?? 0,
-        lastUsed: activity.get(c.accountId)?.lastUsed ?? 0,
-      };
-    };
-    const chat = { provider, model };
-    const now = Date.now();
-    const candidates = pool.map(candidate);
-    const others =
-      kept.length && candidates.every((c) => usedUp(c.snapshot, chat, now))
-        ? ready(usable.filter((c) => left.has(c.accountId))).map(candidate)
-        : [];
-    return balancedAccount(candidates, chat, now, undefined, others);
+    return balancedAccount(
+      pool.map((c) => {
+        const settings = { provider, model: '', connectionId: c.id };
+        const snapshot = snapshotFor(usageSnapshots, settings);
+        if (!snapshot) void refreshUsage(settings);
+        return {
+          connectionId: c.id,
+          snapshot,
+          running: activity.get(c.accountId)?.running ?? 0,
+          lastUsed: activity.get(c.accountId)?.lastUsed ?? 0,
+        };
+      }),
+      { provider, model },
+      Date.now(),
+    );
   }
   function recentFolders(environmentId: string) {
     return [
@@ -8171,9 +8138,7 @@
                       ? switchableConnections.length
                         ? 'Another account applies to the next message. '
                         : 'Fixed for this conversation. '
-                      : balanceCandidates.length > 1 ||
-                          (balanceCandidates.length > 0 &&
-                            balanceLeftOut.some((c) => c.id === selectedSettings.connectionId))
+                      : balanceCandidates.length > 1
                         ? 'Account chosen by usage. '
                         : ''
                   }${selectedSettings.planMode ? 'Plan mode: proposes changes before making them.' : 'Full access: tools run without approval prompts.'}`}
