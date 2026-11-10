@@ -5,6 +5,16 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.1 - 2026-11-10
+
+### Fixed
+
+- Keep the window from running out of memory with a large workspace: once your chats added up to
+  a few hundred megabytes, the window reached the 4 GB its page can hold however much memory the
+  computer had free, went blank and reloaded, several times a day. Saving and syncing now read
+  the chats without the extra copies that filled it, so a 399 MB workspace takes about 640 MB
+  instead of 3.1 GB, and the window starts with far shorter pauses
+
 ## 1.3.0 - 2026-11-10
 
 ### Added
