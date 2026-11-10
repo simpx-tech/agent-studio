@@ -5,6 +5,37 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.0 - 2026-11-10
+
+### Added
+
+- See whether your balanced accounts use more than recommended: with Start on the least used
+  account on, each computer's card in Settings → New chats starts with a bar for every limit its
+  accounts report, their average use against the average of their even-use guides, with the
+  pace arrow
+- Reorder chats, folders and computers in the sidebar: drag them, or move the focused one with
+  Alt+Up and Alt+Down. On touch screens, a held row's menu has Move up and Move down. The order
+  follows you to your other devices
+
+### Changed
+
+- List the accounts Start on the least used account chooses between by agent and then by
+  computer in Settings, each checkbox leaving an account out on that computer alone, with
+  Sign-in needed beside an account that must sign in there
+- Show in red which part of a group of tool calls failed, such as its commands, instead of a
+  Failed mark beside the group
+
+### Fixed
+
+- Start Claude Code installed with npm on Windows, whose recent versions run a native program,
+  and show it as installed in WSL distributions
+- Sync pinned chats between your devices: a pin made on one device did not reach the others and
+  could be removed by a later sync
+- Go on after a usage limit resets in the same CLI process: a Claude chat started a new one,
+  which took in a changed CLAUDE.md again in full and could compact a long chat at once
+- Keep each account's usage bars on one line in the Agent picker, lined up with the other
+  accounts' bars
+
 ## 1.2.1 - 2026-11-09
 
 ### Changed
