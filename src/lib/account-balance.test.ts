@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   accountActivity,
-  balanceableAccounts,
+  balanceGroups,
   balancedAccount,
+  excludedConnections,
   levelPoints,
   type BalanceCandidate,
 } from './account-balance';
@@ -372,7 +373,7 @@ describe('what the saved chats say about each account', () => {
   });
 });
 
-describe('the accounts that can be left out of balancing', () => {
+describe('where Settings narrows balancing', () => {
   const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
   const account = (n: number, provider: Fleet['accounts'][number]['provider'], name: string) => ({
     id: id(n),
@@ -386,52 +387,97 @@ describe('the accounts that can be left out of balancing', () => {
     environmentId: id(environmentId),
     profile: 'isolated' as const,
   });
-  const [windows, wsl, server] = [50, 51, 52];
+  const [desktop, vps, windows, wsl, server] = [40, 41, 50, 51, 52];
+  // A desktop with its WSL distribution, which Connections shows as a computer of its own, and a
+  // server, listed in another order than the computers they belong to.
+  const places = {
+    computers: [
+      { id: id(desktop), name: 'Desktop' },
+      { id: id(vps), name: 'VPS' },
+    ],
+    environments: [
+      { id: id(server), computerId: id(vps), name: 'Linux', platform: 'linux' as const },
+      {
+        id: id(wsl),
+        computerId: id(desktop),
+        name: 'WSL · Ubuntu',
+        platform: 'wsl' as const,
+        discoveredOn: id(windows),
+      },
+      { id: id(windows), computerId: id(desktop), name: 'Windows', platform: 'windows' as const },
+    ],
+  };
+  const fleet: Fleet = {
+    ...places,
+    accounts: [
+      account(1, 'claude', 'First'),
+      account(2, 'codex', 'Only Codex'),
+      account(3, 'claude', 'Second'),
+      account(4, 'claude', 'Server login'),
+      account(5, 'gemini', 'Gemini CLI login'),
+      account(6, 'claude', 'Never connected'),
+      account(7, 'codex', 'Second Codex'),
+      account(8, 'claude', 'Server work'),
+    ],
+    connections: [
+      connection(1, 1, windows),
+      connection(2, 3, windows),
+      connection(3, 1, wsl),
+      connection(4, 3, wsl),
+      // Alone of its agent wherever it is connected: nothing to balance it with.
+      connection(5, 2, windows),
+      connection(6, 7, wsl),
+      connection(8, 5, windows),
+      connection(7, 4, server),
+      connection(9, 8, server),
+    ],
+  };
+  const groups = (fleet: Fleet) =>
+    balanceGroups(fleet).map(({ provider, environmentId, connections }) => [
+      provider,
+      environmentId,
+      connections.map((c) => c.id),
+    ]);
 
-  it('lists accounts connected beside another account of their agent, with where', () => {
-    const fleet = {
-      accounts: [
-        account(1, 'claude', 'First'),
-        account(2, 'codex', 'Only Codex'),
-        account(3, 'claude', 'Second'),
-        account(4, 'claude', 'Server login'),
-        account(5, 'gemini', 'Gemini CLI login'),
-        account(6, 'claude', 'Never connected'),
-        account(7, 'codex', 'Second Codex'),
-      ],
-      connections: [
-        connection(1, 1, windows),
-        connection(2, 3, windows),
-        connection(3, 1, wsl),
-        connection(4, 3, wsl),
-        // Alone of its agent wherever it is connected: nothing to balance it with.
-        connection(5, 2, windows),
-        connection(6, 7, wsl),
-        connection(7, 4, server),
-        connection(8, 5, windows),
-        // Two connections of one account are still one account.
-        connection(9, 4, server),
-      ],
-    };
-    expect(balanceableAccounts(fleet)).toEqual([
-      { ...fleet.accounts[0], environmentIds: [id(windows), id(wsl)] },
-      { ...fleet.accounts[2], environmentIds: [id(windows), id(wsl)] },
+  it('groups each agent’s accounts by the computer where several of them meet', () => {
+    expect(groups(fleet)).toEqual([
+      ['claude', id(windows), [id(101), id(102)]],
+      ['claude', id(wsl), [id(103), id(104)]],
+      ['claude', id(server), [id(107), id(109)]],
     ]);
-    // A second Codex account beside the first joins both, where they meet.
+    // A second Codex account beside the first adds Codex, ahead of Claude as the picker lists it,
+    // where they meet.
     const more = { ...fleet, connections: [...fleet.connections, connection(10, 2, wsl)] };
-    expect(balanceableAccounts(more).map((a) => [a.name, a.environmentIds])).toEqual([
-      ['First', [id(windows), id(wsl)]],
-      ['Only Codex', [id(wsl)]],
-      ['Second', [id(windows), id(wsl)]],
-      ['Second Codex', [id(wsl)]],
-    ]);
-    expect(balanceableAccounts({ accounts: [], connections: [] })).toEqual([]);
+    expect(groups(more)[0]).toEqual(['codex', id(wsl), [id(106), id(110)]]);
+    expect(groups(more)).toHaveLength(4);
+    expect(balanceGroups({ ...places, accounts: [], connections: [] })).toEqual([]);
     // A connection whose account is gone counts for nothing.
     expect(
-      balanceableAccounts({
+      balanceGroups({
+        ...places,
         accounts: [fleet.accounts[0]],
         connections: [connection(1, 1, windows), connection(2, 3, windows)],
       }),
     ).toEqual([]);
+  });
+
+  it('leaves accounts out on one computer, or as earlier releases did on all of them', () => {
+    const none = excludedConnections({}, fleet);
+    expect([...none]).toEqual([]);
+    // An account left out by an earlier release is left out wherever it is connected...
+    expect([...excludedConnections({ balanceExcluded: [id(1)] }, fleet)]).toEqual([
+      id(101),
+      id(103),
+    ]);
+    // ...until the list names connections, which replace it, an empty list included.
+    expect([
+      ...excludedConnections(
+        { balanceExcluded: [id(1)], balanceExcludedConnections: [id(103)] },
+        fleet,
+      ),
+    ]).toEqual([id(103)]);
+    expect([
+      ...excludedConnections({ balanceExcluded: [id(1)], balanceExcludedConnections: [] }, fleet),
+    ]).toEqual([]);
   });
 });

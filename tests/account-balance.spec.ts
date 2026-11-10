@@ -110,10 +110,15 @@ const accountOf = (page: Page, name: string) =>
       ).id as string,
     name,
   );
-// The accounts Settings lists under the option, each with whether new chats may start on it.
+// The accounts Settings lists under the option, agent by agent and computer by computer, each
+// with whether new chats there may start on it.
 const accounts = (page: Page) => page.getByRole('group', { name: 'Accounts new chats start on' });
-async function include(page: Page, name: string, included: boolean) {
-  const option = accounts(page).getByRole('checkbox', { name, exact: true });
+const accountsOn = (page: Page, computer = 'Desktop', agentName = 'Claude') =>
+  accounts(page)
+    .getByRole('group', { name: agentName, exact: true })
+    .getByRole('group', { name: computer, exact: true });
+async function include(page: Page, name: string, included: boolean, computer = 'Desktop') {
+  const option = accountsOn(page, computer).getByRole('checkbox', { name, exact: true });
   await option.setChecked(included);
   await expect(option).toBeEnabled();
 }
@@ -363,12 +368,15 @@ test('an account left out in Settings takes new chats only when chosen', async (
   const option = page.getByRole('checkbox', { name: 'Start on the least used account' });
   await option.setChecked(true);
   await expect(option).toBeEnabled();
-  // Turned on, it lists the accounts it chooses between: those of an agent with several of
-  // them on a computer, so neither the one Codex account nor the Gemini login.
-  await expect(accounts(page).locator('label')).toHaveText([
-    'Claude · Claude CLI login',
-    'Claude · Second Claude',
-    'Claude · Third Claude',
+  // Turned on, it lists the accounts it chooses between, under their agent and computer: those
+  // of an agent with several of them on a computer, so neither the one Codex account nor the
+  // Gemini login.
+  await expect(accounts(page).getByRole('heading', { level: 3 })).toHaveAccessibleName('Claude');
+  await expect(accounts(page).getByRole('heading', { level: 4 })).toHaveText(['Desktop']);
+  await expect(accountsOn(page).locator('label')).toHaveText([
+    'Claude CLI login',
+    'Second Claude',
+    'Third Claude',
   ]);
   for (const box of await accounts(page).getByRole('checkbox').all())
     await expect(box).toBeChecked();
@@ -376,9 +384,9 @@ test('an account left out in Settings takes new chats only when chosen', async (
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
 
   // Left out, the least used account gives the open new chat to the next one.
-  await inSettings(page, () => include(page, 'Claude · Second Claude', false));
+  await inSettings(page, () => include(page, 'Second Claude', false));
   await expect(agent(page)).toHaveText(/Claude · Third Claude/);
-  expect((await saved(page)).balanceExcluded).toEqual([await accountOf(page, 'Second Claude')]);
+  expect((await saved(page)).balanceExcludedConnections).toEqual([second]);
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Third Claude/);
   await expect(agent(page)).toHaveAttribute('title', /^Account chosen by usage\. /);
@@ -399,68 +407,108 @@ test('an account left out in Settings takes new chats only when chosen', async (
   // Taking part again, it is the least used account once more.
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(
-    accounts(page).getByRole('checkbox', { name: 'Claude · Second Claude', exact: true }),
+    accountsOn(page).getByRole('checkbox', { name: 'Second Claude', exact: true }),
   ).not.toBeChecked();
-  await include(page, 'Claude · Second Claude', true);
+  await include(page, 'Second Claude', true);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect.poll(async () => (await saved(page)).balanceExcluded).toBeUndefined();
+  await expect.poll(async () => (await saved(page)).balanceExcludedConnections).toBeUndefined();
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
 
   // With one account left new chats start there, and with none on the account last chosen.
   await inSettings(page, async () => {
-    await include(page, 'Claude · Second Claude', false);
-    await include(page, 'Claude · Third Claude', false);
+    await include(page, 'Second Claude', false);
+    await include(page, 'Third Claude', false);
   });
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Claude CLI login/);
-  await inSettings(page, () => include(page, 'Claude · Claude CLI login', false));
+  await inSettings(page, () => include(page, 'Claude CLI login', false));
   await newChat(page);
   await expect(agent(page)).toHaveText(/Claude · Second Claude/);
   await expect(agent(page)).not.toHaveAttribute('title', /chosen by usage/);
 
-  // Two accounts of an agent under one name are told apart by their computers.
-  await page.evaluate(() => {
-    const workspace = JSON.parse(localStorage.getItem('test-workspace')!);
-    const laptop = { id: crypto.randomUUID(), name: 'Laptop' };
-    const environment = {
-      id: crypto.randomUUID(),
-      computerId: laptop.id,
-      name: 'Windows',
-      platform: 'windows',
-    };
-    const added = ['Claude CLI login', 'Laptop Claude'].map((name) => ({
-      id: crypto.randomUUID(),
-      name,
-      provider: 'claude',
-      purpose: 'personal',
-    }));
-    workspace.fleet.computers.push(laptop);
-    workspace.fleet.environments.push(environment);
-    workspace.fleet.accounts.push(...added);
-    workspace.fleet.connections.push(
-      ...added.map((account) => ({
+  // Another computer has a card of its own, also for an account connected on both, whose
+  // choice there is apart from this computer's. A list an earlier release saved, by account,
+  // counts on every computer until it is next changed.
+  await page.evaluate(
+    ({ secondAccount }) => {
+      const workspace = JSON.parse(localStorage.getItem('test-workspace')!);
+      const laptop = { id: crypto.randomUUID(), name: 'Laptop' };
+      const environment = {
+        id: crypto.randomUUID(),
+        computerId: laptop.id,
+        name: 'Windows',
+        platform: 'windows',
+      };
+      const added = ['Claude CLI login', 'Laptop Claude'].map((name) => ({
+        id: crypto.randomUUID(),
+        name,
+        provider: 'claude',
+        purpose: 'personal',
+      }));
+      workspace.fleet.computers.push(laptop);
+      workspace.fleet.environments.push(environment);
+      workspace.fleet.accounts.push(...added);
+      const connection = (accountId: string) => ({
         id: crypto.randomUUID(),
         environmentId: environment.id,
-        accountId: account.id,
+        accountId,
         profile: 'existing',
-      })),
-    );
-    localStorage.setItem('test-workspace', JSON.stringify(workspace));
-  });
+      });
+      workspace.fleet.connections.push(
+        ...added.map((account) => connection(account.id)),
+        connection(secondAccount),
+      );
+      delete workspace.preferences.balanceExcludedConnections;
+      workspace.preferences.balanceExcluded = [secondAccount];
+      localStorage.setItem('test-workspace', JSON.stringify(workspace));
+    },
+    { secondAccount: await accountOf(page, 'Second Claude') },
+  );
   await page.reload();
   await expect(agent(page)).toBeEnabled();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(accounts(page).locator('label')).toHaveText([
-    'Claude · Claude CLI login Desktop',
-    'Claude · Second Claude',
-    'Claude · Third Claude',
-    'Claude · Claude CLI login Laptop',
-    'Claude · Laptop Claude',
+  await expect(accounts(page).getByRole('heading', { level: 4 })).toHaveText(['Desktop', 'Laptop']);
+  await expect(accountsOn(page).locator('label')).toHaveText([
+    'Claude CLI login',
+    'Second Claude',
+    'Third Claude',
   ]);
+  await expect(accountsOn(page, 'Laptop').locator('label')).toHaveText([
+    'Claude CLI login',
+    'Laptop Claude',
+    'Second Claude',
+  ]);
+  const box = (computer: string, name: string) =>
+    accountsOn(page, computer).getByRole('checkbox', { name, exact: true });
+  await expect(box('Desktop', 'Second Claude')).not.toBeChecked();
+  await expect(box('Laptop', 'Second Claude')).not.toBeChecked();
+  await expect(box('Desktop', 'Third Claude')).toBeChecked();
+  await expect(box('Laptop', 'Claude CLI login')).toBeChecked();
+  // Taking it back on the laptop leaves it out here, now by its connection.
+  await include(page, 'Second Claude', true, 'Laptop');
+  await expect(box('Desktop', 'Second Claude')).not.toBeChecked();
+  await expect.poll(async () => (await saved(page)).balanceExcludedConnections).toEqual([second]);
+  expect((await saved(page)).balanceExcluded).toBeUndefined();
+  await include(page, 'Third Claude', false);
+  await expect(box('Laptop', 'Second Claude')).toBeChecked();
+
+  // An account that needs signing in says so where it does.
+  await page.evaluate((id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'), third);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
   await expect(
-    accounts(page).getByRole('checkbox', { name: 'Claude · Claude CLI login Laptop', exact: true }),
-  ).toBeChecked();
+    page
+      .locator('.fleet-account')
+      .filter({ has: page.getByRole('heading', { name: 'Third Claude', exact: true }) }),
+  ).toContainText('Sign-in needed');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(accountsOn(page).locator('label')).toHaveText([
+    'Claude CLI login',
+    'Second Claude',
+    'Third ClaudeSign-in needed',
+  ]);
+  await expect(accountsOn(page, 'Laptop')).not.toContainText('Sign-in needed');
   await page
     .locator('section[aria-labelledby="new-chats-heading"]')
     .screenshot({ path: 'artifacts/balance-accounts.png' });
@@ -469,5 +517,5 @@ test('an account left out in Settings takes new chats only when chosen', async (
   await option.setChecked(false);
   await expect(accounts(page)).toHaveCount(0);
   await expect.poll(async () => (await saved(page)).balanceAccounts).toBeUndefined();
-  expect((await saved(page)).balanceExcluded).toHaveLength(3);
+  expect((await saved(page)).balanceExcludedConnections).toEqual([second, third]);
 });

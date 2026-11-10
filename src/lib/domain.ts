@@ -152,7 +152,10 @@ export const preferencesSchema = z.object({
   // New chats start on the account of their agent that has used the least, instead of the one
   // last chosen (`src/lib/account-balance.ts`). Off unless set, on this device only.
   balanceAccounts: z.boolean().optional(),
-  // The accounts that leaves out: a new chat starts on one of them only when it is chosen.
+  // The accounts that leaves out on each computer, by connection: a new chat there starts on one
+  // of them only when it is chosen. Earlier releases left accounts out on every computer
+  // (`balanceExcluded`), which counts until the list is next changed.
+  balanceExcludedConnections: z.array(z.string().uuid()).optional(),
   balanceExcluded: z.array(z.string().uuid()).optional(),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;

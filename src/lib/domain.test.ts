@@ -145,9 +145,13 @@ describe('portable conversation state', () => {
     workspace.preferences.balanceAccounts = true;
     const excluded = [crypto.randomUUID()];
     workspace.preferences.balanceExcluded = excluded;
+    const connections = [crypto.randomUUID(), crypto.randomUUID()];
+    workspace.preferences.balanceExcludedConnections = connections;
     const restored = restoreWorkspace(JSON.parse(JSON.stringify(workspace)));
     expect(restored.preferences.balanceAccounts).toBe(true);
-    // The accounts left out of it are kept with it.
+    // The accounts left out of it are kept with it, on each computer and as earlier releases
+    // left them out on all of them.
+    expect(restored.preferences.balanceExcludedConnections).toEqual(connections);
     expect(restored.preferences.balanceExcluded).toEqual(excluded);
     // It belongs to this device, like the agent and account new chats otherwise start with.
     expect(Object.keys(sharedWorkspace(workspace))).not.toContain('preferences');

@@ -1,5 +1,5 @@
-import type { Conversation, ProviderId } from './domain';
-import type { Fleet } from './fleet';
+import { providerIds, type Conversation, type Preferences, type ProviderId } from './domain';
+import { computerViews, type Fleet } from './fleet';
 import { resetTime, visibleLimits, type UsageSnapshot } from './usage';
 
 // Balancing new chats between accounts (Settings → New chats, off unless turned on): a new chat
@@ -138,31 +138,37 @@ export function balancedAccount(
 }
 
 /**
- * The accounts new chats can be balanced between, which Settings lets the user leave out one by
- * one: those connected beside another account of their agent on some computer, in the
- * workspace's order, each with the environments where it has that company.
+ * Where new chats are balanced between accounts, which Settings lets the user narrow on each
+ * computer: every computer with more than one account of an agent, agent by agent as the Agent
+ * picker lists them, then computer by computer as Connections lists them (each WSL distribution
+ * apart), each with its accounts' connections there in the workspace's order.
  */
-export function balanceableAccounts(fleet: Pick<Fleet, 'accounts' | 'connections'>) {
+export function balanceGroups(fleet: Fleet) {
   const agent = new Map(fleet.accounts.map((account) => [account.id, account.provider]));
-  // The accounts each environment has of each agent.
-  const together = new Map<string, { environmentId: string; accounts: Set<string> }>();
-  for (const { environmentId, accountId } of fleet.connections) {
-    const provider = agent.get(accountId);
-    if (!provider) continue;
-    const key = `${environmentId} ${provider}`;
-    if (!together.has(key)) together.set(key, { environmentId, accounts: new Set() });
-    together.get(key)!.accounts.add(accountId);
-  }
-  const where = new Map<string, string[]>();
-  for (const { environmentId, accounts } of together.values()) {
-    if (accounts.size < 2) continue;
-    for (const account of accounts)
-      where.set(account, [...(where.get(account) ?? []), environmentId]);
-  }
-  return fleet.accounts.flatMap((account) => {
-    const environmentIds = where.get(account.id);
-    return environmentIds ? [{ ...account, environmentIds }] : [];
-  });
+  const places = computerViews(fleet).flatMap((view) => view.environments.map((e) => e.id));
+  return providerIds.flatMap((provider) =>
+    places.flatMap((environmentId) => {
+      const connections = fleet.connections.filter(
+        (c) => c.environmentId === environmentId && agent.get(c.accountId) === provider,
+      );
+      return connections.length > 1 ? [{ provider, environmentId, connections }] : [];
+    }),
+  );
+}
+
+/**
+ * The connections balancing leaves out, each an account on one computer: those Settings left
+ * out (`balanceExcludedConnections`), or, as earlier releases saved them until the next change
+ * there, every connection of an account left out (`balanceExcluded`).
+ */
+export function excludedConnections(
+  preferences: Pick<Preferences, 'balanceExcluded' | 'balanceExcludedConnections'>,
+  fleet: Pick<Fleet, 'connections'>,
+) {
+  if (preferences.balanceExcludedConnections)
+    return new Set(preferences.balanceExcludedConnections);
+  const accounts = new Set(preferences.balanceExcluded);
+  return new Set(fleet.connections.filter((c) => accounts.has(c.accountId)).map((c) => c.id));
 }
 
 /**

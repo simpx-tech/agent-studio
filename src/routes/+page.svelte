@@ -323,7 +323,12 @@
     waitingPlan,
   } from '$lib/auto-continue';
   import { accountColorIndex, accountColorValue, assignAccountColors } from '$lib/account-colors';
-  import { accountActivity, balanceableAccounts, balancedAccount } from '$lib/account-balance';
+  import {
+    accountActivity,
+    balanceGroups,
+    balancedAccount,
+    excludedConnections,
+  } from '$lib/account-balance';
   import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
@@ -425,6 +430,7 @@
   } from '$lib/replies';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
   import QuotaBars, { quotaBarsWidth } from '$lib/components/QuotaBars.svelte';
+  import type { BalanceAgent } from '$lib/components/NewChatSettings.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import BrandMark from '$lib/components/BrandMark.svelte';
   import SidebarEmpty from '$lib/components/SidebarEmpty.svelte';
@@ -1514,14 +1520,12 @@
   // every one that can be chosen while their checks run, then those reported ready.
   const balanceCandidates = $derived.by(() => {
     if (!loaded || active || !draftBalanced || !workspace.preferences.balanceAccounts) return [];
-    const excluded = new Set(workspace.preferences.balanceExcluded);
+    const excluded = excludedConnections(workspace.preferences, workspace.fleet);
     const choosable = locationConnections(
       workspace.fleet,
       selectedLocation,
       selectedSettings.provider,
-    ).filter(
-      (c) => !excluded.has(c.accountId) && canChooseConnection(c.id) && !needsSignIn(c.id),
-    );
+    ).filter((c) => !excluded.has(c.id) && canChooseConnection(c.id) && !needsSignIn(c.id));
     const ready = choosable.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     return ready.length && choosable.every((c) => connectionStatus(c.id)) ? ready : choosable;
   });
@@ -1651,47 +1655,57 @@
     // The new chat that is open follows it at once, unless something was written in it.
     if (!activeId && scratchId && (!enabled || !draftFilled)) followBalance(enabled);
   }
-  // The accounts balancing can choose between somewhere, for Settings, which leaves any of them
-  // out: agent by agent, as the Agent picker lists them. Two accounts of an agent under one name
-  // are told apart by their computers.
+  // Where balancing chooses between accounts, for Settings, which leaves any of them out on each
+  // computer: agent by agent, as the Agent picker lists them, then computer by computer, each
+  // account marked when it needs signing in there and so cannot take part.
   const balanceChoices = $derived.by(() => {
-    const excluded = new Set(workspace.preferences.balanceExcluded);
-    const accounts = balanceableAccounts(workspace.fleet)
-      .map((account) => ({
-        ...account,
-        label: `${providers[account.provider].name} · ${account.name}`,
-      }))
-      .sort((a, b) => providerIds.indexOf(a.provider) - providerIds.indexOf(b.provider));
-    const computerOf = (environmentId: string) =>
-      computers.find((c) => c.environments.some((e) => e.id === environmentId))?.name;
-    return accounts.map(({ id, label, environmentIds }) => ({
-      id,
-      name: label,
-      color: accountColorValue(colorsByAccount.get(id)?.color),
-      where: accounts.some((other) => other.id !== id && other.label === label)
-        ? environmentIds.map(computerOf).filter(Boolean).join(', ')
-        : '',
-      included: !excluded.has(id),
-    }));
+    const excluded = excludedConnections(workspace.preferences, workspace.fleet);
+    const agents: BalanceAgent[] = [];
+    for (const { provider, environmentId, connections } of balanceGroups(workspace.fleet)) {
+      let agent = agents.find((a) => a.id === provider);
+      if (!agent) {
+        const { name, mark, color } = providers[provider];
+        agents.push((agent = { id: provider, name, mark, color, computers: [] }));
+      }
+      const view = computers.find((c) => c.environments.some((e) => e.id === environmentId));
+      agent.computers.push({
+        id: environmentId,
+        name: view?.name ?? 'Unknown computer',
+        server: !!view?.wsl || serverEnvironment(environmentId),
+        accounts: connections.map((c) => ({
+          id: c.id,
+          name: workspace.fleet.accounts.find((a) => a.id === c.accountId)?.name ?? '',
+          color: accountColorValue(colorsByAccount.get(c.accountId)?.color),
+          included: !excluded.has(c.id),
+          signIn: needsSignIn(c.id),
+        })),
+      });
+    }
+    return agents;
   });
-  /** Settings → New chats: whether balancing may start new chats on an account. */
-  async function setBalanceIncluded(accountId: string, included: boolean) {
+  /** Settings → New chats: whether balancing may start new chats on an account on a computer. */
+  async function setBalanceIncluded(connectionId: string, included: boolean) {
     if (!loaded) throw new Error('The workspace is still loading.');
     const preferences = workspace.preferences;
-    const before = preferences.balanceExcluded;
-    // An account that is gone leaves the list with the next change.
-    const known = new Set(workspace.fleet.accounts.map((a) => a.id));
-    const excluded = (before ?? []).filter((id) => id !== accountId && known.has(id));
-    if (!included) excluded.push(accountId);
-    const set = (value: string[] | undefined) => {
-      if (value?.length) preferences.balanceExcluded = value;
+    const before = [preferences.balanceExcludedConnections, preferences.balanceExcluded] as const;
+    // A connection that is gone leaves the list with the next change, which also replaces the
+    // accounts earlier releases left out on every computer by their connections.
+    const known = new Set(workspace.fleet.connections.map((c) => c.id));
+    const excluded = [...excludedConnections(preferences, workspace.fleet)].filter(
+      (id) => id !== connectionId && known.has(id),
+    );
+    if (!included) excluded.push(connectionId);
+    const set = (connections?: string[], accounts?: string[]) => {
+      if (connections?.length) preferences.balanceExcludedConnections = connections;
+      else delete preferences.balanceExcludedConnections;
+      if (accounts?.length) preferences.balanceExcluded = accounts;
       else delete preferences.balanceExcluded;
     };
     set(excluded);
     try {
       await persistLocal();
     } catch {
-      set(before);
+      set(...before);
       throw new Error('The setting could not be saved.');
     }
   }
@@ -2807,9 +2821,9 @@
     );
     // With balancing on, the accounts Settings leaves out take part only when no other can.
     const left = workspace.preferences.balanceAccounts
-      ? new Set(workspace.preferences.balanceExcluded)
+      ? excludedConnections(workspace.preferences, workspace.fleet)
       : new Set<string>();
-    const kept = usable.filter((c) => !left.has(c.accountId));
+    const kept = usable.filter((c) => !left.has(c.id));
     const candidates = kept.length ? kept : usable;
     const ready = candidates.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     const pool = ready.length ? ready : candidates;

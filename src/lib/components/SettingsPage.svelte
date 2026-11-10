@@ -7,7 +7,7 @@
   import ClaudeInstructions from './ClaudeInstructions.svelte';
   import CliUpdates from './CliUpdates.svelte';
   import DesktopNotifications from './DesktopNotifications.svelte';
-  import NewChatSettings from './NewChatSettings.svelte';
+  import NewChatSettings, { type BalanceAgent } from './NewChatSettings.svelte';
   import PushNotifications from './PushNotifications.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
   import { desktop, type AppUpdateStatus, type CliUpdates as CliUpdateState } from '$lib/transport';
@@ -40,9 +40,9 @@
     environmentName: (environmentId: string) => string;
     balanceAccounts: boolean;
     setBalanceAccounts: (enabled: boolean) => Promise<void>;
-    /** The accounts new chats are balanced between, each with whether it takes part. */
-    balanceChoices: { id: string; name: string; color: string; where: string; included: boolean }[];
-    setBalanceIncluded: (accountId: string, included: boolean) => Promise<void>;
+    /** Where new chats are balanced between accounts, agent by agent and computer by computer. */
+    balanceChoices: BalanceAgent[];
+    setBalanceIncluded: (connectionId: string, included: boolean) => Promise<void>;
     claudeInstructions?: string;
     saveClaudeInstructions: (
       value: string | undefined,
@@ -82,7 +82,7 @@
       <NewChatSettings
         {balanceAccounts}
         {setBalanceAccounts}
-        accounts={balanceChoices}
+        agents={balanceChoices}
         setIncluded={setBalanceIncluded}
       />
       {#key workspaceSession}<ClaudeInstructions
