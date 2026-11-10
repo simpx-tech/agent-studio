@@ -26,6 +26,8 @@ async function prepare(page: Page) {
         );
         for (const window of result.windows)
           if (window.label in own) window.usedPercent = own[window.label];
+        // The model the account's CLI runs by default, which a reading without one reports.
+        if (own.model && !args.model) result.context = { ...result.context, model: own.model };
       }
       return result;
     };
@@ -129,6 +131,87 @@ test('the Agent picker shows each account’s 5-hour and weekly usage as bars', 
   // Choosing an account through its bars selects it.
   await other.locator('.quota-bars').click();
   await expect(agent).toHaveText(/Claude · Second Claude/);
+});
+
+test('each account’s bars stay on one line, lined up with the other accounts’', async ({
+  page,
+}) => {
+  await prepare(page);
+  await page.goto('/');
+  const second = await addAccount(page, 'Second Claude');
+  // A plan without a 5-hour limit whose CLI runs Fable by default, so its reading names Fable's
+  // own weekly limit too, with the widest values a bar can show.
+  await page.evaluate(
+    (id) =>
+      localStorage.setItem(
+        `test-usage-percent-${id}`,
+        JSON.stringify({
+          omit: ['5-hour'],
+          Weekly: 100,
+          'Fable weekly': 99.5,
+          model: 'claude-fable-5-2',
+        }),
+      ),
+    second,
+  );
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  await agent.click();
+  const other = page.getByRole('option', { name: 'Claude · Second Claude', exact: true });
+  await expect(other.locator('.quota-bar')).toHaveText([
+    'Weekly100% used',
+    'Fable weekly99.5% used',
+  ]);
+  // Every account's bars sit in one row beside its name, each kind of limit in its own column,
+  // and each bar's label, value and arrow on one line, whole.
+  const rows = await page.getByRole('option').evaluateAll((options) =>
+    options.map((option) => {
+      const box = (selector: string) => option.querySelector(selector)!.getBoundingClientRect();
+      const bars = [...option.querySelectorAll<HTMLElement>('.quota-bar')];
+      return {
+        name: option.querySelector('.option-name')!.textContent,
+        beside: !bars.length || box('.quota-bars').left > box('.option-name').right,
+        tops: new Set(bars.map((bar) => Math.round(bar.getBoundingClientRect().top))).size,
+        slots: bars.map((bar) => [bar.dataset.slot, Math.round(bar.getBoundingClientRect().left)]),
+        whole: bars.every((bar) => {
+          const label = bar.querySelector('.quota-label')!;
+          const heading = bar.querySelector('.usage-bar-heading')!.getBoundingClientRect();
+          return (
+            label.scrollWidth <= label.clientWidth &&
+            heading.right <= bar.getBoundingClientRect().right + 0.5 &&
+            heading.height < 20
+          );
+        }),
+      };
+    }),
+  );
+  expect(rows.filter((row) => row.slots.length).length).toBeGreaterThanOrEqual(4);
+  for (const row of rows) {
+    expect(row.beside, row.name!).toBe(true);
+    expect(row.tops, row.name!).toBeLessThanOrEqual(1);
+    expect(row.whole, row.name!).toBe(true);
+  }
+  for (const slot of ['five-hour', 'weekly', 'fable-weekly']) {
+    const lefts = rows.flatMap((row) => row.slots.filter(([s]) => s === slot).map(([, x]) => x));
+    expect(lefts.length, slot).toBeGreaterThan(0);
+    expect(new Set(lefts).size, slot).toBe(1);
+  }
+  await page.locator('.picker-popover').screenshot({ path: 'artifacts/agent-usage-one-line.png' });
+
+  // Too narrow for that, the bars go below each name, still in one row.
+  await agent.press('Escape');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await agent.click();
+  const tops = await other
+    .locator('.quota-bar')
+    .evaluateAll((bars) => bars.map((bar) => Math.round(bar.getBoundingClientRect().top)));
+  expect(tops).toHaveLength(2);
+  expect(new Set(tops).size).toBe(1);
+  const name = (await other.locator('.option-name').boundingBox())!;
+  expect((await other.locator('.quota-bars').boundingBox())!.y).toBeGreaterThanOrEqual(
+    name.y + name.height,
+  );
 });
 
 test('picker usage waits for its first reading and leaves out accounts to sign in to', async ({

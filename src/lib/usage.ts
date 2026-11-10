@@ -269,6 +269,16 @@ export function visibleLimits(
       : [];
   });
 }
+/** The kinds of limit `visibleLimits` shows, in the order they show in. */
+export const limitSlots = ['five-hour', 'weekly', 'fable-weekly'] as const;
+export type LimitSlot = (typeof limitSlots)[number];
+/** The kind of limit a window `visibleLimits` returned is. */
+export const limitSlot = (window: LimitWindow): LimitSlot =>
+  window.windowMinutes === 300
+    ? 'five-hour'
+    : window.model?.toLowerCase() === 'fable'
+      ? 'fable-weekly'
+      : 'weekly';
 export function isStale(snapshot: UsageSnapshot | undefined, window: LimitWindow, now: number) {
   if (!snapshot) return false;
   const reset = resetTime(window.resetsAt);

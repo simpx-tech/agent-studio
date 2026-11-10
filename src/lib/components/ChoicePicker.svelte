@@ -27,6 +27,7 @@
     optionIcon,
     optionMark,
     optionAside,
+    asideWidth = 248,
     width,
     disabled = false,
     field = false,
@@ -48,9 +49,12 @@
     optionIcon?: Snippet<[Option]>;
     /** Draws each option's mark in place of its text `mark`. */
     optionMark?: Snippet<[Option]>;
-    /** Draws more about each option beside its name, or below it in a narrow list, and
-     * describes the option with it. */
-    optionAside?: Snippet<[Option]>;
+    /** Draws more about each option beside its name, or below it in a narrow list (its second
+     * argument), and describes the option with it. */
+    optionAside?: Snippet<[Option, boolean]>;
+    /** The width what `optionAside` draws needs beside a name; a list narrower than that and a
+     * name puts it below the names. */
+    asideWidth?: number;
     /** The list's width when that is wider than the trigger, within the viewport. */
     width?: number;
     disabled?: boolean;
@@ -75,6 +79,10 @@
   const selected = $derived(
     options.find((option) => option.id === value) ?? (fallbackToFirst ? options[0] : undefined),
   );
+  // An option's aside sits beside its name while the list holds both, the option's mark, check
+  // and gaps and a name of some length taking 211px; below the name otherwise.
+  let listWidth = $state(0);
+  const stacked = $derived(!!optionAside && listWidth > 0 && listWidth < asideWidth + 211);
 
   async function highlight(index: number) {
     highlighted = Math.max(0, Math.min(index, options.length - 1));
@@ -294,6 +302,8 @@
           aria-labelledby={`${id}-label`}
           class="picker-options"
           class:with-aside={!!optionAside}
+          class:stacked
+          bind:clientWidth={listWidth}
         >
           {#if !options.length}<p class="picker-empty" role="status">{emptyMessage}</p>{/if}
           {#each options as option, index (option.id)}
@@ -336,7 +346,7 @@
                   >{/if}
               </span>
               {#if optionAside}<span class="option-aside" id={`${id}-option-${index}-aside`}
-                  >{@render optionAside(option)}</span
+                  >{@render optionAside(option, stacked)}</span
                 >{/if}
               <span class="option-check" aria-hidden="true">
                 {#if option.id === value}<Check size={15} strokeWidth={2} />{/if}
@@ -525,11 +535,8 @@
     margin-right: 4px;
     vertical-align: -2px;
   }
-  /* What an option shows beside its name sits before the check mark, or below the name when
-     the list is too narrow for both. */
-  .picker-options.with-aside {
-    container-type: inline-size;
-  }
+  /* What an option shows beside its name sits before the check mark, or below the name, across
+     the rest of the option, when the list is too narrow for both (`stacked`). */
   .with-aside .picker-option {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -548,18 +555,16 @@
   .with-aside .option-check {
     grid-column: 4;
   }
-  @container (max-width: 459px) {
-    .with-aside .picker-option {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-    }
-    .option-aside {
-      grid-column: 2;
-      grid-row: 2;
-    }
-    .with-aside .option-check {
-      grid-column: 3;
-      grid-row: 1;
-    }
+  .stacked .picker-option {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .stacked .option-aside {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+  .stacked .option-check {
+    grid-column: 3;
+    grid-row: 1;
   }
   .option-check {
     display: flex;

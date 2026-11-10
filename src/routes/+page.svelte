@@ -429,11 +429,20 @@
     replyTimeTotals,
   } from '$lib/replies';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
-  import QuotaBars from '$lib/components/QuotaBars.svelte';
+  import QuotaBars, { quotaBarsWidth } from '$lib/components/QuotaBars.svelte';
   import SettingsPage from '$lib/components/SettingsPage.svelte';
   import BrandMark from '$lib/components/BrandMark.svelte';
   import SidebarEmpty from '$lib/components/SidebarEmpty.svelte';
-  import { estimatePromptTokens, usageKey, snapshotFor, type UsageSnapshot } from '$lib/usage';
+  import {
+    estimatePromptTokens,
+    limitSlot,
+    limitSlots,
+    usageKey,
+    snapshotFor,
+    visibleLimits,
+    type LimitSlot,
+    type UsageSnapshot,
+  } from '$lib/usage';
   import { mergeLiveUsage, type AccountUpdate } from '$lib/live-usage';
   import { createVirtualSpace, type VirtualSpace } from '$lib/virtual-space';
   import '$lib/styles.css';
@@ -1485,6 +1494,25 @@
       failed: !!usageErrors[key] || !ready,
     };
   }
+  // The kinds of limit those bars show, each in its own column, so every account's bars sit in
+  // one row and the accounts line up: those that any listed account shows.
+  const listedColumns = $derived.by(() => {
+    if (!agentPickerOpen) return [];
+    const shown = new Set<LimitSlot>();
+    for (const option of agentOptions) {
+      const usage = listedUsage(option.id);
+      if (!usage) continue;
+      const settings: ChatSettings = {
+        provider: usage.provider,
+        model: '',
+        reasoning: '',
+        instructions: '',
+      };
+      for (const window of visibleLimits(usage.snapshot, settings, usage.loading && !usage.failed))
+        shown.add(limitSlot(window));
+    }
+    return limitSlots.filter((slot) => shown.has(slot));
+  });
   // Balancing (Settings → New chats, `src/lib/account-balance.ts`): a new chat starts on the
   // account of its agent, on its computer, that has used the least, until an account is chosen
   // for it. It is balanced between the accounts that can answer and were not left out there:
@@ -8152,9 +8180,10 @@
                   bind:open={agentPickerOpen}
                   value={selectedAgentOption}
                   options={agentOptions}
-                  width={agentPickerOpen && agentOptions.some((option) => listedUsage(option.id))
-                    ? 560
+                  width={listedColumns.length
+                    ? quotaBarsWidth(listedColumns.length) + 312
                     : undefined}
+                  asideWidth={quotaBarsWidth(listedColumns.length)}
                   fallbackToFirst={false}
                   placeholder={agentOptions.length ? 'Select agent' : 'No agents'}
                   disabled={!loaded ||
@@ -8169,8 +8198,9 @@
                         color={selectedAccount.color}
                         size="chip"
                       />{:else}<Bot size={16} />{/if}{/snippet}
-                  {#snippet optionAside(option)}{@const usage = listedUsage(option.id)}{#if usage}<QuotaBars
+                  {#snippet optionAside(option, stacked)}{@const usage = listedUsage(option.id)}{#if usage}<QuotaBars
                         {...usage}
+                        columns={stacked ? undefined : listedColumns}
                       />{/if}{/snippet}
                 </ChoicePicker>
               </div>
