@@ -61,9 +61,9 @@ function owner(node: ts.Node) {
   return names.join(' › ') || 'top level';
 }
 
-// A zero-argument `.workspace()` call is the runtime's whole-workspace getter, a $state.snapshot
-// of everything. Snapshotting, cloning or serializing `workspace` itself copies all of it too, and
-// so does the same on `baseline`, the sync module's copy of everything the relay holds.
+// A zero-argument `.workspace()` call is the runtime's whole-workspace getter, a detached copy of
+// everything. Detaching, snapshotting, cloning or serializing `workspace` itself copies all of it
+// too, and so does the same on `baseline`, the sync module's copy of everything the relay holds.
 function copiesWorkspace(node: ts.Node) {
   if (!ts.isCallExpression(node)) return false;
   const callee = node.expression;
@@ -71,7 +71,9 @@ function copiesWorkspace(node: ts.Node) {
     return node.arguments.length === 0;
   const [first] = node.arguments;
   return (
-    ['$state.snapshot', 'JSON.stringify', 'structuredClone'].includes(callee.getText()) &&
+    ['detached', '$state.snapshot', 'JSON.stringify', 'structuredClone'].includes(
+      callee.getText(),
+    ) &&
     !!first &&
     ts.isIdentifier(first) &&
     (first.text === 'workspace' || first.text === 'baseline')
@@ -130,12 +132,14 @@ describe('performance guards', () => {
       function save() {
         void (async () => JSON.stringify(workspace))();
       }
+      const exported = () => detached(workspace);
       const parts = [$state.snapshot(workspace.fleet), runtime.workspace, JSON.stringify(active)];
     </script>`;
     expect(copiesIn('src/example.svelte', component)).toEqual([
       'src/example.svelte › $effect callback',
       'src/example.svelte › lookup',
       'src/example.svelte › save',
+      'src/example.svelte › exported',
     ]);
     const rust = `#[tauri::command]
       pub fn read() {}

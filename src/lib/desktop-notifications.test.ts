@@ -40,6 +40,21 @@ it('does not notify on initial history, archival changes, title updates or old i
   old.archived = true;
   expect(observe({ conversations: [old, chat('complete', time - 86_400_000)] })).toEqual([]);
 });
+it('never reads the calls of a reply that ended', () => {
+  // Reading them through the page's state would make every call of every chat reactive.
+  const ended = chat('complete', time - 1000);
+  Object.defineProperty(ended.messages[0], 'blocks', {
+    get: () => {
+      throw new Error('Read the calls of a reply that ended');
+    },
+  });
+  const running = chat('running', time - 1000);
+  question(running);
+  const observe = createDesktopNotificationTracker(() => time);
+  expect(observe({ conversations: [ended, running] })).toEqual([]);
+  // The question already asked when the app started raises no alert later either.
+  expect(observe({ conversations: [ended, running] })).toEqual([]);
+});
 it('delivers every terminal kind once across repeated checkpoints and stale running snapshots', () => {
   const observe = createDesktopNotificationTracker(() => time);
   observe({ conversations: [] });

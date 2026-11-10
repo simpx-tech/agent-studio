@@ -24,6 +24,7 @@
   import { createFinishedChatTracker, type FinishedChats } from '$lib/finished-chats';
   import { createChangeMarks } from '$lib/change-marks';
   import { createChatSnapshots } from '$lib/chat-snapshots';
+  import { detached } from '$lib/detached';
   import {
     watchDesktopNotifications,
     watchNotificationView,
@@ -343,13 +344,7 @@
     type Installation,
     type WslDiscovery,
   } from '$lib/fleet';
-  import {
-    applySharedMeta,
-    replaceFields,
-    sharedMeta,
-    sharedWorkspace,
-    type Presence,
-  } from '$lib/sync';
+  import { applySharedMeta, replaceFields, sharedMeta, sharedOf, type Presence } from '$lib/sync';
   import {
     fallbackModels,
     fastModeBlock,
@@ -3359,10 +3354,14 @@
         if (installation)
           configureRuntime({
             installation,
-            workspace: () => $state.snapshot(workspace),
-            // Validating the live workspace already detaches the replicated part of it, so this
-            // costs about half of a snapshot of everything followed by the same validation.
-            shared: () => sharedWorkspace(workspace),
+            workspace: () => detached(workspace),
+            // Its conversations as they sync and save, copies that share what did not change,
+            // rather than a validation reading all of the live state (src/lib/detached.ts).
+            shared: () =>
+              sharedOf(
+                sharedMeta(workspace),
+                workspace.conversations.map((conversation) => chatCopy(conversation)),
+              ),
             fleet: () => $state.snapshot(workspace.fleet),
             revision: () => localChanges,
             statuses: () => $state.snapshot(connectionStatuses),
@@ -4116,7 +4115,7 @@
         ? await rewoundMessage(active, messageId, readChatImage)
         : undefined;
       if (session !== workspaceSession || active?.id !== id) return;
-      before = $state.snapshot(active);
+      before = detached(active);
       const next = messageId ? rewindConversation(before, messageId) : undoRewind(before);
       workspace.conversations = workspace.conversations.map((c) => (c.id === next.id ? next : c));
       restoreComposer = returning
@@ -5469,7 +5468,7 @@
     closeConversationMenu();
     try {
       notice = '';
-      let copy: Conversation = $state.snapshot(source);
+      let copy: Conversation = detached(source);
       // A light Viewer holds the source without its recorded work, which the fork copies.
       if (holdsLightChats()) {
         const [whole] = await readWholeChats([id]);
@@ -7212,13 +7211,13 @@
       if (desktop()) {
         const { invoke } = await import('@tauri-apps/api/core');
         const exported = await invoke<{ path: string; missingImages: number }>('export_workspace', {
-          workspace: { ...$state.snapshot(workspace), ...(workflowStore ? { workflowStore } : {}) },
+          workspace: { ...detached(workspace), ...(workflowStore ? { workflowStore } : {}) },
         });
         notice = `Workspace exported to ${exported.path}.${unexported(exported.missingImages)}`;
       } else {
         // A light Viewer puts back each chat's work from the relay as it writes the file.
         const { blob, missing } = await browserExport({
-          ...$state.snapshot(workspace),
+          ...detached(workspace),
           ...(workflowStore ? { workflowStore } : {}),
         } as Workspace);
         const url = URL.createObjectURL(blob);

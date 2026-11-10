@@ -22,7 +22,13 @@
  * So parts are replaced, never edited in place: `message.usage = { ...message.usage, … }`, not
  * `message.usage.contextInput = …`. `verify` checks every copy against a full parse, which the
  * tests turn on.
+ *
+ * The live conversations are the page's deep `$state`, which these copies read only through
+ * src/lib/detached.ts: reading them through Svelte's proxies made the whole workspace reactive
+ * and filled the page's memory.
  */
+import { untrack } from 'svelte';
+import { detached as plain, liveField as field } from './detached';
 import {
   blockSchema,
   conversationSchema,
@@ -65,53 +71,54 @@ export function createChatSnapshots(options: { verify?: boolean } = {}) {
 
   function readBlock(live: ContentBlock): ContentBlock {
     const fields =
-      live && typeof live === 'object' ? blockFields.get((live as Fields).type) : undefined;
-    if (!fields) return blockSchema.parse(live);
-    const source = live as Fields;
+      live && typeof live === 'object' ? blockFields.get(field(live, 'type')) : undefined;
+    if (!fields) return blockSchema.parse(plain(live));
     const kept = blocks.get(live);
     if (kept) {
       let same = true;
       for (let index = 0; index < fields.length; index++)
-        if (source[fields[index]] !== kept.values[index]) {
+        if (field(live, fields[index]) !== kept.values[index]) {
           same = false;
           break;
         }
       if (same) return kept.copy;
     }
-    const values = fields.map((field) => source[field]);
-    const copy = blockSchema.parse(live);
+    const values = fields.map((name) => field(live, name));
+    const copy = blockSchema.parse(plain(live));
     blocks.set(live, { copy, values });
     return copy;
   }
 
   function readMessage(live: Message, before?: MessageCopy): MessageCopy {
-    const list = (live as Fields | null)?.blocks;
+    const list = live && typeof live === 'object' ? field(live, 'blocks') : undefined;
     // Left to the schema to refuse.
-    if (!Array.isArray(list)) return { live, copy: messageSchema.parse(live), heavy: {} };
-    const blockCopies = new Array<ContentBlock>(list.length);
-    for (let index = 0; index < list.length; index++) blockCopies[index] = readBlock(list[index]);
-    const source: Fields = { ...live, blocks: [] };
+    if (!Array.isArray(list)) return { live, copy: messageSchema.parse(plain(live)), heavy: {} };
+    const length = field(list, 'length') as number;
+    const blockCopies = new Array<ContentBlock>(length);
+    for (let index = 0; index < length; index++)
+      blockCopies[index] = readBlock(field(list, index) as ContentBlock);
     const kept: MessageCopy['heavy'] = {};
     const read: Fields = {};
-    for (const field of heavy) {
-      const value = (live as Fields)[field];
-      read[field] = value;
-      const earlier = before?.heavy[field];
-      if (value !== undefined && earlier && earlier.from === value) {
-        kept[field] = earlier;
-        delete source[field];
-      }
+    for (const name of heavy) {
+      const value = field(live, name);
+      read[name] = value;
+      const earlier = before?.heavy[name];
+      if (value !== undefined && earlier && earlier.from === value) kept[name] = earlier;
     }
+    const source: Fields = {};
+    for (const name of Object.keys(live))
+      if (name === 'blocks') source.blocks = [];
+      else if (!kept[name]) source[name] = plain(field(live, name));
     const parsed = messageSchema.parse(source) as Fields;
-    for (const field of heavy)
-      if (!kept[field] && parsed[field] !== undefined)
-        kept[field] = { from: read[field], copy: parsed[field] };
+    for (const name of heavy)
+      if (!kept[name] && parsed[name] !== undefined)
+        kept[name] = { from: read[name], copy: parsed[name] };
     // In the schema's own order, as a whole parse writes it.
     const copy: Fields = {};
-    for (const field of messageFields) {
-      if (field === 'blocks') copy.blocks = blockCopies;
-      else if (field in parsed) copy[field] = parsed[field];
-      else if (kept[field]) copy[field] = kept[field].copy;
+    for (const name of messageFields) {
+      if (name === 'blocks') copy.blocks = blockCopies;
+      else if (name in parsed) copy[name] = parsed[name];
+      else if (kept[name]) copy[name] = kept[name].copy;
     }
     return { live, copy: copy as Message, heavy: kept };
   }
@@ -119,42 +126,7 @@ export function createChatSnapshots(options: { verify?: boolean } = {}) {
   return {
     /** A validated copy of the live conversation, sharing what did not change with the last. */
     read(conversation: Conversation): Conversation {
-      const live = (conversation as Fields | null)?.messages;
-      if (!Array.isArray(live)) return conversationSchema.parse(conversation);
-      let chat = chats.get(conversation.id);
-      if (!chat) chats.set(conversation.id, (chat = { messages: new Map(), touched: undefined }));
-      const touched = chat.touched;
-      chat.touched = new Set();
-      try {
-        const next = new Map<string, MessageCopy>();
-        const messages = new Array<Message>(live.length);
-        for (let index = 0; index < live.length; index++) {
-          const message = live[index] as Message;
-          const before = chat.messages.get((message as Fields | null)?.id as string);
-          const current = before?.live === message ? before : undefined;
-          const read =
-            current && touched && !touched.has(message.id)
-              ? current
-              : readMessage(message, current);
-          next.set(read.copy.id, read);
-          messages[index] = read.copy;
-        }
-        chat.messages = next;
-        const head = conversationSchema.parse({ ...conversation, messages: [] });
-        const copy: Conversation = { ...head, messages };
-        if (options.verify) {
-          const whole = conversationSchema.parse(conversation);
-          if (!jsonEqual(whole, copy))
-            throw new Error(
-              `A copy of conversation ${conversation.id} differs from its live data: something edited a message, a block or its file changes in place, or changed a message without saying so (src/lib/chat-snapshots.ts).`,
-            );
-        }
-        return copy;
-      } catch (error) {
-        // Nothing is known to be current after a copy that failed.
-        chat.touched = undefined;
-        throw error;
-      }
+      return untrack(() => readChat(conversation));
     },
     /** A message changed, or every message of the conversation when none is named. */
     touch(conversationId: string, messageId?: string) {
@@ -178,4 +150,53 @@ export function createChatSnapshots(options: { verify?: boolean } = {}) {
       chats.clear();
     },
   };
+
+  function readChat(conversation: Conversation): Conversation {
+    const live =
+      conversation && typeof conversation === 'object'
+        ? field(conversation, 'messages')
+        : undefined;
+    if (!Array.isArray(live)) return conversationSchema.parse(plain(conversation));
+    const id = field(conversation, 'id') as string;
+    let chat = chats.get(id);
+    if (!chat) chats.set(id, (chat = { messages: new Map(), touched: undefined }));
+    const touched = chat.touched;
+    chat.touched = new Set();
+    try {
+      const next = new Map<string, MessageCopy>();
+      const length = field(live, 'length') as number;
+      const messages = new Array<Message>(length);
+      for (let index = 0; index < length; index++) {
+        const message = field(live, index) as Message;
+        const messageId =
+          message && typeof message === 'object' ? (field(message, 'id') as string) : undefined;
+        const before = messageId === undefined ? undefined : chat.messages.get(messageId);
+        const current = before?.live === message ? before : undefined;
+        const read =
+          current && touched && messageId !== undefined && !touched.has(messageId)
+            ? current
+            : readMessage(message, current);
+        next.set(read.copy.id, read);
+        messages[index] = read.copy;
+      }
+      chat.messages = next;
+      const fields: Fields = {};
+      for (const name of Object.keys(conversation))
+        fields[name] = name === 'messages' ? [] : plain(field(conversation, name));
+      const head = conversationSchema.parse(fields);
+      const copy: Conversation = { ...head, messages };
+      if (options.verify) {
+        const whole = conversationSchema.parse(plain(conversation));
+        if (!jsonEqual(whole, copy))
+          throw new Error(
+            `A copy of conversation ${id} differs from its live data: something edited a message, a block or its file changes in place, or changed a message without saying so (src/lib/chat-snapshots.ts).`,
+          );
+      }
+      return copy;
+    } catch (error) {
+      // Nothing is known to be current after a copy that failed.
+      chat.touched = undefined;
+      throw error;
+    }
+  }
 }

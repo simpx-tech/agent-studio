@@ -65,6 +65,17 @@ export const sharedMetaSchema = sharedSchema.omit({ conversations: true });
 export type SharedMeta = z.infer<typeof sharedMetaSchema>;
 export const sharedMeta = (workspace: Workspace | SharedWorkspace): SharedMeta =>
   sharedMetaSchema.parse(workspace);
+/**
+ * The replicated workspace from its settings and its conversations, each already validated, with
+ * its fields in the order validating the whole of it gives them.
+ */
+export function sharedOf(meta: SharedMeta, conversations: Conversation[]): SharedWorkspace {
+  const shared: Record<string, unknown> = {};
+  for (const key of Object.keys(sharedSchema.shape))
+    if (key === 'conversations') shared.conversations = conversations;
+    else if (key in meta) shared[key] = meta[key as keyof SharedMeta];
+  return shared as SharedWorkspace;
+}
 export const metaOf = (workspace: SharedWorkspace): SharedMeta => {
   const { conversations, ...meta } = workspace;
   return meta;

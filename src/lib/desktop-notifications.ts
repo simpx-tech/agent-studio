@@ -71,7 +71,12 @@ export function createDesktopNotificationTracker(now = Date.now, wake?: (delay: 
             });
           }
         }
-      } else for (const key of attentionKeys(message)) attention.add(key);
+      } else if (!terminal) {
+        // A reply that ended asks nothing more, so a first look reads only the calls of those
+        // still running: reading every chat's last reply through the page's state made all of
+        // their calls reactive, 130 MB with 556 chats on 2026-11-10.
+        for (const key of attentionKeys(message)) attention.add(key);
+      }
       // Most recently seen last, so the runs of chats still present are the last to go.
       runs.delete(message.runId);
       runs.set(message.runId, { terminal: terminal || !!old?.terminal, attention, asked });

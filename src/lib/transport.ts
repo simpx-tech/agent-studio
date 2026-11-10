@@ -152,6 +152,7 @@ import {
   mergeInvolved,
   metaAnswerSchema,
   nextBaselineChats,
+  shareBaseline,
   syncPlan,
   uploadBatches,
   type Manifest,
@@ -1546,6 +1547,17 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
   const resumed = checkpoint?.url === url && checkpoint.instanceId === instanceId;
   const nextBaseline = resumed ? sharedSchema.parse(checkpoint.base) : emptyShared();
   if (generation !== relayGeneration) return false;
+  // The checkpoint's copy of each conversation this computer still holds as it was then gives
+  // way to the copy it syncs and saves, so the page keeps one of each.
+  if (
+    resumed &&
+    !(await shareBaseline(
+      nextBaseline.conversations,
+      (id) => runtime?.chat(id),
+      () => generation === relayGeneration,
+    ))
+  )
+    return false;
   resetBaseline(
     nextBaseline,
     resumed ? checkpointRevisions(checkpoint.revisions) : undefined,

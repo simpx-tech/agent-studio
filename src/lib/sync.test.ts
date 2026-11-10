@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  conversationSchema,
   copiedReplyError,
   initialWorkspace,
   interruptedReplyError,
@@ -17,6 +18,8 @@ import {
   replaceFields,
   sameMeta,
   sameShared,
+  sharedMeta,
+  sharedOf,
   sharedSchema,
   sharedWorkspace,
 } from './sync';
@@ -37,6 +40,23 @@ const chat = (): Conversation => ({
   messages: [],
 });
 describe('workspace replication', () => {
+  it('puts the replicated workspace together as validating all of it does', () => {
+    const workspace = {
+      ...initialWorkspace(),
+      conversations: [chat(), { ...chat(), archived: true }],
+      claudeInstructions: '',
+      pins: [{ conversationId: crypto.randomUUID(), at: '2026-11-10T12:00:00.000Z' }],
+    };
+    const shared = sharedOf(
+      sharedMeta(workspace),
+      workspace.conversations.map((c) => conversationSchema.parse(c)),
+    );
+    // Fields in the same order too: syncs compare what they would write as JSON.
+    expect(JSON.stringify(shared)).toBe(JSON.stringify(sharedWorkspace(workspace)));
+    expect(JSON.stringify(sharedOf(sharedMeta(initialWorkspace()), []))).toBe(
+      JSON.stringify(sharedWorkspace(initialWorkspace())),
+    );
+  });
   it('compares shared workspaces by item, whatever order each device keeps', () => {
     const first = chat(),
       second = chat();

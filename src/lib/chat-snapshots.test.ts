@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+// What `$state` compiles to: the page's conversations are these proxies.
+import { proxy } from 'svelte/internal/client';
 import { applyRunEvent } from './activity';
 import { chatList, chatParts, chatSize, joinBytes, jsonWith } from './chat-bytes';
 import { createChatSnapshots } from './chat-snapshots';
@@ -44,6 +46,11 @@ function chat(messages: Message[]): Conversation {
 const whole = (conversation: Conversation) => conversationSchema.parse(conversation);
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const event = (value: object) => value as Parameters<typeof applyRunEvent>[1];
+/** A conversation as the page holds it, in Svelte's deep state. */
+const state = <T extends object>(value: T): T => proxy(value);
+/** A field as the state holds it, read without making it reactive. */
+const held = (object: object, key: PropertyKey) =>
+  Object.getOwnPropertyDescriptor(object, key)?.value;
 
 describe('chat snapshots', () => {
   it('copies a conversation as a full parse does', () => {
@@ -161,10 +168,82 @@ describe('chat snapshots', () => {
     expect(() => snapshots.read(chat([{ ...message(0), blocks: undefined } as never]))).toThrow();
   });
 
-  it('follows a reply through a thousand random events', () => {
+  it('reads a conversation in Svelte state without making any of it reactive', () => {
+    const snapshots = createChatSnapshots();
+    const saved = chat([
+      message(0),
+      message(1, {
+        runId: uuid(50),
+        blocks: [block('a'), { type: 'markdown', text: 'Done' }],
+        fileChanges: { revision: 1, edits: [] },
+      }),
+    ]);
+    const target = structuredClone(saved);
+    const live = state(target);
+    const copy = snapshots.read(live);
+    expect(JSON.stringify(copy)).toBe(JSON.stringify(whole(saved)));
+    // Svelte gives a field a signal, and wraps its value, only when the field is read through
+    // its proxy: every field still holds what was saved, so nothing was.
+    for (const key of Object.keys(target))
+      expect(held(live, key)).toBe(target[key as keyof Conversation]);
+    // A copy read again, unchanged, is the same copy.
+    expect(snapshots.read(live).messages[1]).toBe(copy.messages[1]);
+  });
+
+  it('copies what changed through Svelte state as a full parse reads it', () => {
+    // `verify` compares every copy with a full parse of the conversation as it stands, and the
+    // last check with one that reads through the proxies, as the rest of the page does.
     const snapshots = createChatSnapshots({ verify: true });
-    const reply = message(1, { status: 'running', runId: uuid(50), blocks: [] });
-    const live = chat([message(0), reply, message(2), message(3, { blocks: [block('old')] })]);
+    const live = state(
+      chat([message(0), message(1, { status: 'running', runId: uuid(50), blocks: [block('a')] })]),
+    );
+    const first = snapshots.read(live);
+    // The window shows the reply, which grows through the proxies.
+    const reply = live.messages[1];
+    expect(reply.blocks[0].type).toBe('activity');
+    applyRunEvent(reply, event({ kind: 'tool', tool: call('a', 2, 'running') }));
+    applyRunEvent(reply, event({ kind: 'tool', tool: call('b') }));
+    applyRunEvent(reply, event({ kind: 'text', text: 'Answer' }));
+    snapshots.touch(live.id, reply.id);
+    const next = snapshots.read(live);
+    expect(next.messages[0]).toBe(first.messages[0]);
+    expect(next.messages[1].blocks.map((b) => b.type)).toEqual([
+      'activity',
+      'activity',
+      'markdown',
+    ]);
+    // A field removed, a message replaced and one added.
+    delete reply.runId;
+    live.messages[0] = message(0, { blocks: [{ type: 'markdown', text: 'Edited' }] });
+    live.messages.push(message(2));
+    snapshots.touch(live.id);
+    const later = snapshots.read(live);
+    expect(later.messages.map((m) => m.id)).toEqual([uuid(0), uuid(1), uuid(2)]);
+    expect(later.messages[1].runId).toBeUndefined();
+    expect(later.messages[0].blocks).toEqual([{ type: 'markdown', text: 'Edited' }]);
+    // Shortened, as a rewind does.
+    live.messages.length = 1;
+    snapshots.touch(live.id);
+    expect(snapshots.read(live).messages).toHaveLength(1);
+    live.messages.push(later.messages[2]);
+    snapshots.touch(live.id);
+    expect(jsonEqual(snapshots.read(live), whole(live))).toBe(true);
+  });
+
+  it.each([
+    ['plain data', <T extends object>(value: T) => value],
+    ['Svelte state', state],
+  ])('follows a reply through a thousand random events in %s', (_, hold) => {
+    const snapshots = createChatSnapshots({ verify: true });
+    const live = hold(
+      chat([
+        message(0),
+        message(1, { status: 'running', runId: uuid(50), blocks: [] }),
+        message(2),
+        message(3, { blocks: [block('old')] }),
+      ]),
+    );
+    const reply = live.messages[1];
     let seed = 7;
     const next = () => {
       seed = (seed * 1664525 + 1013904223) >>> 0;

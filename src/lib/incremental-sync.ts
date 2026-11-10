@@ -179,6 +179,38 @@ export function nextBaselineChats(
 }
 
 /**
+ * A checkpoint holds a second copy of every conversation this computer holds too, all of it read
+ * anew: with a 399 MB workspace on 2026-11-10, 109 MB of objects and about 380 MB of text, nearly
+ * half of what the page kept. Each conversation of the checkpoint's baseline unchanged since then
+ * gives way, in place, to the copy this computer syncs and saves (`local`), which nothing edits
+ * either and which the baseline takes anyway once a conversation syncs, so the page keeps one of
+ * each. The comparison reads the workspace once, a conversation at a time, letting the window
+ * work in between. Returns whether the connection it was made for is still `current`.
+ */
+export async function shareBaseline(
+  conversations: Conversation[],
+  local: (id: string) => Conversation | undefined,
+  current: () => boolean,
+): Promise<boolean> {
+  let since = performance.now();
+  for (let index = 0; index < conversations.length; index++) {
+    const saved = conversations[index];
+    let copy: Conversation | undefined;
+    try {
+      copy = local(saved.id);
+    } catch {
+      // A conversation this computer cannot copy fails its own sync; the checkpoint's stands.
+    }
+    if (copy && jsonEqual(copy, saved)) conversations[index] = copy;
+    if (performance.now() - since < 30) continue;
+    await new Promise((resolve) => setTimeout(resolve));
+    if (!current()) return false;
+    since = performance.now();
+  }
+  return current();
+}
+
+/**
  * Splits conversations to send into uploads of about `budget` serialized characters, in their
  * order. One larger than the budget goes in an upload of its own; none is left out.
  */

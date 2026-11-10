@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type { Conversation } from './domain';
 import { emptyShared, type SharedMeta } from './sync';
 import {
@@ -6,6 +6,7 @@ import {
   manifestSchema,
   mergeInvolved,
   nextBaselineChats,
+  shareBaseline,
   syncPlan,
   uploadBatches,
 } from './incremental-sync';
@@ -220,4 +221,55 @@ it('splits uploads by size and sends a conversation larger than the budget alone
   expect(uploadBatches([a, b, c, d], sizes, 100)).toEqual([[a], [b], [c], [d]]);
   expect(uploadBatches([a, d, b], sizes, 100)).toEqual([[a, d], [b]]);
   expect(uploadBatches([], sizes, 100)).toEqual([]);
+});
+
+it('keeps one copy of each conversation the checkpoint holds as this computer does', async () => {
+  // Read from the checkpoint file, so none of them is this computer's own copy.
+  const saved = (conversation: Conversation) => JSON.parse(JSON.stringify(conversation));
+  const same = chat('a', 'Same'),
+    renamed = chat('b', 'Before'),
+    unreadable = chat('c', 'Unreadable'),
+    gone = chat('d', 'Deleted here');
+  const local = new Map<string, Conversation>([
+    [same.id, same],
+    [renamed.id, { ...renamed, title: 'After' }],
+  ]);
+  const base = [same, renamed, unreadable, gone].map(saved);
+  const conversations = [...base];
+  const shared = await shareBaseline(
+    conversations,
+    (id) => {
+      if (id === unreadable.id) throw new Error('Not a conversation');
+      return local.get(id);
+    },
+    () => true,
+  );
+  expect(shared).toBe(true);
+  expect(conversations[0]).toBe(same);
+  expect(conversations.slice(1)).toEqual(base.slice(1));
+  for (let index = 1; index < base.length; index++) expect(conversations[index]).toBe(base[index]);
+});
+
+it('lets the window work while it compares, and stops once its connection changed', async () => {
+  // Every comparison takes longer than the window waits.
+  let clock = 0;
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 50));
+  try {
+    const local = ['a', 'b', 'c'].map((id) => chat(id, 'Same'));
+    const conversations = local.map((c) => JSON.parse(JSON.stringify(c)) as Conversation);
+    let connected = true;
+    const sharing = shareBaseline(
+      conversations,
+      (id) => local.find((c) => c.id === id),
+      () => connected,
+    );
+    // The first conversation is shared before the window gets its turn.
+    expect(conversations[0]).toBe(local[0]);
+    expect(conversations[1]).not.toBe(local[1]);
+    connected = false;
+    expect(await sharing).toBe(false);
+    expect(conversations[2]).not.toBe(local[2]);
+  } finally {
+    now.mockRestore();
+  }
 });
