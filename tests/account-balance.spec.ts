@@ -519,3 +519,63 @@ test('an account left out in Settings takes new chats only when chosen', async (
   await expect.poll(async () => (await saved(page)).balanceAccounts).toBeUndefined();
   expect((await saved(page)).balanceExcludedConnections).toEqual([second, third]);
 });
+
+test('Settings shows what the accounts balanced on a computer used together', async ({ page }) => {
+  await prepare(page);
+  const second = await addAccount(page, 'Claude', 'Second Claude');
+  const third = await addAccount(page, 'Claude', 'Third Claude');
+  const login = await connectionOf(page, 'Claude CLI login');
+  // The mock reads every limit an hour before its reset: 80% of a 5-hour window has passed, and
+  // 99.4% of a weekly one.
+  await setUsage(page, login, { '5-hour': 95, Weekly: 50 });
+  await setUsage(page, second, { '5-hour': 85, Weekly: 30 });
+  await setUsage(page, third, { '5-hour': 60, Weekly: 10 });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const option = page.getByRole('checkbox', { name: 'Start on the least used account' });
+  await option.setChecked(true);
+  await expect(option).toBeEnabled();
+
+  // Each limit the accounts report, as their average against the average of their guides.
+  const used = (label: string) =>
+    accountsOn(page).getByRole('progressbar', { name: `${label} limit used`, exact: true });
+  await expect(used('5-hour')).toHaveAttribute(
+    'aria-valuetext',
+    '80% used, recommended 80%, average of 3 accounts',
+  );
+  await expect(used('Weekly')).toHaveAttribute(
+    'aria-valuetext',
+    '30% used, recommended 99.4%, average of 3 accounts',
+  );
+  await expect(accountsOn(page).getByRole('img', { name: 'On track' })).toBeVisible();
+  await expect(accountsOn(page).getByRole('img', { name: 'Below pace' })).toBeVisible();
+
+  // An account left out no longer counts: the two left used more than their guides.
+  await include(page, 'Third Claude', false);
+  await expect(used('5-hour')).toHaveAttribute(
+    'aria-valuetext',
+    '90% used, recommended 80%, average of 2 accounts',
+  );
+  await expect(accountsOn(page).getByRole('img', { name: 'Ahead of pace' })).toBeVisible();
+  await expect(accountsOn(page).locator('.pool-limit').first()).toHaveAttribute(
+    'title',
+    'Average of 2 accounts: 90% used, recommended 80%. Ahead of pace.',
+  );
+  await page
+    .locator('section[aria-labelledby="new-chats-heading"]')
+    .screenshot({ path: 'artifacts/balance-pool.png' });
+
+  // Nor does one that needs signing in, which cannot take part.
+  await page.evaluate((id) => localStorage.setItem(`test-auth-connection-${id}`, 'login'), second);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh connections', exact: true }).click();
+  await expect(
+    page
+      .locator('.fleet-account')
+      .filter({ has: page.getByRole('heading', { name: 'Second Claude', exact: true }) }),
+  ).toContainText('Sign-in needed');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(used('Weekly')).toHaveAttribute(
+    'aria-valuetext',
+    '50% used, recommended 99.4%, average of 1 account',
+  );
+});

@@ -1,7 +1,10 @@
 <script lang="ts" module>
+  import type { PoolReading } from '$lib/account-balance';
+  import type { ProviderId } from '$lib/domain';
+
   /** An agent's accounts that new chats are balanced between, computer by computer. */
   export type BalanceAgent = {
-    id: string;
+    id: ProviderId;
     name: string;
     mark: string;
     color: string;
@@ -11,12 +14,15 @@
       server: boolean;
       /** Each account's connection on that computer, with whether it takes part there. */
       accounts: { id: string; name: string; color: string; included: boolean; signIn: boolean }[];
+      /** The usage of the accounts balancing chooses between there, for what they used together. */
+      usage: PoolReading[];
     }[];
   };
 </script>
 
 <script lang="ts">
   import { Monitor, Scale, Server } from '@lucide/svelte';
+  import PoolUsage from './PoolUsage.svelte';
   let {
     balanceAccounts,
     setBalanceAccounts,
@@ -81,6 +87,7 @@
                       aria-hidden="true"
                     />{/if}<span>{computer.name}</span>
                 </h4>
+                <PoolUsage provider={agent.id} readings={computer.usage} />
                 {#each computer.accounts as account (account.id)}
                   <label class="checkbox"
                     ><input

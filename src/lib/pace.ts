@@ -14,6 +14,56 @@ export type QuotaPace = {
   allowanceUnit: 'hour' | 'day';
 };
 
+/**
+ * How a share used compares with the even-use guide: more than 5 percentage points above it is
+ * ahead of pace, more than 5 below it below pace, and a limit used up is reached.
+ */
+export function guidePace(
+  used: number,
+  expected: number,
+): Pick<QuotaPace, 'state' | 'label' | 'tone' | 'detail' | 'advice'> & {
+  state: Exclude<QuotaPace['state'], 'unknown'>;
+} {
+  const difference = used - expected;
+  const state =
+    used >= 100
+      ? 'exhausted'
+      : difference > 5 + 1e-6
+        ? 'ahead'
+        : difference < -5 - 1e-6
+          ? 'below'
+          : 'on-track';
+  return {
+    state,
+    label: {
+      below: 'Below pace',
+      'on-track': 'On track',
+      ahead: 'Ahead of pace',
+      exhausted: 'Limit reached',
+    }[state],
+    tone:
+      state === 'exhausted'
+        ? 'danger'
+        : state === 'ahead'
+          ? 'watch'
+          : state === 'on-track'
+            ? 'steady'
+            : 'good',
+    detail:
+      state === 'on-track'
+        ? 'Within 5 percentage points of the even-use guide.'
+        : `${Math.abs(difference).toFixed(1)} percentage points ${difference > 0 ? 'above' : 'below'} the even-use guide.`,
+    advice:
+      state === 'exhausted'
+        ? 'Wait for reset or switch provider.'
+        : state === 'ahead'
+          ? ''
+          : state === 'below'
+            ? 'Room to spare compared with evenly spread usage.'
+            : 'Keep usage close to the guide to last until reset.',
+  };
+}
+
 export function quotaPace(
   window: LimitWindow,
   snapshot: UsageSnapshot | undefined,
@@ -56,51 +106,16 @@ export function quotaPace(
   // clock: an unchanged or failed reading must not slowly look more favorable.
   const expected = ((measuredAt - (reset - duration)) / duration) * 100;
   const used = window.usedPercent;
-  const difference = used - expected;
-  const state =
-    used >= 100
-      ? 'exhausted'
-      : difference > 5 + 1e-6
-        ? 'ahead'
-        : difference < -5 - 1e-6
-          ? 'below'
-          : 'on-track';
   const unit = window.windowMinutes === 300 || reset - measuredAt < 86_400_000 ? 'hour' : 'day';
   const remainingUnits = (reset - measuredAt) / (unit === 'hour' ? 3_600_000 : 86_400_000);
   // A projection from the first few moments of a window is too unstable to show.
   const projected = expected >= 5 ? (used / expected) * 100 : null;
   return {
-    state,
-    label: {
-      below: 'Below pace',
-      'on-track': 'On track',
-      ahead: 'Ahead of pace',
-      exhausted: 'Limit reached',
-    }[state],
-    tone:
-      state === 'exhausted'
-        ? 'danger'
-        : state === 'ahead'
-          ? 'watch'
-          : state === 'on-track'
-            ? 'steady'
-            : 'good',
+    ...guidePace(used, expected),
     expectedPercent: expected,
     projectedPercent: projected,
     allowance: Math.max(0, 100 - used) / remainingUnits,
     allowanceUnit: unit,
-    detail:
-      state === 'on-track'
-        ? 'Within 5 percentage points of the even-use guide.'
-        : `${Math.abs(difference).toFixed(1)} percentage points ${difference > 0 ? 'above' : 'below'} the even-use guide.`,
-    advice:
-      state === 'exhausted'
-        ? 'Wait for reset or switch provider.'
-        : state === 'ahead'
-          ? ''
-          : state === 'below'
-            ? 'Room to spare compared with evenly spread usage.'
-            : 'Keep usage close to the guide to last until reset.',
   };
 }
 

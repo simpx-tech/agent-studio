@@ -5,7 +5,9 @@ import {
   balancedAccount,
   excludedConnections,
   levelPoints,
+  poolUsage,
   type BalanceCandidate,
+  type PoolReading,
 } from './account-balance';
 import type { Message } from './domain';
 import type { Fleet } from './fleet';
@@ -370,6 +372,188 @@ describe('what the saved chats say about each account', () => {
       lastUsed: Date.parse('2026-10-13T08:00:00Z'),
     });
     expect([...activity.keys()]).toEqual(['first', 'second']);
+  });
+});
+
+describe('what the accounts balanced on a computer used together', () => {
+  const checked = seconds(now) - 30;
+  // A limit read when `share` percent of its window had passed, so its even-use guide is `share`.
+  const guided = (minutes: number, used: number | null, share: number, model?: string) =>
+    limit(minutes, used, checked + Math.round((1 - share / 100) * minutes * 60), model ?? null);
+  const current = (snapshot: UsageSnapshot): PoolReading => ({
+    snapshot,
+    loading: false,
+    failed: false,
+  });
+  const pool = (readings: PoolReading[], provider: 'claude' | 'codex' = 'claude') =>
+    poolUsage(provider, readings, now).map(({ id, label, counted, unread, pace, ...rest }) => ({
+      id,
+      label,
+      counted,
+      unread,
+      used: rest.usedPercent,
+      expected: rest.expectedPercent == null ? null : Number(rest.expectedPercent.toFixed(6)),
+      pace: pace.state,
+    }));
+
+  it('averages the share used and the guide of each account, each at its own reading', () => {
+    const readings = [
+      current(reading([guided(300, 70, 50), guided(10080, 40, 60)])),
+      current(reading([guided(300, 50, 70), guided(10080, 20, 20)])),
+    ];
+    expect(pool(readings)).toEqual([
+      // One account ahead of its guide and one below it are on track together.
+      {
+        id: 'five-hour',
+        label: '5-hour',
+        counted: 2,
+        unread: 0,
+        used: 60,
+        expected: 60,
+        pace: 'on-track',
+      },
+      {
+        id: 'weekly',
+        label: 'Weekly',
+        counted: 2,
+        unread: 0,
+        used: 30,
+        expected: 40,
+        pace: 'below',
+      },
+    ]);
+    const [, weekly] = poolUsage('claude', readings, now);
+    expect(weekly.pace).toMatchObject({
+      label: 'Below pace',
+      tone: 'good',
+      detail: '10.0 percentage points below the even-use guide.',
+    });
+  });
+
+  it('is ahead of pace when the accounts together used more than their guides', () => {
+    const [fiveHour] = poolUsage(
+      'claude',
+      [
+        current(reading([guided(300, 90, 50)])),
+        current(reading([guided(300, 30, 40)])),
+        current(reading([guided(300, 45, 30)])),
+      ],
+      now,
+    );
+    expect(fiveHour.usedPercent).toBe(55);
+    expect(fiveHour.expectedPercent).toBeCloseTo(40, 6);
+    expect(fiveHour.pace).toMatchObject({ state: 'ahead', label: 'Ahead of pace', tone: 'watch' });
+    // Reached only once every account used it up.
+    const spent = [
+      current(reading([guided(300, 100, 50)])),
+      current(reading([guided(300, 100, 90)])),
+    ];
+    expect(pool(spent)[0].pace).toBe('exhausted');
+    expect(pool([spent[0], current(reading([guided(300, 0, 90)]))])[0]).toMatchObject({
+      used: 50,
+      expected: 70,
+      pace: 'below',
+    });
+  });
+
+  it('counts each limit over the accounts that report it', () => {
+    // A Claude plan without a 5-hour limit, and a Codex account as most read: weekly alone.
+    expect(
+      pool([
+        current(reading([guided(300, 80, 50), guided(10080, 40, 50)])),
+        current(reading([guided(10080, 60, 50)])),
+      ]),
+    ).toEqual([
+      {
+        id: 'five-hour',
+        label: '5-hour',
+        counted: 1,
+        unread: 0,
+        used: 80,
+        expected: 50,
+        pace: 'ahead',
+      },
+      {
+        id: 'weekly',
+        label: 'Weekly',
+        counted: 2,
+        unread: 0,
+        used: 50,
+        expected: 50,
+        pace: 'on-track',
+      },
+    ]);
+    expect(
+      pool([current(codex(70)), current(reading([guided(10080, 10, 40)], 'codex'))], 'codex').map(
+        (limit) => [limit.id, limit.counted],
+      ),
+    ).toEqual([['weekly', 2]]);
+    // A Fable chat's own weekly limit, which a reading reports when its CLI runs Fable by default.
+    const fable = (used: number, share: number): UsageSnapshot => ({
+      ...reading([guided(10080, 20, 50), guided(10080, used, share, 'fable')]),
+      context: { model: 'claude-fable-5', tokens: 1_000_000, source: 'Fixture' },
+    });
+    expect(pool([current(fable(90, 50)), current(fable(50, 30))])).toEqual([
+      expect.objectContaining({ id: 'weekly', used: 20, pace: 'below' }),
+      expect.objectContaining({
+        id: 'fable-weekly',
+        label: 'Fable weekly',
+        used: 70,
+        expected: 40,
+        pace: 'ahead',
+      }),
+    ]);
+  });
+
+  it('leaves out accounts without a current reading, and says how many', () => {
+    const fresh = current(reading([guided(300, 60, 50), guided(10080, 40, 40)]));
+    const old: PoolReading = current({
+      ...reading([guided(300, 99, 50), guided(10080, 99, 50)]),
+      checkedAt: seconds(now) - 600,
+    });
+    const failed: PoolReading = { ...current(claude(99, 99)), failed: true };
+    const loading: PoolReading = { loading: true, failed: false };
+    expect(pool([fresh, old, failed, loading])).toEqual([
+      expect.objectContaining({ id: 'five-hour', counted: 1, unread: 3, used: 60 }),
+      expect.objectContaining({ id: 'weekly', counted: 1, unread: 3, used: 40 }),
+    ]);
+    // Live updates alone name the limits they concern: the account may have the others too.
+    const live: PoolReading = current({
+      ...reading([guided(10080, 80, 40)]),
+      partial: true,
+    });
+    expect(pool([fresh, live])).toEqual([
+      expect.objectContaining({ id: 'five-hour', counted: 1, unread: 1, used: 60 }),
+      expect.objectContaining({ id: 'weekly', counted: 2, unread: 0, used: 60 }),
+    ]);
+  });
+
+  it('waits for the first readings, and shows nothing without one coming', () => {
+    const loading: PoolReading = { loading: true, failed: false };
+    expect(pool([loading, loading])).toEqual([
+      {
+        id: 'five-hour',
+        label: '5-hour',
+        counted: 0,
+        unread: 2,
+        used: null,
+        expected: null,
+        pace: 'unknown',
+      },
+      {
+        id: 'weekly',
+        label: 'Weekly',
+        counted: 0,
+        unread: 2,
+        used: null,
+        expected: null,
+        pace: 'unknown',
+      },
+    ]);
+    // An account that cannot be read now is not being read.
+    expect(pool([{ loading: true, failed: true }])).toEqual([]);
+    expect(pool([{ ...current(claude(40, 40)), failed: true }])).toEqual([]);
+    expect(pool([])).toEqual([]);
   });
 });
 

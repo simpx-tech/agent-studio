@@ -1477,23 +1477,28 @@
           void refreshUsage({ provider, model: '', connectionId });
       });
   });
+  // An account's latest usage reading, whether a reading of it is under way or due, and whether
+  // it can be read now (`ready`), without which its last reading is only what it was.
+  function usageReading(provider: ProviderId, connectionId: string) {
+    const settings = { provider, model: '', connectionId };
+    const key = usageKey(settings);
+    const snapshot = snapshotFor(usageSnapshots, settings);
+    const ready = canQueryConnection(connectionId, provider);
+    return {
+      snapshot,
+      ready,
+      loading: !!usageLoading[key] || (ready && !snapshot && !usageErrors[key]),
+      failed: !!usageErrors[key] || !ready,
+    };
+  }
   // A listed account's 5-hour and weekly usage, as the bars below the composer show it: while
   // its first reading loads, and afterwards as last reported when it can no longer be read. An
   // account to sign in to says so instead.
   function listedUsage(id: string) {
     const option = agentOptions.find((option) => option.id === id);
     if (!option?.connectionId || option.attention) return undefined;
-    const settings = { provider: option.provider, model: '', connectionId: option.connectionId };
-    const key = usageKey(settings);
-    const snapshot = snapshotFor(usageSnapshots, settings);
-    const ready = canQueryConnection(option.connectionId, option.provider);
-    if (!snapshot && !ready) return undefined;
-    return {
-      provider: option.provider,
-      snapshot,
-      loading: !!usageLoading[key] || (ready && !snapshot && !usageErrors[key]),
-      failed: !!usageErrors[key] || !ready,
-    };
+    const { ready, ...reading } = usageReading(option.provider, option.connectionId);
+    return reading.snapshot || ready ? { provider: option.provider, ...reading } : undefined;
   }
   // The kinds of limit those bars show, each in its own column, so every account's bars sit in
   // one row and the accounts line up: those that any listed account shows.
@@ -1525,10 +1530,17 @@
       workspace.fleet,
       selectedLocation,
       selectedSettings.provider,
-    ).filter((c) => !excluded.has(c.id) && canChooseConnection(c.id) && !needsSignIn(c.id));
+    ).filter((c) => takesPart(c.id, excluded));
     const ready = choosable.filter((c) => connectionStatus(c.id)?.auth === 'ready');
     return ready.length && choosable.every((c) => connectionStatus(c.id)) ? ready : choosable;
   });
+  // Whether balancing may start new chats on an account connection: one Settings did not leave
+  // out, whose CLI there can answer for it.
+  function takesPart(connectionId: string, excluded: Set<string>) {
+    return (
+      !excluded.has(connectionId) && canChooseConnection(connectionId) && !needsSignIn(connectionId)
+    );
+  }
   // Each of those accounts with its latest reading, and whether its check or first reading is
   // still under way.
   function balanceReadings() {
@@ -1657,7 +1669,8 @@
   }
   // Where balancing chooses between accounts, for Settings, which leaves any of them out on each
   // computer: agent by agent, as the Agent picker lists them, then computer by computer, each
-  // account marked when it needs signing in there and so cannot take part.
+  // account marked when it needs signing in there and so cannot take part, with the usage of
+  // those that take part, for what they used together.
   const balanceChoices = $derived.by(() => {
     const excluded = excludedConnections(workspace.preferences, workspace.fleet);
     const agents: BalanceAgent[] = [];
@@ -1679,9 +1692,36 @@
           included: !excluded.has(c.id),
           signIn: needsSignIn(c.id),
         })),
+        usage: connections.flatMap((c) =>
+          takesPart(c.id, excluded) ? [usageReading(provider, c.id)] : [],
+        ),
       });
     }
     return agents;
+  });
+  // While Settings shows them, the accounts balancing chooses between are read as Connections
+  // reads its accounts: as it opens, every minute and on returning to the window.
+  function balancedUsageTargets() {
+    const excluded = excludedConnections(workspace.preferences, workspace.fleet);
+    return balanceGroups(workspace.fleet).flatMap(({ provider, connections }) =>
+      connections.flatMap((c) =>
+        takesPart(c.id, excluded) && canQueryConnection(c.id, provider)
+          ? [{ provider, model: '', connectionId: c.id }]
+          : [],
+      ),
+    );
+  }
+  function refreshBalancedUsage() {
+    if (workspace.preferences.balanceAccounts)
+      for (const settings of balancedUsageTargets()) void refreshUsage(settings);
+  }
+  const balancedUsageKey = $derived(
+    loaded && view === 'settings' && workspace.preferences.balanceAccounts
+      ? balancedUsageTargets().map(usageKey).join('|')
+      : '',
+  );
+  $effect(() => {
+    if (balancedUsageKey) untrack(refreshBalancedUsage);
   });
   /** Settings → New chats: whether balancing may start new chats on an account on a computer. */
   async function setBalanceIncluded(connectionId: string, included: boolean) {
@@ -3198,6 +3238,7 @@
       focusTimer = setTimeout(() => {
         void refresh();
         if (view === 'chat') void refreshUsage();
+        if (view === 'settings') refreshBalancedUsage();
       }, 250);
     };
     // Focus coming back from a claude.ai pane over the page never left the window.
@@ -3223,6 +3264,7 @@
       if (loaded && document.visibilityState !== 'hidden') {
         if (view === 'chat') void refreshUsage();
         if (view === 'connections') void refreshAccountUsage();
+        if (view === 'settings') refreshBalancedUsage();
       }
     }, 60_000);
     // A message sent right after midnight already belongs to the new day, so the day moves on as

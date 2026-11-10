@@ -1,6 +1,20 @@
-import { providerIds, type Conversation, type Preferences, type ProviderId } from './domain';
+import {
+  providerIds,
+  type ChatSettings,
+  type Conversation,
+  type Preferences,
+  type ProviderId,
+} from './domain';
 import { computerViews, type Fleet } from './fleet';
-import { resetTime, visibleLimits, type UsageSnapshot } from './usage';
+import { guidePace, quotaPace, type QuotaPace } from './pace';
+import {
+  limitSlot,
+  limitSlots,
+  resetTime,
+  visibleLimits,
+  type LimitSlot,
+  type UsageSnapshot,
+} from './usage';
 
 // Balancing new chats between accounts (Settings → New chats, off unless turned on): a new chat
 // starts on the account of its agent, on its computer, that has the most room for it, so several
@@ -154,6 +168,108 @@ export function balanceGroups(fleet: Fleet) {
       return connections.length > 1 ? [{ provider, environmentId, connections }] : [];
     }),
   );
+}
+
+/** One balanced account's usage, for what the accounts balanced on a computer used together. */
+export type PoolReading = {
+  /** Its latest reading, when it has one. */
+  snapshot?: UsageSnapshot;
+  /** A reading of it is under way, or its first one is due. */
+  loading: boolean;
+  /** It cannot be read now, so its last reading is only what it was. */
+  failed: boolean;
+};
+
+/**
+ * One kind of limit as the accounts balanced on a computer used it together: the average share
+ * used of the accounts whose current reading reports it, beside the average of their even-use
+ * guides, each at the time of its own reading. Every account counts the same, since a reading
+ * reports a share of the account's limit, not an amount.
+ */
+export type PoolLimit = {
+  id: LimitSlot;
+  label: string;
+  /** The accounts the averages count: those whose current reading reports this limit. */
+  counted: number;
+  /** The accounts that may have this limit too but have no current reading of it. */
+  unread: number;
+  /** The average share used, or null while no account has a reading yet. */
+  usedPercent: number | null;
+  /** The average share that using each account evenly over its window would have used. */
+  expectedPercent: number | null;
+  pace: Pick<QuotaPace, 'state' | 'label' | 'tone' | 'detail' | 'advice'>;
+};
+
+const poolLabels: Record<LimitSlot, string> = {
+  'five-hour': '5-hour',
+  weekly: 'Weekly',
+  'fable-weekly': 'Fable weekly',
+};
+
+/**
+ * What the accounts balanced on a computer used together, limit by limit, as each account's bars
+ * show its own (requested 2026-11-10): whether, all accounts taken together, more was used than
+ * even use of each account would have used by now. Only current readings count, as only they
+ * have a guide; an account without one, or whose reading lists only some of its limits, is
+ * `unread` in every limit it may have. Until the first readings arrive, the limits the accounts
+ * may have wait unmeasured.
+ */
+export function poolUsage(
+  provider: ProviderId,
+  readings: readonly PoolReading[],
+  now: number,
+): PoolLimit[] {
+  const settings: ChatSettings = { provider, model: '', reasoning: '', instructions: '' };
+  const tallies = new Map<LimitSlot, { used: number[]; expected: number[]; unread: number }>();
+  // The limits each account whose reading may leave some out reported.
+  const incomplete: Set<LimitSlot>[] = [];
+  for (const { snapshot, failed } of readings) {
+    const reported = new Set<LimitSlot>();
+    for (const window of visibleLimits(snapshot, settings)) {
+      const slot = limitSlot(window);
+      reported.add(slot);
+      let tally = tallies.get(slot);
+      if (!tally) tallies.set(slot, (tally = { used: [], expected: [], unread: 0 }));
+      const pace = quotaPace(window, snapshot, now, failed);
+      if (pace.state === 'unknown' || window.usedPercent == null || pace.expectedPercent == null)
+        tally.unread++;
+      else {
+        tally.used.push(window.usedPercent);
+        tally.expected.push(pace.expectedPercent);
+      }
+    }
+    if (!snapshot || snapshot.partial) incomplete.push(reported);
+  }
+  const average = (values: number[]) =>
+    values.reduce((sum, value) => sum + value, 0) / values.length;
+  const limits = limitSlots.flatMap((slot): PoolLimit[] => {
+    const tally = tallies.get(slot);
+    if (!tally?.used.length) return [];
+    const usedPercent = average(tally.used);
+    const expectedPercent = average(tally.expected);
+    return [
+      {
+        id: slot,
+        label: poolLabels[slot],
+        counted: tally.used.length,
+        unread: tally.unread + incomplete.filter((reported) => !reported.has(slot)).length,
+        usedPercent,
+        expectedPercent,
+        pace: guidePace(usedPercent, expectedPercent),
+      },
+    ];
+  });
+  if (limits.length || !readings.some((reading) => reading.loading && !reading.failed))
+    return limits;
+  return visibleLimits(undefined, settings, true).map((window): PoolLimit => ({
+    id: limitSlot(window),
+    label: poolLabels[limitSlot(window)],
+    counted: 0,
+    unread: readings.length,
+    usedPercent: null,
+    expectedPercent: null,
+    pace: { state: 'unknown', label: 'Pace unavailable', tone: 'muted', detail: '', advice: '' },
+  }));
 }
 
 /**
